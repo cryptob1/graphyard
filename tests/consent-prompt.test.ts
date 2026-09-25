@@ -135,15 +135,15 @@ test('unit:consent-prompt-detected — a launched session stopped on a first-run
     assert.deepEqual(pane.keys, [], 'a prompt outside the allow-list is never answered');
     assert.equal(pane.renamed, 'eng-consent', 'the held session is named so a human can find it');
 
-    // A runtime prompted after it starts (no request contract) is never pasted into the dialog: its
-    // request waits in its launch file, which the hold names for the supervisor to deliver.
-    const pastePane = new ConsentPane('gemini', loginDialog);
-    const pasteHeld = await startAgentSession('eng-paste', 'gemini', 'w1V:pC1', [], 'Implement GY-130', pastePane.run, { directory, ...pastePane.bounds(), holdConsent: true });
-    assert.equal(pasteHeld.delivery, 'paste'); assert.equal(pasteHeld.started.state, 'awaiting consent');
-    assert.equal(pastePane.calls.some(call => call[0] === 'agent' && call[1] === 'prompt'), false);
-    assert.equal(pasteHeld.awaiting!.request, join(directory, '.graphyard/launch/eng-paste.request'));
-    assert.equal(await readFile(pasteHeld.awaiting!.request!, 'utf8'), `${autonomyContract} Implement GY-130`, 'the pending request carries the autonomy contract ahead of the task (GY-184)');
-    assert.equal(consentHold({ herdrWorkspace: 'wE' }, 'GY-130', 1, 'eng-paste', 'w1V:pC1', pasteHeld.awaiting!, clock).request, pasteHeld.awaiting!.request);
+    // Every launched runtime takes its request on its command line (GY-184), so a held one is never
+    // pasted into its dialog and has nothing pending: it reads the request once the dialog is answered.
+    const geminiPane = new ConsentPane('gemini', loginDialog);
+    const geminiHeld = await startAgentSession('eng-gemini', 'gemini', 'w1V:pC1', ['--yolo'], 'Implement GY-130', geminiPane.run, { directory, ...geminiPane.bounds(), holdConsent: true });
+    assert.equal(geminiHeld.delivery, 'request'); assert.equal(geminiHeld.started.state, 'awaiting consent');
+    assert.equal(geminiPane.calls.some(call => call[0] === 'agent' && call[1] === 'prompt'), false);
+    assert.equal(geminiHeld.awaiting!.request, null);
+    assert.equal(await readFile(geminiHeld.files.request!, 'utf8'), `${autonomyContract} Implement GY-130`, 'the request carries the autonomy contract ahead of the task (GY-184)');
+    assert.equal(consentHold({ herdrWorkspace: 'wE' }, 'GY-130', 1, 'eng-gemini', 'w1V:pC1', geminiHeld.awaiting!, clock).request, undefined);
     assert.equal(held.awaiting!.request, null, 'a runtime that read its request from the command line has nothing pending');
     assert.equal(held.awaiting!.named, true);
 

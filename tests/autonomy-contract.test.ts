@@ -10,7 +10,7 @@ import type { Observation, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
 import { autonomyContract, withAutonomyContract } from '../src/autonomy.js';
 import { assertLaunchRecipe, launchPlan, LaunchRefusedError, registryContractRefusal, nonInteractiveLaunch, refusedLaunchKinds } from '../src/harness.js';
-import { accountLaunch, agentKindSchema, atomicPrivateWrite, dispatchWork, launchApprover, launchEscalationHandler, launchRoleContracts, loadMasterConfig, saveProducerProfile, setupMaster, startAgentSession, startMaster, type WorkerProfile } from '../src/master.js';
+import { accountLaunch, agentKindSchema, atomicPrivateWrite, dispatchWork, launchApprover, launchCommand, launchDelivery, launchEscalationHandler, launchRequestContracts, launchRoleContracts, requestContractRefusal, requestPlaceholder, loadMasterConfig, saveProducerProfile, setupMaster, startAgentSession, startMaster, type WorkerProfile } from '../src/master.js';
 import { managedInstructions } from '../src/repository-setup.js';
 import { bindReviewer, launchReview, saveReviewerProfile } from '../src/reviewer.js';
 import { launchProducer } from '../src/producer.js';
@@ -161,6 +161,8 @@ test('unit:every-runtime-non-interactive-or-refused — every kind agentKindSche
         assert.throws(() => accountLaunch({ kind, approvals: 'prompt', agentArgs: [], environment: {} }, null),
           (error: unknown) => error instanceof LaunchRefusedError && error.kind === kind && error.message.includes(`the ${kind} runtime with approvals "prompt"`));
         assert.equal(accountLaunch({ kind, approvals: 'auto', agentArgs: [], environment: {} }, null).plan.applied, true);
+        // Unattended means its instruction is its own first request, on its command line, never a paste.
+        assert.ok(launchRequestContracts[kind], `${kind}: takes its first request on its command line`); assert.equal(launchDelivery(kind), 'request');
         continue;
       }
       assert.throws(() => assertLaunchRecipe(kind), (error: unknown) => error instanceof LaunchRefusedError && error.kind === kind && error.message.includes(`the ${kind} runtime`));
@@ -171,21 +173,46 @@ test('unit:every-runtime-non-interactive-or-refused — every kind agentKindSche
         (error: unknown) => error instanceof LaunchRefusedError && error.message.includes(kind));
       assert.deepEqual(calls, [], `${kind}: refused before anything reached Herdr`);
     }
+    // A profile's own arguments or environment cannot bring a prompt back: the recipe is merged in,
+    // and a value that still lets the runtime ask is refused, naming the runtime and the value.
+    const profileLaunch = (kind: string, agentArgs: string[], environment: Record<string, string> = {}) => () => accountLaunch({ kind, approvals: 'auto', agentArgs, environment }, null);
+    for (const [kind, agentArgs, environment, setting] of [
+      ['codex', ['--ask-for-approval', 'on-request'], {}, '--ask-for-approval on-request'], ['codex', ['-a', 'untrusted'], {}, '--ask-for-approval untrusted'], ['codex', ['--ask-for-approval=on-failure'], {}, '--ask-for-approval on-failure'],
+      ['claude', ['--permission-mode', 'acceptEdits'], {}, '--permission-mode acceptEdits'], ['muse', ['--approval-mode', 'always'], {}, '--approval-mode always'],
+      ['opencode', [], { OPENCODE_PERMISSION: '{"edit":"allow","bash":{"git push *":"ask"}}' }, 'OPENCODE_PERMISSION='], ['opencode', [], { OPENCODE_PERMISSION: 'not json' }, 'OPENCODE_PERMISSION='],
+    ] as const) assert.throws(profileLaunch(kind, [...agentArgs], environment), (error: unknown) => error instanceof LaunchRefusedError && error.kind === kind && error.message.includes(`the ${kind} runtime with ${setting}`), `${kind} ${setting} is refused`);
+    // A recipe flag the profile leaves out is added beside the ones it sets; a value no prompt depends on is the operator's.
+    assert.deepEqual(accountLaunch({ kind: 'copilot', approvals: 'auto', agentArgs: ['--allow-all-tools'], environment: {} }, null).args, ['--allow-all-paths', '--allow-all-tools']);
+    assert.deepEqual(accountLaunch({ kind: 'codex', approvals: 'auto', agentArgs: ['--sandbox', 'danger-full-access'], environment: {} }, null).args.slice(0, 4), ['--ask-for-approval', 'never', '--sandbox', 'danger-full-access']);
+    const bypass = accountLaunch({ kind: 'codex', approvals: 'auto', agentArgs: ['--dangerously-bypass-approvals-and-sandbox'], environment: {} }, null).args;
+    assert.equal(bypass[0], '--dangerously-bypass-approvals-and-sandbox'); assert.ok(!bypass.includes('--ask-for-approval'), 'a flag that already selects the no-approval mode is not joined by a conflicting one');
+    const allowed = accountLaunch({ kind: 'opencode', approvals: 'auto', agentArgs: [], environment: { OPENCODE_PERMISSION: '{"edit":"allow","bash":{"*":"allow","rm -rf *":"deny"}}' } }, null);
+    assert.equal(allowed.environment.OPENCODE_PERMISSION, '{"edit":"allow","bash":{"*":"allow","rm -rf *":"deny"}}', 'a permission document that asks nothing is the operator\'s');
+
     // A runtime the agent registry adds (GY-91) brings its own launch contract: its registered
-    // arguments are its no-approval mode, so a kind with no built-in recipe still launches from it.
+    // arguments are its no-approval mode and say where it takes its first request, so a kind with
+    // no built-in recipe still launches from it.
     const registryAccount = (args: string[]) => ({ name: 'aider-a', kind: 'aider', home: null, fleet: { runtime: 'aider', model: 'gpt', modelId: null, session: 's-1', reason: 'chosen',
       contract: { kind: 'aider', args, environment: {}, homeVariable: 'AIDER_HOME', modelFlag: null, login: null, loginFile: null } } });
-    const registered = accountLaunch({ kind: 'claude', approvals: 'auto', agentArgs: [], environment: {} }, registryAccount(['--yes-always']));
-    assert.equal(registered.kind, 'aider'); assert.deepEqual(registered.args, ['--yes-always']);
+    const registered = accountLaunch({ kind: 'claude', approvals: 'auto', agentArgs: [], environment: {} }, registryAccount(['--yes-always', '--message', requestPlaceholder]));
+    assert.equal(registered.kind, 'aider'); assert.deepEqual(registered.args, ['--yes-always', '--message', requestPlaceholder]);
     const aider = herdr();
     const started = await startAgentSession('registry-aider', registered.kind!, 'pane-aider', registered.args, 'Implement GY-184', aider.run, { directory, attempts: 1, contract: registered.contract });
     assert.equal(started.command.includes('--yes-always'), true, 'the registry runtime starts with its registered no-approval arguments');
-    assert.equal(aider.typed.length, 1);
+    assert.equal(started.delivery, 'request');
+    assert.equal(aider.typed.length, 1); assert.deepEqual(aider.pasted, [], 'its request is never pasted');
+    assert.deepEqual(aider.typed[0].args, ['--yes-always', '--message', `${autonomyContract} Implement GY-184`], 'the request, contract first, stands where the registry contract placed it');
+    // A registry contract that suppresses the prompts but names no place for the request is refused too.
+    const calls: string[][] = [];
+    const unplaced = accountLaunch({ kind: 'claude', approvals: 'auto', agentArgs: [], environment: {} }, registryAccount(['--yes-always']));
+    await assert.rejects(startAgentSession('registry-unplaced', 'aider', 'pane-r', unplaced.args, 'Implement GY-184', (_command, args) => { calls.push(args); return startedAtOnce(args) ?? JSON.stringify({ result: {} }); }, { directory, contract: unplaced.contract }),
+      (error: unknown) => error instanceof LaunchRefusedError && error.kind === 'aider' && error.message === requestContractRefusal('aider'));
+    assert.deepEqual(calls, [], 'refused before anything reached Herdr');
     // The same kind without that contract, or with one that registers nothing to suppress its prompts, is refused before launch.
     const unregistered: string[][] = [];
     await assert.rejects(startAgentSession('registry-none', 'aider', 'pane-r', [], 'Implement GY-184', (_command, args) => { unregistered.push(args); return startedAtOnce(args) ?? JSON.stringify({ result: {} }); }, { directory }),
       (error: unknown) => error instanceof LaunchRefusedError && error.kind === 'aider' && error.message.includes('the aider runtime'));
-    const bare = accountLaunch({ kind: 'claude', approvals: 'auto', agentArgs: [], environment: {} }, registryAccount([]));
+    const bare = accountLaunch({ kind: 'claude', approvals: 'auto', agentArgs: [], environment: {} }, registryAccount([requestPlaceholder]));
     await assert.rejects(startAgentSession('registry-bare', 'aider', 'pane-r', bare.args, 'Implement GY-184', (_command, args) => { unregistered.push(args); return startedAtOnce(args) ?? JSON.stringify({ result: {} }); }, { directory, contract: bare.contract }),
       (error: unknown) => error instanceof LaunchRefusedError && error.message === registryContractRefusal('aider'));
     assert.deepEqual(unregistered, [], 'refused before anything reached Herdr');
@@ -206,10 +233,21 @@ test('unit:contract-reaches-runtimes-without-role-flag — a codex and an openco
       assert.equal(request, `${autonomyContract} Implement GY-184: carry the contract`, 'the task follows the contract unchanged');
       assert.equal(await readFile(started.files.request!, 'utf8'), request);
     }
-    // A runtime delivered by paste gets it the same way, at the start of the pasted request.
-    const muse = herdr();
-    await startAgentSession('request-muse', 'muse', 'pane-muse', [], 'Implement GY-184', muse.run, { directory, attempts: 1 });
-    assert.equal(muse.pasted.length, 1); assert.ok(muse.pasted[0].startsWith(autonomyContract));
+    // Every other runtime without a role-file flag takes it the same way, on its own command line:
+    // no launched session's instruction, contract included, is pasted into it after start.
+    for (const kind of Object.keys(nonInteractiveLaunch).filter(kind => !launchRoleContracts[kind])) {
+      const stub = herdr();
+      const started = await startAgentSession(`request-${kind}`, kind, `pane-${kind}`, nonInteractiveLaunch[kind].args, 'Implement GY-184', stub.run, { directory, attempts: 1 });
+      assert.equal(started.delivery, 'request', `${kind}: delivered as its request`); assert.deepEqual(stub.pasted, [], `${kind}: nothing pasted`);
+      const request = await readFile(started.files.request!, 'utf8');
+      assert.equal(request, `${autonomyContract} Implement GY-184`, `${kind}: the request begins with the contract`);
+      assert.ok(started.command.endsWith(launchRequestContracts[kind]('"$(cat "$GY.request")"')), `${kind}: the command line hands the runtime that file`);
+    }
+    // The command line follows each runtime's own contract for an interactive session's first prompt.
+    const files = { stem: '/w/.graphyard/launch/s', role: null, request: '/w/.graphyard/launch/s.request' };
+    assert.equal(launchCommand('gemini', ['--yolo'], files), 'GY=/w/.graphyard/launch/s; gemini --yolo --prompt-interactive "$(cat "$GY.request")"');
+    assert.equal(launchCommand('copilot', [], files), 'GY=/w/.graphyard/launch/s; copilot --interactive "$(cat "$GY.request")"');
+    assert.equal(launchCommand('pi', [], files), 'GY=/w/.graphyard/launch/s; pi "$(cat "$GY.request")"');
     // The rule itself: a role-loading runtime carries it in the role, never twice; text that already carries it is unchanged.
     assert.deepEqual(withAutonomyContract(false, { request: 'Task' }), { request: `${autonomyContract} Task`, role: null });
     assert.deepEqual(withAutonomyContract(false, { request: `${autonomyContract} Task` }), { request: `${autonomyContract} Task`, role: null });

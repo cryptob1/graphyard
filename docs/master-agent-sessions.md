@@ -7,31 +7,31 @@ Add a worker with `master worker add FILE` from a template ([Codex](../examples/
 
 Reviewers are added with `master reviewer setup` and `master reviewer add FILE` ([Claude](../examples/master/claude-reviewer.json), [opencode](../examples/master/opencode-reviewer.json) templates); the loop launches each review; `master review GY-N [PROFILE]` recovers a refused launch or an unsatisfied attempt.
 
-`master producer replace FILE`, `master producer remove NAME` and `master reviewer remove NAME` apply on the next tick; `setup.attention` reports setup that would stop every launch.
+`master producer replace FILE`, `master producer remove NAME` and `master reviewer remove NAME` apply next tick; `setup.attention` reports setup that stops every launch.
 
 ### Session handles
 
-Each session records a handle on its item (runtime, host, pane, transcript, attach command) under `sessions` in `master status`.
+Each session's handle (runtime, host, pane, transcript, attach command) is under `sessions` in `master status`.
 
 ### Approval modes
 
-Sessions run in their runtime's no-approval mode (`"approvals": "auto"`): `--permission-mode bypassPermissions` (Claude Code); `--ask-for-approval never --sandbox workspace-write`, network, `--add-dir` (Codex); `--force --trust` (Cursor); allow-all `OPENCODE_PERMISSION` (opencode); `--yolo` (Gemini, Qwen, Kimi); `--allow-all-tools --allow-all-paths` (Copilot); `--dangerously-allow-all` (Amp); `--approval-mode never --trust-workspace` (Muse); Pi never asks. `"prompt"` and recipe-less runtimes (`refusedLaunchKinds`) never start; a [registry](onboarding.md#configure-the-fleet) runtime starts with its contract's registered arguments and is refused when it registers none.
+Sessions run in no-approval mode (`"approvals": "auto"`): `--permission-mode bypassPermissions` (Claude Code); `--ask-for-approval never --sandbox workspace-write`, network, `--add-dir` (Codex); `--force --trust` (Cursor); allow-all `OPENCODE_PERMISSION` (opencode); `--yolo` (Gemini, Qwen); `--allow-all-tools --allow-all-paths` (Copilot); `--approval-mode never --trust-workspace` (Muse); none (Pi). Profile flags merge in; asking values are refused. `"prompt"`, `refusedLaunchKinds` (Kimi, Amp: one-shot only) and runtimes without command-line requests never start; [registry](onboarding.md#configure-the-fleet) runtimes need registered arguments including `{request}`.
 
 ### Worker sandbox
 
-Under Codex's sandbox the launcher grants `.git/worktrees/GY-N-E` and the shared `.git` with `--add-dir`, probing each write first (`Worker launch failed: the codex sandbox cannot write PATH`).
+Codex's sandbox gets `.git/worktrees/GY-N-E` and the shared `.git` via `--add-dir`, each write probed first (`Worker launch failed: the codex sandbox cannot write PATH`).
 
 ## Accounts and failover
 
 A profile's `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`) in failover order, unless the [agent registry](onboarding.md#configure-the-fleet) defines the role. Each launch takes the first account logged in and under `run.quotaCeilingPercent` (default 95); one failing a check **fails over** to the next (`dispatch.accounts`).
 
-On a mid-session limit notice the loop commits a worker's changes as an unpushed `WIP:` commit, records `capacity.exhausted` (not `lease-loss`) and relaunches on the next account; a role with none left pauses until the first reset.
+On a mid-session limit notice the loop commits a worker's changes as unpushed `WIP:`, records `capacity.exhausted` (not `lease-loss`) and relaunches on the next account; a role with none left pauses until the first reset.
 
 ## How a session starts
 
 ### The request is the session's first message
 
-Every session receives its instruction as its own first request on the runtime's command line, never pasted (authorization: [onboarding](onboarding.md#what-the-generated-instructions-authorize)).
+Every session's instruction is its first request on the runtime's command line, never pasted (authorization: [onboarding](onboarding.md#what-the-generated-instructions-authorize)).
 
 #### How the request reaches the runtime
 
@@ -53,7 +53,7 @@ A runtime stopped on a first-run prompt is **`awaiting consent`**. The launcher 
 
 ### Acknowledgement, the one re-prompt, and never started
 
-A reviewer or producer is `awaiting acknowledgement` until thirty seconds of activity (`counts.dispatchAwaiting`). Still quiet after `run.acknowledgementSeconds` (30–900, default 90), it is re-prompted once; if it then settles without a result it is **`never started`**, relaunched a minute later without spending retry budget. Three exhaust the request (`retry.neverStarted`).
+A reviewer or producer is `awaiting acknowledgement` until 30 s of activity (`counts.dispatchAwaiting`). Still quiet after `run.acknowledgementSeconds` (30–900, default 90), it is re-prompted once; if it then settles without a result it is **`never started`**, relaunched a minute later without spending retry budget. Three exhaust the request (`retry.neverStarted`).
 
 ### The dispatcher's own state
 

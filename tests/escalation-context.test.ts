@@ -352,11 +352,11 @@ console.log(JSON.stringify({ result, reads }));
   assert.ok(launched.context.startsWith(join(masterRoot, '.graphyard/escalations/')), launched.context);
   assert.equal((await stat(launched.context)).mode & 0o777, 0o600);
   assert.deepEqual(JSON.parse(await readFile(launched.context, 'utf8')), before);
-  // A runtime with no request contract keeps the confirmed paste, and the result says so.
+  // Muse, once prompted after start, takes its request positionally too: nothing is pasted (GY-184).
   herdrCalls.length = 0;
-  const pasted = await launchEscalationHandler(masterRoot, config, before, 'muse', [], herdr);
-  assert.equal(pasted.delivery, 'paste');
-  assert.equal(herdrCalls.filter(call => call[0] === 'agent' && call[1] === 'prompt').length, 1);
+  const positional = await launchEscalationHandler(masterRoot, config, before, 'muse', [], herdr);
+  assert.equal(positional.delivery, 'request');
+  assert.equal(herdrCalls.filter(call => call[0] === 'agent' && call[1] === 'prompt').length, 0);
   // The context's rules layer never comes from a template: it is the repository's file, or an explicit absence.
   assert.equal(before.rules.text, projectRules(base));
   assert.ok(!before.rules.text!.includes('<!-- graphyard'), 'no generated Graphyard block is mistaken for the project\'s rules');

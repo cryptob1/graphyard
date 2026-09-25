@@ -15,7 +15,7 @@ import { broadScopeRefusals, describeChain, dispatchHold, dispatchHoldBoundMs, d
 import type { ConflictReport } from './conflicts.js';
 import { blockedPath, environmentBlocked, grantWorkerPaths, verifyWorkerSandbox, workerPaths, writablePaths, type SandboxExec } from './worker-sandbox.js';
 import { mergeOrder } from './delegation.js';
-import { assertLaunchable, assertNoApprovalOptOut, harnessDecision, launchPlan, masterHarnessPlan, writeHarnessPermissions, type HarnessPlan, type HarnessRule, type RegisteredLaunch } from './harness.js';
+import { assertLaunchable, assertNoApprovalOptOut, LaunchRefusedError, requestPlaceholder, harnessDecision, launchPlan, masterHarnessPlan, writeHarnessPermissions, type HarnessPlan, type HarnessRule, type RegisteredLaunch } from './harness.js';
 import { withAutonomyContract } from './autonomy.js';
 import { capacityRetryAt, describeCapacity, standingCapacity, type CapacityAccount, type CapacityRole, type PartialWork } from './model/capacity.js';
 import { answerCommand, humanDecisionLabel, openHumanRequests, parkedOnHuman } from './model/human-request.js';
@@ -1006,7 +1006,7 @@ export async function onSelectedSession<T>(selected: LaunchSelection, failed: st
 export const openCodeAllowAll = { '*': 'allow', edit: 'allow', bash: 'allow', webfetch: 'allow', external_directory: 'allow', doom_loop: 'allow' };
 export function agentLaunchPlan(kind: string | undefined, approvals: 'auto' | 'prompt' = 'auto', agentArgs: string[] = [], environment: Record<string, string> = {}) {
   const plan = launchPlan(kind, approvals, agentArgs, environment);
-  if (!plan.applied || kind !== 'opencode') return plan;
+  if (!plan.applied || kind !== 'opencode' || !plan.environment.OPENCODE_PERMISSION) return plan;
   return { ...plan, environment: { ...plan.environment, OPENCODE_PERMISSION: JSON.stringify(openCodeAllowAll) }, prompts: 'every permission prompt, including edits, shell commands, fetches, and paths outside the worktree',
     tradeoff: 'opencode edits files, runs shell commands, fetches URLs, and reaches outside its worktree without asking.' };
 }
@@ -1029,6 +1029,8 @@ export function accountLaunch(profile: { kind?: string; approvals: 'auto' | 'pro
   // An approvals opt-out is refused, naming the runtime, before any session starts (GY-184).
   assertNoApprovalOptOut(kind ?? 'unnamed', profile.approvals);
   const plan = agentLaunchPlan(kind, profile.approvals, [...(contract?.args ?? []), ...model, ...own], { ...contract?.environment, ...profile.environment });
+  // So is an effective launch whose own arguments or environment still let the runtime ask.
+  if (plan.refusal) throw new LaunchRefusedError(kind ?? 'unnamed', plan.refusal);
   const environment: Record<string, string> = { ...plan.environment, ...contract?.environment, ...profile.environment };
   if (account) {
     const variable = contract ? contract.homeVariable : environmentVariable[account.kind as EnvironmentKind];
@@ -1151,11 +1153,19 @@ export async function preservePartialWork(path: string, label: string, run: Chil
  */
 export const launchRequestContracts: Record<string, (reference: string) => string> = {
   claude: reference => reference, codex: reference => reference, cursor: reference => reference, opencode: reference => `--prompt ${reference}`,
+  pi: reference => reference, muse: reference => reference, gemini: reference => `--prompt-interactive ${reference}`, qwen: reference => `--prompt-interactive ${reference}`, copilot: reference => `--interactive ${reference}`,
 };
+export { requestPlaceholder };
 /** How a runtime loads the launch authorization from a file; only Claude Code, which leaves AGENTS.md out under a role file, needs one. */
 export const launchRoleContracts: Record<string, (reference: string) => string> = { claude: reference => `--append-system-prompt-file ${reference}` };
 export type RequestDelivery = 'request' | 'paste';
-export const launchDelivery = (kind: string | undefined): RequestDelivery => kind && launchRequestContracts[kind] ? 'request' : 'paste';
+export const launchDelivery = (kind: string | undefined, args: string[] = []): RequestDelivery => kind && (launchRequestContracts[kind] || args.includes(requestPlaceholder)) ? 'request' : 'paste';
+/**
+ * A session's instruction is its own first request, on the runtime's command line, never a paste
+ * (GY-93): a runtime without a way to take it there is refused before launch, naming the runtime
+ * and the fix, rather than started and handed text it may rightly treat as untrusted (GY-184).
+ */
+export const requestContractRefusal = (kind: string) => `Graphyard refuses to launch the ${kind} runtime: it has no way to take the session's first request on its command line, and a launched session's instruction is never pasted into it. Register where ${kind} takes its first prompt with graphyard master registry runtime set NAME --kind ${kind} --arg=${requestPlaceholder} (or --arg=FLAG --arg=${requestPlaceholder}) --reason REASON.`;
 /** The most bytes a launch command line may hold: the runtime, its flags and two file paths, never the request. */
 export const launchCommandLimit = 512;
 export const launchDirectory = (directory: string) => resolve(directory, '.graphyard/launch');
@@ -1185,9 +1195,12 @@ export function writeLaunchFiles(directory: string, name: string, text: { role?:
 /** The command line typed into the pane: the stem binding, then `prefix` (a supervisor), the runtime, its arguments and the file references. */
 export function launchCommand(kind: string, args: string[], files: LaunchFiles, prefix: string[] = []) {
   const role = files.role ? launchRoleContracts[kind]?.(roleReference) : undefined;
-  const request = files.request ? launchRequestContracts[kind]?.(requestReference) : undefined;
-  const binding = role || request ? [`${launchVariable}=${shellWord(files.stem)};`] : [];
-  const command = [...binding, ...prefix.map(shellWord), kind, ...args.map(shellWord), ...(role ? [role] : []), ...(request ? [request] : [])].join(' ');
+  const own = launchRequestContracts[kind];
+  const request = files.request && own ? own(requestReference) : undefined;
+  // A registry runtime's request goes where its contract places `{request}`; a built-in one drops the marker.
+  const placed = args.map(argument => argument !== requestPlaceholder ? shellWord(argument) : files.request && !own ? requestReference : null).filter((word): word is string => word !== null);
+  const binding = role || request || placed.includes(requestReference) ? [`${launchVariable}=${shellWord(files.stem)};`] : [];
+  const command = [...binding, ...prefix.map(shellWord), kind, ...placed, ...(role ? [role] : []), ...(request ? [request] : [])].join(' ');
   const bytes = Buffer.byteLength(command);
   if (bytes > launchCommandLimit) throw new Error(`the launch command line is ${bytes} bytes, over the ${launchCommandLimit}-byte bound; it holds only the runtime, its flags and the paths of the session's request and role files, so shorten the repository path, the managed worktree root or the profile's agent arguments: ${command.slice(0, 160)}…`);
   return command;
@@ -1322,8 +1335,9 @@ export async function awaitRuntimeStart(pane: string, kind: string, command: str
 /**
  * Start a session on its request: its files are written, the short command line is typed into the
  * pane, and the pane is read until the runtime is ready (awaitRuntimeStart), when Herdr's record
- * of it takes the session's name. Only a runtime without a request contract is prompted after it
- * starts, through the confirmed paste delivery below.
+ * of it takes the session's name. A runtime with no way to take its request on the command line is
+ * refused before anything is typed (GY-184); the paste delivery below is only for the loop's
+ * re-prompt and the reviewer's reminder, never a session's instruction.
  *
  * The name goes in before the runtime does. A name the runtime would refuse — too long, or built
  * from characters it does not take — is refused here as that refusal, naming the limit, the name
@@ -1337,15 +1351,16 @@ export async function startAgentSession(name: string, kind: string, pane: string
   // anything is typed, rather than launched into a session that waits for a keypress (GY-184).
   // A registry runtime's own launch contract is its recipe when it registers one.
   assertLaunchable(kind, options.contract);
-  const delivery = launchDelivery(kind);
+  const delivery = launchDelivery(kind, args);
+  if (delivery !== 'request') throw new LaunchRefusedError(kind, requestContractRefusal(kind));
   // Every session carries the autonomy contract: in its role file when the runtime loads one,
-  // otherwise at the start of its first request, pasted or not (GY-184).
+  // otherwise at the start of its first request (GY-184).
   const carried = withAutonomyContract(!!launchRoleContracts[kind], { request: text, role: options.role });
   text = carried.request;
-  const files = writeLaunchFiles(options.directory, name, { role: carried.role, request: delivery === 'request' ? text : null });
+  const files = writeLaunchFiles(options.directory, name, { role: carried.role, request: text });
   const command = launchCommand(kind, args, files, options.prefix);
   await herdrRun(['pane', 'run', pane, command], run);
-  const started = await awaitRuntimeStart(pane, kind, command, run, { ...options, readyStates: delivery === 'request' ? startedStates : promptableStates });
+  const started = await awaitRuntimeStart(pane, kind, command, run, { ...options, readyStates: startedStates });
   let named = true;
   try { await herdrJson(['agent', 'rename', pane, name], run); }
   catch (error) {
@@ -1358,11 +1373,9 @@ export async function startAgentSession(name: string, kind: string, pane: string
     if (!started.awaiting) throw error;
     named = false;
   }
-  // A session awaiting consent has not read its request, so a paste would land in the dialog: the
-  // request waits in its launch file instead, for whoever clears the hold to deliver.
-  if (delivery === 'paste' && !started.awaiting) await deliverPrompt(name, text, run, options);
-  const pending = delivery === 'paste' && started.awaiting ? writeLaunchFiles(options.directory, name, { request: text }).request : null;
-  return { delivery, command, files, consent: started.consent, awaiting: started.awaiting ? { ...started.awaiting, request: pending, named } : undefined,
+  // The request is already the runtime's own first argument, so nothing waits to be pasted: a
+  // session held on a consent dialog reads it once the dialog is answered.
+  return { delivery, command, files, consent: started.consent, awaiting: started.awaiting ? { ...started.awaiting, request: null as string | null, named } : undefined,
     started: { state: started.awaiting ? 'awaiting consent' as const : 'started' as const, detail: started.detail, waitedMs: started.waitedMs, extended: started.extended } };
 }
 

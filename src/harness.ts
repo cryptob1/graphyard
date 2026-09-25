@@ -5,19 +5,34 @@ import { dirname, isAbsolute, resolve } from 'node:path';
 import { endedRuntimeStates, type RuntimeStates } from './model/sessions.js';
 
 export type ApprovalMode = 'auto' | 'prompt';
-export interface LaunchRecipe { args: string[]; environment: Record<string, string>; prompts: string; tradeoff: string }
+/**
+ * A runtime's no-approval startup contract. `args` are its flags (a flag followed by a bare word
+ * takes that word as its value); `equivalents` are operator flags that already select the same
+ * no-approval mode, so the recipe adds nothing beside them; `settable` are recipe flags whose
+ * value an operator may choose because no value of them brings a prompt back (Codex's sandbox);
+ * `aliases` map a short spelling onto its recipe flag; `permits` judges an operator's own value
+ * of a recipe variable, which otherwise must equal the recipe's.
+ */
+export interface LaunchRecipe { args: string[]; environment: Record<string, string>; prompts: string; tradeoff: string; equivalents?: string[]; settable?: string[]; aliases?: Record<string, string>; permits?: Record<string, (value: string) => boolean> }
+/** A permission document that answers nothing with "ask", at any depth: OpenCode's prompting value. */
+export function asksNothing(value: string) {
+  let document: unknown;
+  try { document = JSON.parse(value); } catch { return false; }
+  const asks = (node: unknown): boolean => node === 'ask' || (!!node && typeof node === 'object' && Object.values(node).some(asks));
+  return !asks(document);
+}
 
 // Per-runtime startup contracts that remove the approval and workspace-trust prompts a freshly
 // launched session blocks on. These are runtime CLI contracts, not Graphyard authority: a session
 // that never asks can still only act inside its own assigned worktree and its own credentials.
 export const nonInteractiveLaunch: Record<string, LaunchRecipe> = {
-  claude: { args: ['--permission-mode', 'bypassPermissions'], environment: {}, prompts: 'tool-approval prompts on first use of each command class',
+  claude: { args: ['--permission-mode', 'bypassPermissions'], environment: {}, equivalents: ['--dangerously-skip-permissions'], prompts: 'tool-approval prompts on first use of each command class',
     tradeoff: 'Claude Code stops classifying commands for this session; everything the agent proposes runs without asking.' },
-  codex: { args: ['--ask-for-approval', 'never', '--sandbox', 'workspace-write'], environment: {}, prompts: 'directory-trust and per-command approval prompts',
+  codex: { args: ['--ask-for-approval', 'never', '--sandbox', 'workspace-write'], environment: {}, equivalents: ['--dangerously-bypass-approvals-and-sandbox', '--yolo'], settable: ['--sandbox'], aliases: { '-a': '--ask-for-approval', '-s': '--sandbox' }, prompts: 'directory-trust and per-command approval prompts',
     tradeoff: 'Codex never asks for approval; only its workspace-write sandbox still limits what a command can touch.' },
   cursor: { args: ['--force', '--trust'], environment: {}, prompts: "the 'Run Everything' approval and the fresh-worktree workspace-trust prompt",
     tradeoff: 'cursor-agent runs every command it proposes in the assigned worktree and trusts that worktree without asking.' },
-  opencode: { args: [], environment: { OPENCODE_PERMISSION: '{"edit":"allow","bash":"allow","webfetch":"allow"}' }, prompts: 'edit, bash, and webfetch permission prompts',
+  opencode: { args: [], environment: { OPENCODE_PERMISSION: '{"edit":"allow","bash":"allow","webfetch":"allow"}' }, permits: { OPENCODE_PERMISSION: asksNothing }, prompts: 'edit, bash, and webfetch permission prompts',
     tradeoff: 'opencode edits files, runs shell commands, and fetches URLs without asking.' },
   // Pi has no approval or trust prompt to suppress: every tool it has runs without asking.
   pi: { args: [], environment: {}, prompts: 'none: pi has no approval or workspace-trust prompts',
@@ -28,24 +43,22 @@ export const nonInteractiveLaunch: Record<string, LaunchRecipe> = {
     tradeoff: 'Qwen Code approves every tool call it proposes (YOLO mode) without asking.' },
   copilot: { args: ['--allow-all-tools', '--allow-all-paths'], environment: {}, prompts: 'per-tool approval and path-access prompts',
     tradeoff: 'Copilot CLI runs every tool and reaches every path it proposes without asking.' },
-  kimi: { args: ['--yolo'], environment: {}, prompts: 'per-action approval prompts',
-    tradeoff: 'Kimi CLI approves every action it proposes without asking.' },
-  amp: { args: ['--dangerously-allow-all'], environment: {}, prompts: 'per-command approval prompts',
-    tradeoff: 'Amp runs every command it proposes without asking.' },
   muse: { args: ['--approval-mode', 'never', '--trust-workspace'], environment: {}, prompts: 'approval and workspace-trust prompts',
     tradeoff: 'Muse never asks for approval and trusts the assigned worktree without asking.' },
 };
 
 /**
- * Runtimes Graphyard accepts in a profile but cannot yet start without their own prompts: none
- * has a known flag or variable that suppresses its approval and trust prompts for an interactive
- * session. Each is refused before launch, naming the runtime, rather than started into a session
+ * Runtimes Graphyard accepts in a profile but cannot yet start unattended: none has both a known
+ * flag or variable that suppresses its approval and trust prompts for an interactive session and a
+ * command-line way to hand that session its first request (Kimi and Amp take a prompt only in a
+ * one-shot mode that exits, so their request would have to be pasted, which a session may rightly
+ * refuse). Each is refused before launch, naming the runtime, rather than started into a session
  * that waits for a keypress no one sends (GY-184). A runtime moves out of this list by gaining a
- * recipe above.
+ * recipe above and a request contract in master.ts `launchRequestContracts`.
  */
-export const refusedLaunchKinds = ['devin', 'agy', 'cline', 'omp', 'mastracode', 'kiro', 'droid', 'grok', 'hermes', 'kilo', 'qodercli', 'maki'] as const;
+export const refusedLaunchKinds = ['kimi', 'amp', 'devin', 'agy', 'cline', 'omp', 'mastracode', 'kiro', 'droid', 'grok', 'hermes', 'kilo', 'qodercli', 'maki'] as const;
 export class LaunchRefusedError extends Error { constructor(readonly kind: string, message?: string) {
-  super(message ?? `Graphyard refuses to launch the ${kind} runtime: it has no non-interactive launch contract for ${kind}, so the session would stop at its own approval or trust prompt. Choose a runtime with a launch recipe (${Object.keys(nonInteractiveLaunch).join(', ')}) for this profile or registry role.`);
+  super(message ?? `Graphyard refuses to launch the ${kind} runtime: it has no non-interactive launch contract for ${kind} (no-approval flags and a first request on its command line), so the session would stop at its own approval or trust prompt or never receive its instruction. Choose a runtime with a launch recipe (${Object.keys(nonInteractiveLaunch).join(', ')}) for this profile or registry role.`);
 } }
 /** The runtime's launch recipe, or a refusal naming the runtime when there is none. */
 export function assertLaunchRecipe(kind: string): LaunchRecipe {
@@ -60,12 +73,20 @@ export function assertLaunchRecipe(kind: string): LaunchRecipe {
  * contract that registers neither names no way past the runtime's prompts and is refused like a
  * runtime without a recipe, naming the runtime and the fix.
  */
+/**
+ * Where a registry runtime (GY-91) takes its first request: the argument `{request}` in its launch
+ * contract's arguments stands for it, as `{home}` stands for the account home in its login
+ * command, and master.ts `launchCommand` replaces it with the request file's text (`--message
+ * {request}`, or a bare `{request}` for a positional prompt). It suppresses no prompt, so it never
+ * counts as the contract's no-approval arguments; a runtime with a built-in request contract drops it.
+ */
+export const requestPlaceholder = '{request}';
 export interface RegisteredLaunch { args: string[]; environment?: Record<string, string> }
 export const registryContractRefusal = (kind: string) => `Graphyard refuses to launch the ${kind} runtime: its agent-registry launch contract registers no arguments or environment, so nothing suppresses its own approval or trust prompts and the session would wait for a human. Register the flags that start ${kind} without approvals with graphyard master registry runtime set NAME --kind ${kind} --arg=FLAG --reason REASON.`;
 export function assertLaunchable(kind: string, registered: RegisteredLaunch | null = null) {
   if (nonInteractiveLaunch[kind]) return;
   if (!registered) throw new LaunchRefusedError(kind);
-  if (!registered.args.length && !Object.keys(registered.environment ?? {}).length) throw new LaunchRefusedError(kind, registryContractRefusal(kind));
+  if (!registered.args.some(argument => argument !== requestPlaceholder) && !Object.keys(registered.environment ?? {}).length) throw new LaunchRefusedError(kind, registryContractRefusal(kind));
 }
 /**
  * A profile with `approvals: "prompt"` would start its runtime without the recipe above and wait at
@@ -97,15 +118,44 @@ export const runtimeEndedSessionStates: Record<string, readonly string[]> = {
 };
 export const runtimeEndedStates: RuntimeStates = runtime => runtimeEndedSessionStates[runtime] ?? endedRuntimeStates;
 
+/**
+ * The runtime's no-approval mode merged into a profile's own arguments and environment. Recipe
+ * flags the profile leaves out are added; ones it sets keep its value only where no value brings a
+ * prompt back (`settable`), and otherwise must carry the recipe's value; a recipe variable the
+ * profile sets must equal the recipe's or pass its `permits` check. An effective launch that could
+ * still ask a human is not a launch: `refusal` names the runtime and the value, and `accountLaunch`
+ * refuses it before any session starts (GY-184).
+ */
 export function launchPlan(kind: string | undefined, approvals: ApprovalMode = 'auto', agentArgs: string[] = [], environment: Record<string, string> = {}) {
   const recipe = kind ? nonInteractiveLaunch[kind] : undefined;
-  const base = { approvals, args: [...agentArgs], environment: {} as Record<string, string>, applied: false, prompts: recipe?.prompts ?? null, tradeoff: recipe?.tradeoff ?? null };
+  const base = { approvals, args: [...agentArgs], environment: {} as Record<string, string>, applied: false, refusal: null as string | null, prompts: recipe?.prompts ?? null, tradeoff: recipe?.tradeoff ?? null };
   if (!recipe) return { ...base, reason: kind ? `Graphyard has no non-interactive launch contract for ${kind}; a session of it is refused at launch rather than left at its own approval prompt` : 'A launched session requires an agent kind' };
-  if (approvals === 'prompt') return { ...base, reason: approvalOptOutRefusal(kind!) };
-  // An operator who already configured the runtime's approval flags keeps exactly those arguments.
-  const overridden = recipe.args.some(argument => argument.startsWith('-') && agentArgs.includes(argument)) || Object.keys(recipe.environment).some(name => name in environment);
-  if (overridden) return { ...base, reason: 'This profile already configures the runtime approval flags; Graphyard added nothing' };
-  return { ...base, args: [...recipe.args, ...agentArgs], environment: { ...recipe.environment }, applied: true, reason: null };
+  if (approvals === 'prompt') return { ...base, reason: approvalOptOutRefusal(kind!), refusal: approvalOptOutRefusal(kind!) };
+  const refuse = (setting: string) => { const refusal = `Graphyard refuses to launch the ${kind} runtime with ${setting}: that setting leaves the session able to stop at its own approval prompts for a human, and every launched session must run without asking. Remove it from the profile, or set the value Graphyard's ${kind} recipe uses.`; return { ...base, reason: refusal, refusal }; };
+  if (recipe.equivalents?.some(flag => agentArgs.includes(flag))) return { ...base, applied: true, reason: 'This profile already selects the runtime\'s no-approval mode; Graphyard added nothing' };
+  // The operator's value of a recipe flag, whichever spelling (`--flag value`, `--flag=value`, an alias) it uses.
+  const valueOf = (flag: string) => {
+    for (let index = 0; index < agentArgs.length; index++) {
+      const argument = agentArgs[index], [name, inline] = argument.split(/=(.*)/s);
+      if ((recipe.aliases?.[name] ?? name) !== flag) continue;
+      return { value: inline ?? agentArgs[index + 1] ?? '' };
+    }
+    return null;
+  };
+  const added: string[] = [];
+  for (let index = 0; index < recipe.args.length; index++) {
+    const flag = recipe.args[index], value = recipe.args[index + 1] !== undefined && !recipe.args[index + 1].startsWith('-') ? recipe.args[++index] : null;
+    const present = value === null ? (agentArgs.includes(flag) ? { value: '' } : null) : valueOf(flag);
+    if (!present) { added.push(flag, ...(value === null ? [] : [value])); continue; }
+    if (value !== null && present.value !== value && !recipe.settable?.includes(flag)) return refuse(`${flag} ${present.value}`);
+  }
+  const variables: Record<string, string> = {};
+  for (const [name, value] of Object.entries(recipe.environment)) {
+    if (!(name in environment)) { variables[name] = value; continue; }
+    if (environment[name] !== value && !recipe.permits?.[name]?.(environment[name])) return refuse(`${name}=${environment[name]}`);
+  }
+  const addedNothing = !added.length && Object.keys(variables).length === 0 && (recipe.args.length > 0 || Object.keys(recipe.environment).length > 0);
+  return { ...base, args: [...added, ...agentArgs], environment: variables, applied: true, reason: addedNothing ? 'This profile already configures the runtime approval flags with no-approval values; Graphyard added nothing' : null };
 }
 
 export interface HarnessRule { rule: string; why: string }

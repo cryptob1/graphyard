@@ -270,10 +270,13 @@ test('launched profiles carry each runtime non-interactive contract and a per-pr
   const optOut = launchPlan('cursor', 'prompt', ['--model', 'reviewer']);
   assert.deepEqual(optOut.args, ['--model', 'reviewer']); assert.equal(optOut.applied, false); assert.match(optOut.reason!, /refuses to launch the cursor runtime with approvals "prompt"/);
   assert.ok(optOut.tradeoff, 'the opt-out still states the trade-off it avoids');
+  // GY-184: a profile's own approval setting that still asks is refused, not kept.
   const configured = launchPlan('codex', 'auto', ['--ask-for-approval', 'on-request']);
-  assert.deepEqual(configured.args, ['--ask-for-approval', 'on-request']); assert.match(configured.reason!, /already configures/);
+  assert.equal(configured.applied, false); assert.match(configured.refusal!, /refuses to launch the codex runtime with --ask-for-approval on-request/);
   const presetEnvironment = launchPlan('opencode', 'auto', [], { OPENCODE_PERMISSION: '{"edit":"ask"}' });
-  assert.deepEqual(presetEnvironment.environment, {}); assert.match(presetEnvironment.reason!, /already configures/);
+  assert.deepEqual(presetEnvironment.environment, {}); assert.match(presetEnvironment.refusal!, /refuses to launch the opencode runtime with OPENCODE_PERMISSION=/);
+  const preset = launchPlan('codex', 'auto', ['--ask-for-approval', 'never', '--sandbox', 'workspace-write']);
+  assert.deepEqual(preset.args, ['--ask-for-approval', 'never', '--sandbox', 'workspace-write']); assert.match(preset.reason!, /already configures/);
   // GY-184: Gemini has a recipe now; a runtime without one is refused at launch, and the plan says so.
   assert.deepEqual(launchPlan('gemini', 'auto').args, ['--yolo']);
   assert.match(launchPlan('droid', 'auto').reason!, /no non-interactive launch contract/);

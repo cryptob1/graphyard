@@ -154,17 +154,19 @@ test('unit:launch-command-bounded — the typed launch command line is short and
     assert.equal(longer.typed, typed);
     assert.equal(await readFile(started.files.request!, 'utf8'), request.repeat(40), 'a launch under the same name replaces the file');
 
-    // The other contracts reference the same file: OpenCode through --prompt, Codex and Cursor positionally; a runtime without a contract is pasted and has no request file.
-    for (const [kind, expected] of [['opencode', '--prompt "$(cat "$GY.request")"'], ['codex', '"$(cat "$GY.request")"'], ['cursor', '"$(cat "$GY.request")"']] as const) {
+    // The other contracts reference the same file: OpenCode through --prompt, Gemini and Qwen through --prompt-interactive, Copilot through --interactive, the rest positionally.
+    for (const [kind, expected] of [['opencode', '--prompt "$(cat "$GY.request")"'], ['codex', '"$(cat "$GY.request")"'], ['cursor', '"$(cat "$GY.request")"'], ['muse', '"$(cat "$GY.request")"'], ['pi', '"$(cat "$GY.request")"'],
+      ['gemini', '--prompt-interactive "$(cat "$GY.request")"'], ['qwen', '--prompt-interactive "$(cat "$GY.request")"'], ['copilot', '--interactive "$(cat "$GY.request")"']] as const) {
       const other = new FakePane(() => ({ agent: { agent: kind, agent_status: 'working' } }));
       const result = await startAgentSession(`${kind}-1`, kind, 'w1V:pR6', ['--flag'], request, other.run, { directory, ...other.bounds() });
       assert.ok(other.typed!.endsWith(` ${kind} --flag ${expected}`), `${kind}: ${other.typed}`); assert.equal(result.delivery, 'request'); assert.equal(result.files.role, null);
+      assert.ok(!other.calls.some(call => call[0] === 'agent' && call[1] === 'prompt'), `${kind}: nothing is pasted`);
     }
-    assert.equal(launchDelivery('muse'), 'paste'); assert.equal(launchDelivery(undefined), 'paste');
-    const pasted = new FakePane(() => ({ agent: { agent: 'muse', agent_status: 'idle' } }));
-    const paste = await startAgentSession('muse-1', 'muse', 'w1V:pR6', [], request, pasted.run, { directory, ...pasted.bounds(), attempts: 1 });
-    assert.equal(paste.delivery, 'paste'); assert.equal(pasted.typed, 'muse'); assert.deepEqual(paste.files, { stem: join(directory, '.graphyard/launch/muse-1'), role: null, request: null });
-    assert.ok(pasted.calls.some(call => call[0] === 'agent' && call[1] === 'prompt' && call[3] === `${autonomyContract} ${request}`), 'a runtime without a contract is prompted after it starts, as before, its request led by the autonomy contract (GY-184)');
+    // A runtime with no way to take its request on the command line is refused before anything is typed (GY-184), never pasted into.
+    assert.equal(launchDelivery('aider'), 'paste'); assert.equal(launchDelivery(undefined), 'paste');
+    const refused = new FakePane(() => ({ agent: { agent: 'aider', agent_status: 'idle' } }));
+    await assert.rejects(startAgentSession('aider-1', 'aider', 'w1V:pR6', ['--yes-always'], request, refused.run, { directory, ...refused.bounds(), contract: { args: ['--yes-always'] } }), /refuses to launch the aider runtime: it has no way to take the session's first request on its command line/);
+    assert.deepEqual(refused.calls, []);
 
     // A supervised worker: the same references after `node CLI watch KEY EPOCH -- KIND`; still bounded with the longest runtime path seen in practice.
     const worker = launchCommand('claude', producerArgs, writeLaunchFiles(directory, 'claude-primary', { role, request }), ['/home/operator/.local/share/mise/installs/cursor-agent/2026.09.18-9a7762b/dist-package/node', '/home/operator/code/project/bin/graphyard.mjs', 'watch', 'GY-121', '1', '--']);

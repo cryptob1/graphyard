@@ -23,7 +23,7 @@ import { applyRegistryMutation, chooseSession, emptyRegistry, fleetRoles, fleetV
 import type { Principal, Work } from '../src/model.js';
 import { FleetOverview } from '../web/pages/fleet.js';
 import { views, visibleViews } from '../web/pages/index.js';
-import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
+import { expandTypedCommand, requestOf, startedAtOnce } from './helpers/launch-shell.js';
 
 const operator: Principal = { id: 'operator', role: 'admin' };
 const coordinator: Principal = { id: 'master', role: 'coordinator' };
@@ -308,7 +308,11 @@ test('integration:registry-driven-selection — an executor\'s action runs on th
   const approver = await launchApprover(root, readyWork('GY-950'), 'decision-1', undefined, [], herdr(approverCalls), probe);
   assert.equal(approver.account!.environment, 'muse-a');
   const started = expandTypedCommand(approverCalls.find(args => args[0] === 'pane' && args[1] === 'run')![3]);
-  assert.equal(started.kind, 'muse'); assert.deepEqual(started.args, ['--approval-mode', 'never', '--trust-workspace']);
+  assert.equal(started.kind, 'muse'); assert.deepEqual(started.args.slice(0, 3), ['--approval-mode', 'never', '--trust-workspace']);
+  // Muse takes its request positionally, after its contract's arguments, never pasted (GY-184).
+  assert.equal(started.args.length, 4); assert.match(started.args[3], /You are the independent Graphyard approver/);
+  assert.equal(requestOf(started.kind, started.args), started.args[3]);
+  assert.equal(approverCalls.some(args => args[0] === 'agent' && args[1] === 'prompt'), false);
   // …and a role the registry does not define is not guessed at: reviewer falls to the local profile, which names none.
   assert.deepEqual(await selectAccount(config, 'reviewer', { name: 'review-a' }, probe), { account: null, health: null, skipped: [] });
   const source = await readFile(new URL('../src/master.ts', import.meta.url), 'utf8');
