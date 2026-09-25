@@ -1,5 +1,5 @@
 // Concern: the master status report — dispatch sessions, role concurrency, schedule, branches and deliveries.
-import { dispatchOverlap, describeChain, scopeBreadth, effectiveConcurrency, inFlight, dispatchHoldBoundMs, dispatchable, dispatchOrder, dispatchHold, type DispatchHold } from '../coordination.js';
+import { concurrentOverlap, scopeBreadth, inFlight, dispatchable, dispatchOrder } from '../coordination.js';
 import type { ConflictReport } from '../conflicts.js';
 import { standingCapacity, describeCapacity } from '../model/capacity.js';
 import { parkedOnHuman, humanDecisionLabel, answerCommand, openHumanRequests } from '../model/human-request.js';
@@ -15,7 +15,6 @@ import type { HerdrAgent } from './herdr.js';
 import { type ContainmentAssessment, containmentHold, containmentPhase } from './containment.js';
 import { agentOwner, type AttentionItem, controlPlaneAttention, type ControlPlaneStatus, fleetStatus, workAttentionOwner } from './attention.js';
 import { unrunnableRemedies } from './harness.js';
-import { describeOverlap } from './dispatch.js';
 import { mergedWithoutAuthorization, unauthorizedMergeViolation } from './merge.js';
 
 // Reviewer failover is a capacity decision the operator must see, not a silent retry.
@@ -168,10 +167,9 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       : quarantine.phase === 'grace' ? [`Worker lease for epoch ${quarantine.epoch} lapsed at ${quarantine.lapsedAt}; containment grace window has ${seconds(quarantine.graceRemainingMs!)} remaining before supervisor absence can be verified`, 'containment-grace']
       : [`Containment quarantine from epoch ${quarantine.epoch} blocks dispatch: ${quarantine.lapsedAt ? `worker lease lapsed at ${quarantine.lapsedAt}, past the ${seconds(containmentGraceMs)} grace window; ` : ''}${quarantine.refusals[0]}`, 'containment'];
     const gaps = work.proofGaps ?? [];
-    const held = scheduling.held.find(entry => entry.key === work.key) ?? null, overdueHold = scheduling.overdue.find(entry => entry.key === work.key) ?? null;
-    // An item in flight beside another it overlaps — dispatched over a hold, past the bound or by
-    // --allow-overlap — shows what it runs concurrently with, so the overlap stays recorded.
-    const concurrent = !held && !overdueHold && (active || work.submission) ? dispatchOverlap(work, snapshot.work, now) : [];
+    // Planned-file overlap holds nothing (dispatch is optimistic); an item beside another on the
+    // same files shows what it runs concurrently with, so the overlap stays on the record.
+    const concurrent = concurrentOverlap(work, snapshot.work, now);
     const conflictReport = candidateConflicts.report[work.key];
     const conflicts = work.submission && work.candidate ? { candidates: (conflictReport?.conflicts ?? []).map(conflict => conflict.key), files: conflictReport?.conflicts ?? [], unprobed: conflictReport?.unprobed ?? [], probed: !!conflictReport && candidateConflicts.available } : null;
     const dispatch = describeDispatch(work, reviews, sessions, now);
@@ -230,9 +228,6 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       // used to be the commonest attention line on this list — one per open candidate, every
       // merge — and answering it cost a rework round for a change that was a clean fast-forward.
       : baseRefresh && !work.blocker ? [null, null]
-      // A hold past its bound is no longer holding: the loop offers the item over the overlap on its
-      // next cycle, so it is raised only while nothing has taken it, naming the chain it waited behind.
-      : overdueHold ? [`${work.key} has been held ${hours(overdueHold.hold.ageMs)} behind ${describeChain(overdueHold.hold.chain)}, past the ${hours(overdueHold.hold.boundMs)} bound; it is offered over the overlap and waits only for a free worker`, 'hold-overdue']
       : work.blocker || dwellMs > 3_600_000 ? [first?.reasons[0] ?? `Work has remained at ${work.stage} for more than one hour`, 'gate'] : [null, null];
     const attentionOwner = cause ? workAttentionOwner(work, cause) : null;
     return { key: work.key, title: work.title, stage: work.stage, owner: active ? work.lease!.owner : null, profile: profile?.name ?? null, session: session?.state ?? null, refusal: first ? { gate: first.name, reason: first.reasons[0] } : null, mergeable, review, dispatch, proofGaps: gaps, containment: quarantine, attention, attentionOwner, queue: placement ? queueRows.find(row => row.key === work.key) ?? null : null,
@@ -252,7 +247,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       // A branch carrying another item's unlanded commits and the restore for it (GY-127), and
       // an approval GitHub dismissed for a merge-base change that the control plane restored.
       contamination, restoredApproval: approvalRestored,
-      scope: scopeBreadth(work.plannedFiles), overlap: held ? { held: true, ahead: held.ahead, reason: held.reason, hold: held.hold, concurrent: [] } : overdueHold ? { held: false, ahead: overdueHold.ahead, reason: overdueHold.reason, hold: overdueHold.hold, concurrent: [] } : { held: false, ahead: [], reason: null, hold: null, concurrent }, conflicts,
+      scope: scopeBreadth(work.plannedFiles), overlap: { concurrent }, conflicts,
       // Execution versus wait so far, rework rounds and hand-offs, from the item's own timeline.
       speed: pipelineSpeed(work, now) };
   });
@@ -278,14 +273,14 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
   const capacityItems: AttentionItem[] = capacity.map(entry => ({ subject: `${entry.role} capacity`, text: entry.line,
     ...agentOwner('master', `Nothing to run before ${entry.retryAt ?? 'an account reports quota again'}: the loop resumes ${entry.role} launches on its own. To restore capacity sooner, log another account in and add it with graphyard master environments --apply and graphyard master config accounts:PROFILE=…; buying quota or opening a provider account is the human's decision`) }));
   const humanRequests = openHumanRequests(snapshot.work, now);
-  // The fleet's effective concurrency beside its idle workers: how many items the overlap graph
-  // lets run at once, so eleven free workers and a concurrency of one is read as serialization,
-  // not as a shortage of anything.
-  const graph = effectiveConcurrency(snapshot.work, now);
+  // The fleet's concurrency beside its idle workers: every open item in flight or dispatchable may
+  // run at once — planned-file overlap holds nothing — so idle workers beside dispatchable items is
+  // a dispatch shortfall, not serialization.
+  const inFlightCount = snapshot.work.filter(work => inFlight(work, now)).length;
   const idle = workerSessions.filter(session => session.mode === 'launch' && session.credential.available && (session.state === 'offline' || session.state === 'idle') && !rows.some(row => row.owner === session.principal));
-  const fleet = { ...graph, inFlight: snapshot.work.filter(work => inFlight(work, now)).length, dispatchable: scheduling.order.length, held: scheduling.held.length, overdue: scheduling.overdue.length,
-    idleWorkers: idle.length, workers: workerSessions.filter(session => session.mode === 'launch').length, boundMs: scheduling.boundMs,
-    statement: `${graph.effective} item${graph.effective === 1 ? '' : 's'} could be in flight at once over ${graph.nodes} open item${graph.nodes === 1 ? '' : 's'} (${graph.edges} overlap${graph.edges === 1 ? '' : 's'}${graph.exact ? '' : ', greedy estimate'}); ${idle.length} of ${workerSessions.filter(session => session.mode === 'launch').length} launch profile${workerSessions.filter(session => session.mode === 'launch').length === 1 ? '' : 's'} idle; ${scheduling.held.length} held, ${scheduling.overdue.length} past the ${hours(scheduling.boundMs)} hold bound` };
+  const launchProfiles = workerSessions.filter(session => session.mode === 'launch').length;
+  const fleet = { effective: inFlightCount + scheduling.order.length, inFlight: inFlightCount, dispatchable: scheduling.order.length, idleWorkers: idle.length, workers: launchProfiles,
+    statement: `${inFlightCount + scheduling.order.length} item${inFlightCount + scheduling.order.length === 1 ? '' : 's'} could be in flight at once (${inFlightCount} in flight, ${scheduling.order.length} dispatchable; planned-file overlap holds nothing); ${idle.length} of ${launchProfiles} launch profile${launchProfiles === 1 ? '' : 's'} idle` };
   // A blocker whose remedy no launched session may run is Graphyard's own defect (GY-128).
   const remedies = unrunnableRemedies(snapshot.work, { cliPath, baseBranch, workerKinds: profiles.filter(profile => profile.mode === 'launch').flatMap(profile => profile.kind ? [profile.kind] : []) });
   const remedyItems: AttentionItem[] = remedies.map(entry => ({ subject: entry.key, text: entry.text,
@@ -300,7 +295,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       quarantined: rows.filter(row => row.containment && row.containment.phase !== 'live').length, settleableQuarantines: rows.filter(row => row.containment?.settleable).length,
       awaitingSmoke: delivered.filter(row => row.state === 'awaiting-deployment' || row.state === 'awaiting-smoke').length, postDeployFailures: delivered.filter(row => row.state === 'delivered-with-failure').length,
       reconciledDeliveries: deliveries.reconciled.length, operatorAuthorizedDeliveries: deliveries.operatorAuthorized.length,
-      humanRequests: humanRequests.length, capacityExhausted: capacity.length, concurrencyStarved: concurrency.filter(report => report.starved).length, unrunnableRemedies: remedies.length, effectiveConcurrency: graph.effective, idleWorkers: idle.length, held: scheduling.held.length, holdsOverdue: scheduling.overdue.length,
+      humanRequests: humanRequests.length, capacityExhausted: capacity.length, concurrencyStarved: concurrency.filter(report => report.starved).length, unrunnableRemedies: remedies.length, effectiveConcurrency: fleet.effective, idleWorkers: idle.length,
       contaminatedBranches: rows.filter(row => row.contamination && row.contamination.source.length).length, restoredApprovals: rows.filter(row => row.restoredApproval).length,
       // Closed without delivery (model/closure.ts): never open, never delivered, counted only here.
       closed: snapshot.work.filter(isClosed).length },
@@ -308,7 +303,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     attentionItems: [...rows.flatMap(row => row.attention && row.attentionOwner ? [{ subject: row.key, text: row.attention, ...row.attentionOwner }] : []), ...remedyItems, ...capacityItems, ...concurrencyItems, ...installation.attentionItems, ...registry.attentionItems] as AttentionItem[],
     // What waits on the human, longest first, with how to answer; the roles out of capacity; each
     // role's sessions against its concurrency limit with the longest wait for a slot; the
-    // fleet's effective concurrency — what the overlap graph lets run at once — beside its idle workers;
+    // fleet's concurrency — every open item in flight or dispatchable — beside its idle workers;
     // and the blockers whose remedy no launched session may run.
     humanRequests, capacity, concurrency, effectiveConcurrency: fleet, unrunnableRemedies: remedies,
     closed: closedHistory(snapshot.work),
@@ -338,25 +333,14 @@ export function branchReport(rows: ReturnType<typeof buildMasterStatus>['work'])
 }
 /**
  * The dispatch plan the durable loop and `master dispatch` follow: ready items in the order they
- * would be offered (smallest planned scope first within a priority), the ones held behind a
- * claimed or unmerged item whose changed files (or, before a candidate, planned files) they
- * overlap, with the age of each hold and the chain it waits behind, the holds past the bound —
- * offered over the overlap — and the broad scopes that will overlap nearly everything.
+ * would be offered (smallest planned scope first within a priority), and the broad scopes that
+ * make a weak change-scope contract. Nothing is held for planned-file overlap: dispatch is
+ * optimistic, and the merge queue and a sync round integrate whichever overlapping item lands second.
  */
-export function dispatchSchedule(work: Work[], now: number, boundMs = dispatchHoldBoundMs) {
+export function dispatchSchedule(work: Work[], now: number) {
   const ready = work.filter(item => dispatchable(item, now)).sort(dispatchOrder);
-  const holds = ready.flatMap(item => { const hold = dispatchHold(item, work, now, boundMs); return hold ? [{ key: item.key, ahead: hold.ahead, hold, reason: holdReason(hold) }] : []; });
-  const held = holds.filter(entry => !entry.hold.overdue), overdue = holds.filter(entry => entry.hold.overdue);
-  const heldKeys = new Set(held.map(entry => entry.key)), overdueKeys = new Set(overdue.map(entry => entry.key));
-  return { order: ready.map(item => ({ key: item.key, priority: item.priority, scope: scopeBreadth(item.plannedFiles), held: heldKeys.has(item.key), overdue: overdueKeys.has(item.key) })), held, overdue,
-    highConflict: ready.filter(item => scopeBreadth(item.plannedFiles).highConflict).map(item => ({ key: item.key, broad: scopeBreadth(item.plannedFiles).broad })), boundMs };
-}
-/** The one sentence a hold reads as, before and after the bound: who is ahead, on which files, since when, and what lifts it. */
-export function holdReason(hold: DispatchHold) {
-  const chain = hold.chain.length > hold.ahead.length ? `; the chain it waits behind: ${describeChain(hold.chain)}` : '';
-  return hold.overdue
-    ? `Held by planned-file overlap with ${describeOverlap(hold.ahead)} since ${hold.since} (${hours(hold.ageMs)}), past the ${hours(hold.boundMs)} bound${chain}; dispatched over the overlap: whichever lands second re-integrates the other`
-    : `Held by planned-file overlap with ${describeOverlap(hold.ahead)} since ${hold.since} (${hours(hold.ageMs)} of the ${hours(hold.boundMs)} bound)${chain}; dispatch with --allow-overlap to override, or the bound lifts it`;
+  return { order: ready.map(item => ({ key: item.key, priority: item.priority, scope: scopeBreadth(item.plannedFiles) })),
+    highConflict: ready.filter(item => scopeBreadth(item.plannedFiles).highConflict).map(item => ({ key: item.key, broad: scopeBreadth(item.plannedFiles).broad })) };
 }
 /** Fewest conflicts first: the order that forces the fewest re-integration rounds on the rest. */
 export function sequenceAdvice(candidates: { key: string; conflicts: string[] }[]) {

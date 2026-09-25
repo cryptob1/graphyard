@@ -86,6 +86,8 @@ export function profileHealth(profiles: WorkerProfile[], credentials: Record<str
 /** Retry a refused action on a widening cycle interval rather than on every pass. */
 export function readyToRetry(previous: DaemonAction | undefined, cycle: number, maxBackoffCycles = 30) {
   if (!previous) return true;
+  // A waiting action is an outcome still being reconciled (GY-195): it is asked again every cycle.
+  if (previous.state === 'waiting') return true;
   if (previous.state !== 'failed') return false;
   return cycle - previous.cycle >= Math.min(2 ** Math.max(0, previous.attempts - 1), maxBackoffCycles);
 }

@@ -1,7 +1,7 @@
 // Concern: cycle step 2 — decide open scope requests and measure the decision budget.
 import type { Work } from '../model.js';
-import { type ScopeRequestState, pathScopeContains, redecidableScopeRefusal, routableScopeRequest } from '../model/scope.js';
-import { findingScope } from '../review-scope.js';
+import { type ScopeRequestState, pathScope, pathScopeContains, pinningTestGround, redecidableScopeRefusal, routableScopeRequest, testFile } from '../model/scope.js';
+import { findingScope, type ReviewFinding } from '../review-scope.js';
 import { guardBroadScope } from '../master.js';
 import { message, scopeMeasurementSchema } from './state.js';
 import { scopeKey } from './reconcile.js';
@@ -10,6 +10,28 @@ import { readyToRetry } from './sessions.js';
 import { boundDetail, detailChanged, namePaths } from './decisions.js';
 import { findingRecheckMs, record } from './effects.js';
 import type { Cycle } from './cycle.js';
+
+/**
+ * GY-199. What grants each requested path without an approver, or the first refusal: a trusted
+ * review finding naming it (review-scope.ts findingScope), or — for a test file — the pinning rule
+ * (model/scope.ts pinningTestGround), read from the base branch's texts outside every transaction.
+ */
+export async function automaticScopeGrounds(item: Work, request: ScopeRequestState, paths: readonly string[], findings: readonly ReviewFinding[], exists: (path: string) => boolean, read?: (path: string) => Promise<string | null>): Promise<{ grounds: { path: string; ground: string }[] } | { refusal: string }> {
+  const grounds: { path: string; ground: string }[] = [];
+  let planned: { path: string; text: string | null }[] | null = null;
+  for (const path of paths) {
+    const named = findingScope([path], findings, exists);
+    if ('grounds' in named) { grounds.push(...named.grounds); continue; }
+    if (read && testFile(path) && exists(path)) {
+      const text = await read(path);
+      planned ??= await Promise.all((item.plannedFiles ?? []).filter(scope => !pathScope(scope).prefix && !scope.includes('*')).slice(0, 50).map(async scope => ({ path: scope, text: await read(scope) })));
+      const ground = pinningTestGround(path, request.reason, text, planned);
+      if (ground) { grounds.push({ path, ground }); continue; }
+    }
+    return named;
+  }
+  return { grounds };
+}
 
 /** Step 2: decide the open scope requests, and measure the decision budget over what is still waiting. */
 export async function scopeStep(cycle: Cycle) {
@@ -46,7 +68,7 @@ export async function scopeStep(cycle: Cycle) {
     try {
       const findings = await effects.reviewFindings(item);
       const existing = await effects.basePaths?.(paths) ?? new Set<string>();
-      const scoped = findingScope(paths, findings, path => existing.has(path));
+      const scoped = await automaticScopeGrounds(item, request, paths, findings, path => existing.has(path), effects.baseText);
       if ('refusal' in scoped) {
         const detail = boundDetail(`Not widened on a review finding: ${scoped.refusal}`);
         const entry = await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done', detail, attempts, cycle: state.cycle }, now(), effects.persist);
@@ -56,7 +78,7 @@ export async function scopeStep(cycle: Cycle) {
       }
       const grounds = scoped.grounds.map(entry => `${entry.path} (${entry.ground})`).join('; ');
       const reason = guardBroadScope({ ...item, plannedFiles: [...new Set([...(item.plannedFiles ?? []), ...paths])] },
-        `Additive scope a review finding on ${item.key}'s own change names: ${grounds}. ${request.requestedBy} asked because ${request.reason}`.slice(0, 1900), { allow: false, command: 'the loop', existing: item.plannedFiles });
+        `Additive scope ${item.key}'s own change calls for — a review finding names it, or a test pins text a planned file holds: ${grounds}. ${request.requestedBy} asked because ${request.reason}`.slice(0, 1900), { allow: false, command: 'the loop', existing: item.plannedFiles });
       const widened = await effects.widenScope(item, request, paths, reason) as Work | undefined;
       // The time the control plane recorded the answer, never the cycle's: the worker reads it at once.
       const recorded = widened?.scopeDecision;

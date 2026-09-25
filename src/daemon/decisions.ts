@@ -1,7 +1,9 @@
 // Concern: routine decisions — standing verdicts, decision reasons and the approver step.
 import { type Work, type AgentReview, reviewProviderOf, standingEscalations, leaseLossEpoch } from '../model.js';
 import { routableScopeRequest, scopeDecisionBinding, scopeDecisionReason } from '../model/scope.js';
-import { baseRefreshConflict, threadsAwaitReview, blockingThreads, type ReviewThread, describeThread } from '../merge-queue.js';
+import { baseRefreshConflict, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, type ReviewThread, describeThread } from '../merge-queue.js';
+import { mechanicalFailure, mechanicalVerdicts } from '../model/mechanical-proofs.js';
+import { unexercisedFindings } from '../auto-dispatch.js';
 import { guardBroadScope, type MasterConfig, type ContainmentAssessment, containmentPhase, type HerdrAgent } from '../master.js';
 import { actionDetailMax, type ApprovalWatch, message } from './state.js';
 
@@ -155,14 +157,26 @@ export function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge
   // GY-163's thread rework was refused before its reviewer had judged the head; the reviewer then
   // requested changes, and the loop never asked again because both keyed on the head alone.
   if (conflict) return { action: 'rework', reason: `${work.key}: ${conflict}. Only a fresh attempt can resolve it, so the candidate returns to a worker.`, binding: `${work.candidate!.sha}:conflict` };
+  // A head GitHub reports conflicting with the base, or one the merge queue ejected because its
+  // speculative merge conflicts, is not waited on either (GY-191): nothing but a sync can move it,
+  // so the loop asks for that round at once, naming the base tip it conflicts with.
+  const sync = work.reworkRequested ? null : syncConflict(work);
+  if (sync) return { action: 'rework', reason: `${work.key}: ${sync.reason}. Only a sync can resolve it (graphyard sync ${work.key}: merge the base, resolve, push), so the candidate returns to a worker.`, binding: sync.binding };
   const verdict = standingVerdict(work);
   if (verdict) return { action: 'rework', reason: `${work.key}: ${verdict.reason}. The verdict stands against the current head, so the item returns to a worker for the next round.`, binding: `${work.candidate!.sha}:verdict:${verdict.reviewer}` };
-  // Unresolved review threads block the provider's merge (GY-139) whatever the review state that
-  // opened them — a bot's COMMENTED review leaves no verdict, so without this the item waited on a human.
-  // The review of the current head judges those threads first: its approval names the ones fixed and
-  // the loop resolves them, so a rework requested before it settles invalidated the review that
-  // would have cleared them, and the same open threads carried to the next head — without end.
-  const threads = !work.reworkRequested && work.candidate && !threadsAwaitReview(work, Date.parse(work.observation?.at ?? '')) ? blockingThreads(work) : [];
+  // A failed trusted proof, or evidence the producer found does not exercise its criterion, returns
+  // the head before any review (GY-193): no review comes for such a head, so the thread rule below —
+  // which waits for one — must not hold this rework.
+  const proofs = proofRework(work);
+  if (proofs) return { action: 'rework', ...proofs };
+  // Unresolved review threads block no merge: the reviewer's verdict on the head is the review
+  // gate and the threads are its inputs. A thread still open once the review of the current head
+  // has settled — one it was not shown, or a policy with no review — is a finding the loop sends
+  // back for, early on. The review judges threads first: its approval names the ones fixed or
+  // overridden and the loop resolves them, so a rework requested before it settles would invalidate
+  // the review that clears them. After `botThreadReworkRounds` rework rounds a bot's thread is
+  // advisory: bot findings alone had kept items cycling round after round on the same head family.
+  const threads = !work.reworkRequested && work.candidate && !threadsAwaitReview(work, Date.parse(work.observation?.at ?? '')) ? reworkThreads(work) : [];
   if (threads.length) return { action: 'rework', reason: `${work.key}: ${threadReworkSummary(work.candidate!.sha, threads)}. The findings stand against the current head, so the item returns to a worker to address them; the next review names the threads it verified fixed and the loop resolves them.`,
     binding: `${work.candidate!.sha}:threads:${threads.map(thread => thread.id ?? `${thread.path}:${thread.line}`).sort().join(',')}` };
   // A lease-loss the control plane raised is operational: once the lost attempt can no longer act,
@@ -173,6 +187,54 @@ export function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge
   if (lost) return { action: 'resolve', input: { trigger: 'lease-loss' }, escalation: { trigger: 'lease-loss', at: lost.escalation.at }, binding: `lease-loss:${lost.epoch}:${lost.escalation.at}`,
     reason: `${work.key}: the control plane raised a lease-loss for epoch ${lost.epoch} at ${lost.escalation.at} (${lost.escalation.reason}). ${lost.evidence}Nothing from the lost attempt can act or merge. Resolving clears only this concern: it decides no gate and ships nothing.` };
   if (!config.autoMerge && mergeableCandidate(work)) return { action: 'merge', reason: `${work.key}: every gate passes for candidate ${work.candidate!.sha.slice(0, 12)} and automatic merging is off, so the merge needs an approved decision.`, binding: work.candidate!.sha };
+  return null;
+}
+/**
+ * GY-193. The rework a head's own proofs call for, or null. A trusted proof that failed on the head
+ * (the build gate returns it to its worker before review) and evidence the producer recorded as not
+ * exercising its criterion (the proof also passed with the change removed) both leave a head no
+ * review will ever judge, so the rework is asked for now, whatever threads stand open on it: the
+ * rule that waits for a review to judge the threads first would wait for a review that never comes.
+ * The reason quotes each finding and names the open threads, so the worker takes both in one round.
+ */
+export function proofRework(work: Work): { reason: string; binding: string } | null {
+  const candidate = work.candidate;
+  if (!work.submission || work.reworkRequested || !candidate || work.stage === 'done' || work.observation?.merged) return null;
+  const failed = mechanicalVerdicts(work, [work], new Date()).filter(verdict => verdict.outcome === 'failed');
+  const unexercised = unexercisedFindings(work);
+  if (!failed.length && !unexercised.length) return null;
+  const threads = work.observation?.candidate.sha === candidate.sha ? work.observation.conversations?.unresolved ?? [] : [];
+  const findings = [
+    ...(failed.length ? [`a trusted proof failed: ${failed.map(verdict => mechanicalFailure(verdict, candidate.sha)).join('; ')}`] : []),
+    ...(unexercised.length ? [`the producer recorded evidence that does not exercise its criterion on ${candidate.sha.slice(0, 12)} — ${unexercised.map(entry => `${entry.proof}: "${entry.finding.length > 400 ? `${entry.finding.slice(0, 399)}…` : entry.finding}"`).join('; ')}`] : []),
+  ];
+  const named = threads.slice(0, 5).map(thread => { const text = describeThread(thread); return text.length > 120 ? `${text.slice(0, 119)}…` : text; });
+  const open = threads.length ? ` ${threads.length} review thread${threads.length === 1 ? ' is' : 's are'} also unresolved on the pull request (${named.join('; ')}${threads.length > named.length ? `; and ${threads.length - named.length} more` : ''}); address them in the same round.` : '';
+  return { reason: `${work.key}: ${findings.join('. ')}. No review judges a head whose proof did not pass, so the item returns to a worker now to fix what the proof found.${open}`,
+    binding: `${candidate.sha}:proof:${[...failed.map(verdict => verdict.proof), ...unexercised.map(entry => `unexercised:${entry.proof}`)].sort().join(',')}` };
+}
+
+/** The reason `advanceQueue` ejects an entry whose speculative merge conflicts (github.ts SpeculativeConflict). */
+const speculativeConflictReason = /^Speculative merge of [0-9a-f]+ into .+ conflicts/;
+/**
+ * The conflict with the base that only a sync round can resolve, for exactly the current head, or
+ * null. Two observations say so. GitHub computed a merge conflict for the open pull request (its
+ * `mergeable` is false, not merely uncomputed); and the merge queue ejected this head because its
+ * speculative merge conflicts. An ejection whose base the control plane has not yet tried to
+ * bring the head onto waits for that attempt first: a clean refresh republishes the head and it
+ * re-enters the queue with no round at all, and a conflicting one is named by `baseRefreshConflict`.
+ * The binding names the head and the base tip, so a base that moves on is a fresh ground.
+ */
+export function syncConflict(work: Work): { reason: string; binding: string } | null {
+  const candidate = work.candidate, observation = work.observation;
+  if (!work.submission || work.reworkRequested || !candidate || !observation || work.stage === 'done') return null;
+  if (observation.candidate.sha !== candidate.sha || observation.merged || observation.prState === 'closed') return null;
+  const tip = observation.baseTip ?? candidate.baseSha;
+  if (observation.conflicting && !work.queue)
+    return { reason: `GitHub reports that candidate ${candidate.sha.slice(0, 12)} conflicts with base branch tip ${tip.slice(0, 12)}`, binding: `${candidate.sha}:sync:${tip}` };
+  const ejection = work.queueEjection;
+  if (ejection && !work.queue && ejection.sha === candidate.sha && ejection.policyRevision === work.policyRevision && speculativeConflictReason.test(ejection.reason) && !pendingBaseRefresh(work))
+    return { reason: `the merge queue ejected candidate ${candidate.sha.slice(0, 12)}: ${ejection.reason} (base branch tip ${tip.slice(0, 12)})`, binding: `${candidate.sha}:queue-conflict:${ejection.sequence}:${tip}` };
   return null;
 }
 /**
@@ -224,6 +286,17 @@ export function setAsideFollowUpThreads<S extends { work: Work[] }>(snapshot: S,
     return { ...item, observation: { ...item.observation!, conversations: { ...conversations, unresolved: conversations.unresolved.filter(thread => !thread.id || !ids.has(thread.id)) } } };
   }) };
 }
+/** How many rework rounds an item takes before a bot's review thread stops being grounds for another. */
+export const botThreadReworkRounds = 2;
+/**
+ * The open threads on the current head the loop requests rework for: every one within the first
+ * `botThreadReworkRounds` rework rounds, and after that only a person's — a bot's thread is then
+ * advisory, and only the reviewer's own CHANGES_REQUESTED sends the item back.
+ */
+export function reworkThreads(work: Work): ReviewThread[] {
+  const threads = openThreads(work);
+  return (work.pipeline?.reworkRounds ?? 0) >= botThreadReworkRounds ? threads.filter(thread => !botThread(thread)) : threads;
+}
 /** How many unresolved threads a rework reason names; the binding still carries every one, and the worker reads them all from the pull request. */
 const reworkThreadsNamed = 5;
 /**
@@ -234,7 +307,7 @@ const reworkThreadsNamed = 5;
 export function threadReworkSummary(sha: string, threads: ReviewThread[]): string {
   const named = threads.slice(0, reworkThreadsNamed).map(thread => { const text = describeThread(thread); return text.length > 120 ? `${text.slice(0, 119)}…` : text; });
   const more = threads.length - named.length;
-  return `Branch protection requires conversation resolution and ${threads.length} review thread${threads.length === 1 ? ' is' : 's are'} unresolved on ${sha.slice(0, 12)}: ${named.join('; ')}${more ? `; and ${more} more on the pull request` : ''}. GitHub blocks the merge until each is resolved; rework the candidate to address the findings, never dismiss them`;
+  return `${threads.length} review thread${threads.length === 1 ? ' is' : 's are'} still open on ${sha.slice(0, 12)} after its review settled: ${named.join('; ')}${more ? `; and ${more} more on the pull request` : ''}. Rework the candidate to address the findings, never dismiss them`;
 }
 /**
  * A decision reason within the control plane's bound. What the requester adds around the loop's own

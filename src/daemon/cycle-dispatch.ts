@@ -18,9 +18,9 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
   const { config, state, effects, now, snapshot, clock, performed, isolate, agents, credentials, open } = cycle;
   // 4. Dispatch claimable work to a healthy profile. The launcher claims under the worker's own
   //    identity; the daemon never holds a lease. An unhealthy profile is skipped, not waited on.
-  //    An item whose planned files overlap a claimed or unmerged item is not claimable (the
-  //    loop never overrides that; `master dispatch --allow-overlap` is the operator's call), and
-  //    the smallest planned scope within a priority is offered first.
+  //    Planned-file overlap never holds an item (dispatch is optimistic: the merge queue and a
+  //    sync round integrate whichever lands second); only exclusive resources do. The smallest
+  //    planned scope within a priority is offered first.
   const claimable = open.filter(item => {
     try { assertDispatchable(item, snapshot.work, snapshot.now); return true; } catch { return false; }
   }).sort(dispatchOrder);

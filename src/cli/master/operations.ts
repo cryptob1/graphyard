@@ -37,8 +37,8 @@ export async function operationsCommand(session: MasterSession): Promise<unknown
     return print({ key: settled.key, epoch: assessment.epoch, scope: assessment.scope, containmentQuarantine: settled.containmentQuarantine, stage: settled.stage, verification: assessment.verification });
   }
   if (id === 'dispatch') {
-    const { values, positionals } = parseArgs({ args, options: { 'allow-overlap': { type: 'boolean' } }, allowPositionals: true });
-    if (!positionals[0]) throw new Error('Use master dispatch GY-N PROFILE [--allow-overlap]');
+    const { positionals } = parseArgs({ args, options: {}, allowPositionals: true });
+    if (!positionals[0]) throw new Error('Use master dispatch GY-N PROFILE');
     const requestedAt = Date.now(), snapshot = await masterApi('work-snapshot');
     const work = snapshot.work.find((item: any) => item.id === positionals[0] || item.key === positionals[0]);
     const profile = master.workers.find(item => item.name === positionals[1]);
@@ -50,7 +50,7 @@ export async function operationsCommand(session: MasterSession): Promise<unknown
       const workerStatus = await masterApi('status', await readWorkerCredential(root, profile.credentialFile));
       if (workerStatus.actor?.role !== 'worker' || workerStatus.actor.id !== profile.principal) throw new Error('Worker credential no longer matches the configured principal; update the profile before dispatch');
     }
-    return print(await dispatchWork(root, work, profile, await listHerdrAgents(), undefined, snapshot.work, undefined, undefined, undefined, snapshot.now, { allowOverlap: !!values['allow-overlap'], claimBy }));
+    return print(await dispatchWork(root, work, profile, await listHerdrAgents(), undefined, snapshot.work, undefined, undefined, undefined, snapshot.now, { claimBy }));
   }
   if (id === 'merge') {
     if (!args[0]) throw new Error('Use master merge GY-N or master merge --all');

@@ -1,6 +1,9 @@
 // Concern: cycle steps 5–7 — shepherd reviews and proofs, the guarded merge, deployment verification.
 import { reviewProviderOf, reviewerProfileFor, exhaustedReviewerProfiles, deploySmokeRequired, deliveryState, rollbackGuidance } from '../model.js';
-import { mergedWithoutAuthorization, unauthorizedMergeViolation, approvedMerge } from '../master.js';
+import { mergedWithoutAuthorization, unauthorizedMergeViolation, approvedMerge, transientMergeRace } from '../master.js';
+import { type Work } from '../model.js';
+import { queueSequencingReason } from '../merge-queue.js';
+import type { DaemonAction } from './state.js';
 import { boundDeployment, deploymentObservationSchema, maxProofAttempts, message } from './state.js';
 import { candidateKey, decisionKey } from './reconcile.js';
 import { missingProofs } from './metrics.js';
@@ -9,6 +12,32 @@ import { detailChanged, maxApproverLaunches, standingVerdict } from './decisions
 import { record } from './effects.js';
 import type { Cycle } from './cycle.js';
 import { deploymentDetail } from './deployment.js';
+
+/** How many times one cycle re-reads and retries a guarded merge that lost a race to a concurrent write. */
+export const mergeRaceRetries = 3;
+/**
+ * A merge candidate whose only refusal is its place in the merge queue — another item is ahead,
+ * or its speculative tip is not published yet. It waits its turn; the guarded merge is not asked.
+ */
+export function waitingInMergeQueue(work: Work) {
+  const failing = work.gates.filter(gate => !gate.passed);
+  return !work.violations.length && failing.length > 0 && failing.every(gate => gate.name === 'merge' && gate.reasons.length > 0 && gate.reasons.every(queueSequencingReason));
+}
+
+/** The first and the longest pause between guarded merge attempts on an unchanged, all-gates-passing candidate (GY-202). */
+export const mergeRetryBaseMs = 15_000, mergeRetryCapMs = 60_000;
+/**
+ * Whether the guarded merge is asked again for this candidate. The action key binds the head, base
+ * and policy revision, so a moved head starts afresh. While that binding stands and every gate
+ * passes, a refusal is retried on a doubling pause capped at one minute, never on the cycle
+ * backoff that can stretch to thirty cycles: a mergeable candidate is retried until GitHub shows it
+ * merged or its head moves (GY-202). A candidate with a failing gate keeps the cycle backoff.
+ */
+export function mergeRetryDue(previous: DaemonAction | undefined, work: Work, cycle: number, now: number) {
+  if (readyToRetry(previous, cycle)) return true;
+  if (previous?.state !== 'failed' || work.violations.length || !work.gates.every(gate => gate.passed)) return false;
+  return now - Date.parse(previous.at) >= Math.min(mergeRetryBaseMs * 2 ** Math.max(0, previous.attempts - 1), mergeRetryCapMs);
+}
 
 /** Step 5: shepherd reviews and proofs for submitted candidates. */
 export async function shepherdStep(cycle: Cycle) {
@@ -72,11 +101,20 @@ export async function mergeStep(cycle: Cycle) {
     if (state.actions[key]?.state === 'done') return;
     performed.push(await record(state, key, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail: `${item.key} was merged on GitHub (${item.observation!.mergeSha?.slice(0, 12) ?? 'merge commit unknown'} at ${item.observation!.mergedAt ?? 'an unrecorded time'}) without a valid merge execution: ${unauthorizedMergeViolation}. It stays at the merge stage until a two-party decision reconciles it: graphyard master decide ${item.key} merge REASON, then graphyard master approver ${item.key} DECISION; Graphyard re-checks the record at the merge cutoff and delivers on the approved decision`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
   });
-  const mergeCandidates = open.filter(candidate => candidate.stage === 'merge' && !mergedWithoutAuthorization(candidate));
+  //    A candidate waiting its turn in the merge queue is not attempted: the refusal would only
+  //    restate its position, and each one would push its first real attempt further out (GY-192).
+  const mergeCandidates = open.filter(candidate => candidate.stage === 'merge' && !mergedWithoutAuthorization(candidate) && !waitingInMergeQueue(candidate));
+  // The cycle snapshot is 30-45 s old by now, and observations and bookkeeping write to the item
+  // throughout. The merge is invoked on the item as it stands immediately before the call, under
+  // the same action key; one whose candidate or queue turn moved is left to the next cycle.
+  const readMergeItem = async (item: Work, key: string) => {
+    const current = (await effects.snapshot()).work.find(candidate => candidate.id === item.id);
+    return current && current.stage === 'merge' && !mergedWithoutAuthorization(current) && !waitingInMergeQueue(current) && candidateKey('merge', current) === key ? current : null;
+  };
   for (const item of mergeCandidates) await isolate('merge', item, item.key, async () => {
     const key = candidateKey('merge', item);
     const previous = state.actions[key];
-    if (!readyToRetry(previous, state.cycle)) return;
+    if (!mergeRetryDue(previous, item, state.cycle, now())) return;
     // With automatic merging off the guarded merge runs for exactly the candidate an approver
     // agent approved (step 4c requested it). Until that approval is applied, the loop waits on the
     // approver rather than on a person, and says which decision it is waiting for.
@@ -98,13 +136,30 @@ export async function mergeStep(cycle: Cycle) {
         return;
       }
     }
+    let target = await readMergeItem(item, key);
+    if (!target) return;
     await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'started', detail: `Invoking the guarded merge for ${item.key}`, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist);
-    try {
-      const result = await effects.merge(item);
-      performed.push(await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'done', detail: `Guarded merge accepted for ${item.key}: ${(result as { result?: string })?.result ?? 'merge requested'}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
-    } catch (error) {
-      // A refusal is the gate working, not a daemon fault: record it and keep cycling.
-      performed.push(await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'failed', detail: `Guarded merge refused for ${item.key}: ${message(error)}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+    for (let retries = 0; ; retries++) {
+      try {
+        const result = await effects.merge(target) as { result?: string; pending?: boolean } | undefined;
+        // A retained execution with an unknown provider outcome is pending, not merged (GY-195).
+        if (result?.pending) performed.push(await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'waiting', detail: `Guarded merge pending for ${item.key}: ${result.result ?? 'the provider outcome is unknown'}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+        else performed.push(await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'done', detail: `Guarded merge accepted for ${item.key}: ${result?.result ?? 'merge requested'}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+        return;
+      } catch (error) {
+        // A race with the item's own background writes judged nothing about the candidate: it is
+        // retried at once on a fresh read, and never counted toward the backoff (GY-192).
+        const race = transientMergeRace(error);
+        if (race && retries < mergeRaceRetries) {
+          const reread = await readMergeItem(item, key);
+          if (reread) { target = reread; continue; }
+        }
+        // A refusal is the gate working, not a daemon fault: record it and keep cycling.
+        performed.push(await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'failed',
+          detail: `Guarded merge refused for ${item.key}${race ? ` after ${retries + 1} attempt(s) this cycle, each lost to a concurrent write; not counted toward the backoff` : ''}: ${message(error)}`,
+          attempts: race ? previous?.attempts ?? 0 : state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+        return;
+      }
     }
   });
 }

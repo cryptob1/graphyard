@@ -662,7 +662,7 @@ test('unit:queue-real-base-tip — the observed base tip and tree come from refs
   assert.equal((await f.github.observe(f.work)).baseTipContained, false, 'a head whose bound base is neither an ancestor nor tree-identical does not contain the branch');
 });
 
-test('unit:queue-real-base-tip — a review is never requested for a head that does not contain the base tip', async () => {
+test('unit:queue-real-base-tip — a review is never requested for a head that does not contain the base tip and does not merge cleanly (GY-191)', async () => {
   const f = fixture(); f.work.policy.reviewProvider = 'codex';
   f.work.observation = { candidate: { ...f.work.candidate! }, baseTip: 'c'.repeat(40), baseTipContained: false } as any;
   await assert.rejects(f.github.requestCodex(f.work, async () => {}), /does not contain the base branch tip cccccccccccc/);

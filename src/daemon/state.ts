@@ -14,7 +14,7 @@ export const daemonActionSchema = z.object({
   kind: z.enum(daemonActionKinds),
   work: z.string().nullable().default(null),
   principal: z.string().nullable().default(null),
-  state: z.enum(['started', 'done', 'failed', 'indeterminate']),
+  state: z.enum(['started', 'done', 'failed', 'indeterminate', 'waiting']),
   detail: z.string().max(actionDetailMax),
   attempts: z.number().int().min(0).max(1000).default(1),
   // The item's attempt epoch when the action started. A dispatch that lands always advances it,

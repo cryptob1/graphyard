@@ -2,7 +2,7 @@
 import { isAbsolute } from 'node:path';
 import { type ChildRun, defaultChildRun } from '../child-runner.js';
 import { discover, assertRepository } from '../onboarding.js';
-import { dispatchOverlap, resourceConflicts, dispatchHold, describeChain } from '../coordination.js';
+import { concurrentOverlap, resourceConflicts } from '../coordination.js';
 import { type SandboxExec, verifyWorkerSandbox, workerPaths, writablePaths, grantWorkerPaths } from '../worker-sandbox.js';
 import { assertNoApprovalOptOut } from '../harness.js';
 import { parkedOnHuman, humanDecisionLabel, answerCommand } from '../model/human-request.js';
@@ -15,7 +15,6 @@ import { type PromptDelivery, PromptNotAcceptedError, type RequestDelivery, star
 import { createdHerdrTab, type HerdrAgent, herdrJson, stopCreatedHerdrTab } from './herdr.js';
 import { containmentHold } from './containment.js';
 import { dependencyDirectories, failureText, type SharedDependencies, shareDependencies } from './worktrees.js';
-import { hours } from './status.js';
 import { humanOnlyDecisions, installWorkerHarness, prepareSessionHarness } from './harness.js';
 
 /** The launcher's own runner: the CLI as a child, and git. `stdio` is honoured for the streams a child may inherit; the rest is captured. */
@@ -29,7 +28,7 @@ type WorkerPreparer = (root: string, key: string, profileName: string, run?: Wor
  * always probed; a worktree an injected preparer supplies is probed only when a runner is given.
  */
 export interface DispatchOptions {
-  allowOverlap?: boolean; holdBoundMs?: number; probe?: EnvironmentProbe; prompt?: PromptDelivery; start?: StartBounds; sandbox?: SandboxExec;
+  probe?: EnvironmentProbe; prompt?: PromptDelivery; start?: StartBounds; sandbox?: SandboxExec;
   /** A hand dispatch's deadline on this host's clock: past it the item's backed-off dispatch row is the executor's again, so the launch claims nothing (GY-175). */
   claimBy?: number;
 }
@@ -38,8 +37,8 @@ export function assertClaimDeadline(key: string, claimBy: number | undefined, no
   if (claimBy !== undefined && now >= claimBy)
     throw new Error(`${key}: the hand launch did not reach its lease claim before the item's backed-off dispatch action is offered to the executor again, so it claims nothing; the loop's dispatcher launches the item`);
 }
-export const describeOverlap = (overlap: ReturnType<typeof dispatchOverlap>) => overlap.map(ahead => `${ahead.key} (${ahead.state}, ${ahead.stage}) on ${ahead.paths.join(', ')}`).join('; ');
-export function assertDispatchable(work: Work, allWork: Work[], observedAt: string, options: DispatchOptions = {}) {
+export const describeOverlap = (overlap: ReturnType<typeof concurrentOverlap>) => overlap.map(ahead => `${ahead.key} (${ahead.state}, ${ahead.stage}) on ${ahead.paths.join(', ')}`).join('; ');
+export function assertDispatchable(work: Work, allWork: Work[], observedAt: string) {
   const now = Date.parse(observedAt);
   if (!Number.isFinite(now)) throw new Error('Dispatch requires a valid Graphyard snapshot clock');
   if (parkedOnHuman(work)) throw new Error(`Dispatch waits on a human-only decision (${humanDecisionLabel[work.humanRequest!.kind]}); ${answerCommand(work.key, work.humanRequest!)} resumes it`);
@@ -52,14 +51,12 @@ export function assertDispatchable(work: Work, allWork: Work[], observedAt: stri
   if (work.submission && !work.reworkRequested) throw new Error('Dispatch requires operator-authorized rework for a submitted item');
   const conflicts = resourceConflicts(work, allWork, now);
   if (conflicts.length) throw new Error(`Dispatch blocked by exclusive resources: ${conflicts.map(conflict => `${conflict.resource} held by ${conflict.key}`).join(', ')}`);
-  // Overlap is a soft exclusive resource: advisory, bounded in time, with an operator override.
-  const hold = dispatchHold(work, allWork, now, options.holdBoundMs);
-  if (hold && !hold.overdue && !options.allowOverlap) throw new Error(`Dispatch held by planned-file overlap with ${describeOverlap(hold.ahead)}; whichever lands second re-integrates the other. Held since ${hold.since} (${hours(hold.ageMs)} of the ${hours(hold.boundMs)} bound)${hold.chain.length > hold.ahead.length ? `; the chain it waits behind: ${describeChain(hold.chain)}` : ''}. Wait for it to merge, or pass --allow-overlap to dispatch anyway`);
-  return hold;
+  // Planned-file overlap holds nothing: dispatch is optimistic, and the merge queue and a sync
+  // round integrate whichever of two overlapping items lands second.
 }
 
 export async function dispatchWork(root: string, work: Work, profile: WorkerProfile, agents: HerdrAgent[], run?: ChildRun, allWork: Work[] = [work], prepare: WorkerPreparer = prepareWorkerLaunch, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void> = releaseWorkerLaunch, agentTimeoutMs = 30_000, observedAt = new Date().toISOString(), options: DispatchOptions = {}) {
-  assertDispatchable(work, allWork, observedAt, options);
+  assertDispatchable(work, allWork, observedAt);
   const config = await loadMasterConfig(root);
   let target = agents.find(agent => agent.name === profile.agentName);
   let selected: Awaited<ReturnType<typeof selectAccount>> | undefined, launched: ReturnType<typeof accountLaunch> | undefined, relaunched = 0;
@@ -97,15 +94,15 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
       }
     }
   }
-  const hold = dispatchHold(work, allWork, Date.parse(observedAt), options.holdBoundMs);
+  const concurrent = concurrentOverlap(work, allWork, Date.parse(observedAt));
   return { work: work.key, profile: profile.name, principal: profile.principal, agentName: profile.agentName, pane: target.pane_id ?? null, approvals: profile.approvals,
     launch: launched?.plan ?? agentLaunchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment), ownership: 'worker launcher claimed and is supervising the agent process', harness, dependencies, delivery, sandbox,
     // `awaiting consent` is not a started session: the runtime has not read its request (GY-130).
     started, consent: { answered: consent.answered, awaiting: consent.awaiting ? { prompt: consent.awaiting.prompt, kind: consent.awaiting.kind, pane: consent.awaiting.pane, attach: consent.awaiting.attach, releaseAt: consent.awaiting.releaseAt, attention: consentHoldAttention(consent.awaiting) } : null },
     account: selected?.account ? { environment: selected.account.name, kind: selected.account.kind, quota: selected.health?.quota ?? null, skipped: selected.skipped } : null, relaunched,
-    // The overlap a dispatch went over is recorded with the dispatch: by operator override, or
-    // because the hold outlived its bound — the note says which, and the chain the item waited behind.
-    overlap: hold ? { allowed: true, ahead: hold.ahead, hold, note: `Dispatched over a planned-file overlap with ${describeOverlap(hold.ahead)}${hold.overdue ? ` after a hold of ${hours(hold.ageMs)}, past the ${hours(hold.boundMs)} bound${hold.chain.length > hold.ahead.length ? `, behind ${describeChain(hold.chain)}` : ''}` : ' by operator override'}; expect a sync → review → proof round for whichever lands second` } : null };
+    // Planned-file overlap is recorded with the dispatch, never held on: the item runs beside the
+    // in-flight items that touch the same files and whichever lands second is re-integrated.
+    overlap: concurrent.length ? { concurrent, note: `Dispatched beside ${describeOverlap(concurrent)}; the merge queue orders them and whichever lands second is re-integrated by base refresh, or sent back for a sync on a real conflict` } : null };
 }
 
 export const herdrAttach = (pane: string, workspace?: string | null) => `herdr pane attach ${pane}${workspace ? ` --workspace ${workspace}` : ''}`;

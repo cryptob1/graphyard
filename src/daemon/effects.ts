@@ -11,9 +11,10 @@ import { type ResourceReclaimReport, reclaimResources, dispatchRefusal } from '.
 import type { CapacityRole, PartialWork } from '../model/capacity.js';
 import { readProducerLedger, saveProducerLedger, independentProducerProfiles, launchProducer, reclaimCheckouts } from '../producer.js';
 import { followUpThreadIds, readReviewLedger, updateReviewLedger, launchReview } from '../reviewer.js';
-import { type ReviewFinding, readReviewFindings, basePaths } from '../review-scope.js';
+import { type ReviewFinding, readReviewFindings, basePaths, baseText } from '../review-scope.js';
 import { defaultAwaitReviewers } from '../auto-dispatch.js';
-import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type ContainmentAssessment, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, type MergeExecutor, agentToken, decisionInput, launchApprover, listHerdrAgents, readEnvironmentLog, selectionKey, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, mergeExecutor, reclaimWorktrees, reclaimIdleMs, writeFailure, assessContainment } from '../master.js';
+import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type ContainmentAssessment, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, type MergeExecutor, agentToken, decisionInput, launchApprover, listHerdrAgents, readEnvironmentLog, selectionKey, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, mergeExecutor, reclaimWorktrees, reclaimIdleMs, writeFailure, assessContainment, herdrJson } from '../master.js';
+import { annotatePaneShell } from '../quarantine.js';
 import { probeSupervisorAbsence } from '../containment-probe.js';
 import { reconcileFleetSessions } from '../fleet.js';
 import { clampCount, type ContainmentRetention, type DaemonAction, daemonActionSchema, type DaemonState, type DeploymentObservation, message, writeDaemonState } from './state.js';
@@ -47,6 +48,8 @@ export interface DaemonEffects {
   reviewFindings?: (work: Work) => Promise<ReviewFinding[]>;
   /** Which of the paths exist on the base branch, read from one fetch of it per decision. */
   basePaths?: (paths: readonly string[]) => Promise<Set<string>>;
+  /** A file's text on the base branch as `basePaths` fetched it, or null when it has none: what the pinning-test rule reads (GY-199). */
+  baseText?: (path: string) => Promise<string | null>;
   /**
    * The master's own additive scope widening — the revision `master scope` applies — with its
    * audited reason, bound to the scope request it answers (`answeringWidening`).
@@ -395,6 +398,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     reviewFindings: async work => work.candidate?.pr ? readReviewFindings({ repository: current().repository, pr: work.candidate.pr, sha: work.candidate.sha, reviewer: current().reviewer ? `${current().reviewer!.slug}[bot]` : null,
       trusted: current().run.awaitReviewers ?? defaultAwaitReviewers.logins }, run) : [],
     basePaths: paths => basePaths(root, current().baseBranch, paths, run),
+    baseText: path => baseText(root, current().baseBranch, path, run),
     get widenScope() {
       return current().operatorAgent ? async (work: Work, request: ScopeRequestState, paths: string[], reason: string) =>
         asOperatorAgent('POST', `work/${work.id}/requirements`, answeringWidening(work, request, paths, reason)) : undefined;
@@ -436,7 +440,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     get approver() { return current().operatorAgent ? approver : undefined; },
     get withdraw() { return current().operatorAgent ? withdraw : undefined; },
     get decisions() { return current().operatorAgent ? decisions : undefined; },
-    containment: (work, observed) => assessContainment(work, { hostId: current().hostId, observedAt: observed.now, clockOffset: observed.clockOffset, probe: target => probeSupervisorAbsence(target, { run }) }),
+    containment: (work, observed) => assessContainment(work, { hostId: current().hostId, observedAt: observed.now, clockOffset: observed.clockOffset, probe: async target => annotatePaneShell(await probeSupervisorAbsence(target, { run }),
+      work.find(item => item.key === target.key && item.containmentQuarantine?.epoch === target.epoch), pane => herdrJson(['pane', 'process-info', '--pane', pane], run)) }),
     settleContainment: (work, assessment) => deps.mutate(`work/${work.id}/autosettle`, { epoch: assessment.epoch, settlementHash: work.containmentQuarantine!.settlementHash,
       reason: `The master loop verified on ${assessment.host ?? current().hostId} that the supervisor of epoch ${assessment.epoch} is gone; the item is released for a fresh attempt`, verification: assessment.verification }),
     // systemd's own keep-alive channel. `systemd-notify` is part of systemd, so it is present
