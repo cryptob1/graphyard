@@ -3,16 +3,19 @@ import WorkCard from '../components/work-card';
 import { StepNames } from '../components/steps-bar';
 import { GroupDot } from '../components/status-badge';
 import { formatAge } from '../duration';
-import { classify, groupLabel, mergedAt, shippedThisWeek, groupMeaning, groups, humanOnlyIds, summarySentence, upNextMeaning, type OpenGroup } from '../groups';
+import { groupLabel, mergedAt, shippedThisWeek, groupMeaning, groups, summarySentence, upNextTile, type BoardItem, type OpenGroup } from '../groups';
 import { leftFlowAt, releaseView } from '../release';
 import { stalledCards } from './actionless';
+import { groupFaults, statusFaults, workFaults } from '../../src/model/fault-classes';
 import type { Dashboard } from './dashboard';
 
 const week = 7 * 24 * 60 * 60 * 1000;
 
 /**
  * The Work page (GY-161) answers "what is happening and what do I do next" on one screen, with
- * one classification: every open item is in exactly one group (web/groups.ts), each summary tile
+ * one classification: every open item is in exactly one group, as `GET /api/board` serves it
+ * (src/model/board.ts, GY-200) — the page derives no group of its own, so it cannot disagree with
+ * the board `master status` reads — each summary tile
  * counts one group and filters the page to exactly that group's rows, and the lists below are
  * those same groups — so a number on the page is always the number of rows it stands for.
  * Needs you comes first, with the one action to take; Backlog is folded away and carries no
@@ -22,14 +25,23 @@ const week = 7 * 24 * 60 * 60 * 1000;
  * ones the control plane's production observation holds at Deploy (`leftFlowAt`) — none where
  * production serves the newest merge, and none claimed where nothing observes production.
  */
-export default function OverviewPage({ work, status, query, setQuery, setSelected, setCreating, setView, observedAt, filter: only, setFilter: setOnly, stepMoves }: Dashboard) {
+export default function OverviewPage({ work, board, status, query, setQuery, setSelected, setCreating, setView, observedAt, filter: only, setFilter: setOnly, stepMoves }: Dashboard) {
   const now = Number.isNaN(observedAt) ? Date.now() : observedAt;
-  const match = (w: Work) => `${w.key} ${w.title}`.toLowerCase().includes(query.toLowerCase());
+  const match = (w: Pick<Work, 'key' | 'title'>) => `${w.key} ${w.title}`.toLowerCase().includes(query.toLowerCase());
   const release = releaseView(status);
-  const { byGroup } = classify(work.filter(match), now, status?.humanOnly, release);
+  // Each group's rows are the board's, in the board's order; the item documents the rows render come from the snapshot.
+  const byId = new Map(work.map(w => [w.id, w]));
+  const rowsOf = (entries: BoardItem[]) => entries.filter(match).flatMap(entry => byId.has(entry.id) ? [byId.get(entry.id)!] : []);
+  const byGroup = Object.fromEntries(groups.map(group => [group, board ? rowsOf(board.groups[group]) : []])) as Record<OpenGroup, Work[]>;
   const counts = Object.fromEntries(groups.map(group => [group, byGroup[group].length])) as Record<OpenGroup, number>;
   const stalls = new Map(stalledCards(work.filter(w => w.stage !== 'done' && !isClosed(w)), now).map(card => [card.item.id, card]));
-  const humanOnly = humanOnlyIds(work, status?.humanOnly);
+  // Open problems by fault class (GY-173): one count per shared cause, read from each open item's
+  // own record the same way the master loop reads it, and from the control plane's status — the
+  // App permissions, integration jobs, GitHub pause and unserved executors its notices show — so a
+  // cause behind several items or notices reads as one. A single problem is already its own row
+  // or notice, so the grouping is drawn once there are two to group.
+  const problems = [...work.filter(w => w.stage !== 'done' && !isClosed(w)).flatMap(w => workFaults(w, now)), ...statusFaults(status)];
+  const faults = problems.length > 1 ? groupFaults(problems) : [];
   // Shipped this week: delivered and served by the release, dated from when it was seen live.
   const recent = shippedThisWeek(work, now, release);
   // The latest is the newest merge: most real deliveries carry no release record, so ordering by
@@ -51,7 +63,7 @@ export default function OverviewPage({ work, status, query, setQuery, setSelecte
   </section>;
   const admin = status?.actor?.role === 'admin';
   return <>
-    <div className="page-heading"><div><h1>Work</h1><p className="summary">{summarySentence(counts)}</p></div>
+    <div className="page-heading"><div><h1>Work</h1><p className="summary">{board ? summarySentence(counts) : 'Reading the board…'}</p></div>
       <div className="heading-tools"><label className="search"><input aria-label="Search work" placeholder="Search by key or title" value={query} onChange={e => setQuery(e.target.value)}/></label>
         {admin && <button type="button" onClick={() => setCreating(true)}>＋ New work item</button>}</div></div>
     {status && !status.github && <div className="notice">GitHub is not connected, so nothing can merge yet. <a href="/docs/github">Set it up ↗</a></div>}
@@ -60,12 +72,17 @@ export default function OverviewPage({ work, status, query, setQuery, setSelecte
     {status?.githubBudget?.paused && <div className="notice danger" role="alert"><strong>GitHub requests are paused until {status.githubBudget.paused.until}.</strong> {status.githubBudget.paused.reason}. What exhausted the budget: {status.githubBudget.lastHour.requests} requests in the last hour{status.githubBudget.lastHour.byKind.length > 0 && ` (${status.githubBudget.lastHour.byKind.map((entry: any) => `${entry.kind} ${entry.requests}`).join(', ')})`}. Every gate reads stale until the pause lifts{status.jobs?.length > 0 && `; ${status.jobs.length} integration job${status.jobs.length === 1 ? '' : 's'} recorded the refusal`}.</div>}
     {status?.jobs?.length > 0 && !status?.githubBudget?.paused && <div className="notice danger">{status.jobs.length} GitHub update(s) failed: {status.jobs[0].error}</div>}
     {status?.executors?.attention?.length > 0 && <div className="notice danger" role="alert" aria-label="Unserved actions"><strong>{status.executors.live === 0 ? 'No executor is running.' : `No executor serves ${status.executors.attention.map((entry: any) => entry.kind).join(', ')}.`}</strong> {status.executors.attention.map((entry: any) => <p key={entry.kind}>{entry.text}</p>)}<p className="muted">An action nobody can claim is not queued behind other work; nothing moves until an executor of its kind is started. <a href="/docs/master-agent-reference#running-executors-under-supervision">How executors are supervised ↗</a></p></div>}
+    {/* Drawn whether or not any work exists: status-level faults stand without an item. */}
+    {faults.length > 0 && <section className="fault-classes" aria-label="Problems by class">
+      <h2>Problems by class <small>one cause, counted once per class</small></h2>
+      <ul>{faults.map(group => <li key={group.faultClass} data-fault-class={group.faultClass} title={group.meaning}><span className="mono">{group.faultClass}</span> <strong>{group.count}</strong> <small>{group.subjects.join(', ')}</small></li>)}</ul>
+    </section>}
     {work.length === 0 ? <div className="empty"><h2>No work yet.</h2><p>Create a work item, say what must be true when it is done, and an agent will pick it up.</p>{admin && <button type="button" onClick={() => setCreating(true)}>Create the first work item</button>}</div> : <>
       <div role="group" aria-label="Filter by group" className="tiles">{groups.map(group => <button type="button" key={group} className={`tile group-${group}${only === group ? ' selected' : ''}${counts[group] === 0 ? ' empty-tile' : ''}`} aria-pressed={only === group} data-tile={group} onClick={() => setOnly(only === group ? null : group)}>
-        <span className="tile-label"><GroupDot group={group}/>{groupLabel[group]}</span><strong>{counts[group]}</strong><small>{group === 'up-next' ? upNextMeaning(byGroup['up-next'], work, now) : groupMeaning[group]}</small>
+        <span className="tile-label"><GroupDot group={group}/>{groupLabel[group]}</span><strong>{counts[group]}</strong><small>{group === 'up-next' ? upNextTile(board ? board.groups['up-next'].filter(match) : []) : groupMeaning[group]}</small>
       </button>)}</div>
       {only && <p className="filter-note">Showing {groupLabel[only]} only · <button type="button" className="text-button" onClick={() => setOnly(null)}>Show every group</button></p>}
-      {section('needs-you', humanOnly.size ? 'only you can decide these' : undefined)}
+      {section('needs-you', 'only you can decide these')}
       {section('blocked')}
       {section('moving')}
       {section('up-next')}
@@ -73,7 +90,7 @@ export default function OverviewPage({ work, status, query, setQuery, setSelecte
         <summary><GroupDot group="backlog"/>Backlog <span className="count">{byGroup.backlog.length}</span><small>no clock runs</small></summary>
         <div className="rows">{byGroup.backlog.map(w => row(w, 'backlog'))}</div>
       </details>}
-      {groups.every(group => counts[group] === 0) && <p className="muted">{query ? 'No open item matches.' : 'Nothing is open.'}</p>}
+      {board && groups.every(group => counts[group] === 0) && <p className="muted">{query ? 'No open item matches.' : 'Nothing is open.'}</p>}
       <div className="shipped-line" aria-label="Shipped this week">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="M4 12.5l5 5L20 6.5"/></svg>
         <span><strong>{recent.length} shipped this week.</strong>{latest && <> Latest: <button type="button" className="text-button" data-latest={latest.key} onClick={() => setSelected(latest.id)}><span className="mono">{latest.key}</span> <span data-title>{latest.title}</span></button> · merged {formatAge(new Date(mergedAt(latest)).toISOString(), now)} ago</>}{unreleased > 0 && <span className="muted" data-unreleased={unreleased}> {unreleased} merged, not yet seen live.</span>}</span>

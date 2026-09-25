@@ -223,10 +223,18 @@ export function decideIdentityCarry(input: IdentityCarryInput): QueueCarry {
   });
   return { ...base, approval, evidence };
 }
-export interface QueueEjection { at: string; sequence: number; reason: string; sha: string | null; policyRevision: number }
+export interface QueueEjection {
+  at: string; sequence: number; reason: string; sha: string | null; policyRevision: number;
+  /**
+   * For a speculative-merge conflict (GY-321): the keys of the entries the prediction held, the
+   * predecessors the conflicting tip was built behind, or [] when the merge was onto the base
+   * branch tip itself. Absent on other ejections and on records that predate the rule.
+   */
+  predecessors?: string[];
+}
 export interface QueueHistoryEntry {
   at: string; event: 'enqueued' | 'predicted' | 'ejected'; sequence: number; reason?: string; tip?: string;
-  /** For a prediction: the entries the tip was published behind, and the item's own reviewed head it was built from. */
+  /** For a prediction: the entries the tip was published behind, and the item's own reviewed head it was built from. For a speculative-conflict ejection: the entries the conflicting merge was predicted behind (GY-321). */
   predecessors?: string[]; from?: string;
 }
 
@@ -667,7 +675,7 @@ export function predictQueue(all: Work[], now: number): QueuePlacement[] {
  * Kept beside the messages above so a wording change is visible here.
  */
 export function queueSequencingReason(reason: string) {
-  return /^(Merge queue position \d+ of \d+: |Speculative tip on predicted base [0-9a-f]+ has not been published|Waiting for \S+ to publish its speculative tip$|Merge queue is validating speculative tip [0-9a-f]+: )/.test(reason);
+  return /^(Merge queue position \d+ of \d+: |Speculative tip on predicted base [0-9a-f]+ has not been published|Waiting for \S+ to publish its speculative tip$|Merge queue is validating speculative tip [0-9a-f]+: )/.test(reason) || !!predecessorWaitReason(reason);
 }
 export function queuePlacement(work: Work, all: Work[], now: number) {
   return predictQueue(all, now).find(placement => placement.id === work.id) ?? null;
@@ -817,6 +825,48 @@ export function ejectedTipRestore(work: Work, all: Work[]): { contaminated: stri
   return { contaminated: contamination.head, foreign: contamination.foreign, own: contamination.own, reason: `ejected from the merge queue: ${ejection.reason}` };
 }
 
+/** The reason `advanceQueue` ejects an entry whose speculative merge conflicts (github.ts SpeculativeConflict). */
+export const speculativeConflictReason = /^Speculative merge of [0-9a-f]+ into .+ conflicts/;
+/**
+ * GY-321. The predecessors a speculative-merge conflict of exactly the current head was found
+ * behind, or null when the ejection is anything else: another reason, another head or policy, or a
+ * merge onto the base branch tip itself ([] recorded, or a record that predates the rule). Such a
+ * conflict is with work that has not landed, which no sync with the base can resolve: GitHub's
+ * merge queue and bors re-test the entry once the conflicting one resolves, and so does this one.
+ */
+export function predecessorConflict(work: Pick<Work, 'candidate' | 'queue' | 'queueEjection' | 'policyRevision'>): string[] | null {
+  const ejection = work.queueEjection, candidate = work.candidate;
+  if (work.queue || !ejection || !candidate || ejection.sha !== candidate.sha || ejection.policyRevision !== work.policyRevision) return null;
+  if (!speculativeConflictReason.test(ejection.reason) || !ejection.predecessors?.length) return null;
+  return ejection.predecessors;
+}
+/**
+ * The predecessors a predecessor-conflict ejection still waits for: those named in it that are
+ * still queued ahead of where the entry stood. One that landed, or left the queue (and any that
+ * re-entered since, now behind it), no longer holds the conflict; once any has, the prediction the
+ * entry conflicted with is gone and the same head re-enters at the back. Null when the ejection
+ * is not a predecessor conflict; [] when it no longer waits.
+ */
+export function predecessorWait(work: Work, all: Work[]): string[] | null {
+  const named = predecessorConflict(work);
+  if (!named) return null;
+  const sequence = work.queueEjection!.sequence;
+  const queued = named.filter(key => {
+    const item = all.find(entry => entry.key === key);
+    return !!item && item.stage !== 'done' && !item.observation?.merged && !!item.queue && item.queue.sequence < sequence;
+  });
+  return queued.length === named.length ? queued : [];
+}
+/** The merge-gate reason for an entry that waits on its predecessors (see `predecessorWait`). */
+export function predecessorWaitText(work: Work, waiting: string[]) {
+  return `Waiting for ${waiting.join(', ')} to land or leave the merge queue: candidate ${work.candidate!.sha.slice(0, 12)} was ejected because its speculative merge behind ${waiting.length === 1 ? 'it' : 'them'} conflicts (${work.queueEjection!.reason}); no sync with the base resolves that, so the same head re-enters at the back of the queue once ${waiting.length === 1 ? 'it has' : 'any of them has'} landed or left`;
+}
+/** The predecessors a merge-gate reason names as waited on, or null for any other reason. */
+export function predecessorWaitReason(reason: string): string[] | null {
+  const match = reason.match(/^Waiting for (\S+(?:, \S+)*) to land or leave the merge queue: /);
+  return match ? match[1].split(', ') : null;
+}
+
 // ---- GitHub executes merges (GY-258) -------------------------------------------------------------
 // Graphyard gates a merge; GitHub performs it. When every gate passes for a candidate and the
 // coordinator asked for the merge, the control plane's App publishes `Graphyard / merge` success on
@@ -835,7 +885,7 @@ export interface GitHubMergeQueueState {
   head: string;
   /** Whether the base branch has a merge queue; without one Graphyard enables auto-merge, or merges a pull request GitHub reports mergeable now, head-bound. */
   queue: boolean;
-  /** GitHub's MergeStateStatus for the pull request (CLEAN, BLOCKED, …); CLEAN or HAS_HOOKS without a queue is merged at once, head-bound. */
+  /** GitHub's MergeStateStatus for the pull request (CLEAN, BLOCKED, …); CLEAN, UNSTABLE or HAS_HOOKS without a queue is merged at once, head-bound. */
   mergeStateStatus?: string | null;
   mode: GitHubMergeMode;
   /** GitHub's MergeQueueEntryState (QUEUED, AWAITING_CHECKS, MERGEABLE, UNMERGEABLE, LOCKED), or null. */
@@ -846,6 +896,8 @@ export interface GitHubMergeQueueState {
   at: string;
   /** GitHub's latest refusal of the control plane's enqueue or dequeue for this head, recorded as `merge.enqueue.refused`; cleared once a request succeeds. */
   refused?: { reason: string; head: string; mode: GitHubMergeMode; at: string } | null;
+  /** When the coordinator's current merge request for this candidate was recorded, or null; how long a merge has been pending (GY-344). */
+  requestedAt?: string | null;
 }
 declare module './model/work.js' { interface Observation { githubQueue?: GitHubMergeQueueState | null } }
 
@@ -876,8 +928,38 @@ export type MergeQueueAction =
  * read of GitHub. Enqueue only an authorized, requested candidate whose head GitHub still holds;
  * dequeue anything GitHub holds for merging that is not exactly that. Everything else holds.
  */
-/** Whether GitHub merges the pull request at once (CLEAN, HAS_HOOKS) and so refuses to enable auto-merge on it ("Pull request is in clean status"). */
-export const mergeableNow = (state: Pick<GitHubMergeQueueState, 'mergeStateStatus'>) => state.mergeStateStatus === 'CLEAN' || state.mergeStateStatus === 'HAS_HOOKS';
+/**
+ * The merge states in which GitHub merges the pull request at once and so refuses to enable
+ * auto-merge on it ("Pull request is in clean status"). UNSTABLE is one (GY-344): only checks
+ * branch protection does not require are failing or cancelled, and GitHub still enforces every
+ * required check on the head-bound merge. BEHIND, BLOCKED, DIRTY and UNKNOWN are not.
+ */
+export const mergeableStates = ['CLEAN', 'UNSTABLE', 'HAS_HOOKS'] as const;
+/** Whether GitHub merges the pull request at once (CLEAN, UNSTABLE, HAS_HOOKS). */
+export const mergeableNow = (state: Pick<GitHubMergeQueueState, 'mergeStateStatus'>) => (mergeableStates as readonly (string | null | undefined)[]).includes(state.mergeStateStatus);
+/** GitHub's refusal of auto-merge on a pull request already in one of those states ("Pull request is in unstable status"). */
+export const alreadyMergeableRefusal = /\b(clean|unstable|has_hooks) status\b/i;
+/** How long a merge may stay pending on a head GitHub reports mergeable before master status names it (GY-344). */
+export const mergeStallMs = 5 * 60_000;
+/**
+ * Merge requests pending past `mergeStallMs` on a head GitHub reports mergeable, with no refusal
+ * recorded: GitHub was asked to merge something it says it can merge and nothing happened, which is
+ * a new unmerged state the control plane does not handle yet. Only a base branch without a merge
+ * queue is judged: a queued entry waits on its merge group, which GitHub reports on its own.
+ */
+export function mergeStalls(work: Work[], now: number): { key: string; pr: number; head: string; mergeStateStatus: string; requestedAt: string; ageMs: number; text: string; next: string }[] {
+  return work.flatMap(item => {
+    const state = item.observation?.githubQueue, candidate = item.candidate;
+    if (!state || !candidate || item.stage === 'done' || item.observation?.merged || state.queue || state.refused || !state.requestedAt
+      || state.head !== candidate.sha || !mergeableNow(state)) return [];
+    const ageMs = now - Date.parse(state.requestedAt);
+    if (ageMs <= mergeStallMs) return [];
+    const status = state.mergeStateStatus!;
+    return [{ key: item.key, pr: candidate.pr, head: state.head, mergeStateStatus: status, requestedAt: state.requestedAt, ageMs,
+      text: `merge-stalled: ${item.key} pull request #${candidate.pr} at ${state.head.slice(0, 12)} has been requested for merge for ${Math.floor(ageMs / 60_000)} minutes (since ${state.requestedAt}) while GitHub reports mergeStateStatus ${status}, and no refusal is recorded: GitHub was asked to merge a pull request it reports mergeable and has not`,
+      next: `graphyard master create files the control-plane defect for merge state ${status} on ${item.key}; gh pr view ${candidate.pr} shows what GitHub is waiting on` }];
+  });
+}
 export function mergeQueueAction(work: Work, state: GitHubMergeQueueState, request: MergeEnqueueRequest | null): MergeQueueAction {
   const held = state.mode !== 'none';
   const sha = work.candidate?.sha;

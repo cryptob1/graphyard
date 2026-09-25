@@ -3,8 +3,6 @@
 
 ## Master commands
 
-These need judgement:
-
 | Command | Purpose |
 | --- | --- |
 | `master repair GY-N REASON` | Restore a contaminated branch to its reviewed head |
@@ -61,11 +59,11 @@ A failed snapshot read retries once after 0.5–1.5 s jitter; a failed cycle wai
 
 ### Running executors under supervision
 
-`graphyard init` on a coordinator host starts `graphyard-executor@N` systemd user units; `master executors restart` moves them onto the current release.
+`graphyard init` starts `graphyard-executor@N` user units; `master executors restart` moves them to the current release.
 
 ## Resources and disk
 
-`resourceRegistry` declares every bounded resource, reported under `resources` ([remedies](operations-reference.md#control-plane-resources)). The loop removes dependency directories of finished worktrees (`run.reclaimIdleHours`) and raises `disk` attention below `run.diskThresholdGb`.
+`resourceRegistry` declares every bounded resource, reported under `resources` ([remedies](operations-reference.md#control-plane-resources)). The loop `git worktree remove`s finished worktrees (`run.reclaimIdleHours`; never dirty/unpushed), `run.worktreeRemovalLimit`/cycle, logging `.graphyard/worktree-reclaim.jsonl`; `disk` attention below `run.diskThresholdGb`.
 
 ### The managed worktree root
 
@@ -73,12 +71,16 @@ Review and proof checkouts live under `run.worktreeRoot` (default `~/.local/shar
 
 ## Recovery
 
-A dead supervisor leaves its item fenced; `containment` lists each surviving process with pid, cmdline and cwd. With `settleable: true` run `master settle-containment GY-N REASON`; otherwise stop the recorded scope unit (`containment.scope`) and request `rework`.
+A dead supervisor fences its item; `containment` lists each surviving process with pid, cmdline and cwd. With `settleable: true` run `master settle-containment GY-N REASON`; otherwise stop the recorded scope unit (`containment.scope`) and request `rework`.
 
 A lease that lapsed unexplained raises `lease-loss`; `blocked-awaiting-operator` and `stopped-by-attestation` lapses are history. Any admin settles an explained one with `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"` ([who may settle what](delegation.md#who-may-settle-what)). 
 
-`master escalation GY-N` spawns a handler that answers with `master decide GY-N resolve … --context FINGERPRINT REASON`.
+`master escalation GY-N` spawns a handler answering with `master decide GY-N resolve … --context FINGERPRINT REASON`.
+
+## Fault classes
+
+Faults carry `faultClass` (`master status` `faults`); recurring classes file one item (`GRAPHYARD_FAULT_CLASS_*`).
 
 ## Pipeline speed
 
-The target is submit→merge p50 ≤ 30 minutes and p90 ≤ 60 minutes over at least ten deliveries. Each row's `speed` carries `executionMs`, `waitMs`, `reworkRounds` and `interventions`; `speed.submitToMerge` gives the verdict. `node scripts/measure-pipeline-speed.mjs` records what `manual:speed-target-met` reads.
+Target: submit→merge p50 ≤ 30 minutes and p90 ≤ 60 minutes over ten or more deliveries. Each row's `speed` carries `executionMs`, `waitMs`, `reworkRounds` and `interventions`; `speed.submitToMerge` gives the verdict. `node scripts/measure-pipeline-speed.mjs` records what `manual:speed-target-met` reads.

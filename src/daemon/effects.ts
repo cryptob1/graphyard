@@ -16,14 +16,19 @@ import { type ReviewFinding, readReviewFindings, basePaths, baseText } from '../
 import { defaultAwaitReviewers, launchedSessionHandle } from '../auto-dispatch.js';
 import type { DispatchRequest } from '../model/dispatch.js';
 import { registeredLaunch } from '../model/session-state.js';
-import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type ContainmentAssessment, type EscalationSession, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, type MergeExecutor, agentToken, approverRoleHealth, decisionInput, escalationRoleHealth, launchApprover, launchEscalationHandler, readApproverLaunch, readEscalationSessions, saveEscalationSession, verifiedContext, listHerdrAgents, readEnvironmentLog, selectionKey, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, mergeExecutor, reclaimWorktrees, reclaimIdleMs, writeFailure, assessContainment, herdrJson } from '../master.js';
+import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type ContainmentAssessment, type EscalationSession, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, type MergeExecutor, agentToken, approverRoleHealth, decisionInput, escalationRoleHealth, launchApprover, launchEscalationHandler, readApproverLaunch, readEscalationSessions, saveEscalationSession, verifiedContext, listHerdrAgents, readEnvironmentLog, selectionKey, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, mergeExecutor, reclaimWorktrees, removeReclaimableWorktrees, writeWorktreeInventoryCache, reclaimIdleMs, writeFailure, assessContainment, herdrJson } from '../master.js';
 import { annotatePaneShell } from '../quarantine.js';
 import { probeSupervisorAbsence } from '../containment-probe.js';
 import { httpFleetClient, reconcileFleetSessions } from '../fleet.js';
-import { clampCount, type ContainmentRetention, type DaemonAction, daemonActionSchema, type DaemonState, type DeploymentObservation, message, writeDaemonState } from './state.js';
+import { type ContainmentRetention, type DaemonAction, type DaemonState, storeAction, type DeploymentObservation, message, writeDaemonState } from './state.js';
 import { answeringWidening } from './reconcile.js';
 import { type OrphanSupervisor, readyToRetry, stopWatchSupervisor } from './sessions.js';
-import { boundDetail, neededDecision, type RoutineDecisionAction } from './decisions.js';
+import { neededDecision, type RoutineDecisionAction } from './decisions.js';
+import type { FaultClassPolicy, FaultKind, faultClassItem } from '../model/fault-classes.js';
+import type { ControlPlaneStatus } from '../master.js';
+import { readCredentialFile } from '../master.js';
+import { onceAnnotations, timingFaultAttention, type ReportedAttention } from './faults.js';
+import type { daemonSummary } from './run.js';
 import { observeDeployment } from './deployment.js';
 import type { RunRecord } from '../runner/types.js';
 
@@ -216,15 +221,35 @@ export interface DaemonEffects {
    */
   followUpThreads?: (work: Work[], now: number) => Promise<Map<string, Set<string>>>;
   persist: (state: DaemonState) => Promise<void>;
+  /**
+   * Files the one backlog item a recurring fault class gets (GY-173), as the master's own
+   * operator-agent identity, under an idempotency key naming the class and its instances. Absent
+   * while no such identity is provisioned: the classes are still recorded and reported.
+   */
+  fileFaultClass?: (input: ReturnType<typeof faultClassItem>, key: string) => Promise<Work>;
+  /** The recurrence rule; the environment's (GRAPHYARD_FAULT_CLASS_*) or the shipped default when absent. */
+  faultClassPolicy?: FaultClassPolicy;
+  /**
+   * The control plane's status, read with the coordinator's visibility, whose status-level problems
+   * (App permissions, held jobs, production, a GitHub pause, unserved executors) are classified and
+   * tracked each cycle. A read that fails makes the cycle partial: it opens what it saw and ends nothing.
+   */
+  controlPlane?: () => Promise<ControlPlaneStatus & Record<string, unknown>>;
+  /**
+   * The attention `master status` adds after `buildMasterStatus` (generated-file drift, context
+   * overflows, intervention patterns, executors, terminal decisions, throughput, resources, and the
+   * requests, review conflicts, stalls, overlong sessions, owed judgments, setup and dispatcher lines
+   * of derivedAttention), read with the control plane's status so the loop tracks every class the report shows.
+   * `attribute` is the report's last step over the whole list — a ledger refusal in place of the launch symptoms
+   * it causes, a resource at its bound named in place of its symptom — so one cause is tracked as the report shows it, once.
+   */
+  reportedAttention?: (work: Work[], coordinator: ControlPlaneStatus & Record<string, unknown>, observed: { agents: HerdrAgent[]; available?: boolean; approvals: ReturnType<typeof daemonSummary>['approvals']; loop: ReturnType<typeof daemonSummary>['liveness']; now: string }) => Promise<ReportedAttention>;
 }
 
-/**
- * Put an action on the cursor. The detail is bounded here, before the schema sees it, so a caller
- * that quotes a long error or path list cannot fail every cycle with an over-long string (GY-179).
- */
-export async function record(state: DaemonState, key: string, action: Omit<DaemonAction, 'at' | 'epoch'> & { at?: string; epoch?: number | null }, now: number, persist: DaemonEffects['persist']) {
-  const entry = daemonActionSchema.parse({ ...action, detail: boundDetail(action.detail), attempts: clampCount(action.attempts, 1000), at: action.at ?? new Date(now).toISOString() });
-  state.actions[key] = entry; await persist(state);
+/** Put an action on the cursor, through storeAction, which bounds it and notes it against the fault record (GY-173). */
+export async function record(state: DaemonState, key: string, action: Omit<DaemonAction, 'at' | 'epoch' | 'faultClass'> & { at?: string; epoch?: number | null }, now: number, persist: DaemonEffects['persist'], faultKind?: FaultKind | null) {
+  const entry = storeAction(state, key, { epoch: null, ...action, at: action.at ?? new Date(now).toISOString() }, faultKind);
+  await persist(state);
   return entry;
 }
 
@@ -355,15 +380,31 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
    * The coordinator credential cannot, and the approver's
    * credential is never read here: an agent that requested a decision may not approve it.
    */
-  const asOperatorAgent = async (method: 'GET' | 'POST', path: string, body?: unknown) => {
+  const asOperatorAgent = async (method: 'GET' | 'POST', path: string, body?: unknown, key: string = randomUUID()) => {
     const config = current();
     if (!config.operatorAgent) throw new Error('No master operator-agent identity is provisioned; run graphyard master autonomy --admin-token-stdin --apply so the loop can request routine decisions');
     const token = await agentToken(root, config, 'operatorAgent');
-    const response = await fetcher(`${config.url}/api/${path}`, { method, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(30_000) });
+    const response = await fetcher(`${config.url}/api/${path}`, { method, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': key }, ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(30_000) });
     const result = await response.json();
     if (!response.ok) throw new Error(`Graphyard refused ${path} (${response.status}): ${result?.error ?? JSON.stringify(result)}`);
     return result;
   };
+  /**
+   * The status read faults are classified from, with the loop's own coordinator credential: the
+   * operator-agent read withholds held jobs, integration jobs and production (routes/status.ts),
+   * so faults in those catalogued kinds could never recur to the loop and file their class (GY-173).
+   * The attention master status adds is read the same way, as `master status` reads it: the
+   * intervention report refuses operator-agent callers (routes/interventions.ts).
+   */
+  const asCoordinator = async (path: string) => {
+    const config = current();
+    const response = await fetcher(`${config.url}/api/${path}`, { headers: { Authorization: `Bearer ${await readCredentialFile(config.credentialFile)}` }, signal: AbortSignal.timeout(30_000) });
+    const result = await response.json();
+    if (!response.ok) throw new Error(`Graphyard refused ${path} (${response.status}): ${result?.error ?? JSON.stringify(result)}`);
+    return result;
+  };
+  const coordinatorStatus = async () => await asCoordinator('status') as ControlPlaneStatus & Record<string, unknown>;
+  const annotations = onceAnnotations(async checkRunId => JSON.parse(await run('gh', ['api', '--paginate', `repos/${current().repository}/check-runs/${checkRunId}/annotations`])));
   const decide: DaemonEffects['decide'] = async (work, action, reason, input = {}) => {
     const post = (target: Work) => asOperatorAgent('POST', `work/${target.id}/decide`, { action, input: decisionInput(action, target, input), reason });
     try { return await post(work); }
@@ -504,10 +545,21 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // The idle bound comes from the live configuration, so a host under pressure can shorten it
     // (or a slow repository lengthen it) without restarting the loop.
     // The same pass takes back every ephemeral checkout no live session owns, under the managed root.
+    // Finished worktrees are removed outright first, a bounded number per pass (GY-360); the
+    // inventory that remains is the one the dependency reclaim judges and `master status` reads.
     reclaim: async work => {
-      const report = await reclaimWorktrees(root, work, { idleMs: reclaimIdleMs(current()) });
-      try { return { ...report, checkouts: await reclaimCheckouts(root, current()) }; }
-      catch (error) { return { ...report, errors: [...report.errors, `Ephemeral checkouts: ${writeFailure(error, 'Reclaiming the managed worktree root').message}`] }; }
+      const config = current(), idleMs = reclaimIdleMs(config);
+      const livePaths = [...(await readReviewLedger(root)).reviews, ...(await readProducerLedger(root)).producers]
+        .filter(record => record.state === 'pending' && record.checkout).map(record => record.checkout!);
+      const trees = await removeReclaimableWorktrees(root, work, { idleMs, run, baseBranch: config.baseBranch, limit: config.run.worktreeRemovalLimit, livePaths });
+      const report = await reclaimWorktrees(root, work, { idleMs, entries: trees.entries });
+      const taken = new Set(report.applied ? report.removed : []);
+      await writeWorktreeInventoryCache(root, { at: trees.at, entries: trees.entries.map(entry => ({ ...entry, dependencies: entry.dependencies.filter(dependency => !taken.has(dependency.path)) })),
+        held: trees.kept.filter(entry => !entry.reason.startsWith('Git refused')).map(entry => ({ path: entry.path, activityAt: trees.entries.find(tree => tree.path === entry.path)?.activityAt ?? 0, reason: entry.reason })) })
+        .catch(error => report.errors.push(`Worktree inventory cache: ${writeFailure(error, 'Writing the worktree inventory cache').message}`));
+      const withTrees = { ...report, trees };
+      try { return { ...withTrees, checkouts: await reclaimCheckouts(root, config) }; }
+      catch (error) { return { ...withTrees, errors: [...withTrees.errors, `Ephemeral checkouts: ${writeFailure(error, 'Reclaiming the managed worktree root').message}`] }; }
     },
     // The decision effects exist only while the live configuration names the master's
     // operator-agent identity. Without one the loop has no way to request anything, so the cycle
@@ -518,6 +570,18 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     get approver() { return current().operatorAgent ? approver : undefined; },
     get withdraw() { return current().operatorAgent ? withdraw : undefined; },
     get decisions() { return current().operatorAgent ? decisions : undefined; },
+    // A recurring fault class is filed as intent, by the same operator-agent identity (GY-173);
+    // the faults it counts are read with the coordinator's visibility, with or without that identity,
+    // so an installation that has not provisioned it yet still counts every recurrence.
+    controlPlane: coordinatorStatus,
+    reportedAttention: async (work: Work[], coordinator: ControlPlaneStatus & Record<string, unknown>, observed: { agents: HerdrAgent[]; available?: boolean; approvals: ReturnType<typeof daemonSummary>['approvals']; loop: ReturnType<typeof daemonSummary>['liveness']; now: string }) => {
+      // Imported when first read: the status report imports this module, so a static import would be a cycle.
+      const reported = await (await import('../cli/master-status.js')).reportedAttention(root, current(), asCoordinator, coordinator, { work, now: observed.now }, { reviews: (await readReviewLedger(root)).reviews, producers: (await readProducerLedger(root)).producers,
+        runtime: { available: observed.available ?? true, agents: observed.agents }, commit: null, approvals: observed.approvals, loop: observed.loop, standalone: true });
+      // A required check red on the clock is named as master status names it, after buildMasterStatus.
+      return { ...reported, items: [...reported.items, ...await timingFaultAttention(work, current().repository, annotations)] };
+    },
+    get fileFaultClass() { return current().operatorAgent ? (input: ReturnType<typeof faultClassItem>, key: string) => asOperatorAgent('POST', 'work', input, key) as Promise<Work> : undefined; },
     containment: (work, observed) => assessContainment(work, { hostId: current().hostId, observedAt: observed.now, clockOffset: observed.clockOffset, probe: async target => annotatePaneShell(await probeSupervisorAbsence(target, { run }),
       work.find(item => item.key === target.key && item.containmentQuarantine?.epoch === target.epoch), pane => herdrJson(['pane', 'process-info', '--pane', pane], run)) }),
     settleContainment: (work, assessment) => deps.mutate(`work/${work.id}/autosettle`, { epoch: assessment.epoch, settlementHash: work.containmentQuarantine!.settlementHash,

@@ -65,21 +65,32 @@ export async function reclaimStep(cycle: Cycle) {
   const { config, state, effects, now, snapshot, clock, clockOffset, performed, isolate, agents, open } = cycle;
   // 3. Reclaim the disk the finished assignments are holding, before anything asks for more of
   //    it. Every attempt and every rework checks the repository out again, so without this step
-  //    the host fills and the loop starts failing at whatever it happens to write next. The
-  //    reclaimer removes dependency directories only: checkouts, branches and Graphyard's
-  //    registered workspace records are never touched, so nothing here can lose work.
+  //    the host fills and the loop starts failing at whatever it happens to write next. A
+  //    finished worktree is removed with `git worktree remove` (GY-360), a bounded number per
+  //    pass and never a dirty or unpushed one; the dependency directories of the rest go next.
+  //    Branches and Graphyard's registered workspace records are never touched.
   //    Scanning the worktree directory is not free, so it keeps to its own interval — except
   //    while the last scan found free space below the configured threshold, when the host needs
   //    every cycle it can get rather than a cadence.
   const reclaimedAt = state.reclaim ? Date.parse(state.reclaim.at) : Number.NaN;
   const below = (free: number | null | undefined, bound: number) => free !== null && free !== undefined && free < bound;
   const pressed = below(state.reclaim?.freeBytes, diskThresholdBytes(config)) || below(state.reclaim?.rootFreeBytes, worktreeRootMinFreeBytes(config));
-  if (effects.reclaim && (pressed || !(Number.isFinite(reclaimedAt) && clock - reclaimedAt < reclaimIntervalMs))) {
+  //    A worktree backlog larger than one pass's bound drains on consecutive cycles, not intervals.
+  const backlog = (state.reclaim?.treeBacklog ?? 0) > 0;
+  if (effects.reclaim && (pressed || backlog || !(Number.isFinite(reclaimedAt) && clock - reclaimedAt < reclaimIntervalMs))) {
     try {
       const report = await effects.reclaim(snapshot.work);
       state.reclaim = reclaimSummarySchema.parse({ at: report.at, scanned: report.scanned, removed: report.removed.length, kept: report.kept.length,
-        freedBytes: report.freedBytes, freeBytes: report.freeAfter === null ? null : Math.max(0, Math.round(report.freeAfter)), errors: [...report.errors, ...(report.checkouts?.errors ?? [])].map(entry => entry.slice(0, 500)).slice(0, 20),
-        checkouts: report.checkouts?.removed.length ?? 0, rootFreeBytes: report.checkouts?.freeBytes == null ? null : Math.max(0, Math.round(report.checkouts.freeBytes)) });
+        freedBytes: report.freedBytes, freeBytes: report.freeAfter === null ? null : Math.max(0, Math.round(report.freeAfter)), errors: [...report.errors, ...(report.trees?.errors ?? []), ...(report.checkouts?.errors ?? [])].map(entry => entry.slice(0, 500)).slice(0, 20),
+        checkouts: report.checkouts?.removed.length ?? 0, rootFreeBytes: report.checkouts?.freeBytes == null ? null : Math.max(0, Math.round(report.checkouts.freeBytes)),
+        trees: report.trees?.removed.length ?? 0, treeBacklog: report.trees?.backlog ?? 0 });
+      const trees = report.trees?.removed.length ?? 0;
+      if (report.trees && (trees || report.trees.errors.length)) {
+        const kept = report.trees.kept.filter(entry => !entry.reason.startsWith('Git refused'));
+        performed.push(await record(state, `reclaim:trees:${report.at}`, { kind: 'reclaim', work: null, principal: null, state: report.trees.errors.length ? 'failed' : 'done',
+          detail: `Removed ${trees} finished worktree(s) with git worktree remove${report.trees.backlog ? `; ${report.trees.backlog} more are reclaimable and go on the next cycle (at most ${report.trees.limit} per cycle)` : ''}${kept.length ? `; ${kept.length} kept as dirty or unpushed, first ${kept[0].path}: ${kept[0].reason}` : ''}${report.trees.errors.length ? `; ${report.trees.errors.length} could not be removed: ${report.trees.errors[0]}` : ''}`,
+          attempts: 1, cycle: state.cycle }, now(), effects.persist));
+      }
       const orphans = report.checkouts?.removed.length ?? 0, failures = report.errors.length + (report.checkouts?.errors.length ?? 0);
       if (orphans && !report.removed.length && !failures) {
         performed.push(await record(state, `reclaim:${report.at}`, { kind: 'reclaim', work: null, principal: null, state: 'done',

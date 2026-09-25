@@ -1,7 +1,7 @@
 // Concern: routine decisions — standing verdicts, decision reasons and the approver step.
 import { type Work, type AgentReview, reviewProviderOf, standingEscalations, leaseLossEpoch } from '../model.js';
 import { routableScopeRequest, scopeDecisionBinding, scopeDecisionReason } from '../model/scope.js';
-import { baseRefreshConflict, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, type ReviewThread, describeThread } from '../merge-queue.js';
+import { baseRefreshConflict, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, speculativeConflictReason, type ReviewThread, describeThread } from '../merge-queue.js';
 import { mechanicalFailure, mechanicalVerdicts } from '../model/mechanical-proofs.js';
 import { unexercisedFindings } from '../auto-dispatch.js';
 import { guardBroadScope, type MasterConfig, type ContainmentAssessment, containmentPhase, type HerdrAgent } from '../master.js';
@@ -237,8 +237,6 @@ export function proofRework(work: Work): { reason: string; binding: string } | n
     binding: `${candidate.sha}:proof:${[...failed.map(verdict => verdict.proof), ...unexercised.map(entry => `unexercised:${entry.proof}`)].sort().join(',')}` };
 }
 
-/** The reason `advanceQueue` ejects an entry whose speculative merge conflicts (github.ts SpeculativeConflict). */
-const speculativeConflictReason = /^Speculative merge of [0-9a-f]+ into .+ conflicts/;
 /**
  * The conflict with the base that only a sync round can resolve, for exactly the current head, or
  * null. Two observations say so. GitHub computed a merge conflict for the open pull request (its
@@ -247,6 +245,9 @@ const speculativeConflictReason = /^Speculative merge of [0-9a-f]+ into .+ confl
  * bring the head onto waits for that attempt first: a clean refresh republishes the head and it
  * re-enters the queue with no round at all, and a conflicting one is named by `baseRefreshConflict`.
  * The binding names the head and the base tip, so a base that moves on is a fresh ground.
+ * An ejection whose speculative base held predecessors is no conflict with the base (GY-321): merging
+ * the base resolves nothing, so no round is asked; the entry waits for those predecessors
+ * and re-enters with the same head (model/queue.ts, `predecessorWait`).
  */
 export function syncConflict(work: Work): { reason: string; binding: string } | null {
   const candidate = work.candidate, observation = work.observation;
@@ -256,7 +257,7 @@ export function syncConflict(work: Work): { reason: string; binding: string } | 
   if (observation.conflicting && !work.queue)
     return { reason: `GitHub reports that candidate ${candidate.sha.slice(0, 12)} conflicts with base branch tip ${tip.slice(0, 12)}`, binding: `${candidate.sha}:sync:${tip}` };
   const ejection = work.queueEjection;
-  if (ejection && !work.queue && ejection.sha === candidate.sha && ejection.policyRevision === work.policyRevision && speculativeConflictReason.test(ejection.reason) && !pendingBaseRefresh(work))
+  if (ejection && !work.queue && ejection.sha === candidate.sha && ejection.policyRevision === work.policyRevision && speculativeConflictReason.test(ejection.reason) && !ejection.predecessors?.length && !pendingBaseRefresh(work))
     return { reason: `the merge queue ejected candidate ${candidate.sha.slice(0, 12)}: ${ejection.reason} (base branch tip ${tip.slice(0, 12)})`, binding: `${candidate.sha}:queue-conflict:${ejection.sequence}:${tip}` };
   return null;
 }

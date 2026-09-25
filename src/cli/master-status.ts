@@ -1,43 +1,40 @@
 import { randomUUID } from 'node:crypto';
 import { probeCandidateConflicts } from '../conflicts.js';
 import { humanOnlyStatusRow, type HumanRequestRow } from '../model/human-request.js';
-import { agentOwner, agentToken, assessContainment, branchReport, broadScopeFlag, buildMasterStatus, guardBroadScope, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, humanOwner, inspectWorkerCredentials, installationOwner, inventoryWorktrees, managedRootStatus, mergeProtocolSkew, observeHerdrAgents, planWorktreeReclaim, profileConcurrency, reclaimIdleMs, snapshotWithClock, worktreesDirectory, type AttentionItem, type MasterConfig } from '../master.js';
-import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable, generatedManifestScript } from '../install/generated-files.js';
+import { agentOwner, agentToken, assessContainment, branchReport, broadScopeFlag, buildMasterStatus, guardBroadScope, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, humanOwner, inspectWorkerCredentials, installationOwner, statusWorktreeInventory, managedRootStatus, mergeProtocolSkew, observeHerdrAgents, planWorktreeReclaim, profileConcurrency, reclaimIdleMs, snapshotWithClock, worktreesDirectory, type AttentionItem, type MasterConfig } from '../master.js';
 import { impliedScopeRequests, type Work } from '../model/work.js';
-import { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
-import { executorFleet } from './executor-report.js';
+import { actionReport, agentRequestReport, sessionReport } from './loop-report.js';
+import { needsHumanActions, routedScopeStatus } from './owed-report.js';
 import { installationMerger } from '../executor.js';
-import { owedAttention, needsHumanActions, routedScopeStatus, scopeRequestAttention } from './owed-report.js';
 import { daemonSummary, loopAttention, readDaemonState, type CycleMetrics, type DaemonState } from '../master-daemon.js';
 import { readReviewLedger, reconcileReviews, reviewLedgerSpec, sessionLedgerHeadroom, summarizeReviews } from '../reviewer.js';
 import { producerLedgerSpec, readProducerLedger, reconcileProducers, sessionRetries, summarizeProducers } from '../producer.js';
-import { dispatchFailureAttention, dispatchSummary, readDispatchCursor } from '../auto-dispatch.js';
+import { defaultAwaitReviewers, dispatchFailureAttention, dispatchSummary, readDispatchCursor } from '../auto-dispatch.js';
 import { actionlessItems, stallBoundMs } from '../model/action-account.js';
-import { approverLaunchAttention, directMergeLine, nameOrphanSupervisors, stalledItemAttention } from './status-attention.js';
+import { approverLaunchAttention, directMergeLine, nameOrphanSupervisors } from './status-attention.js';
 import { nameUnobtainableReviews, type SettledReviewSession } from '../model/dispatch.js';
 import { unansweredRequestAttention, unobtainableReviewAttention } from './unanswered-requests.js';
-import { reviewConflictAttention } from '../model/review-conflict.js';
 import { readAdministrationLedger, readSudoState, summarizeAdministration } from '../master-browser.js';
-import { stalledActionAttention } from './stalled-actions.js';
-import { actorlessAttention } from './actorless-submissions.js';
 import { livenessStatus } from './liveness-report.js';
-import { ledgerRefusalAttention } from '../master-status.js';
-import { executorFleetReport, readCommit, readExecutorRegistrations } from '../executor-fleet.js';
-import { githubBudgetAttention } from './github-budget-attention.js';
-import { overlongSessionAttention } from './overlong-sessions.js';
 import { ghCheckAnnotations, qualifyTimingFailures } from './timing-failures.js';
-import { throughputStatus } from '../throughput.js';
-import { interventionSummary } from './intervention-status.js';
 import { setupHealth } from './master-setup.js';
-import { consentHoldItems } from './consent-holds.js';
 import { stuckRequestReport, withStuckRequests } from './stuck-requests.js';
-import { nameUnresolvedThreads } from '../merge-queue.js';
-import { contextOverflows } from '../model/escalation-context.js';
+import { mergeStalls, nameUnresolvedThreads } from '../merge-queue.js';
 import type { LoopSupervisorHost } from '../supervisor.js';
+import { attributeAttention, derivedAttention, faulted, ledgerRefusalAttention, resourceStatus } from '../master-status.js';
+import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable, generatedManifestScript } from '../install/generated-files.js';
+import { contextOverflows } from '../model/escalation-context.js';
+import { interventionSummary } from './intervention-status.js';
 import { terminalDecisions } from './decision-report.js';
-import { attributeAttention, resourceStatus } from '../master-status.js';
+import { masterBoard } from '../model/board.js';
+import { executorFleetReport, readCommit, readExecutorRegistrations } from '../executor-fleet.js';
+import { throughputStatus } from '../throughput.js';
 
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
+
+/** A merge pending past five minutes on a head GitHub reports mergeable, with no refusal (GY-344). */
+export const mergeStallAttention = (snapshot: { work: Work[]; now: string }): AttentionItem[] =>
+  mergeStalls(snapshot.work, Date.parse(snapshot.now)).map(stall => ({ subject: stall.key, text: stall.text, ...agentOwner('master', stall.next) }));
 // The attention builders live beside each other in `status-attention.ts`; the report reads them
 // from here, as does everything that was reading them from here before the split.
 export { approverLaunchAttention, nameOrphanSupervisors, orphanSupervisorAttention, stalledItemAttention, supervisorReclaimCommand } from './status-attention.js';
@@ -71,14 +68,16 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // is what logs and persists that repair, so status reports the cursor rather than announcing it.
   const dispatchCursor = await readDispatchCursor(root, master, () => {}).catch(error => ({ error: error instanceof Error ? error.message : 'Master dispatch cursor is unreadable' }));
   const stuck = stuckRequestReport({ reviews: reviewRecords, producers: producerRecords }, Date.now());
-  const dispatch = 'error' in dispatchCursor ? { running: false, failures: [] as { requestId: string; kind: string; attempts: number; reason: string; at: string; nextAt: string }[], error: dispatchCursor.error } : withStuckRequests(dispatchSummary(dispatchCursor, Date.now(), master.run.dispatchIntervalSeconds * 1000), stuck.stuck);
+  const dispatch = 'error' in dispatchCursor ? { running: false, failures: [] as { requestId: string; kind: string; attempts: number; reason: string; at: string; nextAt: string }[], error: dispatchCursor.error } : withStuckRequests(dispatchSummary(dispatchCursor, Date.now(), master.run.dispatchIntervalSeconds * 1000, master.run.awaitReviewers ?? defaultAwaitReviewers.logins), stuck.stuck);
   // A dispatcher that keeps failing its tick launches nothing for any item; it is named before the requests it is not launching.
   const dispatchItems = dispatchFailureAttention(dispatch);
   const containment = await assessContainment(snapshot.work, { hostId: master.hostId, observedAt: snapshot.now, clockOffset });
   // Disk is reported from the host, not from the cursor: the loop may be stopped, and the volume
-  // filling is exactly the condition that stops it. The plan is the one `master reclaim` computes.
+  // filling is exactly the condition that stops it. The plan is the one `master reclaim` computes,
+  // over the inventory the loop's reclaim step cached (GY-360): walking a thousand trees here, on
+  // every call, is what made status take minutes.
   const worktrees = worktreesDirectory(root);
-  const trees = await inventoryWorktrees(root).catch(() => []), reclaimPlan = planWorktreeReclaim(trees, snapshot.work, { now: Date.now(), idleMs: reclaimIdleMs(master) });
+  const inventory = await statusWorktreeInventory(root).catch(() => ({ entries: [], at: null, cached: false })), trees = inventory.entries, reclaimPlan = planWorktreeReclaim(trees, snapshot.work, { now: Date.now(), idleMs: reclaimIdleMs(master) });
   const disk = diskPressure(worktrees, await freeBytes(worktrees), diskThresholdBytes(master), reclaimPlan);
   // The managed worktree root is a volume of its own as often as not: proof and review checkouts
   // live there, and it is judged against its own minimum and budget, before a write there fails.
@@ -108,9 +107,6 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // A waiting sudo prompt is the operator confirming their own GitHub credential on their device,
   // the one step no agent may take for them; a timed-out one is the master's to rerun.
   const sudo = administration.sudo;
-  const scopeRequests = [...scopeRequestAttention(snapshot, cycling?.approvals), ...agentRequestAttention(snapshot), ...consentHoldItems(trees, snapshot)];
-  // A session past its role's maximum: running with no progress is as visible as one that died.
-  const overlong = overlongSessionAttention(snapshot, { ...runtime, hostId: master.hostId }, { proof: master.run.producerTimeoutMinutes * 60_000 });
   // A request whose session settled without satisfying its gate: nothing runs for it, nothing
   // refused, and nothing will launch again until it is named here with the command that answers it.
   // A review every session settled on a dismissal for is the stronger statement of the same
@@ -120,25 +116,15 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // An open item the control plane names no action for. Those waiting on another item or on a
   // live session are accounted and raise nothing; what is left is named, with what is missing.
   const actionless = actionlessItems(snapshot.work, new Date(snapshot.now));
-  const stalledItems = stalledItemAttention(snapshot);
-  // A submitted item with no review, producer or rework request and no named wait (GY-191).
-  const actorless = actorlessAttention(snapshot, cycling?.approvals);
   const liveness = livenessStatus(snapshot); // GY-201: open items holding no obligation, with ages
-  // An action no live executor can claim is not queued behind other work (GY-105); it is named
-  // with its wait and the unit to start, ahead of everything that waits on it.
-  const executors = await executorFleet(root, masterApi, snapshot);
+  // Requests, conflicts, stalls, executors and owed judgments come from derivedAttention, which the loop reads too.
+  const { generatedFiles, overflow, interventions, releases, decisions, throughput, resources, derived: { scopeRequests, stalledItems: derivedStalls, actorless, executors, conflicted, stalled, owed, budget, overlong } } = await reportedAttention(root, master, masterApi, coordinator, snapshot,
+    { reviews: reviewRecords, producers: producerRecords, runtime, commit: cli.commit, approvals: cycling?.approvals ?? [], loop: cycling?.liveness ?? null, rows: status.work, trees });
+  // A merge pending on a head GitHub reports mergeable is named with the stalled items (GY-344).
+  const stalledItems = [...derivedStalls, ...mergeStallAttention(snapshot)];
   // Exactly one component merges (GY-245): the loop, where one is installed or running, else the executors.
   const merger = installationMerger({ loop: { configured: !!setup.supervisor.installed, running: !!cycling?.running, autoMerge: master.autoMerge },
     declaration: executors.supervision.declaration, served: executors.presence.served });
-  // A request two verdicts answered (GY-124): neither is acted on until a fresh review resolves it.
-  const conflicted = reviewConflictAttention(snapshot.work, reviewRecords).map(({ next, ...item }) => ({ ...item, ...agentOwner('control plane', next) }));
-  // A row that keeps failing for the same reason: owed, attempted, and going nowhere. It is raised
-  // as soon as it is classified, which is inside the same idle bound a row nobody is acting on has.
-  const stalled = stalledActionAttention(snapshot);
-  // What waits on a judgment rather than on capacity, named once and counted apart (GY-104).
-  const owed = owedAttention(snapshot, status.work as { key: string; attention: string | null }[], scopeRequests);
-  // The GitHub budget (GY-117): a pause as one incident, an exhaustion ahead, a silent webhook.
-  const budget = githubBudgetAttention(coordinator);
   const attentionItems = [...diskAttention, ...scopeRequests, ...unanswered, ...conflicted, ...stuck.attentionItems, ...stalledItems, ...actorless, ...stalled, ...overlong, ...budget, ...owed.items, ...(sudo ? [...status.attentionItems, { subject: 'installation', text: sudo.instruction,
     ...(Date.parse(sudo.deadline) <= Date.now() ? agentOwner('master', `graphyard master browser ${sudo.flow}`) : humanOwner('issuing credentials to people', sudo.instruction)) }] : [...status.attentionItems])];
   // The loop's own health goes in front of all of it (see loopItems above), then the dispatcher's,
@@ -146,42 +132,10 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   attentionItems.unshift(...loopItems, ...dispatchItems, ...executors.attention, ...merger.attention);
   // Setup that stops every launch, or leaves the loop unsupervised, is the master's to repair.
   attentionItems.push(...setupItems);
-  // The generated-files variable the installers set beside GRAPHYARD_PRINCIPALS, compared with
-  // the managed repository's manifest: a deployment that does not exempt the manifest's paths
-  // sends every docs-touching item into the out-of-scope refusal, so the drift is raised here
-  // with the exact command that fixes the deployment.
-  const generatedFiles: AttentionItem[] = [];
-  try {
-    const manifest = generatedFilesAssignment(root);
-    const deployed = coordinator?.delegationLimits?.deployed?.[generatedFilesVariable];
-    for (const text of generatedFilesDrift(deployed, manifest)) generatedFiles.push({ subject: 'installation', text, ...installationOwner('delegation-limits', text) });
-  } catch (error) {
-    generatedFiles.push({ subject: 'installation', text: `The repository generated-file manifest is unreadable: ${error instanceof Error ? error.message : 'unknown reason'}`,
-      ...agentOwner('master', `Fix ${generatedManifestScript} so --list prints the generated paths; master status reports the deployment drift again once it does`) });
-  }
-  // An escalation context over its budget (GY-138), named before a handler declines on it.
-  const overflow = await contextOverflows(masterApi, snapshot.work);
-  attentionItems.push(...generatedFiles, ...overflow);
-  // What the product made people do by hand this week (GY-98).
-  const interventions = await interventionSummary(masterApi);
-  attentionItems.push(...interventions.attentionItems);
-  // The fleet against the release this CLI runs (GY-126): every executor registered on this host
-  // with the commit it loaded beside the coordinator's, and one item naming each that has stood
-  // down, or will at its next claim, because the checkout moved on under it.
-  const releases = executorFleetReport(await readExecutorRegistrations(master).catch(() => []), { commit: cli.commit ?? readCommit(root) }, { hostId: master.hostId });
-  attentionItems.push(...releases.attention);
-  const decisions = await terminalDecisions(masterApi, snapshot.work, { approvals: cycling?.approvals ?? [], runtime, now: Date.now() });
-  // GY-87's throughput claim against the release now serving: verified, or unverified with what
-  // missed. Delivered is not proven, and nothing else on this report would say which this is.
-  const throughput = await throughputStatus(root, coordinator, snapshot.work);
-  if (throughput.attention) attentionItems.push(throughput.attention);
-  // Every registered resource against its bound (GY-132); a symptom of one at its bound names it.
-  const resources = await resourceStatus(root, master, { reviews: reviewRecords, producers: producerRecords, agents: runtime.available ? runtime.agents : null, work: snapshot.work, loop: cycling?.liveness ?? null });
+  attentionItems.push(...generatedFiles, ...overflow); attentionItems.push(...interventions.attentionItems, ...releases.attention, ...(throughput.attention ? [throughput.attention] : []));
   attentionItems.splice(loopItems.length + dispatchItems.length, 0, ...resources.attention);
-  // Everything the control plane will take from the operator's own credential alone, derived by
-  // the server from the human-only rule table and answered where it is listed — the dashboard's
-  // Needs you page, in the operator's signed-in session. `humanRequests` above is the parked
-  // half of that table; this is the whole of it, approvals included (GY-102).
+  // Everything the control plane takes from the operator's own credential alone, from the
+  // human-only rule table, answered on the dashboard's Needs you page (GY-102).
   const humanOnly = (coordinator?.humanOnly ?? []) as HumanRequestRow[];
   // A standing ledger refusal is attributed first (GY-131); what still reads as a symptom of a
   // resource at its bound is then rewritten to name that resource (GY-132).
@@ -191,7 +145,9 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
       // item is the pipeline working, one with nothing moving it is the pipeline stopped.
       actionless: actionless.length, actorless: actorless.length, livenessViolations: liveness.violations, waitingOnAnother: actionless.filter(entry => entry.outcome === 'waiting-on').length, stalled: stalledItems.length,
       attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + conflicted.length + stuck.attentionItems.length + stalledItems.length + actorless.length + stalled.length + overlong.length + loopItems.length + dispatchItems.length + executors.attention.length + merger.attention.length + releases.attention.length + overflow.length + budget.length + (throughput.attention ? 1 : 0) + owed.counted + resources.attention.length } }, snapshot.work);
-  return { ...directMergeLine(coordinator), ...status, ...attributed, attentionItems: attributeAttention(attributed.attentionItems, resources.readings), resources: resources.report,
+  return { ...directMergeLine(coordinator), ...status, ...attributed, ...faulted(attributeAttention(attributed.attentionItems, resources.readings)), resources: resources.report,
+    // The board (GY-200): what the master owes first, with commands, then the rest.
+    board: await masterBoard(masterApi, snapshot, coordinator, decisions.unanswered),
     humanOnly: humanOnly.map(humanOnlyStatusRow),
     // Every open item the control plane names no action for, with the account it names instead
     // and how long it has held its failing gate; the bound the stalled ones were judged against.
@@ -218,8 +174,32 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     branches: branchReport(status.work),
     requests: agentRequestReport(snapshot), impliedScopeRequests: impliedScopeRequests(snapshot.work),
     // What the host has left, what a reclaim would give back, and the bound it was judged against.
-    disk: { ...disk, worktreeRoot: managedRoot.health, idleMs: reclaimIdleMs(master), reclaimable: reclaimPlan.filter(entry => entry.disposable).map(entry => ({ path: entry.path, key: entry.key, epoch: entry.epoch, disposition: entry.disposition, detail: entry.detail })) },
+    disk: { ...disk, worktreeRoot: managedRoot.health, idleMs: reclaimIdleMs(master), inventory: { at: inventory.at, cached: inventory.cached }, reclaimable: reclaimPlan.filter(entry => entry.disposable).map(entry => ({ path: entry.path, key: entry.key, epoch: entry.epoch, disposition: entry.disposition, detail: entry.detail })) },
     runtime: { herdr: { available: runtime.available, reason: runtime.reason }, reviews: reviewRuntime } };
+}
+
+/** What the report adds after buildMasterStatus; the loop reads it too, to track every class (GY-173). */
+export async function reportedAttention(root: string, master: MasterConfig, masterApi: (path: string) => Promise<any>, coordinator: any, snapshot: { work: Work[]; now: string },
+  observed: Omit<Parameters<typeof resourceStatus>[2], 'work' | 'agents'> & Pick<Parameters<typeof terminalDecisions>[2], 'approvals' | 'runtime'> & Pick<Parameters<typeof derivedAttention>[5], 'rows' | 'trees' | 'standalone' | 'approvals'> & { commit: string | null }) {
+  const generatedFiles: AttentionItem[] = [];
+  try {
+    const deployed = coordinator?.delegationLimits?.deployed?.[generatedFilesVariable];
+    for (const text of generatedFilesDrift(deployed, generatedFilesAssignment(root))) generatedFiles.push({ subject: 'installation', text, ...installationOwner('delegation-limits', text) });
+  } catch (error) {
+    generatedFiles.push({ subject: 'installation', text: `The repository generated-file manifest is unreadable: ${error instanceof Error ? error.message : 'unknown reason'}`,
+      ...agentOwner('master', `Fix ${generatedManifestScript} so --list prints the generated paths; master status reports the deployment drift again once it does`) });
+  }
+  const overflow = await contextOverflows(masterApi, snapshot.work);
+  const interventions = await interventionSummary(masterApi);
+  const releases = executorFleetReport(await readExecutorRegistrations(master).catch(() => []), { commit: observed.commit ?? readCommit(root) }, { hostId: master.hostId });
+  const decisions = await terminalDecisions(masterApi, snapshot.work, { approvals: observed.approvals, runtime: observed.runtime, now: Date.now() });
+  const throughput = await throughputStatus(root, coordinator, snapshot.work);
+  const resources = await resourceStatus(root, master, { reviews: observed.reviews, producers: observed.producers, agents: observed.runtime.available ? observed.runtime.agents : null, work: snapshot.work, loop: observed.loop });
+  const derived = await derivedAttention(root, master, masterApi, coordinator, snapshot, { ...observed, reviews: observed.reviews ?? [], producers: observed.producers ?? [], runtime: { available: observed.runtime.available, agents: observed.runtime.available ? observed.runtime.agents : [] } });
+  const items = [...resources.attention, ...generatedFiles, ...overflow, ...interventions.attentionItems, ...releases.attention, ...(throughput.attention ? [throughput.attention] : []), ...decisions.attentionItems, ...derived.items];
+  // The report's last step over the whole list, which the loop runs too: a cause named once, in place of its symptoms.
+  const attribute = (status: { work: any[]; attentionItems: AttentionItem[] }) => attributeAttention(ledgerRefusalAttention(status, snapshot.work).attentionItems, resources.readings);
+  return { generatedFiles, overflow, interventions, releases, decisions, throughput, resources, derived, items, attribute };
 }
 
 /**

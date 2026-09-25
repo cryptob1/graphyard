@@ -18,6 +18,7 @@ import { OVERDUE_MINUTES, formatDuration, statusDuration } from '../web/duration
 import { phaseOf, phaseLabel, statusHeld, statusSince } from '../web/plain-status.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
 import OverviewPage from '../web/pages/overview.js';
+import { boardFromStatus } from '../src/model/board.js';
 import WorkDetails from '../web/pages/work-details.js';
 import WorkCard from '../web/components/work-card.js';
 import { groupOf, timedGroups } from '../web/groups.js';
@@ -37,7 +38,7 @@ const fixture = (fixtureWork() as unknown as Work[]).map(live);
 const minute = 60_000;
 
 function dashboard(work: Work[], observedAt = NOW, overrides: Partial<Dashboard> = {}): Dashboard {
-  return {
+  const d: Dashboard = {
     token: 'fixture', work, status: fixtureStatus('admin'), error: '', connected: true, lastUpdated: '12:00:00', view: 'work', setView: noop,
     filter: null, setFilter: noop, selected: null, setSelected: noop, creating: false, setCreating: noop, busy: false, setBusy: noop,
     observedAt, jobs: [], query: '', setQuery: noop, operatorAgents: [], operatorAgentsError: null, features: {} as any,
@@ -45,6 +46,8 @@ function dashboard(work: Work[], observedAt = NOW, overrides: Partial<Dashboard>
     queue: predictQueue(work, observedAt), sessionEpoch: { current: 0 }, api: async (path: string) => fixtureApi(path, 'admin'),
     refresh: async () => {}, action: async () => {}, setError: noop, signOut: noop, ...overrides,
   };
+  // The board GET /api/board serves over the same work (GY-200): the Work page renders its groups.
+  return 'board' in overrides ? d : { ...d, board: boardFromStatus(d.work, d.observedAt, d.status) };
 }
 const homeView = (work: Work[], observedAt = NOW) => markup(createElement(OverviewPage as any, dashboard(work, observedAt)));
 /** A board column draws the same component the list draws; web/pages/overview.tsx maps one `card`. */
