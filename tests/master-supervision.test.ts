@@ -29,6 +29,8 @@ const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url))
 const coordinatorToken = 'coordinator-token-'.padEnd(40, 'x');
 const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
 const source = (name: string) => readFileSync(fileURLToPath(new URL(`../src/${name}`, import.meta.url)), 'utf8');
+// src/master.ts re-exports the modules under src/master/ (GY-177); its source is theirs.
+const masterSource = () => readdirSync(fileURLToPath(new URL('../src/master', import.meta.url))).filter(name => name.endsWith('.ts')).sort().map(name => source(`master/${name}`)).join('\n');
 const supervisedUser = String(process.getuid?.() ?? '');
 
 async function repository() {
@@ -295,7 +297,7 @@ test('integration:runtime-calls-bounded — a hung agent runtime fails its step,
     // Every call into the runtime carries the bound, not just the ones a test reaches: each is a
     // spawned child through the asynchronous runner (GY-125), bounded by its timeout, so a hung
     // runtime neither holds the step nor blocks the event loop and the SIGTERM handler with it.
-    const master_ts = source('master.ts');
+    const master_ts = masterSource();
     for (const signature of [
       "export async function herdrJson(args: string[], run: ChildRun = defaultChildRun)",
       "async function herdrRun(args: string[], run: ChildRun = defaultChildRun)",
@@ -305,7 +307,7 @@ test('integration:runtime-calls-bounded — a hung agent runtime fails its step,
     assert.match(master_ts, /agentRuntimeRun = \(timeoutMs: number = agentRuntimeTimeoutMs\)[\s\S]{0,300}?childRunner\(\{ timeoutMs \}\)/);
     assert.equal(defaultChildTimeoutMs, agentRuntimeTimeoutMs, 'the default runner carries the runtime bound');
     // The loop's other subprocess commands are bounded where it builds them.
-    for (const file of ['master-daemon.ts', 'auto-dispatch.ts']) {
+    for (const file of ['daemon/effects.ts', 'auto-dispatch.ts']) {
       const defaults = [...source(file).matchAll(/childRunner\(\{[^}]*\}\)/g)];
       assert.ok(defaults.length, `${file} builds the loop's command runner`);
       for (const [call] of defaults) assert.match(call, /timeoutMs:/, `${file} bounds every command the loop runs: ${call}`);
@@ -471,7 +473,7 @@ test('integration:supervisor-install-explicit-only — the unit is written only 
     // 6. Structurally: the install is reached from setupMaster only through the explicit option,
     //    which master init alone passes; nothing derives it from another argument; and the guard
     //    runs at the installer before its first write, so every test reaching either is covered.
-    const master_ts = source('master.ts');
+    const master_ts = masterSource();
     assert.ok(master_ts.includes('input.installSupervisor === true ? await installLoopSupervisor('), 'setupMaster installs only on the explicit option');
     assert.doesNotMatch(master_ts, /credentialDirectory === undefined/, 'no other argument stands in for the option');
     assert.equal((master_ts.match(/installLoopSupervisor\(/g) ?? []).length, 1, 'one call site in setupMaster');
@@ -486,7 +488,7 @@ test('integration:supervisor-install-explicit-only — the unit is written only 
     assert.ok(init.includes("'replace-supervisor': { type: 'boolean' }") && init.includes("replaceSupervisor: !!values['replace-supervisor']"), 'and --replace-supervisor is the explicit replace flag');
     assert.match(source('cli/master.ts'), /if \(id === 'init'\) return masterInit\(context, root\);/, 'master init reaches the handler and nothing else in the command file passes the option');
     const callers = sources.filter(file => /(?<![.\w])installLoopSupervisor\(/.test(readFileSync(file, 'utf8'))).map(file => file.slice(file.indexOf('/src/') + 5));
-    assert.deepEqual(callers.sort(), ['master.ts', 'supervisor.ts'], 'no other source reaches the installer');
+    assert.deepEqual(callers.sort(), ['master/config.ts', 'supervisor.ts'], 'no other source reaches the installer');
     const supervisor_ts = source('supervisor.ts');
     const installer = supervisor_ts.slice(supervisor_ts.indexOf('export async function installLoopSupervisor('));
     assert.ok(installer.indexOf('testSuiteHomeGuard(unitDirectory);') > 0 && installer.indexOf('testSuiteHomeGuard(unitDirectory);') < installer.indexOf('await mkdir('), 'the guard runs before the installer writes, given the directory and nothing the caller built');
