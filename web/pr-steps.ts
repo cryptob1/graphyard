@@ -71,8 +71,19 @@ export function checkStates(work: Work, ciAppIds: readonly number[] | null = nul
   });
 }
 
+/** The review refusal no reviewer can answer: every configured reviewer profile is exhausted. */
+const reviewersExhausted = /^Every configured reviewer profile is exhausted/;
+/**
+ * Merge refusals only the master agent clears — unverified branch protection, a standing
+ * escalation, a slice lead's hold — and those a new head from the builder clears: a conflict with
+ * the base, unresolved review threads, an ejection from the queue. The same refusals
+ * src/model/refusal-mapping.ts maps to `escalate` and `request-rework`.
+ */
+const mergeMasterClears = /branch protection have not been verified$|^Unresolved \S+ escalation requires operator resolution|^Slice lead \S+ ruled /;
+const mergeBuilderClears = /^Pull request is not mergeable against the current base$|^Branch protection requires conversation resolution and \d+ review threads? (is|are) unresolved|^Ejected from the merge queue:/;
+
 /** What the current step waits on, and who acts next, in plain words. */
-function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: number, release: ReleaseView): { detail: string; who: string } {
+export function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: number, release: ReleaseView): { detail: string; who: string } {
   const reasons = gate?.reasons ?? [];
   switch (step) {
     case 'build': {
@@ -101,6 +112,18 @@ function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: number, 
       return { detail: `${checks.filter(check => check.state === 'passed').length} of ${checks.length} checks done`, who: 'Automated checks' };
     }
     case 'review':
+      // Every reviewer profile exhausted: no reviewer can act, and adding capacity or changing the
+      // provider is the master agent's decision (src/model/refusal-mapping.ts escalates it).
+      if (reasons.some(reason => reviewersExhausted.test(reason))) return { detail: 'no reviewer is available', who: 'Master agent' };
+      // The gate says "approval is required" even while no reviewer can be asked about this head
+      // (src/model/refusal-mapping.ts `reviewStandstill`); the action the control plane computed
+      // from that standstill names who actually moves it.
+      switch (work.nextAction?.gate === 'review' ? work.nextAction.kind : null) {
+        case 'dispatch': return { detail: 'the proofs run before the review', who: 'Prover agent' };
+        case 'resync': return { detail: 'waiting for a fresh reading of the pull request before the review', who: 'Graphyard (automatic)' };
+        case 'escalate': return { detail: 'no reviewer can be asked about this head', who: 'Master agent' };
+        case 'request-rework': return { detail: 'this head needs a new commit before the review', who: 'Builder agent' };
+      }
       return { detail: 'waiting for the reviewer', who: 'Reviewer agent' };
     case 'prove': {
       // Every proof the acceptance gate demands: the item's own and the obligations it inherits from
@@ -115,6 +138,15 @@ function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: number, 
       return { detail: `${total - open.size} of ${total} proofs passed`, who: 'Prover agent' };
     }
     case 'merge': {
+      // Who clears a merge refusal is decided by the refusal itself, as the control plane's
+      // classification decides it: administration and decisions are the master agent's, a new head
+      // is the builder's, and the queue's own work is automatic. A queue position is reported
+      // beside those refusals (src/model/gates.ts), so they are read first: waiting a turn in line
+      // is automatic only when nothing else holds the merge.
+      const master = reasons.find(reason => mergeMasterClears.test(reason));
+      if (master) return { detail: plainReason(master, 'merge').text.replace(/^./, c => c.toLowerCase()), who: 'Master agent' };
+      const builder = reasons.find(reason => mergeBuilderClears.test(reason));
+      if (builder) return { detail: plainReason(builder, 'merge').text.replace(/^./, c => c.toLowerCase()), who: 'Builder agent' };
       const queued = reasons.map(reason => reason.match(/^Merge queue position (\d+) of \d+: (\S+) is ahead$/)).find(Boolean);
       if (queued) return { detail: `${ordinal(Number(queued[1]))} in line, after ${queued[2]}`, who: 'Graphyard (automatic)' };
       const stuck = reasons.map(reason => plainReason(reason, 'merge')).find(plain => plain.stuck);
