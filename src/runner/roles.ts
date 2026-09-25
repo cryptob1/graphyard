@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { piRunner } from './pi.js';
+import { defaultPiModel, piRunner } from './pi.js';
+import type { FleetLaunchAccount } from '../fleet.js';
 import { endRun, liveRun, registerRun } from './registry.js';
 import { decidePayloadSchema, evidencePayloadSchema, graphyardTools, piRuntimeSchema, type DecidePayload, type EvidencePayload } from './payloads.js';
 import { runRecord, type Run, type RunOptions, type RunRecord, type RunResult, type Runner } from './types.js';
@@ -16,6 +17,23 @@ import { runRecord, type Run, type RunOptions, type RunRecord, type RunResult, t
 export function narrowRunner(pi: unknown): Runner {
   const configured = piRuntimeSchema.parse(pi ?? {});
   return piRunner({ command: configured.command, model: configured.model });
+}
+
+/**
+ * A narrow role's headless run on the account the agent registry chose for it (GY-170): the
+ * runtime's executable, the account's login home on the runtime's home variable, the model the
+ * choice names, and the role policy's flags and tool allowlist — all from the registry revision the
+ * choice was made in, never from `run.pi`, which configures only a role the registry does not define.
+ */
+export function registryHeadlessLaunch(account: FleetLaunchAccount) {
+  const { contract, policy, modelId } = account.fleet, tools = policy?.tools ?? [];
+  const args = [...contract.args, ...(policy?.args ?? []), ...(tools.length ? [contract.toolsFlag ?? '--tools', tools.join(',')] : [])];
+  const environment: Record<string, string> = { ...contract.environment, ...(contract.homeVariable && account.home ? { [contract.homeVariable]: account.home } : {}) };
+  return { command: contract.kind, model: modelId ?? defaultPiModel, args, environment };
+}
+export function registryRunner(account: FleetLaunchAccount): Runner {
+  const launch = registryHeadlessLaunch(account);
+  return piRunner({ command: launch.command, model: launch.model, args: launch.args, environment: launch.environment });
 }
 
 export type Applied = RunRecord['applied'][number];

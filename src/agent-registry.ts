@@ -119,13 +119,13 @@ export class AgentRegistry {
         if (foldObservation(account, observed.quota, { actor: actor.id, at })) changed = true;
       }
       const choice = chooseSession(registry, request, now.getTime());
-      let result: { selected: boolean; reason: string; skipped: typeof choice.skipped; session: FleetSession | null; account: unknown; runtime: unknown; model: unknown; revision: number };
+      let result: { selected: boolean; reason: string; skipped: typeof choice.skipped; session: FleetSession | null; account: unknown; runtime: unknown; model: unknown; policy?: unknown; revision: number };
       if (choice.account) {
         const session: FleetSession = { id: randomUUID(), role: request.role, account: choice.account.name, runtime: choice.runtime.name, model: choice.model.name, host: request.host, work: request.work, principal: request.principal, group: request.group,
           selectedAt: at, selectedBy: actor.id, reason: choice.reason, skipped: choice.skipped, endedAt: null, endReason: null };
         registry.sessions.push(session); registry.revision++; registry.updatedAt = at;
         await this.append(db, actor, 'selected', registry, { session });
-        result = { selected: true, reason: choice.reason, skipped: choice.skipped, session, account: choice.account, runtime: choice.runtime, model: choice.model, revision: registry.revision };
+        result = { selected: true, reason: choice.reason, skipped: choice.skipped, session, account: choice.account, runtime: choice.runtime, model: choice.model, policy: choice.policy, revision: registry.revision };
       } else {
         const last = registry.refusals.at(-1);
         const repeated = !!last && last.role === request.role && last.host === request.host && last.work === request.work && last.reason === choice.reason;

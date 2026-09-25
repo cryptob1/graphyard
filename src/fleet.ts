@@ -1,12 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { access, readFile } from 'node:fs/promises';
+import { access, readFile, readdir, stat } from 'node:fs/promises';
 import { basename, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { NoHealthyAccountError, agentEnvironmentRoot, atomicPrivateWrite, checkAgentEnvironment, discoverAgentEnvironments, environmentKinds, readCredentialFile,
   type AccountSkip, type AccountSkipCause, type AgentEnvironment, type EnvironmentHealth, type EnvironmentKind, type EnvironmentProbe, type MasterConfig } from './master.js';
 import { sessionName } from './session-name.js';
-import { accountIneligibility, fleetRoles, liveSessions, proposedConcurrency, proposedRuntimes, type AgentRegistry, type FleetAccount, type FleetAccountInput, type FleetModel, type FleetRole, type FleetRoleName, type FleetRuntime, type FleetSession, type LaunchContract, type QuotaObservation, type SessionSkip } from './model/registry.js';
+import { accountIneligibility, fleetRoles, liveSessions, proposedConcurrency, proposedRuntimeRoles, proposedRuntimes, rolePolicy, type AgentRegistry, type RolePolicy, type FleetAccount, type FleetAccountInput, type FleetModel, type FleetRole, type FleetRoleName, type FleetRuntime, type FleetSession, type LaunchContract, type QuotaObservation, type SessionSkip } from './model/registry.js';
 
 /**
  * The executor's side of the agent registry (GY-91).
@@ -31,9 +31,15 @@ export interface FleetClient {
   select(request: { role: FleetRoleName; host: string; work: string | null; group: string | null; principal: string | null; observations: { account: string; quota: QuotaObservation }[] }): Promise<FleetSelection>;
   end(session: string, reason: string): Promise<void>;
 }
-export interface FleetSelection { selected: boolean; reason: string; skipped: SessionSkip[]; session: FleetSession | null; account: FleetAccount | null; runtime: FleetRuntime | null; model: FleetModel | null; revision: number }
-/** The account a launch runs on, as `accountLaunch` reads it: the login home and the registry's launch contract. */
-export interface FleetLaunchAccount { name: string; kind: string; home: string | null; fleet: { runtime: string; contract: LaunchContract; model: string; modelId: string | null; session: string; reason: string } }
+export interface FleetSelection { selected: boolean; reason: string; skipped: SessionSkip[]; session: FleetSession | null; account: FleetAccount | null; runtime: FleetRuntime | null; model: FleetModel | null;
+  /** The role's launch policy the choice was made under (GY-170); a server that predates it sends none, and the document's is used. */
+  policy?: RolePolicy | null; revision: number }
+/**
+ * The account a launch runs on, as `accountLaunch` reads it: the login home, the registry's launch
+ * contract, the model, and the role's launch policy, all from the registry revision it was chosen in.
+ */
+export interface FleetLaunchAccount { name: string; kind: string; home: string | null; fleet: { runtime: string; contract: LaunchContract; model: string; modelId: string | null; session: string; reason: string;
+  role?: FleetRoleName; policy?: RolePolicy; revision?: number } }
 
 export class FleetUnreachableError extends Error {}
 /**
@@ -190,8 +196,9 @@ export async function selectFleetSession(config: FleetConfig, role: FleetRoleNam
     throw Object.assign(new NoHealthyAccountError(`No healthy agent account for ${role} profile ${profile.name}: ${chosen.reason}`, skipped), roleAtCapacity(chosen.reason) ? { roleAtCapacity: chosen.reason } : {});
   // `release` ends the selected session and says whether the registry was told: a caller that
   // cannot end it keeps its id, the only way to free the role's slot later.
+  const policy = chosen.policy ?? rolePolicy(registry.roles.find(entry => entry.name === role));
   const account: FleetLaunchAccount = { name: chosen.account.name, kind: chosen.runtime.launch.kind, home: chosen.account.credential.home,
-    fleet: { runtime: chosen.runtime.name, contract: chosen.runtime.launch, model: chosen.model.name, modelId: chosen.model.id, session: chosen.session.id, reason: chosen.reason } };
+    fleet: { runtime: chosen.runtime.name, contract: chosen.runtime.launch, model: chosen.model.name, modelId: chosen.model.id, session: chosen.session.id, reason: chosen.reason, role, policy, revision: chosen.revision } };
   return { account, health: observations.find(entry => entry.account === chosen.account!.name)?.health ?? null, skipped, selection: chosen, release: (reason: string) => client.end(chosen.session!.id, reason).then(() => true, () => false) };
 }
 
@@ -269,10 +276,32 @@ export async function discoverHostLogins(options: { directory?: string; home?: s
     // A default home nobody logged in to is not an account; an isolated environment is kept either way.
     if (health.loggedIn) found.push({ name, runtime: kind, home: location, loggedIn: true, quota: health.quota, reason: health.reason, login: null, source: 'default-home' });
   }
+  // A runtime Graphyard has no probe of its own for (Pi) keeps each login in an `<runtime>-<letter>`
+  // environment too; its readiness is only whether the contract's login file exists — never read.
+  for (const location of await runtimeEnvironments(agentEnvironmentRoot(options.directory))) {
+    const loggedIn = await access(resolve(location.home, location.runtime.launch.loginFile!)).then(() => true, () => false);
+    found.push({ name: location.name, runtime: location.runtime.name, home: location.home, loggedIn, quota: 'unknown', reason: loggedIn ? null : `${location.name} is not logged in`,
+      login: loggedIn ? null : location.runtime.launch.login?.replaceAll('{home}', location.home) ?? null, source: 'environment' });
+  }
   const has = options.executables ?? onPath;
   for (const runtime of proposedRuntimes) {
     if ((environmentKinds as readonly string[]).includes(runtime.name) || found.some(entry => entry.runtime === runtime.name) || !has(runtime.launch.kind)) continue;
     found.push({ name: runtime.name, runtime: runtime.name, home: null, loggedIn: null, quota: 'unknown', reason: null, login: runtime.launch.login, source: 'executable' });
+  }
+  return found;
+}
+
+/** Environment directories of the proposed runtimes Graphyard has no probe of its own for: `pi`, `pi-a`, `pi-b`. */
+async function runtimeEnvironments(directory: string) {
+  const runtimes = proposedRuntimes.filter(runtime => !(environmentKinds as readonly string[]).includes(runtime.name) && runtime.launch.homeVariable && runtime.launch.loginFile);
+  let entries: string[];
+  try { entries = await readdir(directory); } catch { return []; }
+  const found: { name: string; home: string; runtime: FleetRuntime }[] = [];
+  for (const name of entries.sort()) {
+    const runtime = runtimes.find(entry => new RegExp(`^${entry.name}(?:-[a-z0-9][a-z0-9_-]{0,30})?$`).test(name));
+    if (!runtime) continue;
+    const home = resolve(directory, name);
+    if (await stat(home).then(entry => entry.isDirectory(), () => false)) found.push({ name, home, runtime });
   }
   return found;
 }
@@ -303,10 +332,12 @@ export function proposeFleet(logins: HostLogin[], host: string, current: Pick<Ag
   }
   const models: FleetModel[] = [...new Set(accounts.map(account => account.model))].filter(name => !current.models.some(model => model.name === name))
     .map(name => ({ name, id: null, cost: { inputPerMTok: null, outputPerMTok: null }, capability: { tier: 'strong' as const, contextTokens: null, notes: 'The account\'s own default model; name the real model, its cost and capability with master registry model set' } }));
-  const added = accounts.map(account => account.name);
-  const roles: FleetRole[] = !added.length ? [] : fleetRoles.map(name => {
+  const serves = (account: FleetAccountInput, role: FleetRoleName) => proposedRuntimeRoles[account.runtime]?.includes(role) ?? true;
+  const roles: FleetRole[] = !accounts.length ? [] : fleetRoles.flatMap(name => {
+    const added = accounts.filter(account => serves(account, name)).map(account => account.name);
     const existing = current.roles.find(role => role.name === name);
-    return existing ? { ...existing, accounts: [...existing.accounts, ...added.filter(account => !existing.accounts.includes(account))] } : { name, accounts: added, concurrency: proposedConcurrency[name] };
+    if (existing) return [{ ...existing, accounts: [...existing.accounts, ...added.filter(account => !existing.accounts.includes(account))] }];
+    return added.length ? [{ name, accounts: added, concurrency: proposedConcurrency[name] }] : [];
   });
   return { runtimes, models, accounts, roles };
 }
