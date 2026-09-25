@@ -316,12 +316,17 @@ test('unit:hold-bound-30m — a dispatch hold lasts at most 30 minutes; past it 
 test('unit:concurrency-counts-open-prs — two items exclude each other only while one is being built without a pull request: three items in review on the same file and one fresh item have an effective concurrency of 4', () => {
   const file = 'src/master.ts';
   const reviews = ['GY-166', 'GY-182', 'GY-187'].map(key => submitted(key, [file], [file], hour, { stage: 'review' }));
-  const fresh = work('GY-191', { plannedFiles: [file] });
+  // Dispatchable five minutes ago, well inside the 30-minute bound: were an open pull request ahead to hold it, status would count it held.
+  const fresh = work('GY-191', { plannedFiles: [file], stageEnteredAt: iso(-5 * 60_000) });
   const items = [...reviews, fresh];
   assert.deepEqual(effectiveConcurrency(items, clock), { effective: 4, items: ['GY-166', 'GY-182', 'GY-187', 'GY-191'], nodes: 4, edges: 0, exact: true });
   const status = buildMasterStatus({ work: items, now: iso(0) }, [], [], {}, {}, { pending: [], completed: [] });
-  assert.equal(status.effectiveConcurrency.effective, 4); assert.equal(status.effectiveConcurrency.held, 0); assert.equal(status.counts.effectiveConcurrency, 4);
-  assert.match(status.effectiveConcurrency.statement, /^4 items could be in flight at once over 4 open items \(0 overlaps\)/);
+  assert.equal(status.effectiveConcurrency.effective, 4); assert.equal(status.counts.effectiveConcurrency, 4);
+  assert.equal(status.effectiveConcurrency.dispatchable, 1); assert.equal(status.effectiveConcurrency.held, 0, 'the fresh item is not held behind the three open pull requests');
+  assert.equal(status.counts.held, 0); assert.equal(status.effectiveConcurrency.overdue, 0, 'nor is it counted as an overdue hold');
+  const row = status.work.find(entry => entry.key === 'GY-191')!;
+  assert.equal(row.overlap.held, false); assert.deepEqual(row.overlap.ahead, []); assert.equal(row.overlap.hold, null);
+  assert.match(status.effectiveConcurrency.statement, /^4 items could be in flight at once over 4 open items \(0 overlaps\); .*; 0 held, 0 past the 0\.5h hold bound$/);
   // Built without a pull request, the same three exclude each other and the fresh item: one at a time.
   const building = ['GY-184', 'GY-189', 'GY-190'].map(key => claimed(key, [file], 5 * 60_000));
   const serial = effectiveConcurrency([...building, fresh], clock);
