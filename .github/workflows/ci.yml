@@ -5,6 +5,12 @@ on:
   pull_request:
 permissions:
   contents: read
+concurrency:
+  # A newer push to a pull request supersedes the run for its older head, which is cancelled rather
+  # than left holding a runner. Every other run (pushes to main, merge-queue refs) gets a group of
+  # its own, so none of them is ever cancelled, running or pending.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}${{ github.event_name != 'pull_request' && format('-{0}', github.run_id) || '' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   container-acceptance:
     runs-on: ubuntu-latest
