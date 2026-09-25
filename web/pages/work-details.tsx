@@ -15,7 +15,7 @@ import Term, { Explained } from '../components/term';
 import { age } from '../format';
 import { formatAge } from '../duration';
 import { candidatePrUrl } from '../links';
-import { activityLabel, overlapLine, whatIsLeft, type LeftGroup } from '../item-page';
+import { activityLabel, historyLabel, overlapLine, whatIsLeft, type LeftGroup } from '../item-page';
 import { plainStatus } from '../plain-status';
 import { groupWithin, nextActor, timedGroups } from '../groups';
 import { checkStates, prSteps, stepHeld } from '../pr-steps';
@@ -146,7 +146,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
     </section>
     <section className="panel activity" aria-label="Activity"><h2>Activity</h2>
       {events.length ? <ul className="activity-list">{events.slice(0, 3).map(event => <li key={event.seq}>{activityLabel(event.kind)} <small>· {formatAge(event.created_at, now)} ago</small></li>)}</ul> : <p className="muted">Nothing recorded yet.</p>}
-      <details className="full-history"><summary>Full history ({events.length})</summary><History key={item.id} events={events}/></details>
+      <details className="full-history"><summary>{historyLabel(events.length)}</summary><History key={item.id} events={events}/></details>
     </section>
     {admin && item.stage !== 'done' && <details className="edit-menu"><summary>Edit</summary>
       <p className="muted">These change the rules for this item and need fresh proof afterwards.</p>

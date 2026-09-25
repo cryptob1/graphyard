@@ -155,7 +155,7 @@ export function fixtureApi(path, role = 'admin') {
   if (route === 'status') return fixtureStatus(role);
   if (route === 'work-snapshot') return { work, jobs: [], now: at(0) };
   if (route === 'work') return work;
-  if (route === 'events') return [{ seq: 3, kind: 'work.claimed', actor: 'worker-3', created_at: at(-4 * hour) }, { seq: 2, kind: 'work.ready', actor: 'operator', created_at: at(-day) }, { seq: 1, kind: 'work.created', actor: 'operator', created_at: at(-10 * day) }];
+  if (route === 'events') return [{ seq: 3, kind: 'claim', actor: 'worker-3', created_at: at(-4 * hour) }, { seq: 2, kind: 'ready', actor: 'operator', created_at: at(-day) }, { seq: 1, kind: 'create', actor: 'operator', created_at: at(-10 * day) }];
   if (route.startsWith('analytics/flow')) return flowApi(work, role)(path);
   if (route.startsWith('analytics/attribution')) {
     const empty = { observedAt: at(0), from: at(-30 * day), to: at(0), days: 30, records: [], recordsTruncated: false, requests: [], requestsTruncated: false, environments: {}, blockedNow: [] };

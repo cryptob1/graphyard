@@ -62,21 +62,51 @@ export function whatIsLeft(work: Work, now: number, release: ReleaseView = noRel
   return [current, ...later.sort((a, b) => stepIds.indexOf(a.step) - stepIds.indexOf(b.step))].filter(group => group.lines.length > 0);
 }
 
-/** A ledger event in plain words. Internal kinds never reach the reader; an unknown one reads as an update. */
+/**
+ * A ledger event in plain words. The ledger records a command under the command's own name
+ * (src/engine.ts `save(db, work, actor, command, …)`: create, ready, claim, submit, …) and the
+ * control plane's own facts under dotted kinds (review.requested, merge.execution.committed,
+ * delivery.verified, …); both read here as what happened to the item. Internal kinds never reach
+ * the reader; an unknown one reads as an update.
+ */
 export function activityLabel(kind: string): string {
   const exact: Record<string, string> = {
-    'work.created': 'Created', 'work.ready': 'Released for work', 'work.released': 'Released for work', 'work.claimed': 'Picked up by a builder',
-    'lease.claimed': 'Picked up by a builder', 'work.submitted': 'Handed in', 'work.closed': 'Closed', 'human.requested': 'Asked you for a decision',
-    'review.requested': 'Review requested', 'review.submitted': 'Reviewed', 'review.completed': 'Reviewed', 'merge.commit': 'Merged',
-    'work.delivery.deployment': 'Deployed', 'queue.ejected': 'Taken out of the line to merge',
+    // Commands (src/engine.ts `commands`), recorded under their own names.
+    create: 'Created', ready: 'Released for work', requirements: 'Requirements changed', reviewpolicy: 'Review rules changed', unblock: 'Unblocked',
+    rework: 'Sent back for changes', resolve: 'A decision was recorded', recover: 'Recovered after a builder stopped', claim: 'Picked up by a builder',
+    rereview: 'Asked for a fresh review', heartbeat: 'The builder is still working', quarantine: 'A stopped builder was fenced off', launch: 'A session was started',
+    settle: 'A builder’s attempt ended', autosettle: 'A builder’s attempt ended', release: 'A builder stopped working on it', workspace: 'The builder said where the code lives',
+    submit: 'Handed in', blocked: 'The builder reported it blocked', scope: 'The builder asked to change the planned files', autoscope: 'The planned files were changed',
+    evidence: 'Proof recorded', deployment: 'Deployment recorded', revoke: 'A proof was withdrawn', session: 'A session was recorded', request: 'An agent asked for a decision',
+    repair: 'Asked to repair the branch',
+    // The control plane's own facts.
+    'human.requested': 'Asked you for a decision', 'human.answered': 'You answered', 'review.requested': 'Review requested', 'review.failover': 'Handed to another reviewer',
+    'queue.ejected': 'Taken out of the line to merge', 'queue.predicted': 'Lined up to merge', 'merge.execution.committed': 'Merged', 'delivery.verified': 'Merged',
+    'direct-merge.delivered': 'Merged', 'lease.expired': 'A builder’s time ran out', 'work.closed': 'Closed', 'intake.created': 'Created',
+    'base.refreshed': 'Brought up to date with the main branch', 'base.conflict': 'Conflicts with the main branch', 'capacity.exhausted': 'Out of agent capacity',
+    'capacity.interrupted': 'Out of agent capacity', 'capacity.restored': 'Agent capacity restored', 'capacity.escalated': 'Asked for more agent capacity',
+    'evidence.exercise.refused': 'A proof did not count',
   };
   if (exact[kind]) return exact[kind];
   const prefix: [RegExp, string][] = [
     [/^lease\./, 'A builder stopped working on it'], [/^github\./, 'Graphyard checked GitHub'], [/^review\./, 'Review updated'],
-    [/^evidence\./, 'Proof recorded'], [/^queue\./, 'Line to merge updated'], [/^merge\./, 'Merge step recorded'],
-    [/^decision\./, 'A decision was recorded'], [/^(requirements|policy)\./, 'Requirements changed'],
+    [/^evidence\./, 'Proof recorded'], [/^queue\./, 'Line to merge updated'], [/^merge\./, 'Merge step recorded'], [/^(branch|base)\./, 'Branch updated'],
+    [/^(decision|escalation|closed-question|judgement|lead)\./, 'A decision was recorded'], [/^(requirements|policy)\./, 'Requirements changed'],
+    [/^(action|validation)\./, 'Graphyard ran a step'], [/^capacity\./, 'Agent capacity changed'],
   ];
   return prefix.find(([pattern]) => pattern.test(kind))?.[1] ?? 'Updated';
+}
+
+/**
+ * The rows one `/api/events?work=…` read returns (src/events-history.ts `eventHistoryLimits.page`;
+ * a test keeps the two equal). The page reads one page and does not follow the cursor, so a read
+ * that fills the page is the latest history, not all of it.
+ */
+export const historyPage = 300;
+
+/** The Activity section's expand label: the full history only when the read returned all of it. */
+export function historyLabel(loaded: number): string {
+  return loaded < historyPage ? `Full history (${loaded})` : `Latest ${loaded} events — older history is kept but not loaded here`;
 }
 
 /**

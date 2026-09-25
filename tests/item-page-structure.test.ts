@@ -9,7 +9,11 @@ import { fixtureApi, fixtureStatus, fixtureWork, NOW, visibleWords } from '../sc
 import { live } from '../browser-tests/ui-board.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
 import WorkDetails from '../web/pages/work-details.js';
-import { overlapLine, plainLines, whatIsLeft } from '../web/item-page.js';
+import { activityLabel, historyLabel, historyPage, overlapLine, plainLines, whatIsLeft } from '../web/item-page.js';
+import { eventHistoryLimits } from '../src/events-history.js';
+import type { Command } from '../src/engine.js';
+import { nextActor, groupWithin } from '../web/groups.js';
+import { prSteps } from '../web/pr-steps.js';
 
 // GY-171: the item page below its first screen. Each section answers one question, in plain words,
 // in a fixed order, and everything technical is one click down in a single collapsed section.
@@ -166,4 +170,48 @@ test('unit:item-page-technical-collapsed — gate internals, sessions with attac
   const alone = { ...overlapping, plannedFiles: ['docs/'] } as Work;
   assert.equal(overlapLine(alone, [...all, alone]), null);
   assert.doesNotMatch(page(alone, [...all, alone]), /overlap-line/);
+});
+
+test('the Activity section reads the kinds the ledger records — command names and the control plane\'s own facts — and never calls a page of history the full history', () => {
+  // Every command is recorded under its own name (src/engine.ts save(db, work, actor, command, …)); each reads as what happened.
+  // Typed over every command: a command added to the engine without a plain label fails typecheck here.
+  const commands: Record<Command, true> = { create: true, ready: true, requirements: true, reviewpolicy: true, unblock: true, rework: true, resolve: true, recover: true, claim: true, rereview: true,
+    heartbeat: true, quarantine: true, launch: true, settle: true, autosettle: true, release: true, workspace: true, submit: true, blocked: true, scope: true, autoscope: true, evidence: true,
+    deployment: true, revoke: true, session: true, request: true, repair: true };
+  for (const command of Object.keys(commands)) assert.notEqual(activityLabel(command), 'Updated', `command ${command} has a plain label`);
+  assert.deepEqual(['create', 'ready', 'claim', 'submit', 'rework', 'review.requested', 'merge.execution.committed', 'delivery.verified', 'human.requested', 'github.observed'].map(activityLabel),
+    ['Created', 'Released for work', 'Picked up by a builder', 'Handed in', 'Sent back for changes', 'Review requested', 'Merged', 'Merged', 'Asked you for a decision', 'Graphyard checked GitHub']);
+  assert.equal(activityLabel('something.unheard.of'), 'Updated');
+  // The page reads one page of /api/events and does not follow the cursor.
+  assert.equal(historyPage, eventHistoryLimits.page);
+  assert.equal(historyLabel(3), 'Full history (3)');
+  assert.equal(historyLabel(historyPage), `Latest ${historyPage} events — older history is kept but not loaded here`);
+  const all = board();
+  const item = midReview(all.find(entry => entry.key === 'GY-15')!);
+  const full = Array.from({ length: historyPage }, (_, i) => ({ seq: historyPage - i, kind: 'claim', actor: 'worker-3', created_at: at(-i * minute) }));
+  const html = page(item, [...all, item], { events: full });
+  assert.match(html, /<summary>Latest 300 events — older history is kept but not loaded here<\/summary>/);
+  assert.doesNotMatch(html, /Full history/);
+});
+
+test('What is left names who clears each step from the refusal itself: exhausted reviewers and unverified branch protection are the master agent\'s, not the reviewer\'s or the builder\'s', () => {
+  const all = board();
+  const base = midReview(all.find(entry => entry.key === 'GY-15')!);
+  const gate = (name: string, reasons: string[]) => ({ name, passed: reasons.length === 0, reasons });
+  // Every reviewer profile exhausted, current step Review: the panel and "Who acts next" agree on the master agent.
+  const exhausted = { ...base, gates: [gate('ready', []), gate('build', []), gate('test', []), gate('acceptance', []), gate('merge', ['GitHub observation missing or older than two minutes']),
+    gate('review', ['Every configured reviewer profile is exhausted for this candidate (reviewer-a); add reviewer capacity or select another review provider'])] } as unknown as Work;
+  const work = [...all, exhausted];
+  const [current] = whatIsLeft(exhausted, NOW);
+  assert.deepEqual([current.label, current.who], ['Review', 'Master agent']);
+  assert.equal(prSteps(exhausted, NOW).who, 'Master agent');
+  assert.equal(nextActor(exhausted, groupWithin(exhausted, work, NOW), NOW).who, 'Master agent');
+  assert.match(page(exhausted, work), /<h3>Review <small>· cleared by Master agent<\/small><\/h3>/);
+  // Branch protection not verified, as a later step: the master agent, not the builder.
+  const protection = { ...base, gates: [gate('ready', []), gate('build', []), gate('test', []), gate('acceptance', []), gate('review', ['Independent approval of the current commit is required']),
+    gate('merge', ['Required Graphyard check and merge-queue branch protection have not been verified'])] } as unknown as Work;
+  assert.deepEqual(whatIsLeft(protection, NOW).map(group => [group.label, group.who]), [['Review', 'Reviewer agent'], ['Merge', 'Master agent']]);
+  // A conflict with the base and unresolved review threads are the builder's to clear on a new head.
+  const threads = { ...protection, gates: [...protection.gates.filter(entry => entry.name !== 'merge'), gate('merge', ['Branch protection requires conversation resolution and 2 review threads are unresolved on 594f711015d0: a on b:1; c on d:2. GitHub blocks the merge until each is resolved'])] } as unknown as Work;
+  assert.deepEqual(whatIsLeft(threads, NOW).map(group => [group.label, group.who]), [['Review', 'Reviewer agent'], ['Merge', 'Builder agent']]);
 });
