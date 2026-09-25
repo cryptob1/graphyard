@@ -2220,8 +2220,23 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   const sessions = async () => inventory ??= await effects.herdr?.() ?? { agents: await effects.agents(), available: true };
   const note = async (key: string, item: Work, kind: DaemonActionKind, outcome: 'done' | 'failed', detail: string) =>
     performed.push(await record(state, key, { kind, work: item.key, principal: null, state: outcome, detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
-  /** Close the approver session a watch names, if Herdr still lists it. False only when it could not be closed. */
+  /**
+   * End the agent registry session a watch's launch holds (GY-182). At a role concurrency of 1 a
+   * live one refuses the next decision's approver, so it goes wherever the approver is closed or
+   * replaced, not only on failover. False only when the registry could not be told; it is kept and
+   * ended on the next try, which the registry answers the same way when it is already ended.
+   */
+  const endApproverSession = async (item: Work, watch: ApprovalWatch, why: string) => {
+    if (!watch.session || !effects.endRegistrySession) return true;
+    try { await effects.endRegistrySession(watch.session, why.slice(0, 500)); watch.session = null; return true; }
+    catch (error) { await note(`close:approver-session:${watch.decision}:${watch.session}`, item, 'close', 'failed', `Could not end approver registry session ${watch.session}: ${message(error)}`); return false; }
+  };
+  /**
+   * Close the approver session a watch names, if Herdr still lists it, and end its registry
+   * session first. False only when either could not be done.
+   */
   const closeApprover = async (item: Work, watch: ApprovalWatch, why: string) => {
+    if (!await endApproverSession(item, watch, why)) { watch.closeAttempts += 1; return false; }
     const session = watch.agentName ? (await sessions()).agents.find(agent => agent.name === watch.agentName) : undefined;
     if (!session?.pane_id) return true;
     const key = `close:approver:${watch.decision}:${session.pane_id}`;
@@ -2241,6 +2256,8 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     if (!listed && approversSpent) { Object.assign(watch, { agentName: null, pane: null }); return `the decision waits: ${capacityWait()}`; }
     // An adopted session keeps the account its launch chose: that is the account it spends.
     const adopted = listed ? await effects.approverLaunch?.(name).catch(() => null) ?? null : null;
+    // A session the watch still holds past its close attempts is ended before the watch forgets it.
+    if (watch.session && !listed) await endApproverSession(item, watch, `approver for ${watch.work} decision ${watch.decision} replaced`);
     Object.assign(watch, { launches: watch.launches + 1, agentName: name, pane: listed?.pane_id ?? null, launchedAt: stamp, account: adopted?.account ?? null, runtime: adopted?.runtime ?? null, session: adopted?.session ?? null });
     await effects.persist(state);
     if (listed) return `adopted approver session ${name}${adopted?.account ? ` on ${adopted.account}` : ''}, already judging it`;
@@ -2275,9 +2292,8 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       await effects.reportCapacity(item, { event: 'exhausted', role: 'approver', requestId: watch.decision.slice(0, 64), profile: approverProfile, account, runtime: watch.runtime, reason: signal.reason, resetsAt: signal.resetsAt,
         partialWork: { state: 'not-applicable', detail: 'an approver session edits nothing: it judges a decision and leaves no work to keep' } });
       const ended = `approver session ${watch.agentName} exhausted ${spentOn} mid-session (${signal.reason}; ${resets})`;
-      // The registry slot goes first: at a role concurrency of 1 the replacement is refused while it is held.
-      if (watch.session) { await effects.endRegistrySession?.(watch.session, ended.slice(0, 500)); watch.session = null; }
-      if (!await closeApprover(item, watch, ended)) throw new Error(`the session could not be closed, so its name still refuses a replacement`);
+      // The registry slot goes first (closeApprover ends it): at a role concurrency of 1 the replacement is refused while it is held.
+      if (!await closeApprover(item, watch, ended)) throw new Error(`the session could not be closed, so its name or registry slot still refuses a replacement`);
       watch.ended = [...watch.ended, ended.slice(0, 300)].slice(-10);
       Object.assign(watch, { launches: Math.max(0, watch.launches - 1), agentName: null, pane: null });
       const next = await launch(item, watch, false);
@@ -2478,7 +2494,10 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
         await note(`approver:${watch.decision}:withdrawn`, item, 'decision', 'failed', `Could not withdraw ${watch.action} decision ${watch.decision}, which ${watch.work} no longer needs: ${message(error)}`);
       }
     }
-    const closed = !item || await closeApprover(item, watch, `${watch.work} no longer needs ${watch.action} decision ${watch.decision}`);
+    // An item no longer open has no pane to close, but its registry session still holds a slot.
+    let closed = true;
+    if (item) closed = await closeApprover(item, watch, `${watch.work} no longer needs ${watch.action} decision ${watch.decision}`);
+    else if (watch.session && effects.endRegistrySession) closed = await effects.endRegistrySession(watch.session, `${watch.work} is no longer open`).then(() => true, () => { watch.closeAttempts += 1; return false; });
     // A tab that will not close, or a request that cannot be taken back, is left to the operator
     // after a few tries; the session name is this decision's alone, so it can refuse no other launch.
     if ((closed && withdrawn) || watch.closeAttempts >= maxApproverCloses) delete state.approvals[key];

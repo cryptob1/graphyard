@@ -863,6 +863,57 @@ test('an exhausted approver\'s agent registry session is ended before its replac
   assert.equal(Object.values(state.approvals)[0].session, 'registry-session-2', 'the replacement\'s own session is what the watch holds now');
 });
 
+/** An approver launch against a registry role at its default concurrency of 1: one live session holds the slot. */
+function approverSlot() {
+  const live = new Set<string>(), ended: string[] = [], slot = { herdr: null as Herdr | null };
+  let launched = 0;
+  const effects: Partial<DaemonEffects> = {
+    approver: async (work, decision) => {
+      if (live.size >= 1) throw new Error(`approver is at its concurrency limit of 1 (${[...live].join(', ')})`);
+      const session = `registry-slot-${++launched}`, agentName = approverSessionName(work, decision), pane = `pane-slot-${launched}`;
+      live.add(session);
+      slot.herdr!.agents = [...slot.herdr!.agents.filter(agent => agent.name !== agentName), { name: agentName, pane_id: pane, agent_status: 'working' }];
+      return { agentName, pane, account: 'env-a', runtime: 'claude', session };
+    },
+    endRegistrySession: async session => { live.delete(session); ended.push(session); },
+  };
+  return { live, ended, effects, slot };
+}
+
+test('an approver that applies its decision has its registry session ended with its pane, so a role at concurrency 1 has the slot for the next decision', async () => {
+  const registry = approverSlot();
+  const { config, herdr, decisions, cycle, calls } = await approverLoop('registry-settled', ['env-a', 'env-b'], () => registry.effects);
+  registry.slot.herdr = herdr;
+  const state = emptyDaemonState(config);
+  await cycle(state);
+  assert.deepEqual([...registry.live], ['registry-slot-1'], 'the launch holds the role\'s one slot');
+  decisions[0].state = 'applied';
+  await cycle(state);
+  const watch = Object.values(state.approvals)[0];
+  assert.ok(watch.settledAt, 'the decision is settled');
+  assert.deepEqual(registry.ended, ['registry-slot-1'], 'the settled approver\'s registry session is ended');
+  assert.deepEqual([...registry.live], [], 'the slot is free for the next decision\'s approver');
+  assert.equal(watch.session, null);
+  assert.ok(calls.closed.includes('pane-slot-1'), 'and its pane is closed');
+});
+
+test('an approver that ends without judging has its registry session ended before the replacement, which the role at concurrency 1 then admits', async () => {
+  const registry = approverSlot();
+  const { config, herdr, clock, work, decisions, cycle } = await approverLoop('registry-relaunch', ['env-a', 'env-b'], () => registry.effects);
+  registry.slot.herdr = herdr;
+  const state = emptyDaemonState(config);
+  await cycle(state);
+  // The approver stops with no limit notice and no judgement: a declined or dropped prompt.
+  herdr.agents.find(agent => agent.name === approverSessionName(work, decisions[0].id))!.agent_status = 'idle';
+  clock.skewMs += 61_000;
+  const relaunch = await cycle(state);
+  assert.equal(relaunch.actions.find(action => action.kind === 'failover'), undefined, 'no limit notice, so no failover');
+  assert.deepEqual(registry.ended, ['registry-slot-1'], 'the ended approver\'s registry session is ended');
+  assert.deepEqual([...registry.live], ['registry-slot-2'], 'the replacement holds the slot');
+  const watch = Object.values(state.approvals)[0];
+  assert.deepEqual([watch.session, watch.launches], ['registry-slot-2', 2], JSON.stringify(relaunch.actions));
+});
+
 test('an exhausted escalation handler\'s record survives a failed relaunch, which a later cycle retries; with no account left the wait reaches the item through the runtime-login hold', async () => {
   const root = await localRoot('escalation-retry');
   const at = Date.now(), notice = "You've hit your weekly limit · resets Sep 26, 10pm";
