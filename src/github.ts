@@ -1346,7 +1346,7 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
    * Only a candidate GitHub reports conflicting is refreshed (GY-292), and GitHub's reading is
    * confirmed first by a test merge on a scratch branch (GY-375). A clean test merge writes
    * nothing to the candidate's branch and is returned as a stale reading (`stale`), which the
-   * engine records instead of a refresh: the candidate keeps its head, review and proofs. A
+   * engine records in place of a refresh: the candidate keeps its head, review and proofs. A
    * confirmed conflict writes nothing either: the refusal names it, trigger `conflict confirmed`,
    * and the candidate goes back to the worker, exactly as a stale candidate always did.
    */
@@ -1367,8 +1367,8 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     // dropped their review and proofs. The conflict is confirmed first by a test merge that never
     // touches the candidate's branch; only one that really conflicts goes back to the worker.
     const conflict = await this.testMerge(work.key, candidate!.sha, branch.tip);
-    if (!conflict) return record({ head: candidate!.sha, trigger: undefined,
-      stale: `GitHub reported ${candidate!.sha.slice(0, 12)} conflicting with base branch tip ${branch.tip.slice(0, 12)}, but a test merge of the two is clean; the reading is stale and nothing was refreshed` });
+    if (!conflict) return record({ head: candidate!.sha, trigger: undefined, stale: { head: candidate!.sha, base: branch.tip, policyRevision: work.policyRevision, at: new Date().toISOString(),
+      reading: `GitHub reported ${candidate!.sha.slice(0, 12)} conflicting with base branch tip ${branch.tip.slice(0, 12)}, but a test merge of the two is clean; the reading is stale and nothing was refreshed` } });
     // The confirmed conflict is the refresh's whole outcome: the provider merge onto the branch
     // would be refused the same way, and nothing is written to it.
     return record({ conflict: `Candidate ${candidate!.sha.slice(0, 12)} cannot be brought onto base branch tip ${branch.tip.slice(0, 12)} without resolving a conflict, which is content nobody reviewed or proved: ${conflict}. Run graphyard sync ${work.key}, resolve it and push; the approval and proofs bound to ${candidate!.sha.slice(0, 12)} do not survive the resolution.` });

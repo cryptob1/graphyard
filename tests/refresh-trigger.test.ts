@@ -110,7 +110,7 @@ function adapter(observation: (work: Work) => Observation, refresh?: GitHub) {
   } as unknown as GitHub };
 }
 const snapshot = (work: Work) => ({ head: work.candidate!.sha, baseSha: work.candidate!.baseSha, review: gate(work, 'review').passed,
-  acceptance: gate(work, 'acceptance').passed, evidence: work.evidence.map(entry => entry.id).sort(), baseRefresh: work.baseRefresh ?? null });
+  acceptance: gate(work, 'acceptance').passed, evidence: work.evidence.map(entry => entry.id).sort(), refreshed: work.baseRefresh?.head !== undefined && work.baseRefresh.head !== work.candidate!.sha, carry: work.baseRefresh?.carry ?? null });
 
 test('unit:clean-candidate-not-refreshed — GitHub reporting a clean unqueued candidate conflicting is checked with a test merge: a clean one is recorded as a stale reading and keeps everything; a confirmed conflict is refreshed and reworked', async () => {
   const main = sha40('a1'), moved = sha40('a2'), head = sha40('a3');
@@ -136,6 +136,11 @@ test('unit:clean-candidate-not-refreshed — GitHub reporting a clean unqueued c
   const stale = staleMergeability(work)!;
   assert.deepEqual([stale.head, stale.base, stale.policyRevision], [head, moved, work.policyRevision], 'the stale reading is recorded for this head and tip');
   assert.match(stale.reading, /test merge of the two is clean; the reading is stale and nothing was refreshed/);
+  assert.deepEqual([work.baseRefresh!.head, work.baseRefresh!.conflict, work.baseRefresh!.trigger], [head, null, undefined], 'the record names the unchanged head: no refresh, no conflict');
+  assert.deepEqual([work.observation!.conflicting, work.observation!.mergeable], [false, true], 'the stored observation has the stale conflict disproved');
+  // GitHub keeps repeating the stale reading: every later observation of the same pair is stored disproved.
+  work = await engine.observe(work.id, work.revision, conflicting(work));
+  assert.equal(work.observation!.conflicting, false);
   assert.equal((await events(work, 'base.stale-mergeability')).length, 1);
   assert.deepEqual([(await events(work, 'base.refreshed')).length, (await events(work, 'base.conflict')).length], [0, 0]);
   // Nothing downstream acts on the stale reading either: no second refresh, no sync, no review hold.
@@ -162,7 +167,7 @@ test('unit:clean-candidate-not-refreshed — GitHub reporting a clean unqueued c
   assert.deepEqual(refreshing.called, ['refreshCandidateBase']);
   assert.ok(conflict.writes.every(write => write === 'POST /merges' || write.includes('graphyard-merge-check/')), 'a confirmed conflict writes nothing to the candidate branch');
   other = await reload(other);
-  assert.equal(other.staleMergeability ?? null, null);
+  assert.equal(other.baseRefresh!.stale ?? null, null);
   assert.equal(other.baseRefresh!.trigger, 'conflict confirmed', 'the refresh records its trigger');
   assert.match(other.baseRefresh!.conflict!, new RegExp(`Candidate ${conflictHead.slice(0, 12)} cannot be brought onto base branch tip ${moved.slice(0, 12)}`));
   const [recorded] = await events(other, 'base.conflict');

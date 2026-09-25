@@ -43,7 +43,7 @@ A candidate enters once its gates pass. Its speculative tip (predicted base merg
 
 ### Bindings and carry
 
-Reviews and proofs bind one head, base and policy revision. A moved base is merged in only by the queue head's speculative tip; the approval carries if no reviewed file changed, each proof if its `scopeFiles` are disjoint, and CI always re-runs. An unqueued candidate keeps its head, review and proofs while main moves. When GitHub reports it conflicting, the App first test-merges it onto the new tip on a scratch `graphyard-merge-check/KEY` branch (deleted afterwards, `[skip ci]`): a clean merge is recorded as a stale reading (`staleMergeability`, event `base.stale-mergeability`) and nothing changes; a real conflict returns it to its worker. Every branch write records its trigger (`queue-head`, `conflict confirmed`, `ejection restore`, `repair`).
+Reviews and proofs bind one head, base and policy revision. A moved base is merged in only by the queue head's speculative tip; the approval carries if no reviewed file changed, each proof if its `scopeFiles` are disjoint, and CI always re-runs. An unqueued candidate keeps its head, review and proofs while main moves. When GitHub reports it conflicting, the App first test-merges it onto the new tip on a scratch `graphyard-merge-check/KEY` branch (deleted afterwards, `[skip ci]`): a clean merge is recorded as a stale reading (`baseRefresh.stale`, event `base.stale-mergeability`), later observations of that head and tip are stored with the conflict disproved, and nothing else changes; a real conflict returns it to its worker. Every branch write records its trigger (`queue-head`, `conflict confirmed`, `ejection restore`, `repair`).
 
 ### Proofs in CI
 

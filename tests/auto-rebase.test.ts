@@ -107,8 +107,8 @@ test('integration:auto-rebase-clean-candidate — a candidate the base branch mo
   const writes: string[] = [];
   const refresh = await f.github.refreshCandidateBase(work, async () => { writes.push('guarded'); });
   assert.deepEqual(writes, ['guarded'], 'the job lease is re-checked before the provider write');
-  assert.deepEqual([refresh.from, refresh.base, refresh.head, refresh.conflict, refresh.merge], [{ sha: head, baseSha: boundBase }, movedTo, head, null, null]);
-  assert.match(refresh.stale!, /test merge of the two is clean; the reading is stale/);
+  assert.deepEqual([refresh.from, refresh.base, refresh.head, refresh.conflict, refresh.merge, refresh.stale!.head, refresh.stale!.base], [{ sha: head, baseSha: boundBase }, movedTo, head, null, null, head, movedTo]);
+  assert.match(refresh.stale!.reading, /test merge of the two is clean; the reading is stale/);
   const merge = f.calls.find(call => call.path === '/merges')!;
   assert.deepEqual(merge.body, { base: 'graphyard-merge-check/gy-82', head: movedTo, commit_message: 'Graphyard merge check for GY-82 [skip ci]' });
   assert.deepEqual(f.calls.filter(call => call.method !== 'GET').map(call => `${call.method} ${call.path}`),

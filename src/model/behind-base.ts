@@ -16,7 +16,7 @@ const short = (sha: string) => sha.slice(0, 12);
  * merge cleanly — GitHub reports a conflict, or has not yet computed mergeability — is withheld,
  * and that one goes back to its worker for a sync.
  */
-export function behindBaseHold(work: Pick<Work, 'candidate' | 'observation' | 'baseRefresh' | 'staleMergeability' | 'policyRevision'>): string | null {
+export function behindBaseHold(work: Pick<Work, 'candidate' | 'observation' | 'baseRefresh' | 'policyRevision'>): string | null {
   const observation = work.observation, candidate = work.candidate;
   if (!observation || !candidate || observation.baseTipContained !== false) return null;
   // The control plane's own attempt to merge this tip in conflicted (merge-queue.ts baseRefreshConflict).
@@ -24,10 +24,6 @@ export function behindBaseHold(work: Pick<Work, 'candidate' | 'observation' | 'b
   if (refresh?.conflict && refresh.from.sha === candidate.sha && refresh.base === observation.baseTip && refresh.policyRevision === work.policyRevision)
     return `head ${short(candidate.sha)} does not contain the base tip ${short(observation.baseTip ?? '')} and cannot be brought onto it without resolving a conflict; it needs a sync before it can be reviewed`;
   if (observation.mergeable === true) return null;
-  // The control plane's own test merge of this head onto this tip was clean (GY-375): GitHub's
-  // conflict reading is stale, and the head is reviewed as one GitHub reports mergeable is.
-  const stale = work.staleMergeability;
-  if (stale && stale.head === candidate.sha && stale.base === observation.baseTip && stale.policyRevision === work.policyRevision) return null;
   const why = observation.conflicting ? 'GitHub reports a merge conflict with that base' : 'GitHub does not report it mergeable against that base';
   return `head ${short(candidate.sha)} does not contain the base tip ${short(observation.baseTip ?? '')} and ${why}; it needs a sync before it can be reviewed`;
 }

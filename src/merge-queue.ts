@@ -387,11 +387,11 @@ export interface BaseRefresh {
    */
   trigger?: RefreshTrigger;
   /**
-   * Set only on what `refreshCandidateBase` returns when its test merge found the candidate clean
-   * against the new tip although GitHub reported it conflicting: nothing was written, and the
-   * engine records the reading as stale (`StaleMergeability`) instead of a refresh.
+   * GitHub reported the head conflicting with `base`, and the control plane's own test merge of
+   * the two was clean (GY-375): nothing was written, and the reading is recorded here instead of a
+   * refresh. `head` is then the unchanged candidate, and whatever the record carried onto it stays.
    */
-  stale?: string | null;
+  stale?: StaleMergeability | null;
 }
 /** Why a branch was written by the control plane rather than by its worker (GY-375). */
 export type RefreshTrigger = 'conflict confirmed' | 'ejection restore' | 'repair';
@@ -400,14 +400,19 @@ export type RefreshTrigger = 'conflict confirmed' | 'ejection restore' | 'repair
  * GitHub recomputes mergeability lazily after the base moves and can report a clean head
  * conflicting for a while; acting on that reading refreshed clean candidates and dropped their
  * review and proofs. The reading is recorded for exactly this head, base tip and policy revision,
- * and nothing is refreshed, held or reworked for it.
+ * and every observation of the same pair is stored with the conflict disproved (`disprovedConflict`),
+ * so nothing refreshes, holds or reworks the candidate for it.
  */
 export interface StaleMergeability { head: string; base: string; policyRevision: number; at: string; reading: string }
 /** The stale reading recorded for exactly the current head and observed base tip, or null. */
-export function staleMergeability(work: Pick<Work, 'candidate' | 'observation' | 'staleMergeability' | 'policyRevision'>): StaleMergeability | null {
-  const stale = work.staleMergeability, candidate = work.candidate, observation = work.observation;
-  if (!stale || !candidate || !observation) return null;
-  return stale.head === candidate.sha && stale.base === observation.baseTip && stale.policyRevision === work.policyRevision ? stale : null;
+export function staleMergeability(work: Pick<Work, 'candidate' | 'observation' | 'baseRefresh' | 'policyRevision'>): StaleMergeability | null {
+  const observation = work.observation;
+  return observation && work.candidate?.sha === observation.candidate.sha ? disprovedConflict(work, observation) : null;
+}
+/** The stale reading that disproves this observation's conflict: recorded for its head, base tip and the current policy. */
+export function disprovedConflict(work: Pick<Work, 'baseRefresh' | 'policyRevision'>, observation: Pick<Observation, 'candidate' | 'baseTip'>): StaleMergeability | null {
+  const stale = work.baseRefresh?.stale;
+  return stale && stale.head === observation.candidate.sha && stale.base === observation.baseTip && stale.policyRevision === work.policyRevision ? stale : null;
 }
 /**
  * A branch that carried another item's unlanded commits, and what the control plane did about it.
@@ -467,7 +472,8 @@ export function heldBase(work: Pick<Work, 'candidate' | 'baseRefresh' | 'policyR
  * reports conflicting with the new base, whose refresh records the conflict and returns it to its
  * worker. GitHub's reading alone is not trusted for that (GY-375): the refresh first test-merges
  * the head onto the new tip on a scratch branch, and a merge that is clean records the reading as
- * stale (`staleMergeability`) and writes nothing to the candidate's branch. A candidate that merges cleanly keeps its head, its CI, its review and its proofs, bound
+ * stale (`staleMergeability`), writes nothing to the candidate's branch, and later observations of
+ * the same head and tip are stored with the conflict disproved. A candidate that merges cleanly keeps its head, its CI, its review and its proofs, bound
  * to the base it was built on (`heldBase`), and its stage; one whose mergeability GitHub has not
  * computed yet waits for the next observation. One attempt per head, base tip and policy revision:
  * a refresh already recorded for the same three is never repeated, so neither a conflict nor a
@@ -481,9 +487,6 @@ export function baseRefreshNeeded(work: Work): { head: string; boundBase: string
   const baseTip = observation.baseTip;
   if (observation.baseTipContained !== false || !baseTip || baseTip === candidate.baseSha) return null;
   if (observation.conflicting !== true) return null;
-  // GitHub's reading was checked against a test merge of this very head onto this tip and found
-  // clean (GY-375): the candidate keeps everything, exactly as one GitHub reports clean does.
-  if (staleMergeability(work)) return null;
   const refresh = work.baseRefresh;
   if (refresh && refresh.from.sha === candidate.sha && refresh.base === baseTip && refresh.policyRevision === work.policyRevision) return null;
   // A head found carrying another item's unlanded commits is not brought onto a moved base: a
