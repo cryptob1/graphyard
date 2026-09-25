@@ -1,5 +1,6 @@
 import { createSign } from 'node:crypto';
 import type { Transport } from './transport.js';
+import { mergeQueueRuleset, mergeQueueRulesetName, mergeQueueState } from '../protection.js';
 
 export const CHECK_NAME = 'Graphyard / merge';
 export const VERIFICATION_CHECK = 'Graphyard / install verification';
@@ -112,7 +113,16 @@ export async function verifyDelivery(app: AppClient, since: number, wait: (ms: n
 export interface ProtectionInputs { repository: string; branch: string; requiredChecks: string[]; graphyardAppId: number | null; reviewCount: number }
 
 export async function readProtection(gh: GitHubCli, repository: string, branch: string): Promise<any | null> {
-  return ghJson(gh, ['api', `repos/${repository}/branches/${branch}/protection`], null);
+  const protection = await ghJson(gh, ['api', `repos/${repository}/branches/${branch}/protection`], null) as any;
+  // GitHub executes merges through its merge queue (GY-258), which lives in the branch's rules.
+  if (protection && typeof protection === 'object') Object.defineProperty(protection, installBranchRules, { value: await ghJson(gh, ['api', `repos/${repository}/rules/branches/${branch}`], null), enumerable: false });
+  return protection;
+}
+const installBranchRules = Symbol.for('graphyard.install.branchRules');
+/** Whether the branch's merge queue requires the App's check; null when the rules were not read. */
+export function mergeQueueSatisfied(current: any | null, graphyardAppId: number | null): boolean | null {
+  const state = graphyardAppId ? mergeQueueState(current?.[installBranchRules], graphyardAppId) : null;
+  return state ? state.queue && state.requiredCheck : null;
 }
 
 /**
@@ -202,7 +212,9 @@ export function protectionSatisfied(inputs: ProtectionInputs, current: any | nul
     // A repository that requires more reviewers than the policy asks for already satisfies it.
     && Number(reviews?.required_approving_review_count ?? -1) >= inputs.reviewCount
     // Approvals only bind a candidate when a stale one is dismissed and the last push is approved.
-    && (inputs.reviewCount === 0 || (!!reviews?.dismiss_stale_reviews && !!reviews?.require_last_push_approval));
+    && (inputs.reviewCount === 0 || (!!reviews?.dismiss_stale_reviews && !!reviews?.require_last_push_approval))
+    // GitHub performs the merge through the base branch's merge queue, which must require the App's check.
+    && mergeQueueSatisfied(current, inputs.graphyardAppId) !== false;
 }
 
 export async function applyProtection(gh: GitHubCli, inputs: ProtectionInputs) {
@@ -210,7 +222,16 @@ export async function applyProtection(gh: GitHubCli, inputs: ProtectionInputs) {
   const payload = protectionPayload(inputs, current);
   const result = await gh(['api', '--method', 'PUT', `repos/${inputs.repository}/branches/${inputs.branch}/protection`, '--input', '-'], { input: JSON.stringify(payload), allowFailure: true });
   if (result.code !== 0) throw new Error(`Branch protection could not be applied; run "gh auth status" and confirm the account administers ${inputs.repository}`);
+  if (inputs.graphyardAppId && mergeQueueSatisfied(current, inputs.graphyardAppId) === false) await applyMergeQueue(gh, inputs.repository, inputs.branch, inputs.graphyardAppId);
   return payload;
+}
+/** Write Graphyard's merge-queue ruleset on the base branch (GY-258): replace the one it wrote before by name, or create it. */
+export async function applyMergeQueue(gh: GitHubCli, repository: string, branch: string, githubAppId: number) {
+  const rulesets = await ghJson(gh, ['api', `repos/${repository}/rulesets?includes_parents=false`], []) as any[];
+  const existing = Array.isArray(rulesets) ? rulesets.find(ruleset => ruleset?.name === mergeQueueRulesetName) : undefined;
+  const result = await gh(['api', '--method', existing ? 'PUT' : 'POST', existing ? `repos/${repository}/rulesets/${existing.id}` : `repos/${repository}/rulesets`, '--input', '-'],
+    { input: JSON.stringify(mergeQueueRuleset({ baseBranch: branch, githubAppId })), allowFailure: true });
+  if (result.code !== 0) throw new Error(`The merge queue could not be configured on ${branch}; confirm the account administers ${repository} and that its plan offers merge queues`);
 }
 
 /** CI identities are discovered from the checks GitHub actually published on the base branch. */

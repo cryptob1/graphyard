@@ -382,9 +382,7 @@ test('integration:done-retires-actions — an item delivered by the gated merge 
   assert.ok(queued.queue, 'the candidate holds a merge-queue entry');
   assert.equal(queued.nextAction?.kind, 'merge', 'and its next action is the merge');
   await seed(queued, [leftover(queued, 'dispatch', 'dispatch:0')]);
-  const granted = await engine.acquireMerge(coordinator, queued.id, { expectedRevision: (await reload(queued)).revision, sha: head, baseSha: base, policyRevision: queued.policyRevision }, randomUUID());
-  await engine.verifyMerge(coordinator, queued.id, { executionId: granted.execution.id }, { ...observation(), prState: 'open', draft: false }, randomUUID());
-  const committed = await engine.commitMerge(coordinator, queued.id, { executionId: granted.execution.id }, randomUUID());
+  const committed = await engine.requestEnqueue(coordinator, queued.id, { enqueue: true, expectedRevision: (await reload(queued)).revision, sha: head, baseSha: base, policyRevision: queued.policyRevision }, randomUUID());
   await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
   const merged = await engine.observe(queued.id, committed.revision, { ...observation(), merged: true, mergedAt, mergeSha: 'e'.repeat(40) });
   assertSettled(merged, 'gated merge observation');
@@ -407,9 +405,7 @@ test('integration:done-rows-never-claimed — a done item\'s pending dispatch an
   // A delivered item as production held 44 of them: a pending dispatch and a pending merge, a
   // queue entry, and a next action from before its delivery.
   const { work: queued, observation } = await queuedCandidate();
-  const granted = await engine.acquireMerge(coordinator, queued.id, { expectedRevision: (await reload(queued)).revision, sha: head, baseSha: base, policyRevision: queued.policyRevision }, randomUUID());
-  await engine.verifyMerge(coordinator, queued.id, { executionId: granted.execution.id }, { ...observation(), prState: 'open', draft: false }, randomUUID());
-  const committed = await engine.commitMerge(coordinator, queued.id, { executionId: granted.execution.id }, randomUUID());
+  const committed = await engine.requestEnqueue(coordinator, queued.id, { enqueue: true, expectedRevision: (await reload(queued)).revision, sha: head, baseSha: base, policyRevision: queued.policyRevision }, randomUUID());
   await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
   const done = await engine.observe(queued.id, committed.revision, { ...observation(), merged: true, mergedAt, mergeSha: 'c'.repeat(40) });
   assert.equal(done.stage, 'done');
