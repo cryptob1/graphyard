@@ -116,7 +116,7 @@ test('integration:renew-not-starved-by-reconcile renewals complete within 2 s th
   const items: Work[] = [];
   for (let n = 0; n < 24; n++) items.push(await claimed(engine, `starve-${n}`));
   const held = items.at(-1)!;
-  assert.equal(store.backgroundLimit, 2, 'background work may hold at most half of a four-connection pool');
+  assert.equal(store.background.limit, 2, 'background work may hold at most half of a four-connection pool');
   // The reconcile is made long the way a deploy's first pass is: every item costs real time.
   let slow = false;
   const evaluate = engine.evaluate.bind(engine);
@@ -131,7 +131,7 @@ test('integration:renew-not-starved-by-reconcile renewals complete within 2 s th
   let lastRenewed = 0;
   try {
     while (reconciling) {
-      peakBackground = Math.max(peakBackground, store.backgroundInUse);
+      peakBackground = Math.max(peakBackground, store.background.inUse);
       const renewStarted = performance.now();
       await engine.execute(engineer, 'heartbeat', held.id, { epoch: held.epoch }, randomUUID());
       latencies.push(performance.now() - renewStarted); lastRenewed = Date.now();
@@ -143,7 +143,7 @@ test('integration:renew-not-starved-by-reconcile renewals complete within 2 s th
   assert.ok(passMs > 3000, `the reconcile ran long (${Math.round(passMs)} ms)`);
   assert.ok(latencies.length >= 5, `renewals ran throughout the reconcile (${latencies.length})`);
   assert.ok(Math.max(...latencies) < 2000, `every renewal completed within 2 s: ${latencies.map(ms => Math.round(ms)).join(', ')} ms`);
-  assert.ok(peakBackground <= store.backgroundLimit, `the reconcile held at most ${store.backgroundLimit} connections`);
+  assert.ok(peakBackground <= store.background.limit, `the reconcile held at most ${store.background.limit} connections`);
   // The reconcile's batches re-read the items, so no renewal made while it yielded was overwritten.
   const after = (await store.list()).find(item => item.id === held.id)!;
   assert.ok(Date.parse(after.lease!.expiresAt) >= lastRenewed + 119_000 - 1000, 'the last renewal survived the reconcile');

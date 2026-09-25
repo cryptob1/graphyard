@@ -251,16 +251,18 @@ export function definiteRenewalRefusal(error: unknown) {
 
 // The deadline uses elapsed local time and server-reported duration, not synchronized clocks.
 export async function supervise(command: string, args: string[], epoch: number, renew: () => Promise<Renewal>, options: { intervalMs?: number; graceMs?: number; shutdownPollMs?: number; shutdownTimeoutMs?: number; safetyMarginMs?: number; retryMs?: number; retryMaxMs?: number; detached?: boolean; containment?: Containment; platform?: NodeJS.Platform; session?: SupervisedSession; quarantine?: { establish: () => Promise<unknown>; revalidate?: () => Promise<unknown>; acknowledge?: () => Promise<unknown>; settle: () => Promise<unknown> } } = {}) {
-  let deadline = 0;
+  let deadline = 0, granted = 0;
   async function heartbeat() {
     const started = performance.now();
     const result = await renew();
     const duration = Date.parse(result.lease?.expiresAt ?? '') - Date.parse(result.updatedAt);
     if (result.lease?.epoch !== epoch || !Number.isFinite(duration) || duration <= 0) throw Object.assign(new Error('Invalid lease renewal'), { definite: true });
-    deadline = started + duration;
+    deadline = started + duration; granted = duration;
     if (deadline <= performance.now()) throw Object.assign(new Error('Lease expired during renewal'), { definite: true });
   }
-  const safetyMarginMs = options.safetyMarginMs ?? renewalSafetyMarginMs;
+  // The margin never exceeds a quarter of the lease the server granted, so a short lease still
+  // gets its renewals; at the production 120 s lease it is the full 15 s.
+  const margin = () => Math.min(options.safetyMarginMs ?? renewalSafetyMarginMs, granted / 4);
   const retryMs = options.retryMs ?? 1000, retryMaxMs = options.retryMaxMs ?? 10_000;
   /**
    * One renewal, retried with backoff while the lease still has more than the safety margin left
@@ -272,15 +274,15 @@ export async function supervise(command: string, args: string[], epoch: number, 
   async function renewWithRetry(stopped: () => boolean): Promise<'renewed' | 'refused' | 'lapsing' | 'stopped'> {
     for (let attempt = 0; ; attempt++) {
       // Inside the safety margin nothing more is attempted: the lease is left to expire on its own.
-      if (attempt === 0 && deadline - safetyMarginMs <= performance.now()) return 'lapsing';
+      if (attempt === 0 && deadline - margin() <= performance.now()) return 'lapsing';
       try { await heartbeat(); return 'renewed'; }
       catch (error) {
         const reason = error instanceof Error ? error.message.slice(0, 300) : String(error);
         if (definiteRenewalRefusal(error)) { console.error(`Graphyard refused the lease renewal: ${reason}`); return 'refused'; }
-        const window = deadline - safetyMarginMs - performance.now();
+        const window = deadline - margin() - performance.now();
         const wait = Math.min(retryMs * 2 ** attempt, retryMaxMs, window);
         if (wait <= 0) {
-          console.error(`Graphyard lease renewal is still failing (${reason}); retries stop ${safetyMarginMs} ms before the lease expires and the worker stops only if the lease actually expires.`);
+          console.error(`Graphyard lease renewal is still failing (${reason}); retries stop ${Math.round(margin())} ms before the lease expires and the worker stops only if the lease actually expires.`);
           return 'lapsing';
         }
         console.error(`Graphyard lease renewal failed transiently (${reason}); retrying in ${Math.round(wait)} ms with ${Math.round((deadline - performance.now()) / 1000)}s of lease left.`);
