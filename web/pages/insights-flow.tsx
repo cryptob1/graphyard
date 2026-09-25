@@ -1,10 +1,14 @@
 import { useEffect, useState } from 'react';
-import { classify } from '../groups';
+import { classify, shippedThisWeek } from '../groups';
 import { releaseView } from '../release';
 import { prSteps, stepIds, stepLabel, type StepId } from '../pr-steps';
 import { positionsAt, replayFrames, replaySeconds, replayWindowMs, transitionsFromRows, type ReplayFrame } from '../flow-replay';
 import { formatDuration } from '../duration';
 import { readStepRows } from '../step-moves';
+import { ShippingPulse, usePulse, type PulseRead } from '../shipping-pulse';
+import FlowAnalytics from '../flow-analytics';
+import type { Work } from '../../src/model';
+import type { HumanRequestRow } from '../../src/model/human-request';
 import type { Dashboard } from './dashboard';
 
 const column = (step: StepId) => `${(stepIds.indexOf(step) + 0.5) / stepIds.length * 100}%`;
@@ -37,7 +41,55 @@ export function ReplayLane({ frames, t }: { frames: ReplayFrame[]; t: number }) 
 }
 
 /**
- * Insights → Flow (GY-161): build to live, one column per pull-request step.
+ * The four headline numbers atop Insights (GY-168), each counted once and from its one source:
+ * shipped this week as the Work page counts it (`shippedThisWeek`); start to live, the shipping
+ * pulse's median from pull request to production; moving now, the Work page's Moving group; and
+ * the time the items waiting on people have waited so far. An unmeasured figure reads
+ * Unavailable, never zero.
+ */
+export function Headline({ shipped, moving, waiting, now, pulse, requests }: { shipped: number; moving: number; waiting: Work[]; now: number; pulse: PulseRead; requests?: HumanRequestRow[] | null }) {
+  // A report without the production metric reads Unavailable rather than breaking the page.
+  const production = pulse.pulse?.prToProduction ?? null;
+  const measured = !!production && production.configured !== false && typeof production.medianHours === 'number';
+  const live = !pulse.pulse ? (pulse.unavailable ? 'Unavailable' : '…')
+    : measured ? formatDuration(production!.medianHours! * 60) : 'Unavailable';
+  // A cached median after a failed or late read is marked stale, never shown as current.
+  const stale = !!pulse.pulse && pulse.stale ? ` · stale: last read ${formatDuration(pulse.elapsed / 60000)} ago${pulse.unavailable ? ', the latest read failed' : ''}` : '';
+  const liveNote = !pulse.pulse ? (pulse.unavailable ? 'the shipping pulse could not be read' : 'reading the shipping pulse')
+    : (!production ? 'the shipping pulse reported no production metric' : production.configured === false ? 'no production observation is recorded' : `pull request to production · ${production.sampleSize} of ${production.eligible} measured`) + stale;
+  // An item waits from when it was asked: its oldest open human-only row (status `humanOnly`),
+  // else its own parked request; its stage clock only when neither says.
+  const asked = (item: Work) => {
+    const rows = (requests ?? []).filter(row => row.id === item.id).map(row => Date.parse(row.request.at)).filter(Number.isFinite);
+    return rows.length ? Math.min(...rows) : Date.parse(item.humanRequest?.at ?? item.stageEnteredAt);
+  };
+  const waited = waiting.reduce((total, item) => total + Math.max(0, now - asked(item)), 0);
+  return <section className="insight-kpis" aria-label="Headline numbers">
+    <div className="kpi" data-kpi="shipped"><span>Shipped</span><strong>{shipped}</strong><small>seen live this week</small></div>
+    <div className={`kpi${stale ? ' stale' : ''}`} data-kpi="start-to-live" data-stale={stale ? 'true' : undefined}><span>Start to live, median</span><strong>{live}</strong><small>{liveNote}</small></div>
+    <div className="kpi" data-kpi="moving"><span>Moving now</span><strong>{moving}</strong><small>build to live</small></div>
+    <div className="kpi" data-kpi="waiting-on-people"><span>Time waiting on people</span><strong>{waiting.length ? formatDuration(waited / 60000) : 'None'}</strong><small>{waiting.length} {waiting.length === 1 ? 'item waits' : 'items wait'} on you now</small></div>
+  </section>;
+}
+
+/**
+ * What Show details opens: the shipping pulse (the former Shipping pulse tab) and the flow
+ * analytics report (the former Flow analytics tab), unfolded, since this toggle is the only one.
+ */
+export function InsightsDetails({ pulse, repository, api, token, canAudit, initial }: { pulse: PulseRead; repository?: string; api: Dashboard['api']; token: string; canAudit: boolean; initial?: Parameters<typeof FlowAnalytics>[0]['initial'] }) {
+  return <>
+    <ShippingPulse read={pulse} repository={repository}/>
+    <FlowAnalytics request={api} token={token} canAudit={canAudit} folded={false} initial={initial}/>
+  </>;
+}
+
+/**
+ * Insights (GY-161, one page since GY-168 as design/dashboard/Insights.dc.html draws it): the
+ * headline numbers, then the Flow panel, then landed per day beside where the time goes, and the
+ * shipping pulse and flow analytics detail folded behind one Show details toggle. The detail is
+ * mounted only once opened, so a visit that never opens it reads none of its reports.
+ *
+ * The Flow panel is build to live, one column per pull-request step.
  *
  * - **Now** places every open item at its true step (`prSteps`, the same reading the Work page
  *   draws). A dot is keyed by its item, so it moves only when that item's step changes.
@@ -49,7 +101,7 @@ export function ReplayLane({ frames, t }: { frames: ReplayFrame[]; t: number }) 
  * Every animation stops under prefers-reduced-motion: the replay then shows its last frame with
  * a slider to step through it, and the CSS rule turns the dots' movement off.
  */
-export default function InsightsFlow({ work, status, api, observedAt, setSelected }: Dashboard) {
+export default function InsightsPage({ work, status, api, token, observedAt, setSelected }: Dashboard) {
   const now = Number.isNaN(observedAt) ? Date.now() : observedAt;
   const [report, setReport] = useState<any>(null);
   const [frames, setFrames] = useState<ReplayFrame[] | null>(null);
@@ -57,6 +109,8 @@ export default function InsightsFlow({ work, status, api, observedAt, setSelecte
   const [error, setError] = useState('');
   const [t, setT] = useState(1);
   const [playing, setPlaying] = useState(false);
+  const [detailed, setDetailed] = useState(false);
+  const pulse = usePulse(token);
   useEffect(() => {
     let active = true;
     readFlow(api, now).then(flow => {
@@ -96,18 +150,20 @@ export default function InsightsFlow({ work, status, api, observedAt, setSelecte
   const landed: { bucket: string; delivered: number }[] = (Array.isArray(report?.throughput) ? report.throughput : []).slice(-7);
   const peak = Math.max(1, ...landed.map(day => day.delivered));
   return <>
-    <div className="page-heading"><div><h1>Flow</h1><p className="summary">Build to live, one column per step. {now7.length} {now7.length === 1 ? 'item is' : 'items are'} in the flow now.</p></div></div>
+    <div className="page-heading"><div><h1>Insights</h1><p className="summary">How work moves from build to live. {now7.length} {now7.length === 1 ? 'item is' : 'items are'} in the flow now.</p></div></div>
+    <Headline shipped={shippedThisWeek(work, now, release).length} moving={byGroup.moving.length} waiting={byGroup['needs-you']} now={now} pulse={pulse} requests={status?.humanOnly}/>
     {error && <p className="notice" role="status">The recorded history could not be read: {error}. The Now view below is live.</p>}
     <section className="flow-panel" aria-label="Flow">
+      <div className="flow-subhead flow-title"><h2>Flow</h2><span>Build to live, one column per step.</span></div>
       <div className="flow-columns-head">{stepIds.map(step => <div key={step} className={step === slowest ? 'flow-step slowest' : 'flow-step'}>
         <strong>{stepLabel[step]}</strong><span>{now7.filter(entry => entry.steps.current === step).length} now · median {minutes(dwell.get(step))}</span>{step === slowest && <small>slowest step</small>}
       </div>)}</div>
-      <div className="flow-subhead"><span className="dot live"/><h2>Now</h2><span>Real time. A dot moves only when its item changes step.</span></div>
+      <div className="flow-subhead"><span className="dot live"/><h3>Now</h3><span>Real time. A dot moves only when its item changes step.</span></div>
       <div className="flow-lane now-lane" data-flow="now" style={{ height: `${nowHeight}px` }}>{now7.map(({ item, steps }) => <button type="button" key={item.id} className={`now-dot group-${byGroup.blocked.includes(item) ? 'blocked' : 'moving'}`} data-step={steps.current} data-key={item.key}
         data-row={row.get(item.id)} style={{ left: column(steps.current!), top: `${12 + row.get(item.id)! * 22}px` }} title={`${item.key}: ${steps.label}`} aria-label={`${item.key} at ${stepLabel[steps.current!]}: ${steps.label}`} onClick={() => setSelected(item.id)}><span className="mono">{item.key}</span></button>)}
         <p className="outside">Waiting outside the flow: {byGroup['needs-you'].length} {byGroup['needs-you'].length === 1 ? 'needs' : 'need'} you · {byGroup['up-next'].length} up next · {byGroup.backlog.length} in backlog</p>
       </div>
-      <div className="flow-subhead"><h2>Last 24 hours, replayed</h2><span>Recorded step changes played back in {replaySeconds} s. Red dots went back to Build for rework.</span></div>
+      <div className="flow-subhead"><h3>Last 24 hours, replayed</h3><span>Recorded step changes played back in {replaySeconds} s. Red dots went back to Build for rework.</span></div>
       {frames === null ? <p className="muted flow-wait">{error ? 'No recorded history to replay.' : 'Reading the recorded step changes…'}</p>
         : frames.length === 0 ? <p className="muted flow-wait">No item changed step in the last 24 hours.</p>
           : <ReplayLane frames={frames} t={t}/>}
@@ -131,5 +187,8 @@ export default function InsightsFlow({ work, status, api, observedAt, setSelecte
           : <p className="muted">{report ? 'No item finished a step in this window.' : 'Reading the recorded step times…'}</p>}
       </section>
     </div>
+    <details className="insight-details" onToggle={event => { if (event.currentTarget.open) setDetailed(true); }}><summary>Show details</summary>
+      {detailed && <div className="insight-details-body"><InsightsDetails pulse={pulse} repository={status?.repository} api={api} token={token} canAudit={['admin', 'coordinator', 'producer'].includes(status?.actor?.role)}/></div>}
+    </details>
   </>;
 }
