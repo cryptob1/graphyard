@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { demand, type Principal, type Work } from '../model.js';
 import { approvalConflict, approveCapability, assertDecisionAuthority, decisionRefusalSchema, decisionRequestSchema } from '../model/approval.js';
-import { scopeRefusalBlocker } from '../model/scope.js';
+import { scopeRefusalBlocker, unplannedPaths } from '../model/scope.js';
 import { save } from '../store.js';
 import { authenticated, digest, findWork, readDecisions, receipt, record } from './decisions.js';
 import type { Services } from './routes.js';
@@ -76,11 +76,14 @@ async function answerScopeRequest(db: Parameters<typeof save>[0], work: Work, de
   const live = !!work.lease && work.lease.epoch === answers?.epoch && Date.parse(work.lease.expiresAt) > now.getTime();
   const current = decision.input?.expectedPolicyRevision === work.policyRevision;
   if (!answers || !request || request.epoch !== answers.epoch || request.at !== answers.at || !live || !current) return;
-  work.scopeDecision = { state: 'refused', reason, at: now.toISOString(), decidedBy: actor.id, waitedMs: Math.max(0, now.getTime() - Date.parse(request.at)), paths: request.paths, requestedBy: request.requestedBy, requestedAt: request.at, epoch: request.epoch };
+  // What was refused is what the approver judged: the paths still outside plannedFiles, not those a
+  // partial widening has planned since the worker asked.
+  const refused = unplannedPaths(work.plannedFiles, request.paths), paths = refused.length ? refused : request.paths;
+  work.scopeDecision = { state: 'refused', reason, at: now.toISOString(), decidedBy: actor.id, waitedMs: Math.max(0, now.getTime() - Date.parse(request.at)), paths, requestedBy: request.requestedBy, requestedAt: request.at, epoch: request.epoch };
   work.scopeRequest = { ...request, decision: work.scopeDecision };
   // The refusal replaces only a scope refusal (the rule's, which it answers) or no blocker at all: a
   // blocker the worker reported meanwhile is its own hand-off, and withdrawing the ask — which lifts
   // only a scope-refusal blocker — must not clear it. The refusal itself is held in scopeDecision.
   if (!work.blocker || work.blocker.startsWith(scopeRefusalBlocker)) work.blocker = `${scopeRefusalBlocker} by the independent approver ${actor.id} (decision ${decision.id}): ${reason}`.slice(0, 2000);
-  await save(db, work, actor.id, 'scope.refused', now, { decision: decision.id, epoch: request.epoch, requestedAt: request.at, paths: request.paths, approver: actor.id, reason });
+  await save(db, work, actor.id, 'scope.refused', now, { decision: decision.id, epoch: request.epoch, requestedAt: request.at, paths, approver: actor.id, reason });
 }

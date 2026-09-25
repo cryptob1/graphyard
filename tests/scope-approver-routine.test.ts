@@ -549,3 +549,27 @@ test('unit:scope-approver-routine — a decision still requested when a partial 
   assert.ok(work.plannedFiles.includes(helper) && work.plannedFiles.includes(other));
   assert.equal(work.lease?.epoch, before.epoch);
 });
+
+test('unit:scope-outcome-delivered — after a partial widening, a refusal names only the paths still outside plannedFiles', async () => {
+  let work = await claimed('refused after a partial widening');
+  const route = 'src/server/routes/work.ts';
+  await ask(work, [helper, route], 'The layout needs its measuring helper and the route');
+  // Another additive widening plans the helper; the request stays open for the route alone.
+  const asked = await reload(work.id);
+  await ok(master.token, 'POST', `work/${work.id}/requirements`, { expectedPolicyRevision: asked.policyRevision, criteria: asked.criteria, dependencies: asked.dependencies, plannedFiles: [layout, helper], exclusiveResources: asked.exclusiveResources ?? [], producerProofs: asked.producerProofs ?? [], reason: 'The helper is part of the layout criterion' });
+  work = await reload(work.id);
+  assert.ok(work.scopeRequest, 'a partial widening leaves the request open');
+  assert.equal(work.lease?.epoch, asked.epoch, 'and the worker keeps its lease');
+  const loop = harness(), state = emptyDaemonState(loopConfig());
+  await loop.cycle(state);
+  const [requested] = await standing(work);
+  assert.ok(requested, 'the loop asks the approver about the rest');
+  await ok(approver.token, 'POST', `work/${work.id}/approve`, { action: 'refuse', decision: requested.id, reason: 'The route belongs to another item' });
+  work = await reload(work.id);
+  assert.equal(work.scopeDecision!.decidedBy, approver.id);
+  assert.deepEqual(work.scopeDecision!.paths, [route], 'the recorded refusal is of the route alone');
+  const told = scopeRequestOutcome(work, { epoch: work.epoch, at: work.scopeRequest!.at, paths: [helper, route] }, Date.now());
+  assert.equal(told.state, 'refused');
+  assert.match(told.text, /for src\/server\/routes\/work\.ts was refused/);
+  assert.doesNotMatch(told.text, /measure\.ts/, 'the helper, now planned, is not among the paths to finish without');
+});

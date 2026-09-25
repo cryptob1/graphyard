@@ -199,9 +199,13 @@ export function routableScopeRequest(item: { plannedFiles?: readonly string[]; s
   if (!request || request.decision?.state !== 'refused' || request.remove?.length || request.criteria?.length) return null;
   // A request whose attempt no longer holds the lease is moot: a fresh attempt asks afresh.
   if (!item.lease || item.lease.epoch !== request.epoch || Date.parse(item.lease.expiresAt) <= now) return null;
-  const paths = [...new Set(request.paths)].filter(path => !(item.plannedFiles ?? []).some(planned => pathScopeContains(planned, path)));
+  const paths = unplannedPaths(item.plannedFiles, request.paths);
   return paths.length ? { request, paths, plannedFiles: [...new Set([...(item.plannedFiles ?? []), ...paths])] } : null;
 }
+
+/** The requested paths the item's plannedFiles do not yet cover — what is still being asked for. */
+export const unplannedPaths = (plannedFiles: readonly string[] | undefined, paths: readonly string[]) =>
+  [...new Set(paths)].filter(path => !(plannedFiles ?? []).some(planned => pathScopeContains(planned, path)));
 
 /** One requested decision per request: the instant the worker recorded it identifies the ask. */
 export const scopeDecisionBinding = (request: Pick<ScopeRequestState, 'epoch' | 'at'>) => `scope:${request.epoch}:${request.at}`;
@@ -251,13 +255,15 @@ export function scopeRequestOutcome(item: { key: string; plannedFiles?: readonly
   ask: { epoch: number; at: string; paths: readonly string[] }, now: number, cli = 'graphyard'): ScopeRequestOutcome {
   const own = item.scopeRequest?.epoch === ask.epoch && item.scopeRequest.at === ask.at ? item.scopeRequest : null;
   const decided = item.scopeDecision?.requestedAt === ask.at ? item.scopeDecision : null;
-  const covered = ask.paths.every(path => (item.plannedFiles ?? []).some(planned => pathScopeContains(planned, path)));
+  const outside = unplannedPaths(item.plannedFiles, ask.paths), covered = !outside.length;
   // Liveness comes first: an outcome, even one decided before the deadline, is not this attempt's
   // to act on once its lease has lapsed or been reconciled away.
   if (item.lease?.epoch !== ask.epoch || Date.parse(item.lease.expiresAt) <= now) return { state: 'ended', text: `Graphyard: your lease on ${item.key} (epoch ${ask.epoch}) is no longer live, so no scope outcome applies to this attempt; stop the work` };
   if (!own && covered) return { state: 'approved', text: scopeOutcomeMessage(item.key, ask.epoch, { state: 'approved', paths: ask.paths, approver: decided?.state === 'approved' && decided.decidedBy !== 'graphyard' ? decided.decidedBy : null, reason: decided?.state === 'approved' ? decided.reason : null }, cli) };
   const refusal = own?.decision ?? decided;
-  if (refusal?.state === 'refused' && refusal.decidedBy !== 'graphyard') return { state: 'refused', text: scopeOutcomeMessage(item.key, ask.epoch, { state: 'refused', paths: ask.paths, approver: refusal.decidedBy, reason: refusal.reason }, cli) };
+  // A refusal names only the paths still outside plannedFiles: one widened meanwhile, by any path,
+  // is planned, and the worker is not told to finish without it.
+  if (refusal?.state === 'refused' && refusal.decidedBy !== 'graphyard') return { state: 'refused', text: scopeOutcomeMessage(item.key, ask.epoch, { state: 'refused', paths: outside.length ? outside : ask.paths, approver: refusal.decidedBy, reason: refusal.reason }, cli) };
   if (!own) return { state: 'ended', text: `Graphyard: your scope request on ${item.key} (epoch ${ask.epoch}) is no longer open — withdrawn or re-asked — and nothing widened plannedFiles for it` };
   return { state: 'pending', text: `Graphyard: your scope request on ${item.key} (epoch ${ask.epoch}) for ${ask.paths.join(', ')} is ${own.decision ? 'with the independent approver: the widening rule could not ground it' : 'waiting for the widening rule'}; you keep your lease` };
 }
