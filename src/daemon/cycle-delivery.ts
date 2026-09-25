@@ -155,10 +155,11 @@ export async function mergeStep(cycle: Cycle) {
           const reread = await readMergeItem(item, key);
           if (reread) { target = reread; continue; }
         }
-        // A refusal is the gate working, not a daemon fault: record it and keep cycling.
+        // A refusal is the gate working, not a daemon fault: record it (no fault kind, so it is no
+        // recurrence instance and files no structural item) and keep cycling.
         performed.push(await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'failed',
           detail: `Guarded merge refused for ${item.key}${race ? ` after ${retries + 1} attempt(s) this cycle, each lost to a concurrent write; not counted toward the backoff` : ''}: ${message(error)}`,
-          attempts: race ? previous?.attempts ?? 0 : state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+          attempts: race ? previous?.attempts ?? 0 : state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist, null));
         return;
       }
     }
