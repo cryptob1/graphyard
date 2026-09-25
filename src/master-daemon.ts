@@ -7,7 +7,7 @@ import { z } from 'zod';
 import { ciReportingEnvironment } from './install/ci-proofs.js';
 import { productionEnvironmentFromEnv } from './flow-analytics.js';
 import { ChildWaitLedger, childRunner, type ChildRun } from './child-runner.js';
-import { uncitedRefusals } from './model/approval.js';
+import { decisionSituation, uncitedRefusals, type DecisionSituation } from './model/approval.js';
 import { currentEvidence, deliveryState, deploySmokeRequired, exhaustedReviewerProfiles, leaseLossEpoch, postDeployMs, productionLatencyMs, reviewProviderOf, reviewerProfileFor, rollbackGuidance, standingEscalations, type AgentReview, type ContainmentScope, type Work } from './model.js';
 import { pathScope, pathScopeContains, pinningTestGround, redecidableScopeRefusal, routableScopeRequest, scopeBlockedBudgetMs, scopeDecisionBinding, scopeDecisionBudgetMs, scopeDecisionReason, scopeDecisionSample, testFile, unplannedPaths, type ScopeRequestState } from './model/scope.js';
 import { mechanicalFailure, mechanicalVerdicts } from './model/mechanical-proofs.js';
@@ -1113,6 +1113,11 @@ export function reworkDecisionReason(prefix: string, grounds: string, refused: s
   const suffix = [prose, bare].find(text => decisionReasonMax - prefix.length - text.length >= Math.min(reworkGroundsMin, grounds.length));
   return suffix === undefined ? null : fitDecisionReason(prefix, grounds, suffix);
 }
+/** How many standing refusals the server names that a rework request answers by citing them before it gives up. */
+export const maxRefusalAnswers = 3;
+/** The refused rework decision the server's refusal of a request names as standing against it, or null. */
+export const refusalNamedIn = (error: string): string | null =>
+  /Decision ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}) \(rework\) with this input\b/.exec(error)?.[1] ?? null;
 /**
  * Whether the loop may attest that the item's previous worker is stopped. `rework` and `recover`
  * carry that attestation and the engine lowers the containment fence on it, so it rests only on
@@ -1678,7 +1683,7 @@ export interface DaemonEffects {
    * One item's decision history: the approved merge decision automatic merging asks for, and what
    * became of every decision this loop requested.
    */
-  decisions?: (work: Work) => Promise<{ decisions: { id: string; action: string; state: string; input: any; pin?: { escalations?: { trigger: string; at: string }[] } | null; reason?: string; precedent?: string[]; approvedBy: string | null; approvedAt?: string | null; approvalReason?: string | null; outcome?: string | null; refusal?: { approver: string; reason: string; at?: string } | null }[] }>;
+  decisions?: (work: Work) => Promise<{ decisions: { id: string; action: string; state: string; input: any; pin?: { escalations?: { trigger: string; at: string }[] } | null; reason?: string; precedent?: string[]; situation?: DecisionSituation | null; approvedBy: string | null; approvedAt?: string | null; approvalReason?: string | null; outcome?: string | null; refusal?: { approver: string; reason: string; at?: string } | null }[] }>;
   /**
    * Takes back one of the loop's own requests, as its requester. Only for a request the item has
    * moved past — a merge decision bound to an earlier candidate, a round the item no longer needs —
@@ -2681,9 +2686,11 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
       // names its grounds, and a refused binding is never requested again), so it answers the prior
       // refusals of this action on the item by citing them. A refusal an earlier refused request
       // already cited is answered through it, so only the uncited ones are named: however many
-      // refusals the item gathers, the citation stays the newest one or few (GY-163).
-      const refused = decision.action === 'rework' ? uncitedRefusals(history.map(entry => ({ ...entry, reason: entry.reason ?? '' })), 'rework', decisionInput('rework', item, {}), (a, b) => JSON.stringify(a) === JSON.stringify(b)) : [];
-      const reason = decision.action === 'rework' ? reworkDecisionReason(`${observedFrom(item)} `, decision.reason, refused) : fitDecisionReason('', decision.reason, '');
+      // refusals the item gathers, the citation stays the newest one or few (GY-163). A refusal
+      // stands only against the candidate and base it judged (GY-229): one refused for an earlier
+      // candidate is not this request's to answer, so only this candidate's refusals are cited.
+      let refused = decision.action === 'rework' ? uncitedRefusals(history.map(entry => ({ ...entry, reason: entry.reason ?? '' })), 'rework', decisionInput('rework', item, {}), (a, b) => JSON.stringify(a) === JSON.stringify(b), decisionSituation('rework', item)) : [];
+      let reason = decision.action === 'rework' ? reworkDecisionReason(`${observedFrom(item)} `, decision.reason, refused) : fitDecisionReason('', decision.reason, '');
       if (reason === null) {
         // Retrying would be refused every time; the request is not sent, and the master is told once.
         const escalation = `escalation:rework-refusals:${item.key}:${refused.length}`;
@@ -2691,7 +2698,21 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
         if (!state.actions[escalation]) await note(escalation, item, 'escalation', 'failed', `${item.key} has ${refused.length} refused rework decisions that no later refused request cited, and a rework request must cite each by id within the ${decisionReasonMax}-character reason bound; they no longer fit beside its grounds (${decision.reason.slice(0, 300)}), so the loop has stopped requesting it: read them with graphyard master decisions ${item.key}, then request it with graphyard master decide ${item.key} rework --precedent ID[,ID] REASON citing them, or act on the item yourself`);
         return;
       }
-      const requested = standing ?? await effects.decide!(item, decision.action, reason, decision.input);
+      // The history the loop read can miss a refusal the server holds (the read failed, or a refusal
+      // landed since). The server's answer names it, and this candidate's refusal is the loop's to
+      // answer on its new grounds: the request is made again citing it, a bounded number of times,
+      // rather than failing on every cycle with nobody told why (GY-229).
+      let requested: { id: string } | undefined = standing;
+      for (let answers = 0; !requested; answers++) {
+        try { requested = await effects.decide!(item, decision.action, reason, decision.input); }
+        catch (error) {
+          const named = decision.action === 'rework' && answers < maxRefusalAnswers ? refusalNamedIn(message(error)) : null;
+          const cited = named && !refused.includes(named) ? reworkDecisionReason(`${observedFrom(item)} `, decision.reason, [...refused, named]) : null;
+          if (!named || cited === null) throw error;
+          refused = [...refused, named];
+          reason = cited;
+        }
+      }
       // A standing request another watch holds is the same decision under a binding that has since
       // changed (a rework's unresolved-thread set moved while it was requested). That watch is
       // retired here, its sessions and counts carried over, so the cleanup below does not withdraw
