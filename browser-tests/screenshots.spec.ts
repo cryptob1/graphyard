@@ -83,3 +83,25 @@ for (const viewport of viewports) test(`every page is captured at ${viewport.nam
   await page.getByRole('button', { name: 'Help' }).click();
   await shot('guide');
 });
+
+// GY-204: the Flow page's 24-hour replay waits still under its play button, as a video does,
+// captured at a laptop and a small-phone width. Pressing play starts it and the pause control appears.
+export const replayOverlayWidths = [{ name: 'laptop', width: 1280, height: 900 }, { name: 'small-phone', width: 375, height: 812 }] as const;
+for (const viewport of replayOverlayWidths) test(`the Flow replay's play overlay is captured at ${viewport.width} px`, async ({ page }) => {
+  mkdirSync(out, { recursive: true });
+  await page.setViewportSize({ width: viewport.width, height: viewport.height });
+  await open(page);
+  await nav(page, 'Insights', viewport.width < 650);
+  const play = page.getByRole('button', { name: 'Play the last 24 hours' });
+  await expect(play).toBeVisible();
+  await expect(page.locator('.replay-stage')).toHaveAttribute('data-playing', 'false');
+  const box = (await page.locator('.replay-disc').boundingBox())!;
+  expect(Math.min(box.width, box.height)).toBeGreaterThanOrEqual(64);
+  const bounds = await page.evaluate(() => ({ content: document.documentElement.scrollWidth, width: document.documentElement.clientWidth }));
+  expect(bounds.content).toBeLessThanOrEqual(bounds.width);
+  await play.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: `${out}/insights-replay-overlay-${viewport.width}.png`, fullPage: true });
+  await play.click();
+  await expect(page.getByRole('button', { name: 'Pause the replay' })).toBeVisible();
+  await expect(play).toBeHidden();
+});
