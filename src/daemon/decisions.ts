@@ -210,6 +210,20 @@ export function resolveCovers(standing: { input: any; pin?: { escalations?: { tr
 }
 /** The control plane's bound on a decision's reason (`src/model/approval.ts`); a longer one is refused on every retry. */
 export const decisionReasonMax = 2000;
+/**
+ * The snapshot as the cycle decides from it: each item's unresolved threads without the ones its
+ * approval named as follow-up (GY-166). Those are the review loop's to file and resolve, not a
+ * worker's to fix, so a thread-rework decision is never requested for them. Only the cycle's copy
+ * changes; GitHub still blocks the merge on each until the loop has resolved it.
+ */
+export function setAsideFollowUpThreads<S extends { work: Work[] }>(snapshot: S, followUps: Map<string, Set<string>> | undefined): S {
+  if (!followUps?.size) return snapshot;
+  return { ...snapshot, work: snapshot.work.map(item => {
+    const ids = followUps.get(item.key), conversations = item.observation?.conversations;
+    if (!ids?.size || !conversations?.unresolved.some(thread => thread.id && ids.has(thread.id))) return item;
+    return { ...item, observation: { ...item.observation!, conversations: { ...conversations, unresolved: conversations.unresolved.filter(thread => !thread.id || !ids.has(thread.id)) } } };
+  }) };
+}
 /** How many unresolved threads a rework reason names; the binding still carries every one, and the worker reads them all from the pull request. */
 const reworkThreadsNamed = 5;
 /**
