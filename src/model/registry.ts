@@ -23,6 +23,8 @@ const secretName = /(TOKEN|SECRET|PASSWORD|PRIVATE|API_KEY|CREDENTIAL)/;
 // What a pasted credential looks like: provider key prefixes, a bearer header, a PEM block, a JWT.
 const secretValue = /^(sk-|ghp_|gho_|ghs_|github_pat_|xox[abp]-|Bearer\s)|-----BEGIN|^eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\./;
 const notSecret = (value: string) => !secretValue.test(value);
+/** Whether a value looks like a pasted credential: the dashboard refuses to send one, and the registry to store one. */
+export const looksLikeSecret = (value: string) => secretValue.test(value.trim());
 
 const launchEnvironment = z.record(
   z.string().regex(/^[A-Z_][A-Z0-9_]*$/)
@@ -47,6 +49,8 @@ export const launchContractSchema = z.object({
   modelFlag: z.string().regex(/^--?[a-zA-Z][a-zA-Z0-9-]*$/).nullable().default(null),
   login: z.string().trim().min(1).max(500).refine(notSecret, 'A login command names how to log in, never the credential').nullable().default(null),
   loginFile: z.string().trim().min(1).max(200).refine(value => !isAbsolute(value) && !value.split('/').includes('..'), 'loginFile is a path inside the account home').nullable().default(null),
+  /** The argument that limits a session to a tool allowlist (a role's `policy.tools`, joined by commas); null when the runtime has none. */
+  toolsFlag: z.string().regex(/^--?[a-zA-Z][a-zA-Z0-9-]*$/).nullable().optional(),
 }).strict();
 export type LaunchContract = z.infer<typeof launchContractSchema>;
 
@@ -107,14 +111,34 @@ export interface FleetAccount extends FleetAccountInput { quota: ObservedQuota }
 
 export const fleetRoles = ['worker', 'reviewer', 'producer', 'approver', 'escalation-handler'] as const;
 export type FleetRoleName = typeof fleetRoles[number];
+/**
+ * How every session of a role is launched, whichever account serves it (GY-170): the runtime
+ * flags it starts with beyond its runtime's contract — a permission mode, an auto-approve flag —
+ * the tools it may use, and the model it runs in place of each account's own. The launcher still
+ * refuses flags that would let a session stop to ask (src/harness.ts), so a policy narrows what a
+ * session may do and never brings a prompt back. Like everything else here it holds no secret.
+ */
+export const rolePolicySchema = z.object({
+  args: z.array(z.string().min(1).max(1000).refine(value => !/[\u0000-\u001f\u007f]/.test(value), 'Control characters are not allowed').refine(notSecret, 'That argument looks like a credential; the registry stores references, never secrets')).max(30).default([]),
+  /** The tools a session may use, passed on the runtime's `toolsFlag`; empty leaves the runtime's own set. */
+  tools: z.array(z.string().trim().min(1).max(200).refine(value => !value.includes(','), 'One tool per entry').refine(notSecret, 'A tool is a name, never a credential')).max(100).default([]),
+  /** A registered model this role runs instead of each account's own; null keeps the account's. */
+  model: entryName.nullable().default(null),
+}).strict();
+export type RolePolicy = z.infer<typeof rolePolicySchema>;
+export const emptyRolePolicy = (): RolePolicy => ({ args: [], tools: [], model: null });
 export const roleSchema = z.object({
   name: z.enum(fleetRoles),
   /** Eligible accounts, most preferred first. */
   accounts: z.array(entryName).max(50).refine(list => new Set(list).size === list.length, 'A role lists each account once'),
   /** How many sessions of this role may run at once; 0 pauses the role. */
   concurrency: z.number().int().min(0).max(100),
+  /** The role's launch policy; a role stored before GY-170 has none, which is the empty policy. */
+  policy: rolePolicySchema.optional(),
 }).strict();
 export type FleetRole = z.infer<typeof roleSchema>;
+/** A role's launch policy, the empty one when it records none. */
+export const rolePolicy = (role: Pick<FleetRole, 'policy'> | undefined): RolePolicy => ({ ...emptyRolePolicy(), ...role?.policy });
 
 export interface SessionSkip { account: string; reason: string }
 /** One recorded choice: who asked, what was chosen, why, and everything passed over on the way. */
@@ -203,6 +227,8 @@ export function applyRegistryMutation(current: AgentRegistry, kind: RegistryMuta
   const setRole = (role: FleetRole) => {
     const unknown = role.accounts.filter(name => !next.accounts.some(account => account.name === name));
     demandRegistry(!unknown.length, `Unknown account${unknown.length === 1 ? '' : 's'} ${unknown.join(', ')}; add an account before the role that names it`);
+    const model = role.policy?.model;
+    demandRegistry(!model || next.models.some(entry => entry.name === model), `Unknown model ${model}; add the model before the role policy that runs it`);
     upsert(next.roles, role);
   };
   let reasonText: string;
@@ -219,6 +245,8 @@ export function applyRegistryMutation(current: AgentRegistry, kind: RegistryMuta
     demandRegistry(next.models.some(model => model.name === data.name), `Unknown model ${data.name}`);
     const users = next.accounts.filter(account => account.model === data.name).map(account => account.name);
     demandRegistry(!users.length, `Model ${data.name} is what ${users.join(', ')} run${users.length === 1 ? 's' : ''}; point ${users.length === 1 ? 'that account' : 'those accounts'} at another model first`);
+    const roles = next.roles.filter(role => role.policy?.model === data.name).map(role => role.name);
+    demandRegistry(!roles.length, `Model ${data.name} is what the ${roles.join(', ')} role policy runs; change that policy first`);
     next.models = next.models.filter(model => model.name !== data.name);
   }
   else if (kind === 'account.set') { const data = registryMutationSchemas[kind].parse(input); reasonText = data.reason; setAccount(data.account); }

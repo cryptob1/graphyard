@@ -164,7 +164,7 @@ test('integration:agent-registry-model — the control plane stores runtimes wit
 
   // API: every runtime the item names, each with its launch contract, and one added later that no code knows.
   for (const runtime of proposedRuntimes) await ok('agent-registry/runtimes', operator, { runtime, reason: `Register ${runtime.name}` });
-  assert.deepEqual(proposedRuntimes.map(runtime => runtime.name).sort(), ['claude', 'codex', 'cursor', 'muse', 'opencode']);
+  assert.deepEqual(proposedRuntimes.map(runtime => runtime.name).sort(), ['claude', 'codex', 'cursor', 'muse', 'opencode', 'pi']);
   await ok('agent-registry/runtimes', coordinator, { runtime: { name: 'aider', description: 'Added after release', launch: { kind: 'aider', args: ['--yes-always'], homeVariable: 'AIDER_HOME', modelFlag: '--model', login: 'AIDER_HOME={home} aider --login', loginFile: 'session.json' } }, reason: 'A runtime Graphyard has never heard of' });
   // A registry holds references, never secrets: not in a contract's environment, its arguments, or an account.
   for (const launch of [{ kind: 'x', environment: { ANTHROPIC_API_KEY: 'value' } }, { kind: 'x', args: ['--key', 'sk-ant-api03-abcdefghijklmnop'] }, { kind: 'x', environment: { GRAPHYARD_TOKEN_FILE: '/x' } }])
@@ -196,8 +196,8 @@ test('integration:agent-registry-model — the control plane stores runtimes wit
   const posted = [...page.matchAll(/=> [`']agent-registry\/([^`']+)[`']/g)].map(match => `/api/agent-registry/${match[1].replace(/\$\{field\(form, 'collection'\)\}/, 'accounts').replace(/\$\{[^}]+\}/g, 'name')}`);
   assert.ok(posted.length >= 6, 'runtime, model, account, role, quota and remove forms');
   for (const path of posted) assert.ok(served.some(route => typeof route === 'string' ? route === path : route.test(path)), `${path} is served`);
-  assert.ok(visibleViews({ status: { actor: { role: 'admin' } }, features: {} } as any).some(view => view.id === 'fleet') && !visibleViews({ status: { actor: { role: 'worker' } }, features: {} } as any).some(view => view.id === 'fleet'));
-  assert.ok(views.some(view => view.id === 'fleet'));
+  assert.ok(visibleViews({ status: { actor: { role: 'admin' } }, features: {} } as any).some(view => view.id === 'agents') && !visibleViews({ status: { actor: { role: 'worker' } }, features: {} } as any).some(view => view.id === 'agents'));
+  assert.ok(views.some(view => view.id === 'agents'));
   // What the role form submits, as the signed-in admin's browser sends it.
   await ok('agent-registry/roles', operator, { role: { name: 'worker', accounts: ['claude-a', 'codex-a', 'aider-a'], concurrency: 3 }, reason: 'Prefer Claude, then Codex, then the newcomer' });
   await ok('agent-registry/roles', operator, { role: { name: 'reviewer', accounts: ['codex-a', 'claude-a'], concurrency: 1 }, reason: 'Review on a different model than the author' });
@@ -212,7 +212,7 @@ test('integration:agent-registry-model — the control plane stores runtimes wit
   await registryCommand({ hostId: HOST }, ['account', 'quota', 'aider-a', 'exhausted', '--resets-at', resetsAt, '--reason', 'Plan exhausted'], cli);
   const view: FleetView = await ok(`agent-registry?host=${HOST}`, auditor);
   assert.equal(view.configured, true);
-  assert.deepEqual(view.roles.find(role => role.role === 'worker'), { role: 'worker', accounts: ['claude-a', 'codex-a', 'aider-a'], concurrency: 3, live: 0, next: 'claude-a', blocked: null });
+  assert.deepEqual(view.roles.find(role => role.role === 'worker'), { role: 'worker', accounts: ['claude-a', 'codex-a', 'aider-a'], concurrency: 3, live: 0, next: 'claude-a', blocked: null, policy: { args: [], tools: [], model: null } });
   assert.deepEqual(fleetRoles.filter(name => view.roles.some(role => role.role === name)), [...fleetRoles]);
   const claude = view.accounts.find(account => account.name === 'claude-a')!;
   assert.deepEqual([claude.runtime, claude.model, claude.modelId, claude.cost, claude.capability?.tier, claude.host, claude.home, claude.maxSessions], ['claude', 'opus', 'claude-opus-5', { inputPerMTok: 15, outputPerMTok: 75 }, 'frontier', HOST, claudeHome, 2]);
@@ -302,9 +302,12 @@ test('integration:registry-driven-selection — an executor\'s action runs on th
   await assert.rejects(dispatch(root, config, 'worker-a', probe, [], args => args[0] === 'pane' && args[1] === 'run'), /herdr refused the launch/);
   const released = (await ok('agent-registry/document', coordinator) as Registry).sessions.at(-1)!;
   assert.ok(released.endedAt); assert.match(released.endReason!, /worker launch for GY-\d+ failed: herdr refused the launch/);
-  // So does a launch refused for its effective arguments after the account was chosen: a claude
-  // profile restoring the approval prompt ends the session it reserved, not five minutes later (GY-184).
+  // So does a launch refused for its effective arguments after the account was chosen: a role
+  // policy restoring the approval prompt ends the session it reserved, not five minutes later
+  // (GY-184). A registry role launches with its own policy, never the profile's arguments (GY-170).
+  await ok('agent-registry/roles', operator, { role: { name: 'worker', accounts: ['claude-fresh'], concurrency: 3, policy: { args: ['--permission-mode', 'default'], tools: [], model: null } }, reason: 'a policy that would bring the prompt back' });
   await assert.rejects(dispatch(root, config, 'worker-c', probe), /refuses to launch the claude runtime with --permission-mode default/);
+  await ok('agent-registry/roles', operator, { role: { name: 'worker', accounts: ['claude-fresh'], concurrency: 3 }, reason: 'the approval prompt stays off' });
   const refusedLaunch = (await ok('agent-registry/document', coordinator) as Registry).sessions.at(-1)!;
   assert.equal(refusedLaunch.principal, 'implementer-c'); assert.ok(refusedLaunch.endedAt, 'the refused launch gives its session back');
   assert.match(refusedLaunch.endReason!, /worker launch for GY-\d+ failed: Graphyard refuses to launch the claude runtime/);
@@ -546,4 +549,5 @@ test('integration:registry-setup-proposal — setup discovers the logged-in CLIs
   const runtime = written.find(entry => entry.path === 'agent-registry/runtimes')!;
   assert.deepEqual([runtime.data.runtime.name, runtime.data.runtime.launch.args, runtime.data.runtime.launch.modelFlag, runtime.data.runtime.launch.homeVariable], ['aider', ['--yes-always'], '--model', 'AIDER_HOME']);
   assert.deepEqual(written.filter(entry => entry.path === 'agent-registry/roles').map(entry => entry.data.role.name), ['worker', 'reviewer']);
+  assert.deepEqual(written.find(entry => entry.data.role?.name === 'reviewer')!.data.role.policy, { args: [], tools: ['Read'], model: 'opus' });
 });

@@ -2,22 +2,25 @@ import { readFile } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
 import type { MasterConfig } from '../master.js';
 import { discoverHostLogins, proposeFleet } from '../fleet.js';
-import { fleetRoles, quotaStates, type AgentRegistry } from '../model/registry.js';
+import { emptyRolePolicy, fleetRoles, quotaStates, rolePolicy, type AgentRegistry } from '../model/registry.js';
 
 export const registryHelp = [
   '  master registry               The fleet the control plane holds: every account with its runtime,',
   '                                model, roles, live sessions, quota, reset and ineligible reason',
   '  master registry propose [--directory DIR] [--apply]',
-  '                                Discover the agent CLIs logged in on this host and propose the',
-  '                                runtimes, models, accounts and roles for them; --apply stores it',
+  '                                Discover the agent environments on this host (~/.coding_agents: Claude,',
+  '                                Codex, Cursor, OpenCode, Pi) and propose the runtimes, models, accounts',
+  '                                and roles for them; --apply stores it as a registry revision',
   '  master registry runtime set NAME|@FILE [--kind K] [--arg=A]… [--home-variable VAR]',
-  '              [--model-flag=FLAG] [--login COMMAND] [--login-file PATH] [--env K=V]… --reason R',
+  '              [--model-flag=FLAG] [--tools-flag=FLAG] [--login COMMAND] [--login-file PATH] [--env K=V]… --reason R',
   '  master registry model set NAME|@FILE [--provider P] [--id ID] [--input-cost USD]',
   '              [--output-cost USD] [--tier frontier|strong|fast] [--context TOKENS] --reason R',
   '  master registry account set NAME|@FILE --runtime R --model M [--home PATH] [--host HOST]',
   '              [--max-sessions N] [--disable|--enable] [--note TEXT] --reason R',
   '  master registry account quota NAME exhausted|available|unknown [--resets-at ISO] --reason R',
-  '  master registry role set ROLE ACCOUNT[,ACCOUNT…] [--concurrency N] --reason R',
+  '  master registry role set ROLE ACCOUNT[,ACCOUNT…] [--concurrency N] [--arg=A]… [--tool T]… [--model M]',
+  '              [--clear-policy] --reason R   The role\'s accounts and its launch policy: permission-mode /',
+  '                                auto-approve flags, tool allowlist and model for every session of it',
   '  master registry runtime|model|account|role remove NAME --reason R',
   '  master registry session end ID --reason R   End one live session the registry still counts',
   '  master registry history [--limit N]   Every registry change and selection, newest first',
@@ -78,12 +81,12 @@ export async function registryCommand(master: Pick<MasterConfig, 'hostId'>, args
   if (action !== 'set') throw new Error(`Use master registry ${collection} set … or master registry ${collection} remove NAME --reason REASON`);
   const current: AgentRegistry = await api.read('agent-registry/document');
   if (collection === 'runtime') {
-    const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { reason: { type: 'string' }, kind: { type: 'string' }, arg: { type: 'string', multiple: true }, 'home-variable': { type: 'string' }, 'model-flag': { type: 'string' }, login: { type: 'string' }, 'login-file': { type: 'string' }, env: { type: 'string', multiple: true }, description: { type: 'string' } } });
+    const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { reason: { type: 'string' }, kind: { type: 'string' }, arg: { type: 'string', multiple: true }, 'home-variable': { type: 'string' }, 'model-flag': { type: 'string' }, 'tools-flag': { type: 'string' }, login: { type: 'string' }, 'login-file': { type: 'string' }, env: { type: 'string', multiple: true }, description: { type: 'string' } } });
     if (!positionals[0] || !values.reason) throw new Error('Use master registry runtime set NAME|@FILE [--kind K] [--arg=A]… --reason REASON; a value that starts with a dash is written onto its flag with =, as --arg=--yes-always and --model-flag=--model');
     if (positionals[0].startsWith('@')) return api.write('agent-registry/runtimes', { runtime: await fromFile(positionals[0]), reason: values.reason });
     const existing = current.runtimes.find(runtime => runtime.name === positionals[0]);
     const environment = values.env ? Object.fromEntries(values.env.map(pair => { const at = pair.indexOf('='); if (at < 1) throw new Error('--env takes NAME=VALUE'); return [pair.slice(0, at), pair.slice(at + 1)]; })) : undefined;
-    const launch = { ...(existing?.launch ?? { kind: positionals[0] }), ...defined({ kind: values.kind, args: values.arg, homeVariable: values['home-variable'], modelFlag: values['model-flag'], login: values.login, loginFile: values['login-file'], environment }) };
+    const launch = { ...(existing?.launch ?? { kind: positionals[0] }), ...defined({ kind: values.kind, args: values.arg, homeVariable: values['home-variable'], modelFlag: values['model-flag'], toolsFlag: values['tools-flag'], login: values.login, loginFile: values['login-file'], environment }) };
     return api.write('agent-registry/runtimes', { runtime: { ...defined({ description: values.description ?? existing?.description }), name: positionals[0], launch }, reason: values.reason });
   }
   if (collection === 'model') {
@@ -108,14 +111,19 @@ export async function registryCommand(master: Pick<MasterConfig, 'hostId'>, args
       credential: { host: values.host ?? existing?.credential.host ?? master.hostId, home: values.home ?? existing?.credential.home ?? null } };
     return api.write('agent-registry/accounts', { account, reason: values.reason });
   }
-  const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { reason: { type: 'string' }, concurrency: { type: 'string' } } });
+  const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { reason: { type: 'string' }, concurrency: { type: 'string' },
+    arg: { type: 'string', multiple: true }, tool: { type: 'string', multiple: true }, model: { type: 'string' }, 'clear-policy': { type: 'boolean' } } });
   const [name, list] = positionals;
-  if (!(fleetRoles as readonly string[]).includes(name ?? '') || !values.reason) throw new Error(`Use master registry role set ${fleetRoles.join('|')} ACCOUNT[,ACCOUNT…] [--concurrency N] --reason REASON`);
+  if (!(fleetRoles as readonly string[]).includes(name ?? '') || !values.reason) throw new Error(`Use master registry role set ${fleetRoles.join('|')} ACCOUNT[,ACCOUNT…] [--concurrency N] [--arg=A]… [--tool T]… [--model M] [--clear-policy] --reason REASON`);
   const existing = current.roles.find(role => role.name === name);
   const accounts = list === undefined ? existing?.accounts : list.split(',').map(entry => entry.trim()).filter(Boolean);
   const concurrency = number(values.concurrency, '--concurrency') ?? existing?.concurrency;
   if (!accounts || concurrency === undefined) throw new Error(`${name} is a new role; name its accounts in preference order and its --concurrency`);
-  return api.write('agent-registry/roles', { role: { name, accounts, concurrency }, reason: values.reason });
+  // The policy is changed only where a flag names it; --clear-policy starts it from empty. `--model none` drops the override.
+  const base = values['clear-policy'] ? emptyRolePolicy() : rolePolicy(existing);
+  const policy = { ...base, ...defined({ args: values.arg, tools: values.tool?.flatMap(entry => entry.split(',').map(tool => tool.trim()).filter(Boolean)), model: values.model === undefined ? undefined : values.model === 'none' ? null : values.model }) };
+  const empty = !policy.args.length && !policy.tools.length && policy.model === null;
+  return api.write('agent-registry/roles', { role: { name, accounts, concurrency, ...(empty && !existing?.policy ? {} : { policy }) }, reason: values.reason });
 }
 
 /**

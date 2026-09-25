@@ -24,9 +24,9 @@ export const defaultPiModel = 'zai/glm-5.3-flash';
  * under judgement cannot load code into its judge. The prompt follows `--` so it is never read as
  * an option.
  */
-export function piArgs(prompt: string, options: { model: string; extension?: string }) {
+export function piArgs(prompt: string, options: { model: string; extension?: string; args?: string[] }) {
   return ['--mode', 'json', '--no-session', '--no-extensions', '--extension', options.extension ?? piExtensionPath,
-    '--no-skills', '--no-prompt-templates', '--no-themes', '--no-context-files', '--no-approve', '--model', options.model, '--', prompt];
+    '--no-skills', '--no-prompt-templates', '--no-themes', '--no-context-files', '--no-approve', '--model', options.model, ...(options.args ?? []), '--', prompt];
 }
 
 /** Inherited variables a run never sees: the loop's own Graphyard and Herdr identity. What a run may hold is passed in `env`. */
@@ -63,6 +63,10 @@ export interface PiRunnerOptions {
   /** How long after `agent_settled` the process may take to exit before it is stopped. */
   exitGraceMs?: number;
   spawn?: typeof spawn;
+  /** Arguments after Pi's own and before the prompt: a registry role's policy flags and tool allowlist (GY-170). */
+  args?: string[];
+  /** Variables every run of this runner starts with: a registry account's login home. */
+  environment?: Record<string, string>;
 }
 
 export function piRunner(configured: PiRunnerOptions = {}): Runner {
@@ -100,8 +104,8 @@ export function piRunner(configured: PiRunnerOptions = {}): Runner {
       };
 
       try {
-        child = (configured.spawn ?? spawn)(command, [...(configured.commandArgs ?? []), ...piArgs(prompt, { model, extension: configured.extension })], {
-          cwd: options.cwd, env: runEnvironment(process.env, options.env), stdio: ['ignore', 'pipe', 'pipe'] });
+        child = (configured.spawn ?? spawn)(command, [...(configured.commandArgs ?? []), ...piArgs(prompt, { model, extension: configured.extension, args: configured.args })], {
+          cwd: options.cwd, env: runEnvironment(process.env, { ...configured.environment, ...options.env }), stdio: ['ignore', 'pipe', 'pipe'] });
       } catch (error) {
         queueMicrotask(() => fail({ reason: 'spawn', detail: `${command} could not be started: ${error instanceof Error ? error.message : String(error)}` }));
       }
