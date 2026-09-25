@@ -71,7 +71,7 @@ function elements(node: ReactNode): ReactElement<any>[] {
   const props = node.props as { children?: ReactNode };
   return [node as ReactElement<any>, ...elements(props.children)];
 }
-/** The item page's first screen: everything before "More details", without the closed Edit menu. */
+/** The item page's first screen: everything before "Technical details", without the closed Edit menu. */
 const firstScreen = (html: string) => html.slice(0, html.indexOf('<details class="more-details"')).replace(/<details class="edit-menu">[\s\S]*?<\/details>/, '');
 
 test('unit:ui-one-classification — every summary tile filters the groups the lists render, its count equals the cards in that group, and pressing it shows exactly those cards', () => {

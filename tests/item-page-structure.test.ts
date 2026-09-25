@@ -1,0 +1,169 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import type { Work } from '../src/model.js';
+import { predictQueue } from '../src/merge-queue.js';
+// @ts-expect-error the checked-in dashboard fixture is plain JavaScript
+import { fixtureApi, fixtureStatus, fixtureWork, NOW, visibleWords } from '../scripts/dashboard-fixture.mjs';
+import { live } from '../browser-tests/ui-board.js';
+import type { Dashboard } from '../web/pages/dashboard.js';
+import WorkDetails from '../web/pages/work-details.js';
+import { overlapLine, plainLines, whatIsLeft } from '../web/item-page.js';
+
+// GY-171: the item page below its first screen. Each section answers one question, in plain words,
+// in a fixed order, and everything technical is one click down in a single collapsed section.
+
+const board = () => (fixtureWork() as any[]).map(live) as unknown as Work[];
+const noop = () => {};
+const at = (ms: number) => new Date(NOW + ms).toISOString();
+const minute = 60_000;
+const escape = (text: string) => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+function dashboard(work: Work[], overrides: Partial<Dashboard> = {}): Dashboard {
+  return {
+    token: 'fixture', work, status: fixtureStatus('admin'), error: '', connected: true, lastUpdated: '12:00:00', view: 'work', setView: noop, filter: null, setFilter: noop,
+    selected: null, setSelected: noop, creating: false, setCreating: noop, busy: false, setBusy: noop, observedAt: NOW, jobs: [], query: '', setQuery: noop,
+    operatorAgents: [], operatorAgentsError: null, features: {} as any, events: fixtureApi('events') as any[], editingRequirements: false, setEditingRequirements: noop, codexAvailable: false,
+    queue: predictQueue(work, NOW), sessionEpoch: { current: 0 }, api: async (path: string) => fixtureApi(path, 'admin'), refresh: async () => {}, action: async () => {},
+    setError: noop, signOut: noop, ...overrides,
+  } as Dashboard;
+}
+const page = (item: Work, all: Work[], overrides: Partial<Dashboard> = {}) => renderToStaticMarkup(createElement(WorkDetails, { ...dashboard(all, overrides), item }));
+
+/**
+ * A real-shaped item in the middle of review, as `graphyard status` returns one: handed in, its
+ * checks passed, waiting for an independent approval, two proofs owed and the merge not yet
+ * observed — the control plane's own gate reasons, a running implementation session with its
+ * attach command, an open scope request and a computed next action.
+ */
+function midReview(base: Work): Work {
+  return {
+    ...base, id: 'gy-171-probe', key: 'GY-171', stage: 'review', plannedFiles: ['web/', 'tests/item-page-structure.test.ts'],
+    criteria: [
+      { id: 'AC-1', text: 'Below the existing summary the item page shows What is left, Requirements, Pull request and Activity in this order. A test renders a real-shaped item mid-review and asserts the section order.', proofs: ['unit:item-page-sections'] },
+      { id: 'AC-2', text: 'Everything technical sits in one collapsed Technical details section, and planned-file overlaps render as a single line.', proofs: ['unit:item-page-technical-collapsed'] },
+    ],
+    gates: [
+      { name: 'ready', passed: true, reasons: [] },
+      { name: 'build', passed: true, reasons: [] },
+      { name: 'review', passed: false, reasons: ['Independent approval of the current commit is required'] },
+      { name: 'test', passed: true, reasons: [] },
+      { name: 'acceptance', passed: false, reasons: [
+        'AC-1: unit:item-page-sections needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy',
+        'AC-2: unit:item-page-technical-collapsed needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy',
+      ] },
+      { name: 'merge', passed: false, reasons: ['GitHub observation missing or older than two minutes', 'Pull request is not mergeable against the current base'] },
+    ],
+    sessions: [{ id: 'graphyard-cursor-1:1', tab: null, head: null, host: 'vishrog', kind: 'implementation', pane: 'w1V:p32M', role: null, epoch: null, state: 'running', attach: 'herdr pane attach w1V:p32M --workspace w1V',
+      endedAt: null, outcome: null, runtime: 'claude', subject: 'GY-171: item page hierarchy', agentName: null, principal: 'graphyard-cursor-1', startedAt: at(-20 * minute), updatedAt: at(-20 * minute), workspace: 'w1V', transcript: null }],
+    agentRequests: [{ id: 'scope-1', type: 'scope-request', epoch: 1, requestedBy: 'graphyard-cursor-1', at: at(-10 * minute), reason: 'The browser suite pins the old section name', paths: ['browser-tests/dashboard.spec.ts'],
+      decider: { who: 'Master agent', command: 'graphyard master scope GY-171' }, releasedLease: false, state: 'open' }],
+    nextAction: { kind: 'request-review', gate: 'review', refusal: 'Independent approval of the current commit is required', reason: 'the candidate passed the build gate', llmRole: 'judgment' },
+  } as unknown as Work;
+}
+
+test('unit:item-page-sections — below the summary the item page shows What is left (plain lines grouped by step, naming who clears them), Requirements, Pull request and Activity, in that order, and no raw gate reason outside the collapsed technical section', () => {
+  const all = board();
+  const item = midReview(all.find(entry => entry.key === 'GY-15')!);
+  const work = [...all, item];
+  const html = page(item, work);
+  const technical = html.indexOf('<details class="more-details" aria-label="Technical details">');
+  assert.ok(technical > 0, 'the page has a Technical details section');
+  const above = html.slice(0, technical);
+
+  // The order: the summary (status sentence, who acts next, the seven-step tracker), then the four sections, then the technical detail.
+  const order = ['class="status-sentence', 'Who acts next:', 'class="steps-detail', 'aria-label="What is left"', 'aria-label="Requirements"', 'aria-label="Pull request"', 'aria-label="Activity"', 'aria-label="Technical details"'].map(needle => html.indexOf(needle));
+  assert.ok(order.every(index => index >= 0), `every section is rendered: ${order}`);
+  assert.deepEqual([...order].sort((a, b) => a - b), order, 'summary, What is left, Requirements, Pull request, Activity, Technical details');
+
+  // What is left: one plain line per unmet requirement, grouped by step, each group naming who clears it.
+  const groups = whatIsLeft(item, NOW);
+  assert.deepEqual(groups.map(group => [group.label, group.who, group.current]), [['Review', 'Reviewer agent', true], ['Prove', 'Prover agent', false], ['Merge', 'Builder agent', false]]);
+  for (const group of groups) {
+    const gate = item.gates.find(entry => ({ Review: 'review', Prove: 'acceptance', Merge: 'merge' } as Record<string, string>)[group.label] === entry.name)!;
+    assert.deepEqual(group.lines, plainLines(gate), `${group.label}: every line is the gate reason's plain translation`);
+  }
+  assert.deepEqual(groups.flatMap(group => group.lines), ['Waiting for someone else to approve the latest code', 'The proof unit:item-page-sections has not passed yet', 'The proof unit:item-page-technical-collapsed has not passed yet', 'Graphyard is re-checking GitHub', 'The pull request conflicts with the main branch']);
+  const left = html.slice(html.indexOf('aria-label="What is left"'), html.indexOf('aria-label="Requirements"'));
+  assert.match(left, /<small>5 things<\/small>/);
+  assert.match(left, /<section class="left-step" aria-label="Review step"><h3>Review <small>· cleared by Reviewer agent<\/small><\/h3>/);
+  // The current step is open; the later steps are one click down, each still named with who clears it.
+  assert.match(left, /<details class="later-steps"><summary>Later steps \(2\)<\/summary><section class="left-step" aria-label="Prove step"><h3>Prove <small>· cleared by Prover agent<\/small><\/h3>[\s\S]*<section class="left-step" aria-label="Merge step"><h3>Merge <small>· cleared by Builder agent<\/small><\/h3>/);
+  assert.equal(left.match(/<li>/g)?.length, 5, 'one line per unmet requirement');
+
+  // Requirements: one line per criterion with a met or pending mark; the full text on expand.
+  const requirements = html.slice(html.indexOf('aria-label="Requirements"'), html.indexOf('aria-label="Pull request"'));
+  assert.equal(requirements.match(/<details class="criterion-full"><summary><span class="criterion-mark" title="Pending">○<\/span> <span class="mono">AC-\d<\/span>/g)?.length, 2, 'each criterion once, marked pending');
+  for (const ac of item.criteria) assert.ok(requirements.includes(`<p>${escape(ac.text)}</p></details>`), `${ac.id}: full text behind its line`);
+  const shown = visibleWords(html.replace('<details class="panel requirements"', '<details open class="panel requirements"')).join(' ');
+  assert.match(shown, /AC-1 Below the existing summary the item page shows What is left, Requirements, Pull request… unit:item-page-sections pending/, 'one line: the first sentence, capped');
+  assert.doesNotMatch(shown, /A test renders a real-shaped item mid-review/, 'the rest waits for the expand');
+  // A criterion whose every proof passed is marked met (GY-16 in the fixture: two of its three proofs passed).
+  const proven = all.find(entry => entry.key === 'GY-16')!;
+  const marks = [...page(proven, all).matchAll(/<span class="criterion-mark" title="(Met|Pending)">[✓○]<\/span> <span class="mono">(AC-\d)<\/span>/g)].map(match => `${match[2]} ${match[1]}`);
+  assert.deepEqual(marks, ['AC-1 Met', 'AC-2 Met', 'AC-3 Pending']);
+
+  // Pull request: link, 8-character commit, changed-file count, checks and review state.
+  const pr = html.slice(html.indexOf('aria-label="Pull request"'), html.indexOf('aria-label="Activity"'));
+  assert.match(pr, /<dt>Link<\/dt><dd><a class="pr-open" href="https:\/\/github\.com\/[^"]+\/pull\/42"/);
+  assert.match(pr, /<code class="sha" title="d{40}">d{8}<\/code>/);
+  assert.match(pr, /<dt>Changes<\/dt><dd>1 file<\/dd>/);
+  assert.match(pr, /<dt>Checks<\/dt><dd>test passed · typecheck passed<\/dd>/);
+  assert.match(pr, /<dt>Review<\/dt><dd>Waiting for approval<\/dd>/);
+
+  // Activity: the latest few events in plain words; the full history on expand.
+  const activity = html.slice(html.indexOf('aria-label="Activity"'), technical);
+  assert.deepEqual([...activity.matchAll(/<li>([^<]+) <small>/g)].map(match => match[1]), ['Picked up by a builder', 'Released for work', 'Created']);
+  assert.match(activity, /<details class="full-history"><summary>Full history \(3\)<\/summary><section aria-label="Work history">/);
+  const many = Array.from({ length: 9 }, (_, i) => ({ seq: 9 - i, kind: 'github.observed', actor: 'github', created_at: at(-i * minute) }));
+  assert.equal(page(item, work, { events: many }).match(/<li>Graphyard checked GitHub <small>/g)?.length, 3, 'only the latest few above the fold');
+
+  // No raw gate reason appears outside the collapsed technical section; inside it every one is kept.
+  for (const gate of item.gates) for (const reason of gate.reasons) {
+    assert.ok(!above.includes(escape(reason)) && !above.includes(reason), `raw reason outside Technical details: ${reason}`);
+    assert.ok(html.slice(technical).includes(escape(reason)), `raw reason kept under Technical details: ${reason}`);
+  }
+  for (const fragment of ['needs trusted passing evidence', 'executed &gt; 0', 'older than two minutes', 'not mergeable against the current base', 'Independent approval of the current commit']) assert.ok(!above.includes(fragment), fragment);
+});
+
+test('unit:item-page-technical-collapsed — gate internals, sessions with attach commands, review provider, next action and executors and agent requests sit in one collapsed Technical details section; four overlapping items make exactly one overlap line', () => {
+  const all = board();
+  const item = midReview(all.find(entry => entry.key === 'GY-15')!);
+  const html = page(item, [...all, item]);
+  // One Technical details section, closed.
+  assert.equal(html.match(/<details[^>]*aria-label="Technical details"/g)?.length, 1);
+  assert.match(html, /<details class="more-details" aria-label="Technical details"><summary>Technical details<\/summary>/);
+  const technical = html.indexOf('<details class="more-details" aria-label="Technical details">');
+  const above = html.slice(0, technical), inside = html.slice(technical);
+  assert.doesNotMatch(inside.slice(0, inside.indexOf('>') + 1), /\sopen/, 'collapsed');
+  // Everything technical is inside it, and none of it is above it.
+  const technicalParts = ['<h3>Gate decisions</h3>', '<h3>Sessions (1)</h3>', 'herdr pane attach w1V:p32M --workspace w1V', '<h3>Code review</h3>', 'Provider: Formal GitHub approval',
+    '<h3>Next action and executors</h3>', '<code>request-review</code>', '<h3>Agent requests (1)</h3>', 'graphyard master scope GY-171', 'graphyard-cursor-1'];
+  for (const part of technicalParts) {
+    assert.ok(inside.includes(part), `inside Technical details: ${part}`);
+    assert.ok(!above.includes(part), `not above Technical details: ${part}`);
+  }
+  // Nothing past the summary is visible: the section shows only its summary until opened.
+  const visible = visibleWords(inside).join(' ');
+  assert.equal(visible, 'Technical details');
+  // It is the last thing on the page: nothing technical follows it outside a collapsed section.
+  assert.ok(html.endsWith('</details></article>'));
+
+  // Planned-file overlaps: four overlapping items make one line naming each of them and the shared paths.
+  const peers = ['GY-166', 'GY-167', 'GY-168', 'GY-169'].map((key, i) => ({ ...item, id: `peer-${i}`, key, plannedFiles: i < 2 ? ['tests/'] : ['web/pages/'], observation: { ...item.observation!, files: [] }, sessions: [], agentRequests: [] }) as unknown as Work);
+  const overlapping = { ...item, plannedFiles: ['web/', 'tests/'], observation: { ...item.observation!, files: [] } } as Work;
+  const work = [...all, overlapping, ...peers];
+  const line = overlapLine(overlapping, work);
+  assert.equal(line, 'Shares files with GY-166, GY-167, GY-168, GY-169 (tests/, web/)');
+  const rendered = page(overlapping, work);
+  assert.equal(rendered.match(/class="overlap-line"/g)?.length, 1, 'exactly one overlap line');
+  assert.equal(rendered.match(/Shares files with/g)?.length, 1);
+  assert.doesNotMatch(rendered, /Possible overlap with/, 'no box per overlapping item');
+  assert.ok(rendered.indexOf('class="overlap-line"') > rendered.indexOf('aria-label="Technical details"'), 'the overlap line is technical detail');
+  // Two overlapping items name only themselves; none makes no line at all.
+  assert.equal(overlapLine(overlapping, [...all, overlapping, ...peers.slice(0, 2)]), 'Shares files with GY-166, GY-167 (tests/)');
+  const alone = { ...overlapping, plannedFiles: ['docs/'] } as Work;
+  assert.equal(overlapLine(alone, [...all, alone]), null);
+  assert.doesNotMatch(page(alone, [...all, alone]), /overlap-line/);
+});

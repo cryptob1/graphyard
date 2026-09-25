@@ -72,7 +72,7 @@ export function checkStates(work: Work, ciAppIds: readonly number[] | null = nul
 }
 
 /** What the current step waits on, and who acts next, in plain words. */
-function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: number, release: ReleaseView): { detail: string; who: string } {
+export function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: number, release: ReleaseView): { detail: string; who: string } {
   const reasons = gate?.reasons ?? [];
   switch (step) {
     case 'build': {
