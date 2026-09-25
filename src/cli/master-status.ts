@@ -12,12 +12,14 @@ import { readReviewLedger, reconcileReviews, reviewLedgerSpec, sessionLedgerHead
 import { producerLedgerSpec, readProducerLedger, reconcileProducers, sessionRetries, summarizeProducers } from '../producer.js';
 import { dispatchFailureAttention, dispatchSummary, readDispatchCursor } from '../auto-dispatch.js';
 import { actionlessItems, stallBoundMs } from '../model/action-account.js';
-import { directMergeLine, nameOrphanSupervisors, stalledItemAttention } from './status-attention.js';
+import { approverLaunchAttention, directMergeLine, nameOrphanSupervisors, stalledItemAttention } from './status-attention.js';
 import { nameUnobtainableReviews, type SettledReviewSession } from '../model/dispatch.js';
 import { unansweredRequestAttention, unobtainableReviewAttention } from './unanswered-requests.js';
 import { reviewConflictAttention } from '../model/review-conflict.js';
 import { readAdministrationLedger, readSudoState, summarizeAdministration } from '../master-browser.js';
 import { stalledActionAttention } from './stalled-actions.js';
+import { actorlessAttention } from './actorless-submissions.js';
+import { livenessStatus } from './liveness-report.js';
 import { ledgerRefusalAttention } from '../master-status.js';
 import { executorFleetReport, readCommit, readExecutorRegistrations } from '../executor-fleet.js';
 import { githubBudgetAttention } from './github-budget-attention.js';
@@ -38,37 +40,11 @@ import { masterBoard } from '../model/board.js';
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
 // The attention builders live beside each other in `status-attention.ts`; the report reads them
 // from here, as does everything that was reading them from here before the split.
-export { nameOrphanSupervisors, orphanSupervisorAttention, stalledItemAttention, supervisorReclaimCommand } from './status-attention.js';
+export { approverLaunchAttention, nameOrphanSupervisors, orphanSupervisorAttention, stalledItemAttention, supervisorReclaimCommand } from './status-attention.js';
 export { humanNeededAttention, needsHumanActions, scopeRequestAttention } from './owed-report.js';
 export { stalledActionAttention } from './stalled-actions.js';
 export { overlongSessionAttention } from './overlong-sessions.js';
 export { unansweredRequestAttention, unansweredRequestOwner, unobtainableReviewAttention } from './unanswered-requests.js';
-
-/**
- * One attention item per requested decision whose approver could not be launched (GY-101). A
- * decision changes nothing until a session judges it, and a launch the runtime refuses — for a
- * name it will not take, a credential it cannot read, a workspace that is gone — leaves the watch
- * standing with a session that never started. `master status` used to show that as a decision
- * "waiting for approver session NAME to judge it", naming a session nobody could find. It is
- * named here as what it is, with the loop's own refusal and the command that launches it again.
- */
-export function approverLaunchAttention(daemon: {
-  approvals?: { key: string; work: string; action: string; decision: string; agentName: string | null; launches: number; launchedAt: string | null; requestedAt: string; settledAt: string | null }[];
-  actions?: { key: string; kind: string; state: string; detail: string; at: string }[];
-}): AttentionItem[] {
-  const actions = daemon.actions ?? [];
-  return (daemon.approvals ?? []).flatMap(watch => {
-    if (watch.settledAt) return [];
-    // The loop records a refused launch under the decision it was requested for (the request that
-    // could not reach an approver) or under that launch's own key (a replacement that could not).
-    const since = Date.parse(watch.launchedAt ?? watch.requestedAt);
-    const refusal = actions.find(action => action.state === 'failed' && action.kind === 'decision'
-      && (action.key === watch.key || action.key.startsWith(`approver:${watch.decision}:launch:`))
-      && (!Number.isFinite(since) || Date.parse(action.at) >= since));
-    return refusal ? [{ subject: watch.work, text: `${watch.work} is awaiting an approver for ${watch.action} decision ${watch.decision} that could not start${watch.agentName ? ` as ${watch.agentName}` : ''}: ${refusal.detail}`,
-      ...agentOwner('master', `graphyard master approver ${watch.work} ${watch.decision} [AGENT_KIND]`, 'approver') }] : [];
-  });
-}
 
 /**
  * The `master status` report: Graphyard work truth joined with Herdr session health, the local
@@ -145,6 +121,9 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // live session are accounted and raise nothing; what is left is named, with what is missing.
   const actionless = actionlessItems(snapshot.work, new Date(snapshot.now));
   const stalledItems = stalledItemAttention(snapshot);
+  // A submitted item with no review, producer or rework request and no named wait (GY-191).
+  const actorless = actorlessAttention(snapshot, cycling?.approvals);
+  const liveness = livenessStatus(snapshot); // GY-201: open items holding no obligation, with ages
   // An action no live executor can claim is not queued behind other work (GY-105); it is named
   // with its wait and the unit to start, ahead of everything that waits on it.
   const executors = await executorFleet(root, masterApi, snapshot);
@@ -157,7 +136,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const owed = owedAttention(snapshot, status.work as { key: string; attention: string | null }[], scopeRequests);
   // The GitHub budget (GY-117): a pause as one incident, an exhaustion ahead, a silent webhook.
   const budget = githubBudgetAttention(coordinator);
-  const attentionItems = [...diskAttention, ...scopeRequests, ...unanswered, ...conflicted, ...stuck.attentionItems, ...stalledItems, ...stalled, ...overlong, ...budget, ...owed.items, ...(sudo ? [...status.attentionItems, { subject: 'installation', text: sudo.instruction,
+  const attentionItems = [...diskAttention, ...scopeRequests, ...unanswered, ...conflicted, ...stuck.attentionItems, ...stalledItems, ...actorless, ...stalled, ...overlong, ...budget, ...owed.items, ...(sudo ? [...status.attentionItems, { subject: 'installation', text: sudo.instruction,
     ...(Date.parse(sudo.deadline) <= Date.now() ? agentOwner('master', `graphyard master browser ${sudo.flow}`) : humanOwner('issuing credentials to people', sudo.instruction)) }] : [...status.attentionItems])];
   // The loop's own health goes in front of all of it (see loopItems above), then the dispatcher's,
   // then an action no live executor can claim: nothing below any of the three is moving until they are.
@@ -205,8 +184,8 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     counts: { ...status.counts, dispatchUnanswered: unanswered.length, dispatchUnobtainableReview: unobtainable.length, unansweredDecisions: decisions.unanswered.length, refusedDecisions: decisions.refused, reviewConflicts: conflicted.length, stuckRequests: stuck.stuck.length, stalledActions: stalled.length, overlongSessions: overlong.length, needsHuman: owed.rows.length, humanOnly: humanOnly.length,
       // Items with no action, split the way a reader has to read them: one waiting on another
       // item is the pipeline working, one with nothing moving it is the pipeline stopped.
-      actionless: actionless.length, waitingOnAnother: actionless.filter(entry => entry.outcome === 'waiting-on').length, stalled: stalledItems.length,
-      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + conflicted.length + stuck.attentionItems.length + stalledItems.length + stalled.length + overlong.length + loopItems.length + dispatchItems.length + executors.attention.length + releases.attention.length + overflow.length + budget.length + (throughput.attention ? 1 : 0) + owed.counted + resources.attention.length } }, snapshot.work);
+      actionless: actionless.length, actorless: actorless.length, livenessViolations: liveness.violations, waitingOnAnother: actionless.filter(entry => entry.outcome === 'waiting-on').length, stalled: stalledItems.length,
+      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + conflicted.length + stuck.attentionItems.length + stalledItems.length + actorless.length + stalled.length + overlong.length + loopItems.length + dispatchItems.length + executors.attention.length + releases.attention.length + overflow.length + budget.length + (throughput.attention ? 1 : 0) + owed.counted + resources.attention.length } }, snapshot.work);
   return { ...directMergeLine(coordinator), ...status, ...attributed, attentionItems: attributeAttention(attributed.attentionItems, resources.readings), resources: resources.report,
     // The board (GY-200): what the master owes first, with commands, then the rest.
     board: await masterBoard(masterApi, snapshot, coordinator, decisions.unanswered),
@@ -214,6 +193,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     // Every open item the control plane names no action for, with the account it names instead
     // and how long it has held its failing gate; the bound the stalled ones were judged against.
     actionless: { bound: stallBoundMs, items: actionless },
+    liveness,
     interventions: interventions.summary,
     terminalDecisions: decisions.listed, throughput, unansweredDecisions: decisions.unanswered,
     // The commits no reviewer session has ever obtained a verdict on, with the dismissed review.

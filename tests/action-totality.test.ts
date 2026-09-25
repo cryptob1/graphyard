@@ -104,8 +104,9 @@ test('integration:no-failing-gate-without-action — an item whose review gate r
   const states: { name: string; work: Work; kind: string }[] = [
     { name: 'a reviewer requested changes on exactly this head', kind: 'request-rework',
       work: graded({ ...item, observation: { ...item.observation!, reviews: [{ reviewer: 'reviewer', sha: head, state: 'CHANGES_REQUESTED' }] } } as Work) },
-    { name: 'the head does not contain the base tip, so any approval would be dismissed', kind: 'resync',
-      work: graded({ ...item, observation: { ...item.observation!, baseTipContained: false } } as Work) },
+    // GY-191: behind alone is reviewed as it stands; only a head that conflicts with the base is withheld.
+    { name: 'the head does not contain the base tip and conflicts with it, so it needs a sync', kind: 'resync',
+      work: graded({ ...item, observation: { ...item.observation!, baseTipContained: false, mergeable: false, conflicting: true } } as Work) },
     { name: 'the control plane dispatches this provider through its own observation job', kind: 'resync',
       work: graded({ ...item, evidence: provenHead, policy: { ...item.policy, reviewProvider: 'codex' } } as Work) },
     { name: 'every configured reviewer profile is exhausted', kind: 'escalate',
