@@ -29,11 +29,11 @@ Granted permissions are compared with the declaration every five minutes and aft
 
 ## The reviewer App
 
-The control-plane App never reviews what it gates, so review uses a separate reviewer App created by `graphyard master reviewer setup` (Pull requests write, reads otherwise); binding refuses an installation that can write code. Each review session gets a token valid for one hour; an approval by `SLUG[bot]` on the exact head satisfies both GitHub and Graphyard.
+Review uses a separate reviewer App, created by `graphyard master reviewer setup` (Pull requests write, reads otherwise); binding refuses an installation that can write code. Each review session's token lasts one hour; an approval by `SLUG[bot]` on the exact head satisfies both GitHub and Graphyard.
 
 ## Require the check
 
-On the base branch require `Graphyard / merge` bound to this App, leave "require up to date" (`strict`) **off**, enforce for administrators, forbid force pushes and deletion, and remove bypass rights from worker identities. `master browser protection` reconciles it on the settings page.
+On the base branch require `Graphyard / merge` bound to this App, leave "require up to date" (`strict`) **off**, enforce for administrators, forbid force pushes and deletion, and remove bypass rights from worker identities. `master browser protection` reconciles it.
 
 The gate also requires CI checks from Apps in `GITHUB_CI_APP_IDS`, an approval of the current head, trusted evidence with executed > 0 and skipped 0, a mergeable non-draft PR, and the queue head.
 
@@ -47,7 +47,7 @@ Reviews and proofs bind one head, base and policy revision. When the base moves,
 
 ### Proofs in CI
 
-A protected workflow runs on every push to a `graphyard/*` PR branch via `pull_request_target`, so workflow and secrets come from the default branch: **plan** finds the item and its registered `unit:*` and `integration:*` proofs, **exercise** runs one secret-free job per proof against the candidate merged with its base, and **publish** submits each report through the [CI producer](deployment.md#ci-producer) with a `ciRun` binding. A queue tip is committed onto the pull-request branch, so it gets the same run; dependencies are cached. Manual proofs stay producer sessions.
+A protected workflow runs on every push to a `graphyard/*` PR branch via `pull_request_target`, so workflow and secrets come from the default branch: **plan** finds the item and its registered `unit:*` and `integration:*` proofs, **exercise** runs one secret-free job per proof against the candidate merged with its base, and **publish** submits each report through the [CI producer](deployment.md#ci-producer) with a `ciRun` binding. A queue tip is committed onto the pull-request branch, so it gets the same run. Manual proofs stay producer sessions.
 
 ## Post-deployment smoke proof
 
@@ -55,7 +55,7 @@ With `"deploySmoke": true` in the policy, the master dispatches the smoke workfl
 
 ## Enforcement boundary
 
-No transaction spans GitHub and Postgres: a single-use merge execution and a final re-observation narrow the gap, and [revocation](protocol/evidence.md#revocation) cancels an execution until its commit point. Restrict other merge identities; a worker can still push its own branch after losing its lease.
+No transaction spans GitHub and Postgres: a single-use merge execution and final re-observation narrow the gap, and [revocation](protocol/evidence.md#revocation) cancels an execution until its commit point. An unknown provider outcome is settled next tick from the pull request: merged delivers; open at the same head is retried. Restrict other merge identities; a worker can still push its own branch after losing its lease.
 
 ## Identity-bound agent review
 

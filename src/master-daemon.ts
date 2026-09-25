@@ -669,6 +669,21 @@ export function readyToRetry(previous: DaemonAction | undefined, cycle: number, 
   return cycle - previous.cycle >= Math.min(2 ** Math.max(0, previous.attempts - 1), maxBackoffCycles);
 }
 
+/** The first and the longest pause between guarded merge attempts on an unchanged, all-gates-passing candidate (GY-202). */
+export const mergeRetryBaseMs = 15_000, mergeRetryCapMs = 60_000;
+/**
+ * Whether the guarded merge is asked again for this candidate. The action key binds the head, base
+ * and policy revision, so a moved head starts afresh. While that binding stands and every gate
+ * passes, a refusal is retried on a doubling pause capped at one minute, never on the cycle
+ * backoff that can stretch to thirty cycles: a mergeable candidate is retried until GitHub shows it
+ * merged or its head moves (GY-202). A candidate with a failing gate keeps the cycle backoff.
+ */
+export function mergeRetryDue(previous: DaemonAction | undefined, work: Work, cycle: number, now: number) {
+  if (readyToRetry(previous, cycle)) return true;
+  if (previous?.state !== 'failed' || work.violations.length || !work.gates.every(gate => gate.passed)) return false;
+  return now - Date.parse(previous.at) >= Math.min(mergeRetryBaseMs * 2 ** Math.max(0, previous.attempts - 1), mergeRetryCapMs);
+}
+
 export function recordProfileFailure(state: DaemonState, profile: WorkerProfile, reason: string, now: number) {
   const previous = state.profiles[profile.name] ?? { failures: 0, reason: null, cooldownUntil: null };
   state.profiles[profile.name] = { failures: previous.failures + 1, reason: reason.slice(0, 500), cooldownUntil: new Date(now + profileCooldownMs).toISOString() };
@@ -2560,7 +2575,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
   for (const item of mergeCandidates) await isolate('merge', item, item.key, async () => {
     const key = candidateKey('merge', item);
     const previous = state.actions[key];
-    if (!readyToRetry(previous, state.cycle)) return;
+    if (!mergeRetryDue(previous, item, state.cycle, now())) return;
     // With automatic merging off the guarded merge runs for exactly the candidate an approver
     // agent approved (step 4c requested it). Until that approval is applied, the loop waits on the
     // approver rather than on a person, and says which decision it is waiting for.
