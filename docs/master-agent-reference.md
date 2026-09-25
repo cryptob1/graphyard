@@ -21,7 +21,7 @@ Dispatch is optimistic (overlap holds nothing), smallest planned scope first; `g
 
 ### Speculative tips and branch protection
 
-**An approval must survive a tip publication.** It carries when the predecessor changed no reviewed file.
+**An approval must survive a tip publication.** It carries by the [carry rule](github.md#bindings-and-carry).
 
 **A merge-base dismissal is not a reviewer withdrawing a verdict.** An approval of the current head dismissed with `The merge-base changed after approval.` is restored (`observation.reviews[].dismissal`); no other dismissal is.
 
