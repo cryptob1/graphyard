@@ -25,7 +25,8 @@ import { humanNeededActions } from './model/next-action.js';
 import { independentProducerProfiles, launchProducer, readProducerLedger, reclaimCheckouts, saveProducerLedger } from './producer.js';
 import { followUpThreadIds, launchReview, readReviewLedger, updateReviewLedger } from './reviewer.js';
 import { basePaths, findingScope, readReviewFindings, type ReviewFinding } from './review-scope.js';
-import { defaultAwaitReviewers } from './auto-dispatch.js';
+import { defaultAwaitReviewers, launchedSessionHandle } from './auto-dispatch.js';
+import type { DispatchRequest } from './model/dispatch.js';
 import { inspectProducerCredentials, inspectProfileAccounts, preservePartialWork, profileAccount, readEnvironmentLog, recordObservedExhaustion, roleCapacity, selectionKey, type ObservedExhaustion, type ProfileAccountHealth, type RoleCapacity } from './master.js';
 import { agentOwner, agentToken, approvedMerge, approverSessionId, approverSessionName, assertDispatchable, guardBroadScope, assertOutsideWorktrees, assessContainment, closeHerdrPane, containmentPhase, decisionInput, diskExhaustionMessage, diskThresholdBytes, dispatchWork, inspectWorkerCredentials, launchApprover, listHerdrAgents, mergeExecutor, mergedWithoutAuthorization, observeHerdrAgents, reclaimAdvice, reclaimIdleMs, reclaimWorktrees, unauthorizedMergeViolation, writeFailure, type AttentionItem, type ConfigReload, type ContainmentAssessment, type HerdrAgent, type MasterConfig, type MergeExecutor, type WorkerProfile, type WorktreeReclaimReport } from './master.js';
 import { worktreeRootMinFreeBytes } from './install/worktree-root.js';
@@ -3174,6 +3175,46 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
 }
 
 /** Effects bound to the real coordinator process; `config` may be a live source the loop reloads. */
+/**
+ * The quota failover's relaunch of a reviewer or producer session, registered like every other
+ * launch (GY-172 AC-2). The session that ran out was ended on its ledger, but its record still
+ * names its pane and its launch; it is closed with that reason, and the next session for the same
+ * request is registered through `registeredLaunch` before its runtime starts and coordinated once
+ * it has, so the relaunched session is observed and closed by the session report like the one it
+ * replaces rather than running unrecorded while the report loses the old pane.
+ */
+export async function relaunchSession(config: MasterConfig, session: LaunchedSession, work: Work, agents: HerdrAgent[], launch: {
+  review: (profile: MasterConfig['reviewers'][number], request: DispatchRequest, agents: HerdrAgent[]) => Promise<unknown>;
+  producer: (profile: MasterConfig['producers'][number], request: DispatchRequest, agents: HerdrAgent[]) => Promise<unknown>;
+  record?: (handle: SessionHandleInput) => Promise<unknown>;
+}): Promise<{ profile: string }> {
+  const request = session.role === 'reviewer' ? work.autoDispatch?.review : work.autoDispatch?.producers.find(entry => entry.id === session.requestId);
+  if (!request || request.id !== session.requestId || request.state !== 'requested') throw new Error(`${work.key} no longer requests this ${session.role} session`);
+  const kind = session.role === 'reviewer' ? 'review' as const : 'proof' as const;
+  const subject = kind === 'review' ? `${work.key}: review ${request.sha.slice(0, 12)} (PR #${request.pr})` : `${work.key}: ${request.group} proofs on ${request.sha.slice(0, 12)} (${(request.proofs ?? []).join(', ')})`;
+  const previous = work.sessions?.find(handle => handle.id === request.id && handle.state === 'running');
+  if (previous && launch.record) {
+    await launch.record({ id: previous.id, kind: previous.kind, runtime: previous.runtime, host: previous.host, subject: previous.subject, state: 'finished',
+      outcome: `ended on its provider's quota notice (${session.agentName} on profile ${session.profile}); its request is launched again on another account` }).catch(() => {});
+  }
+  // The profile that just ran out goes last: its other accounts are still its own failover.
+  const order = <P extends { name: string; agentName: string }>(profiles: P[]) => [...profiles.filter(profile => profile.name !== session.profile), ...profiles.filter(profile => profile.name === session.profile)].filter(profile => !agents.some(agent => agent.name === profile.agentName));
+  const skipped: string[] = [];
+  // As in the dispatcher: only skips that were all spent quota make this a wait for capacity.
+  let capacity = true;
+  const attach = (pane: string) => `herdr pane attach ${pane}${config.herdrWorkspace ? ` --workspace ${config.herdrWorkspace}` : ''}`;
+  for (const profile of session.role === 'reviewer' ? order(config.reviewers) : order(independentProducerProfiles(work, config.producers))) {
+    try {
+      const principal = session.role === 'producer' ? (profile as MasterConfig['producers'][number]).principal : undefined;
+      await registeredLaunch(launch.record, launchedSessionHandle(kind, request, subject, config.hostId, undefined, profile.kind, config.herdrWorkspace, principal),
+        () => session.role === 'reviewer' ? launch.review(profile as MasterConfig['reviewers'][number], request, agents) : launch.producer(profile as MasterConfig['producers'][number], request, agents), undefined, attach);
+      return { profile: profile.name };
+    } catch (error) { if (!(error as { accountsExhausted?: boolean })?.accountsExhausted) throw error; skipped.push(message(error)); capacity &&= !!(error as { capacityExhausted?: boolean }).capacityExhausted; }
+  }
+  if (!skipped.length) throw new Error(`no ${session.role} profile is free to take the request`);
+  throw Object.assign(new Error(skipped.join('; ')), { accountsExhausted: true, capacityExhausted: capacity });
+}
+
 export function daemonEffects(root: string, source: MasterConfig | (() => MasterConfig), deps: {
   snapshot: () => Promise<{ work: Work[]; now: string }>;
   mutate: (path: string, data: unknown, requestId?: string) => Promise<any>;
@@ -3258,25 +3299,11 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       if (session.role === 'reviewer') await updateReviewLedger(root, ledger => { ledger.reviews = ledger.reviews.map(entry => entry.id === session.record && entry.state === 'pending' ? { ...entry, ...ended } : entry); });
       else { const ledger = await readProducerLedger(root); await saveProducerLedger(root, { ...ledger, producers: ledger.producers.map(entry => entry.id === session.record && entry.state === 'pending' ? { ...entry, ...ended } : entry) }); }
     },
-    relaunch: async (session, work, snapshot) => {
-      const config = current(), agents = await listHerdrAgents(run);
-      const request = session.role === 'reviewer' ? work.autoDispatch?.review : work.autoDispatch?.producers.find(entry => entry.id === session.requestId);
-      if (!request || request.id !== session.requestId || request.state !== 'requested') throw new Error(`${work.key} no longer requests this ${session.role} session`);
-      // The profile that just ran out goes last: its other accounts are still its own failover.
-      const order = <P extends { name: string; agentName: string }>(profiles: P[]) => [...profiles.filter(profile => profile.name !== session.profile), ...profiles.filter(profile => profile.name === session.profile)].filter(profile => !agents.some(agent => agent.name === profile.agentName));
-      const skipped: string[] = [];
-      // As in the dispatcher: only skips that were all spent quota make this a wait for capacity.
-      let capacity = true;
-      for (const profile of session.role === 'reviewer' ? order(config.reviewers) : order(independentProducerProfiles(work, config.producers))) {
-        try {
-          if (session.role === 'reviewer') await launchReview(root, work, profile.name, agents, snapshot.now, { run, requestId: request.id });
-          else await launchProducer(root, work, request, profile as MasterConfig['producers'][number], agents, snapshot.now, { run });
-          return { profile: profile.name };
-        } catch (error) { if (!(error as { accountsExhausted?: boolean })?.accountsExhausted) throw error; skipped.push(message(error)); capacity &&= !!(error as { capacityExhausted?: boolean }).capacityExhausted; }
-      }
-      if (!skipped.length) throw new Error(`no ${session.role} profile is free to take the request`);
-      throw Object.assign(new Error(skipped.join('; ')), { accountsExhausted: true, capacityExhausted: capacity });
-    },
+    relaunch: async (session, work, snapshot) => relaunchSession(current(), session, work, await listHerdrAgents(run), {
+      review: (profile, request, agents) => launchReview(root, work, profile.name, agents, snapshot.now, { run, requestId: request.id }),
+      producer: (profile, request, agents) => launchProducer(root, work, request, profile, agents, snapshot.now, { run }),
+      record: handle => deps.mutate(`work/${work.id}/session`, handle),
+    }),
     roleHealth: async () => {
       const config = current();
       return {
