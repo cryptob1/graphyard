@@ -94,7 +94,7 @@ const rowOf = (html: string, sessionId: string) => { const start = html.indexOf(
 test('integration:workers-tab-lists-every-session — a top-level Workers tab lists every handle across every item with its item, role kind and time spent, live for a running handle and fixed for a finished one', async () => {
   // Registered beside Shipped and Insights; since GY-161 it is its own sidebar entry, so no tab row repeats it.
   const ids = views.map(view => view.id);
-  assert.ok(ids.indexOf('workers') > ids.indexOf('shipped') && ids.indexOf('workers') < ids.indexOf('pulse'), `registered beside Shipped and Insights: ${ids.join(', ')}`);
+  assert.ok(ids.indexOf('workers') > ids.indexOf('shipped') && ids.indexOf('workers') < ids.indexOf('insights'), `registered beside Shipped and Insights: ${ids.join(', ')}`);
   assert.equal(views.find(view => view.id === 'workers')?.section, 'workers');
   for (const role of ['admin', 'reader', 'worker', 'coordinator', 'operator-agent']) assert.ok(visibleViews({ ...dashboard([]), status: { actor: { role } } }).some(view => view.id === 'workers'), role);
   const tabs = [...renderToStaticMarkup(createElement(TopBar, { ...dashboard([]), view: 'workers' })).matchAll(/class="tab(?: active)?"[^>]*>(?:<abbr[^>]*>)?([^<]+)</g)].map(match => match[1]);

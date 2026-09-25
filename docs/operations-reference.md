@@ -11,15 +11,15 @@ Restart `graphyard master run` freely: it reconciles and never dispatches twice.
 
 ## Lost worker before submission
 
-The lease expires 120 seconds after the last heartbeat and the next claim gets a higher epoch; keep the old worktree. An unexplained lapse raises `lease-loss` ([classification](protocol/leases.md#how-a-lease-ends)), which blocks merge until settled ([who may settle what](delegation.md#who-may-settle-what)).
+The lease expires 120 seconds after the last heartbeat; the next claim gets a higher epoch. An unexplained lapse raises `lease-loss` ([classification](protocol/leases.md#how-a-lease-ends)), which blocks merge until settled ([who may settle what](delegation.md#who-may-settle-what)).
 
 ## Supervisor died leaving a containment quarantine
 
-On the worker's machine, `graphyard master settle-containment GY-N "reason"` verifies that no process survives (`containment.held` lists survivors). If it refuses, confirm the stop yourself, then `graphyard rework GY-N --previous-worker-stopped "reason"`, or `graphyard recover-containment GY-N --previous-worker-stopped "reason"` once delivered.
+On the worker's machine, `graphyard master settle-containment GY-N "reason"` verifies no process survives (`containment.held` lists them); only the loop excuses idle pane shells. If refused, confirm the stop, then `graphyard rework GY-N --previous-worker-stopped "reason"`, or `graphyard recover-containment GY-N --previous-worker-stopped "reason"` once delivered.
 
 ## Submitted implementation needs rework
 
-To reassign, stop the worker, then `graphyard rework GY-N --previous-worker-stopped "reason"`; the next worker resubmits the same PR from a fresh workspace.
+Stop the worker, then `graphyard rework GY-N --previous-worker-stopped "reason"`; the next worker resubmits the same PR.
 
 ## Accepted evidence turns out to be wrong
 
@@ -50,7 +50,7 @@ Below **500 requests** by default, `GRAPHYARD_GITHUB_RESERVE` on the deployment,
 
 ### What an observation costs
 
-About ten requests uncached; unchanged candidates cost none.
+About ten requests uncached; unchanged ones cost none.
 
 ### What a pause means for gates
 
@@ -70,11 +70,11 @@ Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROF
 
 ## Bootstrap mode for a self-proving change
 
-A change that ships its own proof harness cannot be proven by it, so the human operator, or an operator agent with `policy:bootstrap`, adds `"bootstrap": {"reason": "…", "contractPaths": ["src/herdr/recovery.ts"]}` to that criterion. Other gates still apply and `e2e:` proofs cannot be deferred; the next item touching the contract paths owes the proof (`graphyard obligations`).
+A change shipping its own proof harness cannot prove itself, so an admin or operator agent with `policy:bootstrap` adds `"bootstrap": {"reason": "…", "contractPaths": ["src/herdr/recovery.ts"]}` to that criterion. Other gates apply and `e2e:` proofs cannot be deferred; the next item touching those paths owes the proof (`graphyard obligations`).
 
 ## Delivered with a failed smoke proof
 
-The item stays Done, marked **delivered with failure**. Roll back or revert through a new item; never backfill evidence.
+The item stays Done, marked **delivered with failure**. Revert through a new item; never backfill evidence.
 
 ## Merged but not deployed
 
@@ -108,4 +108,4 @@ Four provider jobs per tick per replica; watch lock wait, job lag and the reques
 
 ### Concurrent reconciliation
 
-A stale snapshot during observation is retried after two seconds, not shown as an error.
+A stale snapshot during observation is retried after two seconds.

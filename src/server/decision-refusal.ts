@@ -1,6 +1,8 @@
 import { z } from 'zod';
-import { demand, type Principal } from '../model.js';
+import { demand, type Principal, type Work } from '../model.js';
 import { approvalConflict, approveCapability, assertDecisionAuthority, decisionRefusalSchema, decisionRequestSchema } from '../model/approval.js';
+import { scopeRefusalBlocker } from '../model/scope.js';
+import { save } from '../store.js';
 import { authenticated, digest, findWork, readDecisions, receipt, record } from './decisions.js';
 import type { Services } from './routes.js';
 
@@ -25,6 +27,7 @@ export async function refuseDecision(services: Services, caller: Principal, id: 
     assertDecisionAuthority(actor, approveCapability, work!, services.repository);
     demand(decision!.state === 'requested', `Decision ${decision!.id} is already ${decision!.state}; only a requested decision can be refused`, 409);
     await record(db, work!, actor.id, 'decision.declined', { id: decision!.id, action: decision!.action, reason: data.reason, requestedBy: decision!.requestedBy, approver: { id: actor.id, role: actor.role } });
+    await answerScopeRequest(db, work!, decision!, actor, data.reason, now);
     const result = (await readDecisions(db, work!)).find(entry => entry.id === decision!.id)!;
     await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
     return result;
@@ -54,4 +57,23 @@ export async function withdrawDecision(services: Services, caller: Principal, id
     await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
     return result;
   });
+}
+
+/**
+ * A refused widening that answers a worker's scope request (GY-176) is that request's decision:
+ * kept on the item, in the same transaction, where the asking worker's own `status` and
+ * `scope-request --wait` read it — the approver, its reason, and that the attempt stays inside
+ * plannedFiles — rather than sent to its session. Only the open request of the live attempt it
+ * names is answered; one withdrawn, re-asked or outlived by its lease is left as it stands.
+ */
+async function answerScopeRequest(db: Parameters<typeof save>[0], work: Work, decision: { id: string; action: string; input: any }, actor: Principal, reason: string, now: Date) {
+  const answers = decision.action === 'requirements' ? decision.input?.answers : undefined, request = work.scopeRequest;
+  // The same liveness the approval path demands: a lease that has expired, reconciled or not, is
+  // no attempt to answer, and its item is not written to on that attempt's behalf.
+  const live = !!work.lease && work.lease.epoch === answers?.epoch && Date.parse(work.lease.expiresAt) > now.getTime();
+  if (!answers || !request || request.epoch !== answers.epoch || request.at !== answers.at || !live) return;
+  work.scopeDecision = { state: 'refused', reason, at: now.toISOString(), decidedBy: actor.id, waitedMs: Math.max(0, now.getTime() - Date.parse(request.at)), paths: request.paths, requestedBy: request.requestedBy, requestedAt: request.at, epoch: request.epoch };
+  work.scopeRequest = { ...request, decision: work.scopeDecision };
+  work.blocker = `${scopeRefusalBlocker} by the independent approver ${actor.id} (decision ${decision.id}): ${reason}`.slice(0, 2000);
+  await save(db, work, actor.id, 'scope.refused', now, { decision: decision.id, epoch: request.epoch, requestedAt: request.at, paths: request.paths, approver: actor.id, reason });
 }
