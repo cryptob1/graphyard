@@ -126,7 +126,7 @@ test('integration:absent-pane-resolves-request — a producer request whose pane
     assert.match(after.resolution!, /pane pane-proof was already gone/);
     assert.equal((await readProducerLedger(root)).producers[0].state, 'expired');
     // The loop's own mid-session closure (quota failover) tolerates the absent pane the same way.
-    const daemon = await readFile(new URL('../src/master-daemon.ts', import.meta.url), 'utf8');
+    const daemon = await readFile(new URL('../src/daemon/effects.ts', import.meta.url), 'utf8');
     assert.match(daemon, /catch \(error\) \{ if \(!paneAlreadyGone\(error\)\) throw error; paneGone = true; \}/);
   } finally { await cleanup(); }
 });
