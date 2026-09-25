@@ -109,24 +109,20 @@ async function candidate(options: { proven?: boolean; queue?: boolean; alone?: b
 }
 const snapshotsReporting = async (workId: string, mergeSha: string) => (await store.pool.query("SELECT created_at, payload->'work' AS work FROM events WHERE work_id=$1 AND payload->'work'->'observation'->>'mergeSha'=$2 ORDER BY seq", [workId, mergeSha])).rows as { created_at: Date; work: Work }[];
 
-test('integration:reconciliation-snapshot-precedes-merge — GY-81 exactly: a whole-second mergedAt, a recorded clock offset and post-merge observations inside the old cutoff window; the reconciliation re-checks the last snapshot that precedes the merge, never one that already reports it, and delivers', async () => {
+test('integration:reconciliation-snapshot-precedes-merge — GY-81 exactly: a whole-second mergedAt and post-merge observations inside the whole-second cutoff window; the reconciliation re-checks the last snapshot that precedes the merge, never one that already reports it, and delivers', async () => {
   const work = await candidate({ alone: true });
   const mergeSha = sha(`merge-${work.key}`);
-  // GY-81's ledger: the broker acquired, verified with a bounded clock offset, committed, and the
-  // execution was cancelled before the merge cutoff; GitHub then merged the pull request anyway.
-  const executor: MergeExecutor = { principal: coordinator.id, instance: `daemon-${randomUUID()}` };
-  const offset = { min: 0, max: 2000 };
-  const granted = await engine.acquireMerge(coordinator, work.id, { expectedRevision: work.revision, sha: head(work), baseSha: base, policyRevision: work.policyRevision, executor: executor.instance }, id());
-  await engine.verifyMerge(coordinator, work.id, { executionId: granted.execution.id, executor: executor.instance }, { ...observation(work), prState: 'open', draft: false, clockOffset: offset }, id());
-  await engine.commitMerge(coordinator, work.id, { executionId: granted.execution.id, executor: executor.instance }, id());
-  await engine.cancelMerge(coordinator, work.id, { executionId: granted.execution.id, reason: '{"error":"Merge execution was already verified; retry with the original idempotency key"}', executor: executor.instance }, id());
+  // GY-81's ledger, as GitHub now executes merges (GY-258): the record authorized the candidate, and
+  // GitHub merged the pull request with no coordinator request recorded before the merge.
   const preMerge = await reload(work.id);
   assert.ok(preMerge.mergeAuthorization && preMerge.gates.every(gate => gate.passed) && !preMerge.violations.length, 'the record before the merge authorized the candidate');
-  // The merge lands in a later whole second than the authorization, as GitHub reports it.
+  // The merge lands in a later whole second than the authorization, as GitHub reports it, early in
+  // that second so the post-merge observations below fall inside its whole-second cutoff window.
   await delay(1100);
+  await waitUntil(Math.ceil(Date.parse(await dbNow()) / 1000) * 1000 + 10);
   const merged = await mergedAt(work, mergeSha);
   const providerMergedTime = Date.parse(merged.mergedAt!);
-  const oldCutoff = providerMergedTime + 1000 + offset.max;
+  const oldCutoff = providerMergedTime + 1000;
   let current = await engine.observe(work.id, preMerge.revision, merged);
   assert.equal(current.stage, 'merge'); assert.ok(current.violations.includes(unauthorizedMergeViolation)); assert.equal(current.delivery, undefined);
   current = await engine.observe(work.id, current.revision, { ...merged, at: new Date().toISOString() });
@@ -149,7 +145,7 @@ test('integration:reconciliation-snapshot-precedes-merge — GY-81 exactly: a wh
   }
   // The recovery, requested after the cutoff: the pre-merge snapshot is chosen and the item delivers.
   await waitUntil(oldCutoff);
-  const decision = await mergeDecision(current, `Reconcile ${work.key}: GitHub merged ${mergeSha.slice(0, 12)} after the execution was cancelled`);
+  const decision = await mergeDecision(current, `Reconcile ${work.key}: GitHub merged ${mergeSha.slice(0, 12)} with no merge request recorded before it`);
   const delivered = await engine.observe(work.id, (await reload(work.id)).revision, { ...merged, at: new Date().toISOString() });
   assert.equal(delivered.stage, 'done', delivered.violations.join(' | '));
   assert.deepEqual(delivered.violations, []);
@@ -157,10 +153,8 @@ test('integration:reconciliation-snapshot-precedes-merge — GY-81 exactly: a wh
   assert.equal(delivery.mergeSha, mergeSha); assert.equal(delivery.mergedAt, merged.mergedAt);
   assert.equal(delivery.reconciliation.decision, decision);
   assert.equal(delivery.reconciliation.snapshotRevision, preMerge.revision, 'the snapshot re-checked is the last one that precedes the merge');
-  assert.equal(delivery.reconciliation.cutoff, new Date(oldCutoff).toISOString(), 'the clock-offset allowance still widens the validity window');
-  assert.equal(delivery.authorizationRevision, granted.execution.authorizationRevision);
-  // The offset carries the merge onto the repository clock exactly as an authorized delivery is recorded.
-  assert.equal(delivery.repositoryClockOffsetMs, offset.min); assert.equal(delivery.mergedAtRepository, new Date(providerMergedTime + offset.min).toISOString());
+  assert.equal(delivery.reconciliation.cutoff, new Date(oldCutoff).toISOString(), 'the whole-second allowance widens the validity window');
+  assert.equal(delivery.authorizationRevision, preMerge.revision);
   const reconciled = await events(work.id, 'merge.reconciled');
   assert.equal(reconciled.length, 1); assert.equal(reconciled[0].payload.details.snapshotRevision, preMerge.revision);
   assert.equal((await events(work.id, 'merge.reconciliation.refused')).length, 0, 'nothing was refused on the way');

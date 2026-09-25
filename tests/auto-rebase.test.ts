@@ -224,9 +224,7 @@ const refreshRecord = (work: Work, to: { head: string | null; base: string }, ov
 /** The head lands through the broker exactly as the master does it, and Graphyard observes the merge. */
 async function mergeHead(work: Work, candidate: { sha: string; baseSha: string }, mergeSha: string) {
   const current = await reload(work);
-  const granted = await engine.acquireMerge(coordinator, current.id, { expectedRevision: current.revision, sha: candidate.sha, baseSha: candidate.baseSha, policyRevision: current.policyRevision }, randomUUID());
-  await engine.verifyMerge(coordinator, current.id, { executionId: granted.execution.id }, seen(current, candidate), randomUUID());
-  const committed = await engine.commitMerge(coordinator, current.id, { executionId: granted.execution.id }, randomUUID());
+  const committed = await engine.requestEnqueue(coordinator, current.id, { enqueue: true, expectedRevision: current.revision, sha: candidate.sha, baseSha: candidate.baseSha, policyRevision: current.policyRevision }, randomUUID());
   await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
   return engine.observe(current.id, committed.revision, seen(current, candidate, { merged: true, mergeSha, mergedAt }));
 }

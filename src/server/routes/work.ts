@@ -66,28 +66,16 @@ export const workRoutes = defineRoutes('work', [
     },
   },
   {
-    method: 'POST', path: /^\/api\/work\/([^/]+)\/merge-(acquire|cancel|verify|commit)$/,
-    async handle(context, [id, action]) {
-      const { actor, services: { engine, github } } = context;
-      // These routes sit above the generic work route, so their own refusal
+    // GitHub executes merges; Graphyard only gates them (GY-258). The merge step's one route
+    // records the coordinator's request that GitHub merge exactly this candidate: no execution,
+    // verification window or provider clock reading is issued, and nothing here calls a merge.
+    method: 'POST', path: /^\/api\/work\/([^/]+)\/merge-acquire$/,
+    async handle(context, [id]) {
+      const { actor, services: { engine } } = context;
+      // This route sits above the generic work route, so its own refusal
       // is recorded here rather than inherited from a handler never reached.
-      await refuseLead(context, id, `merge-${action}`);
-      const data = await parseJson(context, undefined, '{}'), key = context.idempotencyKey();
-      if (action === 'acquire') return engine.acquireMerge(actor, id, data, key);
-      if (action === 'cancel') return engine.cancelMerge(actor, id, data, key);
-      if (action === 'commit') return engine.commitMerge(actor, id, data, key);
-      demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
-      demand(github, 'GitHub integration is required for merge verification', 503);
-      const work = (await engine.store.list()).find(item => item.id === id || item.key === id); demand(work?.submission, 'Submitted work item required', 404);
-      const replay = await engine.replayMergeVerification(actor, work.id, data, key); if (replay) return replay;
-      const observation = await github.verify(work);
-      const before = (await engine.store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date;
-      const providerTime = await github.serverTime();
-      const after = (await engine.store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date;
-      // Bound DB minus GitHub time using the request interval and GitHub's
-      // whole-second Date precision. Keep all network I/O outside transactions.
-      observation.clockOffset = { min: before.getTime() - providerTime - 1000, max: after.getTime() - providerTime };
-      return engine.verifyMerge(actor, work.id, data, observation, key);
+      await refuseLead(context, id, 'merge-acquire');
+      return engine.requestEnqueue(actor, id, await parseJson(context, undefined, '{}'), context.idempotencyKey());
     },
   },
   {

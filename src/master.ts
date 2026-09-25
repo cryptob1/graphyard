@@ -17,22 +17,25 @@ import { blockedPath, environmentBlocked, grantWorkerPaths, verifyWorkerSandbox,
 import { mergeOrder } from './delegation.js';
 import { assertLaunchable, assertNoApprovalOptOut, LaunchRefusedError, nonInteractiveLaunch, requestPlaceholder, harnessDecision, launchPlan, masterHarnessPlan, writeHarnessPermissions, type HarnessPlan, type HarnessRule, type RegisteredLaunch } from './harness.js';
 import { withAutonomyContract } from './autonomy.js';
-import { capacityRetryAt, describeCapacity, standingCapacity, type CapacityAccount, type CapacityRole, type PartialWork } from './model/capacity.js';
+import { capacityRetryAt, quotaRoles, describeCapacity, standingCapacity, type CapacityAccount, type CapacityRole, type PartialWork } from './model/capacity.js';
 import { answerCommand, humanDecisionLabel, openHumanRequests, parkedOnHuman } from './model/human-request.js';
+import type { SessionHandleInput } from './model/sessions.js';
+import { registeredLaunch, sessionView } from './model/session-state.js';
+import { liveReviewRequest } from './model/dispatch.js';
 import { automatableProof } from './model/mechanical-proofs.js';
 import { documentationWorkerSection } from './model/documentation.js';
-import { CHECK_NAME, carriedApproval, closedHistory, isClosed, escalationTriggers, deliveryState, deploySmokeRequired, describeQueueBinding, evidenceIndependenceRefusals, exhaustedReviewerProfiles, implementerIdentities, nativeReviewRequired, postDeployMs, productionLatencyMs, providerDelayAfterVerification, reviewerProfileFor, reviewProviderOf, rollbackGuidance, standingEscalations, type CarriedApproval, type QueueBindingReport, type Work } from './model.js';
+import { CHECK_NAME, carriedApproval, closedHistory, isClosed, escalationTriggers, deliveryState, deploySmokeRequired, describeQueueBinding, evidenceIndependenceRefusals, exhaustedReviewerProfiles, implementerIdentities, nativeReviewRequired, postDeployMs, productionLatencyMs, reviewerProfileFor, reviewProviderOf, rollbackGuidance, standingEscalations, type CarriedApproval, type QueueBindingReport, type Work } from './model.js';
 import { containmentAttestation, containmentGraceMs, containmentSettlementRefusals, containmentVerificationSchema, type ContainmentVerification } from './quarantine.js';
 import { probeSupervisorAbsence, type SupervisorProbe } from './containment-probe.js';
 import { consentHoldAttention, consentHoldMs, detectConsentPrompt, sameConsentPrompt, settingsWarning, writeConsentHold, type ConsentAnswer, type ConsentHold, type ConsentPrompt } from './consent-prompt.js';
 import { installLoopSupervisor, loopSupervisionAttention, loopUnitName, unsupervisedInstruction, type LoopSupervisorHost, type LoopSupervisorInstallation } from './supervisor.js';
-import { baseRefreshConflict, branchContamination, currentBaseRefreshCarry, currentRestore, pendingBaseRefresh, pendingRestore, predictQueue, refusedReconciliation, restoredApproval, unpublishableEntry, conversationProtectionRefusal, type QueuePlacement } from './merge-queue.js';
+import { baseRefreshConflict, branchContamination, currentBaseRefreshCarry, describeGitHubQueue, currentRestore, pendingBaseRefresh, pendingRestore, predictQueue, refusedReconciliation, restoredApproval, unpublishableEntry, conversationProtectionRefusal, type QueuePlacement } from './merge-queue.js';
 import { MERGE_PROTOCOL } from './protocol-version.js';
 import { mergeBaseDismissal, mergeBaseDismissalAttention, missingAncestryReason, missingBaseAncestry } from './merge-base-ancestry.js';
 import { attentionLines, type ProductionReport } from './production-watch.js';
 import { allocateSessionCheckout, inspectWorktreeRoot, reclaimCommand, removeSessionCheckout, verifyWorktreeRoot, worktreeRoot, worktreeRootBudgetBytes, worktreeRootConcerns, worktreeRootMinFreeBytes, type CheckoutReclaimReport, type FilesystemProbe, type SessionCheckout, type WorktreeRootHealth } from './install/worktree-root.js';
 import { pipelineSpeed, pipelineSpeedSummary } from './pipeline-speed.js';
-import { fleetRoleHealth, selectFleetSession, type FleetLaunchAccount, type FleetProbe } from './fleet.js';
+import { fleetRoleHealth, httpFleetClient, selectFleetSession, type FleetLaunchAccount, type FleetProbe } from './fleet.js';
 import type { FleetView } from './model/registry.js';
 import { contextFingerprint, escalationAction, followPrecedent, handleEscalation, type EscalationContext } from './model/escalation-context.js';
 
@@ -472,7 +475,7 @@ export async function inspectWorkerCredentials(root: string, profiles: WorkerPro
 }
 // A profile's accounts are part of whether it can launch, so status and the durable loop read them
 // with its credential: a profile none of whose accounts is logged in with quota left is unavailable.
-async function withAccountHealth<T extends { available: boolean; reason: string | null }>(root: string, role: LaunchRole, profiles: { name: string; accounts?: string[] }[], health: Record<string, T>, probe?: EnvironmentProbe) {
+async function withAccountHealth<T extends { available: boolean; reason: string | null }>(root: string, role: LaunchRole, profiles: { name: string; accounts?: string[]; kind?: string; environment?: Record<string, string> }[], health: Record<string, T>, probe?: EnvironmentProbe) {
   // A profile that names no accounts can still be held by an exhaustion one of its own sessions
   // reported (GY-89), so the log is read for those too; only a named account needs the configuration.
   const named = profiles.some(profile => profile.accounts?.length);
@@ -864,7 +867,8 @@ export async function checkAgentEnvironment(environment: AgentEnvironment, probe
   return health;
 }
 
-export type LaunchRole = 'worker' | 'reviewer' | 'producer';
+/** Every launched role selects its account the same way and skips the same spent accounts (GY-182). */
+export type LaunchRole = CapacityRole;
 /**
  * Why a launch passed an account over. Only `exhausted` — a quota read as spent, or one a session
  * itself reported — is the provider's capacity and waits for a reset. A logged-out account or a
@@ -890,13 +894,13 @@ export class NoHealthyAccountError extends Error {
 const environmentLogSchema = z.object({
   version: z.literal(1),
   environments: z.record(z.string(), z.any()).default({}),
-  skipped: z.array(z.object({ at: z.string(), role: z.enum(['worker', 'reviewer', 'producer']), profile: z.string(), environment: z.string(), reason: z.string().max(500), work: z.string().nullable(),
+  skipped: z.array(z.object({ at: z.string(), role: z.enum(quotaRoles), profile: z.string(), environment: z.string(), reason: z.string().max(500), work: z.string().nullable(),
     // Logs written before GY-89 carry no cause; they read as the exhaustion the flag then meant.
     cause: z.enum(['exhausted', 'logged-out', 'unconfigured']).default('exhausted') }).strict()).max(50).default([]),
   // Accounts a session exhausted mid-work (GY-89), by environment name, each held until its reset.
   // The account each profile's latest launch selected, by `role:profile`, so an exhausted session can be traced to its account.
   selected: z.record(z.string(), z.object({ environment: z.string().nullable(), kind: z.string().nullable(), at: z.string(), work: z.string().nullable() }).strict()).default({}),
-  exhausted: z.record(z.string(), z.object({ at: z.string(), until: z.string(), resetsAt: z.string().nullable(), reason: z.string().max(500), role: z.enum(['worker', 'reviewer', 'producer']), profile: z.string(), work: z.string().nullable() }).strict()).default({}),
+  exhausted: z.record(z.string(), z.object({ at: z.string(), until: z.string(), resetsAt: z.string().nullable(), reason: z.string().max(500), role: z.enum(quotaRoles), profile: z.string(), work: z.string().nullable() }).strict()).default({}),
 }).strict();
 /**
  * An account a running session exhausted. The provider's own usage endpoint may lag behind the
@@ -910,6 +914,23 @@ export interface AccountSelection { environment: string | null; kind: string | n
 export type EnvironmentLog = { version: 1; environments: Record<string, EnvironmentHealth>; skipped: AccountSkip[]; selected: Record<string, AccountSelection>; exhausted: Record<string, ObservedExhaustion> };
 /** A profile that names no accounts launches on whatever its own environment selects; its exhaustion is held under this name. */
 export const profileAccount = (profile: string) => `profile:${profile}`;
+/**
+ * The runtime's own login (GY-182): a session launched on `kind` with no named account and no home
+ * of its own runs on it, whichever role it serves, so its exhaustion is held under this name as
+ * well and every such launch of every role is refused until the reset.
+ */
+export const runtimeLogin = (kind: string) => `runtime:${kind}`;
+/** Whether a profile that names no accounts launches on its runtime's own login, rather than a home its environment selects. */
+const sharesRuntimeLogin = (profile: { kind?: string; environment?: Record<string, string> }) =>
+  !!profile.kind && !Object.hasOwn(profile.environment ?? {}, environmentVariable[profile.kind as EnvironmentKind] ?? '');
+/** The names a session on no named account is held under: the profile's own and, when it shares it, the runtime's own login. */
+export const ownLoginAccounts = (profile: { name: string; kind?: string; environment?: Record<string, string> }) =>
+  [profileAccount(profile.name), ...(sharesRuntimeLogin(profile) ? [runtimeLogin(profile.kind!)] : [])];
+/** The hold, if any, that bars a launch of `profile` on no named account. */
+export function ownLoginHold(held: Record<string, ObservedExhaustion>, profile: { name: string; kind?: string; environment?: Record<string, string> }) {
+  const key = ownLoginAccounts(profile).find(name => held[name]);
+  return key ? { key, held: held[key] } : null;
+}
 export const selectionKey = (role: LaunchRole, profile: string) => `${role}:${profile}`;
 export function environmentLogPath(config: Pick<MasterConfig, 'credentialFile'>) {
   return resolve(dirname(config.credentialFile), `${basename(config.credentialFile).replace(/\.token$/, '')}.environments.json`);
@@ -955,9 +976,24 @@ export async function recordEnvironmentLog(config: Pick<MasterConfig, 'credentia
  * A role the registry does not define yet launches from the profile's own accounts, as before.
  */
 export type LaunchAccount = AgentEnvironment | FleetLaunchAccount;
-export interface LaunchSelection { account: LaunchAccount | null; health: EnvironmentHealth | null; skipped: AccountSkip[]; /** Gives a registry session back when the launch it was chosen for failed. */ release?: (reason: string) => Promise<void> }
-export async function selectAccount(config: Pick<MasterConfig, 'environments' | 'credentialFile' | 'run'> & Partial<Pick<MasterConfig, 'url' | 'hostId'>>, role: LaunchRole, profile: { name: string; accounts?: string[]; principal?: string }, probe: FleetProbe = {}): Promise<LaunchSelection> {
-  const fleet = await selectFleetSession(config, role, profile, probe);
+export interface LaunchSelection { account: LaunchAccount | null; health: EnvironmentHealth | null; skipped: AccountSkip[]; /** Gives a registry session back when the launch it was chosen for failed; false when the registry could not be told. */ release?: (reason: string) => Promise<boolean> }
+/**
+ * The registry chooses from what this host reports of each login, so an account a session here saw
+ * spent is reported spent (GY-182): whichever role found out, the registry hands it to no role
+ * before its reset, and records the hold for every other executor too. Nothing changes while no
+ * account is held.
+ */
+export async function heldAwareProbe(config: Pick<MasterConfig, 'credentialFile'> & Partial<Pick<MasterConfig, 'url' | 'hostId'>>, probe: FleetProbe = {}): Promise<FleetProbe> {
+  const held = await observedExhaustions(config, probe.now?.() ?? Date.now());
+  if (!Object.keys(held).length) return probe;
+  const client = probe.registry ?? (config.url && config.hostId ? httpFleetClient({ url: config.url, credentialFile: config.credentialFile }, probe.fetch ?? fetch, probe.timeoutMs ?? 10_000) : null);
+  if (!client) return probe;
+  return { ...probe, registry: { document: () => client.document(), end: (session, reason) => client.end(session, reason),
+    select: request => client.select({ ...request, observations: request.observations.map(entry => !held[entry.account] ? entry
+      : { account: entry.account, quota: { ...entry.quota, state: 'exhausted', resetsAt: held[entry.account].until, reason: describeObservedExhaustion(entry.account, held[entry.account]).slice(0, 500) } }) }) } };
+}
+export async function selectAccount(config: Pick<MasterConfig, 'environments' | 'credentialFile' | 'run'> & Partial<Pick<MasterConfig, 'url' | 'hostId'>>, role: LaunchRole, profile: { name: string; accounts?: string[]; principal?: string; kind?: string; environment?: Record<string, string> }, probe: FleetProbe = {}): Promise<LaunchSelection> {
+  const fleet = await selectFleetSession(config, role, profile, await heldAwareProbe(config, probe));
   if (fleet) {
     await recordEnvironmentLog(config, fleet.health ? [fleet.health] : [], fleet.skipped).catch(() => {});
     return fleet;
@@ -966,9 +1002,9 @@ export async function selectAccount(config: Pick<MasterConfig, 'environments' | 
   const checked: EnvironmentHealth[] = [], skipped: AccountSkip[] = [];
   const held = await observedExhaustions(config, probe.now?.() ?? Date.now());
   if (!profile.accounts?.length) {
-    const own = held[profileAccount(profile.name)];
+    const own = ownLoginHold(held, profile);
     if (own) {
-      const skip: AccountSkip = { at, role, profile: profile.name, environment: profileAccount(profile.name), reason: describeObservedExhaustion(`${profile.name}'s own account`, own), work: probe.work ?? null, cause: 'exhausted' };
+      const skip: AccountSkip = { at, role, profile: profile.name, environment: own.key, reason: describeObservedExhaustion(`${profile.name}'s own account`, own.held), work: probe.work ?? null, cause: 'exhausted' };
       await recordEnvironmentLog(config, [], [skip]).catch(() => {});
       throw new NoHealthyAccountError(`No healthy agent account for ${role} profile ${profile.name}: ${skip.reason}`, [skip]);
     }
@@ -1080,7 +1116,7 @@ export async function sharedGitDirectory(root: string) {
  * with each account's reason.
  */
 export interface ProfileAccountHealth { environment: string; healthy: boolean; reason: string | null; quota: string; resetsAt: string | null }
-export async function inspectProfileAccounts<T extends { available: boolean; reason: string | null }>(config: Pick<MasterConfig, 'environments' | 'credentialFile' | 'run'> & Partial<Pick<MasterConfig, 'url' | 'hostId'>>, role: LaunchRole, profiles: { name: string; accounts?: string[] }[], health: Record<string, T>, probe: EnvironmentProbe = {}) {
+export async function inspectProfileAccounts<T extends { available: boolean; reason: string | null }>(config: Pick<MasterConfig, 'environments' | 'credentialFile' | 'run'> & Partial<Pick<MasterConfig, 'url' | 'hostId'>>, role: LaunchRole, profiles: { name: string; accounts?: string[]; kind?: string; environment?: Record<string, string> }[], health: Record<string, T>, probe: EnvironmentProbe = {}) {
   const result: Record<string, T & { accounts?: ProfileAccountHealth[] }> = { ...health };
   const now = probe.now?.() ?? Date.now(), held = await observedExhaustions(config, now);
   // A role the agent registry defines is judged from the registry: every profile of the role
@@ -1088,14 +1124,17 @@ export async function inspectProfileAccounts<T extends { available: boolean; rea
   const fleet = await fleetRoleHealth(config, role, probe).catch(() => null);
   for (const profile of profiles) {
     if (fleet) {
-      if (result[profile.name]?.available !== false) result[profile.name] = { ...(result[profile.name] ?? { available: true, reason: null } as T), available: fleet.available, reason: fleet.reason, accounts: fleet.accounts };
+      // What a session on this host printed outranks the registry's last probe (GY-182).
+      const accounts = withHeldAccounts(fleet.accounts, held), usable = fleet.available && accounts.some(account => account.healthy);
+      if (result[profile.name]?.available !== false) result[profile.name] = { ...(result[profile.name] ?? { available: true, reason: null } as T), available: usable,
+        reason: usable ? null : !fleet.available ? fleet.reason : `No eligible account for ${role}: ${accounts.map(account => account.reason).filter(Boolean).join('; ')}`, accounts };
       continue;
     }
     if (result[profile.name]?.available === false) continue;
     if (!profile.accounts?.length) {
-      const own = held[profileAccount(profile.name)];
-      if (own) result[profile.name] = { ...(result[profile.name] ?? { available: true, reason: null } as T), available: false, reason: `No healthy agent account: ${describeObservedExhaustion(`${profile.name}'s own account`, own)}`,
-        accounts: [{ environment: profileAccount(profile.name), healthy: false, reason: describeObservedExhaustion(`${profile.name}'s own account`, own), quota: 'exhausted', resetsAt: own.resetsAt }] };
+      const own = ownLoginHold(held, profile);
+      if (own) result[profile.name] = { ...(result[profile.name] ?? { available: true, reason: null } as T), available: false, reason: `No healthy agent account: ${describeObservedExhaustion(`${profile.name}'s own account`, own.held)}`,
+        accounts: [{ environment: own.key, healthy: false, reason: describeObservedExhaustion(`${profile.name}'s own account`, own.held), quota: 'exhausted', resetsAt: own.held.resetsAt }] };
       continue;
     }
     const accounts: ProfileAccountHealth[] = [];
@@ -1115,6 +1154,11 @@ export async function inspectProfileAccounts<T extends { available: boolean; rea
   return result;
 }
 
+/** Registry accounts as this host knows them: one a session here saw spent is spent, whatever the registry last read. */
+export function withHeldAccounts(accounts: ProfileAccountHealth[], held: Record<string, ObservedExhaustion>): ProfileAccountHealth[] {
+  return accounts.map(account => held[account.environment] ? { ...account, healthy: false, reason: describeObservedExhaustion(account.environment, held[account.environment]), quota: 'exhausted', resetsAt: held[account.environment].resetsAt } : account);
+}
+
 /**
  * Whether a role has any account left. A role is out of capacity only when every launch profile
  * it has is unavailable for one reason — each of its accounts is spent — so a logged-out account
@@ -1124,7 +1168,9 @@ export interface RoleCapacity { role: CapacityRole; exhausted: boolean; accounts
 export function roleCapacity(role: CapacityRole, profiles: { name: string }[], health: Record<string, { available: boolean; reason: string | null; accounts?: ProfileAccountHealth[] }>): RoleCapacity {
   const spent = profiles.map(profile => ({ profile, accounts: health[profile.name]?.accounts ?? [], available: health[profile.name]?.available !== false }));
   const exhausted = spent.length > 0 && spent.every(entry => !entry.available && entry.accounts.length > 0 && entry.accounts.every(account => account.quota === 'exhausted'));
-  const accounts: CapacityAccount[] = exhausted ? spent.flatMap(entry => entry.accounts.map(account => ({ account: account.environment, profile: entry.profile.name, resetsAt: account.resetsAt, reason: (account.reason ?? 'quota exhausted').slice(0, 500) }))) : [];
+  // Profiles the registry decides share its accounts; each account is named once.
+  const accounts: CapacityAccount[] = exhausted ? spent.flatMap(entry => entry.accounts.map(account => ({ account: account.environment, profile: entry.profile.name, resetsAt: account.resetsAt, reason: (account.reason ?? 'quota exhausted').slice(0, 500) })))
+    .filter((account, index, all) => all.findIndex(other => other.account === account.account) === index) : [];
   return { role, exhausted, accounts, retryAt: capacityRetryAt(accounts) };
 }
 
@@ -1836,7 +1882,7 @@ export async function herdrWorkspaceHealth(config: Pick<MasterConfig, 'herdrWork
   return { workspace: config.herdrWorkspace, exists, reason: exists ? null : `Herdr workspace ${config.herdrWorkspace} configured in .graphyard/master.json no longer exists (Herdr lists ${workspaces.map(entry => entry?.workspace_id).filter(Boolean).join(', ') || 'none'}); every launch into it will refuse. Set herdrWorkspace to a live workspace, or rerun master init --herdr-workspace ID` };
 }
 
-export type HerdrAgent = { name?: string; pane_id?: string; agent?: string; agent_status?: string; cwd?: string; foreground_cwd?: string; tokens?: Record<string, string> };
+export type HerdrAgent = { name?: string; pane_id?: string; agent?: string | null; agent_status?: string; cwd?: string; foreground_cwd?: string; tokens?: Record<string, string> };
 // Reviewer failover is a capacity decision the operator must see, not a silent retry.
 function reviewState(work: Work) {
   if (reviewProviderOf(work.policy) !== 'agent') return null;
@@ -1982,8 +2028,9 @@ export function installationOwner(source: 'app-permissions' | 'held-jobs' | 'del
  * identity may run is routed to an agent: decisions a human used to make go to the master and
  * its independent approver through graphyard master decide.
  */
-export function workAttentionOwner(work: Work, cause: 'human-request' | 'containment-settleable' | 'containment-grace' | 'containment' | 'session' | 'proof-gap' | 'reviewer-exhausted' | 'launch-review' | 'launch-producer' | 'base-conflict' | 'merged-unauthorized' | 'merged-reverted' | 'contaminated' | 'merge-base-dismissed' | 'gate'): AttentionOwner {
+export function workAttentionOwner(work: Work, cause: 'human-request' | 'containment-settleable' | 'containment-grace' | 'containment' | 'session' | 'proof-gap' | 'reviewer-exhausted' | 'launch-review' | 'launch-producer' | 'base-conflict' | 'merged-unauthorized' | 'merged-reverted' | 'contaminated' | 'merge-base-dismissed' | 'merge-refused' | 'gate'): AttentionOwner {
   const key = work.key;
+  if (cause === 'merge-refused') return agentOwner('master', `Nothing to run by hand: the integration job asks GitHub again on every observation of ${key}; fix what GitHub names (branch protection, the App's pull request permission, a moved head) and the next observation clears it`);
   if (cause === 'merge-base-dismissed') return agentOwner('master', missingBaseAncestry(work)
     ? `Nothing to run: the merge queue republishes ${key}'s tip onto the base branch tip and the merge broker refuses it until then; graphyard master status shows the new head`
     : `Nothing to run: the approval is restored on the unchanged head and re-posted before the merge`);
@@ -2504,16 +2551,23 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     return { profile: profile.name, principal: profile.principal, agentName: profile.agentName, mode: profile.mode, state: agent?.agent_status ?? 'offline', pane: agent?.pane_id ?? null, cwd: agent?.foreground_cwd ?? agent?.cwd ?? null, contextPercent: agent?.tokens?.agent_watcher_context_pct ? Number(agent.tokens.agent_watcher_context_pct) : null, credential };
   });
   const placements = predictQueue(snapshot.work, now);
-  const queueRows = placements.map(placement => queueRow(placement, describeQueueBinding(snapshot.work.find(work => work.id === placement.id)!, snapshot.work, new Date(now), placement)));
+  // Each queued item's place in GitHub's own merge queue, as the control plane last read it (GY-258):
+  // GitHub performs the merge, so this is where a queued item waits once every gate passes.
+  const githubQueueRow = (work: Work) => work.observation?.githubQueue ? { github: { ...work.observation.githubQueue, summary: describeGitHubQueue(work) } } : {};
+  const queueRows = placements.map(placement => { const work = snapshot.work.find(item => item.id === placement.id)!; return { ...queueRow(placement, describeQueueBinding(work, snapshot.work, new Date(now), placement)), ...githubQueueRow(work) }; });
   const rows = snapshot.work.filter(work => work.stage !== 'done').map(work => {
     const placement = placements.find(entry => entry.id === work.id) ?? null;
     const active = !!work.lease && Date.parse(work.lease.expiresAt) > now;
     const profile = active ? profiles.find(item => item.principal === work.lease!.owner) : undefined;
     const session = profile ? workerSessions.find(item => item.profile === profile.name) : undefined;
+    // The one session state (GY-172): the attempt's registered record, as every reader shows it.
+    // Herdr's reading of the profile answers only for a session no launcher registered.
+    const handle = active ? (work.sessions ?? []).find(entry => entry.kind === 'implementation' && entry.id === `${work.lease!.owner}:${work.lease!.epoch}`) : undefined;
+    const recorded = handle ? sessionView(handle, new Date(now)) : null;
+    const sessionState = handle && recorded ? recorded.live ? recorded.observed! : handle.state === 'running' ? `not seen since ${recorded.seenAt ?? handle.updatedAt}` : recorded.observed ?? 'finished' : session?.state ?? 'offline';
     const first = work.gates.find(gate => !gate.passed);
     const freshObservation = !!work.observation && now - Date.parse(work.observation.at) >= 0 && now - Date.parse(work.observation.at) < 120_000;
-    const activeMerge = !!work.mergeExecution && Date.parse(work.mergeExecution.expiresAt) > now;
-    const mergeable = !activeMerge && freshObservation && work.stage === 'merge' && !!work.candidate && !!work.mergeAuthorization
+    const mergeable = freshObservation && work.stage === 'merge' && !!work.candidate && !!work.mergeAuthorization
       && work.mergeAuthorization.sha === work.candidate.sha && work.mergeAuthorization.baseSha === work.candidate.baseSha
       && work.mergeAuthorization.policyRevision === work.policyRevision
       && work.gates.every(gate => gate.passed) && !work.violations.length;
@@ -2582,6 +2636,8 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       ...(reverted ? { reverted: { base: reverted.base, files: reverted.files, removedBy: reverted.removedBy, partial: !!reverted.partial } } : {}),
       ...(dead && placement ? { queue: { sequence: dead.sequence, position: placement.position + 1, size: placement.size, unpublishable: true as const, behind: placements.filter(entry => entry.sequence > placement.sequence).map(entry => entry.key) } } : {}) } : null;
     const parked = parkedOnHuman(work) ? work.humanRequest! : null;
+    const queueRefusal = work.observation?.merged ? null : work.observation?.githubQueue?.refused ?? null;
+    const mergeRefusal = queueRefusal && queueRefusal.head === work.candidate?.sha ? queueRefusal : null;
     const [attention, cause]: [string | null, Parameters<typeof workAttentionOwner>[1] | null] = containmentAttention ? containmentAttention
       : parked ? [`${work.key} is parked on a human-only decision (${humanDecisionLabel[parked.kind]}) since ${parked.at}: ${parked.needed} — ${parked.reason}. It holds no lease and delays nothing else`, 'human-request']
       : merged?.reverted ? [`${work.key} was merged on GitHub (${merged.sha?.slice(0, 12) ?? 'merge commit unknown'} at ${merged.at ?? 'an unrecorded time'}) and its content is not on the base branch: ${merged.reverted.files.length}${merged.reverted.partial ? ' or more' : ''} file${merged.reverted.files.length === 1 && !merged.reverted.partial ? '' : 's'} missing from base ${merged.reverted.base.slice(0, 12)} — ${merged.reverted.files.map(file => `${file.path} (${file.detail})`).join(', ')} — ${merged.reverted.removedBy
@@ -2591,7 +2647,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       // A branch carrying another item's unlanded commits blocks the candidate whatever else stands
       // (GY-127): the restore is the control plane's, and the row says whether it is owed, requested or ran.
       : contaminated && !(contamination?.restore && contamination.restore.performedAt && contamination.restore.head !== contaminated.head) ? [`${work.key} branch head ${contaminated.head.slice(0, 12)} carries the unlanded commits of ${contaminated.foreign.join(', ')} (${contaminated.source.includes('ejection') ? `a speculative tip published behind ${contaminated.foreign.join(', ')} and ejected from the merge queue` : 'found in its history by GitHub'}): kept, it is refused as an out-of-scope regression; landed, it would record ${contaminated.foreign.join(', ')} merged without ${contaminated.foreign.length === 1 ? 'its' : 'their'} content. ${contamination?.restore?.outcome === 'unrepairable' ? 'A restore found no own reviewed head under it: the foreign commits sit under something the control plane cannot move' : contamination?.restore && !contamination.restore.performedAt ? `A restore is requested (${contamination.restore.cause}) and runs on the next reconciliation` : work.queueEjection?.sha === contaminated.head ? 'The control plane restores it to its own reviewed head merged onto the base on the next reconciliation' : `graphyard master repair ${work.key} REASON restores it to its own reviewed head merged onto the base`}`, 'contaminated']
-      : active && (!session || !['working', 'idle'].includes(session.state)) ? [`Assigned worker session is ${session?.state ?? 'offline'}`, 'session']
+      : active && !['working', 'idle'].includes(sessionState) ? [`Assigned worker session is ${sessionState}`, 'session']
       : gaps.length ? [`No principal is authorized to produce ${gaps.join(', ')}; grant the proof name before dispatch`, 'proof-gap']
       : review?.exhausted ? [`Every configured reviewer profile is exhausted for the current candidate (${review.failedOver.map(entry => `${entry.profile}: ${entry.exhaustion}`).join(', ')})`, 'reviewer-exhausted']
       : stalledLaunch ? [`Automatic ${stalledLaunch.failure!.kind} launch for ${work.key} refused ${stalledLaunch.failure!.attempts} time(s): ${stalledLaunch.failure!.reason}`, stalledLaunch.failure!.kind === 'review' ? 'launch-review' : 'launch-producer']
@@ -2603,6 +2659,9 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       // An item the control plane is bringing onto a moved base is not waiting for anybody. It
       // used to be the commonest attention line on this list — one per open candidate, every
       // merge — and answering it cost a rework round for a change that was a clean fast-forward.
+      // GitHub refused the control plane's merge request for this head: named with GitHub's reason,
+      // never left as a silent wait (every merge once stalled on a refused auto-merge).
+      : mergeRefusal ? [`GitHub refused the merge request for ${work.key} at ${mergeRefusal.head.slice(0, 12)} since ${mergeRefusal.at}: ${mergeRefusal.reason}`, 'merge-refused']
       : baseRefresh && !work.blocker ? [null, null]
       : work.blocker || dwellMs > 3_600_000 ? [first?.reasons[0] ?? `Work has remained at ${work.stage} for more than one hour`, 'gate'] : [null, null];
     const attentionOwner = cause ? workAttentionOwner(work, cause) : null;
@@ -2640,7 +2699,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
   const speed = pipelineSpeedSummary(snapshot.work, now);
   // Capacity, one line per spent role: the accounts, their resets, and every item that waits on it.
   const open = snapshot.work.filter(work => work.stage !== 'done');
-  const capacity = (['worker', 'reviewer', 'producer'] as const).flatMap(role => {
+  const capacity = quotaRoles.flatMap(role => {
     const waiting = open.filter(work => standingCapacity(work, role).length);
     if (!waiting.length) return [];
     const latest = waiting.map(work => standingCapacity(work, role)[0]).sort((a, b) => Date.parse(b.at) - Date.parse(a.at))[0];
@@ -3250,13 +3309,10 @@ export async function prepareWorkerLaunch(root: string, key: string, profileName
 /**
  * One merge executor instance: the coordinator principal and the instance minted for one daemon
  * process or one interactive `master merge` request (its request id, so a replay under
- * `GRAPHYARD_REQUEST_ID` is the same instance). The engine records the execution owner as
- * `principal#instance` (Engine.acquireMerge), so two executors under one credential never read
- * each other's execution as their own: the executor presents the same owner to
- * assertMergeCandidate and the same instance to every merge step.
+ * `GRAPHYARD_REQUEST_ID` is the same instance). The engine records who requested a merge as
+ * `principal#instance` (Engine.requestEnqueue); GitHub performs the merge itself.
  */
 export interface MergeExecutor { principal: string; instance: string }
-export const mergeExecutionOwner = (executor: MergeExecutor) => `${executor.principal}#${executor.instance}`;
 /**
  * The durable loop's executor instance, minted once per daemon process: an execution this loop
  * acquires is resumed by this loop alone, and an interactive `master merge` under the same
@@ -3267,22 +3323,14 @@ export const daemonExecutor = (principal: string): MergeExecutor => ({ principal
 export const unauthorizedMergeViolation = 'Merge observed without a prior authorization for this candidate';
 /** True for an item held at the merge stage by an observed merge no execution authorized (GY-92). */
 export const mergedWithoutAuthorization = (work: Work) => work.stage !== 'done' && !!work.observation?.merged && work.violations.includes(unauthorizedMergeViolation);
-export function assertMergeCandidate(work: Work, observedAt?: string, executionOwner?: string) {
+export function assertMergeCandidate(work: Work, observedAt?: string) {
   const age = observedAt && work.observation ? Date.parse(observedAt) - Date.parse(work.observation.at) : 0;
   const fresh = !observedAt || !!work.observation && Number.isFinite(age) && age >= 0 && age < 120_000;
-  const activeMerge = !!observedAt && !!work.mergeExecution && Date.parse(work.mergeExecution.expiresAt) > Date.parse(observedAt);
-  // Only the executor instance that acquired an execution resumes it. Another instance — the
-  // daemon beside an interactive merge, or a second daemon — is not a candidate for this item
-  // while it stands, and stands down here, before any authority is acquired or cancelled.
-  const resumable = activeMerge && !!executionOwner && work.mergeExecution!.owner === executionOwner && !work.mergeExecution!.fenced
-    && work.mergeExecution!.sha === work.candidate?.sha && work.mergeExecution!.baseSha === work.candidate?.baseSha
-    && work.mergeExecution!.policyRevision === work.policyRevision;
-  if (activeMerge && !resumable) throw new Error(`${work.key} does not have a current all-gates-passing merge authorization for this executor: merge execution ${work.mergeExecution!.id} is held by ${work.mergeExecution!.owner} until ${work.mergeExecution!.expiresAt}; this executor stands down without cancelling it`);
   // Unresolved review threads never refuse a merge by themselves; a branch that still requires
   // conversation resolution (protection drift) is a merge GitHub will refuse, so that is refused
-  // here, naming the threads, before any execution is issued.
-  const threads = activeMerge ? null : conversationProtectionRefusal(work);
-  if (threads) throw new Error(`${work.key} was refused before any merge execution was issued: ${threads}`);
+  // here, naming the threads, before GitHub is asked to merge.
+  const threads = conversationProtectionRefusal(work);
+  if (threads) throw new Error(`${work.key} was refused before GitHub was asked to merge it: ${threads}`);
   // An unresolved escalation, a standing blocking lead ruling, and trusted
   // evidence whose producer has since implemented the item each refuse delivery
   // in the broker as well as in the gate, so a stale snapshot can never present
@@ -3292,12 +3340,12 @@ export function assertMergeCandidate(work: Work, observedAt?: string, executionO
 }
 // Merge order is recomputed from current dependencies and conflicts on every
 // batch; registration order carries no authority.
-export function currentMergeCandidates(work: Work[], observedAt: string, executionOwner?: string) {
+export function currentMergeCandidates(work: Work[], observedAt: string) {
   const observed = Date.parse(observedAt);
   const order = mergeOrder(work, Number.isFinite(observed) ? observed : Date.now());
   const rank = (item: Work) => order.indexOf(item.key) + 1 || Number.MAX_SAFE_INTEGER;
   return work.filter(item => {
-    try { assertMergeCandidate(item, observedAt, executionOwner); return true; }
+    try { assertMergeCandidate(item, observedAt); return true; }
     catch { return false; }
   }).sort((a, b) => rank(a) - rank(b) || a.key.localeCompare(b.key));
 }
@@ -3309,7 +3357,6 @@ export async function continueMergeBatch<T extends { key: string }, R>(items: T[
   }
   return results;
 }
-type MergeExecution = { id: string; owner: string; sha: string; baseSha: string; policyRevision: number; authorizationRevision: number; issuedAt: string; expiresAt: string; verifiedAt?: string; committingAt?: string; clockOffset?: { min: number; max: number }; fenced?: { reason: string; at: string } | null };
 export function assertMergeProtection(protection: any, config: MasterConfig, work: Work) {
   const nativeReview = nativeReviewRequired(work.policy);
   const reviews = protection?.required_pull_request_reviews;
@@ -3407,109 +3454,6 @@ export async function repostCarriedApproval(config: MasterConfig, work: Work, ca
   if (posted?.state !== 'APPROVED' || posted?.commit_id !== candidate.sha || String(posted?.user?.login ?? '').toLowerCase() !== identity.toLowerCase() || !Number.isSafeInteger(posted?.id)) throw new Error(`GitHub did not record the re-posted approval for ${work.key} as ${identity} on ${candidate.sha.slice(0, 12)}`);
   return { posted: true, reviewId: posted.id, reason: `re-posted the carried approval of ${carried.originalSha.slice(0, 12)} as ${identity} on tip ${candidate.sha.slice(0, 12)}` };
 }
-export function githubProviderDelay(verifiedTime: number, serverDelayMs: number, response: string, providerToDatabaseOffsetMin = 0) {
-  const header = /^Date:\s*(.+?)\r?$/gmi.exec(response);
-  const githubTime = header ? Date.parse(header[1]) : Number.NaN;
-  if (!Number.isFinite(verifiedTime) || !Number.isInteger(serverDelayMs) || serverDelayMs < 0 || !Number.isFinite(githubTime) || !Number.isFinite(providerToDatabaseOffsetMin)) throw new Error('GitHub did not provide a valid server time for merge ordering');
-  // GitHub's Date and merged_at values have whole-second precision. Waiting from
-  // the lower bound of GitHub's reported second remains conservative when the
-  // database clock is ahead of GitHub's clock.
-  // Delivery compares the lower bound of GitHub's whole-second merged_at interval,
-  // translated into the database clock domain by offset.min.  Therefore the provider
-  // clock must cross (database time - offset.min), not merely database time.
-  const verifiedBoundary = Math.ceil((verifiedTime - providerToDatabaseOffsetMin + 1) / 1000) * 1000;
-  return Math.max(serverDelayMs, verifiedBoundary - githubTime, 0);
-}
-/**
- * The engine's answer when a merge step was already taken on the execution: `already verified`
- * (merge-verify) and `already committed` (merge-commit), each a confirmed refusal that tells
- * the caller to retry with the original idempotency key. From any executor but the one holding
- * that key, it means the execution is being driven by someone else.
- */
-export function stepAlreadyPerformed(error: unknown) {
-  return !!(error as { confirmedRefusal?: boolean } | null)?.confirmedRefusal && /Merge execution was already (verified|committed)/.test(error instanceof Error ? error.message : String(error));
-}
-function recordedVerification(execution: MergeExecution) {
-  const verifiedAt = Date.parse(execution.verifiedAt ?? '');
-  if (!Number.isFinite(verifiedAt) || !execution.clockOffset) throw Object.assign(new Error('Resumed merge execution carries an incomplete verification record'), { confirmedRefusal: true });
-  return { executionId: execution.id, sha: execution.sha, verifiedAt: execution.verifiedAt!, providerDelayMs: providerDelayAfterVerification(verifiedAt, execution.clockOffset), clockOffset: execution.clockOffset };
-}
-/** The engine's execution bound from its observation (engine.ts acquireMerge). */
-const mergeExecutionWindowMs = 120_000;
-/** The provider reserve (~92 s) plus the verify, protection and commit round trips before it. */
-export const mergeWindowFloorMs = 108_000;
-/** An observation older than this is re-read before a merge attempt acquires authority. */
-export const mergeObservationFreshMs = 8_000;
-const mergeObservationWaitSteps = 20;
-const commitMarginMs = 5_000;
-const observationAgeMs = (item: Work, now: string) => Date.parse(now) - Date.parse(item.observation?.at ?? '');
-/** A gh failure that carries a GitHub 4xx status: GitHub answered and did not merge. */
-export function definiteProviderRefusal(error: unknown) {
-  const message = error instanceof Error ? error.message : String(error);
-  const status = /\(HTTP (4\d\d)\)/.exec(message)?.[1];
-  if (!status) return null;
-  const line = message.split('\n').find(entry => entry.includes(`(HTTP ${status})`)) ?? '';
-  return `${line.replace(/^gh:\s*/, '').trim() || `HTTP ${status}`}`.slice(0, 500);
-}
-/**
- * The latest `Graphyard / merge` run on the head must have succeeded before the provider is asked.
- * Only runs published by the control plane's own GitHub App count: branch protection binds the
- * required check to that App, so a same-named run from another App or workflow neither satisfies
- * nor defers the merge.
- */
-export function assertMergeCheckPublished(payload: any, key: string, sha: string, appId: number) {
-  // Read with `--paginate --slurp`, the answer is the list of pages; GitHub filters check runs by
-  // name but not by App, so every page is read before the App's own runs are picked out.
-  const pages = Array.isArray(payload) ? payload : [payload];
-  if (!pages.length || pages.some(page => !Array.isArray(page?.check_runs))) throw new Error(`${key} merge deferred: GitHub's check runs on ${sha.slice(0, 12)} could not be read; retry`);
-  const runs = pages.flatMap(page => page.check_runs).filter((entry: any) => entry?.name === CHECK_NAME && entry?.app?.id === appId)
-    .sort((a: any, b: any) => Date.parse(b?.started_at ?? b?.completed_at ?? '') - Date.parse(a?.started_at ?? a?.completed_at ?? ''));
-  const latest = runs[0];
-  if (latest?.status !== 'completed' || latest?.conclusion !== 'success')
-    throw new Error(`${key} merge deferred: GitHub does not yet show ${CHECK_NAME} as passed on ${sha.slice(0, 12)} (${latest ? `${latest.status}${latest.conclusion ? `/${latest.conclusion}` : ''}` : 'not published'}); retry once it is`);
-}
-/** What mergeWork reports for a retained execution: pending until GitHub shows the merge (GY-195). */
-type RetainedMergeOutcome = { key: string; pr: number; sha: string; method: MasterConfig['mergeMethod']; result: string; pending?: boolean; merged?: boolean; mergeSha?: string; carriedApproval?: CarriedApprovalRepost };
-/**
- * A committed execution whose provider outcome is unknown is one GitHub read away from an answer
- * (GY-202). The pull request itself says whether it merged; waiting for the execution to expire
- * only delayed the answer by up to two minutes and stranded the candidate if nobody asked again.
- *
- * - merged: the control plane is asked to observe it now, which records the delivery from
- *   merge_commit_sha and closes the execution; no provider call is made.
- * - open at the execution's head: the provider did not merge, as far as this one read can tell.
- *   This executor cancels its own execution and fails the attempt; the guarded merge is retried
- *   on the next cycle, never in this one: a read served by a lagging replica can say open for a pull request the
- *   provider already merged, and a fresh execution acquired on it would be the one the merged
- *   observation is bound to. A cycle later the pull request answers for itself.
- * - anything else — an unreadable answer, a moved head, a closed pull request, or an execution
- *   another executor instance holds — stays pending, and the control plane is asked to observe.
- */
-async function settleRetainedMerge(config: MasterConfig, current: Work, authorization: ReturnType<typeof assertMergeCandidate>, cancel: (work: Work, execution: MergeExecution, reason: string) => Promise<unknown>, run: ChildRun, executionOwner?: string, refresh?: (work: Work) => Promise<unknown>): Promise<RetainedMergeOutcome> {
-  const execution = current.mergeExecution!;
-  const outcome = { key: authorization.key, pr: authorization.pr, sha: authorization.sha, method: config.mergeMethod };
-  // A refresh that fails is not a failed settlement — the observation job still runs on its own
-  // cadence — but what it failed with is part of what the pending outcome reports.
-  let refreshError: string | null = null;
-  const observe = async () => { try { await refresh?.(current); } catch (error) { refreshError = (error instanceof Error ? error.message : String(error)).slice(0, 200); } };
-  if (current.observation?.merged) return { ...outcome, merged: true, ...(current.observation.mergeSha ? { mergeSha: current.observation.mergeSha } : {}), result: 'GitHub shows the pull request merged under the retained execution; Graphyard delivers it from that observation without another provider call' };
-  const pending = (why: string) => ({ ...outcome, pending: true, result: `the provider outcome of merge execution ${execution.id} is unknown; ${why}; Graphyard retained it until ${execution.expiresAt} and asks GitHub again next cycle${refreshError ? ` (asking the control plane to observe it failed: ${refreshError})` : ''}` });
-  let pr: { merged?: unknown; merge_commit_sha?: unknown; state?: unknown; head?: { sha?: unknown } } | null = null;
-  try { pr = JSON.parse(await run('gh', ['api', `repos/${config.repository}/pulls/${authorization.pr}`])); }
-  catch (error) { return pending(`GitHub could not be read (${error instanceof Error ? error.message.slice(0, 200) : 'unknown error'})`); }
-  if (pr?.merged === true && typeof pr.merge_commit_sha === 'string') {
-    await observe();
-    return { ...outcome, merged: true, mergeSha: pr.merge_commit_sha, result: `GitHub shows pull request #${authorization.pr} merged as ${pr.merge_commit_sha.slice(0, 12)} under the retained execution; the control plane observes it and records the delivery from that merge commit without another provider call` };
-  }
-  if (pr?.merged !== false || typeof pr.state !== 'string') return pending('GitHub did not say whether the pull request merged');
-  if (pr.state !== 'open' || pr.head?.sha !== execution.sha) { await observe(); return pending(`GitHub shows the pull request ${pr.state} at head ${String(pr.head?.sha ?? 'unknown').slice(0, 12)}, not open at ${execution.sha.slice(0, 12)}`); }
-  if (!executionOwner || execution.owner !== executionOwner) { await observe(); return pending(`GitHub shows the pull request open and unmerged, and the execution belongs to ${execution.owner}, which this executor never cancels`); }
-  await cancel(current, execution, `GitHub shows pull request #${authorization.pr} open and unmerged at ${execution.sha.slice(0, 12)} after the provider call; the merge is retried next cycle`);
-  await observe();
-  // Thrown, not returned: nothing was merged by this attempt, so the executor's row and the loop's
-  // action record a failed attempt and retry it on their short backoff rather than settle it.
-  throw new Error(`${authorization.key}: GitHub shows pull request #${authorization.pr} open and unmerged at ${execution.sha.slice(0, 12)}, so merge execution ${execution.id} was cancelled; the guarded merge is retried next cycle, once a fresh reading can show a merge this one missed${refreshError ? ` (asking the control plane to observe it failed: ${refreshError})` : ''}`);
-}
 /**
  * What a guarded merge is bound to: the candidate head, its base, the policy revision, the published
  * queue tip and the all-gates authorization for exactly those. The whole-document revision is not
@@ -3529,198 +3473,59 @@ export function mergeBinding(work: Work) {
  */
 export function transientMergeRace(error: unknown) {
   const text = error instanceof Error ? error.message : String(error);
-  return /(changed (before|after) GitHub verification|changed while GitHub was re-read before merging|Task changed before merge execution); retry\b/.test(text);
+  return /(changed (before|after) GitHub verification|Task changed before (the merge was requested|merge execution)); retry\b/.test(text);
 }
-export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot: () => Promise<{ work: Work[]; now: string }>, acquire: (work: Work, authorization: ReturnType<typeof assertMergeCandidate>) => Promise<{ execution: MergeExecution }>, cancel: (work: Work, execution: MergeExecution, reason: string) => Promise<unknown>, verify: (work: Work, execution: MergeExecution) => Promise<{ executionId: string; sha: string; verifiedAt: string; providerDelayMs: number; clockOffset?: { min: number; max: number } }>, run: ChildRun = defaultChildRun, executionOwner?: string, commit?: (work: Work, execution: MergeExecution) => Promise<{ executionId: string; sha: string; committingAt: string }>, repost?: (work: Work, carried: CarriedApproval) => Promise<CarriedApprovalRepost>, refresh?: (work: Work) => Promise<unknown>) {
-  let before = await freshSnapshot(); let current = before.work.find(item => item.id === work.id);
+/** What the merge step reports: the request GitHub now holds, or the merge GitHub already performed. */
+export type MergeOutcome = { key: string; pr: number; sha: string; result: string; pending?: boolean; enqueued?: boolean; merged?: boolean; mergeSha?: string; carriedApproval?: CarriedApprovalRepost };
+/**
+ * The merge step (GY-258). GitHub executes merges; Graphyard only gates them. The step re-reads the
+ * item, confirms every gate still passes for exactly the candidate, and records the coordinator's
+ * request that GitHub merge it. The control plane's App then publishes `Graphyard / merge` on that
+ * head and enqueues the pull request in GitHub's merge queue (auto-merge where the base branch has
+ * none), and dequeues it if authorization is withdrawn. The outcome is pending until the merged
+ * observation, from which the delivery is recorded; no Graphyard code calls the merge endpoint.
+ */
+export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot: () => Promise<{ work: Work[]; now: string }>, enqueue: (work: Work, authorization: ReturnType<typeof assertMergeCandidate>) => Promise<{ enqueue?: { sha: string; at: string } }>, run: ChildRun = defaultChildRun, repost?: (work: Work, carried: CarriedApproval) => Promise<CarriedApprovalRepost>): Promise<MergeOutcome> {
+  const before = await freshSnapshot(); const current = before.work.find(item => item.id === work.id);
   // The attempt is bound to what it merges, not to the revision it was read at (GY-192).
   if (!current || mergeBinding(current) !== mergeBinding(work)) throw new Error(`${work.key} changed before GitHub verification; retry`);
-  // Only a recorded provider commit marks an unknown provider outcome: the broker may already
-  // have called GitHub. That retained execution is a pending outcome, never a merge (GY-195), and
-  // it is settled by reading the pull request (GY-202): merged is delivered from the observation
-  // without another provider call; open at the same head cancels it, and the guarded merge runs
-  // again next cycle. A verified execution that never reached the commit resumes below; the
-  // provider was not attempted.
-  if (current.mergeExecution?.committingAt) return settleRetainedMerge(config, current, assertMergeCandidate(current, before.now, executionOwner), cancel, run, executionOwner, refresh);
-  // The engine bounds a merge execution by the GitHub observation it was granted on (two minutes
-  // from observation.at), and the provider call needs about 92 s of it. An attempt that starts
-  // on an observation already ~20 s old runs out of window after committing (GY-159, 2026-09-24),
-  // so a fresh reading is asked for first and the attempt continues on it.
-  if (refresh && !current.mergeExecution && observationAgeMs(current, before.now) > mergeObservationFreshMs) {
-    const seen = current.observation?.at;
-    await refresh(current);
-    for (let step = 0; step < mergeObservationWaitSteps; step++) {
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      before = await freshSnapshot(); current = before.work.find(item => item.id === work.id);
-      if (!current || current.observation?.at !== seen) break;
-    }
-    if (!current || mergeBinding(current) !== mergeBinding(work)) throw new Error(`${work.key} changed while GitHub was re-read before merging; retry`);
-  }
-  const authorization = assertMergeCandidate(current, before.now, executionOwner);
+  if (current.observation?.merged && current.candidate) return { key: current.key, pr: current.candidate.pr, sha: current.candidate.sha, merged: true, ...(current.observation.mergeSha ? { mergeSha: current.observation.mergeSha } : {}),
+    result: 'GitHub shows the pull request merged; Graphyard records the delivery from that observation' };
+  const authorization = assertMergeCandidate(current, before.now);
   // The pull request answers for its own head, base branch name and state; the base tip is read
   // from the ref itself inside assertQueuedLanding, because `baseRefOid` is a cached value.
   const pr = JSON.parse(await run('gh', ['pr', 'view', String(authorization.pr), '--repo', config.repository, '--json', 'headRefOid,baseRefName,state,isDraft']));
   if (pr.headRefOid !== authorization.sha || pr.baseRefName !== config.baseBranch || pr.state !== 'OPEN' || pr.isDraft) throw new Error(`${work.key} changed on GitHub before merge`);
   await assertQueuedLanding(current, authorization, config.baseBranch, config.repository, run);
   // A head without the base tip in its history is refused before any approval is re-posted: GitHub
-  // would dismiss it again as a merge-base change on this very attempt (GY-145).
+  // would dismiss it again as a merge-base change (GY-145).
   const unancestored = missingBaseAncestry(current);
   if (unancestored) throw new Error(`${work.key} merge refused: ${missingAncestryReason(unancestored)}`);
-  // An approval the control plane carried onto its authored tip is re-posted through the
-  // reviewer App before any authority is acquired, so a native review requirement that GitHub
-  // re-armed on the tip publication is met by the same identity that gave the approval.
+  // An approval the control plane carried onto its authored tip is re-posted through the reviewer
+  // App first, so a native review requirement GitHub re-armed on the tip does not hold the queue.
   const carried = carriedApproval(current);
   const reposted = carried && repost ? await repost(current, carried) : null;
-  const authorityBudgetStartedAt = performance.now();
   const after = await freshSnapshot(); const latest = after.work.find(item => item.id === work.id);
-  // What GitHub was just verified against must still be what is merged; an unrelated write in
-  // between (an observation refresh, a dispatch record) is not a reason to refuse.
   if (!latest || mergeBinding(latest) !== mergeBinding(current)) throw new Error(`${work.key} changed after GitHub verification; retry`);
   let latestAuthorization: ReturnType<typeof assertMergeCandidate>;
-  try { latestAuthorization = assertMergeCandidate(latest, after.now, executionOwner); }
+  try { latestAuthorization = assertMergeCandidate(latest, after.now); }
   catch (error) { throw new Error(`${work.key} changed after GitHub verification and no longer qualifies: ${error instanceof Error ? error.message : String(error)}`); }
-  const resumed = latest.mergeExecution && Date.parse(latest.mergeExecution.expiresAt) > Date.parse(after.now) && latest.mergeExecution.owner === executionOwner;
-  // No execution is acquired that cannot cover the provider call: it would only expire, or be
-  // retained as an unknown outcome, and block the next attempt until it lapses.
-  if (!resumed) {
-    const window = Math.min(Date.parse(latest.observation?.at ?? '') + mergeExecutionWindowMs, Date.parse(after.now) + mergeExecutionWindowMs) - Date.parse(after.now);
-    if (!(window >= mergeWindowFloorMs)) throw new Error(`${work.key} merge deferred: the GitHub observation leaves ${Number.isFinite(window) ? Math.round(window / 1000) : 0} s of merge window, under the ${mergeWindowFloorMs / 1000} s a provider call needs; retry on a fresh observation`);
-  }
-  const granted = resumed ? { execution: latest.mergeExecution } : await acquire(latest, latestAuthorization);
-  if (!granted.execution || granted.execution.sha !== authorization.sha || granted.execution.baseSha !== authorization.baseSha || granted.execution.policyRevision !== authorization.policyRevision || !resumed && !(granted.execution.authorizationRevision >= latestAuthorization.revision)) throw new Error(`${work.key} received an invalid merge execution authority`);
-  const remainingAtSnapshot = Date.parse(granted.execution.expiresAt) - Date.parse(after.now);
-  let providerStarted = false; let cancelled = false;
-  let verificationStarted = false; let verificationCompleted = false;
-  try {
-    const lockedPr = JSON.parse(await run('gh', ['pr', 'view', String(authorization.pr), '--repo', config.repository, '--json', 'headRefOid,baseRefName,state,isDraft']));
-    if (lockedPr.headRefOid !== authorization.sha || lockedPr.baseRefName !== config.baseBranch || lockedPr.state !== 'OPEN' || lockedPr.isDraft) throw new Error(`${work.key} changed on GitHub after merge authority was acquired`);
-    await assertQueuedLanding(latest, authorization, config.baseBranch, config.repository, run);
-    const remaining = remainingAtSnapshot - (performance.now() - authorityBudgetStartedAt);
-    if (!Number.isFinite(remaining) || remaining <= 90_000) throw new Error(`${work.key} merge execution does not remain valid for the provider timeout; refresh gate inputs and retry`);
-    const protection = JSON.parse(await run('gh', ['api', `repos/${config.repository}/branches/${encodeURIComponent(config.baseBranch)}/protection`]));
-    assertMergeProtection(protection, config, latest);
-    // A broker that stopped between merge-verify and merge-commit resumes here holding a verified
-    // execution. The verification is a durable fact of that execution — the record carries its
-    // verifiedAt and bounded clock offset — so the resumed attempt rebuilds it rather than asking
-    // the engine to verify again, which it refuses, and then runs the same clock wait, pre-commit
-    // revalidation, transactional commit and pre-provider checks as a first attempt.
-    verificationStarted = true; const verified = granted.execution.verifiedAt ? recordedVerification(granted.execution) : await verify(latest, granted.execution); verificationCompleted = true;
-    const verifiedTime = Date.parse(verified.verifiedAt);
-    if (verified.executionId !== granted.execution.id || verified.sha !== authorization.sha || !Number.isFinite(verifiedTime) || !Number.isInteger(verified.providerDelayMs) || verified.providerDelayMs < 0 || verified.providerDelayMs > 21_000
-      || !verified.clockOffset || !Number.isFinite(verified.clockOffset.min) || !Number.isFinite(verified.clockOffset.max) || verified.clockOffset.min > verified.clockOffset.max || verified.clockOffset.max - verified.clockOffset.min > 20_000) throw new Error(`${work.key} received an invalid final GitHub gate verification`);
-    // Delivery attribution accepts a merge only when GitHub's whole-second merged_at interval,
-    // translated into the database clock by the verified offset bound, ends before the execution
-    // expires. The remaining authority must therefore cover the provider timeout plus that
-    // timestamp interval and the accepted offset width, or a slow but successful provider merge
-    // just inside the deadline would be permanently classified as unauthorized.
-    const providerReserve = 90_000 + 1000 + (verified.clockOffset.max - verified.clockOffset.min);
-    const githubClock = await run('gh', ['api', '--include', 'rate_limit']);
-    const delay = githubProviderDelay(verifiedTime, verified.providerDelayMs, githubClock);
-    if (delay > 21_000 || remainingAtSnapshot - (performance.now() - authorityBudgetStartedAt) - delay <= providerReserve) throw new Error('Clock uncertainty leaves insufficient merge authority; refresh and retry');
-    if (delay) await new Promise(resolve => setTimeout(resolve, delay));
-    const remainingAfterProtection = remainingAtSnapshot - (performance.now() - authorityBudgetStartedAt);
-    // The margin covers the commit round trip and the post-commit clock wait, so a window that is
-    // already too short is refused here, before commit, where the execution is released.
-    if (!Number.isFinite(remainingAfterProtection) || remainingAfterProtection <= providerReserve + commitMarginMs) throw new Error(`${work.key} merge execution no longer has enough time for the provider call after verifying branch protection; retry`);
-    // Verification and the provider call are separated by the clock-ordering
-    // delay, and a lead escalation or blocking ruling can land inside it. The
-    // last thing Graphyard reads before handing the merge to GitHub is the
-    // record itself: the execution must still stand unfenced, and every gate
-    // must still pass. Pinned inputs are not re-aged here, so this adds a
-    // refusal for concerns raised mid-flight without adding a freshness race.
-    const settled = await freshSnapshot(); const final = settled.work.find(item => item.id === work.id);
-    const execution = final?.mergeExecution;
-    if (!final || !execution || execution.id !== granted.execution.id || execution.fenced || Date.parse(execution.expiresAt) <= Date.parse(settled.now))
-      throw new Error(`${work.key} merge execution was fenced, cancelled, or expired after final verification: ${execution?.fenced?.reason ?? 'execution is no longer current'}`);
-    const refusals = [...standingEscalations(final).map(entry => `Unresolved ${entry.trigger} escalation: ${entry.reason}`),
-      ...(final.leadHold ? [`Slice lead ${final.leadHold.leadId} ruled ${final.leadHold.action} under rule ${final.leadHold.ruleId}`] : []),
-      ...final.gates.filter(gate => !gate.passed).flatMap(gate => gate.reasons), ...final.violations];
-    if (refusals.length || !final.mergeAuthorization || final.mergeAuthorization.sha !== authorization.sha
-      || final.mergeAuthorization.baseSha !== authorization.baseSha || final.mergeAuthorization.policyRevision !== authorization.policyRevision
-      || final.candidate?.sha !== authorization.sha || final.candidate.baseSha !== authorization.baseSha)
-      throw new Error(`${work.key} no longer passes every gate after final verification: ${refusals.join('; ') || 'merge authorization was invalidated'}`);
-    // GitHub refuses the merge while the published `Graphyard / merge` check lags the gates it
-    // reports (HTTP 405, GY-159 2026-09-24). Read it before committing, while a refusal still
-    // releases the execution.
-    assertMergeCheckPublished(JSON.parse(await run('gh', ['api', `repos/${config.repository}/commits/${authorization.sha}/check-runs?check_name=${encodeURIComponent(CHECK_NAME)}&filter=all&per_page=100`, '--paginate', '--slurp'])), work.key, authorization.sha, config.githubAppId);
-    if (!commit) throw new Error(`${work.key} merge broker commit callback is unavailable`);
-    const committed = await commit(latest, granted.execution);
-    const committingTime = Date.parse(committed.committingAt);
-    if (committed.executionId !== granted.execution.id || committed.sha !== authorization.sha || !Number.isFinite(committingTime)) throw new Error(`${work.key} received an invalid provider commit authority`);
-    // From this transactional boundary onward revocation refuses: the broker has won
-    // serialization and must treat any provider error as an unknown merge outcome.
-    providerStarted = true;
-    // GitHub reports merged_at only to whole-second precision. Cross a provider-clock
-    // boundary after the transactional commit so a fast successful merge cannot appear
-    // to predate the authority that serialized it against revocation.
-    const commitClock = await run('gh', ['api', '--include', 'rate_limit']);
-    const commitDelay = githubProviderDelay(committingTime, 0, commitClock, verified.clockOffset.min);
-    if (commitDelay > 21_000 || remainingAtSnapshot - (performance.now() - authorityBudgetStartedAt) - commitDelay <= providerReserve) throw new Error('Clock uncertainty leaves insufficient committed merge authority; wait for observation or expiry');
-    if (commitDelay) await new Promise(resolve => setTimeout(resolve, commitDelay));
-    // A suspended broker can resume after its execution expired: reconciliation then
-    // clears the execution, the revocation window reopens, and this stale SHA could
-    // merge before the asynchronously published GitHub check changes. Revalidate the
-    // committed authority and its remaining lifetime immediately before the provider
-    // mutation; the mutation is refused on any missing, fenced or expired authority. The base
-    // branch is re-read from its ref for the same reason: a base that advanced outside the
-    // queue during the wait would land a different tree than the one the tip was tested on.
-    await assertQueuedLanding(latest, authorization, config.baseBranch, config.repository, run);
-    const preProvider = await freshSnapshot();
-    const finalExecution = preProvider.work.find(item => item.id === work.id)?.mergeExecution;
-    const remainingBeforeProvider = remainingAtSnapshot - (performance.now() - authorityBudgetStartedAt);
-    if (!finalExecution || finalExecution.id !== granted.execution.id || !finalExecution.committingAt || finalExecution.fenced
-      || finalExecution.sha !== authorization.sha || Date.parse(finalExecution.expiresAt) <= Date.parse(preProvider.now)
-      || !Number.isFinite(remainingBeforeProvider) || remainingBeforeProvider <= providerReserve)
-      throw new Error(`${work.key} merge execution expired, was fenced or was superseded during the provider clock wait; the provider merge is refused${finalExecution?.fenced ? `: ${finalExecution.fenced.reason}` : ''}`);
-    let answer: string;
-    try { answer = await run('gh', ['api', '--method', 'PUT', `repos/${config.repository}/pulls/${authorization.pr}/merge`, '-f', `sha=${authorization.sha}`, '-f', `merge_method=${config.mergeMethod}`]); }
-    catch (error) {
-      // A 4xx answer is GitHub refusing the merge, not an unknown outcome: the execution is
-      // released so the next attempt is not held until it lapses.
-      const refusal = definiteProviderRefusal(error);
-      if (refusal) { await cancel(latest, granted.execution, refusal); cancelled = true; throw new Error(`GitHub refused the merge of ${work.key}: ${refusal}`); }
-      throw error;
-    }
-    const provider = JSON.parse(answer);
-    if (provider.merged !== true || typeof provider.sha !== 'string') {
-      await cancel(latest, granted.execution, provider.message || 'GitHub confirmed that it did not merge the candidate'); cancelled = true;
-      throw new Error(provider.message || 'GitHub did not merge the candidate');
-    }
-  }
-  catch (error) {
-    // A confirmed refusal that says the step was already performed on this execution means
-    // another executor — or an earlier attempt of this one, read from a stale snapshot — is
-    // ahead of this attempt. The execution is theirs to finish: this executor stands down and
-    // leaves it intact for its owner or for observation to reconcile. It never cancels an
-    // execution it did not just acquire, whatever the refusal (GY-92).
-    if (stepAlreadyPerformed(error)) throw new Error(`${work.key}: ${error instanceof Error ? error.message : 'merge step refused'}; another executor already performed that step on merge execution ${granted.execution.id}, so this executor stands down and leaves the execution intact`);
-    if (!providerStarted && verificationStarted && !verificationCompleted && !(error as any)?.confirmedRefusal) throw new Error(`${error instanceof Error ? error.message : 'Final GitHub verification failed'}; the verification outcome is unknown, so Graphyard retained execution ${granted.execution.id} for an idempotent retry`);
-    if (!providerStarted) try { await cancel(latest, granted.execution, error instanceof Error ? error.message : 'GitHub merge failed before provider invocation'); }
-    catch { throw new Error(`${work.key} GitHub merge failed before provider invocation and Graphyard could not cancel execution ${granted.execution.id}`); }
-    if (providerStarted && !cancelled) throw new Error(`${error instanceof Error ? error.message : 'GitHub merge call failed'}; the merge outcome is unknown, so Graphyard retained execution ${granted.execution.id} until observation or expiry`);
-    throw error;
-  }
-  return { key: authorization.key, pr: authorization.pr, sha: authorization.sha, method: config.mergeMethod, result: 'merge requested; Graphyard will mark Done only after observing the merge', ...(reposted ? { carriedApproval: reposted } : {}) };
+  const requested = await enqueue(latest, latestAuthorization);
+  if (requested.enqueue?.sha !== authorization.sha) throw new Error(`${work.key} merge request was not recorded for ${authorization.sha.slice(0, 12)}`);
+  return { key: authorization.key, pr: authorization.pr, sha: authorization.sha, pending: true, enqueued: true,
+    result: `merge requested for ${authorization.sha.slice(0, 12)}: the control plane publishes ${CHECK_NAME} on it and enqueues pull request #${authorization.pr} in GitHub's merge queue; GitHub performs the merge and Graphyard marks Done only after observing it`,
+    ...(reposted ? { carriedApproval: reposted } : {}) };
 }
 
 /**
- * One guarded merge attempt, with the idempotency keys that make an interrupted attempt safe to
- * repeat. The interactive command and the durable loop share it so neither can drift into a
- * different merge path.
+ * One merge step, with the idempotency key that makes an interrupted request safe to repeat. The
+ * interactive command and the durable loop share it so neither can drift into a different path.
  */
 export function mergeExecutor(config: MasterConfig, snapshot: () => Promise<{ work: Work[]; now: string }>, mutation: (path: string, data: unknown, requestId?: string) => Promise<any>, executor: MergeExecutor, outerRequest: string, run?: ChildRun) {
-  const stepKey = (item: Work, step: string, executionId = '') => createHash('sha256').update(`${outerRequest}\0master-merge\0${item.id}\0${item.candidate?.sha ?? ''}\0${step}\0${executionId}`).digest('hex');
-  // Every step names the executor instance; the engine binds it to the principal and refuses a
-  // step — cancel above all — from any other instance, so the owner the broker resumes on is
-  // exactly the one the engine recorded.
-  const instance = executor.instance;
+  const stepKey = (item: Work, step: string) => createHash('sha256').update(`${outerRequest}\0master-merge\0${item.id}\0${item.candidate?.sha ?? ''}\0${step}`).digest('hex');
   return (item: Work) => mergeWork(config, item, snapshot,
-    (latest, authorization) => mutation(`work/${latest.id}/merge-acquire`, { expectedRevision: authorization.revision, sha: authorization.sha, baseSha: authorization.baseSha, policyRevision: authorization.policyRevision, ...(latest.queue?.speculation?.tip ? { queueTip: latest.queue.speculation.tip } : {}), executor: instance }, stepKey(latest, 'acquire')),
-    (latest, execution, reason) => mutation(`work/${latest.id}/merge-cancel`, { executionId: execution.id, reason, executor: instance }, stepKey(latest, 'cancel', execution.id)),
-    (latest, execution) => mutation(`work/${latest.id}/merge-verify`, { executionId: execution.id, executor: instance }, stepKey(latest, 'verify', execution.id)), run, mergeExecutionOwner(executor),
-    (latest, execution) => mutation(`work/${latest.id}/merge-commit`, { executionId: execution.id, executor: instance }, stepKey(latest, 'commit', execution.id)),
-    (latest, carried) => repostCarriedApproval(config, latest, carried, { run: run ?? defaultChildRun }),
-    latest => mutation(`work/${latest.id}/resync`, {}, stepKey(latest, `refresh:${latest.observation?.at ?? ''}`)));
+    (latest, authorization) => mutation(`work/${latest.id}/merge-acquire`, { enqueue: true, expectedRevision: authorization.revision, sha: authorization.sha, baseSha: authorization.baseSha, policyRevision: authorization.policyRevision, ...(latest.queue?.speculation?.tip ? { queueTip: latest.queue.speculation.tip } : {}), executor: executor.instance }, stepKey(latest, 'enqueue')),
+    run, (latest, carried) => repostCarriedApproval(config, latest, carried, { run: run ?? defaultChildRun }));
 }
 
 // ---- Autonomy ----------------------------------------------------------------------------------
@@ -4056,7 +3861,82 @@ export async function restartMasterLoop(root: string, config: MasterConfig, lock
 export const approverDistinguisher = 6;
 export const approverSessionName = (work: Pick<Work, 'key'>, decision: string) =>
   distinctSessionName(sessionNameLimit - sessionName('graphyard-approver', work.key).length - 1 >= approverDistinguisher ? ['graphyard-approver'] : ['gy-approver'], work.key, decision);
-export async function launchApprover(root: string, work: Work, decision: string, explicitKind: NonNullable<WorkerProfile['kind']> | undefined, agents: HerdrAgent[], run?: ChildRun, probe: FleetProbe = {}) {
+/**
+ * The names an approver's and an escalation handler's exhaustion is held under when the session
+ * ran on no named account: the runtime's own login, which every launch of the role shares.
+ */
+export const approverProfile = 'approver', escalationProfile = 'escalation-handler';
+/** The runtime an approver runs on when nothing names an account or a runtime for it. */
+export const approverRuntime = (config: Pick<MasterConfig, 'reviewers' | 'workers'>) => config.reviewers[0]?.kind ?? config.workers[0]?.kind;
+/**
+ * Where an approver may run when the agent registry does not decide the role (GY-182): the accounts
+ * the reviewer profiles name — the runtime an approver already borrowed — or, with none named, the
+ * worker profiles'. An approver is a capacity role like any other, so an account a session of any
+ * role saw spent is skipped until its reset, and the next account takes the decision.
+ */
+export function approverProfiles(config: Pick<MasterConfig, 'reviewers' | 'workers'>) {
+  const named = <P extends { name: string; accounts?: string[] }>(profiles: P[]) => profiles.filter(profile => profile.accounts?.length).map(profile => ({ name: profile.name, accounts: profile.accounts! }));
+  const reviewers = named(config.reviewers);
+  return reviewers.length ? reviewers : named(config.workers.filter(profile => profile.mode === 'launch'));
+}
+export type ApproverSelection = { fleet: NonNullable<Awaited<ReturnType<typeof selectFleetSession>>>; account: FleetLaunchAccount; profile: string; skipped: AccountSkip[] }
+  | { fleet: null; account: AgentEnvironment | null; profile: string; skipped: AccountSkip[] };
+/**
+ * The account an approver launches on: the registry's approver role when it defines one, else the
+ * first healthy, unheld account of `approverProfiles`, else the runtime's own login unless a session
+ * saw it spent. Throws `NoHealthyAccountError` — `capacityExhausted` when every skip was spent quota.
+ */
+export async function selectApproverAccount(config: MasterConfig, work: string | null, principal: string, probe: FleetProbe = {}, kind = approverRuntime(config)): Promise<ApproverSelection> {
+  const fleet = await selectFleetSession(config, 'approver', { name: approverProfile, principal }, await heldAwareProbe(config, { ...probe, work: work ?? undefined }));
+  if (fleet) return { fleet, account: fleet.account, profile: approverProfile, skipped: fleet.skipped };
+  const profiles = approverProfiles(config), skipped: AccountSkip[] = [];
+  if (!profiles.length) { await selectAccount(config, 'approver', { name: approverProfile, kind }, { ...probe, work: work ?? undefined }); return { fleet: null, account: null, profile: approverProfile, skipped }; }
+  for (const profile of profiles) {
+    try {
+      const selected = await selectAccount(config, 'approver', profile, { ...probe, work: work ?? undefined });
+      return { fleet: null, account: selected.account as AgentEnvironment | null, profile: profile.name, skipped: [...skipped, ...selected.skipped] };
+    } catch (error) { if (!(error instanceof NoHealthyAccountError)) throw error; skipped.push(...error.skipped); }
+  }
+  const spent = new NoHealthyAccountError(`No healthy agent account for the approver: ${skipped.map(entry => entry.reason).join('; ')}`, skipped);
+  if (spent.capacityExhausted) throw spent;
+  // A named account that is logged out or unconfigured is a fault to fix, not a wait: the approver
+  // runs on the runtime's own login, as it did before it had accounts, unless that one is spent too.
+  await selectAccount(config, 'approver', { name: approverProfile, kind }, { ...probe, work: work ?? undefined });
+  return { fleet: null, account: null, profile: approverProfile, skipped };
+}
+/**
+ * The runtime's own login for a role launched on an explicit runtime: no account is chosen, but a
+ * login a session of any role saw spent is refused until its reset, as `selectAccount` refuses it.
+ */
+export async function heldRuntimeLogin(config: MasterConfig, role: LaunchRole, profile: string, work: string | null, probe: FleetProbe = {}, kind?: string): Promise<ApproverSelection> {
+  const at = probe.now?.() ?? Date.now(), own = ownLoginHold(await observedExhaustions(config, at), { name: profile, kind });
+  if (own) {
+    const skip: AccountSkip = { at: new Date(at).toISOString(), role, profile, environment: own.key, reason: describeObservedExhaustion(`${profile}'s own account`, own.held), work, cause: 'exhausted' };
+    await recordEnvironmentLog(config, [], [skip]).catch(() => {});
+    throw new NoHealthyAccountError(`No healthy agent account for ${role} profile ${profile}: ${skip.reason}`, [skip]);
+  }
+  return { fleet: null, account: null, profile, skipped: [] };
+}
+/**
+ * Undo a launch that failed after its tab or registry session existed: the tab is closed and the
+ * registry session ended. One the registry could not be told of is named on the returned error
+ * (`registrySession`), so the caller keeps the only id that can free the role's slot later.
+ */
+async function abandonLaunch(error: unknown, pane: string | undefined, tabId: string | undefined, selected: { release: (reason: string) => Promise<boolean>; account: FleetLaunchAccount } | null, reason: string, run?: ChildRun) {
+  if (pane || tabId) try { await stopCreatedHerdrTab(pane, tabId, run); } catch { /* the launch error is the report */ }
+  const failure = error instanceof Error ? error : new Error(failureText(error));
+  if (selected && !await selected.release(reason)) Object.assign(failure, { registrySession: selected.account.fleet.session });
+  return failure;
+}
+/**
+ * The session record a decision's approver registers (GY-172): keyed on the decision, so a
+ * relaunch for the same decision reopens it rather than adding a second, and bound to nothing the
+ * item moves past — the session report closes it once its pane is gone, and the loop records it
+ * ended when it closes the pane of a decision that settled.
+ */
+export const approverSessionId = (decision: string) => `approver:${decision}`;
+export type SessionRegistrar = (handle: SessionHandleInput) => Promise<unknown>;
+export async function launchApprover(root: string, work: Work, decision: string, explicitKind: NonNullable<WorkerProfile['kind']> | undefined, agents: HerdrAgent[], run?: ChildRun, probe: FleetProbe = {}, register?: SessionRegistrar) {
   const config = await loadMasterConfig(root);
   await agentToken(root, config, 'approver');
   const retry = `graphyard master approver ${work.key} ${decision} [AGENT_KIND]`;
@@ -4065,16 +3945,19 @@ export async function launchApprover(root: string, work: Work, decision: string,
   // The approver's runtime and account come from the registry's approver role. An explicit
   // AGENT_KIND is the operator's override; an installation whose registry has no approver role
   // yet runs the approver on its first reviewer profile's runtime. No runtime is assumed.
+  // The override picks the runtime, never past a hold: the runtime's own login a session saw spent
+  // is not launched on again before its reset, whichever form of the command asked for it.
   // The sessions Herdr lists are what the role's count is judged against (GY-190): an approver that
   // judged its decision and exited no longer holds a slot the next one needs.
-  const selected = explicitKind ? null : await selectFleetSession(config, 'approver', { name, principal: config.approver!.id }, { runtime: { agents, available: true }, ...probe, work: work.key });
+  const chosen = explicitKind ? await heldRuntimeLogin(config, 'approver', approverProfile, work.key, probe, explicitKind) : await selectApproverAccount(config, work.key, config.approver!.id, { runtime: { agents, available: true }, ...probe });
+  const selected = chosen?.fleet ?? null;
   // Nothing here names a runtime: the role's account decides, then the operator's own argument,
   // then a runtime this installation already configured for another session.
-  const kind = selected?.account.kind ?? explicitKind ?? config.reviewers[0]?.kind ?? config.workers[0]?.kind;
+  const kind = chosen?.account?.kind ?? explicitKind ?? approverRuntime(config);
   // A launch refused for its runtime gives the chosen session back at once (GY-184).
   const plan = () => {
     if (!kind) throw new Error('No runtime is configured for the approver: name accounts for the approver role with graphyard master registry role set approver ACCOUNT[,ACCOUNT…] --reason REASON, or pass AGENT_KIND');
-    return accountLaunch({ kind, approvals: 'auto', agentArgs: [], environment: {} }, selected?.account ?? null);
+    return accountLaunch({ kind, approvals: 'auto', agentArgs: [], environment: {} }, chosen?.account ?? null);
   };
   let launch: ReturnType<typeof accountLaunch>;
   try { launch = plan(); }
@@ -4086,15 +3969,133 @@ export async function launchApprover(root: string, work: Work, decision: string,
   try {
     const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root, '--label', `Approver · ${work.key}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', `GRAPHYARD_TOKEN_FILE=${config.approver!.credentialFile}`, '--env', 'GRAPHYARD_APPROVER=1', '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, ...Object.entries(launch.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'], run));
     pane = created.pane; tabId = created.tab;
-    ({ delivery } = await startAgentSession(name, kind, created.pane, launch.args, prompt, run, { directory: root, retry, contract: launch.contract, environment: launch.environment }));
+    // Registered with its pane before its runtime starts (GY-172 AC-2), so the session report
+    // observes this approver like every other session and closes it once it is gone.
+    ({ delivery } = await registeredLaunch(register, { id: approverSessionId(decision), kind: 'coordination', role: 'approver', principal: config.approver!.id, runtime: kind, host: config.hostId,
+      agentName: name, pane: created.pane, attach: herdrAttach(created.pane, config.herdrWorkspace), ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}),
+      subject: `${work.key}: judge decision ${decision}`, state: 'running' }, () => startAgentSession(name, kind, created.pane, launch.args, prompt, run, { directory: root, retry, contract: launch.contract, environment: launch.environment }), () => undefined));
   } catch (error) {
-    if (pane || tabId) try { await stopCreatedHerdrTab(pane, tabId, run); } catch { /* the launch error below is the report */ }
-    await selected?.release(`approver launch for ${work.key} failed: ${failureText(error).slice(0, 300)}`);
-    throw error;
+    throw await abandonLaunch(error, pane, tabId, selected, `approver launch for ${work.key} failed: ${failureText(error).slice(0, 300)}`, run);
   }
-  // The registry session is returned with the launch: the loop ends it once the decision is judged.
-  return { agentName: name, work: work.key, decision, identity: config.approver!.id, pane: pane!, delivery, focusChanged: false, session: selected?.account.fleet.session ?? null,
-    account: selected ? { environment: selected.account.name, kind, reason: selected.selection.reason, skipped: selected.skipped } : null };
+  const spentOn = selected?.account.name ?? chosen?.account?.name ?? null;
+  // The registry session is kept with the launch: the loop ends it once the decision is judged, or
+  // the moment the session is spent.
+  const session = selected?.account.fleet.session ?? null;
+  // The record is part of the launch: without it an adopted session's spent account and registry
+  // slot are unknown, so a launch whose record cannot be written is closed and fails.
+  try { await saveApproverLaunch(root, { agentName: name, account: spentOn, runtime: kind, session, launchedAt: new Date().toISOString() }); }
+  catch (error) { throw await abandonLaunch(error, pane, tabId, selected, `approver launch record for ${work.key} could not be written: ${failureText(error).slice(0, 300)}`, run); }
+  return { agentName: name, work: work.key, decision, identity: config.approver!.id, pane: pane!, delivery, focusChanged: false, runtime: kind, session,
+    account: selected ? { environment: selected.account.name, kind, reason: selected.selection.reason, skipped: selected.skipped }
+      : chosen?.account ? { environment: chosen.account.name, kind, reason: `the first healthy account of profile ${chosen.profile}`, skipped: chosen.skipped } : null };
+}
+
+/**
+ * The account each approver session was launched on (GY-182). The loop adopts a session a master
+ * started with `master approver` rather than launching its own, and an adopted session that stops
+ * on a limit notice must hold the account it actually spent, not the runtime's own login.
+ */
+export const approverLaunchSchema = z.object({ agentName: z.string().max(200), account: z.string().max(200).nullable(), runtime: z.string().max(40).nullable(),
+  /** The agent registry session the launch holds, when the registry chose its account. */
+  session: z.string().max(200).nullable().default(null), launchedAt: z.string() }).strict();
+export type ApproverLaunch = z.infer<typeof approverLaunchSchema>;
+const approverLaunchesPath = async (root: string) => resolve(await localDirectory(root), 'approvers', 'launches.json');
+export async function readApproverLaunch(root: string, agentName: string): Promise<ApproverLaunch | null> {
+  try { return z.array(approverLaunchSchema).parse(JSON.parse(await readFile(await approverLaunchesPath(root), 'utf8'))).findLast(entry => entry.agentName === agentName) ?? null; } catch { return null; }
+}
+/** Record the launch of `launch.agentName`, replacing an earlier one of that name; records past a day are dropped. */
+export async function saveApproverLaunch(root: string, launch: ApproverLaunch, now = Date.now()) {
+  const file = await approverLaunchesPath(root);
+  let kept: ApproverLaunch[] = [];
+  try { kept = z.array(approverLaunchSchema).parse(JSON.parse(await readFile(file, 'utf8'))); } catch { /* a missing or unreadable record starts empty */ }
+  kept = kept.filter(entry => entry.agentName !== launch.agentName && now - Date.parse(entry.launchedAt) < escalationSessionMs);
+  await mkdir(dirname(file), { recursive: true, mode: 0o700 });
+  await atomicPrivateWrite(file, [...kept, launch].slice(-retainedEscalationSessions));
+}
+
+/** The approver role's accounts as `roleCapacity` reads them: whether any is left, and each one's reset. */
+export async function approverRoleHealth(config: MasterConfig, probe: EnvironmentProbe = {}) {
+  const named = approverProfiles(config), profiles = named.length ? named : [{ name: approverProfile, kind: approverRuntime(config) }];
+  return { profiles, health: await inspectProfileAccounts(config, 'approver', profiles, Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null as string | null }])), probe) };
+}
+
+/**
+ * The escalation-handler role's accounts as `roleCapacity` reads them, as `approverRoleHealth` does
+ * for the approver. A handler launches on the runtime its escalation names, so `runtimes` — those of
+ * the handlers waiting to launch again — are each checked: a runtime's own login another role saw
+ * spent bars the handler too. The role has capacity while any of them can launch.
+ */
+export async function escalationRoleHealth(config: MasterConfig, probe: EnvironmentProbe = {}, runtimes: string[] = []) {
+  const profiles = [{ name: escalationProfile }], results: { available: boolean; reason: string | null; accounts?: ProfileAccountHealth[] }[] = [];
+  for (const kind of runtimes.length ? [...new Set(runtimes)] : [undefined]) {
+    results.push((await inspectProfileAccounts(config, 'escalation-handler', [{ name: escalationProfile, kind }], { [escalationProfile]: { available: true, reason: null as string | null } }, probe))[escalationProfile]);
+  }
+  const usable = results.find(result => result.available);
+  return { profiles, health: { [escalationProfile]: usable ?? { available: false, reason: results.map(result => result.reason).filter(Boolean).join('; ') || null, accounts: results.flatMap(result => result.accounts ?? []) } } };
+}
+
+/**
+ * The escalation handlers this host launched and has not seen end (GY-182). A handler is launched
+ * by a master, not by the loop, so this is what lets the loop find one that stopped on its
+ * provider's limit notice, hold the account and launch the same escalation again elsewhere.
+ * `waiting` is a handler ended for spent quota with no account left: it is launched again once
+ * `retryAt` passes. One that finished — stopped with no notice, or gone from Herdr — is ended by
+ * the loop too, so the registry session it holds does not keep the role's slot.
+ */
+export const escalationSessionSchema = z.object({
+  agentName: z.string().max(200), pane: z.string().max(200).nullable(), work: z.string().max(40), trigger: z.string().max(64),
+  kind: z.string().max(40), account: z.string().max(200).nullable(), runtime: z.string().max(40).nullable(), launchedAt: z.string(),
+  /** The agent registry session the handler holds, when the registry chose its account: ended with the handler. */
+  session: z.string().max(200).nullable().default(null),
+  waiting: z.object({ since: z.string(), retryAt: z.string(), reason: z.string().max(500) }).strict().nullable().default(null),
+  /** When the loop first saw the handler stopped with no limit notice: past a grace, it has finished. */
+  idleSince: z.string().optional(),
+}).strict();
+export type EscalationSession = z.infer<typeof escalationSessionSchema>;
+export const retainedEscalationSessions = 50, escalationSessionMs = 86_400_000;
+/** With no reset known for a spent account, a waiting handler is tried again this soon (the loop's capacity recheck). */
+const escalationCapacityRecheckMs = 60_000;
+const escalationSessionsPath = async (root: string) => resolve(await localDirectory(root), 'escalations', 'sessions.json');
+export async function readEscalationSessions(root: string): Promise<EscalationSession[]> {
+  try { return z.array(escalationSessionSchema).parse(JSON.parse(await readFile(await escalationSessionsPath(root), 'utf8'))); } catch { return []; }
+}
+/**
+ * Replace the handler of `work`/`trigger` (or drop it with `session` null). A running handler's
+ * record is dropped a day after launch, or when more than the retained count are running; a waiting
+ * one is kept until a day past its `retryAt`, however many there are, so a weekly reset still finds
+ * the escalation to launch again.
+ */
+export async function saveEscalationSession(root: string, work: string, trigger: string, session: EscalationSession | null, now = Date.now()) {
+  const current = (entry: EscalationSession) => now - Date.parse(entry.waiting ? entry.waiting.retryAt : entry.launchedAt) < escalationSessionMs;
+  const kept = (await readEscalationSessions(root)).filter(entry => !(entry.work === work && entry.trigger === trigger) && current(entry));
+  const file = await escalationSessionsPath(root); await mkdir(dirname(file), { recursive: true, mode: 0o700 });
+  // The count bounds running and finished records only: a waiting one is the loop's only way to
+  // launch its escalation again, so it stays until the time filter above lets it go.
+  const all = [...kept, ...(session ? [session] : [])], launched = all.filter(entry => !entry.waiting);
+  const evicted = new Set(launched.slice(0, Math.max(0, launched.length - retainedEscalationSessions)));
+  await atomicPrivateWrite(file, all.filter(entry => !evicted.has(entry)));
+}
+
+/**
+ * `master review` registers the reviewer session before its runtime starts (GY-172 AC-2), keyed on
+ * the review request it answers, as the loop's own reviewer launches are; the pane and name the
+ * launcher returns are written over the registration once it has started. `launch` is the reviewer
+ * launcher itself, which still refuses an unknown item or profile with its own reason.
+ */
+export async function registeredReview<T>(config: MasterConfig, args: string[], snapshot: { work: Work[] }, mutate: (path: string, body: unknown) => Promise<unknown>, launch: () => Promise<T>) {
+  const work = snapshot.work.find(item => item.id === args[0] || item.key === args[0]);
+  const profile = args[1] ? config.reviewers.find(entry => entry.name === args[1]) : config.reviewers.length === 1 ? config.reviewers[0] : undefined;
+  if (!work?.candidate || !profile) return launch();
+  const request = liveReviewRequest(work), sha = work.candidate.sha, id = request?.id ?? `review:${sha}`;
+  // A reviewer another launch registered for this request is not this call's to close: the
+  // registration carries this attempt's token and the control plane refuses to register over, or
+  // close, a running handle another attempt holds — checked in its mutation, not against this
+  // snapshot, which a concurrent `master review` or the loop's own reviewer launch shares. A running
+  // handle with no token predates that rule and has nothing to hold it, so it is left alone here.
+  if (work.sessions?.some(handle => handle.id === id && handle.state === 'running' && handle.head === sha && !handle.launch)) return launch();
+  return registeredLaunch(handle => mutate(`work/${work.id}/session`, handle), { id, kind: 'review', role: 'review', head: sha, runtime: profile.kind, host: config.hostId,
+    ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}), subject: `${work.key}: review ${sha.slice(0, 12)} (PR #${work.candidate.pr})`, state: 'running' },
+  launch, launched => launched as { pane?: string | null; agentName?: string | null }, pane => herdrAttach(pane, config.herdrWorkspace));
 }
 
 /**
@@ -4113,15 +4114,37 @@ export function verifiedContext(context: EscalationContext) {
  * --context`, so the ledger carries the reason, the precedent it relied on and what it saw; with
  * no precedent to cite it decides without `--precedent`, and the ledger records that (GY-138).
  */
-export async function launchEscalationHandler(root: string, config: MasterConfig, context: EscalationContext, kind: NonNullable<WorkerProfile['kind']>, agents: HerdrAgent[], run?: ChildRun) {
+export async function launchEscalationHandler(root: string, config: MasterConfig, context: EscalationContext, kind: NonNullable<WorkerProfile['kind']>, agents: HerdrAgent[], run?: ChildRun, register?: SessionRegistrar) {
   await agentToken(root, config, 'operatorAgent');
   const escalationRetry = `graphyard master escalation ${context.key} ${context.escalation.trigger} ${kind}`;
   const name = nameForLaunch(escalationRetry, () => distinctSessionName(['graphyard-escalation', 'graphyard-esc', 'gy-esc'], context.key, context.escalation.trigger));
   if (agents.some(agent => agent.name === name)) throw new Error(`Escalation handler ${name} is already visible in Herdr; let it finish or close it first`);
+  // A capacity role like any other (GY-182): the registry's escalation-handler role chooses the
+  // account when it defines one, and a login a session saw spent is not launched on before it resets.
+  let selected: Awaited<ReturnType<typeof selectFleetSession>>;
+  try {
+    selected = await selectFleetSession(config, 'escalation-handler', { name, principal: config.operatorAgent!.id }, await heldAwareProbe(config, { work: context.key }));
+    if (!selected) await selectAccount(config, 'escalation-handler', { name: escalationProfile, kind }, { work: context.key });
+  } catch (error) {
+    if (!(error instanceof NoHealthyAccountError) || !error.capacityExhausted) throw error;
+    // Every account is already spent before this handler starts — another role may have held a
+    // shared one. The escalation is kept as a waiting record, so the loop reports the capacity
+    // wait and launches it again once the first held account resets, with no one retrying it.
+    const at = Date.now(), held = await observedExhaustions(config, at);
+    const retryAt = capacityRetryAt(error.skipped.map(skip => ({ resetsAt: held[skip.environment]?.until ?? null }))) ?? new Date(at + escalationCapacityRecheckMs).toISOString();
+    await saveEscalationSession(root, context.key, context.escalation.trigger, { agentName: name, pane: null, work: context.key, trigger: context.escalation.trigger, kind, account: null, runtime: null, launchedAt: new Date(at).toISOString(), session: null,
+      waiting: { since: new Date(at).toISOString(), retryAt, reason: error.message.slice(0, 500) } });
+    // The wait rides on the error, so a loop that ended a spent handler keeps it rather than its own guess.
+    throw Object.assign(new NoHealthyAccountError(`${error.message}; the escalation waits and the loop launches it again at ${retryAt}`, error.skipped), { retryAt });
+  }
+  const runtime = selected?.account.kind ?? kind;
   const directory = resolve(await localDirectory(root), 'escalations'); await mkdir(directory, { recursive: true, mode: 0o700 });
   const file = resolve(directory, `${context.key}-${context.escalation.trigger}-${context.fingerprint.slice(0, 12)}.json`);
   await atomicPrivateWrite(file, context);
-  const launch = agentLaunchPlan(kind, 'auto');
+  // A launch refused for its runtime gives the chosen session back at once (GY-184).
+  let launch: ReturnType<typeof accountLaunch>;
+  try { launch = accountLaunch({ kind: runtime, approvals: 'auto', agentArgs: [], environment: {} }, selected?.account ?? null); }
+  catch (error) { await selected?.release(`escalation handler launch for ${context.key} failed: ${failureText(error).slice(0, 300)}`); throw error; }
   const cli = `node ${config.cliPath}`;
   const prompt = `You are a Graphyard escalation handler spawned for the ${context.escalation.trigger} escalation on ${context.key} in ${config.repository}, acting as ${config.operatorAgent!.id}. Your entire input is the file ${file}: the context the control plane assembled for this decision — the repository's own operating rules and policy, the current goals and priorities, the item (requirements, the standing refusal, the candidate, its typed history) and precedent (earlier ${escalationAction} decisions with their reasons and outcomes). Read that file and nothing else: do not run status, events or any other read, do not open the repository, and hold no state beyond it. Decide whether the ${context.escalation.trigger} escalation should be resolved, following the precedent that applies and saying which. If it should, run ${cli} master decide ${context.key} ${escalationAction} '{"trigger":"${context.escalation.trigger}"}' --precedent DECISION_ID[,DECISION_ID] --context ${context.fingerprint} "YOUR REASON" exactly once, citing only ids listed in precedent.detail; when precedent.detail lists no decision that applies, leave out --precedent and the control plane records that no precedent was available — never invent an id. An independent approver judges it. If it should not, request nothing and state the reason in this tab. Never edit, push, merge, review, approve or submit evidence. Stop when the decision is recorded or declined.`;
   let pane: string | undefined, tabId: string | undefined, delivery: RequestDelivery | undefined;
@@ -4130,12 +4153,27 @@ export async function launchEscalationHandler(root: string, config: MasterConfig
     pane = created.pane; tabId = created.tab;
     // The instruction is the session's own first request (GY-93), never pasted into it: a handler
     // that refused a pasted prompt would record no decision and leave the escalation standing.
-    ({ delivery } = await startAgentSession(name, kind, created.pane, launch.args, prompt, run, { directory: root, retry: escalationRetry, environment: launch.environment }));
+    // Registered first, like every launched session (GY-172 AC-2).
+    ({ delivery } = await registeredLaunch(register, { id: `escalation:${context.escalation.trigger}:${context.fingerprint.slice(0, 12)}`, kind: 'coordination', role: 'escalation', principal: config.operatorAgent!.id, runtime, host: config.hostId,
+      agentName: name, pane: created.pane, attach: herdrAttach(created.pane, config.herdrWorkspace), ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}),
+      subject: `${context.key}: handle the ${context.escalation.trigger} escalation`, state: 'running' }, () => startAgentSession(name, runtime, created.pane, launch.args, prompt, run, { directory: root, retry: escalationRetry, environment: launch.environment }), () => undefined));
   } catch (error) {
-    if (pane || tabId) try { await stopCreatedHerdrTab(pane, tabId, run); } catch { /* the launch error below is the report */ }
-    throw error;
+    const failure = await abandonLaunch(error, pane, tabId, selected, `escalation handler launch for ${context.key} failed: ${failureText(error).slice(0, 300)}`, run);
+    // A registry session that could not be ended is kept on a record due now: the loop ends it
+    // before it launches the escalation again, so the role's slot is never left orphaned.
+    const orphan = (failure as { registrySession?: string }).registrySession;
+    if (orphan) {
+      const at = new Date().toISOString();
+      await saveEscalationSession(root, context.key, context.escalation.trigger, { agentName: name, pane: null, work: context.key, trigger: context.escalation.trigger, kind, account: selected?.account.name ?? null, runtime, launchedAt: at, session: orphan,
+        waiting: { since: at, retryAt: at, reason: `the launch failed (${failureText(error)}) and its registry session could not be ended`.slice(0, 500) } }).catch(() => {});
+    }
+    throw failure;
   }
-  return { agentName: name, work: context.key, trigger: context.escalation.trigger, fingerprint: context.fingerprint, context: file, identity: config.operatorAgent!.id, pane: pane!, delivery, focusChanged: false };
+  // The record is part of the launch: it is how the loop finds a handler that stopped on a limit
+  // notice and ends its registry session, so a launch whose record cannot be written is closed and fails.
+  try { await saveEscalationSession(root, context.key, context.escalation.trigger, { agentName: name, pane: pane!, work: context.key, trigger: context.escalation.trigger, kind, account: selected?.account.name ?? null, runtime, launchedAt: new Date().toISOString(), session: selected?.account.fleet.session ?? null, waiting: null }); }
+  catch (error) { throw await abandonLaunch(error, pane, tabId, selected, `escalation handler record for ${context.key} could not be written: ${failureText(error).slice(0, 300)}`, run); }
+  return { agentName: name, work: context.key, trigger: context.escalation.trigger, fingerprint: context.fingerprint, context: file, identity: config.operatorAgent!.id, pane: pane!, delivery, focusChanged: false, account: selected?.account.name ?? null };
 }
 
 export const broadScopeFlag = '--allow-broad-scope';
@@ -4158,6 +4196,10 @@ export interface AutonomyDependencies {
   readSecret: () => Promise<string>;
   agents: () => HerdrAgent[] | Promise<HerdrAgent[]>;
   daemonLock: () => Promise<{ pid: number; host: string; heartbeatAt: string } | null>;
+  /** A coordinator-authenticated mutation, with which a session this command launches is registered before it starts (GY-172). */
+  mutate?: (path: string, body: unknown) => Promise<unknown>;
+  /** The runner a launched session's runtime calls go through; the asynchronous runner when omitted. */
+  runtime?: ChildRun;
   fetcher?: typeof fetch;
   /** Runs the roster applier; the default is the asynchronous runner with the applier's output passed through. */
   run?: (command: string, args: string[], options?: ChildRunOptions) => string | Buffer | Promise<string | Buffer>;
@@ -4182,6 +4224,7 @@ export async function runAutonomyCommand(root: string, config: MasterConfig, id:
     const result = await response.json(); if (!response.ok) throw new Error(JSON.stringify(result)); return result;
   };
   const operator = () => agentToken(root, config, 'operatorAgent');
+  const registrar = (work: string): SessionRegistrar | undefined => deps.mutate ? handle => deps.mutate!(`work/${encodeURIComponent(work)}/session`, handle) : undefined;
   const snapshotItem = async (key: string | undefined) => {
     if (!key) throw new Error(`Use master ${id} GY-N …`);
     const snapshot = await deps.coordinator('work-snapshot'), found = snapshot.work.find((work: Work) => work.id === key || work.key === key);
@@ -4255,7 +4298,7 @@ export async function runAutonomyCommand(root: string, config: MasterConfig, id:
     if (id === 'context') return context;
     const handler = rest.find(value => value !== trigger) ?? 'precedent';
     if (handler === 'precedent') return handleEscalation(context, followPrecedent, async request => call(await operator(), `work/${encodeURIComponent(context.key)}/decide`, request));
-    return launchEscalationHandler(root, config, context, agentKindSchema.parse(handler), await deps.agents());
+    return launchEscalationHandler(root, config, context, agentKindSchema.parse(handler), await deps.agents(), deps.runtime, registrar(context.key));
   }
   if (id === 'decisions') return deps.coordinator(`work/${encodeURIComponent((await item(args[0])).id)}/decisions`);
   if (id === 'approve') {
@@ -4270,7 +4313,7 @@ export async function runAutonomyCommand(root: string, config: MasterConfig, id:
   }
   if (id === 'approver') {
     const work = await item(args[0]); if (!args[1]) throw new Error('Use master approver GY-N DECISION [AGENT_KIND]');
-    return launchApprover(root, work, args[1], args[2] ? agentKindSchema.parse(args[2]) : undefined, await deps.agents());
+    return launchApprover(root, work, args[1], args[2] ? agentKindSchema.parse(args[2]) : undefined, await deps.agents(), deps.runtime, {}, registrar(work.id));
   }
   if (id === 'principals') {
     const live = (await deps.coordinator('principals')).principals;

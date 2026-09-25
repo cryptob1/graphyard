@@ -3,11 +3,11 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { resourceConflicts } from '../coordination.js';
-import { agentToken, approvedMerges, assertMasterBinding, autonomySubcommands, continueMergeBatch, runAutonomyCommand, currentMergeCandidates, daemonExecutor, dispatchWork, listHerdrAgents, liveMasterConfig, loadMasterConfig, masterHarness, masterSettingsFromArgs, mergeExecutor, mergeProtocolSkew, producerCommand, readCredentialFile, readWorkerCredential, saveMasterSettings, saveWorkerProfile, snapshotWithClock, startMaster, verifyContainmentDeath, workerProfileSchema } from '../master.js';
+import { agentToken, approvedMerges, assertMasterBinding, autonomySubcommands, continueMergeBatch, runAutonomyCommand, currentMergeCandidates, daemonExecutor, dispatchWork, listHerdrAgents, liveMasterConfig, loadMasterConfig, masterHarness, masterSettingsFromArgs, mergeExecutor, mergeProtocolSkew, producerCommand, readCredentialFile, readWorkerCredential, registeredReview, saveMasterSettings, saveWorkerProfile, snapshotWithClock, startMaster, verifyContainmentDeath, workerProfileSchema } from '../master.js';
 import { cliCommit } from '../protocol-version.js';
 import { daemonEffects, readDaemonState, retriedSnapshot, runDaemon } from '../master-daemon.js';
 import { verificationEffects, verifyDeployment } from '../master-verification.js';
-import { readReviewLedger, reviewCommand } from '../reviewer.js';
+import { readReviewLedger, reviewCommand as launchReview } from '../reviewer.js';
 import { readProducerLedger } from '../producer.js';
 import { dispatchEffects, dispatchReadTimeoutMs, readDispatchCursor, runAutoDispatch } from '../auto-dispatch.js';
 import { applyProtection, protectionPlan, readProtection } from '../protection.js';
@@ -113,6 +113,7 @@ export const masterCommands = defineCommands([
       // The CLI's own commit, for the version-skew guard.
       const cli = { commit: cliCommit(fileURLToPath(new URL('../..', import.meta.url))) };
       const assertProtocol = (status: any) => { const skew = mergeProtocolSkew(status, cli); if (skew) throw new Error(skew); };
+      const reviewCommand: typeof launchReview = (...a) => registeredReview(master, a[1], a[2], masterMutation, () => launchReview(...a));
       if (id === 'create' || id === 'requirements') return print(await derivedIntent(root, master, id, args, { coordinator: masterApi, mutate: masterMutation, token: () => agentToken(root, master, 'operatorAgent') }));
       // Evidence and merge decisions on a system-driven item are the loop's to request (GY-175),
       // judged on the same work document the decision is built from.
@@ -121,7 +122,7 @@ export const masterCommands = defineCommands([
         const owned = handDecision(work, action, input, loop); if (owned) assertHandAction(work, owned);
       };
       if ((autonomySubcommands as readonly string[]).includes(id ?? '')) return print(await runAutonomyCommand(root, master, id!, args,
-        { coordinator: masterApi, readSecret: () => readSecretFromStdin(10_000), agents: listHerdrAgents, daemonLock: async () => (await readDaemonState(root, master)).lock, assertDecision }));
+        { coordinator: masterApi, readSecret: () => readSecretFromStdin(10_000), agents: listHerdrAgents, daemonLock: async () => (await readDaemonState(root, master)).lock, assertDecision, mutate: masterMutation }));
       if (id === 'scope') return print(await approveScopeRequest(root, master, args, { coordinator: masterApi }));
       if (id === 'start') {
         const kind = workerProfileSchema.shape.kind.safeParse(args[0]); if (!kind.success) throw new Error('Use master start with a supported agent kind such as codex or claude');
@@ -209,7 +210,7 @@ export const masterCommands = defineCommands([
         // Skew is refused before any candidate is read: an undeployed server is protocol skew, not a failed gate.
         assertProtocol(coordinator);
         const snapshot = await masterApi('work-snapshot');
-        const selected = args[0] === '--all' ? currentMergeCandidates(snapshot.work, snapshot.now, coordinator.actor.id) : snapshot.work.filter((item: any) => item.id === args[0] || item.key === args[0]);
+        const selected = args[0] === '--all' ? currentMergeCandidates(snapshot.work, snapshot.now) : snapshot.work.filter((item: any) => item.id === args[0] || item.key === args[0]);
         if (!selected.length) throw new Error(args[0] === '--all' ? 'No work has a current all-gates-passing merge authorization' : `Unknown work item ${args[0]}`);
         // `--all` merges the candidates that are not system-driven and leaves the rest to the loop; a named item is refused (GY-175).
         if (args[0] === '--all') { const hand = selected.filter((item: any) => !systemDriven(item)); if (!hand.length) assertHandAction(selected[0], 'merge'); selected.splice(0, selected.length, ...hand); }

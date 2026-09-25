@@ -21,6 +21,7 @@ import { queueRef, type QueueSpeculation } from '../src/merge-queue.js';
 import { masterConfigSchema, profileSessions } from '../src/master.js';
 import { sessionReport } from '../src/cli/master-status.js';
 import { overlongSessionAttention } from '../src/cli/overlong-sessions.js';
+import { lostAfterReports, sessionLaunchGraceMs } from '../src/model/session-state.js';
 
 /**
  * GY-113: a session was recorded as running until something ended it, so a session that crashed,
@@ -140,9 +141,7 @@ async function delivered(sessionId: string) {
   const speculation: QueueSpeculation = { ref: queueRef(item.key), tip: head, base, baseTree: sha40('7e'), predecessors: [], policyRevision: item.policyRevision, publishedAt: new Date().toISOString() };
   await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{queue,speculation}',$2::jsonb) WHERE id=$1", [item.id, JSON.stringify(speculation)]);
   item = await engine.observe(item.id, (await reload(item)).revision, approved());
-  const granted = await engine.acquireMerge(coordinator, item.id, { expectedRevision: item.revision, sha: head, baseSha: base, policyRevision: item.policyRevision }, randomUUID());
-  await engine.verifyMerge(coordinator, item.id, { executionId: granted.execution.id }, approved(), randomUUID());
-  const committed = await engine.commitMerge(coordinator, item.id, { executionId: granted.execution.id }, randomUUID());
+  const committed = await engine.requestEnqueue(coordinator, item.id, { enqueue: true, expectedRevision: item.revision, sha: head, baseSha: base, policyRevision: item.policyRevision }, randomUUID());
   await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
   return engine.observe(item.id, committed.revision, approved({ merged: true, mergeSha: sha40('de11'), mergedAt }));
 }
@@ -557,9 +556,10 @@ test('manual:session-liveness-docs-review — docs/master-agent.md states that t
   assert.match(section, /every automatic-dispatch tick/);
   assert.match(section, /run\.dispatchIntervalSeconds/);
   assert.match(section, new RegExp(`${sessionReconcileIntervalMs / 1000} at most`));
-  assert.match(section, new RegExp(`${sessionVanishGraceMs / 1000}-second grace`));
-  assert.match(section, /counted from the first sweep\s+that missed it/);
-  assert.match(section, new RegExp(`within ${sessionClosureBoundMs / 1000} seconds of the runtime dropping it`));
+  // The session report's rule (GY-172): lost at the second consecutive miss, and a young handle left alone.
+  assert.equal(lostAfterReports, 2);
+  assert.match(section, /closes at the second consecutive sweep\s+that misses it/);
+  assert.match(section, new RegExp(`left alone for its first ${sessionLaunchGraceMs / 60_000} minutes`));
   assert.match(section, /A handle another host launched is left to\s+that host's loop/);
 
   // Every closure the sweep makes, named with the reason it records.

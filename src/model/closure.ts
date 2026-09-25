@@ -1,6 +1,5 @@
 import { z } from 'zod';
 import type { Stage, Work } from './work.js';
-import { holdsMergeExecution } from './escalation.js';
 
 // ---------------------------------------------------------------------------
 // Closing a work item that will never be delivered: a duplicate, work another change already
@@ -46,7 +45,6 @@ export function closeRefusal(work: Work, now: number): string | null {
   if (work.stage === 'done') return `${work.key} is delivered; delivered work is immutable`;
   if (work.observation?.merged) return `${work.key}'s pull request is merged; reconciliation records its delivery`;
   if (work.lease && Date.parse(work.lease.expiresAt) > now) return `${work.key} has a live worker lease (${work.lease.owner}, epoch ${work.lease.epoch}); release it or let it lapse before closing`;
-  if (holdsMergeExecution(work, now)) return `${work.key} has a merge execution in flight; retry after it completes or expires`;
   return null;
 }
 

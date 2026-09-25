@@ -22,7 +22,7 @@ import { pipelineSpeedSummary, speedTarget } from '../src/pipeline-speed.js';
 import { dispatchEffects, executorEffects, executorKinds, launchedSessionHandle, runDispatchTick, runExecutor, runExecutorTick, runWorkerPull, workerPullIntervalMs, emptyDispatchCursor, type DispatchEffects, type ExecutorEffects } from '../src/auto-dispatch.js';
 import { controlPlaneHandlers, executorMergeExecutor, judgmentInExecutorLoop } from '../src/executor.js';
 import { runCycle, emptyDaemonState, type DaemonEffects } from '../src/master-daemon.js';
-import { assertMergeCandidate, mergeExecutionOwner, masterConfigSchema } from '../src/master.js';
+import { assertMergeCandidate, masterConfigSchema } from '../src/master.js';
 // @ts-expect-error Dependency-free worker entry point.
 import { pullOnce, transportRetries } from '../scripts/graphyard-pull.mjs';
 import { agentRequestAttention, agentRequestReport, actionReport, sessionReport } from '../src/cli/master-status.js';
@@ -120,10 +120,8 @@ async function publishTip(item: Work) {
 async function mergeItem(actor: Principal, item: Work) {
   let current = await publishTip(item);
   current = await engine.observe(current.id, current.revision, observation(current));
-  const granted = await engine.acquireMerge(actor, current.id, { expectedRevision: current.revision, sha: head, baseSha: base, policyRevision: current.policyRevision }, randomUUID());
-  await engine.verifyMerge(actor, current.id, { executionId: granted.execution.id }, observation(current), randomUUID());
-  const committed = await engine.commitMerge(actor, current.id, { executionId: granted.execution.id }, randomUUID());
-  const mergedAt = new Date(Math.ceil((Date.parse(committed.committingAt) + 1) / 1000) * 1000).toISOString().replace(/\.\d+Z$/, 'Z');
+  const committed = await engine.requestEnqueue(actor, current.id, { enqueue: true, expectedRevision: current.revision, sha: head, baseSha: base, policyRevision: current.policyRevision }, randomUUID());
+  const mergedAt = new Date(Math.ceil((Date.parse(committed.enqueue.at) + 1) / 1000) * 1000).toISOString().replace(/\.\d+Z$/, 'Z');
   return engine.observe(current.id, committed.revision, { ...observation(current), merged: true, mergeSha, mergedAt });
 }
 
@@ -811,16 +809,13 @@ test('integration:multi-executor-throughput — the poll every executor runs on 
   assert.ok(pipelineBackfillState().lastRun!.backfilled > 0, 'the full read still reconstructs what is pending');
 });
 
-test('integration:multi-executor-throughput — every executor brokers merges under its own execution instance, so a second executor and the daemon stand down from an in-flight merge instead of resuming it', async () => {
-  // A merge is the one action where two brokers driving one execution strands a delivery: one can
-  // cancel or let lapse what the other is committing. The action lease serializes executors
-  // against each other, but the daemon claims nothing from the queue, so it is not serialized by
-  // it at all. What separates them is ownership: an execution belongs to the instance that
-  // acquired it (GY-92), never to the coordinator principal they share.
+test('integration:multi-executor-throughput — every executor requests merges under its own instance, and one candidate carries one merge request whoever records it, so GitHub performs exactly one merge', async () => {
+  // GitHub executes merges (GY-258): the merge step records a request that GitHub merge exactly
+  // this candidate, and no executor holds an execution another could resume or strand. Two
+  // executors under one credential are still told apart by instance (GY-92) on the request.
   const first = executorMergeExecutor(executorA.id), second = executorMergeExecutor(executorA.id);
   assert.equal(first.principal, executorA.id);
   assert.notEqual(first.instance, second.instance, 'each executor process mints its own instance');
-  assert.notEqual(mergeExecutionOwner(first), executorA.id, 'the owner is never the bare credential every executor shares');
   assert.match(first.instance, /^executor-/);
 
   const item = await submitted();
@@ -831,21 +826,18 @@ test('integration:multi-executor-throughput — every executor brokers merges un
   await engine.reconcile();
   current = await publishTip(await reload(current));
   current = await engine.observe(current.id, current.revision, observation(current));
-  const granted = await engine.acquireMerge(executorA, current.id, { expectedRevision: current.revision, sha: head, baseSha: base, policyRevision: current.policyRevision, executor: first.instance }, randomUUID());
-  assert.equal(granted.execution.owner, mergeExecutionOwner(first), 'the execution is owned by the executor instance, not by its principal');
-
+  const bound = { enqueue: true as const, expectedRevision: current.revision, sha: head, baseSha: base, policyRevision: current.policyRevision };
+  const granted = await engine.requestEnqueue(executorA, current.id, { ...bound, executor: first.instance }, randomUUID());
+  assert.equal(granted.enqueue.requestedBy, `${executorA.id}#${first.instance}`, 'the request names the executor instance, not only its principal');
+  // The second executor asking for the same candidate gets the standing request back, not a second one.
+  const again = await engine.requestEnqueue(executorA, current.id, { ...bound, executor: second.instance }, randomUUID());
+  assert.deepEqual(again.enqueue, granted.enqueue);
+  const requests = (await store.pool.query("SELECT count(*)::int AS n FROM events WHERE work_id=$1 AND kind='merge.enqueue.requested'", [current.id])).rows[0].n;
+  assert.equal(requests, 1, 'one candidate carries one merge request');
+  // Nothing is held, so no executor stands down from another's merge: each may re-request it.
   const held = await reload(current);
-  const observedAt = new Date().toISOString();
-  // The second executor — and a `master run` loop, and an interactive merge — read the same
-  // credential and the same item, and still stand down before acquiring or cancelling anything.
-  for (const other of [second, executorMergeExecutor(executorA.id), { principal: executorA.id, instance: 'daemon-1' }]) {
-    assert.throws(() => assertMergeCandidate(held, observedAt, mergeExecutionOwner(other)), /stands down without cancelling it/, `${other.instance} does not resume another instance's execution`);
-  }
-  // Nor can another instance step the execution it does not own.
-  await assert.rejects(engine.cancelMerge(executorA, held.id, { executionId: granted.execution.id, reason: 'not mine to cancel', executor: second.instance }, randomUUID()), /owned by another coordinator executor instance/);
-  // The instance that acquired it resumes its own, which is what makes a retried merge one merge.
-  assert.doesNotThrow(() => assertMergeCandidate(held, observedAt, mergeExecutionOwner(first)));
-  await engine.cancelMerge(executorA, held.id, { executionId: granted.execution.id, reason: 'test complete', executor: first.instance }, randomUUID());
+  assert.equal(held.mergeExecution ?? null, null, 'no merge execution is issued');
+  assert.doesNotThrow(() => assertMergeCandidate(held, new Date().toISOString()));
 });
 
 // ---- AC-4: workers pull -----------------------------------------------------------------------
@@ -1384,8 +1376,12 @@ test('integration:session-handles-visible — the reviewer and producer launcher
   const next = await runDispatchTick(fleetConfig, cursor, effects);
   assert.deepEqual(next.launched.map(entry => entry.kind), ['review'], `the tick launched ${JSON.stringify(next.waiting)}`);
   assert.ok([...tick.launched, ...next.launched].every(entry => entry.work === item.key));
-  assert.equal(handles.length, 2, 'a handle was recorded for each launch');
-  assert.deepEqual(mutations.map(mutation => mutation.path.split('/').at(-1)), ['session', 'session'], 'each one went to the control plane through the shipped mutation');
+  // Each launch registers its session before the runtime starts and then writes the pane the
+  // launcher returned (GY-172 AC-2): two writes to one handle per launch.
+  assert.equal(new Set(handles.map(entry => entry.handle.id)).size, 2, 'a handle was recorded for each launch');
+  assert.deepEqual(handles.map(entry => [entry.handle.kind, entry.handle.pane ?? null]), [['proof', null], ['proof', 'pane-13'], ['review', null], ['review', 'pane-12']],
+    'each registered before its runtime started, then given the pane it runs in');
+  assert.deepEqual(mutations.map(mutation => mutation.path.split('/').at(-1)), ['session', 'session', 'session', 'session'], 'each one went to the control plane through the shipped mutation');
   // And a dispatcher built with nothing but a snapshot records them too: the mutation is derived
   // from the configuration the loop already runs on, so no caller can leave the handles out.
   assert.ok(dispatchEffects('/outside', () => fleetConfig, { snapshot: effects.snapshot }).recordSession, 'the handle recording is not a caller\'s option');

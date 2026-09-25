@@ -1,4 +1,4 @@
-import { MergeExecutionInProgress, ReconciliationRetry, Refusal, SpeculativeConflict, requireCurrent } from './model.js';
+import { ReconciliationRetry, Refusal, SpeculativeConflict, requireCurrent } from './model.js';
 import { createSign, randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { observeCodex } from './codex-review.js';
@@ -11,7 +11,7 @@ import { inPlannedScope } from './regression-guard.js';
 import type { GitHubCacheStore } from './github-cache.js';
 import { nextAction } from './model/next-action.js';
 export { CHECK_NAME };
-import { baseRefreshNeeded, dismissedVerdict, ejectedTipRestore, heldBase, mergeBaseDismissalPattern, ownHeads, pendingRestore, queuePlacement, queueRef, treeIdenticalPrediction, type BaseRefresh, type BranchRestore, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread } from './merge-queue.js';
+import { baseRefreshNeeded, dismissedVerdict, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, pendingRestore, queuePlacement, queueRef, treeIdenticalPrediction, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread } from './merge-queue.js';
 import { blockedFeatures, controlPlanePermissions, describeShortfall, permissionShortfalls, requiredPermissions, type PermissionFeature, type PermissionLevel, type PermissionShortfall } from './github-permissions.js';
 
 /** Out-of-scope paths compared against the base tip per observation; the rest are refused as uncompared. */
@@ -191,12 +191,18 @@ export function observationFingerprint(observation: Observation | null | undefin
  * is the classification the whole control plane already uses for what an item needs next, so the
  * cadence follows it rather than inventing a second reading of the same state.
  */
-export function observationBand(work: Work, all: Work[], now: Date): { band: Exclude<CadenceBand, 'steady'>; reason: string } {
-  const next = nextAction(work, all, now);
+export function observationBand(work: Work, all: Work[], now: Date, next = nextAction(work, all, now)): { band: Exclude<CadenceBand, 'steady'>; reason: string; fresh?: true } {
   const open = !!work.candidate && !!work.observation && !work.observation.merged && work.observation.prState === 'open';
   if (next?.kind === 'merge' || open && work.gates.every(gate => gate.name === 'merge' || gate.passed))
     return { band: 'merge', reason: `${work.key} is at the merge gate with every other gate passing; the merge executor spends its observation's freshness` };
-  if (!next || next.kind === 'dispatch' || next.kind === 'request-rework' || next.kind === 'escalate')
+  // The loop requests a rework only from an observation under two minutes old (master-daemon.ts
+  // reworkObservationWait, GY-144). Polled on the idle or steady band — never less than two
+  // minutes apart — the decision nearly always met a stale one: on 2026-09-25 GY-173, GY-177 and
+  // GY-182 sat ejected from the merge queue for over an hour, "rework waits for a fresh GitHub
+  // observation" every cycle. So such an item is observed at the active cadence, never stretched.
+  if (next?.kind === 'request-rework')
+    return { band: 'active', fresh: true, reason: `${work.key} needs a new head, and the loop requests that round only from an observation under two minutes old, so it is observed at the active cadence` };
+  if (!next || next.kind === 'dispatch' || next.kind === 'escalate')
     return { band: 'idle', reason: `${work.key} needs ${next ? `a ${next.kind}` : 'nothing an observation can supply'}; nothing on GitHub can move it, so the webhook wakes it and polling is the safety net` };
   return { band: 'active', reason: `${work.key} needs ${next.kind}; GitHub can still change what it is waiting for` };
 }
@@ -208,9 +214,9 @@ export function observationBand(work: Work, all: Work[], now: Date): { band: Exc
  * Active candidates use the `steady` band; idle candidates retain their idle band and five-minute
  * floor so something GitHub cannot move is never polled more often than an active candidate.
  */
-export function observationCadence(work: Work, all: Work[], now: Date, previous?: Observation | null, steadyMs: number = observationCadenceMs.steady): { band: CadenceBand; ms: number; reason: string } {
-  const state = observationBand(work, all, now);
-  if (state.band !== 'merge' && previous && observationFingerprint(previous) === observationFingerprint(work.observation)) {
+export function observationCadence(work: Work, all: Work[], now: Date, previous?: Observation | null, steadyMs: number = observationCadenceMs.steady, next = nextAction(work, all, now)): { band: CadenceBand; ms: number; reason: string } {
+  const state = observationBand(work, all, now, next);
+  if (state.band !== 'merge' && !state.fresh && previous && observationFingerprint(previous) === observationFingerprint(work.observation)) {
     const band = state.band === 'active' ? 'steady' : state.band;
     return { band, ms: Math.max(observationCadenceMs[band], steadyMs),
       reason: `${work.key} came back with its head, base tip, check state and review state unchanged; polling settles to the steady-state interval and the webhook wakes it the moment any of that moves` };
@@ -272,6 +278,20 @@ export function appJwt(appId: number, privateKey: string, now = Date.now()) {
   const unsigned = `${encode({ alg: 'RS256', typ: 'JWT' })}.${encode({ iat: issued - 60, exp: issued + 540, iss: String(appId) })}`;
   return `${unsigned}.${createSign('RSA-SHA256').update(unsigned).sign(privateKey, 'base64url')}`;
 }
+const mergeQueueQuery = `query($owner: String!, $name: String!, $number: Int!, $branch: String!) {
+  repository(owner: $owner, name: $name) {
+    mergeQueue(branch: $branch) { id }
+    pullRequest(number: $number) { id headRefOid mergeStateStatus isInMergeQueue autoMergeRequest { enabledAt } mergeQueueEntry { state position headCommit { oid } } }
+  }
+}`;
+const enqueueMutation = `mutation($id: ID!, $head: GitObjectID!) { enqueuePullRequest(input: { pullRequestId: $id, expectedHeadOid: $head }) { mergeQueueEntry { id } } }`;
+const dequeueMutation = `mutation($id: ID!) { dequeuePullRequest(input: { id: $id }) { mergeQueueEntry { id } } }`;
+const autoMergeMutation = `mutation($id: ID!, $head: GitObjectID!, $method: PullRequestMergeMethod!) { enablePullRequestAutoMerge(input: { pullRequestId: $id, expectedHeadOid: $head, mergeMethod: $method }) { pullRequest { id } } }`;
+/** An immediate merge bound to the exact head, for a pull request GitHub reports mergeable now (no queue); branch protection still applies. */
+const headBoundMergeMutation = `mutation($id: ID!, $head: GitObjectID!, $method: PullRequestMergeMethod!) { mergePullRequest(input: { pullRequestId: $id, expectedHeadOid: $head, mergeMethod: $method }) { pullRequest { id } } }`;
+const disableAutoMergeMutation = `mutation($id: ID!) { disablePullRequestAutoMerge(input: { pullRequestId: $id }) { pullRequest { id } } }`;
+/** The merge method auto-merge uses where the base branch has no queue; a queue's own ruleset sets its method. */
+const autoMergeMethod = () => (['MERGE', 'SQUASH', 'REBASE'] as const).find(method => method === process.env.GITHUB_MERGE_METHOD?.toUpperCase()) ?? 'MERGE';
 export const installationSettingsUrl = (installationId: number) => `https://github.com/settings/installations/${installationId}`;
 export class GitHub {
   private token = '';
@@ -1014,17 +1034,6 @@ export class GitHub {
     demand(gates(first) === gates(second), 'GitHub gates changed during final verification; retry');
     return second;
   }
-  async serverTime(): Promise<number> {
-    await this.authenticate();
-    const response = await fetch('https://api.github.com/rate_limit', { headers: { Authorization: `Bearer ${this.token}`, Accept: 'application/vnd.github+json', 'Cache-Control': 'no-cache' }, signal: AbortSignal.timeout(15_000) });
-    const time = Date.parse(response.headers.get('date') ?? '');
-    this.record('/rate_limit', response, true, Date.now(), false);
-    const refused = await this.refusal(response, 'GET /rate_limit');
-    if (refused) throw refused;
-    demand(Number.isFinite(time), 'GitHub server time is unavailable', 502);
-    await response.body?.cancel();
-    return time;
-  }
   /** Resolve a policy profile to the numeric App identity registered with this control plane. */
   reviewerAppFor(profile: ReviewerProfile | null | undefined): ReviewerApp | undefined {
     if (!profile) return undefined;
@@ -1365,6 +1374,59 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     if (!merged) return record({ head: candidate!.sha });
     return record({ head: merged, merge: await this.describeMerge(candidate!.sha, merged, candidate!.baseSha, branch.tip) });
   }
+  /**
+   * The pull request's place in GitHub's merge queue (GY-258): whether the base branch has a queue,
+   * whether the pull request is queued or set to auto-merge, and the merge group commit GitHub builds
+   * for its entry. One GraphQL read.
+   */
+  async mergeQueueState(pr: number): Promise<GitHubMergeQueueState> {
+    const [owner, name] = this.config.repository.split('/');
+    const data = await this.graphql(mergeQueueQuery, { owner, name, number: pr, branch: this.config.base });
+    const pull = data?.repository?.pullRequest;
+    demand(typeof pull?.id === 'string' && typeof pull?.headRefOid === 'string', `GitHub did not report the merge-queue state of pull request #${pr}`, 502);
+    const entry = pull.mergeQueueEntry ?? null;
+    return { pullRequestId: pull.id, head: pull.headRefOid, queue: !!data.repository.mergeQueue?.id, mergeStateStatus: typeof pull.mergeStateStatus === 'string' ? pull.mergeStateStatus : null,
+      mode: pull.isInMergeQueue || entry ? 'queued' : pull.autoMergeRequest ? 'auto-merge' : 'none',
+      entryState: typeof entry?.state === 'string' ? entry.state : null, position: Number.isSafeInteger(entry?.position) ? entry.position : null,
+      groupHead: typeof entry?.headCommit?.oid === 'string' ? entry.headCommit.oid : null, at: new Date().toISOString() };
+  }
+  /**
+   * Hand an authorized head to GitHub: into the merge queue; where the base branch has none,
+   * auto-merge, or an immediate merge when GitHub already reports the pull request mergeable (it
+   * refuses auto-merge on a clean pull request, and Graphyard enqueues only once its own required
+   * check has passed, so a clean pull request is the usual case). `expectedHeadOid` binds every
+   * request to exactly that head, so a push in between is refused by GitHub rather than merged, and
+   * GitHub still enforces branch protection and every required check. These are the only ways
+   * Graphyard ever asks GitHub to merge.
+   */
+  async enqueuePullRequest(state: GitHubMergeQueueState, sha: string) {
+    if (state.queue) return void await this.graphql(enqueueMutation, { id: state.pullRequestId, head: sha });
+    const variables = { id: state.pullRequestId, head: sha, method: autoMergeMethod() };
+    if (mergeableNow(state)) return void await this.graphql(headBoundMergeMutation, variables);
+    try { await this.graphql(autoMergeMutation, variables); }
+    catch (error) {
+      // The pull request became mergeable between the read and the request: merge it, still head-bound.
+      if (!/clean status/i.test(error instanceof Error ? error.message : String(error))) throw error;
+      await this.graphql(headBoundMergeMutation, variables);
+    }
+  }
+  /** Take a pull request out of GitHub's hands: out of the merge queue, or auto-merge disabled. */
+  async dequeuePullRequest(state: GitHubMergeQueueState) {
+    if (state.mode === 'queued') await this.graphql(dequeueMutation, { id: state.pullRequestId });
+    else if (state.mode === 'auto-merge') await this.graphql(disableAutoMergeMutation, { id: state.pullRequestId });
+  }
+  /**
+   * GitHub's merge queue requires every required check on the merge group commit it builds, not only
+   * on the pull request head. The authorized head's verdict is carried to that commit, and only
+   * while the head stays authorized: a withdrawn head is dequeued, which discards the group.
+   */
+  async publishGroupCheck(work: Work, groupHead: string) {
+    const existing = (await this.pages(`/commits/${groupHead}/check-runs?check_name=${encodeURIComponent(CHECK_NAME)}&filter=latest`, 'check_runs')).find(c => c.app.id === this.config.appId);
+    if (existing?.status === 'completed' && existing.conclusion === 'success' && existing.external_id === work.id) return;
+    const body = { name: CHECK_NAME, head_sha: groupHead, status: 'completed', conclusion: 'success', external_id: work.id,
+      output: { title: 'All required gates passed', summary: `Merge group for ${work.key}: candidate ${work.candidate!.sha}; base ${work.candidate!.baseSha}; policy ${work.policyRevision}` } };
+    await this.request(existing ? `/check-runs/${existing.id}` : '/check-runs', existing ? 'PATCH' : 'POST', body);
+  }
   async publish(work: Work, forcedReason?: string, beforeWrite: () => Promise<void> = async () => {}) {
     if (!work.candidate) return;
     const reasons = [...work.gates.flatMap(g => g.reasons), ...work.violations, ...(forcedReason ? [forcedReason] : [])];
@@ -1386,6 +1448,34 @@ function appAuthored(commit: any, login: string): boolean {
   const email = typeof commit?.commit?.author?.email === 'string' ? commit.commit.author.email : '';
   return author !== null ? author.toLowerCase() === login.toLowerCase() && commit.author?.type === 'Bot'
     : new RegExp(`^\\d+\\+${login.replace(/[[\]]/g, '\\$&')}@users\\.noreply\\.github\\.com$`, 'i').test(email);
+}
+/** What gating one item's merge needs from GitHub (GY-258): the check publication and the merge-queue calls. */
+export type MergeGateClient = Pick<GitHub, 'publish' | 'mergeQueueState' | 'enqueuePullRequest' | 'dequeuePullRequest' | 'publishGroupCheck'>;
+/**
+ * Graphyard gates, GitHub merges. The `Graphyard / merge` check is published on the exact head
+ * first — success only for a head every gate passes — and then GitHub's queue is brought in line:
+ * an authorized head the coordinator asked to merge is enqueued (where the base branch has no queue,
+ * auto-merge, or an immediate head-bound merge when GitHub reports it mergeable now), a withdrawn one
+ * dequeued, and a queued entry's merge group commit is given the same verdict so the queue can land
+ * it. Graphyard never merges past GitHub: branch protection and required checks decide every merge.
+ */
+export async function gateMerge(github: MergeGateClient, work: Work, request: MergeEnqueueRequest | null, beforeWrite: () => Promise<void> = async () => {}): Promise<{ action: MergeQueueAction; state: GitHubMergeQueueState | null }> {
+  demand(work.candidate, `${work.key} has no candidate to gate`);
+  // Failure is written before a dequeue, success before an enqueue: GitHub never holds a head for
+  // merging whose published verdict says otherwise.
+  await github.publish(work, undefined, beforeWrite);
+  // The queue step never fails the observation: a withdrawn head already carries a failing required
+  // check, which GitHub will not merge, and the next observation retries the queue step.
+  let state: GitHubMergeQueueState;
+  try { state = await github.mergeQueueState(work.candidate.pr); }
+  catch (error) { return { action: { kind: 'hold', reason: `GitHub's merge queue could not be read for ${work.key}: ${error instanceof Error ? error.message : String(error)}` }, state: null }; }
+  const action = mergeQueueAction(work, state, request);
+  try {
+    if (action.kind === 'dequeue') await github.dequeuePullRequest(state);
+    if (action.kind === 'enqueue') { await beforeWrite(); await github.enqueuePullRequest(state, work.candidate.sha); }
+    if (action.kind === 'hold' && state.mode === 'queued' && state.groupHead && state.head === work.candidate.sha && mergeAuthorized(work)) await github.publishGroupCheck(work, state.groupHead);
+  } catch (error) { return { action: { kind: 'hold', reason: `GitHub refused to ${action.kind} ${work.key}: ${error instanceof Error ? error.message : String(error)}` }, state }; }
+  return { action, state };
 }
 export async function githubFromEnv() {
   if (!process.env.GITHUB_APP_ID || !process.env.GITHUB_REPOSITORY) return null;
@@ -1580,6 +1670,12 @@ export async function processJob(engine: Engine, github: GitHub) {
       if (!observation.merged) {
         const unpublishable = hold('check');
         if (unpublishable) held ??= unpublishable;
+        else if (typeof github.mergeQueueState === 'function') {
+          // The check and GitHub's queue move together (GY-258): an authorized, requested head is
+          // published as passed and handed to GitHub to merge; anything else is failed and taken out.
+          const gated = await gateMerge(github, work, await engine.enqueueRequest(work.id), guard(work, work.gates.every(g => g.passed) && !work.violations.length));
+          if (gated.state) work = await engine.recordGitHubQueue(work.id, gated.state, gated.action);
+        }
         else await github.publish(work, undefined, guard(work, work.gates.every(g => g.passed) && !work.violations.length));
       }
       return false;
@@ -1587,7 +1683,9 @@ export async function processJob(engine: Engine, github: GitHub) {
     // The schedule: the merge-queue head every 20 s and everything else at the 300 s backstop a
     // webhook wake short-circuits; GY-117's fleet bound only ever stretches that backstop for an
     // unchanged candidate, never shortens it.
-    const head = !settled && !held && work?.stage === 'merge' && queuePlacement(work, await engine.store.list(), Date.now())?.position === 0;
+    // An authorized head GitHub may merge at any moment is observed at the same cadence, so the
+    // record before its merge always carries a fresh observation to attribute the delivery from.
+    const head = !settled && !held && work?.stage === 'merge' && (mergeAuthorized(work) || queuePlacement(work, await engine.store.list(), Date.now())?.position === 0);
     const cadence = schedule.cadence && (head ? { ...schedule.cadence, band: 'merge' as const, ms: headObservationSeconds * 1000 }
       : { ...schedule.cadence, band: schedule.cadence.band === 'merge' ? 'active' as const : schedule.cadence.band, ms: Math.max(idleObservationSeconds * 1000, schedule.cadence.ms) });
     if (cadence && work) github.recordObservation?.(work.id, { requests, uncached, band: cadence.band, cadenceMs: cadence.ms });
@@ -1603,12 +1701,12 @@ export async function processJob(engine: Engine, github: GitHub) {
     if (paused && error instanceof Refusal && /requests paused/.test(message)) { await engine.store.finishJob(job.work_id, job.token, message, false, Math.max(2000, Date.parse(paused.until) - Date.now() + 1000)); return; }
     const current = (await engine.store.pool.query('SELECT document,clock_timestamp() AS now FROM work_items WHERE id=$1', [job.work_id])).rows[0];
     const latest = current?.document as Work | undefined;
-    const execution = latest?.mergeExecution;
-    const executionActive = !!execution && Date.parse(execution.expiresAt) > current.now.getTime();
-    if (execution && (executionActive || error instanceof MergeExecutionInProgress)) {
-      await engine.store.deferJob(job.work_id, job.token, execution.expiresAt); return;
-    }
     if (latest?.candidate && latest.stage !== 'done' && !hold('check')) try { await github.publish(latest, 'Reconciliation failed; fresh verification required', guard(latest, false)); } catch { /* Durable retry follows. */ }
+    // A head Graphyard could not verify is not left for GitHub to merge (GY-258).
+    if (latest?.candidate && latest.stage !== 'done' && !hold('check') && typeof github.mergeQueueState === 'function') try {
+      const state = await github.mergeQueueState(latest.candidate.pr);
+      if (state.mode !== 'none') await github.dequeuePullRequest(state);
+    } catch { /* Durable retry follows. */ }
     // A permission refusal is not transient: after a bounded number of ordinary retries the
     // job is held with the reason, and the next preflight either confirms the shortfall or
     // releases it once the installation changed. A refusal the declaration does not explain
