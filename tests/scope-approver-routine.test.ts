@@ -187,6 +187,25 @@ test('unit:scope-approver-routine — a refused decision is recorded, never re-r
   assert.match(work.blocker!, /^Scope request refused by the independent approver independent-approver/);
 });
 
+test('unit:scope-approver-routine — a refusal keeps a blocker the worker reported while the request waited, and withdrawing the ask does not clear it', async () => {
+  let work = await claimed('refused over a worker blocker');
+  await ask(work, ['src/server/routes/work.ts'], 'The route would be easier to change here too');
+  const loop = harness(), state = emptyDaemonState(loopConfig());
+  await loop.cycle(state);
+  const [requested] = await standing(work);
+  const own = 'The fixture database is unreachable from this host';
+  await engine.execute(implementer, 'blocked', work.id, { epoch: work.epoch, reason: own }, randomUUID());
+  await ok(approver.token, 'POST', `work/${work.id}/approve`, { action: 'refuse', decision: requested.id, reason: 'The route is another item\'s scope' });
+  work = await reload(work.id);
+  assert.equal(work.scopeDecision!.state, 'refused', 'the refusal is still recorded');
+  assert.equal(work.scopeDecision!.decidedBy, approver.id);
+  assert.equal(work.blocker, own, 'the worker\'s own blocker is not overwritten');
+  await ok(token(implementer), 'POST', `work/${work.id}/scope`, { epoch: work.epoch, paths: [], reason: 'Staying inside plannedFiles' });
+  work = await reload(work.id);
+  assert.equal(work.scopeRequest, null);
+  assert.equal(work.blocker, own, 'withdrawing the ask leaves the unrelated blocker standing');
+});
+
 test('unit:scope-approver-routine — an approval is refused once the asking attempt no longer holds the lease, with the policy revision unchanged', async () => {
   let work = await claimed('stale approval');
   const asked = await ask(work, [helper], 'The layout measures through the helper');

@@ -78,6 +78,9 @@ async function answerScopeRequest(db: Parameters<typeof save>[0], work: Work, de
   if (!answers || !request || request.epoch !== answers.epoch || request.at !== answers.at || !live || !current) return;
   work.scopeDecision = { state: 'refused', reason, at: now.toISOString(), decidedBy: actor.id, waitedMs: Math.max(0, now.getTime() - Date.parse(request.at)), paths: request.paths, requestedBy: request.requestedBy, requestedAt: request.at, epoch: request.epoch };
   work.scopeRequest = { ...request, decision: work.scopeDecision };
-  work.blocker = `${scopeRefusalBlocker} by the independent approver ${actor.id} (decision ${decision.id}): ${reason}`.slice(0, 2000);
+  // The refusal replaces only a scope refusal (the rule's, which it answers) or no blocker at all: a
+  // blocker the worker reported meanwhile is its own hand-off, and withdrawing the ask — which lifts
+  // only a scope-refusal blocker — must not clear it. The refusal itself is held in scopeDecision.
+  if (!work.blocker || work.blocker.startsWith(scopeRefusalBlocker)) work.blocker = `${scopeRefusalBlocker} by the independent approver ${actor.id} (decision ${decision.id}): ${reason}`.slice(0, 2000);
   await save(db, work, actor.id, 'scope.refused', now, { decision: decision.id, epoch: request.epoch, requestedAt: request.at, paths: request.paths, approver: actor.id, reason });
 }
