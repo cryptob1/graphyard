@@ -9,7 +9,7 @@ import { productionEnvironmentFromEnv } from './flow-analytics.js';
 import { ChildWaitLedger, childRunner, type ChildRun } from './child-runner.js';
 import { uncitedRefusals } from './model/approval.js';
 import { currentEvidence, deliveryState, deploySmokeRequired, exhaustedReviewerProfiles, leaseLossEpoch, postDeployMs, productionLatencyMs, reviewProviderOf, reviewerProfileFor, rollbackGuidance, standingEscalations, type AgentReview, type ContainmentScope, type Work } from './model.js';
-import { pathScopeContains, redecidableScopeRefusal, routableScopeRequest, scopeBlockedBudgetMs, scopeDecisionBinding, scopeDecisionBudgetMs, scopeDecisionReason, scopeDecisionSample, unplannedPaths, type ScopeRequestState } from './model/scope.js';
+import { pathScope, pathScopeContains, pinningTestGround, redecidableScopeRefusal, routableScopeRequest, scopeBlockedBudgetMs, scopeDecisionBinding, scopeDecisionBudgetMs, scopeDecisionReason, scopeDecisionSample, testFile, unplannedPaths, type ScopeDecisionContext, type ScopeRequestState } from './model/scope.js';
 import { scopePattern, watchAssignment } from './supervisor.js';
 import type { SessionHandleInput } from './model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from './request-settlement.js';
@@ -23,7 +23,7 @@ import { stalledItems } from './model/action-account.js';
 import { humanNeededActions } from './model/next-action.js';
 import { independentProducerProfiles, launchProducer, readProducerLedger, reclaimCheckouts, saveProducerLedger } from './producer.js';
 import { followUpThreadIds, launchReview, readReviewLedger, updateReviewLedger } from './reviewer.js';
-import { basePaths, findingScope, readReviewFindings, type ReviewFinding } from './review-scope.js';
+import { basePaths, findingScope, namesPath, readReviewFindings, type ReviewFinding } from './review-scope.js';
 import { defaultAwaitReviewers } from './auto-dispatch.js';
 import { inspectProducerCredentials, inspectProfileAccounts, preservePartialWork, profileAccount, readEnvironmentLog, recordObservedExhaustion, roleCapacity, selectionKey, type ObservedExhaustion, type ProfileAccountHealth, type RoleCapacity } from './master.js';
 import { agentOwner, agentToken, approvedMerge, approverSessionName, assertDispatchable, guardBroadScope, assertOutsideWorktrees, assessContainment, closeHerdrPane, containmentPhase, decisionInput, diskExhaustionMessage, diskThresholdBytes, dispatchWork, inspectWorkerCredentials, launchApprover, listHerdrAgents, mergeExecutor, mergedWithoutAuthorization, observeHerdrAgents, reclaimAdvice, reclaimIdleMs, reclaimWorktrees, unauthorizedMergeViolation, writeFailure, type AttentionItem, type ConfigReload, type ContainmentAssessment, type HerdrAgent, type MasterConfig, type MergeExecutor, type WorkerProfile, type WorktreeReclaimReport } from './master.js';
@@ -807,7 +807,7 @@ const sameAnswers = (a: any, b: any) => !a || !b ? !a && !b : a.epoch === b.epoc
  * the approver grants it only with a stated reason. Unlike rework it attests nothing about a
  * stopped worker: the worker is live and waiting on the answer.
  */
-export function scopeRoutineDecision(work: Work, now: number, judged: boolean): RoutineDecision | null {
+export function scopeRoutineDecision(work: Work, now: number, judged: boolean, context: ScopeDecisionContext = {}): RoutineDecision | null {
   if (!judged || work.stage === 'done') return null;
   const routable = routableScopeRequest(work, now);
   if (!routable) return null;
@@ -815,8 +815,40 @@ export function scopeRoutineDecision(work: Work, now: number, judged: boolean): 
   let broad: string | null = null;
   try { guardBroadScope({ ...work, plannedFiles }, request.reason, { allow: false, command: 'the loop', existing: work.plannedFiles }); }
   catch (error) { broad = `${guardBroadScope({ ...work, plannedFiles }, 'the approver grants it only with a stated reason', { allow: true, command: 'the loop', existing: work.plannedFiles })} (${message(error)})`; }
-  return { action: 'requirements', binding: scopeDecisionBinding(request), input: { plannedFiles, answers: { epoch: request.epoch, at: request.at } }, reason: scopeDecisionReason(work.key, request, work.criteria, paths, broad),
+  return { action: 'requirements', binding: scopeDecisionBinding(request), input: { plannedFiles, answers: { epoch: request.epoch, at: request.at } }, reason: scopeDecisionReason(work.key, request, work.criteria, paths, broad, context),
     scope: { epoch: request.epoch, at: request.at, requestedBy: request.requestedBy, paths: paths.slice(0, 50).map(path => path.slice(0, 500)) } };
+}
+
+/**
+ * GY-199. What grants each requested path without an approver, or the first refusal: a trusted
+ * review finding naming it (review-scope.ts findingScope), or — for a test file on the base — the
+ * pinning rule (model/scope.ts pinningTestGround) applied to the base branch's texts of that test
+ * and of the item's planned files, read outside every transaction. Anything else is the approver's.
+ */
+export async function automaticScopeGrounds(item: Work, request: ScopeRequestState, paths: readonly string[], findings: readonly ReviewFinding[], exists: (path: string) => boolean, read?: (path: string) => Promise<string | null>): Promise<{ grounds: { path: string; ground: string }[] } | { refusal: string }> {
+  const grounds: { path: string; ground: string }[] = [];
+  let planned: { path: string; text: string | null }[] | null = null;
+  for (const path of paths) {
+    const named = findingScope([path], findings, exists);
+    if ('grounds' in named) { grounds.push(...named.grounds); continue; }
+    if (read && testFile(path) && exists(path)) {
+      const text = await read(path);
+      planned ??= await Promise.all((item.plannedFiles ?? []).filter(scope => !pathScope(scope).prefix && !scope.includes('*')).slice(0, 50).map(async scope => ({ path: scope, text: await read(scope) })));
+      const ground = pinningTestGround(path, request.reason, text, planned);
+      if (ground) { grounds.push({ path, ground }); continue; }
+    }
+    return named;
+  }
+  return { grounds };
+}
+
+/**
+ * The review threads an approver of a scope request reads first (GY-199): those the worker's reason
+ * cites by id or that name a requested file, then the rest the loop read, in the order it read them.
+ */
+export function citedFindings(findings: readonly ReviewFinding[], request: Pick<ScopeRequestState, 'reason'>, paths: readonly string[]) {
+  const cited = (finding: ReviewFinding) => request.reason.includes(finding.ground.replace(/^review (thread )?/, '')) || paths.some(path => namesPath(finding.text, path));
+  return [...findings.filter(cited), ...findings.filter(finding => !cited(finding))];
 }
 /**
  * The decision one item needs right now, or null. Rework returns a head nothing can carry forward
@@ -1493,6 +1525,14 @@ export interface DaemonEffects {
   reviewFindings?: (work: Work) => Promise<ReviewFinding[]>;
   /** Which of the paths exist on the base branch, read from one fetch of it per decision. */
   basePaths?: (paths: readonly string[]) => Promise<Set<string>>;
+  /** A file's text on the base branch as `basePaths` fetched it, or null when it has none: what the pinning-test rule reads (GY-199). */
+  baseText?: (path: string) => Promise<string | null>;
+  /**
+   * The requested files' diffs against the base as the asking attempt holds them — its worktree on
+   * this host, committed or not — for the approver of a scope request (GY-199). Empty when this
+   * host holds no worktree of that attempt.
+   */
+  scopeDiffs?: (work: Work, epoch: number, paths: readonly string[]) => Promise<{ path: string; diff: string }[]>;
   /**
    * The master's own additive scope widening — the revision `master scope` applies — with its
    * audited reason, bound to the scope request it answers (`answeringWidening`).
@@ -1939,10 +1979,14 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
   //    What this pass decides is kept, so the budget below measures what is still waiting rather
   //    than what has just been answered.
   const settled = new Map<string, Work>();
-  // 2a. A refused request for files a review finding on the item's own change names. The finding
-  //     is the grounds the item's criteria lack: the loop reads it with its own GitHub access and
-  //     widens by exactly those files as the master's own additive intent, once per request and
-  //     policy revision; anything the findings do not name stays refused and escalated. Findings
+  // The findings step 2a read this cycle, per item: the threads a scope decision's approver reads (step 4c).
+  const findingsRead = new Map<string, ReviewFinding[]>();
+  // 2a. A refused request for files a review finding on the item's own change names, or for a test
+  //     whose failing assertion quotes text a file the item plans holds (GY-199). The finding, or the
+  //     pinned text, is the grounds the item's criteria lack: the loop reads it with its own GitHub
+  //     access and the base branch, and widens by exactly those files as the master's own additive
+  //     intent, once per request and policy revision; anything else goes to the independent
+  //     approver in step 4c (escalated to a master only when this loop cannot request it). Findings
   //     change while the request and revision stand — a bot's thread lands after the refusal — so
   //     a refusal on the findings is judged again every findingRecheckMs, never cached for good.
   //     The reads take seconds; the widening names the request it answers, so a claim or lease
@@ -1961,8 +2005,9 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
     const attempts = judged ? previous.attempts : (previous?.attempts ?? 0) + 1;
     try {
       const findings = await effects.reviewFindings(item);
+      findingsRead.set(item.id, findings);
       const existing = await effects.basePaths?.(paths) ?? new Set<string>();
-      const scoped = findingScope(paths, findings, path => existing.has(path));
+      const scoped = await automaticScopeGrounds(item, request, paths, findings, path => existing.has(path), effects.baseText);
       if ('refusal' in scoped) {
         const detail = boundDetail(`Not widened on a review finding: ${scoped.refusal}`);
         const entry = await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done', detail, attempts, cycle: state.cycle }, now(), effects.persist);
@@ -1972,12 +2017,12 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
       }
       const grounds = scoped.grounds.map(entry => `${entry.path} (${entry.ground})`).join('; ');
       const reason = guardBroadScope({ ...item, plannedFiles: [...new Set([...(item.plannedFiles ?? []), ...paths])] },
-        `Additive scope a review finding on ${item.key}'s own change names: ${grounds}. ${request.requestedBy} asked because ${request.reason}`.slice(0, 1900), { allow: false, command: 'the loop', existing: item.plannedFiles });
+        `Additive scope ${item.key}'s own change calls for — a review finding names it, or a test pins text a planned file holds: ${grounds}. ${request.requestedBy} asked because ${request.reason}`.slice(0, 1900), { allow: false, command: 'the loop', existing: item.plannedFiles });
       const widened = await effects.widenScope(item, request, paths, reason) as Work | undefined;
       // The time the control plane recorded the answer, never the cycle's: the worker reads it at once.
       const recorded = widened?.scopeDecision;
       const at = recorded?.epoch === request.epoch && recorded.requestedAt === request.at ? recorded.at : new Date(now()).toISOString();
-      performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done', detail: boundDetail(`Widened ${item.key} with ${namePaths(paths)} on the review finding that names ${paths.length === 1 ? 'it' : 'them'}: ${grounds}`), attempts, cycle: state.cycle }, now(), effects.persist));
+      performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done', detail: boundDetail(`Widened ${item.key} with ${namePaths(paths)} on the review finding or pinned text that grounds ${paths.length === 1 ? 'it' : 'them'}: ${grounds}`), attempts, cycle: state.cycle }, now(), effects.persist));
       return at;
     } catch (error) {
       performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'failed', detail: boundDetail(`Could not widen ${item.key} on a review finding: ${message(error)}`), attempts, cycle: state.cycle }, now(), effects.persist));
@@ -2545,7 +2590,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
     const assessment = assessments[item.id];
     // A request step 2 refused this cycle is read as it was decided, not as the snapshot saw it.
     const scoped = settled.get(item.id) ?? item;
-    const decision = scopeRoutineDecision(scoped, clock, findingsJudged(scoped)) ?? routineDecision(item, config, clock, assessment);
+    let decision = scopeRoutineDecision(scoped, clock, findingsJudged(scoped)) ?? routineDecision(item, config, clock, assessment);
     if (!decision) {
       // Still called for, only not attestable this cycle: its request is not one the item moved past.
       const called = neededDecision(item, config);
@@ -2580,6 +2625,14 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
       const detail = `${item.key} needs a ${decision.action} decision: ${decision.reason} This loop runs without the decision effects, so it cannot request one: graphyard master decide ${item.key} ${decision.action} REASON, then graphyard master approver ${item.key} DECISION`;
       if (detailChanged(state.actions[escalationKey], detail)) performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[escalationKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
       return;
+    }
+    // A scope decision carries what its approver judges it on (GY-199): the review threads — read
+    // again when step 2a did not read them this cycle — and the requested files' diffs.
+    if (decision.scope) {
+      const request = scoped.scopeRequest!;
+      const findings = findingsRead.get(item.id) ?? (effects.reviewFindings ? await effects.reviewFindings(scoped).catch(() => []) : []);
+      const diffs = effects.scopeDiffs ? await effects.scopeDiffs(scoped, decision.scope.epoch, decision.scope.paths).catch(() => []) : [];
+      decision = scopeRoutineDecision(scoped, clock, true, { threads: citedFindings(findings, request, decision.scope.paths), diffs }) ?? decision;
     }
     await request(item, decision, key, null);
   });
@@ -3339,6 +3392,20 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     reviewFindings: async work => work.candidate?.pr ? readReviewFindings({ repository: current().repository, pr: work.candidate.pr, sha: work.candidate.sha, reviewer: current().reviewer ? `${current().reviewer!.slug}[bot]` : null,
       trusted: current().run.awaitReviewers ?? defaultAwaitReviewers.logins }, run) : [],
     basePaths: paths => basePaths(root, current().baseBranch, paths, run),
+    // Read from the ref `basePaths` just fetched; a file the base lacks, or one too large to quote, reads as none.
+    baseText: async path => {
+      try { const text = String(await run('git', ['-C', root, 'show', `origin/${current().baseBranch}:${path}`])); return text.length > 1_000_000 ? null : text; }
+      catch { return null; }
+    },
+    // The attempt's own worktree on this host, against its merge base with the base branch: committed
+    // and uncommitted edits alike, and never the base's own later changes read backwards.
+    scopeDiffs: async (work, epoch, paths) => {
+      const workspace = work.workspaces.find(entry => entry.epoch === epoch && entry.host === current().hostId);
+      if (!workspace || !paths.length) return [];
+      const base = String(await run('git', ['-C', workspace.path, 'merge-base', 'HEAD', `origin/${current().baseBranch}`])).trim();
+      const diff = String(await run('git', ['-C', workspace.path, 'diff', '--no-color', '--unified=1', base, '--', ...paths]));
+      return diff.split(/^(?=diff --git )/m).filter(Boolean).map(entry => ({ path: /^diff --git a\/(\S+)/.exec(entry)?.[1] ?? 'unknown', diff: entry.split('\n').filter(line => !/^(diff --git|index |--- |\+\+\+ )/.test(line)).join('\n') }));
+    },
     get widenScope() {
       return current().operatorAgent ? async (work: Work, request: ScopeRequestState, paths: string[], reason: string) =>
         asOperatorAgent('POST', `work/${work.id}/requirements`, answeringWidening(work, request, paths, reason)) : undefined;

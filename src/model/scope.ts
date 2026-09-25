@@ -169,6 +169,48 @@ export function decideScopeRequest(
   return { state: 'approved', reason: `additive scope the item already implies — ${matched.map(entry => `${entry.path} (${entry.by!.why})`).join('; ')}`, paths };
 }
 
+// ---------------------------------------------------------------------------
+// Pinning tests (GY-199). A behaviour change breaks the tests that pin the old text: the worker asks
+// for the test, the item's criteria never name it, and the rule above refuses it. Such a test is the
+// item's own scope when its failing assertion quotes text a planned file holds — the text the item
+// changes. The loop reads both files from the base branch outside every transaction and applies this
+// rule to what it read; nothing here reads a file.
+// ---------------------------------------------------------------------------
+
+/** A test file as the pinning rule reads one: under a tests directory, or named `*.test.*` / `*.spec.*`. */
+export const testFile = (path: string) => !pathScope(path).prefix && (/(^|\/)(tests?|__tests__|browser-tests|spec)\//.test(path) || /\.(test|spec)\.[cm]?[jt]sx?$/.test(path));
+/** The shortest quote the rule accepts: shorter text is too common to tie a test to a file. */
+export const pinnedQuoteMin = 8;
+/**
+ * The texts a request's reason quotes, as written and as the file would hold them: backtick and
+ * double-quoted segments as they are, and a regular-expression literal (`/Old text\./`) both as its
+ * source (the test holds that) and unescaped (the planned file holds that).
+ */
+export function quotedTexts(reason: string): { raw: string; text: string }[] {
+  const quotes: { raw: string; text: string }[] = [];
+  for (const match of reason.matchAll(/`([^`\n]+)`|"([^"\n]+)"|(?:^|[\s(,=:])\/((?:\\.|[^/\\\n])+)\/[dgimsuyv]*/g)) {
+    const raw = match[1] ?? match[2] ?? match[3];
+    const text = match[3] ? raw.replace(/\\(.)/g, '$1') : raw;
+    if (text.trim().length >= pinnedQuoteMin) quotes.push({ raw, text });
+  }
+  return quotes;
+}
+/**
+ * The grounds a test file is granted on, or null. The request's reason quotes the failing assertion;
+ * the quote must be in the test file (it is that test's assertion) and in a file the item already
+ * plans (the text the item changes). Anything else — a quote only one of them holds, a file that is
+ * not a test — is refused and goes to the approver.
+ */
+export function pinningTestGround(path: string, reason: string, testText: string | null, planned: readonly { path: string; text: string | null }[]): string | null {
+  if (!testFile(path) || !testText) return null;
+  for (const quote of quotedTexts(reason)) {
+    if (!testText.includes(quote.raw) && !testText.includes(quote.text)) continue;
+    const holder = planned.find(file => file.path !== path && !!file.text && file.text.includes(quote.text));
+    if (holder) return `${path} pins "${quote.text.length > 80 ? `${quote.text.slice(0, 79)}…` : quote.text}", which planned file ${holder.path} holds`;
+  }
+  return null;
+}
+
 /**
  * True when a request the loop refused would be approved by the rules as they stand now — a rule
  * change, or a widening that made its implication hold — so the loop asks the control plane to
@@ -216,16 +258,24 @@ export const scopeDecisionBinding = (request: Pick<ScopeRequestState, 'epoch' | 
  * criteria. A widening that introduces a root-level directory carries the broad-scope exception
  * (`broad`, the text `guardBroadScope` records): the approver may grant it only with a stated
  * reason, which the control plane writes into the applied revision beside this one.
+ * `context` (GY-199) adds the review threads the loop read, cited ones first, and the requested files'
+ * diffs, each within a third of the room left; the criteria take the rest, and a cut is read from `status`.
  */
-export function scopeDecisionReason(key: string, request: Pick<ScopeRequestState, 'requestedBy' | 'reason' | 'decision'>, criteria: readonly ScopeCriterion[], paths: readonly string[], broad: string | null, max = 2000) {
-  const cut = (text: string, room: number) => text.length <= room ? text : `${text.slice(0, Math.max(0, room - 1))}…`;
-  const rules = ` The implication rule refused it and no review finding on the item's own change names it, so it is the approver's judgement: approve an additive widening the item's criteria justify (the worker keeps its lease), refuse with the reason otherwise.`;
+export interface ScopeDecisionContext { threads?: readonly { ground: string; text: string }[]; diffs?: readonly { path: string; diff: string }[] }
+export function scopeDecisionReason(key: string, request: Pick<ScopeRequestState, 'requestedBy' | 'reason' | 'decision'>, criteria: readonly ScopeCriterion[], paths: readonly string[], broad: string | null, context: ScopeDecisionContext = {}, max = 2000) {
+  const cut = (text: string, room: number) => text.length <= room ? text : room <= 0 ? '' : `${text.slice(0, Math.max(0, room - 1))}…`;
+  const flat = (text: string) => text.replace(/\s+/g, ' ').trim();
+  const rules = ` The implication rule refused it and neither a review finding on the item's own change nor a test pinning a planned file's text grounds it, so it is the approver's judgement: approve an additive widening the item's criteria justify (the worker keeps its lease), refuse with the reason otherwise.`;
   const exception = broad ? ` ${cut(broad, 300)} It needs the broad-scope flag (--allow-broad-scope): grant it only with a stated reason why narrower paths will not do.` : '';
   const asked = cut(`${key}: ${request.requestedBy} asks to widen plannedFiles with ${cut(paths.join(', '), 400)} because ${request.reason}.`, 800);
   const refusal = cut(` Rule refusal: ${request.decision?.reason ?? 'none recorded'}.`, 250);
   const named = ` Criteria: ${criteria.map(criterion => `${criterion.id}: ${criterion.text}`).join(' | ')}`;
   const head = asked + rules + exception + refusal;
-  return head + cut(named, max - head.length);
+  const share = Math.max(0, Math.floor((max - head.length) / 3));
+  const threads = context.threads?.length ? cut(` Review threads: ${context.threads.map(thread => `${thread.ground}: ${flat(thread.text)}`).join(' | ')}.`, share) : '';
+  const diffs = context.diffs?.length ? cut(` Diffs: ${context.diffs.map(entry => `${entry.path}: ${entry.diff.trim().replace(/\n/g, ' ⏎ ')}`).join(' | ')}`, share) : ''; // ⏎ keeps a diff's hunks legible
+  const body = head + threads + diffs;
+  return body + cut(named, max - body.length);
 }
 
 /**
