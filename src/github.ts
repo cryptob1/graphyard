@@ -11,7 +11,7 @@ import { inPlannedScope } from './regression-guard.js';
 import type { GitHubCacheStore } from './github-cache.js';
 import { nextAction } from './model/next-action.js';
 export { CHECK_NAME };
-import { baseRefreshNeeded, dismissedVerdict, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, pendingRestore, queuePlacement, queueRef, mergeCheckBranch, treeIdenticalPrediction, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread } from './merge-queue.js';
+import { alreadyMergeableRefusal, baseRefreshNeeded, dismissedVerdict, enqueueRequestCurrent, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, pendingRestore, queuePlacement, queueRef, mergeCheckBranch, treeIdenticalPrediction, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread } from './merge-queue.js';
 import { blockedFeatures, controlPlanePermissions, describeShortfall, permissionShortfalls, requiredPermissions, type PermissionFeature, type PermissionLevel, type PermissionShortfall } from './github-permissions.js';
 
 /** Out-of-scope paths compared against the base tip per observation; the rest are refused as uncompared. */
@@ -1411,9 +1411,10 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
   }
   /**
    * Hand an authorized head to GitHub: into the merge queue; where the base branch has none,
-   * auto-merge, or an immediate merge when GitHub already reports the pull request mergeable (it
-   * refuses auto-merge on a clean pull request, and Graphyard enqueues only once its own required
-   * check has passed, so a clean pull request is the usual case). `expectedHeadOid` binds every
+   * auto-merge, or an immediate merge when GitHub already reports the pull request mergeable —
+   * CLEAN, UNSTABLE or HAS_HOOKS (it refuses auto-merge on such a pull request, and Graphyard
+   * enqueues only once its own required check has passed, so a mergeable pull request is the usual
+   * case). `expectedHeadOid` binds every
    * request to exactly that head, so a push in between is refused by GitHub rather than merged, and
    * GitHub still enforces branch protection and every required check. These are the only ways
    * Graphyard ever asks GitHub to merge.
@@ -1424,8 +1425,9 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     if (mergeableNow(state)) return void await this.graphql(headBoundMergeMutation, variables);
     try { await this.graphql(autoMergeMutation, variables); }
     catch (error) {
-      // The pull request became mergeable between the read and the request: merge it, still head-bound.
-      if (!/clean status/i.test(error instanceof Error ? error.message : String(error))) throw error;
+      // The pull request became mergeable (clean, unstable or has_hooks) between the read and the
+      // request: merge it, still head-bound.
+      if (!alreadyMergeableRefusal.test(error instanceof Error ? error.message : String(error))) throw error;
       await this.graphql(headBoundMergeMutation, variables);
     }
   }
@@ -1489,6 +1491,8 @@ export async function gateMerge(github: MergeGateClient, work: Work, request: Me
   try { state = await github.mergeQueueState(work.candidate.pr); }
   catch (error) { return { action: { kind: 'hold', reason: `GitHub's merge queue could not be read for ${work.key}: ${error instanceof Error ? error.message : String(error)}` }, state: null }; }
   const action = mergeQueueAction(work, state, request);
+  // The current request's time goes on the record, so a merge left pending on a mergeable head is named (GY-344).
+  state = { ...state, requestedAt: enqueueRequestCurrent(work, request) ? request!.at : null };
   try {
     if (action.kind === 'dequeue') await github.dequeuePullRequest(state);
     if (action.kind === 'enqueue') { await beforeWrite(); await github.enqueuePullRequest(state, work.candidate.sha); }

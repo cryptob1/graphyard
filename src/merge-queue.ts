@@ -925,7 +925,7 @@ export interface GitHubMergeQueueState {
   head: string;
   /** Whether the base branch has a merge queue; without one Graphyard enables auto-merge, or merges a pull request GitHub reports mergeable now, head-bound. */
   queue: boolean;
-  /** GitHub's MergeStateStatus for the pull request (CLEAN, BLOCKED, …); CLEAN or HAS_HOOKS without a queue is merged at once, head-bound. */
+  /** GitHub's MergeStateStatus for the pull request (CLEAN, BLOCKED, …); CLEAN, UNSTABLE or HAS_HOOKS without a queue is merged at once, head-bound. */
   mergeStateStatus?: string | null;
   mode: GitHubMergeMode;
   /** GitHub's MergeQueueEntryState (QUEUED, AWAITING_CHECKS, MERGEABLE, UNMERGEABLE, LOCKED), or null. */
@@ -936,6 +936,8 @@ export interface GitHubMergeQueueState {
   at: string;
   /** GitHub's latest refusal of the control plane's enqueue or dequeue for this head, recorded as `merge.enqueue.refused`; cleared once a request succeeds. */
   refused?: { reason: string; head: string; mode: GitHubMergeMode; at: string } | null;
+  /** When the coordinator's current merge request for this candidate was recorded, or null; how long a merge has been pending (GY-344). */
+  requestedAt?: string | null;
 }
 declare module './model/work.js' { interface Observation { githubQueue?: GitHubMergeQueueState | null } }
 
@@ -966,8 +968,38 @@ export type MergeQueueAction =
  * read of GitHub. Enqueue only an authorized, requested candidate whose head GitHub still holds;
  * dequeue anything GitHub holds for merging that is not exactly that. Everything else holds.
  */
-/** Whether GitHub merges the pull request at once (CLEAN, HAS_HOOKS) and so refuses to enable auto-merge on it ("Pull request is in clean status"). */
-export const mergeableNow = (state: Pick<GitHubMergeQueueState, 'mergeStateStatus'>) => state.mergeStateStatus === 'CLEAN' || state.mergeStateStatus === 'HAS_HOOKS';
+/**
+ * The merge states in which GitHub merges the pull request at once and so refuses to enable
+ * auto-merge on it ("Pull request is in clean status"). UNSTABLE is one (GY-344): only checks
+ * branch protection does not require are failing or cancelled, and GitHub still enforces every
+ * required check on the head-bound merge. BEHIND, BLOCKED, DIRTY and UNKNOWN are not.
+ */
+export const mergeableStates = ['CLEAN', 'UNSTABLE', 'HAS_HOOKS'] as const;
+/** Whether GitHub merges the pull request at once (CLEAN, UNSTABLE, HAS_HOOKS). */
+export const mergeableNow = (state: Pick<GitHubMergeQueueState, 'mergeStateStatus'>) => (mergeableStates as readonly (string | null | undefined)[]).includes(state.mergeStateStatus);
+/** GitHub's refusal of auto-merge on a pull request already in one of those states ("Pull request is in unstable status"). */
+export const alreadyMergeableRefusal = /\b(clean|unstable|has_hooks) status\b/i;
+/** How long a merge may stay pending on a head GitHub reports mergeable before master status names it (GY-344). */
+export const mergeStallMs = 5 * 60_000;
+/**
+ * Merge requests pending past `mergeStallMs` on a head GitHub reports mergeable, with no refusal
+ * recorded: GitHub was asked to merge something it says it can merge and nothing happened, which is
+ * a new unmerged state the control plane does not handle yet. Only a base branch without a merge
+ * queue is judged: a queued entry waits on its merge group, which GitHub reports on its own.
+ */
+export function mergeStalls(work: Work[], now: number): { key: string; pr: number; head: string; mergeStateStatus: string; requestedAt: string; ageMs: number; text: string; next: string }[] {
+  return work.flatMap(item => {
+    const state = item.observation?.githubQueue, candidate = item.candidate;
+    if (!state || !candidate || item.stage === 'done' || item.observation?.merged || state.queue || state.refused || !state.requestedAt
+      || state.head !== candidate.sha || !mergeableNow(state)) return [];
+    const ageMs = now - Date.parse(state.requestedAt);
+    if (ageMs <= mergeStallMs) return [];
+    const status = state.mergeStateStatus!;
+    return [{ key: item.key, pr: candidate.pr, head: state.head, mergeStateStatus: status, requestedAt: state.requestedAt, ageMs,
+      text: `merge-stalled: ${item.key} pull request #${candidate.pr} at ${state.head.slice(0, 12)} has been requested for merge for ${Math.floor(ageMs / 60_000)} minutes (since ${state.requestedAt}) while GitHub reports mergeStateStatus ${status}, and no refusal is recorded: GitHub was asked to merge a pull request it reports mergeable and has not`,
+      next: `graphyard master create files the control-plane defect for merge state ${status} on ${item.key}; gh pr view ${candidate.pr} shows what GitHub is waiting on` }];
+  });
+}
 export function mergeQueueAction(work: Work, state: GitHubMergeQueueState, request: MergeEnqueueRequest | null): MergeQueueAction {
   const held = state.mode !== 'none';
   const sha = work.candidate?.sha;
