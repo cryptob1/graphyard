@@ -20,7 +20,8 @@ import { describeReclaim, dispatchRefusal, reclaimResources, type ResourceReclai
 import { capacitySignature, describeCapacity, detectExhaustion, standingCapacity, type CapacityAccount, type CapacityRole, type PartialWork } from './model/capacity.js';
 import { answerCommand, humanDecisionLabel, parkedOnHuman } from './model/human-request.js';
 import { stalledItems } from './model/action-account.js';
-import { humanNeededActions } from './model/next-action.js';
+import { actionAccount, humanNeededActions } from './model/next-action.js';
+import { reviewNeed } from './model/dispatch.js';
 import { independentProducerProfiles, launchProducer, readProducerLedger, reclaimCheckouts, saveProducerLedger } from './producer.js';
 import { launchReview, readReviewLedger, updateReviewLedger } from './reviewer.js';
 import { basePaths, findingScope, readReviewFindings, type ReviewFinding } from './review-scope.js';
@@ -814,6 +815,79 @@ export function scopeRoutineDecision(work: Work, now: number, judged: boolean): 
     scope: { epoch: request.epoch, at: request.at, requestedBy: request.requestedBy, paths: paths.slice(0, 50).map(path => path.slice(0, 500)) } };
 }
 /**
+ * GY-191. A conflict with the base that nothing is resolving: GitHub reports a head behind the base
+ * tip unmergeable, or the merge queue ejected the head because its speculative merge conflicts
+ * (an ejected head never re-enters the queue). Neither is withheld review waiting for a sync
+ * nobody runs any more — the worker's lease ended at submit — so the loop asks for the rework.
+ * `baseTip` is the commit the head conflicts with: the base branch tip, or the predicted base the
+ * queue merged onto.
+ */
+export function unresolvedBaseConflict(work: Work): { baseTip: string; reason: string } | null {
+  const candidate = work.candidate, observation = work.observation;
+  if (!work.submission || !candidate || !observation || work.queue || observation.merged || observation.prState === 'closed' || observation.draft) return null;
+  if (observation.candidate.sha !== candidate.sha) return null;
+  const head = candidate.sha.slice(0, 12), ejection = work.queueEjection;
+  if (ejection && ejection.sha === candidate.sha && ejection.policyRevision === work.policyRevision && /conflicts and cannot be resolved/.test(ejection.reason)) {
+    const baseTip = /Speculative merge of ([0-9a-f]{7,40})/.exec(ejection.reason)?.[1] ?? observation.baseTip ?? '';
+    return { baseTip, reason: `the merge queue ejected ${head} because its speculative merge onto base tip ${baseTip.slice(0, 12)} conflicts (${ejection.reason})` };
+  }
+  if (observation.baseTipContained === false && observation.mergeConflict && observation.baseTip)
+    return { baseTip: observation.baseTip, reason: `GitHub reports ${head} conflicting with base branch tip ${observation.baseTip.slice(0, 12)}, which it does not contain` };
+  return null;
+}
+/** How long a submitted item may have nobody acting on it before master status names it (GY-191), inside AC-3's five minutes. */
+export const actorlessBoundMs = 2 * 60_000;
+const runningCheck = /^(queued|in_progress|pending|requested|waiting)$/;
+/**
+ * GY-191. Who acts on a submitted item now, or null when nobody does: a review request, a producer
+ * request, a rework request (standing, or one the loop asks for), or a named external wait. The
+ * action account's `resync` is not an actor: re-reading a head nobody changes moves nothing, and
+ * it is what GY-166, GY-174, GY-176 and GY-181 were named while they sat withheld from review.
+ */
+export function submittedItemActor(work: Work, all: Work[], now: number): string | null {
+  const candidate = work.candidate!, observation = work.observation, dispatch = work.autoDispatch;
+  if (dispatch?.review?.state === 'requested') return `review request ${dispatch.review.id}`;
+  if (work.reviewRequest?.sha === candidate.sha) return `${work.reviewRequest.provider ?? 'codex'} review request`;
+  const producer = dispatch?.producers.find(request => request.state === 'requested');
+  if (producer) return `producer request ${producer.id}`;
+  if (work.reworkRequested) return 'rework round';
+  const decision = neededDecision(work, { autoMerge: true });
+  if (decision) return `${decision.action} decision`;
+  if (work.lease && Date.parse(work.lease.expiresAt) > now) return `worker ${work.lease.owner}`;
+  if (work.blocker) return 'blocker';
+  if (work.containmentQuarantine) return 'containment settlement';
+  if (work.queue) return 'merge queue';
+  if (pendingBaseRefresh(work)) return 'base refresh';
+  if (!observation || observation.candidate.sha !== candidate.sha || !(now - Date.parse(observation.at) < 120_000)) return 'GitHub observation';
+  if (observation.checks.some(check => runningCheck.test(check.result))) return 'CI';
+  if (mergeableCandidate(work)) return 'merge';
+  const account = actionAccount(work, all, new Date(now));
+  if (account.action && account.action.kind !== 'resync') return `${account.action.kind} action`;
+  if (account.wait && account.wait.kind !== 'settled') return `${account.wait.kind} wait${account.wait.on ? ` on ${account.wait.on}` : ''}`;
+  return null;
+}
+/** What the item is missing, named from the first gate that refuses it. */
+function missingActor(work: Work, all: Work[], now: number): string {
+  const gate = work.gates.find(entry => !entry.passed);
+  const need = reviewNeed(work, all, new Date(now));
+  if (need.state === 'base-not-contained') return `a worker to sync it (${need.reason})`;
+  const actor = gate?.name === 'review' ? 'a reviewer' : gate?.name === 'acceptance' ? 'a proof producer' : gate?.name === 'test' ? 'CI or a worker' : gate?.name === 'merge' ? 'the merge queue' : 'a worker';
+  return `${actor}${gate ? ` for the ${gate.name} gate (${gate.reasons[0] ?? 'refused'})` : ''}`;
+}
+/**
+ * Every submitted item with no review request, producer request, rework request or named external
+ * wait for longer than `actorlessBoundMs`, as a master status attention item naming the item and
+ * the actor it is missing. `raised` are the items already named; an item is named once.
+ */
+export function actorlessAttention(snapshot: { work: Work[]; now: string }, raised: AttentionItem[] = []): AttentionItem[] {
+  const now = Date.parse(snapshot.now);
+  const found = snapshot.work.filter(work => work.stage !== 'done' && work.ready && work.submission && work.candidate && !raised.some(item => item.subject === work.key)
+    && now - Date.parse(work.stageEnteredAt) >= actorlessBoundMs && !submittedItemActor(work, snapshot.work, now)).map(work => ({ subject: work.key,
+    text: `${work.key} is submitted (PR #${work.candidate!.pr}, head ${work.candidate!.sha.slice(0, 12)}) with no review request, no producer request, no rework request and no named external wait; missing actor: ${missingActor(work, snapshot.work, now)}`,
+    ...agentOwner('master', `graphyard diagnose ${work.key}, then request what it lacks — graphyard master decide ${work.key} rework REASON returns it to a worker`) }));
+  return [...raised, ...found];
+}
+/**
  * The decision one item needs right now, or null. Rework returns a head nothing can carry forward
  * — a standing verdict, or a base branch Graphyard could not merge in — to a fresh attempt.
  * Recovery releases a delivered item whose supervisor is still quarantined. A merge decision is
@@ -845,6 +919,9 @@ function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>): Ro
   // GY-163's thread rework was refused before its reviewer had judged the head; the reviewer then
   // requested changes, and the loop never asked again because both keyed on the head alone.
   if (conflict) return { action: 'rework', reason: `${work.key}: ${conflict}. Only a fresh attempt can resolve it, so the candidate returns to a worker.`, binding: `${work.candidate!.sha}:conflict` };
+  // GY-191: a conflict GitHub or the merge queue found, where no base refresh recorded one, is the same ground.
+  const found = work.reworkRequested ? null : unresolvedBaseConflict(work);
+  if (found) return { action: 'rework', reason: `${work.key}: ${found.reason}. Only a fresh attempt can resolve it: its worker runs graphyard sync ${work.key} onto ${found.baseTip.slice(0, 12)}, resolves the conflict and pushes, so the candidate returns to a worker.`, binding: `${work.candidate!.sha}:conflict` };
   const verdict = standingVerdict(work);
   if (verdict) return { action: 'rework', reason: `${work.key}: ${verdict.reason}. The verdict stands against the current head, so the item returns to a worker for the next round.`, binding: `${work.candidate!.sha}:verdict:${verdict.reviewer}` };
   // Unresolved review threads block the provider's merge (GY-139) whatever the review state that

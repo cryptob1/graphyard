@@ -237,8 +237,12 @@ export function diagnose(work: Work, all: Work[], now: number, jobs: Integration
   if (baseConflict) add('base-conflict', baseConflict, `Graphyard cannot bring this head onto the base branch itself. Resolve the conflict on the pull-request branch and push; nothing carries across the resolution, so the item takes a fresh review and fresh proofs.`);
   else if (refreshing) add('base-behind', `Candidate ${work.candidate?.sha.slice(0, 12)} does not contain the base branch tip ${refreshing.baseTip.slice(0, 12)}; it stays bound to ${refreshing.boundBase.slice(0, 12)} while the control plane brings it onto the new tip`,
     'Nothing to run: the reconciliation job merges the base into this branch and decides what the review and each proof carry. No sync, no rework round, and no review or proof round is requested for the move.');
+  // Behind alone withholds nothing (GY-191): a mergeable head is reviewed and proven, and the
+  // queue integrates it; a conflicting one goes back to a worker through the loop's rework round.
   else if (work.submission && work.observation?.baseTipContained === false) add('base-behind', `Candidate ${work.candidate?.sha.slice(0, 12)} does not contain the base branch tip ${work.observation.baseTip?.slice(0, 12) ?? ''}`,
-    `No review is requested for it: run graphyard sync ${work.key} and push, or let the merge queue publish a tip that contains the base once the candidate is proven.`);
+    work.observation.mergeable ? 'Nothing to run: GitHub reports it mergeable, so it is reviewed and proven as it stands and the merge queue integrates and re-tests it on the base.'
+      : work.observation.mergeConflict ? `It conflicts with the base: the master loop requests a rework round, whose worker runs graphyard sync ${work.key}, resolves it and pushes.`
+      : 'GitHub has not reported whether it merges cleanly; the next observation reads it.');
   // What the control plane's last base refresh kept and what it re-required, each with its reason.
   const refreshCarry = currentBaseRefreshCarry(work);
   if (refreshCarry) {

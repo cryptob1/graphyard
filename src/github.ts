@@ -5,7 +5,7 @@ import { observeCodex } from './codex-review.js';
 import { observeAgentReview } from './agent-review.js';
 import { readFile } from 'node:fs/promises';
 import type { Engine } from './engine.js';
-import { mechanicalHold } from './model/dispatch.js';
+import { mechanicalHold, reviewWithheldBehindBase } from './model/dispatch.js';
 import { CHECK_NAME, carriedApproval, demand, nativeReviewRequired, parseReviewerApps, reviewerProfileFor, reviewProviderOf, type Observation, type ReviewerApp, type ReviewerProfile, type ScopeFile, type TipMerge, type Work, type ReviewRequest } from './model.js';
 import { inPlannedScope } from './regression-guard.js';
 import type { GitHubCacheStore } from './github-cache.js';
@@ -835,6 +835,8 @@ export class GitHub {
       reviews: [...latest.values()].map(r => ({ id: r.id, reviewer: r.user.login, sha: r.commit_id, state: r.state, submittedAt: r.submitted_at,
         ...(r.state === 'DISMISSED' && dismissalOf(r.id) ? { dismissal: dismissalOf(r.id)! } : {}) })),
       prState: pr.state, draft: pr.draft, prCreatedAt: pr.created_at, merged: pr.merged, mergeSha: pr.merge_commit_sha, mergedAt: pr.merged_at, mergeable: pr.mergeable === true && !pr.draft && pr.state === 'open',
+      // GitHub answers `null` while it computes mergeability; only an explicit `false` is a conflict.
+      ...(pr.mergeable === false && !pr.merged && pr.state === 'open' ? { mergeConflict: true } : {}),
       protected: protection.protected, conversations, files: files.map(f => f.filename), at: startedAt,
       baseTip: branch.tip, baseTree: branch.tree, baseTipContained, baseTipAncestor: contained, scopeFiles,
       ...(landing ? { landing } : {}), ...(revertedDelivery ? { revertedDelivery } : {}),
@@ -1041,13 +1043,12 @@ export class GitHub {
     return observeAgentReview(this, pr.number, pr.head.sha, reviews, pr.user.id, work.reviewRequest, candidateBase, work.policyRevision, this.config.appId, profile, app);
   }
   /**
-   * A review is requested only for a head that contains the base tip; anything else is refused
-   * before any write. This is a wait, not a rework round: the control plane brings the head onto
-   * the moved base itself (see `refreshCandidateBase`) and the request is dispatched for the head
-   * it republishes, unless the merge conflicts, which is the one case the worker still owns.
+   * A review is requested for a head that contains the base tip or that GitHub reports mergeable
+   * (GY-191): the merge queue integrates and re-tests the combined tip, so being behind alone
+   * never withholds one. A behind head that conflicts is the worker's, through a rework round.
    */
   private reviewable(work: Work) {
-    demand(work.observation?.baseTipContained !== false, `Candidate ${work.candidate?.sha.slice(0, 12)} does not contain the base branch tip ${work.observation?.baseTip?.slice(0, 12)}; a review of it would be dismissed when the merge base changes, so none is requested until the head contains the tip`);
+    demand(!work.observation || !reviewWithheldBehindBase(work.observation), `Candidate ${work.candidate?.sha.slice(0, 12)} does not contain the base branch tip ${work.observation?.baseTip?.slice(0, 12)} and GitHub does not report it mergeable, so no review is requested until it does or a worker syncs it`);
   }
   async requestAgentReview(work: Work, profile: ReviewerProfile, app: ReviewerApp, beforeWrite: () => Promise<void>): Promise<ReviewRequest> {
     demand(work.candidate && work.policy.review && reviewProviderOf(work.policy) === 'agent', 'Candidate with agent review policy required');
@@ -1533,12 +1534,11 @@ export async function processJob(engine: Engine, github: GitHub) {
         if (refreshed.published) { await engine.store.finishJob(job.work_id, job.token, undefined, true); return true; }
       }
       const provider = reviewProviderOf(work.policy);
-      // A head that does not contain the base tip is not reviewed: the request is deferred, and
-      // diagnose reports why, until the refresh above republishes it, the queue publishes a tip
-      // that contains it, or — when the merge conflicts — the worker resolves it and pushes.
+      // A head behind the base tip is reviewed when GitHub reports it mergeable (GY-191); one that
+      // is not is deferred, and diagnose reports why, until it is or a rework round syncs it.
       // Nor is a head whose unit and integration proofs have not all passed: mechanical
       // verification precedes review for every provider, not only the one a session answers.
-      const dispatchable = !observation.merged && observation.prState === 'open' && observation.draft === false && work.policy.review && observation.baseTipContained !== false
+      const dispatchable = !observation.merged && observation.prState === 'open' && observation.draft === false && work.policy.review && !reviewWithheldBehindBase(observation)
         && !mechanicalHold(work, all, new Date());
       // A request binds the exact candidate; an approval Graphyard carried onto its own authored
       // tip already stands for that candidate, so no new request is dispatched for it.

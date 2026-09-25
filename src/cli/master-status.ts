@@ -7,7 +7,7 @@ import { impliedScopeRequests, type Work } from '../model/work.js';
 import { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
 import { executorFleet } from './executor-report.js';
 import { owedAttention, needsHumanActions, routedScopeStatus, scopeRequestAttention } from './owed-report.js';
-import { daemonSummary, loopAttention, readDaemonState, type CycleMetrics, type DaemonState } from '../master-daemon.js';
+import { actorlessAttention, daemonSummary, loopAttention, readDaemonState, type CycleMetrics, type DaemonState } from '../master-daemon.js';
 import { readReviewLedger, reconcileReviews, reviewLedgerSpec, sessionLedgerHeadroom, summarizeReviews } from '../reviewer.js';
 import { producerLedgerSpec, readProducerLedger, reconcileProducers, sessionRetries, summarizeProducers } from '../producer.js';
 import { dispatchFailureAttention, dispatchSummary, readDispatchCursor } from '../auto-dispatch.js';
@@ -140,17 +140,17 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // request (GY-100) and is reported once, as the review that cannot be obtained on that commit.
   const unobtainable = unobtainableReviewAttention(status.work, reviews.completed as SettledReviewSession[]);
   const unanswered = unansweredRequestAttention(status.work);
-  // An open item the control plane names no action for. Those waiting on another item or on a
-  // live session are accounted and raise nothing; what is left is named, with what is missing.
+  // An open item with no action named, or submitted with nobody acting on it (GY-191). Items
+  // waiting on another item or a live session raise nothing; the rest are named with what is missing.
   const actionless = actionlessItems(snapshot.work, new Date(snapshot.now));
-  const stalledItems = stalledItemAttention(snapshot);
+  const stalledItems = actorlessAttention(snapshot, stalledItemAttention(snapshot));
   // An action no live executor can claim is not queued behind other work (GY-105); it is named
   // with its wait and the unit to start, ahead of everything that waits on it.
   const executors = await executorFleet(root, masterApi, snapshot);
-  // A request two verdicts answered (GY-124): neither is acted on until a fresh review resolves it.
+  // A request two verdicts answered (GY-124) is not acted on until a fresh review resolves it.
   const conflicted = reviewConflictAttention(snapshot.work, reviewRecords).map(({ next, ...item }) => ({ ...item, ...agentOwner('control plane', next) }));
   // A row that keeps failing for the same reason: owed, attempted, and going nowhere. It is raised
-  // as soon as it is classified, which is inside the same idle bound a row nobody is acting on has.
+  // once classified, inside the same idle bound a row nobody is acting on has.
   const stalled = stalledActionAttention(snapshot);
   // What waits on a judgment rather than on capacity, named once and counted apart (GY-104).
   const owed = owedAttention(snapshot, status.work as { key: string; attention: string | null }[], scopeRequests);

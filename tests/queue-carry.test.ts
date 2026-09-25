@@ -96,13 +96,16 @@ test('unit:queue-authored-tip-carry — a carried binding applies only to the ex
 
 test('unit:queue-real-base-tip — the review launcher refuses a candidate that does not contain the real base tip, and diagnose reports it', () => {
   const candidate = { sha: H, baseSha: B, pr: 7, branch: 'graphyard/gy-7-1', author: 'worker' };
-  const observation = { candidate, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true, files: [], scopeFiles: [], at, prState: 'open', draft: false, baseTip: sha40('b2'), baseTree: sha40('7b'), baseTipContained: false } as Observation;
+  // Behind alone withholds nothing (GY-191): the refused head is one GitHub reports conflicting.
+  const observation = { candidate, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: false, mergeConflict: true, protected: true, files: [], scopeFiles: [], at, prState: 'open', draft: false, baseTip: sha40('b2'), baseTree: sha40('7b'), baseTipContained: false } as Observation;
   const work = { key: 'GY-7', policy: { checks: [], review: true }, submission: { epoch: 1, pr: 7 }, candidate, observation, reworkRequested: false, ready: true, dependencies: [], workspaces: [], criteria: [], evidence: [], gates: [], violations: [], plannedFiles: [], scenarioRequirements: [] } as unknown as Work;
-  assert.throws(() => assertReviewCandidate(work, at), new RegExp(`GY-7 candidate ${H.slice(0, 12)} does not contain the base branch tip ${sha40('b2').slice(0, 12)}; .* Run graphyard sync GY-7`));
+  assert.throws(() => assertReviewCandidate(work, at), new RegExp(`GY-7 candidate ${H.slice(0, 12)} does not contain the base branch tip ${sha40('b2').slice(0, 12)} and GitHub does not report it mergeable; .* graphyard sync GY-7`));
   const behind = diagnose(work, [work], Date.parse(at)).find(entry => entry.kind === 'base-behind')!;
   assert.match(behind.message, new RegExp(`does not contain the base branch tip ${sha40('b2').slice(0, 12)}`));
   // Bringing the head onto the moved tip is the control plane's work now, not a worker sync round.
   assert.match(behind.next, /the reconciliation job merges the base into this branch/);
+  work.observation = { ...observation, mergeable: true, mergeConflict: undefined };
+  assert.equal(assertReviewCandidate(work, at).sha, H, 'a behind head that merges cleanly is reviewed');
   work.observation = { ...observation, baseTipContained: true };
   assert.equal(assertReviewCandidate(work, at).sha, H);
   assert.equal(diagnose(work, [work], Date.parse(at)).some(entry => entry.kind === 'base-behind'), false);

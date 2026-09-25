@@ -161,7 +161,8 @@ test('unit:auto-dispatch-binding — a verdict or trusted evidence satisfies the
   assert.equal(agent.autoDispatch!.review, null); assert.equal(reviewNeed(agent).state, 'proofs-pending', 'the control plane\'s own review dispatch waits for the proofs too');
   assert.equal(agent.autoDispatch!.producers.length, 2, 'producers are launched whatever the review provider');
   agent.evidence = provenHead(); assert.match(reviewNeed(agent).reason, /control plane dispatches agent review/);
-  const behind = work({ observation: observation({ sha: H, baseSha: B }, { baseTipContained: false, baseTip: B2 }) });
+  // Behind alone withholds nothing (GY-191); a behind head GitHub does not report mergeable waits.
+  const behind = work({ observation: observation({ sha: H, baseSha: B }, { baseTipContained: false, baseTip: B2, mergeable: false, mergeConflict: true }) });
   reconcileAutoDispatch(behind, [behind], new Date(clock));
   assert.equal(behind.autoDispatch!.review, null); assert.match(reviewNeed(behind).reason, /does not contain the base tip/);
   assert.equal(behind.autoDispatch!.producers.length, 2, 'evidence for a head behind the base still carries, so it is produced');
