@@ -52,7 +52,7 @@ install -d -o graphyard-attestor -g graphyard-boundary -m 2750 /srv/graphyard/at
 setfacl -d -m g:graphyard-boundary:rx /srv/graphyard/attempts
 ```
 
-The container writes through the group and the attestor and collector read; **never add the runner account to the group**.
+The container writes through the group, the attestor and collector read; **never add the runner account to the group**.
 
 ## Collect and publish
 

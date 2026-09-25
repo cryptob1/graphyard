@@ -11,7 +11,8 @@ import { autonomyContract } from '../../src/autonomy';
  * never run blindly. Nothing here asks a person anything: there is no UI call anywhere in this
  * file, and a refused call returns its reason to the agent so it retries safely.
  *
- * `GRAPHYARD_PI_ROLE` (approver | producer) selects the role's tool; unset, both are registered.
+ * `GRAPHYARD_PI_ROLE` (approver | producer | research) selects the role's tool; unset, the approver's
+ * and the producer's are registered.
  * The tools submit nothing to the control plane themselves: the runner hands the validated payload
  * to the loop, which applies it through the same routes a terminal session uses, and the gates
  * decide. The extension is self-contained apart from the one contract text it shares with every
@@ -54,6 +55,21 @@ export const evidenceParameters: JsonSchema = {
       properties: { criterion: text(80, 'The criterion id, such as AC-1'), behaviour: text(300, 'The behaviour you removed'), result: { type: 'string', enum: ['pass', 'fail'] }, executed: count('Cases that ran against the stripped tree') } },
     environment: text(100, 'The runtime and how the result was produced'),
     scopeFiles: { type: 'array', minItems: 1, maxItems: 100, items: text(500, 'A path the proof depends on') },
+  },
+};
+
+/** The research brief (GY-259, src/research.ts researchBriefSchema): what exists, what is proven, what could go wrong, what to do, and what only the operator may decide. */
+export const researchParameters: JsonSchema = {
+  type: 'object', additionalProperties: false, required: ['existingCode', 'patterns', 'risks', 'approach', 'questions'],
+  properties: {
+    existingCode: { type: 'array', maxItems: 40, description: 'Existing code and conventions in this checkout to reuse',
+      items: { type: 'object', additionalProperties: false, required: ['path', 'note'], properties: { path: text(500, 'A path in this checkout'), note: text(1000, 'What it offers the item') } } },
+    patterns: { type: 'array', maxItems: 20, description: 'Relevant external patterns and prior art',
+      items: { type: 'object', additionalProperties: false, required: ['pattern', 'source'], properties: { pattern: text(1000, 'The pattern or prior art'), source: text(500, 'Where it comes from: a URL, library, standard or path') } } },
+    risks: { type: 'array', maxItems: 20, items: text(1000, 'A risk or edge case the build must handle') },
+    approach: text(6000, 'The approach you recommend the worker take'),
+    questions: { type: 'array', maxItems: 10, description: 'Product-experience questions only the operator may answer; the build proceeds on each recommendation until answered',
+      items: { type: 'object', additionalProperties: false, required: ['question', 'why', 'recommendation'], properties: { question: text(1000, 'The question'), why: text(1000, 'Why the answer matters'), recommendation: text(1000, 'The answer you recommend') } } },
   },
 };
 
@@ -106,6 +122,8 @@ export function graphyardTools(role: string | undefined = process.env.GRAPHYARD_
   };
   const decide = tool('graphyard_decide', 'Graphyard decide', 'Record your verdict on the Graphyard decision you were asked to judge: approve true or false, with your reason. Call it exactly once; it is your answer.', decideParameters, params => `decision ${params.decision}`, true);
   const evidence = tool('graphyard_submit_evidence', 'Graphyard evidence', 'Submit one proof\'s result on the exact head, base and policy revision you were given, with the exercise run against the tree with the criterion\'s behaviour removed. Call it once per proof, pass or fail.', evidenceParameters, params => `proof ${params.proof}`, false);
+  // The research session's brief (GY-259) is registered for its own role only.
+  if (role === 'research') return [tool('graphyard_research_brief', 'Graphyard research brief', 'Record the research brief for the item you were asked to research: existing code to reuse, patterns and prior art with sources, risks, the approach you recommend, and the operator\'s product questions with your recommended answers. Call it exactly once; it is your result.', researchParameters, () => 'the brief', true)];
   return role === 'approver' ? [decide] : role === 'producer' ? [evidence] : [decide, evidence];
 }
 

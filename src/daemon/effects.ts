@@ -33,7 +33,8 @@ import { onceAnnotations, timingFaultAttention, type ReportedAttention } from '.
 import type { daemonSummary } from './run.js';
 import { observeDeployment } from './deployment.js';
 import { serverCallName, timedCall, timedFetch, timedRun } from '../master/timings.js';
-import type { RunRecord } from '../runner/types.js';
+import type { RunRecord, Runner } from '../runner/types.js';
+import type { ResearchEvent } from '../research.js';
 
 /** A reviewer or producer session a launch ledger holds as pending, as the failover step reads it. */
 export interface LaunchedSession { role: 'reviewer' | 'producer'; record: string; profile: string; agentName: string; pane: string | null; work: string; requestId: string | null }
@@ -175,6 +176,13 @@ export interface DaemonEffects {
   answerSession?: (agent: HerdrAgent, keys: string[]) => void | Promise<void>;
   promptSession?: (agent: HerdrAgent, text: string) => void | Promise<void>;
   reportCapacity?: (work: Work, event: Record<string, unknown>) => Promise<Work>;
+  /**
+   * Research before build (GY-259): records a research run's start, brief or failure on the item as
+   * the coordinator, and names the checkout the research session reads (and, in a test, its runner).
+   * A loop wired without it, or whose config has no `run.research`, researches nothing and dispatches as before.
+   */
+  recordResearch?: (work: Work, event: ResearchEvent) => Promise<unknown>;
+  research?: { cwd: string; runner?: Runner };
   /** The reviewer and producer sessions the launch ledgers hold as pending. */
   launchedSessions?: () => Promise<LaunchedSession[]>;
   /** The account the profile's current session was launched on, as its launcher recorded it. */
@@ -470,6 +478,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     answerSession: async (agent, keys) => { await run('herdr', ['pane', 'send-keys', agent.pane_id!, ...keys]); await delay(2_000); },
     promptSession: async (agent, text) => { await deliverPrompt(agent.name ?? agent.pane_id!, text, run); },
     reportCapacity: (work, event) => mutate(`work/${work.id}/capacity`, event),
+    recordResearch: (work, event) => mutate(`work/${work.id}/research`, event),
+    research: { cwd: root },
     launchedSessions: async () => [
       ...(await readReviewLedger(root)).reviews.filter(entry => entry.state === 'pending' && !entry.launching).map(entry => ({ role: 'reviewer' as const, record: entry.id, profile: entry.profile, agentName: entry.agentName, pane: entry.pane, work: entry.key, requestId: entry.requestId ?? null })),
       ...(await readProducerLedger(root)).producers.filter(entry => entry.state === 'pending').map(entry => ({ role: 'producer' as const, record: entry.id, profile: entry.profile, agentName: entry.agentName, pane: entry.pane, work: entry.key, requestId: entry.requestId })),

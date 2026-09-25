@@ -13,7 +13,7 @@ Each concurrent session needs a worker identity and host ID: raise the installer
 node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST --herdr --host-id UNIQUE_MACHINE_NAME --token-stdin
 ```
 
-Commit `AGENTS.md`, `.gitignore` and `graphyard.json`, never `.graphyard/`. Without the master, `graphyard watch GY-1 EPOCH -- COMMAND` runs a worker and stops it on lease loss.
+Commit `AGENTS.md`, `.gitignore`, `graphyard.json`; never `.graphyard/`. Without the master, `graphyard watch GY-1 EPOCH -- COMMAND` runs a worker, stopping it on lease loss.
 
 ### Documentation policy
 

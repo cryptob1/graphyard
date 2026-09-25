@@ -4,6 +4,7 @@ import { isAbsolute } from 'node:path';
 import { z } from 'zod';
 import { defaultMergeBatchSize, maxMergeBatchSize } from '../merge-queue.js';
 import { narrowRoleRuntimeSchema, piRuntimeSchema } from '../runner/payloads.js';
+import { researchSettingsSchema } from '../research.js';
 import { sessionNameField, sessionNameLimit, assertSessionName, sessionNameDigestLength, SessionNameRefusedError } from '../session-name.js';
 
 const safeEnvironment = z.record(
@@ -226,6 +227,9 @@ export const masterRunSchema = z.object({
   // unit proof group. `pi` names the environment wrapper and model those runs use.
   runtimes: narrowRoleRuntimeSchema.optional(),
   pi: piRuntimeSchema.optional(),
+  // Research before build (GY-259): the cheap Pi session that briefs a feature before its worker
+  // starts — its model (the Z.AI GLM flash model by default), time limit and token budget.
+  research: researchSettingsSchema.optional(),
 }).strict();
 export type MasterRun = z.infer<typeof masterRunSchema>;
 

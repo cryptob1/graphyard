@@ -1,15 +1,15 @@
 <!-- page: Agent protocol | 3 | leases, workspaces, `watch`. -->
 # Leases, workspaces and supervision
 
-Claims last 120 seconds; renew at least every 30. Every owner mutation carries the epoch; an expired epoch is refused and cannot be revived.
+Claims last 120 seconds, renewed at least every 30. Every owner mutation carries the epoch; an expired epoch is refused and cannot be revived.
 
 ## Workspaces
 
-Register the exact branch, path and host ID (`graphyard register GY-1 workspace.json`) before submitting. Branches begin `graphyard/` and are globally unique; paths are unique per host, including historical reservations. Put the epoch in both names.
+Register the exact branch, path and host ID (`graphyard register GY-1 workspace.json`) before submitting. Branches begin `graphyard/` and are globally unique, paths unique per host (historical reservations included); put the epoch in both.
 
 ## `watch`
 
-`graphyard watch GY-N EPOCH -- COMMAND` strips Graphyard credentials from the child and on lease loss sends SIGTERM then SIGKILL to the process group; it is not a sandbox. A contained launch first records a **quarantine** naming its systemd scope unit. If the supervisor dies, the item stays fenced until `POST /api/work/UUID/autosettle` (`coordinator` or `admin`) proves authority expired 120 seconds ago and no supervisor, workspace process or scope member is alive, or until an operator attests the stop. Settlement then excuses only the recorded pane's idle, childless shell, whose pane the loop closes.
+`graphyard watch GY-N EPOCH -- COMMAND` strips Graphyard credentials from the child and on lease loss sends SIGTERM then SIGKILL to the process group; it is not a sandbox. A contained launch first records a **quarantine** naming its systemd scope unit. If the supervisor dies, the item stays fenced until `POST /api/work/UUID/autosettle` (`coordinator` or `admin`) proves authority expired 120 seconds ago and no supervisor, workspace process or scope member is alive, or an operator attests the stop. Settlement excuses only the recorded pane's idle, childless shell, which the loop closes.
 
 ## How a lease ends
 

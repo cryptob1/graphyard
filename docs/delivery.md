@@ -5,7 +5,7 @@ Graphyard records which release each environment should run and verifies it only
 
 ## Who writes what
 
-Policy and approvals are `admin`'s; builds come from a `producer` with a `builder` registration, selection from `admin` or a `promoter`, and observations from a `producer` with an `observer` registration holding a lease (`POST /api/delivery/lease`).
+Policy and approvals are `admin`'s; builds from a `producer` with a `builder` registration, selection from `admin` or a `promoter`, observations from a `producer` with an `observer` registration and a lease (`POST /api/delivery/lease`).
 
 ```json
 {"kind":"environment","id":"production","expectedRevision":0,"repository":"owner/repository",

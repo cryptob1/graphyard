@@ -5,13 +5,13 @@ An `e2e:` proof passes only from a pinned candidate and bundle, published by a s
 
 ## Test cases
 
-Define a test case in **Settings → Test cases** or with `graphyard scenario scenario.json` (`admin`): `id`, `title`, `purpose`, `setup`, `steps`, `expected`, `environment`, `runner`, `testPath`. Revisions are immutable. A criterion naming `e2e:ID` pins the latest revision at creation; adopting a newer one needs a follow-up item.
+Define a test case in **Settings → Test cases** or with `graphyard scenario scenario.json` (`admin`): `id`, `title`, `purpose`, `setup`, `steps`, `expected`, `environment`, `runner`, `testPath`. Revisions are immutable; a criterion naming `e2e:ID` pins the latest at creation, and adopting a newer one needs a follow-up item.
 
 ## Identities
 
 - Human operator (`admin`): defines environments and bundles, registers identities, selects candidates, requests, cancels and recovers.
 - Runner (`worker` + runner registration): polls `dispatch`, acknowledges and heartbeats its attempt.
-- Builder and collector (`producer` + registration): attest source → artifacts, and verify and publish the result. A collector that attested the build is refused.
+- Builder and collector (`producer` + registration): attest source → artifacts, then verify and publish. A collector that attested the build is refused.
 
 `graphyard validation define|build|candidate|request|dispatch|ack|heartbeat|result FILE.json` wraps `POST /api/validation/ACTION`.
 

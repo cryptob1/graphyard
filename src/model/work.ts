@@ -13,6 +13,7 @@ import type { SessionHandle } from './sessions.js';
 import { namedPaths, pathScope, pathScopeContains, type ScopeDecision, type ScopeRequestState } from './scope.js';
 import type { CapacityState } from './capacity.js';
 import type { HumanRequest } from './human-request.js';
+import type { ResearchRecord } from '../research.js';
 import type { Closure } from './closure.js';
 import { proofSchema } from './proof.js';
 import { closedQuestionsSchema } from './closed-question.js';
@@ -54,6 +55,9 @@ export const createSchema = z.object({
   // loop owns for it (src/cli/hand-actions.ts). New items take the shipped default; an item
   // created before the field existed carries none and is not system-driven.
   systemDriven: z.preprocess(value => value === undefined ? systemDrivenDefault : value, z.boolean().optional()),
+  // Research before build (GY-259): a feature item is researched unless this is false, and any
+  // other item only when it is true. See src/research.ts.
+  research: z.boolean().optional(),
 }).strict();
 export type Create = z.infer<typeof createSchema>;
 // The `decision:*` capabilities request a two-party decision (see model/approval.ts); an agent
@@ -164,6 +168,8 @@ export interface Work extends Create {
    */
   humanRequest?: HumanRequest | null;
   humanRequests?: HumanRequest[];
+  /** What the research step found before build, and the product questions it asked (src/research.ts). */
+  researchBrief?: ResearchRecord | null;
   /** Set when the item was closed without delivery (model/closure.ts); a closed item is `done` but never delivered. */
   closure?: Closure | null;
   /** Sessions of this item that ran out of provider quota, and any role with no account left (model/capacity.ts). */
