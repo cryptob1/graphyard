@@ -25,11 +25,11 @@ A reviewer App is never granted Contents: write, Checks, or Administration; work
 | Metadata | Read | read the managed repository (repository access) |
 | Pull requests | Read and write | post the verdict comment (review dispatch) |
 
-Grants are checked every five minutes and after any 403; a shortfall shows under `appPermissions`, its jobs **held, not retried** (`integration-held`) until `master browser app-permissions` or `master browser installation-accept` fixes it.
+Grants are checked every five minutes and after a 403; a shortfall shows under `appPermissions`, its jobs **held, not retried** (`integration-held`) until `master browser app-permissions` or `master browser installation-accept` fixes it.
 
 ## The reviewer App
 
-A separate reviewer App, created by `graphyard master reviewer setup` (Pull requests write, reads otherwise), reviews; binding refuses one that can write code. Review tokens last one hour; an approval by `SLUG[bot]` on the exact head satisfies GitHub and Graphyard.
+A separate reviewer App (`graphyard master reviewer setup`; Pull requests write, reads otherwise) reviews; binding refuses one that can write code. Review tokens last one hour; `SLUG[bot]`'s approval of the exact head satisfies GitHub and Graphyard.
 
 ## Require the check
 
@@ -45,18 +45,22 @@ A candidate enters once its gates pass. Its speculative tip (predicted base merg
 
 Reviews and proofs bind one head, base and policy revision. A moved base is merged into the branch; the approval carries if no reviewed file changed, each proof if its `scopeFiles` are disjoint. CI always re-runs.
 
+### Direct merges
+
+Without a queue, `CLEAN`, `UNSTABLE` (optional checks not passing) and `HAS_HOOKS` PRs merge at once, head-bound; one pending five minutes is `merge-stalled`.
+
 ### Proofs in CI
 
-A protected `pull_request_target` workflow runs on every push to a `graphyard/*` PR branch, with workflow and secrets from the default branch: **plan** finds the item's registered `unit:*` and `integration:*` proofs, **exercise** runs one secret-free job per proof against the candidate merged with its base, and **publish** submits each report through the [CI producer](deployment.md#ci-producer) with a `ciRun` binding. Queue tips get the same run; dependencies are cached. Manual proofs stay producer sessions.
+A protected `pull_request_target` workflow, with the default branch's workflow and secrets, runs on every `graphyard/*` PR push: **plan** finds the item's registered `unit:*` and `integration:*` proofs, **exercise** runs one secret-free job per proof against the candidate merged with its base, and **publish** submits reports via the [CI producer](deployment.md#ci-producer) with a `ciRun` binding. Queue tips run it too; dependencies are cached. Manual proofs stay producer sessions.
 
 ## Post-deployment smoke proof
 
-With `"deploySmoke": true`, the master dispatches the smoke workflow (`master init --smoke-workflow deploy-smoke.yml`) once the release serves the merge; `scripts/deploy-smoke.mjs` publishes `e2e:deploy-smoke`, and a failure marks the item [delivered with failure](operations-reference.md#delivered-with-a-failed-smoke-proof).
+With `"deploySmoke": true`, the master dispatches `master init --smoke-workflow deploy-smoke.yml` once the release serves the merge; `scripts/deploy-smoke.mjs` publishes `e2e:deploy-smoke`; a failure marks it [delivered with failure](operations-reference.md#delivered-with-a-failed-smoke-proof).
 
 ## Enforcement boundary
 
-GitHub merges only heads whose required check passed; Graphyard has no merge route. Restrict other merge identities; a worker can still push its branch after losing its lease.
+GitHub merges only heads whose required check passed; Graphyard has no merge route. Restrict other merge identities; a worker losing its lease can still push.
 
 ## Identity-bound agent review
 
-`reviewProvider: "codex"` accepts only the Codex connector's clean result on the exact head. The `agent` provider requires a registered reviewer App distinct from the author (`github-setup URL --reviewer claude`, listed in `GRAPHYARD_REVIEWER_APPS`), adopted with `graphyard reviewpolicy GY-N agent REVISION "reason" --profiles` [FILE](../examples/reviewer-profiles.json). The reviewer replies with `<!-- graphyard-verdict:MARKER head:FULL_40_CHAR_SHA verdict:approved -->`; `verdict:usage-limit` or silence fails over to the next profile.
+`reviewProvider: "codex"` accepts only Codex's clean result on the exact head. `agent` requires a registered reviewer App distinct from the author (`github-setup URL --reviewer claude`, listed in `GRAPHYARD_REVIEWER_APPS`), adopted with `graphyard reviewpolicy GY-N agent REVISION "reason" --profiles` [FILE](../examples/reviewer-profiles.json). The reviewer replies with `<!-- graphyard-verdict:MARKER head:FULL_40_CHAR_SHA verdict:approved -->`; `verdict:usage-limit` or silence fails over.
