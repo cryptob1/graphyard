@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync } from 'node:fs';
 import { createServer } from 'node:net';
@@ -170,41 +171,69 @@ function onPath(name: string, env: NodeJS.ProcessEnv): string | null {
   return null;
 }
 
+/** Whether `bwrap` runs here with the namespaces containedInstall unshares (a host can refuse unprivileged user namespaces). */
+export function containmentWorks(bwrap = 'bwrap'): boolean {
+  return spawnSync(bwrap, ['--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--unshare-all', '--share-net', '--die-with-parent', '--', 'true'], { stdio: 'ignore' }).status === 0;
+}
+
 export interface ContainedInstall { command: string; args: string[] }
 /**
- * `npm ci` for a managed worktree, contained so its lifecycle scripts cannot read a credential
- * file. The install runs the checkout's scripts and its dependencies' as the coordinator's user,
- * outside any agent sandbox, and an environment without the launcher's variables is not enough:
- * the scripts could still open ~/.config/graphyard/<install>/tokens/*.token, a GitHub CLI login or
- * an SSH key by path. So npm runs under bubblewrap with the home directory, the Graphyard and XDG
- * config homes and the token file's directory replaced by empty ones; only what the install
- * writes (the worktree, npm's cache, TMPDIR) and what runs it (node, the PATH, ~/.npmrc for the
- * registry) are put back. A host without bubblewrap installs nothing rather than install
- * uncontained: the worktree reports the failed install, with this reason.
+ * `npm ci` for a checkout whose lifecycle scripts must not reach this host's authority. The
+ * install runs the checkout's scripts and its dependencies' as the caller's user, outside any agent
+ * sandbox, and an environment without the launcher's variables is not enough: the scripts could
+ * open ~/.config/graphyard/<install>/tokens/*.token, a GitHub CLI login or an SSH key by path,
+ * rewrite the coordinator checkout (or the trusted harness) that later runs with credentials, read
+ * another process's credentials through /proc/<pid>/root or /proc/<pid>/environ, or leave a process
+ * behind that changes files after the install was judged. So npm runs under bubblewrap with:
+ *
+ * - the whole filesystem read-only, a fresh /dev, and only the checkout and npm's content cache
+ *   (verified by integrity on every read) writable;
+ * - every namespace but the network unshared, so its /proc shows only its own processes and, when
+ *   the install ends, the kernel kills every process it started (a PID namespace ends with its
+ *   first process): nothing it spawned outlives the call;
+ * - the home directory, /tmp, the user's runtime directory (the session bus, through which
+ *   `systemd-run --user` would start a process outside) and every credential location replaced by
+ *   empty ones, TMPDIR pointing at the empty /tmp; only what runs npm (node, the PATH, ~/.npmrc for
+ *   the registry) is put back, read-only.
+ *
+ * A host without bubblewrap installs nothing rather than install uncontained: the caller reports
+ * the failed install, with this reason.
  */
-export function containedInstall(cwd: string, env: NodeJS.ProcessEnv = process.env, options: { bwrap?: string | null; node?: string } = {}): ContainedInstall {
+export function containedInstall(cwd: string, env: NodeJS.ProcessEnv = process.env, options: { bwrap?: string | null; node?: string; uid?: number } = {}): ContainedInstall {
   const bwrap = options.bwrap === undefined ? onPath('bwrap', env) : options.bwrap;
-  if (!bwrap) throw new Error('bubblewrap (bwrap) is not installed, and dependencies are never installed without it: the checkout\'s install scripts would run with read access to this host\'s credential files. Install bubblewrap (e.g. apt install bubblewrap) and recreate the worktree');
+  if (!bwrap) throw new Error('bubblewrap (bwrap) is not installed, and dependencies are never installed without it: the checkout\'s install scripts would run with this host\'s authority. Install bubblewrap (e.g. apt install bubblewrap) and recreate the worktree');
   const home = resolve(env.HOME || homedir());
+  const uid = options.uid ?? process.getuid?.();
   const directory = (path: string) => { try { return lstatSync(path).isDirectory(); } catch { return false; } };
+  // Emptied first, then what the install needs is put back inside them; paths are only ever
+  // re-exposed inside one of these, never elsewhere (the rest of the filesystem stays as it is, read-only).
+  const hidden = [...new Set([home, '/tmp', uid === undefined ? null : `/run/user/${uid}`, env.XDG_RUNTIME_DIR]
+    .filter((path): path is string => !!path && isAbsolute(path)).map(path => resolve(path)))].filter(path => path === home || path === '/tmp' || directory(path))
+    .sort((a, b) => a.length - b.length);
   const credentials = [...new Set([
     env.GRAPHYARD_CONFIG_HOME, env.XDG_CONFIG_HOME, join(home, '.config'), join(home, '.ssh'),
     env.GRAPHYARD_TOKEN_FILE ? dirname(env.GRAPHYARD_TOKEN_FILE) : undefined,
   ].filter((path): path is string => !!path && isAbsolute(path)).map(path => resolve(path)))].filter(directory);
-  const cache = resolve(env.npm_config_cache || join(home, '.npm'));
-  if (within(cache, home)) mkdirSync(cache, { recursive: true });
+  // npm's content cache only: its entries are addressed and verified by integrity. The rest of the
+  // cache folder (npx's installs, logs) stays out of reach.
+  const cache = join(resolve(env.npm_config_cache || join(home, '.npm')), '_cacache');
+  mkdirSync(cache, { recursive: true });
   // node and npm are often installed under the home directory (nvm, mise, fnm): the folder above
   // each one's real executable holds the rest of it (node's prefix; npm's package, for npm-cli.js).
   const tools = [options.node ?? process.execPath, onPath('node', env), onPath('npm', env)].flatMap(path => { try { return path ? [dirname(dirname(realpathSync(path)))] : []; } catch { return []; } });
   const readable = [...tools, ...(env.PATH ?? '').split(delimiter).filter(isAbsolute), join(home, '.npmrc'), env.npm_config_userconfig]
     .filter((path): path is string => !!path).map(path => resolve(path));
-  const writable = [cache, env.TMPDIR ? resolve(env.TMPDIR) : null].filter((path): path is string => !!path);
-  const args = ['--dev-bind', '/', '/', '--die-with-parent', '--tmpfs', home], made = new Set<string>();
-  // A path put back inside the emptied home keeps the symlinks on its way (mise's installs/node/26
+  const args = ['--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--unshare-all', '--share-net', '--die-with-parent', '--new-session'];
+  for (const path of hidden) args.push('--tmpfs', path); // parents first, or a later one would bury an earlier
+  args.push('--setenv', 'TMPDIR', '/tmp');
+  const made = new Set<string>();
+  const hiddenRoot = (path: string) => hidden.filter(root => within(path, root)).sort((a, b) => b.length - a.length)[0];
+  // A path put back inside an emptied folder keeps the symlinks on its way (mise's installs/node/26
   // -> 26.10.0, from which npm's own links resolve), each recreated and followed to what it names.
   const expose = (path: string, flag: string, depth = 0): void => {
-    if (depth > 16 || !within(path, home) || path === home || !existsSync(path) || credentials.some(parent => within(path, parent))) return;
-    for (let at = path; at !== home; at = dirname(at)) {
+    const root = hiddenRoot(path);
+    if (depth > 16 || !root || path === root || !existsSync(path) || credentials.some(parent => within(path, parent))) return;
+    for (let at = path; at !== root; at = dirname(at)) {
       if (!lstatSync(at).isSymbolicLink()) continue;
       const target = readlinkSync(at);
       if (!made.has(at)) { made.add(at); args.push('--symlink', target, at); }
@@ -213,10 +242,11 @@ export function containedInstall(cwd: string, env: NodeJS.ProcessEnv = process.e
     if (!made.has(path)) { made.add(path); args.push(flag, path, path); }
   };
   for (const path of readable) expose(path, '--ro-bind');
-  for (const path of writable) expose(path, '--bind');
-  // Emptied last, so no folder put back above re-exposes one; outside the home directory too.
-  for (const path of credentials) if (!within(path, home) || [...made].some(exposed => within(path, exposed))) args.push('--tmpfs', path);
-  args.push('--bind', resolve(cwd), resolve(cwd), '--chdir', resolve(cwd), '--', 'npm', ...npmCiArgs);
+  const writable = [cache, resolve(cwd)];
+  for (const path of writable) args.push('--bind', path, path);
+  // Emptied last, so no folder put back above re-exposes one, whether or not it lies in an emptied folder.
+  for (const path of credentials) if (!hiddenRoot(path) || [...made, ...writable].some(exposed => within(path, exposed))) args.push('--tmpfs', path);
+  args.push('--chdir', resolve(cwd), '--', 'npm', ...npmCiArgs);
   return { command: bwrap, args };
 }
 

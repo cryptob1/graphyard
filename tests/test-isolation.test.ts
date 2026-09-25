@@ -6,7 +6,8 @@ import { chmod, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { abnormalTestExit, containedInstall, isolatedTestEnvironment, loaderDigest, passedTestControls, reserveTestPorts, testPortEnvironment, npmCiArgs, npmCiEnvironment, repeatedRequiredTitle } from '../src/cli/test-isolation.js';
+import { fileURLToPath } from 'node:url';
+import { abnormalTestExit, containedInstall, containmentWorks, isolatedTestEnvironment, loaderDigest, passedTestControls, reserveTestPorts, testPortEnvironment, npmCiArgs, npmCiEnvironment, repeatedRequiredTitle } from '../src/cli/test-isolation.js';
 import { countProofCases, runProof } from '../src/cli/verify.js';
 import { bindEvidence, leaseCommands, testedBinding } from '../src/cli/lease.js';
 import { githubPauseReset, pauseRetry, submitThroughPause } from '../src/cli/complete.js';
@@ -250,49 +251,69 @@ test('unit:test-isolation the managed worktree installs dependencies when packag
     assert.ok(npmCiArgs.includes('--include=dev'));
     // Optional dependencies too: an .npmrc omit=optional would skip platform packages (esbuild's binary, which tsx loads; @embedded-postgres/*) while npm exits 0, and the lockfile check accepts a missing optional entry.
     assert.ok(npmCiArgs.includes('--include=optional'), 'an .npmrc omit=optional is overridden');
-    assert.match(await readFile(new URL('scripts/run-unit-acceptance.mjs', repository), 'utf8'), /'--include=dev', '--include=optional'/, 'the trusted unit runner installs optional dependencies too');
     assert.ok(npmCiArgs.includes('--no-dry-run'), 'a dry-run from an .npmrc is overridden too');
     // So are settings that let npm exit 0 with a matching hidden lockfile but no install scripts run or no .bin links made.
     assert.ok(npmCiArgs.includes('--ignore-scripts=false') && npmCiArgs.includes('--bin-links'), 'ignore-scripts and bin-links=false are overridden');
-    assert.match(await readFile(new URL('scripts/run-unit-acceptance.mjs', repository), 'utf8'), /'--no-dry-run', '--ignore-scripts=false', '--bin-links'/, 'the trusted unit runner overrides them too');
+    // The trusted unit runner installs the candidate through the same contained npm ci, npmCiArgs and all.
+    assert.match(await readFile(new URL('scripts/run-unit-acceptance.mjs', repository), 'utf8'), /provisionContainment\(\);\n\s*const install = containedInstall\(candidate\);\n\s*execFileSync\(install\.command, install\.args, \{ cwd: candidate, env: npmCiEnvironment\(\)/, 'the trusted unit runner installs contained, with the full tree');
     const cleared = npmCiEnvironment({ PATH: '/bin', NODE_ENV: 'production', npm_config_omit: 'dev', NPM_CONFIG_PRODUCTION: 'true', npm_config_dry_run: 'true', 'npm_config_dry-run': 'true', npm_config_ignore_scripts: 'true', npm_config_bin_links: 'false' });
     assert.deepEqual(cleared, { PATH: '/bin' });
     // The install runs the checkout's lifecycle scripts outside any sandbox: none of the launcher's credentials reach them.
     assert.deepEqual(npmCiEnvironment({ PATH: '/bin', npm_config_registry: 'https://registry.example/', GRAPHYARD_TOKEN_FILE: '/secret', GRAPHYARD_TOKEN: 't', GRAPHYARD_URL: 'http://plane', HERDR_PANE: 'p', GH_TOKEN: 'g', GITHUB_TOKEN: 'g' }),
       { PATH: '/bin', npm_config_registry: 'https://registry.example/' });
 
-    // Filtering the environment is not containment: npm runs under bubblewrap with the home directory and every credential
-    // location emptied, and only node, npm, the PATH, ~/.npmrc, npm's cache and the worktree put back.
+    // Filtering the environment is not containment: npm runs under bubblewrap with the filesystem read-only, its own PID
+    // namespace and /proc, the home directory, /tmp and every credential location emptied, and only node, npm, the PATH and
+    // ~/.npmrc put back (read-only) and npm's content cache and the worktree writable.
     assert.throws(() => containedInstall(worktree, { PATH: '/usr/bin', HOME: root }, { bwrap: null }), /bubblewrap \(bwrap\) is not installed, and dependencies are never installed without it/);
-    const home = join(root, 'home'), outside = join(root, 'secrets');
-    await mkdir(join(home, '.config', 'graphyard', 'tokens'), { recursive: true }); await mkdir(join(home, '.ssh')); await mkdir(outside);
+    const home = join(root, 'home'), outside = join(root, 'secrets'), runtime = join(root, 'runtime');
+    await mkdir(join(home, '.config', 'graphyard', 'tokens'), { recursive: true }); await mkdir(join(home, '.ssh')); await mkdir(outside); await mkdir(runtime);
     await writeFile(join(home, '.config', 'graphyard', 'tokens', 'worker.token'), 'secret'); await writeFile(join(outside, 'worker.token'), 'secret');
     await writeFile(join(home, '.ssh', 'id_ed25519'), 'secret'); await writeFile(join(home, '.npmrc'), 'registry=https://registry.npmjs.org/\n');
     // A tool installed under the home directory through a version symlink (mise's node/26 -> 26.10.0), npm linking into its lib.
-    const tool = join(home, '.local', 'share', 'tool');
+    // The stub npm is the hostile lifecycle script: it reads credentials, writes outside the worktree, looks at other
+    // processes through /proc and leaves a detached process behind to write after the install returned.
+    const tool = join(home, '.local', 'share', 'tool'), probe = fileURLToPath(new URL('.containment-probe', repository));
     await mkdir(join(tool, '26.10.0', 'bin'), { recursive: true }); await mkdir(join(tool, '26.10.0', 'lib'), { recursive: true }); await symlink('26.10.0', join(tool, '26'));
-    await writeFile(join(tool, '26.10.0', 'lib', 'npm-cli.sh'), `#!/bin/sh\ncat "${join(home, '.config', 'graphyard', 'tokens', 'worker.token')}" "${join(outside, 'worker.token')}" "${join(home, '.ssh', 'id_ed25519')}" > leaked.txt 2>/dev/null\ncat "${join(home, '.npmrc')}" > npmrc.txt\necho "$@" > args.txt\n`);
+    await writeFile(join(tool, '26.10.0', 'lib', 'npm-cli.sh'), [
+      '#!/bin/sh',
+      `cat "${join(home, '.config', 'graphyard', 'tokens', 'worker.token')}" "${join(outside, 'worker.token')}" "${join(home, '.ssh', 'id_ed25519')}" /proc/${process.pid}/environ /proc/${process.pid}/root/${join(outside, 'worker.token')} > leaked.txt 2>/dev/null`,
+      `cat "${join(home, '.npmrc')}" > npmrc.txt`, 'echo "$@" > args.txt',
+      `touch "${probe}" 2>/dev/null; ls -d /proc/[0-9]* | wc -l > processes.txt; echo "$TMPDIR" > tmpdir.txt`,
+      `setsid sh -c 'sleep 1; echo late > "${join(worktree, 'late.txt')}"' >/dev/null 2>&1 < /dev/null &`, '',
+    ].join('\n'));
     await chmod(join(tool, '26.10.0', 'lib', 'npm-cli.sh'), 0o755); await symlink('../lib/npm-cli.sh', join(tool, '26.10.0', 'bin', 'npm'));
-    const env = { PATH: `${join(tool, '26', 'bin')}:/usr/bin:/bin`, HOME: home, GRAPHYARD_TOKEN_FILE: join(outside, 'worker.token') };
-    const contained = containedInstall(worktree, env, { bwrap: '/usr/bin/bwrap', node: '/usr/bin/node' });
+    const env = { PATH: `${join(tool, '26', 'bin')}:/usr/bin:/bin`, HOME: home, GRAPHYARD_TOKEN_FILE: join(outside, 'worker.token'), XDG_RUNTIME_DIR: runtime };
+    const contained = containedInstall(worktree, env, { bwrap: '/usr/bin/bwrap', node: '/usr/bin/node', uid: 4242 });
     assert.equal(contained.command, '/usr/bin/bwrap');
     const pairs = (flag: string) => contained.args.flatMap((arg, index) => arg === flag ? [contained.args[index + 1]] : []);
-    assert.deepEqual(pairs('--tmpfs'), [home, outside], 'the home directory and the token file\'s directory outside it are emptied');
+    assert.deepEqual(contained.args.slice(0, 11), ['--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--unshare-all', '--share-net', '--die-with-parent', '--new-session'],
+      'the filesystem is read-only and every namespace but the network is the install\'s own: its /proc shows only its processes, all killed when it ends');
+    assert.ok(!contained.args.includes('--dev-bind'), 'nothing of the host is mounted writable wholesale');
+    assert.deepEqual(pairs('--tmpfs'), ['/tmp', home, runtime], '/tmp (the token file\'s directory in it), the home and the runtime directories are emptied');
+    assert.ok(contained.args.join(' ').includes('--setenv TMPDIR /tmp'));
     assert.deepEqual(pairs('--symlink'), ['26.10.0'], 'the version symlink on the way to npm is recreated');
     assert.ok(pairs('--ro-bind').includes(join(tool, '26.10.0', 'bin')) && pairs('--ro-bind').includes(join(home, '.npmrc')), 'npm and the registry config are put back, read-only');
-    assert.ok(pairs('--bind').includes(join(home, '.npm')) && pairs('--bind').includes(worktree), 'npm\'s cache and the worktree are writable');
+    assert.deepEqual(pairs('--bind'), [join(home, '.npm', '_cacache'), worktree], 'only npm\'s content cache and the worktree are writable');
     assert.ok(![...pairs('--ro-bind'), ...pairs('--bind')].some(path => path.startsWith(join(home, '.config')) || path.startsWith(join(home, '.ssh')) || path.startsWith(outside)), 'no credential location is put back');
     assert.deepEqual(contained.args.slice(contained.args.indexOf('--')), ['--', 'npm', ...npmCiArgs]);
     assert.match(await readFile(new URL('src/repository-setup.ts', repository), 'utf8'), /const \{ command, args \} = containedInstall\(cwd\);\n\s*const child = spawn\(command, args,/, 'the worktree install runs contained');
-    // Where bubblewrap runs, the contained install's scripts really cannot read a credential file.
-    if (spawnSync('bwrap', ['--dev-bind', '/', '/', 'true']).status === 0) {
+    // Where bubblewrap can unshare those namespaces, the contained install's scripts really are contained.
+    if (containmentWorks()) {
       const live = containedInstall(worktree, env, { node: process.execPath });
-      const ran = spawnSync(live.command, live.args, { cwd: worktree, env, encoding: 'utf8' });
-      assert.equal(ran.status, 0, ran.stderr);
-      assert.equal(await readFile(join(worktree, 'leaked.txt'), 'utf8'), '', 'no token or key was readable');
-      assert.match(await readFile(join(worktree, 'npmrc.txt'), 'utf8'), /registry=/);
-      assert.equal((await readFile(join(worktree, 'args.txt'), 'utf8')).trim(), npmCiArgs.join(' '));
-      for (const file of ['leaked.txt', 'npmrc.txt', 'args.txt']) await rm(join(worktree, file));
+      try {
+        const ran = spawnSync(live.command, live.args, { cwd: worktree, env, encoding: 'utf8' });
+        assert.equal(ran.status, 0, ran.stderr);
+        assert.equal(await readFile(join(worktree, 'leaked.txt'), 'utf8'), '', 'no token, key or other process\'s environment was readable');
+        assert.match(await readFile(join(worktree, 'npmrc.txt'), 'utf8'), /registry=/);
+        assert.equal((await readFile(join(worktree, 'args.txt'), 'utf8')).trim(), npmCiArgs.join(' '));
+        assert.equal(existsSync(probe), false, 'the script could not write the checkout outside the worktree');
+        assert.ok(Number(await readFile(join(worktree, 'processes.txt'), 'utf8')) < 10, 'its /proc lists only the install\'s own processes');
+        assert.equal((await readFile(join(worktree, 'tmpdir.txt'), 'utf8')).trim(), '/tmp');
+        await new Promise(done => setTimeout(done, 1500));
+        assert.equal(existsSync(join(worktree, 'late.txt')), false, 'no process the install started outlived it');
+      } finally { await rm(probe, { force: true }); }
+      for (const file of ['leaked.txt', 'npmrc.txt', 'args.txt', 'processes.txt', 'tmpdir.txt']) await rm(join(worktree, file));
     }
 
     // A refused lease heartbeat stops the install and fails the worktree command.
@@ -372,10 +393,10 @@ test('an ordinary case of the same file', () => { writeFileSync(${JSON.stringify
     // The transpiler loads from the protected harness, never from the tsx the candidate's lockfile installed.
     assert.doesNotMatch(runner, /'--import', 'tsx'/);
     assert.match(runner, /\['--import', transpiler\.href, '--test'/);
-    assert.match(runner, /const transpiler = harnessTranspiler\(\);\n\s*execFileSync\('npm', \['ci'/, 'the transpiler is resolved before any candidate code runs');
+    assert.match(runner, /const transpiler = harnessTranspiler\(\);\n\s*provisionContainment\(\);\n\s*const install = containedInstall\(candidate\);/, 'the transpiler is resolved before any candidate code runs');
     assert.match(runner, /try \{ href = import\.meta\.resolve\('tsx'\); \}/);
-    // The candidate's install can write the harness's node_modules: what the transpiler loads is digested before that
-    // install and checked before and after the run, and the harness's own fallback install is the hardened one.
+    // The candidate's install runs contained, and what the transpiler loads is still digested before that install and
+    // checked before and after the run; the harness's own fallback install is the hardened one.
     assert.match(runner, /return \{ href, digest: loaderDigest\(href\) \};/);
     assert.match(runner, /assertLoaderUnchanged\(transpiler, 'before the inventory ran'\);\n\s*const run = spawnSync/);
     assert.match(runner, /if \(run\.error\) throw run\.error;\n\s*assertLoaderUnchanged\(transpiler, 'while the inventory ran'\);/);
