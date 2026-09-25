@@ -85,6 +85,12 @@ export interface ProductionReport {
 export const INCIDENT_EVENT = 'delivery.deployment-incident', RECOVERY_EVENT = 'delivery.deployment-recovered';
 /** A delivery first observed inside the release production serves; containment is never asked again for it. */
 export const CONTAINED_EVENT = 'delivery.deployment-contained';
+/**
+ * The deliveries known not to be in the serving release, with that release: a restart at an
+ * unchanged serving SHA (a config-only restart, a failed rollout, a crash loop) restores them and
+ * asks none again. A plane event (no work id), written only when the set changes.
+ */
+export const PENDING_EVENT = 'production.deployment-pending';
 /** A merged commit not served within this long is a missing deployment. */
 export const DEPLOYMENT_GRACE_MS = 5 * 60_000;
 /** Deliveries older than this are not re-verified against the provider on every pass. */
@@ -117,6 +123,8 @@ export class ProductionWatch {
    */
   private deployedIn = new Map<string, string>();
   private notIn = new Map<string, string>();
+  /** The pending set last written to the ledger, so an unchanged one is not written again. */
+  private recordedPending = '';
   private passing = false;
   private report: ProductionReport;
   constructor(private store: Store, private options: ProductionWatchOptions) {
@@ -139,6 +147,13 @@ export class ProductionWatch {
     // would be compared and recorded again, and the duplicate could crowd out another on a later restart.
     const contained = (await this.store.pool.query('SELECT DISTINCT ON (work_id) work_id, payload FROM events WHERE kind=$1 AND created_at >= $2 AND work_id IS NOT NULL ORDER BY work_id, seq DESC', [CONTAINED_EVENT, since])).rows;
     for (const row of contained) if (row.work_id && typeof row.payload?.serving === 'string' && !this.deployedIn.has(row.work_id)) this.deployedIn.set(row.work_id, row.payload.serving);
+    // The negative answers for the last serving commit: only the newest record matters, since a
+    // record for an older serving commit would be asked again anyway.
+    const pending = (await this.store.pool.query('SELECT payload FROM events WHERE kind=$1 ORDER BY seq DESC LIMIT 1', [PENDING_EVENT])).rows[0]?.payload;
+    if (typeof pending?.serving === 'string' && Array.isArray(pending.workIds)) {
+      for (const id of pending.workIds) if (typeof id === 'string' && !this.deployedIn.has(id)) this.notIn.set(id, pending.serving);
+      this.recordedPending = pendingKey(pending.serving, pending.workIds.filter((id: unknown) => typeof id === 'string' && !this.deployedIn.has(id)));
+    }
     this.loaded = true;
     this.report.incidents = this.openIncidents();
   }
@@ -226,6 +241,7 @@ export class ProductionWatch {
       await this.raise(item, report, at, 'missing', null, `no ${this.options.provider ? `${this.options.provider.name} deployment` : 'deployment'} of ${mergeSha.slice(0, 12)} was observed within ${Math.round(this.grace / 60_000)} minutes of the merge; production serves ${report.serving!.slice(0, 12)}, which does not contain it${this.options.provider ? '' : '. Configure RAILWAY_API_TOKEN (or RAILWAY_TOKEN) so the provider reports the failing deployment'}`);
       report.pending.push(item.key);
     }
+    if (report.serving) await this.recordPending(report.serving, at);
     report.incidents = this.openIncidents();
     report.attention = attentionLines(report);
     this.report = report;
@@ -247,6 +263,15 @@ export class ProductionWatch {
     return contained;
   }
 
+  /** Persists the deliveries known not to be in `serving`, when that set changed since the last record. */
+  private async recordPending(serving: string, at: string) {
+    const workIds = [...this.notIn].filter(([, release]) => release === serving).map(([id]) => id).sort();
+    const key = pendingKey(serving, workIds);
+    if (key === this.recordedPending) return;
+    await this.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', ['graphyard', PENDING_EVENT, JSON.stringify({ serving, workIds, at })]);
+    this.recordedPending = key;
+  }
+
   private async raise(item: Work, report: ProductionReport, at: string, status: 'failed' | 'missing', deploymentId: string | null, reason: string) {
     const open = this.incidents.get(item.id);
     // The same open incident is not re-recorded on every pass; a changed status or reason is.
@@ -262,6 +287,8 @@ export class ProductionWatch {
     await this.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [item.id, 'graphyard', RECOVERY_EVENT, JSON.stringify({ incidentId: open.id, key: item.key, mergeSha: open.mergeSha, serving: report.serving, since: open.since, at })]);
   }
 }
+
+function pendingKey(serving: string, workIds: string[]) { return workIds.length ? `${serving}:${[...workIds].sort().join(',')}` : ''; }
 
 /** The operator sentences: how far main is ahead, why, and which merged items are not serving. */
 export function attentionLines(report: Pick<ProductionReport, 'ahead' | 'aheadError' | 'serving' | 'incidents' | 'error' | 'latest' | 'provider'>): string[] {

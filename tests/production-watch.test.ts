@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { CONTAINED_EVENT, ProductionWatch, startProductionWatch } from '../src/production-watch.js';
+import { CONTAINED_EVENT, PENDING_EVENT, ProductionWatch, startProductionWatch } from '../src/production-watch.js';
 import { startReconciliation } from '../src/server/main.js';
 import { GitHub } from '../src/github.js';
 import { buildIdentity } from '../src/protocol-version.js';
@@ -17,8 +17,9 @@ const T0 = Date.parse('2026-09-24T12:00:00Z');
 
 /** The ledger and work items the watch reads, in memory: only the queries the watch issues. */
 function memoryStore(work: Work[]) {
-  const events: { seq: number; work_id: string; kind: string; payload: any }[] = [];
+  const events: { seq: number; work_id: string | null; kind: string; payload: any }[] = [];
   const pool = { async query(sql: string, params: any[] = []) {
+    if (sql.startsWith('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL')) { events.push({ seq: events.length + 1, work_id: null, kind: params[1], payload: JSON.parse(params[2]) }); return { rows: [] }; }
     if (sql.startsWith('INSERT INTO events')) { events.push({ seq: events.length + 1, work_id: params[0], kind: params[2], payload: JSON.parse(params[3]) }); return { rows: [] }; }
     const limit = Number(sql.match(/LIMIT (\d+)/)?.[1] ?? Infinity);
     if (sql.includes('kind IN ($1,$2)')) return { rows: events.filter(row => row.kind === params[0] || row.kind === params[1]).reverse().slice(0, limit) };
@@ -77,6 +78,19 @@ test('unit:containment-monotonic — over 150 delivered items a new serving SHA 
   assert.equal(report.deployed.length, 145); assert.equal(report.pending.length, 5);
   for (const item of work.slice(0, 140)) assert.ok(!github.compares.some(path => path.includes(item.delivery!.mergeSha)), `${item.key} was recorded contained and is never compared again`);
   assert.equal(events.filter(event => event.kind === CONTAINED_EVENT).length, 145);
+
+  // A restart while production still serves the same commit (a config-only restart, a failed
+  // rollout, a crash loop) restores the negative answers too: no containment compare at all.
+  github.compares.length = 0; clock += 61_000;
+  const sameRelease = new ProductionWatch(store, options);
+  report = await sameRelease.tick();
+  assert.deepEqual(github.compares.filter(path => !isAheadBy(path)), [], 'a restart at an unchanged serving SHA makes no containment compares');
+  assert.equal(report.deployed.length, 145); assert.equal(report.pending.length, 5);
+  const pendingRecords = events.filter(event => event.kind === PENDING_EVENT);
+  assert.deepEqual(pendingRecords.at(-1)!.payload.workIds, work.slice(145).map(item => item.id).sort(), 'the pending set is recorded with its serving SHA');
+  assert.equal(pendingRecords.at(-1)!.payload.serving, sha(145));
+  clock += 61_000; await sameRelease.tick();
+  assert.equal(events.filter(event => event.kind === PENDING_EVENT).length, pendingRecords.length, 'an unchanged pending set is not recorded again');
 
   // Every deploy restarts the process: the record is the ledger, so a new watch at a new serving
   // SHA still compares only what was pending.

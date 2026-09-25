@@ -45,7 +45,7 @@ Store its token as `GRAPHYARD_CI_PRODUCER_TOKEN` on the `graphyard-reporting` en
 
 ### Production deployment observation
 
-When the serving commit (`GRAPHYARD_BUILD_SHA`) changes, each undeployed merge is compared once; contained ones are recorded (`delivery.deployment-contained`) and never rechecked. One unserved after five minutes is a `delivery.deployment-incident`; `master status` shows `main is N commits ahead of production`. Probe: `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`.
+When the serving commit (`GRAPHYARD_BUILD_SHA`) changes, undeployed merges are compared once; answers are recorded (`delivery.deployment-contained`, `production.deployment-pending`), so a same-commit restart compares nothing. One unserved after five minutes is a `delivery.deployment-incident`; `master status` shows `main is N commits ahead of production`. Probe: `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`.
 
 ## Backup, upgrade, rollback
 
