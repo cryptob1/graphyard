@@ -17,7 +17,7 @@ A criterion states an outcome and its proofs:
 
 ## Dispatch optimistically, smallest scope first
 
-`plannedFiles` (paths, or directory prefixes ending in `/`) is the change-scope contract, not a lock: the merge queue and `sync` rework integrate overlapping items. `master status` records `overlap.concurrent` and lists candidates `git merge-tree` cannot merge. Smallest planned scope dispatches first; a root-level directory is `highConflict`, refused without `--allow-broad-scope`. Only `exclusiveResources`, reserved at claim, hold a dispatch.
+`plannedFiles` (paths, or directory prefixes ending in `/`) is the change-scope contract, not a lock: the merge queue and `sync` rework integrate overlapping items, and [GitHub merges](github.md#merge-queue). `master status` records `overlap.concurrent` and lists candidates `git merge-tree` cannot merge. Smallest planned scope dispatches first; a root-level directory is `highConflict`, refused without `--allow-broad-scope`. Only `exclusiveResources`, reserved at claim, hold a dispatch.
 
 ## Review gate: verdicts, not threads
 

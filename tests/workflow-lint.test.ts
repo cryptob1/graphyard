@@ -120,7 +120,7 @@ test('unit:onboarding-ci-concurrency-advisory — onboarding recommends cancelli
   const pushOnly: WorkflowFile = { path: '.github/workflows/nightly.yml', text: 'name: Nightly\non:\n  push:\n    branches: [main]\njobs:\n  soak:\n    runs-on: ubuntu-latest\n' };
   const workflows = [uncancelled, cancelled, jobLevel, pushOnly];
 
-  const plan = protectionPlan(protection, config, [openWork(['test', 'typecheck', 'lint', 'e2e', 'soak']), openWork(['deploy'], { key: 'GY-9', stage: 'done' } as any)], workflows);
+  const plan = protectionPlan(protection, config, [openWork(['test', 'typecheck', 'lint', 'e2e', 'soak']), openWork(['deploy'], { key: 'GY-9', stage: 'done' } as any)], undefined, workflows);
   assert.deepEqual(plan.advisories, [
     'Required check test runs in .github/workflows/ci.yml (job unit), which never cancels superseded pull-request runs; add a concurrency group per pull request with cancel-in-progress for pull_request events, so a run for a superseded head stops holding an Actions runner',
     'Required check typecheck runs in .github/workflows/ci.yml (job typecheck), which never cancels superseded pull-request runs; add a concurrency group per pull request with cancel-in-progress for pull_request events, so a run for a superseded head stops holding an Actions runner',

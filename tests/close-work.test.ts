@@ -143,10 +143,6 @@ test('integration:close-refusals — a live lease refuses, and only the master o
   assert.equal(leased.status, 409); assert.match(JSON.stringify(leased.body), /live worker lease/);
   await ok(worker, `work/${work.id}/release`, { epoch: claimed.epoch });
   for (const principal of [worker, producer]) assert.equal((await call(principal, `work/${work.id}/close`, { kind: 'obsolete', reason: 'Not wanted' })).status, 403, principal.id);
-  const execution = { id: 'm-1', owner: coordinator.id, sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), policyRevision: 1, authorizationRevision: 1, issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60_000).toISOString() };
-  await patch(work, { mergeExecution: execution });
-  assert.equal((await call(coordinator, `work/${work.id}/close`, { kind: 'obsolete', reason: 'Not wanted' })).status, 409, 'an in-flight merge execution refuses');
-  await patch(work, { mergeExecution: null });
   assert.equal((await ok(operator, `work/${work.id}/close`, { kind: 'obsolete', reason: 'Not wanted' })).stage, 'done');
 });
 

@@ -8,7 +8,6 @@ export class Refusal extends Error {
 }
 export class ReconciliationRetry extends Refusal {}
 export class SpeculativeConflict extends Refusal {}
-export class MergeExecutionInProgress extends ReconciliationRetry {}
 export function requireCurrent(value: unknown, message: string): asserts value {
   if (!value) throw new ReconciliationRetry(message, 409);
 }
