@@ -1986,7 +1986,7 @@ export function installationOwner(source: typeof installationSources[number], te
 }
 /** Why a work item raises attention; each cause is also its fault kind. */
 export const workAttentionCauses = ['human-request', 'containment-settleable', 'containment-grace', 'containment', 'session', 'proof-gap', 'reviewer-exhausted', 'launch-review', 'launch-producer',
-  'base-conflict', 'merged-unauthorized', 'merged-reverted', 'hold-overdue', 'contaminated', 'merge-base-dismissed', 'gate'] as const satisfies readonly FaultKind[];
+  'base-conflict', 'merged-unauthorized', 'merged-reverted', 'hold-overdue', 'contaminated', 'merge-base-dismissed', 'merge-refused', 'gate'] as const satisfies readonly FaultKind[];
 export type WorkAttentionCause = typeof workAttentionCauses[number];
 /**
  * The owner of a work item's attention, from the same facts that raised it. Everything an agent
@@ -1995,6 +1995,7 @@ export type WorkAttentionCause = typeof workAttentionCauses[number];
  */
 export function workAttentionOwner(work: Work, cause: WorkAttentionCause): AttentionOwner {
   const key = work.key;
+  if (cause === 'merge-refused') return agentOwner('master', `Nothing to run by hand: the integration job asks GitHub again on every observation of ${key}; fix what GitHub names (branch protection, the App's pull request permission, a moved head) and the next observation clears it`);
   if (cause === 'merge-base-dismissed') return agentOwner('master', missingBaseAncestry(work)
     ? `Nothing to run: the merge queue republishes ${key}'s tip onto the base branch tip and the merge broker refuses it until then; graphyard master status shows the new head`
     : `Nothing to run: the approval is restored on the unchanged head and re-posted before the merge`);
@@ -2602,6 +2603,8 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       ...(reverted ? { reverted: { base: reverted.base, files: reverted.files, removedBy: reverted.removedBy, partial: !!reverted.partial } } : {}),
       ...(dead && placement ? { queue: { sequence: dead.sequence, position: placement.position + 1, size: placement.size, unpublishable: true as const, behind: placements.filter(entry => entry.sequence > placement.sequence).map(entry => entry.key) } } : {}) } : null;
     const parked = parkedOnHuman(work) ? work.humanRequest! : null;
+    const queueRefusal = work.observation?.merged ? null : work.observation?.githubQueue?.refused ?? null;
+    const mergeRefusal = queueRefusal && queueRefusal.head === work.candidate?.sha ? queueRefusal : null;
     const [attention, cause]: [string | null, WorkAttentionCause | null] = containmentAttention ? containmentAttention
       : parked ? [`${work.key} is parked on a human-only decision (${humanDecisionLabel[parked.kind]}) since ${parked.at}: ${parked.needed} — ${parked.reason}. It holds no lease and delays nothing else`, 'human-request']
       : merged?.reverted ? [`${work.key} was merged on GitHub (${merged.sha?.slice(0, 12) ?? 'merge commit unknown'} at ${merged.at ?? 'an unrecorded time'}) and its content is not on the base branch: ${merged.reverted.files.length}${merged.reverted.partial ? ' or more' : ''} file${merged.reverted.files.length === 1 && !merged.reverted.partial ? '' : 's'} missing from base ${merged.reverted.base.slice(0, 12)} — ${merged.reverted.files.map(file => `${file.path} (${file.detail})`).join(', ')} — ${merged.reverted.removedBy
@@ -2623,6 +2626,9 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       // An item the control plane is bringing onto a moved base is not waiting for anybody. It
       // used to be the commonest attention line on this list — one per open candidate, every
       // merge — and answering it cost a rework round for a change that was a clean fast-forward.
+      // GitHub refused the control plane's merge request for this head: named with GitHub's reason,
+      // never left as a silent wait (every merge once stalled on a refused auto-merge).
+      : mergeRefusal ? [`GitHub refused the merge request for ${work.key} at ${mergeRefusal.head.slice(0, 12)} since ${mergeRefusal.at}: ${mergeRefusal.reason}`, 'merge-refused']
       : baseRefresh && !work.blocker ? [null, null]
       : work.blocker || dwellMs > 3_600_000 ? [first?.reasons[0] ?? `Work has remained at ${work.stage} for more than one hour`, 'gate'] : [null, null];
     const attentionOwner = cause ? workAttentionOwner(work, cause) : null;
