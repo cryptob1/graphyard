@@ -26,8 +26,7 @@ function App() {
   const [draftToken, setDraftToken] = useState('');
   const [work, setWork] = useState<Work[]>([]);
   const [status, setStatus] = useState<any>(null);
-  // The board (GY-200) as GET /api/board serves it: the Work page's groups; the last one read stands through a failed read.
-  const [board, setBoard] = useState<Board | null>(null), keepBoard = (value: unknown) => { if (isBoard(value)) setBoard(value); };
+  const [board, setBoard] = useState<Board | null>(null), keepBoard = (value: unknown) => { if (isBoard(value)) setBoard(value); }; // GET /api/board (GY-200): the Work page's groups; the last one read stands through a failed read
   const [error, setError] = useState('');
   const [connected, setConnected] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);

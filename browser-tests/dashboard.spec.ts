@@ -5,12 +5,12 @@ import { boardFromStatus } from '../src/model/board';
 // GET /api/board (GY-200): the Work page renders the groups the server serves. The fixture builds it
 // with the server's own module over the snapshot the page is served, read back through the page's
 // routes, so a test that overrides the snapshot is served that snapshot's board.
-// A read still in flight when its test ends is abandoned rather than failing the finished test.
+// A read that fails (offline) or is still in flight when its test ends is aborted rather than left hanging.
 async function serveBoard(page: Page, route: Route) {
   try {
     const snapshot = await page.evaluate(() => fetch('/api/work-snapshot', { headers: { Authorization: 'Bearer browser-fixture' } }).then(response => response.json()));
     await route.fulfill({ json: boardFromStatus(snapshot?.work ?? [], Date.parse(snapshot?.now ?? new Date().toISOString()), null) });
-  } catch { /* the page closed under the read */ }
+  } catch { await route.abort().catch(() => {}); /* the read failed (offline) or the page closed under it: settle the request so polling does not stall */ }
 }
 
 // Browser-only API fixtures: no production requests, credentials, or writes.
