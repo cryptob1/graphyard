@@ -114,7 +114,9 @@ test('unit:github-budget-tracked — the budget is read from every response, the
   t.mock.method(globalThis, 'fetch', api.fetch);
   const github = api.client();
   // A budget going down: 100 requests remain, and every uncached read takes one.
-  api.limit = 5000; api.remaining = 100; api.resetAt = Math.ceil(Date.now() / 1000) + 2400;
+  // The reset is a minute past the projected exhaustion: at exactly forty minutes, the time the
+  // twenty reads take moved the projection past a reset read at whole-second precision (a flake).
+  api.limit = 5000; api.remaining = 100; api.resetAt = Math.ceil(Date.now() / 1000) + 2460;
   for (let index = 0; index < 20; index++) await github.request(`/compare/${sha(`x${index}`)}...${sha(`y${index}`)}?per_page=1`);
   const budget = github.budget();
   assert.deepEqual([budget.limit, budget.remaining, budget.used], [5000, 80, 4920], 'the last response is the reading');
@@ -122,7 +124,7 @@ test('unit:github-budget-tracked — the budget is read from every response, the
   assert.equal(budget.spentInWindow, 20); assert.equal(budget.perMinute, 2, 'twenty charged requests over a ten-minute window');
   const projected = Date.parse(budget.projectedExhaustionAt!);
   assert.ok(Math.abs(projected - (Date.now() + 40 * 60_000)) < 5_000, `80 remaining at 2/min is exhausted in 40 minutes, not ${budget.projectedExhaustionAt}`);
-  assert.equal(budget.exhaustsBeforeReset, true, 'forty minutes is before the reset in forty');
+  assert.equal(budget.exhaustsBeforeReset, true, 'forty minutes is before the reset in forty-one');
   assert.deepEqual(budget.lastHour, { requests: 20, byKind: [{ kind: 'compare', requests: 20 }] });
   const attention = exhaustionAttention({ githubBudget: budget });
   assert.equal(attention.length, 1);

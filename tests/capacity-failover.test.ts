@@ -107,9 +107,7 @@ async function submittedAndProven(work: Work, worker: Principal, extra: Partial<
 /** The loop's guarded merge, as the broker performs it with the coordinator credential alone. */
 async function guardedMerge(work: Work) {
   const current = await reload(work.id), candidate = { sha: current.candidate!.sha, baseSha: current.candidate!.baseSha };
-  const granted = await engine.acquireMerge(coordinator, current.id, { expectedRevision: current.revision, ...candidate, policyRevision: current.policyRevision }, randomUUID());
-  await engine.verifyMerge(coordinator, current.id, { executionId: granted.execution.id }, seen(current, candidate), randomUUID());
-  const committed = await engine.commitMerge(coordinator, current.id, { executionId: granted.execution.id }, randomUUID());
+  const committed = await engine.requestEnqueue(coordinator, current.id, { enqueue: true, expectedRevision: current.revision, ...candidate, policyRevision: current.policyRevision }, randomUUID());
   await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
   await engine.observe(current.id, committed.revision, seen(current, candidate, { merged: true, mergeSha: sha40(`merge:${work.id}`), mergedAt }));
   return { result: 'merged' };

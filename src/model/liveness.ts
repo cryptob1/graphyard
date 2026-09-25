@@ -1,6 +1,6 @@
-import { actionId, actionIdleMs, actionSettleMs, actionStall, actionStallMaxMs, claimLive, reconcileActions, waitingToRetry, type ActionRow } from './actions.js';
+import { actionId, actionIdleMs, actionSettleMs, actionStall, actionStallMaxMs, claimLive, waitingToRetry, type ActionRow } from './actions.js';
 import { actionAccount } from './next-action.js';
-import { nextActionLlmRoles, type NextAction, type NextActionInputs } from './action-kinds.js';
+import { nextActionLlmRoles, type NextAction } from './action-kinds.js';
 import type { ActionAccount, ActionWait } from './action-account.js';
 import { producerGroupDecisions } from './mechanical-proofs.js';
 import { roleSessionMaximumMs } from './sessions.js';
@@ -189,17 +189,9 @@ export function livenessFallback(work: Work, all: Work[], now: Date): NextAction
 
 // ---- Detection --------------------------------------------------------------------------------
 
-/** A merge the broker committed to the provider and never saw observed: a fresh reading reconciles it. */
-export function reconcileMergeAction(work: Work): NextAction {
-  const execution = work.mergeExecution!;
-  const inputs: NextActionInputs = { kind: 'resync', pr: work.candidate?.pr ?? work.submission?.pr ?? null, sha: execution.sha, baseSha: execution.baseSha, baseTip: work.observation?.baseTip ?? null, observedAt: work.observation?.at ?? null };
-  return { kind: 'resync', work: work.id, key: work.key, gate: 'merge', refusal: null, llmRole: null, inputs, binding: `reconcile-merge:${execution.id}`,
-    reason: `${work.key}'s merge execution ${execution.id} committed ${execution.sha.slice(0, 12)} to the provider and expired at ${execution.expiresAt} with the pull request still open; a fresh reading reconciles the provider outcome` };
-}
-
 function classify(work: Work, all: Work[], now: Date, successor: NextAction | null): ViolationClass {
   if (!successor) return 'unaccounted';
-  if (successor.binding.startsWith('reconcile-merge:') || successor.kind === 'merge') return 'stranded-merge';
+  if (successor.kind === 'merge') return 'stranded-merge';
   if (successor.binding.startsWith('stalled:')) return 'stalled-action';
   if (successor.inputs.kind === 'escalate' && successor.inputs.trigger === 'stale-wait') return 'stale-wait';
   if (successor.inputs.kind === 'escalate' && successor.inputs.trigger === 'unaccounted') return 'unaccounted';
@@ -226,15 +218,6 @@ export function livenessOf(work: Work, all: Work[], now: Date): Liveness {
     const row = openRow(work, actionId(next.kind, work.id, next.binding));
     return row ? { ...base, violation: null, obligation: { kind: 'action', owner: row.claim?.executor ?? null, dueAt: rowDueAt(row, now), detail: next.reason, action: { id: row.id, kind: row.kind, state: row.state } } } : null;
   };
-  // A merge execution is the broker's step while it holds; a committed one that outlived its
-  // authority with the pull request still open is re-read, never guessed at (GY-195).
-  const execution = work.mergeExecution;
-  if (execution && (execution.committingAt || Date.parse(execution.expiresAt) > now.getTime())) {
-    if (Date.parse(execution.expiresAt) > now.getTime() || work.observation?.merged)
-      return { ...base, violation: null, obligation: { kind: 'wait', owner: execution.owner, dueAt: execution.expiresAt, detail: `merge execution ${execution.id} on ${execution.sha.slice(0, 12)}` } };
-    const next = reconcileMergeAction(work);
-    return owned(next) ?? violation(next, next.reason, execution.expiresAt);
-  }
   // A lease that lapsed since the last tick is overdue, not gone: the reconciliation that runs
   // next clears it and names the step after it, exactly as it always has.
   if (work.lease && !liveLease(work, now))
@@ -256,18 +239,6 @@ export function livenessViolations(all: Work[], now: Date): LivenessViolation[] 
 }
 
 // ---- Repair -----------------------------------------------------------------------------------
-
-/**
- * Keep the fresh reading owed by a committed merge execution that outlived its authority with the
- * pull request open (GY-195) on the queue, inside the caller's transaction. The reconciliation does
- * not re-evaluate an item a merge execution holds, so this is the only thing that opens the row,
- * and reopens it after each settle window until GitHub's observation reconciles the execution.
- */
-export function repairLiveness(work: Work, all: Work[], now: Date) {
-  const execution = work.mergeExecution;
-  if (!execution?.committingAt || Date.parse(execution.expiresAt) > now.getTime() || work.observation?.merged) return [];
-  return reconcileActions(work, all, now, { next: reconcileMergeAction(work) });
-}
 
 /** The ledger entry for a violation found at the start of a tick, judged against the item after it. */
 export function livenessRepairEntry(found: LivenessViolation, work: Work, all: Work[], now: Date) {
