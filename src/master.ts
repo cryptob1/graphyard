@@ -3472,8 +3472,8 @@ type RetainedMergeOutcome = { key: string; pr: number; sha: string; method: Mast
  * - merged: the control plane is asked to observe it now, which records the delivery from
  *   merge_commit_sha and closes the execution; no provider call is made.
  * - open at the execution's head: the provider did not merge, as far as this one read can tell.
- *   This executor cancels its own execution and the guarded merge is retried on the next cycle,
- *   never in this one: a read served by a lagging replica can say open for a pull request the
+ *   This executor cancels its own execution and fails the attempt; the guarded merge is retried
+ *   on the next cycle, never in this one: a read served by a lagging replica can say open for a pull request the
  *   provider already merged, and a fresh execution acquired on it would be the one the merged
  *   observation is bound to. A cycle later the pull request answers for itself.
  * - anything else — an unreadable answer, a moved head, a closed pull request, or an execution
@@ -3500,7 +3500,9 @@ async function settleRetainedMerge(config: MasterConfig, current: Work, authoriz
   if (!executionOwner || execution.owner !== executionOwner) { await observe(); return pending(`GitHub shows the pull request open and unmerged, and the execution belongs to ${execution.owner}, which this executor never cancels`); }
   await cancel(current, execution, `GitHub shows pull request #${authorization.pr} open and unmerged at ${execution.sha.slice(0, 12)} after the provider call; the merge is retried next cycle`);
   await observe();
-  return { ...outcome, pending: true, result: `GitHub shows pull request #${authorization.pr} open and unmerged at ${execution.sha.slice(0, 12)}, so merge execution ${execution.id} was cancelled; the guarded merge is retried next cycle, once a fresh reading can show a merge this one missed${refreshError ? ` (asking the control plane to observe it failed: ${refreshError})` : ''}` };
+  // Thrown, not returned: nothing was merged by this attempt, so the executor's row and the loop's
+  // action record a failed attempt and retry it on their short backoff rather than settle it.
+  throw new Error(`${authorization.key}: GitHub shows pull request #${authorization.pr} open and unmerged at ${execution.sha.slice(0, 12)}, so merge execution ${execution.id} was cancelled; the guarded merge is retried next cycle, once a fresh reading can show a merge this one missed${refreshError ? ` (asking the control plane to observe it failed: ${refreshError})` : ''}`);
 }
 /**
  * What a guarded merge is bound to: the candidate head, its base, the policy revision, the published

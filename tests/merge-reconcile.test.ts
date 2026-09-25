@@ -148,9 +148,9 @@ test('unit:unknown-merge-reconciled-from-github — a retained unknown outcome G
     assert.equal(control.counts.cancelled, 1, 'the retained execution is cancelled');
     assert.equal(control.counts.acquired, 0, 'no fresh execution is acquired on the read that said open');
     assert.equal(gh.providerCalls(), 0, 'and no provider call is made in that tick');
-    assert.equal(first?.state, 'waiting', first?.detail);
+    assert.equal(first?.state, 'failed', 'nothing was merged by the attempt, so it is a failed one, retried on the short backoff');
     assert.match(first!.detail, /retried next cycle/);
-    const second = (await runCycle(config, state, loop(config, control, gh), () => start + 20_000)).actions.find(action => action.kind === 'merge');
+    const second = (await runCycle(config, state, loop(config, control, gh), () => start + mergeRetryCapMs)).actions.find(action => action.kind === 'merge');
     assert.equal(control.counts.acquired, 1, 'the next tick acquires a fresh execution');
     assert.equal(gh.providerCalls(), 1, 'the guarded merge is retried exactly once');
     assert.equal(second?.state, 'done', second?.detail);
@@ -165,19 +165,21 @@ test('unit:unknown-merge-reconciled-from-github — a retained unknown outcome G
       return lagRun(command, args);
     } };
     const raced = plane(work({ mergeExecution: retained() }), lagging);
-    const racedOutcome = await mergeWork(config, raced.item, raced.snapshot, raced.acquire, raced.cancel, raced.verify, replica.run, 'master', raced.commit, undefined, raced.refresh) as { pending?: boolean; result: string };
-    assert.equal(racedOutcome.pending, true, racedOutcome.result);
+    await assert.rejects(mergeWork(config, raced.item, raced.snapshot, raced.acquire, raced.cancel, raced.verify, replica.run, 'master', raced.commit, undefined, raced.refresh), /was cancelled; the guarded merge is retried next cycle/);
     assert.deepEqual([raced.counts.cancelled, raced.counts.acquired, lagging.providerCalls()], [1, 0, 0], 'no execution is acquired for the lagging read, so none can be bound to the merge');
     assert.equal(raced.counts.refreshed, 1, 'the control plane is asked to observe');
     assert.equal(raced.item.stage, 'done', 'and its observation records the delivery');
     assert.equal(raced.item.delivery?.mergeSha, mergeSha);
 
-    // A refresh that fails is reported with the pending outcome rather than swallowed.
     const refusing = github({ merged: false, state: 'open', head: sha });
     const failing = plane(work({ mergeExecution: retained() }), refusing);
-    const unobserved = await mergeWork(config, failing.item, failing.snapshot, failing.acquire, failing.cancel, failing.verify, refusing.run, 'master', failing.commit, undefined, async () => { throw new Error('control plane answered 503'); }) as { pending?: boolean; result: string };
-    assert.equal(unobserved.pending, true);
-    assert.match(unobserved.result, /asking the control plane to observe it failed: control plane answered 503/);
+    await assert.rejects(mergeWork(config, failing.item, failing.snapshot, failing.acquire, failing.cancel, failing.verify, refusing.run, 'master', failing.commit, undefined, async () => { throw new Error('control plane answered 503'); }),
+      /asking the control plane to observe it failed: control plane answered 503/, 'a refresh that fails is reported with the outcome rather than swallowed');
+    const moved = github({ merged: false, state: 'open', head: movedSha });
+    const unread = plane(work({ mergeExecution: retained() }), moved);
+    const waiting = await mergeWork(config, unread.item, unread.snapshot, unread.acquire, unread.cancel, unread.verify, moved.run, 'master', unread.commit, undefined, async () => { throw new Error('control plane answered 503'); }) as { pending?: boolean; result: string };
+    assert.equal(waiting.pending, true);
+    assert.match(waiting.result, /asking the control plane to observe it failed: control plane answered 503/, 'and on a pending outcome too');
 
     // A lapsed execution another executor instance committed is never cancelled from here: it stays
     // pending, and the control plane is asked to observe it.
