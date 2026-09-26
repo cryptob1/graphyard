@@ -1,14 +1,15 @@
 // Concern: agent environments and accounts — discovery, health, quota, selection and the launch plan.
 import { existsSync } from 'node:fs';
-import { readdir, stat, mkdir, readFile } from 'node:fs/promises';
+import { readdir, stat, mkdir, readFile, writeFile, access } from 'node:fs/promises';
 import { resolve, dirname, basename } from 'node:path';
 import { homedir } from 'node:os';
+import { createDecipheriv, createHash, createPrivateKey, createPublicKey, diffieHellman, generateKeyPairSync, hkdfSync, type KeyObject } from 'node:crypto';
 import { z } from 'zod';
-import { defaultChildRun } from '../child-runner.js';
+import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { sessionName } from '../session-name.js';
 import { launchPlan, assertNoApprovalOptOut, LaunchRefusedError } from '../harness.js';
 import { type CapacityRole, type CapacityAccount, capacityRetryAt, quotaRoles } from '../model/capacity.js';
-import { type FleetLaunchAccount, type FleetProbe, selectFleetSession, fleetRoleHealth, httpFleetClient } from '../fleet.js';
+import { type FleetLaunchAccount, type FleetProbe, selectFleetSession, fleetRoleHealth, httpFleetClient, fleetRequest, connectProvider, connectDefaultRoles, parseLoginOutput, redactKey, relaySubscriptionLogin as fleetRelaySubscriptionLogin, type ConnectProvider } from '../fleet.js';
 import { type AgentEnvironment, agentEnvironmentSchema, type EnvironmentKind, environmentKinds, environmentVariable, type MasterConfig, masterConfigSchema, producerProfileSchema, reviewerProfileSchema, workerProfileSchema } from './profiles.js';
 import { atomicPrivateText, atomicPrivateWrite, externalCredential, loadMasterConfig, readCredentialFile } from './config.js';
 import { failureText } from './worktrees.js';
@@ -89,10 +90,16 @@ const windowName = (minutes: number) => minutes >= 1440 && minutes % 1440 === 0 
 
 // Claude Code keeps its subscription login in the environment's .credentials.json. The usage the
 // provider meters against it is read from the same endpoint Claude Code's /usage reads; the token
-// is sent only to its own provider and never leaves this function.
+// is sent only to its own provider and never leaves this function. An account connected with a
+// pasted API key (GY-409) holds it in the environment's settings.json instead, which is a login
+// the health probe recognises even though no usage endpoint stands behind it.
 async function claudeAccount(environment: AgentEnvironment, probe: EnvironmentProbe, now: number) {
   const oauth = (await readJsonFile(resolve(environment.home, '.credentials.json')))?.claudeAiOauth;
-  if (!oauth || typeof oauth !== 'object' || !(oauth.accessToken || oauth.refreshToken)) return { loggedIn: false, usage: [], note: null };
+  if (!oauth || typeof oauth !== 'object' || !(oauth.accessToken || oauth.refreshToken)) {
+    const settings = await readJsonFile(resolve(environment.home, 'settings.json'));
+    if (typeof settings?.env?.ANTHROPIC_API_KEY === 'string' && settings.env.ANTHROPIC_API_KEY) return { loggedIn: true, usage: [], note: 'an API-key account: the provider exposes no usage Graphyard can read' };
+    return { loggedIn: false, usage: [], note: null };
+  }
   if (probe.quota === false) return { loggedIn: true, usage: [], note: 'quota not read' };
   if (typeof oauth.accessToken !== 'string' || typeof oauth.expiresAt === 'number' && oauth.expiresAt <= now) return { loggedIn: true, usage: [], note: 'the stored access token has expired; Claude Code refreshes it at launch, so quota is read on the next check' };
   try {
@@ -610,4 +617,179 @@ export async function setupAgentEnvironments(root: string, input: { directory?: 
       : !input.apply ? 'Rerun with --apply to write these environments and profiles to .graphyard/master.json'
       : loggedOut.length ? `Profiles use the ${loggedIn.length} logged-in environment(s). Log in the rest (${loggedOut.map(entry => entry.login).join(' ; ')}) and rerun master environments --apply to add them`
       : 'Every environment is logged in and every profile uses it; master run checks login and quota before each launch and fails over between them' };
+}
+
+// ---------------------------------------------------------------------------
+// Connect an account from the UI (GY-409).
+//
+// The operator pastes a key or starts a subscription login in Settings › Agents; the control plane
+// stores and relays ciphertext only; this host's executor does everything else here: it holds the
+// login home's key pair, unseals what the browser sealed to its public key, writes the provider's
+// own auth file at mode 0600 inside a new login home under the agent environment root, relays a
+// subscription login's URL and code, runs the one-line smoke prompt, and reports the card healthy
+// or the provider's error. The plaintext key lives in this function's scope alone and is redacted
+// from everything that is reported.
+// ---------------------------------------------------------------------------
+
+/** The host's connect key: the private half stays beside the coordinator credential, never sent anywhere. */
+const connectKeyPath = (credentialFile: string, file?: string) => file ?? resolve(dirname(credentialFile), `${basename(credentialFile).replace(/\.token$/, '')}.connect.key`);
+/** Load this host's connect key pair, creating it on first use; the public half is what the control plane holds. */
+export async function hostKeyPair(credentialFile: string, file?: string): Promise<{ privateKey: KeyObject; publicKey: string }> {
+  const path = connectKeyPath(credentialFile, file);
+  try {
+    const stored = JSON.parse(await readFile(path, 'utf8'));
+    if (typeof stored?.privateKey === 'string') {
+      const privateKey = createPrivateKey(stored.privateKey);
+      return { privateKey, publicKey: createPublicKey(privateKey).export({ format: 'der', type: 'spki' }).toString('base64') };
+    }
+  } catch { /* first use */ }
+  const pair = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+  await atomicPrivateText(path, `${JSON.stringify({ privateKey: pair.privateKey.export({ format: 'pem', type: 'pkcs8' }).toString() }, null, 2)}\n`);
+  return { privateKey: pair.privateKey, publicKey: pair.publicKey.export({ format: 'der', type: 'spki' }).toString('base64') };
+}
+
+/**
+ * Open what the browser sealed to this host's public key: an ephemeral ECDH P-256 key, an HKDF over
+ * the shared secret (salted with the host key itself, info naming the scheme), and AES-256-GCM with
+ * the tag appended — the same construction `web/seal.ts` runs in the browser, so the control plane
+ * in between holds nothing that can open the payload.
+ */
+export function unsealToHost(privateKey: KeyObject, sealed: { ephemeral: string; iv: string; ciphertext: string }): string {
+  const ephemeral = createPublicKey({ key: Buffer.from(sealed.ephemeral, 'base64'), format: 'der', type: 'spki' });
+  const shared = diffieHellman({ privateKey, publicKey: ephemeral });
+  const salt = createHash('sha256').update(createPublicKey(privateKey).export({ format: 'der', type: 'spki' })).digest();
+  const key = Buffer.from(hkdfSync('sha256', shared, salt, 'graphyard connect-account v1', 32));
+  const data = Buffer.from(sealed.ciphertext, 'base64');
+  const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(sealed.iv, 'base64'), { authTagLength: 16 });
+  decipher.setAuthTag(data.subarray(data.length - 16));
+  return Buffer.concat([decipher.update(data.subarray(0, data.length - 16)), decipher.final()]).toString('utf8');
+}
+
+/** The provider's own auth file inside a fresh login home, merged over whatever was there, at mode 0600. */
+export async function writeProviderAuthFile(provider: ConnectProvider, home: string, key: string): Promise<string> {
+  const file = resolve(home, provider.authFile!);
+  await mkdir(dirname(file), { recursive: true, mode: 0o700 });
+  let existing: Record<string, unknown> = {};
+  try {
+    const parsed = JSON.parse(await readFile(file, 'utf8'));
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) existing = parsed;
+  } catch { /* a fresh home */ }
+  await atomicPrivateText(file, `${JSON.stringify(provider.authDocument!(existing, key), null, 2)}\n`);
+  return file;
+}
+
+/** The one-line smoke prompt inside the login home: healthy when the runtime answers, the provider's error when it does not. */
+export async function runSmokePrompt(provider: ConnectProvider, home: string, options: { runner?: ChildRun; timeoutMs?: number } = {}): Promise<{ healthy: boolean; error: string | null }> {
+  const environment: NodeJS.ProcessEnv = { ...process.env, [provider.smoke.envVariable]: home };
+  if (provider.smoke.envVariable === 'XDG_DATA_HOME') {
+    // mise resolves installed runtimes under XDG_DATA_HOME; keep it on the operator's own install.
+    const mise = process.env.MISE_DATA_DIR ?? resolve(process.env.XDG_DATA_HOME ?? resolve(homedir(), '.local/share'), 'mise');
+    if (existsSync(mise)) environment.MISE_DATA_DIR = mise;
+  }
+  try {
+    await (options.runner ?? defaultChildRun)(provider.smoke.command, provider.smoke.args, { env: environment, timeoutMs: options.timeoutMs ?? 120_000 });
+    return { healthy: true, error: null };
+  } catch (error) { return { healthy: false, error: failureText(error) }; }
+}
+
+/**
+ * Start the provider's own login inside a fresh login home and relay what it prints: the URL and
+ * code reach the UI as soon as they appear, the login file's arrival ends the wait, and the caller
+ * runs the smoke prompt before the card turns healthy. The child is bounded: past the window it is
+ * stopped and the failure is what the card shows. It lives in fleet.ts (as `relaySubscriptionLogin`)
+ * because the loop's modules run children only through the asynchronous runner.
+ */
+export const relaySubscriptionLogin = fleetRelaySubscriptionLogin;
+
+/**
+ * Research joins through a Pi wrapper (GY-409 AC-4): `pi-<letter>` reads the provider key at run
+ * time from the account's login home and execs `pi`, so a cheap account can serve research without
+ * the key being copied anywhere. An existing wrapper is never overwritten; null says there was
+ * nothing to write.
+ */
+export async function ensureResearchWrapper(name: string, home: string, options: { root?: string; binDirectory?: string } = {}): Promise<string | null> {
+  const letter = name.match(/-([a-z0-9]+)$/)?.[1];
+  if (!letter) return null;
+  const bin = options.binDirectory ?? resolve(homedir(), '.local/bin');
+  const file = resolve(bin, `pi-${letter}`);
+  if (await access(file).then(() => true, () => false)) return null;
+  const script = [
+    '#!/usr/bin/env bash',
+    `# pi, env ${letter}: the provider key is read at run time from ${home}; never stored here.`,
+    `mkdir -p "${resolve(agentEnvironmentRoot(options.root), `pi-${letter}`)}"`,
+    `export PI_CODING_AGENT_DIR="${resolve(agentEnvironmentRoot(options.root), `pi-${letter}`)}"`,
+    `export ZAI_API_KEY="$(node -e 'process.stdout.write(require(process.argv[1])["zai-coding-plan"].key)' "${resolve(home, 'opencode/auth.json')}")"`,
+    'exec pi "$@"',
+    '',
+  ].join('\n');
+  await mkdir(bin, { recursive: true });
+  await writeFile(file, script, { mode: 0o755 });
+  return file;
+}
+
+/** One connect request as the worker reads it from the control plane. */
+interface ConnectAssignment { id: string; state: string; provider: string; name?: string | null; url?: string | null; code?: string | null; sealed?: { ephemeral: string; iv: string; ciphertext: string } }
+export interface ConnectWorkerReport { id: string; provider: string; state: 'healthy' | 'failed' | 'skipped'; detail: string }
+export interface ConnectAccountOptions {
+  fetch?: typeof fetch; now?: () => number;
+  /** The smoke prompt's runner; a test hands in a stub. */
+  runner?: ChildRun;
+  /** Overrides for tests: where login homes are created, where the host key lives, and every bound. */
+  root?: string; keyFile?: string; pollMs?: number; loginTimeoutMs?: number; smokeTimeoutMs?: number;
+}
+const connectOpen = (state: string) => state === 'pending' || state === 'claimed' || state === 'connecting';
+/**
+ * The host's half of connecting an account: register this host's public key, take the connect
+ * requests addressed to it, and carry each one from sealed payload or provider login to a
+ * registered, smoke-tested account — or to the error its card shows. Sequential by design: these
+ * are the operator's own rare, human-paced actions.
+ */
+export async function processConnectAccounts(config: Pick<MasterConfig, 'url' | 'hostId' | 'credentialFile'>, options: ConnectAccountOptions = {}): Promise<ConnectWorkerReport[]> {
+  if (!config.url || !config.hostId) return [];
+  const fetcher = options.fetch ?? fetch, reports: ConnectWorkerReport[] = [];
+  const { privateKey, publicKey } = await hostKeyPair(config.credentialFile, options.keyFile);
+  await fleetRequest(config, 'agent-registry/connect/host-key', { body: { host: config.hostId, publicKey }, fetch: fetcher });
+  const { connects } = await fleetRequest(config, `agent-registry/connect/requests?host=${encodeURIComponent(config.hostId)}`, { fetch: fetcher }) as { connects: ConnectAssignment[] };
+  for (const connect of connects) {
+    if (!connectOpen(connect.state)) continue;
+    const provider = connectProvider(connect.provider);
+    if (!provider) { reports.push({ id: connect.id, provider: connect.provider, state: 'skipped', detail: 'no known provider' }); continue; }
+    let claimed = false;
+    try {
+      await fleetRequest(config, `agent-registry/connect/${connect.id}/claim`, { body: {}, fetch: fetcher });
+      claimed = true;
+      const root = agentEnvironmentRoot(options.root);
+      const discovered = await discoverAgentEnvironments(root);
+      // A request this host already started keeps the login home it created.
+      const environment = (connect.name ? discovered.find(entry => entry.name === connect.name) : undefined)
+        ?? await createAgentEnvironment(root, provider.runtime as EnvironmentKind, discovered);
+      const name = environment.name, home = environment.home;
+      const report = async (healthy: boolean, error: string | null) => {
+        await fleetRequest(config, `agent-registry/connect/${connect.id}/result`, { body: healthy ? { state: 'healthy', name, home } : { state: 'failed', name, error: error!.slice(0, 2000) }, fetch: fetcher });
+        reports.push({ id: connect.id, provider: provider.id, state: healthy ? 'healthy' : 'failed', detail: healthy ? `${name} joined ${connectDefaultRoles(provider.tier).join(', ')}` : error!.slice(0, 500) });
+      };
+      if (provider.kind === 'api-key') {
+        // The plaintext key exists only inside this block and is redacted from everything reported.
+        const key = unsealToHost(privateKey, connect.sealed!);
+        await writeProviderAuthFile(provider, home, key);
+        await fleetRequest(config, `agent-registry/connect/${connect.id}/progress`, { body: { state: 'connecting', name }, fetch: fetcher });
+        const smoke = await runSmokePrompt(provider, home, options);
+        if (!smoke.healthy) { await report(false, redactKey(smoke.error!, key)); continue; }
+        await report(true, null);
+        if (provider.id === 'z.ai') await ensureResearchWrapper(name, home, options).catch(() => {});
+      } else {
+        await fleetRequest(config, `agent-registry/connect/${connect.id}/progress`, { body: { state: 'connecting', name }, fetch: fetcher });
+        const relay = await relaySubscriptionLogin(provider, home, options);
+        if (relay.url || relay.code) await fleetRequest(config, `agent-registry/connect/${connect.id}/progress`, { body: { state: 'waiting-login', name, ...(relay.url ? { url: relay.url } : {}), ...(relay.code ? { code: relay.code } : {}) }, fetch: fetcher });
+        if (!relay.loggedIn) { await report(false, relay.error ?? 'the login did not complete'); continue; }
+        const smoke = await runSmokePrompt(provider, home, options);
+        await report(smoke.healthy, smoke.healthy ? null : smoke.error);
+      }
+    } catch (error) {
+      const detail = failureText(error).slice(0, 2000);
+      if (claimed) await fleetRequest(config, `agent-registry/connect/${connect.id}/result`, { body: { state: 'failed', error: detail }, fetch: fetcher }).catch(() => {});
+      reports.push({ id: connect.id, provider: connect.provider, state: 'failed', detail: detail.slice(0, 500) });
+    }
+  }
+  return reports;
 }

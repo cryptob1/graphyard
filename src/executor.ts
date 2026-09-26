@@ -14,6 +14,7 @@ import type { ExecutorRelease } from './executor-fleet.js';
 import { dispatchReserved, type HerdrAgent, type MasterConfig, type MergeExecutor, type ProducerProfile, type WorkerProfile } from './master.js';
 import { agentNameReadings, assertNameAvailable, attributeRefusal } from './master-resources.js';
 import { agentOwner, loadMasterConfig, type AttentionItem } from './master.js';
+import { processConnectAccounts } from './master/environments.js';
 import { loopUnitName } from './supervisor.js';
 import { executorUnitDirectory } from './repository-setup.js';
 
@@ -67,11 +68,41 @@ const message = (error: unknown) => error instanceof Error ? error.message : Str
 const statelessProfiles = { profiles: {} } as unknown as DaemonState;
 
 /**
+ * The connect-account worker (GY-409): this host's resident executor is what turns a connect an
+ * operator makes in Settings › Agents into a registered, smoke-tested account. It registers the
+ * host's public key, claims each connect addressed to this host — the control plane's claim makes
+ * every connect exactly-once across this host's slots — unseals the payload to this host alone,
+ * writes the provider's auth file at mode 0600, relays a subscription login's URL and code, and
+ * reports the card healthy or the provider's error. The control plane never sees a plaintext key,
+ * and no worker here reads one: the sealed payload is opened only inside `processConnectAccounts`.
+ *
+ * The loop is deferred and unref'd: it fires first after `intervalMs`, never holds the process
+ * open, and one pass at a time per process.
+ */
+export function startConnectAccountWorker(config: () => MasterConfig, options: { intervalMs?: number; connect?: typeof processConnectAccounts; log?: (line: string) => void } = {}) {
+  const intervalMs = options.intervalMs ?? 15_000, connect = options.connect ?? processConnectAccounts, log = options.log ?? (line => console.error(line));
+  let running = false;
+  const tick = async () => {
+    if (running) return;
+    running = true;
+    try { await connect(config()); } catch (error) { log(`[graphyard-executor] connect-account worker: ${message(error)}`); }
+    finally { running = false; }
+  };
+  const first = setTimeout(() => { void tick(); const rest = setInterval(() => { void tick(); }, intervalMs); rest.unref?.(); }, intervalMs);
+  first.unref?.();
+  return { stop: () => clearTimeout(first) };
+}
+
+/**
  * The handlers a control-plane executor runs: one per mechanical kind, plus the two that launch a
  * session and walk away. Every kind whose judgment happens in the step itself is absent by
  * construction, and `judgmentInExecutorLoop` below is what keeps that true as kinds are added.
  */
 export function controlPlaneHandlers(config: () => MasterConfig, effects: ControlPlaneEffects): Partial<Record<NextActionKind, ExecutorHandler>> {
+  // A host with a declared identity serves connects: a fresh installation's operator connects its
+  // first accounts from the UI before any session can launch, and this is the process that is
+  // already resident on the agent host with a coordinator credential (GY-409).
+  if (config().url && config().hostId) startConnectAccountWorker(config);
   const find = async (action: ActionRow) => {
     const snapshot = await effects.snapshot();
     const work = snapshot.work.find(item => item.id === action.work);
