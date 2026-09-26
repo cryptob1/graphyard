@@ -44,7 +44,7 @@ export function mergeProtocolSkew(status: { build?: { commit?: string | null; pr
   return `server runs ${serverCommit}, CLI expects ${cliCommit}: deploy main first (server merge protocol ${serverProtocol}, CLI merge protocol ${cliProtocol}${serverProtocol < cliProtocol ? '; the deployment has not served the commit the CLI runs' : '; update the CLI checkout to the deployed commit'})`;
 }
 /** Sessions the local ledgers hold and the launches the dispatcher refused, as `master status` joins them onto each candidate's requests. */
-export interface SessionRetryReport { requestId: string; attempts: number; started: number; neverStarted: number; limit: number; unstartedLimit: number; nextAt: string | null; exhausted: boolean; last: { state: string; resolution: string | null } | null }
+export interface SessionRetryReport { requestId: string; attempts: number; started: number; neverStarted: number; lost?: number; limit: number; unstartedLimit: number; nextAt: string | null; exhausted: boolean; last: { state: string; resolution: string | null } | null }
 export interface DispatchSessions { producers: { pending: any[]; completed: any[] }; failures: { requestId: string; kind: string; attempts: number; reason: string; at: string; nextAt: string }[]; retries?: SessionRetryReport[] }
 const noSessions: DispatchSessions = { producers: { pending: [], completed: [] }, failures: [] };
 /**

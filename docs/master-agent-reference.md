@@ -11,7 +11,7 @@
 
 ## Items, scope and human waits
 
-An unplanned file needs `scope-request GY-N EPOCH PATH… [--wait] -- REASON` (other flags before `--` are refused). Automatic, grounded: documentation; files criteria name; for items planning `docs/`, single `web/` and `browser-tests/` files; base files an unresolved reviewer or `run.awaitReviewers`-bot thread, or reviewer's current-head `CHANGES_REQUESTED` review, names literally (unnegated; rechecked every two minutes); tests pinning planned-file quotes or criterion labels; files defining a criterion's symbol or calling a rare one; planned files' successors (renames, copies, `Graphyard-Successor: OLD -> NEW` trailers, re-export barrels), also added to open items. The approver judges the rest (`--allow-broad-scope` needs a reason); workers keep leases (`scope-request GY-N EPOCH --wait` reads the outcome). A request belongs to its attempt: when that ends (submit, release, lease lapse, rework, a requirements revision) an open or refused request closes with reason `attempt ended` (`scope.closed`), no longer holding the ready gate, and the next attempt asks afresh; `master unblock GY-N` closes one whose attempt already ended, naming it in the unblock's history. A human-only decision needs `park GY-N EPOCH KIND NEEDED -- REASON`; the item waits under **Work → Needs you** for `graphyard answer GY-N …`.
+An unplanned file needs `scope-request GY-N EPOCH PATH… [--wait] -- REASON` (other flags before `--` are refused). Automatic, grounded: documentation; files criteria name; for items planning `docs/`, single `web/` and `browser-tests/` files; base files an unresolved reviewer or `run.awaitReviewers`-bot thread, or reviewer's current-head `CHANGES_REQUESTED` review, names literally (unnegated; rechecked every two minutes); tests pinning planned-file quotes or criterion labels; files defining a criterion's symbol or calling a rare one; planned files' successors (renames, copies, `Graphyard-Successor: OLD -> NEW` trailers, re-export barrels), also added to open items. The approver judges the rest (`--allow-broad-scope` needs a reason); workers keep leases (`scope-request GY-N EPOCH --wait` reads the outcome). A request belongs to its attempt: when that ends (submit, release, lease lapse, rework, requirements revision) an open or refused request closes (`attempt ended`, `scope.closed`), freeing the ready gate, and the next attempt asks afresh; `master unblock GY-N` closes one whose attempt already ended, naming it in the unblock's history. A human-only decision needs `park GY-N EPOCH KIND NEEDED -- REASON`; the item waits under **Work → Needs you** for `graphyard answer GY-N …`.
 
 ## Conflict avoidance
 
@@ -27,7 +27,7 @@ Dispatch is optimistic (overlap holds nothing), smallest planned scope first; `g
 
 #### A contaminated branch
 
-It is listed under `branches.contaminated`: run `master repair GY-42 REASON`.
+Listed under `branches.contaminated`, it needs `master repair GY-42 REASON`.
 
 A worker restores its own: `git reset --hard REVIEWED_HEAD`, `graphyard sync GY-N`, then `graphyard restore-branch GY-N EPOCH`.
 
@@ -41,7 +41,7 @@ Protection reconciles via `master protection --apply`; where GitHub offers only 
 | `installation-accept` | Accepts the pending permission request |
 | `protection` | Reconciles branch protection |
 
-Each flow records `record.json` under `.graphyard/master-actions/`, appending to `ledger.json`. Approving its *Confirm access* GitHub Mobile code on the device is human-only. The master never stores the profile's cookies, and must never use a merge bypass, push code or read a worker credential.
+Each flow records `record.json` under `.graphyard/master-actions/` and appends to `ledger.json`. Approving its *Confirm access* GitHub Mobile code on the device is human-only. The master never stores the profile's cookies, uses a merge bypass, pushes code or reads a worker credential.
 
 ## Harness permissions
 
@@ -49,9 +49,9 @@ A harness classifier refuses routine administration; `master harness claude --ap
 
 ## Typed actions and executors
 
-Each item has one typed action (`nextAction`): `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment` or `escalate`. Executors claim rows under their own credential; `escalate` and `request-rework` are judgements (`actions.needsHuman`). `graphyard init` starts `graphyard-executor@N` user units; `master executors restart` moves them to the current release.
+Each item has one typed action (`nextAction`): `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment` or `escalate`. Executors claim rows under their own credential; `escalate` and `request-rework` are judgements (`actions.needsHuman`). `graphyard init` starts `graphyard-executor@N` units; `master executors restart` upgrades them to the current release.
 
-A `resync` completes only on a fresh observation. The executor calls `POST /api/work/:id/resync` with `{ since }` (its claim time); the server wakes the item's observation job, answering `observed`, `observedAt` and `job`, the job's `availableAt`, `lockedUntil`, `attempts`, `error`, `heldUntil` and `heldReason`. `wake: false` only reads. It waits up to 90 seconds for a newer observation, else fails with `no observation newer than the claim was saved` and the job's condition. Three such claims in a row stall the row; `master status` names the item and condition. Claiming, renewing or settling a row is only action bookkeeping, so an observation read before it still saves; any other change since the read refuses it.
+A `resync` completes only on a fresh observation. The executor calls `POST /api/work/:id/resync` with `{ since }` (its claim time); the server wakes the item's observation job, answering `observed`, `observedAt` and `job`, the job's `availableAt`, `lockedUntil`, `attempts`, `error`, `heldUntil` and `heldReason`. `wake: false` only reads. It waits up to 90 seconds for a newer observation, else fails with `no observation newer than the claim was saved` and the job's condition. Three such claims in a row stall the row; `master status` names the item and condition. Claiming, renewing or settling a row leaves earlier observation reads valid; any other change since the read refuses it.
 
 Three failures with an unchanged reason mark a row stalled rather than retrying (a fleet that looks idle): once in no count and no list, it shows in `actions.stalled` and on the item's own card; backoff, doubling from one minute, never outlives it. Eight escalate it (half-hourly); ticks requeue ownerless items (`liveness.violations`).
 
@@ -65,7 +65,7 @@ A failed snapshot read retries once after 0.5–1.5 s; a failed cycle waits min(
 
 ## Recovery
 
-A dead supervisor fences its item; `containment` lists each surviving process's pid, cmdline and cwd. With `settleable: true` run `master settle-containment GY-N REASON`; otherwise stop the recorded scope unit (`containment.scope`) and request `rework`.
+A dead supervisor fences its item; `containment` lists surviving processes' pid, cmdline and cwd. With `settleable: true` run `master settle-containment GY-N REASON`; otherwise stop the recorded scope unit (`containment.scope`) and request `rework`.
 
 An unexplained lapsed lease raises `lease-loss` (`blocked-awaiting-operator` and `stopped-by-attestation` lapses are history); any admin settles an explained one with `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"` ([settling](delegation.md#who-may-settle-what)). 
 

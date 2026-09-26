@@ -109,7 +109,7 @@ function daemonEffects(overrides: Partial<DaemonEffects> = {}, log: string[] = [
 test('integration:producer-session-retry — a failed or expired producer session is relaunched for the same request on a widening, bounded schedule, and master status shows the attempts and the next retry', async () => {
   // The schedule: one session per request at a time; a failed or expired one waits 1, 4 then 16 minutes; four sessions in all.
   const failedAt = (minutes: number, state = 'failed') => ({ requestId: 'r1', state, requestedAt: iso(minutes * 60_000 - 30_000), closedAt: iso(minutes * 60_000), resolution: 'the session finished (done) without trusted evidence' });
-  assert.deepEqual(sessionRetry([], 'r1', clock), { requestId: 'r1', attempts: 0, started: 0, neverStarted: 0, limit: sessionRetryLimit, unstartedLimit: unstartedRetryLimit, last: null, launch: true, settled: false, nextAt: null, exhausted: false });
+  assert.deepEqual(sessionRetry([], 'r1', clock), { requestId: 'r1', attempts: 0, started: 0, neverStarted: 0, lost: 0, limit: sessionRetryLimit, unstartedLimit: unstartedRetryLimit, last: null, launch: true, settled: false, nextAt: null, exhausted: false });
   assert.equal(sessionRetry([{ requestId: 'r1', state: 'pending', requestedAt: iso(0) }], 'r1', clock + 3_600_000).settled, true, 'a live session is never doubled');
   for (const state of ['completed', 'cancelled']) assert.equal(sessionRetry([{ requestId: 'r1', state, requestedAt: iso(0) }], 'r1', clock).settled, true, `a ${state} session settles the request`);
   const once = [failedAt(0)];

@@ -80,6 +80,8 @@ export type DispatchFailure = z.infer<typeof dispatchFailureSchema>;
 export const abandonedRequestSchema = z.object({
   kind: z.enum(['review', 'producer']), work: z.string().min(1).max(40), sha: z.string().min(1).max(40), at: z.string(),
   reason: z.string().max(cursorTextLimit), attempts: z.array(z.string().max(cursorTextLimit)).max(30),
+  /** Producer only (GY-496): the proof group and proofs the request stood for, which the attention and the rework name. */
+  group: z.string().min(1).max(40).optional(), proofs: z.array(z.string().min(1).max(200)).max(50).optional(),
 }).strict();
 export type AbandonedRequest = z.infer<typeof abandonedRequestSchema>;
 const capacityHoldSchema = z.object({ at: z.string(), recheckAt: z.string(), reason: z.string().max(capacityReasonLimit) }).strict();
@@ -766,7 +768,8 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
   // A request whose automatic sessions all ended unanswered is left to the master, once, naming
   // every attempt; the wait says no further attempt follows, and status raises the attention item.
   const abandon = (kind: 'review' | 'producer', item: Work, request: DispatchRequest, records: DispatchedSession[], why: string) => {
-    if (!cursor.abandoned[request.id]) cursor.abandoned[request.id] = { kind, work: item.key, sha: request.sha, at: new Date(now()).toISOString(), reason: bounded(why, dispatchFailureReasonLimit), attempts: describeAttempts(records, request.id) };
+    if (!cursor.abandoned[request.id]) cursor.abandoned[request.id] = { kind, work: item.key, sha: request.sha, at: new Date(now()).toISOString(), reason: bounded(why, dispatchFailureReasonLimit), attempts: describeAttempts(records, request.id),
+      ...(kind === 'producer' && request.group ? { group: request.group, proofs: (request.proofs ?? []).slice(0, 50) } : {}) };
     wait(kind, item, request, `${why}; no further automatic attempt, raised as attention for the master`);
   };
   // Whether the request already has its session, waits to relaunch one that ended, or may launch now.
@@ -1234,12 +1237,15 @@ export function dispatchFailureAttention(dispatch: { consecutiveFailures?: numbe
 }
 /**
  * One attention item per request the loop has stopped attempting (GY-193): the request, the head,
- * and every session it launched with how each ended, addressed to the master.
+ * and every session it launched with how each ended, addressed to the master. A producer request's
+ * item also names its proof group, and says the loop itself requests the rework (GY-496).
  */
 export function abandonedAttention(entry: AbandonedRequest & { requestId: string }): AttentionItem {
   const role = entry.kind === 'review' ? 'reviewer' : 'producer';
-  return { subject: entry.work, text: bounded(`${entry.work}'s ${role} request ${entry.requestId} on ${entry.sha.slice(0, 12)} still stands after ${entry.attempts.length} automatic session${entry.attempts.length === 1 ? '' : 's'}, none of which answered it, so the loop has stopped attempting it (${entry.reason}): ${entry.attempts.join('; ')}`, 2000),
-    ...agentOwner('master', entry.kind === 'review' ? `Fix what the attempts name, then graphyard master review ${entry.work}` : `Fix what the attempts name (a producer profile or its credential), or return the head to its worker with graphyard master decide ${entry.work} rework REASON`) };
+  const group = entry.kind === 'producer' && entry.group ? ` for the ${entry.group} proof group${entry.proofs?.length ? ` (${entry.proofs.join(', ')})` : ''}` : '';
+  return { subject: entry.work, text: bounded(`${entry.work}'s ${role} request ${entry.requestId}${group} on ${entry.sha.slice(0, 12)} still stands after ${entry.attempts.length} automatic session${entry.attempts.length === 1 ? '' : 's'}, none of which answered it, so the loop has stopped attempting it (${entry.reason}): ${entry.attempts.join('; ')}`, 2000),
+    ...agentOwner('master', entry.kind === 'review' ? `Fix what the attempts name, then graphyard master review ${entry.work}`
+      : `The loop requests a rework decision for ${entry.work} on its next cycle, quoting these attempts, and the approver judges it; if the attempts name a launcher fault (a producer profile or its credential), fix that first`) };
 }
 function tickFailureAttention(dispatch: { consecutiveFailures?: number; lastSuccessAt?: string | null; lastFailure?: TickFailure | null; error?: string }): AttentionItem[] {
   if (dispatch.error) return [{ subject: 'dispatch', text: `The dispatch cursor cannot be read, so whether any reviewer or producer is being launched is unknown: ${dispatch.error}`,

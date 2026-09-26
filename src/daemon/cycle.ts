@@ -3,7 +3,7 @@ import type { Work } from '../model.js';
 import type { MasterConfig, WorkerProfile, HerdrAgent } from '../master.js';
 import { cycleMetricsSchema, type CycleStepName, type DaemonAction, type DaemonActionKind, type DaemonState, emptyCycleSteps, message, pruneDaemonState } from './state.js';
 import { reconcilePendingActions } from './reconcile.js';
-import { setAsideFollowUpThreads } from './decisions.js';
+import { type ExhaustedProof, setAsideFollowUpThreads } from './decisions.js';
 import { actionableSubjects, latencyBudget, observeItemClock, stageMetrics, trackSilence } from './metrics.js';
 import { profileHealth } from './sessions.js';
 import { boundedPersist } from './liveness.js';
@@ -149,6 +149,8 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   /** The item a worker profile holds a live lease on, which a failure while handling that profile is recorded against. */
   const heldBy = (profile: WorkerProfile) => open.find(item => !!item.lease && item.lease.owner === profile.principal && Date.parse(item.lease.expiresAt) > clock) ?? null;
 
+  let exhausted: Promise<ExhaustedProof[]> | undefined;
+  const exhaustedProofs = () => exhausted ??= effects.exhaustedProofs?.().catch(() => []) ?? Promise.resolve([]);
   /**
    * Hand one launch to the launcher and move on (GY-616). `key` is the cursor key the launch records
    * its `started` entry under, so a launch in flight is neither repeated nor reconciled as
@@ -165,7 +167,7 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
       } catch { /* a cursor that cannot be written is the next cycle's failure */ }
     }
   });
-  const cycle: Cycle = { config, state, effects, now, snapshot, clock, clockOffset, performed, isolate, agents, credentials, open, owns, heldBy, timings, launcher, launch, detached: !settle };
+  const cycle: Cycle = { config, state, effects, now, snapshot, clock, clockOffset, performed, isolate, agents, credentials, open, owns, heldBy, timings, launcher, launch, detached: !settle, exhaustedProofs };
   /** A cycle that owns its launcher waits for what a step handed it; the loop's cycles never do. */
   const settleLaunches = async () => { if (settle && launcher.pending) { await timings.step('launches', () => launcher.idle()); performed.push(...launcher.drain()); } };
   await timings.step('close', () => closeStep(cycle));
@@ -260,6 +262,8 @@ export interface Cycle {
   owns: (principal: string) => boolean; heldBy: (profile: WorkerProfile) => Work | null;
   /** This cycle's step and call timings (GY-377); a step may time a phase of its own inside it. */
   timings: Timings;
+  /** The producer requests the dispatcher stopped attempting (GY-496), read once per cycle for the proof and decision steps. */
+  exhaustedProofs: () => Promise<ExhaustedProof[]>;
   /** The launcher beside the cycle (GY-616): what is in flight, and what it holds. */
   launcher: Launcher;
   /** Hands a launch to the launcher without waiting on it; false when one under `key` is already in flight. */

@@ -17,6 +17,8 @@ import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-da
 import { Launcher } from '../src/daemon/cycle.js';
 import { successorWidening } from '../src/model/successors.js';
 import { systemInvariants, type InvariantCheck } from '../src/model/invariants.js';
+import { lostRunReason, requestAttemptLimit, sessionRetry, sessionRetryLimit } from '../src/producer.js';
+import type { ExhaustedProof } from '../src/daemon/decisions.js';
 import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } from './helpers/soak-world.js';
 
 /**
@@ -27,7 +29,8 @@ import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } f
  * (src/model/invariants.ts) holds. Fifteen items pass through it: released every fifteen minutes so
  * a merge lands about every fifteen, three sent back by their reviewer, two whose worker dies, two
  * production deploys, a file split on main that re-plans an item, one pull request GitHub reports
- * CLEAN at once and one UNSTABLE, and a reviewer bot out of quota that fails over. Every one of the
+ * CLEAN at once and one UNSTABLE, a reviewer bot out of quota that fails over, and one head whose
+ * producer runs are killed, then fail until the request is spent (GY-496). Every one of the
  * fifteen must be delivered. The loop carries one `Launcher` across its cycles (GY-616), as
  * `runDaemon` does, so session launches run beside the cycle — outliving it, holding their profile
  * from hand-off, and reported by the next cycle — and the invariants hold on that detached path. A
@@ -60,6 +63,9 @@ const plan = {
   items: 15, releaseEveryMs: 15 * minute, workMs: 20 * minute,
   rework: new Set([3, 7, 11]), deaths: new Set([5, 9]), deathAfterMs: 8 * minute,
   deploys: [2 * hour + 30 * minute, 5 * hour], split: { at: 45 * minute, item: 12 }, clean: 2, unstable: 4, slowRecompute: 8, exhaustedReviewer: 6,
+  // GY-496: item 10's first head has its producer runs killed (exit 143) twice, then failing until
+  // the request is spent; the loop escalates it once and requests one rework for that head.
+  spentProducer: 10, lostRuns: 2,
 };
 const file = (n: number) => `src/soak/item-${n}.ts`;
 
@@ -162,10 +168,33 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     pending.push(async () => { await api(principals.approver, 'POST', `work/${work.id}/approve`, { decision, reason: `Approved: the loop's routine ${decision} decision for ${work.key} rests on what it verified` }); herdr.status(pane, 'done'); });
     return { agentName, pane };
   };
+  // GY-496: the dispatcher's producer request for item `plan.spentProducer`'s first head, scheduled by
+  // the real `sessionRetry`. Its first runs are killed (a lost run relaunches at once, spending no
+  // attempt), the rest fail, until the request is spent and the dispatcher stops attempting it.
+  const producerRuns: { requestId: string; state: string; requestedAt: string; closedAt: string | null; resolution: string | null }[] = [];
+  const abandoned = new Map<string, ExhaustedProof>();
+  let spentHead: string | null = null;
+  const spentOn = (work: Work) => numberOf(work) === plan.spentProducer && !!work.candidate && (spentHead ??= work.candidate.sha) === work.candidate.sha;
+  const producersTick = async (now: number) => {
+    const item = (await store.list()).find(entry => numberOf(entry) === plan.spentProducer);
+    if (!item?.submission || !item.candidate || item.stage === 'done' || !spentOn(item)) return;
+    const requestId = `soak-producer-${item.key}-${item.candidate.sha.slice(0, 12)}`, at = new Date(now).toISOString();
+    if (abandoned.has(requestId)) return;
+    const runs = () => producerRuns.filter(run => run.requestId === requestId);
+    const running = runs().find(run => run.state === 'pending');
+    if (running) Object.assign(running, { state: 'failed', closedAt: at, resolution: runs().length <= plan.lostRuns
+      ? `${lostRunReason}: the headless run was killed (pi exited on SIGTERM) before it reached a verdict, without trusted evidence for ${PROOF} (missing); it is relaunched and not counted as an attempt`
+      : `the headless run ended (exit: pi exited with code 1) without trusted evidence for ${PROOF} (fail)` });
+    const retry = sessionRetry(producerRuns, requestId, now);
+    if (retry.exhausted) abandoned.set(requestId, { requestId, work: item.key, sha: item.candidate.sha, group: 'unit', proofs: [PROOF], reason: `${retry.started} of its sessions failed`, attempts: runs().map(run => `${run.state}: ${run.resolution}`) });
+    else if (retry.launch) producerRuns.push({ requestId, state: 'pending', requestedAt: at, closedAt: null, resolution: null });
+  };
   const requestProof: DaemonEffects['requestProof'] = work => {
     pending.push(async () => {
       const current = (await store.list()).find(item => item.id === work.id)!;
       if (!current.candidate || current.candidate.sha !== work.candidate?.sha || current.stage === 'done') return;
+      // The trusted workflow publishes nothing for the spent head: only the dispatcher's producer runs stand for it.
+      if (spentOn(current)) return;
       await engine.execute(principals.producer, 'evidence', current.id, { proof: PROOF, sha: current.candidate.sha, baseSha: current.candidate.baseSha, policyRevision: current.policyRevision, result: 'pass', executed: 4, skipped: 0,
         exercise: { criterion: 'AC-1', behaviour: `item ${numberOf(current)}'s change`, result: 'fail', executed: 1 } }, id());
     });
@@ -200,6 +229,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       return { source: 'endpoint', sha: production.sha, at: new Date(clock.now()).toISOString(), reason: null, deployed: serving.map(item => item.key), pending: delivered.filter(item => !serving.includes(item)).map(item => item.key) };
     },
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    exhaustedProofs: async () => [...abandoned.values()],
   };
 
   // ---- The day. ----
@@ -208,7 +238,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   // cycles, the way `runDaemon` does, and a launch settles in the interval after the cycle that
   // handed it over — here, before the simulated clock moves on.
   const launcher = new Launcher();
-  const violations: string[] = [], observed = new Set<string>(), failures: string[] = [];
+  const violations: string[] = [], observed = new Set<string>(), failures: string[] = [], actionKeys = new Set<string>();
   let released = 0, split = false, deploys = 0, cycles = 0, reportedDispatches = 0;
   const jobsDue = async () => Number((await store.pool.query('SELECT count(*) AS due FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now())')).rows[0].due);
   for (let elapsed = 0; elapsed <= options.hours * hour;) {
@@ -227,6 +257,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     // sessions have renewed: for the rest of that minute nothing reaches it, the loop included.
     github.tick(now);
     await workersTick(now);
+    await producersTick(now);
     if (!deploying) {
       for (const act of pending.splice(0)) await act();
       await engine.reconcile();
@@ -237,6 +268,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
         if (process.env.SOAK_TRACE) for (const action of result.actions) console.error(`+${Math.round(elapsed / minute)} ${action.kind} ${action.state} ${action.work ?? ''}: ${action.detail.slice(0, 300)}`);
       }
       catch (error) { failures.push(`${new Date(now).toISOString()}: ${error instanceof Error ? error.message : String(error)}`); }
+      for (const key of Object.keys(state.actions)) actionKeys.add(key);
       // The interval between cycles is when a hand-off launch settles; the day's clock waits for
       // them so the world never acts on a half-finished launch.
       await launcher.idle();
@@ -251,12 +283,12 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   }
 
   const final = (await store.list()).filter(item => items.some(entry => entry.id === item.id));
-  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart };
+  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, producerRuns, abandoned, spentHead, actionKeys };
 }
 
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 180_000 }, async () => {
   const began = performance.now();
-  const { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
+  const { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, producerRuns, abandoned, spentHead, actionKeys } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
   const undelivered = final.filter(item => item.stage !== 'done' || !item.delivery);
   assert.deepEqual(undelivered.map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
@@ -271,7 +303,20 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.ok(github.merges.some(entry => entry.key === items[plan.clean - 1].key && entry.state === 'CLEAN' && entry.mode === 'immediate'), `a CLEAN pull request merged at once: ${JSON.stringify(github.merges)}`);
   assert.ok(github.merges.some(entry => entry.key === items[plan.unstable - 1].key && entry.state === 'UNSTABLE' && entry.mode === 'immediate'), 'an UNSTABLE pull request merged at once');
   assert.ok(github.merges.some(entry => entry.key === items[plan.slowRecompute - 1].key && entry.mode === 'auto-merge'), 'one GitHub reported BLOCKED when asked was set to auto-merge, and GitHub merged it once it recomputed');
-  assert.equal(final.reduce((total, item) => total + (item.pipeline?.reworkRounds ?? 0), 0), plan.rework.size, 'three rework rounds');
+  assert.equal(final.reduce((total, item) => total + (item.pipeline?.reworkRounds ?? 0), 0), plan.rework.size + 1, 'three rework rounds from reviewers and one from the spent producer request');
+  // GY-496: the killed runs relaunched without spending an attempt, the request stayed bounded, and
+  // its spent head was escalated once and reworked once; the fresh head passed its proofs.
+  const spent = final.find(item => item.key === items[plan.spentProducer - 1].key)!;
+  assert.ok(spentHead && spent.candidate && spent.candidate.sha !== spentHead, `the spent head was replaced by a fresh one: ${spentHead} → ${spent.candidate?.sha}`);
+  assert.equal(abandoned.size, 1, 'one producer request was spent');
+  assert.deepEqual(producerRuns.map(run => run.resolution?.startsWith(`${lostRunReason}: `) ? 'lost' : 'counted'), [...Array(plan.lostRuns).fill('lost'), ...Array(sessionRetryLimit).fill('counted')], 'the killed runs spent no attempt; the failing runs spent them all');
+  assert.ok(producerRuns.length <= requestAttemptLimit, 'relaunches stay bounded per request');
+  assert.equal(spent.pipeline?.reworkRounds, 1, 'the spent head was reworked once');
+  const escalations = [...actionKeys].filter(key => key.startsWith(`escalation:proof-exhausted:${spent.key}:`));
+  const reworks = [...actionKeys].filter(key => key.startsWith(`decision:rework:${spent.id}:${spentHead}:proof-exhausted`));
+  assert.equal(escalations.length, 1, `one escalation for the spent request: ${escalations.join(', ')}`);
+  assert.equal(reworks.length, 1, `one rework decision for the spent head: ${reworks.join(', ')}`);
+  assert.deepEqual([...actionKeys].filter(key => key.startsWith('escalation:proof-workflow:')), [], 'the trusted workflow was never spent');
   assert.equal(sessions.filter(session => session.state === 'dead').length, plan.deaths.size, 'two workers died');
   // Every dispatch the launcher settled was reported by a later cycle (GY-616): one dispatch-done
   // per session, none lost between the hand-off and the drain.

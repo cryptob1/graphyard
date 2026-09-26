@@ -16,7 +16,7 @@ import type { CapacityRole, PartialWork } from '../model/capacity.js';
 import { readProducerLedger, saveProducerLedger, independentProducerProfiles, launchProducer, reclaimCheckouts } from '../producer.js';
 import { followUpThreadIds, readReviewLedger, updateReviewLedger, launchReview } from '../reviewer.js';
 import { type ReviewFinding, type SuccessionRead, readReviewFindings, basePaths, baseText, baseMentions, successionReader } from '../review-scope.js';
-import { defaultAwaitReviewers, launchedSessionHandle } from '../auto-dispatch.js';
+import { defaultAwaitReviewers, launchedSessionHandle, readDispatchCursor } from '../auto-dispatch.js';
 import type { DispatchRequest } from '../model/dispatch.js';
 import { registeredLaunch } from '../model/session-state.js';
 import { readApproverLaunches } from '../master/autonomy.js';
@@ -27,7 +27,7 @@ import { httpFleetClient, reconcileFleetSessions, settledRecordSessions } from '
 import { type ContainmentRetention, type DaemonAction, type DaemonState, storeAction, type DeploymentObservation, message, writeDaemonState } from './state.js';
 import { answeringWidening } from './reconcile.js';
 import { type OrphanSupervisor, readyToRetry, stopWatchSupervisor } from './sessions.js';
-import { neededDecision, type RoutineDecisionAction } from './decisions.js';
+import { neededDecision, type ExhaustedProof, type RoutineDecisionAction } from './decisions.js';
 import type { FaultClassPolicy, FaultKind, faultClassItem } from '../model/fault-classes.js';
 import type { ControlPlaneStatus } from '../master.js';
 import { readCredentialFile } from '../master.js';
@@ -107,6 +107,11 @@ export interface DaemonEffects {
   publishMergeBatchSize?: () => Promise<unknown>;
   /** Asks the provider to run the trusted smoke workflow against the observed deployment. */
   requestSmoke: (work: Work) => void | Promise<void>;
+  /**
+   * The producer requests the dispatcher has stopped attempting (GY-496), from its cursor: the loop
+   * escalates each and, a cycle later, requests the rework. Absent, nothing is escalated.
+   */
+  exhaustedProofs?: () => Promise<ExhaustedProof[]>;
   /**
    * Removes the dependency directories of finished assignment worktrees. A loop configured
    * without it keeps cycling; it simply never reclaims. It touches no checkout, no branch, and
@@ -602,6 +607,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       publishedBatchSize = batchSize;
     },
     recordDeployment: (work, observation) => mutate(`work/${work.id}/deployment`, { sha: observation.sha, mergeSha: work.delivery!.mergeSha, source: observation.source, observedAt: observation.observedAt }),
+    exhaustedProofs: async () => Object.entries((await readDispatchCursor(root, current(), () => {})).abandoned).filter(([, entry]) => entry.kind === 'producer')
+      .map(([requestId, entry]) => ({ requestId, work: entry.work, sha: entry.sha, group: entry.group ?? null, proofs: entry.proofs ?? [], attempts: entry.attempts, reason: entry.reason })),
     requestSmoke: async work => {
       const config = current();
       await run('gh', ['workflow', 'run', config.run.smokeWorkflow!, '--repo', config.repository, '--ref', config.baseBranch,
