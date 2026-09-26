@@ -34,7 +34,7 @@ function item(key: string, head: string, sequence: number | null, extra: Partial
 }
 /** The queue ejecting `work` for a speculative-merge conflict, recorded as the engine records it. */
 function eject(work: Work, all: Work[]): Work {
-  const { ejection, history } = queueEjectionRecord(work, all, conflict(work.candidate!.sha, work.key), now);
+  const { ejection, history } = queueEjectionRecord(work, all, conflict(work.candidate!.sha, work.key), now, true);
   return { ...work, queue: null, queueEjection: ejection, queueHistory: history };
 }
 const decide = (work: Work) => routineDecision(work, { autoMerge: true }, clock);
@@ -46,6 +46,7 @@ test('unit:predecessor-conflict-waits — a speculative conflict behind a queued
   const queued = item('GY-2', sha('2'), 2);
   const behind = eject(queued, [predecessor, queued]);
   assert.deepEqual(behind.queueEjection!.predecessors, ['GY-1'], 'the ejection records the predecessors the conflicting prediction held');
+  assert.ok(behind.queueEjection!.conflict, 'the ejection carries a typed conflict flag (GY-252)');
   assert.deepEqual(behind.queueHistory!.at(-1)!.predecessors, ['GY-1']);
   assert.equal(syncConflict(behind), null, 'merging the base resolves nothing, so no sync round is asked');
   assert.equal(decide(behind), null, 'no rework decision is needed for a conflict with a predecessor');
@@ -58,12 +59,20 @@ test('unit:predecessor-conflict-waits — a speculative conflict behind a queued
   const alone = item('GY-3', sha('3'), 3);
   const onBase = eject(alone, [alone]);
   assert.deepEqual(onBase.queueEjection!.predecessors, [], 'a merge onto the base branch tip records no predecessors');
+  assert.deepEqual(onBase.queueEjection!.conflict, { base }, 'the conflict names the base tip the merge was attempted onto (GY-252)');
+  // A reworded conflict message is still a conflict: the flag, not the reason, is read.
+  const reworded = { ...onBase, queueEjection: { ...onBase.queueEjection!, reason: 'speculative tip could not be built' } } as Work;
+  assert.equal(decide(reworded)?.binding, `${sha('3')}:queue-conflict:3:${base}`);
+  // A non-conflict ejection records conflict: null and predicts nothing, whatever its reason reads.
+  const other = queueEjectionRecord(alone, [alone], conflict(alone.candidate!.sha, alone.key), now).ejection;
+  assert.equal(other.conflict, null);
+  assert.equal(other.predecessors, undefined);
   const decision = decide(onBase);
   assert.equal(decision?.action, 'rework');
   assert.equal(decision?.binding, `${sha('3')}:queue-conflict:3:${base}`, 'the rework is keyed on the base tip the head conflicts with');
   assert.match(decision!.reason, /graphyard sync GY-3/);
   // A record from before the rule names no predecessors and still reads as a base conflict.
-  const legacy = { ...onBase, queueEjection: { ...onBase.queueEjection!, predecessors: undefined } } as Work;
+  const legacy = { ...onBase, queueEjection: { ...onBase.queueEjection!, predecessors: undefined, conflict: undefined } } as Work;
   assert.equal(decide(legacy)?.binding, `${sha('3')}:queue-conflict:3:${base}`);
 });
 
