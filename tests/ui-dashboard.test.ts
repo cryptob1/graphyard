@@ -182,7 +182,7 @@ test('unit:ui-design-system — one navigation and one design system: every stat
   const d = dashboard();
   // One navigation: the sidebar. The sub-page row under a section never repeats a sidebar entry.
   const sidebarLabels = sections.map(section => section.label);
-  for (const view of views) assert.ok(!sidebarLabels.includes(view.label as any) || view.id === 'work' || view.id === 'workers' || view.id === 'insights', `${view.label} is not a second entry for a sidebar item`);
+  for (const view of views) assert.ok(!sidebarLabels.includes(view.label as any) || view.id === 'work' || view.id === 'workers' || view.id === 'insights' || view.id === 'tests', `${view.label} is not a second entry for a sidebar item`);
   for (const view of visibleViews(d)) {
     const tabs = [...markup(createElement(TopBar, { ...d, view: view.id }) as any).matchAll(/class="tab(?: active)?"[^>]*>(?:<abbr[^>]*>)?([^<]+)</g)].map(match => match[1]);
     for (const tab of tabs) assert.ok(!sidebarLabels.includes(tab as any), `${view.id}: tab ${tab} overlaps the sidebar`);
@@ -266,10 +266,10 @@ test('unit:ui-browser-screenshots — the browser suite captures every page at d
   // It walks the navigation as the dashboard draws it — every sidebar entry and every page under it — plus the linked pages.
   assert.match(spec, /getByRole\('navigation', \{ name: 'Primary' \}\)\.getByRole\('button'\)\.allTextContents\(\)/);
   assert.match(spec, /getByRole\('navigation', \{ name: 'Pages in this section' \}\)/);
-  assert.match(spec, /expect\(entries\)\.toEqual\(\['Work', 'Workers', 'Shipped', 'Insights', 'Settings'\]\)/);
+  assert.match(spec, /expect\(entries\)\.toEqual\(\['Work', 'Workers', 'Shipped', 'Tests', 'Insights', 'Settings'\]\)/);
   const d = dashboard();
   const entries = views.map(view => primaryEntry(d, view)).filter(Boolean).map(entry => entry!.label);
-  for (const label of ['Work', 'Workers', 'Shipped', 'Insights', 'Settings']) assert.ok(entries.includes(label as any), label);
+  for (const label of ['Work', 'Workers', 'Shipped', 'Tests', 'Insights', 'Settings']) assert.ok(entries.includes(label as any), label);
   // The committed images: every page of the registry at both widths, before and after.
   const slug = (text: string) => text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
   const after = new Set(readdirSync(new URL('browser-tests/screenshots/after/', root)));
@@ -452,7 +452,7 @@ test('unit:ui-insights-flow — Insights shows a Now view at each item\'s true s
   assert.match(source, /\{!reducedMotion\(\) && <button[^>]*onClick=\{\(\) => \{ if \(t >= 1\) setT\(0\); setPlaying/);
 });
 
-test('unit:ui-matches-design — the shared tokens and IBM Plex fonts are the only colour and font definitions in web/style.css, and the sidebar lists exactly Work, Workers, Shipped, Tests (planned), Insights and Settings', async () => {
+test('unit:ui-matches-design — the shared tokens and IBM Plex fonts are the only colour and font definitions in web/style.css, and the sidebar lists exactly Work, Workers, Shipped, Tests, Insights and Settings', async () => {
   const css = await read('web/style.css');
   const tokens = { bg: '#0f1411', surface: '#121915', raised: '#161d18', border: '#2a352d', text: '#e3eae2', 'text-2': '#a3b0a5', 'needs-you': '#e8b45a', blocked: '#ef8a6b', moving: '#7fb8f0', 'up-next': '#c5e69b', shipped: '#8fcf8a' };
   const rootBlock = /\n:root\{([^}]*)\}/.exec(css)![1];
@@ -479,13 +479,14 @@ test('unit:ui-matches-design — the shared tokens and IBM Plex fonts are the on
   assert.doesNotMatch(faces, /https?:\/\//, 'every font file is same-origin');
   assert.deepEqual([...new Set([...faces.matchAll(/font-family:'([^']+)'/g)].map(match => match[1]))], ['IBM Plex Sans', 'IBM Plex Mono']);
   for (const [, file] of faces.matchAll(/url\(\/fonts\/([^)]+)\)/g)) assert.equal((await readFile(new URL(`web/public/fonts/${file}`, root))).subarray(0, 4).toString('latin1'), 'wOF2', file);
-  // The sidebar: exactly the approved entries, Tests marked planned (GY-162).
+  // The sidebar: exactly the approved entries; Tests opens its page (GY-162).
   const d = dashboard();
   const sidebar = markup(createElement(Sidebar, { entries: views.map(view => primaryEntry(d, view)), dashboard: d }));
   const nav = /<nav class="primary-nav" aria-label="Primary">([\s\S]*?)<\/nav>/.exec(sidebar)![1];
   assert.deepEqual([...nav.matchAll(/data-nav="([^"]+)"/g)].map(match => match[1]), ['work', 'workers', 'shipped', 'tests', 'insights', 'settings']);
   assert.deepEqual([...nav.matchAll(/<span>([^<]+)<\/span>/g)].map(match => match[1]), ['Work', 'Workers', 'Shipped', 'Tests', 'Insights', 'Settings']);
-  assert.match(nav, /data-nav="tests"[^>]*title="Planned in GY-162"[\s\S]*?<small>planned<\/small>/);
+  assert.match(nav, /<button[^>]*data-nav="tests"/);
+  assert.doesNotMatch(nav, /planned/);
   // Built to the checked-in design: every artboard is in the repository.
   for (const name of ['Main', 'Item', 'Workers', 'Phone', 'Insights', 'System']) assert.ok(existsSync(new URL(`design/dashboard/${name}.dc.html`, root)), name);
   const system = await read('design/dashboard/System.dc.html');
