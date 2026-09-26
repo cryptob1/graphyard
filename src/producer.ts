@@ -396,7 +396,7 @@ async function launchHeadlessProducer(root: string, config: MasterConfig, work: 
   }
   // A registry session is the run: its slot is given back the moment the run ends.
   const settled = started.settled.then(async run => { await registry?.release(`the headless producer run for ${binding.key} ended`, runOutcome(run)); return run; },
-    async error => { await registry?.release(`the headless producer run for ${binding.key} ended`); throw error; }).then(run => updateProducerRecord(root, session.id, entry => ({ ...entry, run })).then(() => run));
+    async error => { await registry?.release(`the headless producer run for ${binding.key} ended`, 'no-result'); throw error; }).then(run => updateProducerRecord(root, session.id, entry => ({ ...entry, run })).then(() => run));
   settled.catch(() => { /* reconciliation settles the record on its expiry */ });
   return { producer: record.id, requestId: request.id, attempt: record.attempt, work: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, group: binding.group, proofs: binding.proofs,
     profile: profile.name, principal: profile.principal, agentName: session.agentName, pane: null, checkout: checkout.directory, expiresAt: record.expiresAt, runtime: 'pi' as const, delivery: 'request' as const,

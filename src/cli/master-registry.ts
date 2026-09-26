@@ -110,6 +110,7 @@ export async function registryCommand(master: Pick<MasterConfig, 'hostId'>, args
     const existing = current.accounts.find(account => account.name === positionals[0]);
     if (!existing && (!values.runtime || !values.model)) throw new Error(`${positionals[0]} is a new account; name its --runtime and --model (graphyard master registry lists both)`);
     const { quota: _observed, smoke: _smoke, unjudged: _held, ...kept } = existing ?? { quota: null };
+    if (values['no-key'] && (values['key-file'] || values['key-variable'])) throw new Error('--no-key removes the account\'s key; it cannot be combined with --key-file or --key-variable');
     if (!!values['key-file'] !== !!values['key-variable']) throw new Error('Name the key by both --key-file FILE (inside the login home) and --key-variable VAR (the variable the runtime reads it from)');
     const existingKey = existing?.credential.key;
     const key = values['no-key'] ? undefined : values['key-file'] ? { file: values['key-file'], variable: values['key-variable']! } : existingKey;

@@ -5,12 +5,14 @@ import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { selectFleetSession, type FleetClient, type FleetSelection } from '../src/fleet.js';
+import { needsSmoke, selectFleetSession, type FleetClient, type FleetSelection } from '../src/fleet.js';
 import { launchApprover, loadMasterConfig, masterConfigSchema, setupMaster } from '../src/master.js';
 import type { Work } from '../src/model.js';
-import { RegistryError, applyRegistryMutation, chooseSession, emptyRegistry, endRegistrySession, fleetView, foldObservations, proposedRuntimes, recordRunOutcome, supersededByRequest, unjudgedHoldMs,
+import { RegistryError, applyRegistryMutation, chooseSession, emptyRegistry, endRegistrySession, fleetView, foldObservations, proposedRuntimes, recordRunOutcome, smokeRetestMs, supersededByRequest, unjudgedHoldMs,
   type AgentRegistry, type FleetSession, type RegistryMutation } from '../src/model/registry.js';
 import { accountKeyEnvironment } from '../src/runner/roles.js';
+import type { Runner } from '../src/runner/types.js';
+import { registryCommand } from '../src/cli/master-registry.js';
 import { clearRuns } from '../src/runner/registry.js';
 import type { FilesystemProbe } from '../src/install/worktree-root.js';
 
@@ -295,4 +297,53 @@ test('unit:account-smoke-gate — two consecutive approver runs on one account t
   assert.equal(endRegistrySession(copy, late, 'the run ended', 'no-result', iso(6)), false, 'recorded once');
   assert.equal(late.endReason, 'gone from Herdr', 'the first end stands');
   assert.ok((await stat(silent)).isDirectory());
+});
+
+test('unit:account-smoke-gate — a failed smoke test is retested once its delay has passed, so a transient provider outage does not keep a sound account out (GY-515)', async () => {
+  const { config } = await installation(), registry = memoryRegistry(config.hostId);
+  piFleet(registry, config.hostId, [{ name: 'pi-r', home: await piHome('pi-r', null) }]);
+  let outage = true;
+  const tested: number[] = [], smoke = async () => { tested.push(1); return outage ? { ok: false, error: '503 provider unavailable' } : { ok: true, error: null }; };
+  await assert.rejects(selectFleetSession(config, 'approver', { name: 'approver' }, { registry: registry.client, quota: false, cacheMs: 0, smoke }), /pi-r failed its smoke test: 503 provider unavailable; it is tested again after 60 minutes/);
+  outage = false;
+  await assert.rejects(selectFleetSession(config, 'approver', { name: 'approver' }, { registry: registry.client, quota: false, cacheMs: 0, smoke }), /failed its smoke test/, 'within the delay the failure stands untested');
+  assert.equal(tested.length, 1);
+  const later = Date.now() + smokeRetestMs + 1_000;
+  const chosen = await selectFleetSession(config, 'approver', { name: 'approver' }, { registry: registry.client, quota: false, cacheMs: 0, smoke, now: () => later });
+  assert.equal(tested.length, 2, 'the executor tested it again');
+  assert.equal(chosen?.account.name, 'pi-r');
+  assert.equal(registry.current().accounts[0].smoke?.result, 'pass');
+
+  // The rule itself: only a Pi account's failure is retested, and only after the delay.
+  const account = registry.current().accounts[0], pi = registry.current().runtimes[0], at = Date.parse('2026-09-26T12:00:00Z');
+  const failed = { ...account, smoke: { result: 'fail' as const, reason: 'down', at: new Date(at).toISOString(), by: 'executor' } };
+  assert.equal(needsSmoke(failed, pi, at + smokeRetestMs - 1), false);
+  assert.equal(needsSmoke(failed, pi, at + smokeRetestMs), true);
+  assert.equal(needsSmoke({ ...failed, smoke: { ...failed.smoke, result: 'pass' } }, pi, at + 10 * smokeRetestMs), false, 'a pass is not retested until the account changes');
+  assert.equal(needsSmoke(failed, { ...pi, launch: { ...pi.launch, kind: 'claude' } }, at + smokeRetestMs), false, 'an interactive runtime has no smoke test');
+});
+
+test('unit:account-smoke-gate — a headless run whose settlement rejects is released as a run without a result, so it counts toward the hold (GY-515)', async () => {
+  const { root, config } = await installation(), registry = memoryRegistry(config.hostId);
+  piFleet(registry, config.hostId, [{ name: 'pi-c', home: await piHome('pi-c', secret()), key: zaiKey }]);
+  const crashing: Runner = { name: 'crashing', start: () => ({ id: crypto.randomUUID(), events: [], onEvent: () => () => {}, cancel: () => {}, result: () => Promise.reject(new Error('the runner crashed')) }) as never };
+  for (const n of [1, 2]) {
+    const launched = await launchApprover(root, item(`GY-95${n}`), decisionId(20 + n), undefined, { agents: [], available: true }, noHerdr,
+      { registry: registry.client, quota: false, cacheMs: 0, smoke: async () => ({ ok: true, error: null }) }, undefined, { fetcher: accepted, filesystem: durable, runner: crashing } as never);
+    await assert.rejects(launched.settled!, /the runner crashed/);
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  const ended = registry.current().sessions;
+  assert.deepEqual(ended.map(session => session.outcome), ['no-result', 'no-result']);
+  assert.ok(registry.current().accounts[0].unjudged?.approver?.until, 'two rejected runs in a row hold the account from the role');
+});
+
+test('unit:registry-account-key — --no-key combined with --key-file or --key-variable is refused rather than silently winning (GY-515)', async () => {
+  const writes: unknown[] = [];
+  const api = { read: async () => emptyRegistry(), write: async (_path: string, data: unknown) => { writes.push(data); return data; } };
+  await assert.rejects(registryCommand({ hostId: 'h' }, ['account', 'set', 'pi-a', '--runtime', 'pi', '--model', 'glm', '--no-key', '--key-file', 'zai.key', '--key-variable', 'ZAI_API_KEY', '--reason', 'r'], api), /--no-key .*cannot be combined with --key-file or --key-variable/);
+  await assert.rejects(registryCommand({ hostId: 'h' }, ['account', 'set', 'pi-a', '--runtime', 'pi', '--model', 'glm', '--no-key', '--key-variable', 'ZAI_API_KEY', '--reason', 'r'], api), /cannot be combined/);
+  assert.equal(writes.length, 0);
+  await registryCommand({ hostId: 'h' }, ['account', 'set', 'pi-a', '--runtime', 'pi', '--model', 'glm', '--no-key', '--reason', 'r'], api);
+  assert.equal(writes.length, 1);
 });
