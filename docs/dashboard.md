@@ -28,7 +28,7 @@ Rows show **Build, Validate, Test, Review, Prove, Merge, Deploy** (`src/model/pr
 
 ## An item page
 
-Below the summary: **What is left** (unmet requirements, who clears each), **Requirements** (✓ or ○ per criterion), **Pull request** and **Activity**. **Technical details** holds gates, sessions, evidence and overlaps (`Shares files with GY-166, GY-167 (tests/)`).
+Below the summary: **What is left** (unmet requirements, who clears each), **Requirements** (✓ or ○ per criterion), **Pull request** and **Activity**. **Technical details** holds gates, sessions, evidence and overlaps (`Shares files with GY-166 (tests/)`).
 
 ## Insights
 

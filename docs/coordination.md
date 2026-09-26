@@ -13,7 +13,7 @@ A criterion states an outcome and its proofs:
 
 ## Revise requirements explicitly
 
-`graphyard master requirements GY-N revision.json "REASON"` adds; rewriting, removing or narrowing is a two-party `master decide GY-N requirements @revision.json "REASON"`. A revision replaces the whole document against `expectedPolicyRevision`; stop the worker first — plannedFiles-only widenings excepted — as prior evidence, review and authorization lapse.
+`graphyard master requirements GY-N revision.json "REASON"` adds; rewriting, removing or narrowing is a two-party `master decide GY-N requirements @revision.json "REASON"`. A revision replaces the document against `expectedPolicyRevision`; stop the worker first, plannedFiles-only widenings excepted: prior evidence, review and authorization lapse.
 
 ## Dispatch optimistically, smallest scope first
 
@@ -21,15 +21,15 @@ A criterion states an outcome and its proofs:
 
 ## Review gate: verdicts, not threads
 
-The gate is the reviewer's approval of the exact head plus required CI; threads are inputs: an approval names each listed one resolved, follow-up (filed as backlog), overridden, or withdrawn; the loop resolves them. A filing refused as a reused idempotency key links that key's item (same parent and approval), or files under an approval-and-body-hash key. Retries stop after 10 consecutive identical 4xx failures, raising one attention item naming step, error and item (typed actions escalate those). After two rework rounds a bot's thread is advisory. Required conversation resolution is drift: `master protection --apply`.
+The gate is the reviewer's approval of the exact head plus required CI; threads are inputs: an approval names each thread resolved, follow-up (filed as backlog), overridden, or withdrawn; the loop resolves them. A filing refused as a reused idempotency key links that key's item, or files under an approval-and-body-hash key. Retries stop after 10 consecutive identical 4xx failures, raising one attention item naming step, error and item (typed actions escalate those). After two rework rounds a bot's thread is advisory. Required conversation resolution is drift: `master protection --apply`.
 
 ## Refuse candidates that revert shipped code outside their scope
 
-`plannedFiles` also bounds what a candidate may change. At `complete`, on every new head and at landing, files inside scope and new files pass; every other file must match the bound base byte-for-byte. A deletion, revert or rewrite is refused, naming the files and their shipping items. A worker cannot widen `plannedFiles`; a scope request or an audited revision can. Asks over 20 files in one directory, or past the 100-entry cap, collapse to their deepest common directory (`tests/`); pending asks merge into one.
+`plannedFiles` also bounds what a candidate may change. At `complete`, on every new head and at landing, in-scope files and new files pass; every other file must match the bound base byte-for-byte. A deletion, revert or rewrite is refused, naming the files and their shipping items. A worker cannot widen `plannedFiles`; a scope request or an audited revision can. Asks over 20 files in one directory, or past the 100-entry cap, collapse to their deepest common directory (`tests/`); pending asks merge into one.
 
 ### Keep current with `graphyard sync`
 
-Before any push, `graphyard sync GY-N` merges `origin/BASE` (never a rebase), regenerates, commits, prints the same classification. Restore an out-of-scope file: `git checkout BASE_TIP -- PATH`.
+Before any push, `graphyard sync GY-N` merges `origin/BASE` (never rebase), regenerates, commits, prints the same classification. Restore an out-of-scope file: `git checkout BASE_TIP -- PATH`.
 
 ### Generated files never conflict
 
@@ -41,4 +41,4 @@ The [routine target](master-agent-reference.md#pipeline-speed) comes from `sync`
 
 ## Explain stalls
 
-`graphyard diagnose GY-N` explains the first refusing gate and anything else holding it; `base-behind` and `base-conflict` get rework, or a [docs-sync](development.md#documentation-that-rarely-conflicts) when only docs conflict.
+`graphyard diagnose GY-N` explains the first refusing gate and anything else holding it; `base-behind` and `base-conflict` rework, or [docs-sync](development.md#documentation-that-rarely-conflicts) when only docs conflict.

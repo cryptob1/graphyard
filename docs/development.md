@@ -7,7 +7,7 @@
 - An HTTP route: a module under `src/server/routes/` (`defineRoutes`).
 - A schema or gate rule: its concern module under `src/model/`; commands run through `src/engine.ts`, GitHub I/O in `src/github.ts`.
 - A table: a `defineTable` under `src/store/tables/`, from which migrations and backups derive.
-- A dashboard view: a page under `web/pages/` plus one entry in `web/pages/index.tsx`.
+- A dashboard view: a page under `web/pages/`, one entry in `web/pages/index.tsx`.
 - A protocol topic: a page under `docs/protocol/` starting `<!-- page: Agent protocol | N | summary -->`.
 - Managed `AGENTS.md` text: the template in `src/repository-setup.ts` or `src/master.ts`; re-render and commit `AGENTS.md`.
 
@@ -27,7 +27,7 @@ npm ci && npm run build && npm test
 
 ### Documentation that rarely conflicts
 
-Write self-contained paragraphs; reword shared sentences only when wrong. A conflict the test merge confirms only in docs is docs-synced, not reworked: the base merges in keeping both sides in budget, the approval while the non-docs diff is unchanged. Status and Insights rank daily conflict hotspots; five on one path is raised.
+Write self-contained paragraphs; reword shared sentences only when wrong. A conflict the test merge confirms only in docs is docs-synced, not reworked: the base merges in keeping both sides in budget, the approval while the non-docs diff is unchanged. Status and Insights rank daily hotspots; five on one path is raised.
 
 ## Trusted contracts
 
