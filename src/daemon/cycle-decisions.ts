@@ -175,6 +175,9 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
         await effects.withdraw(item, standing.id, `The candidate moved to ${decision.binding.slice(0, 12)}; ${stale}, so it can never apply and is withdrawn for a request that names the current candidate`);
         standing = undefined;
       }
+      // An attestation adopted must be the one asked for: this head and proof, carrying the exercise
+      // record (GY-523). One without it would be recorded as not exercising its criterion again.
+      if (standing && decision.action === 'attest' && !(standing.input?.sha === item.candidate?.sha && standing.input?.proof === decision.input?.proof && standing.input?.exercise)) standing = undefined;
       // Nor does the server keep more than one resolve standing, whatever its trigger. One for
       // another escalation (a security-concern a master asked about) is not this decision: adopting
       // it would settle this watch while the lease-loss still stands, and the binding would never
