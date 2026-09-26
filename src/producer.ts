@@ -17,6 +17,7 @@ import { narrowRoleRuntime, piRuntimeSchema } from './runner/payloads.js';
 import { liveRun, registeredRun } from './runner/registry.js';
 import { narrowRunner, piProducerPrompt, producerRunOptions, registryRunner, startNarrowRun, submitEvidence } from './runner/roles.js';
 import { runRecordSchema, type RunRecord, type Runner } from './runner/types.js';
+import { researchCheckouts } from './research.js';
 
 /**
  * Producer sessions launched for the control plane's producer requests (model/dispatch.ts).
@@ -503,12 +504,13 @@ export async function reconcileProducers(root: string, config: MasterConfig, wor
 
 /**
  * The reclaim pass over the managed worktree root: every session directory no pending producer or
- * reviewer record owns is removed. Settlement removes a session's own checkout, so what this finds
- * was left by a session whose master died before it could settle.
+ * reviewer record, and no research run this process has in flight (GY-401), owns is removed.
+ * Settlement removes a session's own checkout, so what this finds was left by a session whose
+ * master died before it could settle.
  */
 export async function reclaimCheckouts(root: string, config: MasterConfig, options: { now?: number; graceMs?: number; probe?: FilesystemProbe } = {}): Promise<CheckoutReclaimReport> {
   const [producers, reviews] = await Promise.all([readProducerLedger(root), readReviewLedger(root)]);
-  const live = [...producers.producers, ...reviews.reviews].filter(record => record.state === 'pending' && record.checkout).map(record => record.checkout!);
+  const live = [...[...producers.producers, ...reviews.reviews].filter(record => record.state === 'pending' && record.checkout).map(record => record.checkout!), ...researchCheckouts()];
   return reclaimSessionCheckouts(root, worktreeRoot(root, config), live, { ...options, failure: writeFailure });
 }
 

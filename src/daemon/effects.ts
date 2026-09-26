@@ -503,8 +503,11 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
         const base = worktreeRoot(root, current());
         const head = (await run('git', ['-C', root, 'rev-parse', 'HEAD'])).trim();
         const checkout = await allocateSessionCheckout(base, 'research', work.key, head, randomUUID());
-        await run('git', ['-C', root, 'worktree', 'add', '--detach', checkout.worktree, head]);
-        return { cwd: checkout.worktree, dispose: () => removeSessionCheckout(root, base, checkout.directory, run) };
+        const dispose = () => removeSessionCheckout(root, base, checkout.directory, run);
+        // A worktree git would not add leaves no directory behind for the reclaim pass to find.
+        try { await run('git', ['-C', root, 'worktree', 'add', '--detach', checkout.worktree, head]); }
+        catch (error) { await dispose().catch(() => {}); throw error; }
+        return { cwd: checkout.worktree, directory: checkout.directory, dispose };
       },
     },
     launchedSessions: async () => [

@@ -157,6 +157,20 @@ test('unit:research-budget-uses-reported-usage — the runner reports a message 
   await researchStep({ items: [estimated], clock: NOW, settings: settings({ tokenBudget: 1_000 }), config: { repository: 'owner/project' }, cwd: process.cwd(), runner: quiet.runner, record: estimatedPlane.record });
   await researchSettled();
   assert.equal(currentResearch(estimated)!.failure!.reason, 'token-budget', 'the characters-over-four estimate still bounds a runtime that reports nothing');
+
+  // Billed tokens: once the runtime reports usage, tool output is already in the next call's input
+  // and is not counted a second time as characters over four.
+  const billed = item({ id: '17171717-1717-4717-8717-171717171717', key: 'GY-16' });
+  const tools = fakeRunner(() => 'never', [
+    { kind: 'message', at, role: 'assistant', text: 'x', stopReason: null, error: null, usage: { input: 300, output: 100 } },
+    { kind: 'tool-end', at, tool: 'read', call: 'c1', error: false, text: 'y'.repeat(8_000) },
+    { kind: 'message', at, role: 'assistant', text: 'z', stopReason: null, error: null, usage: { input: 400, output: 100 } },
+  ]);
+  const billedPlane = plane([billed]);
+  await researchStep({ items: [billed], clock: NOW, settings: settings({ tokenBudget: 1_000 }), config: { repository: 'owner/project' }, cwd: process.cwd(), runner: tools.runner, record: billedPlane.record });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(currentResearch(billed)!.state, 'running', '900 billed tokens stay inside the 1000 budget although the tool streamed 8000 characters');
+  clearResearchRuns();
 });
 
 test('unit:research-questions-in-human-only — the server\'s human-only list derives research questions beside the rule table', async t => {
