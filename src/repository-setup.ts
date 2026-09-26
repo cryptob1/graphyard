@@ -463,9 +463,13 @@ export async function writeDocumentationConfig(root: string, proposed: Documenta
   return { state: 'written', policy: proposed };
 }
 
-/** The policy a checkout's committed configuration declares, or null when it has none. */
+/**
+ * The documentation policy a checkout's committed configuration declares, or null when it has none.
+ * A word budget is not part of the policy the control plane is deployed with: it is read from the
+ * committed file at each counted commit (GY-574), so it is left out here and never reads as drift.
+ */
 export async function readDocumentationConfig(root: string): Promise<DocumentationPolicy | null> {
-  try { return parseRepositoryConfig(await readFile(resolve(root, repositoryConfigFile), 'utf8')).documentation; }
+  try { const { wordBudget: _budget, ...policy } = parseRepositoryConfig(await readFile(resolve(root, repositoryConfigFile), 'utf8')).documentation; return policy; }
   catch (error: any) { if (error.code === 'ENOENT') return null; throw error; }
 }
 
