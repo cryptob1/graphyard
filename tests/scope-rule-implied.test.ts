@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { automaticScopeGrounds, emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
-import { barrelSuccessorGround, criterionSymbolGround, criterionSymbols, criterionTestGround } from '../src/model/criterion-scope.js';
+import { barrelSuccessorGround, criterionSymbolGround, criterionSymbols, criterionTestGround, phraseCallees } from '../src/model/criterion-scope.js';
 import type { ScopeCriterion, ScopeRequestState } from '../src/model/scope.js';
 import type { Work } from '../src/model.js';
 
@@ -309,4 +309,33 @@ test('unit:scope-rule-criteria-implied — the loop widens by what the criteria 
   assert.match(audited?.detail ?? '', /on what the item's criteria name/, audited?.detail);
   const partly = Object.values(state.actions).find(action => action.work === 'GY-406' && /^Partly widened /.test(action.detail));
   assert.match(partly?.detail ?? '', /src\/cli\/master-status\.ts \(src\/cli\/master-status\.ts is the `master status` command AC-3 names\)\. The rest goes to the approver: no unresolved review finding on the head names src\/ci-guard\.ts/, partly?.detail);
+});
+
+test('unit:scope-rule-criteria-implied — (d) a common phrase grounds an unexported declaration of it only where few files on the base mention it', () => {
+  const symbols = criterionSymbols([{ id: 'AC-1', text: 'Every follow up names its decision id.' }]);
+  const local = 'export function settle(work: Work) {\n  const decisionId = work.decision.id;\n  return decisionId;\n}';
+  assert.equal(criterionSymbolGround('src/g.ts', local, symbols), null, 'an unsearched local grounds nothing');
+  assert.equal(criterionSymbolGround('src/g.ts', local, symbols, new Map([['decisionId', 40]])), null, 'a local half the tree also declares is a common name, not the behaviour');
+  assert.equal(criterionSymbolGround('src/g.ts', local, symbols, new Map([['decisionId', 2]])), 'src/g.ts defines decisionId, the "decision id" AC-1 names');
+  assert.deepEqual(phraseCallees(local, symbols), ['decisionId'], 'the loop searches the base tree for the local before it can ground the file');
+  assert.equal(criterionSymbolGround('src/h.ts', 'export function decisionIdOf() {}', symbols), 'src/h.ts defines decisionIdOf, the "decision id" AC-1 names', 'an exported definition grounds unbounded');
+  assert.deepEqual(phraseCallees('export function decisionIdOf() {}', symbols), [], 'an exported definition is not searched');
+});
+
+test('unit:scope-rule-criteria-implied — (e) a partly widened request with no approver escalates only the paths still refused', async () => {
+  const lease = { epoch: 1, owner: 'graphyard-worker', expiresAt: new Date(clock + 600_000).toISOString() };
+  const paths = ['src/cli/master-status.ts', 'src/ci-guard.ts'];
+  const part = item('GY-406', replays[2].planned, { lease, scopeRequest: ask(paths) } as Partial<Work>);
+  const state = emptyDaemonState(loopConfig());
+  await runCycle(loopConfig(), state, loopEffects(() => [part], {
+    basePaths: async asked => new Set(asked.filter(exists)), baseText: read, baseMentions: mentions,
+    decideScope: async work => {
+      const decision = { state: 'refused', reason: 'outside what the criteria imply', at: '2026-09-26T01:00:01.000Z', decidedBy: 'graphyard', waitedMs: 1000, paths, requestedBy: 'graphyard-worker', requestedAt: work.scopeRequest!.at, epoch: 1 };
+      return { ...work, scopeRequest: { ...work.scopeRequest!, decision }, scopeDecision: decision } as unknown as Work;
+    },
+    widenScope: async (work, _request, granted) => ({ ...work, plannedFiles: [...(work.plannedFiles ?? []), ...granted], policyRevision: work.policyRevision + 1 }) as Work,
+  }), () => clock);
+  const escalated = Object.entries(state.actions).find(([key]) => key.startsWith('escalation:scope:'))?.[1];
+  assert.match(escalated?.detail ?? '', /asked for 1 file \(src\/ci-guard\.ts\) because/, escalated?.detail);
+  assert.doesNotMatch(escalated?.detail ?? '', /master-status/, 'the path just granted is not escalated');
 });
