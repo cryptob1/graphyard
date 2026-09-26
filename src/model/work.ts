@@ -104,6 +104,8 @@ export interface ScopeFile {
 export interface Observation {
   clockOffset?: { min: number; max: number };
   reviewIds?: number[];
+  /** Every review on the pull request GitHub reports as dismissed, whoever posted it and whatever they posted since; unset on observations recorded before GY-486. */
+  dismissedReviewIds?: number[];
   agentReview?: AgentReview;
   prState?: 'open' | 'closed'; draft?: boolean; prCreatedAt?: string;
   candidate: Candidate; checks: { name: string; result: string; appId: number; id?: number; attempt?: number }[];
