@@ -12,6 +12,18 @@ import { regressionRefusals } from '../regression-guard.js';
 import { mechanicalFailure, mechanicalVerdicts } from './mechanical-proofs.js';
 
 // Pure evaluation: neither worker assertions nor UI state can authorize progression.
+declare module './work.js' {
+  interface Observation {
+    // GitHub has not computed mergeability yet (`pr.mergeable === null`): it recomputes lazily after
+    // the base moves. Unknown is neither mergeable nor conflicting; it is re-read on the next
+    // observation rather than refused as not mergeable (GY-548). Recorded by github.ts `observe`.
+    mergeabilityUnknown?: boolean;
+  }
+}
+
+/** The merge gate's refusal while GitHub has not computed a pull request's mergeability (GY-548). */
+export const mergeabilityComputingRefusal = 'GitHub is computing mergeability against the current base; the next observation reads it again';
+
 export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[], mergeQueue?: number | MergeQueueSettings): { stage: Stage; gates: Gate[]; violations: string[]; queue: QueueEntry | null; queueSequence: number; queueEjection: QueueEjection | null; queueHistory: QueueHistoryEntry[] } {
   const gates: Gate[] = [];
   const add = (name: string, reasons: string[]) => gates.push({ name, passed: reasons.length === 0, reasons });
@@ -98,7 +110,13 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[],
   const test = gates.find(g => g.name === 'test')!;
   const validating = tipValidation(work, queueState.queue, test.reasons);
   if (validating) { test.reasons = []; test.passed = true; }
-  add('merge', [...(!fresh ? ['GitHub observation missing or older than two minutes'] : []), ...(!obs?.protected ? ['Required Graphyard check and merge-queue branch protection have not been verified'] : []), ...(!obs?.mergeable && !obs?.merged ? ['Pull request is not mergeable against the current base'] : []), ...(threads ? [threads] : []), ...delivery, ...queueState.reasons, ...(validating ?? [])]);
+  // GitHub's `mergeable: null` is a computation it has not finished, not a refusal (GY-548): it is
+  // named as such and read again on the next observation. A queued entry is not held on it at
+  // all: what merges is its speculative tip, and that tip's own CI and merge decide.
+  const mergeability = obs?.mergeable || obs?.merged ? null
+    : obs?.mergeabilityUnknown ? (queueState.queue ? null : mergeabilityComputingRefusal)
+      : 'Pull request is not mergeable against the current base';
+  add('merge', [...(!fresh ? ['GitHub observation missing or older than two minutes'] : []), ...(!obs?.protected ? ['Required Graphyard check and merge-queue branch protection have not been verified'] : []), ...(mergeability ? [mergeability] : []), ...(threads ? [threads] : []), ...delivery, ...queueState.reasons, ...(validating ?? [])]);
   const first = gates.find(g => !g.passed);
   const violations = [...work.violations];
   let stage: Stage = !work.ready ? 'backlog' : !work.submission ? (work.lease && Date.parse(work.lease.expiresAt) > now.getTime() ? 'build' : 'ready') : (first?.name === 'ready' ? 'build' : first?.name as Stage ?? 'merge');
