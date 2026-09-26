@@ -238,9 +238,15 @@ async function applyThroughEngine(services: Services, decision: DecisionRecord, 
     case 'rework': await engine.execute(actor, 'rework', decision.workId, { reason, previousWorkerStopped: true }, key); return 'Rework authorized';
     case 'recover': await engine.execute(actor, 'recover', decision.workId, { reason, previousWorkerStopped: true }, key); return 'Containment quarantine recovered';
     case 'attest': await engine.execute(actor, 'evidence', decision.workId, input, key); return `${input.proof} attested ${input.result} for ${input.sha}`;
-    case 'close': return applyTriageClosure(services, actor, decision.workId, input, decision.id, key);
+    case 'close': {
+      // A triage closure (its input carries the judgement's `triageAt`) applies through the triage
+      // path; a diagnostician's closure (GY-439) closes the item directly, with the approval's own
+      // composed reason.
+      if (input.triageAt !== undefined) return applyTriageClosure(services, actor, decision.workId, input, decision.id, key);
+      const work = await closeWork(services, actor, decision.workId, { kind: input.kind, reason, ref: input.ref ?? null }, key);
+      return `Closed ${work.key} as ${input.kind}${input.ref ? ` of ${input.ref}` : ''}`;
+    }
     case 'grant': { const grant = await services.proofGrants.grant(actor, input.principal, { patterns: input.patterns, reason, ...(input.expectedRevision === undefined ? {} : { expectedRevision: input.expectedRevision }) }, key); return `Granted ${input.patterns.join(', ')} to ${input.principal} (grant revision ${grant.revision})`; }
-    case 'close': { const work = await closeWork(services, actor, decision.workId, { kind: input.kind, reason, ref: input.ref ?? null }, key); return `Closed ${work.key} as ${input.kind}${input.ref ? ` of ${input.ref}` : ''}`; }
     default: throw new Error(`No engine application for ${decision.action}`);
   }
 }

@@ -95,7 +95,8 @@ export async function agentToken(root: string, config: MasterConfig, which: 'ope
  * decision and its reason and Graphyard supplies the exact revision or candidate it binds to.
  */
 export function decisionInput(action: string, work: Work, input: Record<string, unknown>) {
-  if (['release', 'unblock', 'resolve', 'close'].includes(action)) return { expectedRevision: work.revision, ...input };
+  // A triage closure (GY-402) binds its judgement, not the revision; a diagnostician's closure (GY-439) binds the revision.
+  if (['release', 'unblock', 'resolve'].includes(action) || (action === 'close' && input.triageAt === undefined)) return { expectedRevision: work.revision, ...input };
   if (action === 'requirements') return { expectedPolicyRevision: work.policyRevision, criteria: work.criteria, dependencies: work.dependencies, plannedFiles: work.plannedFiles, exclusiveResources: work.exclusiveResources ?? [], producerProofs: work.producerProofs ?? [], ...input };
   if ((action === 'merge' || action === 'attest') && work.candidate) return { sha: work.candidate.sha, baseSha: work.candidate.baseSha, policyRevision: work.policyRevision, ...(action === 'attest' ? { result: 'pass', executed: 1, skipped: 0, ...attestationExercise(work, input.proof) } : {}), ...input };
   if (action === 'rework' || action === 'recover') return { previousWorkerStopped: true, ...input };
