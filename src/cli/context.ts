@@ -61,7 +61,7 @@ export async function createContext(command: string, id: string | undefined, arg
     if (!token) throw new Error('Set GRAPHYARD_TOKEN to your individual credential');
     const response = await fetch(`${base}/api/${path}`, { method: data === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': requestId }, body: data === undefined ? undefined : JSON.stringify(data), signal: AbortSignal.timeout(30_000) });
     const body = await response.json();
-    if (!response.ok) { const error = new Error(JSON.stringify(body)); (error as any).confirmedRefusal = isConfirmedCoordinationRefusal(response.status, body); throw error; }
+    if (!response.ok) { const error = new Error(JSON.stringify(body)); (error as any).confirmedRefusal = isConfirmedCoordinationRefusal(response.status, body); (error as any).status = response.status; throw error; }
     return body;
   };
   return {
