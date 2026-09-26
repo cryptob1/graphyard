@@ -459,8 +459,6 @@ export const escalationSessionSchema = z.object({
 }).strict();
 export type EscalationSession = z.infer<typeof escalationSessionSchema>;
 export const retainedEscalationSessions = 50, escalationSessionMs = 86_400_000;
-/** With no reset known for a spent account, a waiting handler is tried again this soon (the loop's capacity recheck). */
-const escalationCapacityRecheckMs = 60_000;
 const escalationSessionsPath = async (root: string) => resolve(await localDirectory(root), 'escalations', 'sessions.json');
 export async function readEscalationSessions(root: string): Promise<EscalationSession[]> {
   try { return z.array(escalationSessionSchema).parse(JSON.parse(await readFile(await escalationSessionsPath(root), 'utf8'))); } catch { return []; }
@@ -537,7 +535,12 @@ export async function launchEscalationHandler(root: string, config: MasterConfig
     // shared one. The escalation is kept as a waiting record, so the loop reports the capacity
     // wait and launches it again once the first held account resets, with no one retrying it.
     const at = Date.now(), held = await observedExhaustions(config, at);
-    const retryAt = capacityRetryAt(error.skipped.map(skip => ({ resetsAt: held[skip.environment]?.until ?? null }))) ?? new Date(at + escalationCapacityRecheckMs).toISOString();
+    // With no reset known for a spent account, the handler is tried again this soon: the same
+    // capacity recheck every other spent role waits on (GY-316). Read through a dynamic import:
+    // auto-dispatch imports this barrel, so a static edge here would run its module body while
+    // the reviewer module it reads top-level is still initializing.
+    const { capacityRecheckMs } = await import('../auto-dispatch.js');
+    const retryAt = capacityRetryAt(error.skipped.map(skip => ({ resetsAt: held[skip.environment]?.until ?? null }))) ?? new Date(at + capacityRecheckMs).toISOString();
     await saveEscalationSession(root, context.key, context.escalation.trigger, { agentName: name, pane: null, work: context.key, trigger: context.escalation.trigger, kind, account: null, runtime: null, launchedAt: new Date(at).toISOString(), session: null,
       waiting: { since: new Date(at).toISOString(), retryAt, reason: error.message.slice(0, 500) } });
     // The wait rides on the error, so a loop that ended a spent handler keeps it rather than its own guess.
