@@ -303,7 +303,7 @@ function plane(scripts: Script[], options: { hostId?: string; host?: { root: str
       target.stage = 'done'; target.stageEnteredAt = iso();
       target.delivery = { mergedAt: iso(), mergedAtRepository: iso(), mergeSha, authorizationRevision: target.revision };
       recompute(target);
-      return { result: 'merged' };
+      return { result: 'merged', merged: true };
     },
     observeDeployment: async () => ({ source: 'unavailable' as const, sha: null, at: iso(clockStart), reason: 'No deployment endpoint is configured in this exercise', deployed: [], pending: [] }),
     recordDeployment: async () => {},

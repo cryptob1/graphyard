@@ -156,8 +156,8 @@ test('unit:idle-pane-shell-not-a-worker the pane\'s childless interactive shell 
   const work = stranded();
   assert.deepEqual(refusals(work, paneShellProbe()), [], 'an idle pane shell beside a not-found scope is no worker');
   assert.deepEqual(refusals(work, paneShellProbe({ activeState: 'inactive' })), [], 'an inactive (ended) scope is ended too');
-  for (const command of ['/usr/bin/bash', '-bash', 'bash -i', '/bin/zsh -l', 'fish']) assert.equal(isInteractiveShell(command), true, command);
-  for (const command of ['bash -c sleep 100', 'bash -lc watch', '/usr/bin/bash script.sh', 'node server.js', 'claude', 'bash --rcfile x', 'bash -s', 'bash -is', 'sh -', 'zsh -s arg']) assert.equal(isInteractiveShell(command), false, command);
+  for (const command of ['/usr/bin/bash', '-bash', 'bash -i', '/bin/zsh -l', 'fish', 'bash -il', 'bash --login', 'bash --noprofile --norc -i']) assert.equal(isInteractiveShell(command), true, command);
+  for (const command of ['bash -c sleep 100', 'bash -lc watch', '/usr/bin/bash script.sh', 'node server.js', 'claude', 'bash --rcfile x', 'bash --init-file x', 'bash --rcfile=x', 'bash --init-file=/tmp/rc', 'bash -O extglob', 'bash -o vi', 'zsh -x', 'bash --debugger', 'bash -s', 'bash -is', 'sh -', 'zsh -s arg']) assert.equal(isInteractiveShell(command), false, command);
 
   // One cycle: the pane is closed, the item re-probed with the pane gone, and the quarantine settled.
   let probes = 0;
