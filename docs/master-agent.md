@@ -1,4 +1,4 @@
-<!-- page: Operate Graphyard | 5 | the loop, dispatch and merges. -->
+<!-- page: Operate Graphyard | 5 | loop, dispatch, merges. -->
 # Master-agent operating mode
 
 The master (`coordinator`) routes work, merges, verifies deployments and administers GitHub, never implementing, reviewing or proving.
@@ -49,7 +49,7 @@ another session's handle finished to free a slot.
 
 ## Research and diagnosis
 
-With `run.research` (`model`, `timeoutMinutes` 15, `tokenBudget`), a feature (or `"research": true`) gets a read-only Pi brief per requirements revision for worker and reviewer: reusable code, prior art, risks, approach. Product questions go under Needs you; build proceeds on the recommendation, differing answers request rework, failure never blocks.
+With `run.research` set (`model`, `timeoutMinutes` 15, `tokenBudget`), a feature (or `"research": true`) gets one read-only Pi session per requirements revision, briefing worker and reviewer. Product questions go under Needs you; build proceeds on the recommendation, a differing answer requests rework, failure never blocks.
 
 Each `Recurring <class> faults` item or `invariant:` fault past `invariantBoundMinutes`, gets a read-only diagnostician (`run.diagnostician` `model`/`fallbackModel`/`serverLogCommand`, or registry role). Approved decisions release its fix or `close` it as duplicate; recurrences re-file post-delivery.
 
@@ -73,7 +73,7 @@ With a pass, the producer records `"exercise"`: the same proof run with the crit
 "exercise":{"criterion":"AC-1","behaviour":"the lease expiry check in claim()","result":"fail","executed":4}
 ```
 
-A pass is trusted only when that stripped run failed with a case executed; otherwise it is recorded as not exercising its criterion rather than as passing (`unexercised`, `evidence.exercise.refused`); the loop requests rework quoting it.
+A pass is trusted only when that stripped run failed with a case executed; otherwise it is recorded as not exercising its criterion rather than as passing (`unexercised`, `evidence.exercise.refused`); the loop requests rework quoting it. `decide attest` adds `exercise` (fails on base), approver-confirmed; unexercised `manual:` proofs: re-attest, never rework.
 
 ## Guarded merges
 
@@ -81,6 +81,6 @@ A pass is trusted only when that stripped run failed with a case executed; other
 
 ### Repair lane
 
-The one sanctioned exception to "never use an administrative merge bypass": once a `"repair": "merge-path"` item (`mergePath` files only) stalls 15 minutes with checks passed and an approver agent's `master decide GY-N repair-merge REASON` naming the fault, the App's ruleset bypass merges its head, audited (`repair.merged`) and flagged until a normal merge.
+The sole exception to the no-admin-bypass rule: once a `"repair": "merge-path"` item (`mergePath` files only) stalls 15 minutes with checks passed and an approver agent's `master decide GY-N repair-merge REASON` naming the fault, the App's ruleset bypass merges its head, audited (`repair.merged`) and flagged until a normal merge.
 
 Unresolved review threads are the reviewer's inputs, not merge blockers (`reviewThreads`); its approval names each on `Resolved threads:`, `Follow-up threads:` or `Overridden threads:` ([rules](coordination.md#review-gate-verdicts-not-threads)).

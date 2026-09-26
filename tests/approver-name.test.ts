@@ -217,7 +217,7 @@ test('integration:approver-launch-refusal-visible — a launch a runtime refuses
         if (args[0] === 'agent' && args[1] === 'rename') throw Object.assign(new Error('Command failed: herdr agent rename'), { stdout: JSON.stringify({ error: { code: 'invalid_argument', message: 'agent name must start with a lowercase letter and contain only lowercase letters, digits, \'-\' or \'_\' (1-32 characters)' } }) });
         return startedAtOnce(args) ?? JSON.stringify({ result: {} });
       };
-      await assert.rejects(launchApprover(root, item, decision, 'claude', [], refusing), (error: unknown) => {
+      await assert.rejects(launchApprover(root, item, decision, 'claude', { agents: [], available: true }, refusing), (error: unknown) => {
         assert.ok(error instanceof SessionNameRefusedError, 'a refused name is reported as a refused name');
         refusal = error;
         return true;
@@ -239,7 +239,7 @@ test('integration:approver-launch-refusal-visible — a launch a runtime refuses
       closeSession: () => {},
       dispatch: async () => {},
       requestProof: () => {},
-      merge: async work => { merged.push(work.key); return { result: 'merged' }; },
+      merge: async work => { merged.push(work.key); return { result: 'merged', merged: true }; },
       observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(), reason: 'not configured', deployed: [], pending: [] }),
       recordDeployment: async () => {},
       requestSmoke: () => {},

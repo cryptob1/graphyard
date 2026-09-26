@@ -303,7 +303,7 @@ function plane(scripts: Script[], options: { hostId?: string; host?: { root: str
       target.stage = 'done'; target.stageEnteredAt = iso();
       target.delivery = { mergedAt: iso(), mergedAtRepository: iso(), mergeSha, authorizationRevision: target.revision };
       recompute(target);
-      return { result: 'merged' };
+      return { result: 'merged', merged: true };
     },
     observeDeployment: async () => ({ source: 'unavailable' as const, sha: null, at: iso(clockStart), reason: 'No deployment endpoint is configured in this exercise', deployed: [], pending: [] }),
     recordDeployment: async () => {},
@@ -418,8 +418,8 @@ test('integration:unattended-full-cycle — with no master session and no human 
   // The launch contract itself, which the loop has to live inside: a name still listed refuses a
   // second session for the same decision, and says nothing about another decision on the item.
   const lingering = [{ name: first, pane_id: 'pane-lingering', agent_status: 'done' }];
-  await assert.rejects(launchApprover(host.root, item, requested[0].id, 'claude', lingering, simulation.sessions.run), /is already visible in Herdr; let it finish or close it first/);
-  const beside = await launchApprover(host.root, item, requested[1].id, 'claude', lingering, simulation.sessions.run);
+  await assert.rejects(launchApprover(host.root, item, requested[0].id, 'claude', { agents: lingering, available: true }, simulation.sessions.run), /is already visible in Herdr; let it finish or close it first/);
+  const beside = await launchApprover(host.root, item, requested[1].id, 'claude', { agents: lingering, available: true }, simulation.sessions.run);
   assert.equal(beside.agentName, second);
   assert.deepEqual((await listHerdrAgents(simulation.sessions.run)).map(agent => [agent.name, agent.agent_status]), [[second, 'working']]);
 
