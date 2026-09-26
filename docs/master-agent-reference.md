@@ -79,7 +79,7 @@ An unexplained lapsed lease raises `lease-loss` (`blocked-awaiting-operator` and
 
 ## Fault classes
 
-Faults carry `faultClass` (`master status` `faults`); recurring classes file one item (`GRAPHYARD_FAULT_CLASS_*`). What stands on the loop's first complete cycle is `baseline` (`daemon.faults.since`), never a recurrence; a commit in a fault's wording does not make it a new fault, and an unserved kind only split executors serve counts as their restart fault.
+Faults carry `faultClass` (`master status` `faults`); recurring non-`baseline` ones file one item (`GRAPHYARD_FAULT_CLASS_*`).
 
 ## Pipeline speed
 
