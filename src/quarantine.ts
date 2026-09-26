@@ -179,7 +179,9 @@ export const containmentVerificationSchema = z.object({
     /** How many live processes name this one as their parent; absent from a probe before GY-189. */
     children: z.number().int().min(0).optional(),
     /** Whether its standard input is a terminal; absent when fd 0 could not be read, and from a probe before GY-189. */
-    stdinTerminal: z.boolean().optional() }).strict()).max(400).default([]),
+    stdinTerminal: z.boolean().optional(),
+    /** Its parent's command line, bounded; absent when it could not be read, and from a probe before GY-413. */
+    parent: z.string().max(500).optional() }).strict()).max(400).default([]),
   /** The scope the quarantine recorded at launch and how systemd reports it now. */
   recordedScope: z.object({ unit: z.string().min(1).max(200), pid: z.number().int().positive(), activeState: z.string().min(1).max(40) }).strict().nullable().default(null),
   /**
@@ -228,7 +230,12 @@ export function paneShellReport(pane: string, result: unknown): NonNullable<Cont
   if (!info || info.pane_id !== pane || !positive(info.shell_pid)) return null;
   return { pane, pid: info.shell_pid as number, foregroundGroup: positive(info.foreground_process_group_id) ? info.foreground_process_group_id as number : null };
 }
-export interface ProcessTableDeps { listProcesses?: () => string[]; readParent?: (pid: number) => number; readStdin?: (pid: number) => string }
+export interface ProcessTableDeps { listProcesses?: () => string[]; readParent?: (pid: number) => number; readStdin?: (pid: number) => string; readCommand?: (pid: number) => string }
+/** Herdr's own server by its command line: the `herdr` binary run as `herdr server`, the parent of every pane's shell. */
+export function isHerdrServer(command: string | undefined) {
+  const [binary, subcommand] = (command ?? '').trim().split(/\s+/);
+  return (binary ?? '').split('/').pop() === 'herdr' && subcommand === 'server';
+}
 /** A terminal device a shell reads its prompt from: a pseudo-terminal or a console tty. */
 const terminalDevice = /^\/dev\/(pts\/\d+|tty[A-Za-z]*\d+)$/;
 /**
@@ -239,7 +246,7 @@ const terminalDevice = /^\/dev\/(pts\/\d+|tty[A-Za-z]*\d+)$/;
  * that could not be read leaves every count out, which settlement reads as 'not proven idle'.
  * An fd 0 that cannot be read is left out too, again 'not proven idle'.
  */
-export function countHeldChildren<T extends { held: { pid: number }[] }>(verification: T, deps: ProcessTableDeps = {}): Omit<T, 'held'> & { held: (T['held'][number] & { children?: number; stdinTerminal?: boolean })[] } {
+export function countHeldChildren<T extends { held: { pid: number }[] }>(verification: T, deps: ProcessTableDeps = {}): Omit<T, 'held'> & { held: (T['held'][number] & { children?: number; stdinTerminal?: boolean; parent?: string })[] } {
   if (!verification.held.length) return verification;
   const listProcesses = deps.listProcesses ?? (() => readdirSync('/proc'));
   // The parent is the second field after the command name, which may itself hold spaces or ')'.
@@ -249,27 +256,49 @@ export function countHeldChildren<T extends { held: { pid: number }[] }>(verific
     return parent;
   });
   const readStdin = deps.readStdin ?? ((pid: number) => readlinkSync(`/proc/${pid}/fd/0`));
+  const readCommand = deps.readCommand ?? ((pid: number) => readFileSync(`/proc/${pid}/cmdline`, 'utf8'));
   const stdinTerminal = (pid: number) => { try { return { stdinTerminal: terminalDevice.test(readStdin(pid)) }; } catch { return {}; } };
-  const parents: number[] = [];
+  // The parent's command line tells a Herdr pane's own shell (a child of `herdr server`) apart (GY-413).
+  const parentCommand = (pid: number) => {
+    const parent = parents.get(pid);
+    if (parent === undefined) return {};
+    try { return { parent: readCommand(parent).split('\0').filter(Boolean).join(' ').slice(0, 500) }; } catch { return {}; }
+  };
+  const parents = new Map<number, number>();
   try {
     for (const pid of listProcesses().filter(name => /^\d+$/.test(name)).map(Number)) {
-      try { parents.push(readParent(pid)); }
+      try { parents.set(pid, readParent(pid)); }
       catch (error) { if (!['ENOENT', 'ESRCH'].includes((error as { code?: string }).code ?? '')) return verification; }
     }
   } catch { return verification; }
-  return { ...verification, held: verification.held.map(entry => ({ ...entry, children: parents.filter(parent => parent === entry.pid).length, ...stdinTerminal(entry.pid) })) };
+  const all = [...parents.values()];
+  return { ...verification, held: verification.held.map(entry => ({ ...entry, children: all.filter(parent => parent === entry.pid).length, ...stdinTerminal(entry.pid), ...parentCommand(entry.pid) })) };
 }
 /**
  * The loop's host probe, annotated for GY-189: each held process's children and stdin, and, when
  * something still holds the fence, what Herdr reports for the recorded session's pane shell. A
  * pane Herdr cannot read is left out, which settlement reads as 'not proven idle'.
  */
-export async function annotatePaneShell<T extends { held: { pid: number }[] }>(verification: T, work: Pick<Work, 'containmentQuarantine' | 'sessions'> | undefined, readPane: (pane: string) => Promise<unknown>, deps?: ProcessTableDeps) {
+export async function annotatePaneShell<T extends { held: { pid: number; command: string; cwd: string | null; unit: string | null }[] }>(verification: T, work: Pick<Work, 'containmentQuarantine' | 'sessions'> | undefined, readPane: (pane: string) => Promise<unknown>, deps?: ProcessTableDeps,
+  listPanes?: () => Promise<unknown>) {
   const report = countHeldChildren(verification, deps);
+  if (!report.held.length) return report;
   const pane = work ? recordedPane(work) : null;
-  if (!pane || !report.held.length) return report;
-  const paneShell = await readPane(pane).then(result => paneShellReport(pane, result), () => null);
-  return paneShell ? { ...report, paneShell } : report;
+  const recorded = pane ? await readPane(pane).then(result => paneShellReport(pane, result), () => null) : null;
+  if (recorded && report.held.some(entry => entry.pid === recorded.pid)) return { ...report, paneShell: recorded };
+  // GY-413: a failed launch may leave its pane unrecorded, or the ledger may name another one. An
+  // idle interactive shell whose parent is `herdr server` is looked up in Herdr's own inventory:
+  // the pane Herdr names as that pid's shell is the pane, never a coordinate the worker wrote.
+  const candidates = report.held.filter(entry => entry.unit === null && entry.children === 0 && isInteractiveShell(entry.command) && isHerdrServer(entry.parent));
+  if (candidates.length && listPanes) {
+    const listed = await listPanes().catch(() => null) as { panes?: { pane_id?: unknown; cwd?: unknown }[] } | null;
+    for (const entry of Array.isArray(listed?.panes) ? listed.panes : []) {
+      if (typeof entry?.pane_id !== 'string' || (typeof entry.cwd === 'string' && !candidates.some(candidate => candidate.cwd === entry.cwd))) continue;
+      const shell = await readPane(entry.pane_id).then(result => paneShellReport(entry.pane_id as string, result), () => null);
+      if (shell && candidates.some(candidate => candidate.pid === shell.pid)) return { ...report, paneShell: shell };
+    }
+  }
+  return recorded ? { ...report, paneShell: recorded } : report;
 }
 /**
  * The launch pane's own shell, left in the worktree after `watch` exited (GY-189): the process
@@ -285,14 +314,21 @@ export async function annotatePaneShell<T extends { held: { pid: number }[] }>(v
  */
 function idlePaneShell(work: Pick<Work, 'containmentQuarantine' | 'sessions'>, verification: ContainmentVerification, process: ContainmentVerification['processes'][number]) {
   const quarantine = work.containmentQuarantine;
-  if (process.evidence !== 'workspace' || !quarantine?.scope) return false;
-  const recorded = verification.recordedScope;
-  if (recorded?.unit !== quarantine.scope.unit || recorded.pid !== quarantine.scope.pid || !endedScopeStates.includes(recorded.activeState)) return false;
-  const shell = verification.paneShell, pane = recordedPane(work);
-  if (!shell || !pane || shell.pane !== pane || shell.pid !== process.pid || shell.foregroundGroup !== process.pid) return false;
+  if (process.evidence !== 'workspace' || !quarantine) return false;
+  const shell = verification.paneShell;
+  if (!shell || shell.pid !== process.pid || shell.foregroundGroup !== process.pid) return false;
   const found = verification.held.find(entry => entry.pid === process.pid);
-  return !!found && found.unit === null && found.children === 0 && found.stdinTerminal === true && isInteractiveShell(found.command)
-    && !verification.scopes.some(scope => scope.processes.includes(process.pid) || scope.attributed.includes(process.pid));
+  if (!found || found.unit !== null || found.children !== 0 || found.stdinTerminal !== true || !isInteractiveShell(found.command)
+    || verification.scopes.some(scope => scope.processes.includes(process.pid) || scope.attributed.includes(process.pid))) return false;
+  const recorded = verification.recordedScope;
+  const scopeEnded = !!quarantine.scope && recorded?.unit === quarantine.scope.unit && recorded.pid === quarantine.scope.pid && endedScopeStates.includes(recorded.activeState);
+  // GY-189: the recorded session's pane, beside the recorded scope that ended.
+  if (scopeEnded && shell.pane === recordedPane(work)) return true;
+  // GY-413: the shell Herdr itself names as a pane's, a child of `herdr server` with nothing under
+  // it — no supervisor, no runtime — while no supervisor of the assignment runs and the recorded
+  // scope, if the launch got as far as one, has ended: the pane a launch left when its runtime
+  // never started. Only the supervisor, the runtime or the runtime's descendants are the worker.
+  return isHerdrServer(found.parent) && (scopeEnded || !quarantine.scope) && !verification.processes.some(entry => entry.evidence === 'command');
 }
 /**
  * The pane the loop may close once its worker's supervisor ended (GY-189): the recorded session's

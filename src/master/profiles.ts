@@ -204,6 +204,9 @@ export const masterRunSchema = z.object({
   // re-prompts it once, and how long after that re-prompt a still-quiet session is recorded as
   // never started (see acknowledgeLaunch); default 90.
   acknowledgementSeconds: z.number().int().min(30).max(900).optional(),
+  // How long a launched runtime has to come up in its pane before the launch fails and closes it
+  // (GY-413); default 60. A loaded host echoes the launch command slowly, which is a slow start.
+  launchStartSeconds: z.number().int().min(10).max(600).optional(),
   // Worktree reclamation: how long an assignment worktree may sit untouched before its dependency
   // directories count as disposable, and the free space below which `master status` raises disk
   // pressure. Both are read from .graphyard/master.json on every cycle, so a host with a smaller
