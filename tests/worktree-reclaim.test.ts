@@ -589,3 +589,37 @@ test('unit:worktree-orphan-reclaimed — a delivered item\'s directory Git no lo
     assert.deepEqual(audit.map(entry => [entry.action, entry.key]), [['orphan-remove', 'GY-160']]);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+// GY-552: the follow-up from GY-450's review. A hold recorded while a delivered item's tree was
+// registered does not shield the directory once Git forgets it: the orphan is judged regardless.
+test('unit:worktree-orphan-after-hold — a delivered item\'s tree held while registered is removed once Git no longer registers it, though its refs and activity never moved', async () => {
+  const root = await host(false);
+  try {
+    const idleMs = 3 * hour;
+    const tree = assignment(root, 'GY-170', 1);
+    for (const name of ['.gitignore', 'package-lock.json', 'source.ts']) await rm(join(tree.path, name));
+    await symlink(join(root, 'node_modules'), join(tree.path, 'node_modules'));
+    const when = new Date(Date.now() - 4 * hour);
+    const backdate = async () => { await utimes(join(tree.path, '.git'), when, when); await utimes(tree.path, when, when); };
+    await backdate();
+    const snapshot = [work('GY-170', { stage: 'done', workspaces: [workspace(tree.path, tree.branch, 1)] })];
+    const pass = async () => {
+      const report = await removeReclaimableWorktrees(root, snapshot, { idleMs, run: runChild, baseBranch: 'main' });
+      await writeWorktreeInventoryCache(root, { at: report.at, entries: report.entries, held: report.held });
+      return report;
+    };
+    const first = await pass();
+    assert.match(first.kept[0].reason, /Uncommitted changes/);
+    assert.equal(first.held.length, 1);
+    // Git forgets the tree; nothing the hold's fingerprint or activity sees has changed.
+    await rm(join(root, '.git', 'worktrees', 'GY-170-1'), { recursive: true });
+    execFileSync('git', ['worktree', 'prune'], { cwd: root });
+    await backdate();
+    const second = await pass();
+    assert.deepEqual(second.errors, []);
+    assert.deepEqual(second.removed.map(entry => entry.key), ['GY-170']);
+    assert.match(second.removed[0].reason, /no longer a registered Git worktree and held nothing but dependency trees/);
+    assert.equal(await exists(tree.path), false);
+    assert.deepEqual(second.held, []);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

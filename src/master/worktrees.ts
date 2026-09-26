@@ -349,11 +349,13 @@ export async function removeReclaimableWorktrees(root: string, work: Work[], opt
   let examined = 0, backlog = 0;
   for (const { candidate, reason } of reclaimable) {
     const activityAt = byPath.get(candidate.path)!.activityAt, refs = fingerprint(candidate);
-    const before = previous.find(entry => entry.path === candidate.path && entry.activityAt === activityAt && entry.refs === refs);
+    // Registration is judged before a hold is reused: a hold recorded while the tree was registered
+    // says nothing about the orphan it has since become, and neither its refs nor its activity see that.
+    const unregistered = registered !== null && !registered.has(await realpath(candidate.path).catch(() => candidate.path));
+    const finished = unregistered && work.find(item => item.key === candidate.key)?.stage === 'done';
+    const before = finished ? undefined : previous.find(entry => entry.path === candidate.path && entry.activityAt === activityAt && entry.refs === refs);
     if (before) { held.push(before); kept.push({ path: candidate.path, key: candidate.key, reason: before.reason }); continue; }
     if (!registered) { kept.push({ path: candidate.path, key: candidate.key, reason: 'Git refused: the registered worktrees could not be listed' }); continue; }
-    const unregistered = !registered.has(await realpath(candidate.path).catch(() => candidate.path));
-    const finished = unregistered && work.find(item => item.key === candidate.key)?.stage === 'done';
     if (unregistered && !finished) {
       kept.push({ path: candidate.path, key: candidate.key, reason: 'Not a registered Git worktree: its clean state cannot be judged apart from an enclosing repository' });
       continue;
