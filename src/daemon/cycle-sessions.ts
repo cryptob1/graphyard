@@ -483,12 +483,19 @@ async function resumeStep(cycle: Cycle, failedOver: Set<string>) {
     if (scopeDetail && state.actions[keys.scope]?.detail !== boundDetail(scopeDetail)) await entry(keys.scope, 'waiting', scopeDetail);
     if (item.blocker || request) { await drop(keys.idle); return; }
 
-    // 1e. Nothing is open any more: what the attempt waited on was resolved.
+    // 1e. Nothing is open any more: what the attempt waited on was resolved. A scope request asked
+    //     and answered between two cycles was never marked, but its decision stays on the item with
+    //     the attempt's epoch (GY-544), so a recent one nobody was told of since counts as waited on.
+    //     A blocker cleared between two cycles leaves no such record on the item, so it is left
+    //     to the idle-with-lease re-prompt below.
     const waited = [state.actions[keys.blocker], state.actions[keys.scope]].filter((action): action is DaemonAction => action?.state === 'waiting');
-    if (waited.length) {
+    const decision = item.scopeDecision, decidedAt = decision?.epoch === epoch ? Date.parse(decision.at) : NaN;
+    const unmarked = !state.actions[keys.scope] && Number.isFinite(decidedAt) && now() - decidedAt <= idleLeaseMs
+      && !Object.entries(state.actions).some(([key, action]) => key.startsWith(`resume:prompt:${item.id}:${epoch}:`) && action.state !== 'failed' && Date.parse(action.at) >= decidedAt);
+    if (waited.length || unmarked) {
       const blocker = state.actions[keys.blocker]?.detail.split(blockerMarker)[1];
-      const changed = [state.actions[keys.blocker] ? `its blocker${blocker ? ` ("${blocker.slice(0, 300)}")` : ''} was cleared` : null, state.actions[keys.scope] ? scopeChange(item) : null].filter(Boolean).join(', and ');
-      const promptKey = `resume:prompt:${item.id}:${epoch}:${waited[0].at}`, previous = state.actions[promptKey];
+      const changed = [state.actions[keys.blocker] ? `its blocker${blocker ? ` ("${blocker.slice(0, 300)}")` : ''} was cleared` : null, state.actions[keys.scope] || unmarked ? scopeChange(item) : null].filter(Boolean).join(', and ');
+      const promptKey = `resume:prompt:${item.id}:${epoch}:${waited[0]?.at ?? decision!.at}`, previous = state.actions[promptKey];
       if (previous && previous.state !== 'failed') { await drop(keys.blocker, keys.scope); return; }
       // No session to tell (1d settles a dead one), or one on a runtime prompt (1b answers that first).
       if (!agent || !pane || status === 'blocked') return;
@@ -552,10 +559,16 @@ async function resumeStep(cycle: Cycle, failedOver: Set<string>) {
  * no longer the pane's foreground process. The pane is matched on its own coordinate, never on the
  * profile's agent name, which the profile's next session reuses in another pane. The handle is
  * closed with the reason, so no reader counts it running.
+ *
+ * Herdr's foreground detection misreads a live agent at times, and a pane can drop out of one
+ * listing (GY-544), so an exited runtime is acted on as step 1 acts on one: only when Herdr read
+ * the handle's workspace at all, and only once the same sight stands on a later cycle and
+ * launchAppearanceMs after it was first seen.
  */
 async function closeExitedWorkerSessions(cycle: Cycle, runtime: { agents: HerdrAgent[]; available: boolean } | null) {
   const { config, state, effects, snapshot, clock, now, performed, isolate } = cycle;
   if (!effects.recordSession) return;
+  const sighted = new Set<string>();
   for (const item of snapshot.work) for (const handle of item.sessions ?? []) {
     if (handle.kind !== 'implementation' || handle.state !== 'running' || handle.host !== config.hostId) continue;
     const leased = !!item.lease && item.lease.owner === handle.principal && Date.parse(item.lease.expiresAt) > clock;
@@ -563,8 +576,18 @@ async function closeExitedWorkerSessions(cycle: Cycle, runtime: { agents: HerdrA
     if (item.stage !== 'build' && !leased) reason = `${item.key} has left build, the stage this implementation session was launched for, and is now in ${item.stage}`;
     else if (runtime?.available && handle.pane && !(clock - Date.parse(handle.startedAt) < launchAppearanceMs)) {
       const listed = runtime.agents.find(agent => agent.pane_id === handle.pane);
-      if (!listed || listed.agent === null || listed.agent === '')
-        reason = `the ${handle.runtime} runtime is no longer the foreground process of pane ${handle.pane}: Herdr ${listed ? 'detects no agent in it' : 'lists no agent in it'}, so the agent has exited`;
+      // A pane absent from a listing that holds nothing of its workspace says nothing about the pane.
+      const workspace = handle.workspace ?? (handle.pane.includes(':') ? handle.pane.split(':')[0] : null);
+      const read = !!listed || !workspace || runtime.agents.some(agent => agent.pane_id?.startsWith(`${workspace}:`));
+      const exited = read && (!listed || listed.agent === null || listed.agent === '')
+        ? `the ${handle.runtime} runtime is no longer the foreground process of pane ${handle.pane}: Herdr ${listed ? 'detects no agent in it' : 'lists no agent in it'}, so the agent has exited` : null;
+      const seenKey = `exited:implementation:${item.id}:${handle.id}:${handle.startedAt}`, seen = state.actions[seenKey];
+      if (exited) {
+        sighted.add(seenKey);
+        if (!seen) { await record(state, seenKey, { kind: 'close', work: item.key, principal: handle.principal, state: 'waiting', detail: `${exited}; implementation session ${handle.id} is closed if that still stands on a later cycle, ${launchAppearanceMs / 1000}s from now`, attempts: 1, cycle: state.cycle }, now(), effects.persist); continue; }
+        if (seen.cycle === state.cycle || now() - Date.parse(seen.at) < launchAppearanceMs) continue;
+        reason = `${exited} (first seen at ${seen.at})`;
+      }
     }
     if (!reason) continue;
     const key = `close:implementation:${item.id}:${handle.id}:${handle.startedAt}`, previous = state.actions[key];
@@ -580,4 +603,8 @@ async function closeExitedWorkerSessions(cycle: Cycle, runtime: { agents: HerdrA
       }
     });
   }
+  // A sighting that did not stand this cycle — the agent reappeared, or its handle was closed — starts over.
+  const lapsed = Object.keys(state.actions).filter(key => key.startsWith('exited:implementation:') && state.actions[key].state === 'waiting' && !sighted.has(key));
+  for (const key of lapsed) delete state.actions[key];
+  if (lapsed.length) await effects.persist(state);
 }
