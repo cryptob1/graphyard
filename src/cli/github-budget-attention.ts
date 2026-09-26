@@ -11,7 +11,8 @@ import { agentOwner, type AttentionItem } from '../master.js';
  *   identical errors, and the one thing they all meant — GitHub refused, until when, and what
  *   spent the budget — was said nowhere. The per-job errors stay in the ledger.
  * - **A projected exhaustion** is raised while the budget is still there to keep: the spend rate
- *   over the last ten minutes reaches zero before the reset does.
+ *   over the last ten minutes reaches zero before the reset does. It names the pace the
+ *   observation workers are held to (GY-567), which is what brings the spend back under the reset.
  * - **A silent webhook** is a broken webhook, not a slower control plane: no delivery for an hour
  *   while pull requests are open, named with the App settings page that fixes it, instead of
  *   being compensated by polling without a word.
@@ -24,6 +25,7 @@ export interface BudgetStatus {
     paused: { since: string; until: string; reason: string } | null;
     lastHour: { requests: number; byKind: { kind: string; requests: number }[] };
     deferrals?: { work: string; until: string; reason: string }[];
+    pace?: { tier: string; perMinute: number | null } | null;
   } | null;
   webhooks?: { lastDeliveryAt: string | null; lastHour: number; configured?: boolean; settingsUrl: string | null; openPullRequests: number } | null;
   jobs?: { work_id: string; error: string | null }[];
@@ -49,7 +51,7 @@ export function exhaustionAttention(status: BudgetStatus): AttentionItem[] {
   const budget = status.githubBudget;
   if (!budget || budget.paused || !budget.exhaustsBeforeReset || !budget.projectedExhaustionAt) return [];
   return [{ subject: 'github',
-    text: `GitHub budget: ${budget.remaining ?? '?'}${budget.limit !== null ? ` of ${budget.limit}` : ''} requests remain and the spend rate is ${budget.perMinute}/min over the last ten minutes; at that rate the budget is exhausted at ${budget.projectedExhaustionAt}, before it resets at ${budget.resetAt ?? 'an unknown time'}${budget.belowReserve ? `; it is already below the ${budget.reserve}-request merge-path reserve, so only merge-gate candidates and webhook wakes are observed` : ''}`,
+    text: `GitHub budget: ${budget.remaining ?? '?'}${budget.limit !== null ? ` of ${budget.limit}` : ''} requests remain and the spend rate is ${budget.perMinute}/min over the last ten minutes; at that rate the budget is exhausted at ${budget.projectedExhaustionAt}, before it resets at ${budget.resetAt ?? 'an unknown time'}${budget.pace?.perMinute != null ? `; observation workers are paced to ${budget.pace.perMinute}/min (${budget.pace.tier}) so the spend above the reserve lasts until the reset` : ''}${budget.belowReserve ? `; it is already below the ${budget.reserve}-request merge-path reserve, so only merge-gate candidates and webhook wakes are observed` : ''}`,
     ...agentOwner('master', `graphyard status (githubBudget) names the spend by kind; below the ${budget.reserve}-request reserve non-merge observations yield on their own, so nothing needs stopping — reduce open candidates or wait for the reset if the spend is not observation`) }];
 }
 
