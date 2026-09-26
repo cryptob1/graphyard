@@ -44,6 +44,8 @@ function provider(options: { head: string; boundBase: string; branchTip: string;
     }
     if (method !== 'GET') return { id: 12 };
     if (path === '/git/ref/heads/main') return { ref: 'refs/heads/main', object: { type: 'commit', sha: branchTip } };
+    // A refused merge reads the branch it would resolve onto (GY-444); these fakes model an unresolvable conflict.
+    if (path.startsWith('/git/ref/heads/')) return { ref: path.slice(5), object: { type: 'commit', sha: '0'.repeat(40) } };
     if (/^\/commits\/[a-f0-9]{40}$/.test(path)) {
       const sha = path.slice(9);
       return { sha, commit: { tree: { sha: sha === branchTip ? branchTree : treeOf(sha) }, author: { email: 'noreply@github.com' } }, parents: [], author: null, ...(commits[sha] ?? {}) };
