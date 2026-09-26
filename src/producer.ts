@@ -8,7 +8,7 @@ import { defaultChildRun, type ChildRun } from './child-runner.js';
 import { closeFailedLaunch, launchStartMs, withLaunchClose, accountLaunch, acknowledgeLaunch, acknowledgementMs, allocateManagedCheckout, atomicPrivateWrite, autonomousSession, closeHerdrPane, createdHerdrTab, deliverPrompt, destructivePromptGuidance, herdrJson, loadMasterConfig, markReprompted, neverStarted, onSelectedSession, prepareSessionHarness, privateFile, profileAtLimit, profileSessions, registrySessionOf, readProducerCredential, readSessionScreen, repromptText, selectAccount, selectRegistryAccount, sessionActivity, sessionAgentName, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, writeFailure, type PromptDelivery, type StartBounds, type HerdrAgent, type MasterConfig, type ProducerProfile, type RequestDelivery, type SessionRetryReport } from './master.js';
 import type { FleetProbe, selectFleetSession } from './fleet.js';
 import { implementerIdentities, type Work } from './model.js';
-import type { DispatchRequest } from './model/dispatch.js';
+import { requestAttemptLimit, type DispatchRequest } from './model/dispatch.js';
 import { reclaimSessionCheckouts, removeSessionCheckout, sessionCheckout, worktreeRoot, type CheckoutReclaimReport, type FilesystemProbe, type SessionCheckout } from './install/worktree-root.js';
 import { assertSessionLedgerRoom, boundSessionLedger, readReviewLedger, releaseClosedRequests, unrecordedPaneStopped, type SessionLedgerSpec } from './reviewer.js';
 import { closedQuestionFor } from './model/closed-question.js';
@@ -109,8 +109,7 @@ export const producerIdleGraceMs = producerLedgerSpec.idleGraceMs;
  * Such sessions have a bound of their own, `unstartedRetryLimit`, because a request whose
  * sessions keep not starting has a launcher problem that more launches will not fix.
  */
-/** Every session one request may have in all, however each ended: the dispatch failure limit (auto-dispatch.ts). */
-export const requestAttemptLimit = 12;
+export { requestAttemptLimit };
 export const sessionRetryLimit = 4, sessionRetryBaseMs = 60_000, sessionRetryMaxMs = 30 * 60_000, unstartedRetryLimit = 3;
 export const sessionRetryDelay = (attempts: number) => Math.min(sessionRetryBaseMs * 4 ** Math.max(0, attempts - 1), sessionRetryMaxMs);
 const retriedStates = ['failed', 'expired'];

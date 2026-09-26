@@ -3,6 +3,7 @@ import type { Work } from './work.js';
 import { exactApproval, exhaustedReviewerProfiles, reviewProviderOf, reviewerProfileFor } from './review.js';
 import { carriedApproval } from './carry.js';
 import { behindBaseHold } from './behind-base.js';
+import { currentEvidence } from './evidence.js';
 import { automatableOutcomes, dispatchIneligibility, mechanicalHold, producerGroupDecisions, type ProducerGroup } from './mechanical-proofs.js';
 
 /**
@@ -210,8 +211,52 @@ export interface RequestProgress {
   /** The head the request binds, when the reader carries it; a review reader names the commit no verdict can be obtained on. */
   sha?: string;
   /** `verdict` is the session's recorded verdict state, as a status reader summarizes it: `DISMISSED`, `APPROVED`, or null. */
-  session: { state: string; attempt?: number; resolution?: string | null; verdict?: string | null } | null;
+  /** `settledMs` is how long ago a session that is no longer pending settled, when the reader knows. */
+  session: { state: string; attempt?: number; resolution?: string | null; verdict?: string | null; settledMs?: number | null } | null;
   retry?: { attempts: number; limit: number; nextAt: string | null; exhausted: boolean } | null;
+  /**
+   * The decision a producer request waits on instead of another session, when its evidence on the
+   * head was recorded as not exercising its criterion (GY-193 AC-3): the loop launches no producer
+   * for the head again and requests rework — or, for a `manual:` proof, the attestation again.
+   */
+  remedy?: RequestRemedy | null;
+}
+export interface RequestRemedy { decision: 'rework' | 'attest'; proofs: string[] }
+/** Every session one request may have in all, however each ended: the dispatch failure limit (auto-dispatch.ts). */
+export const requestAttemptLimit = 12;
+/**
+ * GY-533. A session that settled while its request still stands is answered within moments: the
+ * evidence it recorded resolves the request on the control plane's next observation, and
+ * otherwise the loop relaunches the request on its next dispatch tick (GY-193) or raises the
+ * decision its evidence calls for. Until this long after it settled, such a request is an answer
+ * in progress, not an unanswered one.
+ */
+export const settledAnswerGraceMs = 5 * 60_000;
+/** Sessions whose request is relaunched on the widening retry schedule (producer.ts `sessionRetry`); every other settled state is relaunched on the next tick. */
+const retriedSessionStates = ['failed', 'expired'];
+
+/**
+ * The producer's finding that a proof on this head does not exercise its criterion (GY-135): the
+ * pass also held with the change removed. Such evidence is the worker's to fix, so the request is
+ * never launched again for the head and the loop requests the rework instead (GY-193 AC-3).
+ */
+export function unexercisedFindings(work: Work, sha: string | undefined = work.candidate?.sha, proofs?: readonly string[]): { proof: string; finding: string }[] {
+  if (!sha) return [];
+  const findings = new Map<string, string>();
+  for (const entry of work.evidence ?? []) {
+    if (!entry.unexercised || entry.sha !== sha || entry.policyRevision !== work.policyRevision || (proofs && !proofs.includes(entry.proof))) continue;
+    findings.set(entry.proof, entry.unexercised);
+  }
+  // A trusted pass recorded since answers the finding: the proof is proven on this head after all.
+  return [...findings].filter(([proof]) => !(sha === work.candidate?.sha && currentEvidence(work, proof)?.result === 'pass')).map(([proof, finding]) => ({ proof, finding }));
+}
+/** The decision a producer request waits on, or null when a session answers it (daemon/decisions.ts raises the decision). */
+export function requestRemedy(work: Work, request: Pick<DispatchRequest, 'kind' | 'sha' | 'proofs'>): RequestRemedy | null {
+  if (request.kind !== 'producer') return null;
+  const proofs = unexercisedFindings(work, request.sha, request.proofs).map(entry => entry.proof);
+  if (!proofs.length) return null;
+  // An unexercised `manual:` proof is re-attested, never reworked; any other calls for the rework.
+  return { decision: proofs.every(proof => proof.startsWith('manual:')) ? 'attest' : 'rework', proofs };
 }
 /**
  * Verdicts that answer a review request. The gate accepts one and refuses the other, and either
@@ -219,8 +264,13 @@ export interface RequestProgress {
  * while the control plane catches up. A dismissal answers nothing: GitHub withdrew it.
  */
 export const answeringVerdicts = ['APPROVED', 'CHANGES_REQUESTED'];
-/** A live request whose session settled leaving its gate unsatisfied, with nothing scheduled to answer it. */
-export interface UnansweredRequest { requestId: string; kind: DispatchKind; group?: string; sinceMs: number; state: string; verdict: string | null; attempts: number; resolution: string | null }
+/**
+ * A live request whose session settled leaving its gate unsatisfied past the grace. `next` names
+ * what answers it: the relaunch the loop owes it, the decision it waits on, or nothing at all.
+ */
+export interface UnansweredRequest { requestId: string; kind: DispatchKind; group?: string; sinceMs: number; state: string; verdict: string | null; attempts: number; resolution: string | null;
+  settledMs: number | null; next: UnansweredNext }
+export type UnansweredNext = { kind: 'relaunch'; attempt: number; limit: number } | ({ kind: 'decision' } & RequestRemedy) | null;
 
 /**
  * A request nothing is going to answer: its session settled — with a verdict the gate cannot
@@ -234,8 +284,18 @@ export function unansweredRequest(request: RequestProgress, kind: DispatchKind):
   if (!session || session.state === 'pending') return null;
   if (request.retry && !request.retry.exhausted && request.retry.nextAt) return null;
   if (session.verdict && answeringVerdicts.includes(session.verdict)) return null;
+  // GY-533: a session that settled moments ago is being answered — its evidence read, its request
+  // relaunched or its decision raised — and is not a request nothing will answer.
+  const settledMs = typeof session.settledMs === 'number' && Number.isFinite(session.settledMs) ? session.settledMs : null;
+  if (settledMs !== null && settledMs < settledAnswerGraceMs) return null;
+  const attempts = request.retry?.attempts ?? session.attempt ?? 1;
+  // What answers it now: the decision its evidence calls for; else, for a session that settled
+  // without failing, the relaunch the loop owes it on its next tick up to the attempt limit
+  // (auto-dispatch.ts `session`); a failed or expired one has its retry schedule, which is spent.
+  const next: UnansweredNext = kind === 'producer' && request.remedy ? { kind: 'decision', ...request.remedy }
+    : !retriedSessionStates.includes(session.state) && attempts < requestAttemptLimit ? { kind: 'relaunch', attempt: attempts + 1, limit: requestAttemptLimit } : null;
   return { requestId: request.requestId, kind, ...(request.group ? { group: request.group } : {}), sinceMs: request.sinceMs,
-    state: session.state, verdict: session.verdict ?? null, attempts: request.retry?.attempts ?? session.attempt ?? 1, resolution: session.resolution ?? null };
+    state: session.state, verdict: session.verdict ?? null, attempts, resolution: session.resolution ?? null, settledMs, next };
 }
 
 /** One settled reviewer session as a status reader summarizes it (summarizeReviews), for the judgement below. */

@@ -65,7 +65,7 @@ test('unit:fault-classes — every existing attention kind maps to exactly one c
     ['failed loop actions', daemonActionKinds.map(daemonActionFaultKind)],
     ['loop attention', ['loop-liveness', 'loop-cost', 'loop-failures', 'loop-silence', 'delivery-budget', 'loop-cursor', 'dispatch-failures']],
     ['master status builders', ['disk-pressure', 'resource-bound', 'ledger-refusal', 'scope-request', 'consent-hold', 'review-conflict', 'unobtainable-review', 'decision-refused', 'decision-stale', 'decision-unanswered',
-      'approver-launch', 'stalled-action', 'stalled-item', 'unanswered-request', 'stuck-request', 'overlong-session', 'context-overflow', 'timing-failure', 'agent-request', 'owed-decision', 'generated-files',
+      'approver-launch', 'request-remedy', 'stalled-action', 'stalled-item', 'unanswered-request', 'stuck-request', 'overlong-session', 'context-overflow', 'timing-failure', 'agent-request', 'owed-decision', 'generated-files',
       'github-budget', 'intervention-pattern', 'throughput', 'executor', 'setup', 'installation', 'sudo', 'unrunnable-remedy', 'role-capacity', 'concurrency-starved', 'fleet', 'actorless']],
     ['work item record', ['containment', 'human-request', 'scope-request', 'proof-gap', 'role-capacity', 'scope-violation', 'blocker', 'sandbox-blocker']],
   ];

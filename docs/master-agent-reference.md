@@ -75,6 +75,8 @@ An unexplained lapsed lease raises `lease-loss` (`blocked-awaiting-operator` and
 
 Faults carry `faultClass` (`master status` `faults`); recurring classes file one item (`GRAPHYARD_FAULT_CLASS_*`); moving hashes never reopen a standing fault. A failed section is listed only in `unavailable`.
 
+A request whose session settled is not `unanswered-request` for 5 minutes (`settledAnswerGraceMs`). Past that, the line names what answers it: the relaunch the loop owes (attempt N of 12), or "no further attempt is scheduled" once none is. A producer request whose evidence did not exercise its criterion is `request-remedy` (decision class), naming the rework or attest decision it awaits.
+
 ## Pipeline speed
 
 Target: submit→merge p50 ≤ 30 minutes and p90 ≤ 60 minutes over ten-plus deliveries. Each row's `speed` carries `executionMs`, `waitMs`, `reworkRounds` and `interventions`; `speed.submitToMerge` gives the verdict. `node scripts/measure-pipeline-speed.mjs` records what `manual:speed-target-met` reads.
