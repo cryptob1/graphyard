@@ -9,18 +9,9 @@ Only three decisions are human-only: goals and priorities, spending money or ope
 
 ## Operate
 
-Keep cycling: status, dispatch, review, merge, deployment verification. Stop only when every in-scope item is Done or has a genuinely external blocker recorded in Graphyard, and every merged change is verified against the exact deployed release or has a recorded deployment blocker.
+Cycle (`master status`; `master run` dispatches in `schedule.order`; findings go to rework; merge exact candidates passing every gate; `master verify-deployment GY-N` after delivery, [refusals](operations-reference.md#perpetual-master-loop)) until every in-scope item is Done or externally blocked, and every merge verified deployed or blocked, recorded in Graphyard. Railway: `master config productionEnvironment='graphyard / production'`; `controlPlane.production` flags main ahead of production.
 
-1. `master status`.
-2. `master run` dispatches ready work in `schedule.order`.
-3. Route findings to rework.
-4. Merge only exact candidates passing every gate.
-5. `master verify-deployment GY-N` after delivery ([refusals](operations-reference.md#perpetual-master-loop)). Railway: `master config productionEnvironment='graphyard / production'`.
-6. Close finished agent sessions.
-
-Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions. `controlPlane.production` flags main ahead of production.
-
-`master run` runs this loop under the `graphyard-master.service` unit ([supervision](onboarding.md#the-loop-must-be-supervised)); restart it with `systemctl --user restart graphyard-master` when `daemon.liveness` is `stalled` or `absent`.
+`master run` runs this loop under the `graphyard-master.service` unit ([supervision](onboarding.md#the-loop-must-be-supervised)); restart it (`systemctl --user restart graphyard-master`) when `daemon.liveness` is `stalled` or `absent`.
 
 ### System-driven items
 
@@ -31,7 +22,7 @@ The loop drives every item. Unless created `"systemDriven": false`, one refuses 
 **The control plane reconciles session liveness; closing finished sessions is not the master's
 manual duty.** A sweep runs on every automatic-dispatch tick (`run.dispatchIntervalSeconds`, default 10, 30 at most). A handle closes at the second consecutive sweep
 that misses it; an unobserved one is left alone for its first 3 minutes. A handle another host launched is left to
-that host's loop. `master status` lists stale handles as `sessions.unseen`. `dispatch.sessionReconcile` reports each closure:
+that host's loop. `sessions.unseen` lists stale handles. `dispatch.sessionReconcile` reports each closure:
 
 - **Vanished**: missing from two consecutive listings.
 - **Ended**: agentless pane, or terminal state. `idle`, `done` and
@@ -49,7 +40,7 @@ another session's handle finished to free a slot.
 
 ## Research before build
 
-With `run.research` set (`model`, `timeoutMinutes` 15, `tokenBudget`), a feature (or `"research": true`) gets one read-only Pi session per requirements revision, briefing worker and reviewer: reusable code, prior art, risks, approach. Product questions go under Needs you with recommendation and deadline; build proceeds on it, a differing answer requests rework, failure never blocks.
+With `run.research` set (`model`, `timeoutMinutes` 15, `tokenBudget`), a feature (or `"research": true`) gets one read-only Pi session per requirements revision briefing worker and reviewer (reusable code, prior art, risks, approach). Product questions go under Needs you with a recommendation and deadline; build proceeds on it; a differing answer requests rework; failure never blocks.
 
 ## Automatic dispatch at submit
 
@@ -76,5 +67,9 @@ A pass is trusted only when that stripped run failed with a case executed; other
 ## Guarded merges
 
 `master merge GY-N|--all` (skipping system-driven items) asks [GitHub to merge](github.md#merge-queue) only under a current authorization for the exact head, base and policy, never an administrative bypass. Protocol skew refuses: `server runs <sha>, CLI expects <sha>: deploy main first`.
+
+### Repair lane
+
+The one sanctioned exception to "never use an administrative merge bypass": a `"repair": "merge-path"` item (only `mergePath` files) merges head-bound through the App's pull-request-mode ruleset bypass after required checks pass on the head, an approver agent approves `master decide GY-N repair-merge REASON` naming the broken file, and the normal merge stalls 15 minutes. `repair.merged` audits it; `master status` flags it until a normal merge.
 
 Unresolved review threads are the reviewer's inputs, not merge blockers (`reviewThreads`); its approval names each on `Resolved threads:`, `Follow-up threads:` or `Overridden threads:` ([rules](coordination.md#review-gate-verdicts-not-threads)).

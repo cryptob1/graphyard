@@ -162,6 +162,8 @@ requested it for, and `graphyard master merge` refuses a candidate the approver 
 has not approved. Otherwise opted-out items may also use `graphyard master merge --all`. The guarded merge rechecks the exact current
 candidate, every configured gate, and GitHub state immediately before merging. Unapproved decisions, stale observations, failures, and
 changed commits remain blocking. Never use an administrative merge bypass, edit a candidate, or read a
-worker credential. Read `docs/master-agent.md`
+worker credential. The one sanctioned exception is the audited repair lane: the Graphyard App's own
+ruleset bypass merges a `"repair": "merge-path"` item whose normal merge has stalled, after an
+approved `repair-merge` decision naming the fault. Read `docs/master-agent.md`
 in Graphyard or run `graphyard master guide` for the complete operating loop.
 <!-- /graphyard-master -->
