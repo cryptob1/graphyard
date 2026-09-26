@@ -80,8 +80,9 @@ export type ResearchBrief = z.infer<typeof researchBriefSchema>;
  * `run.research` in .graphyard/master.json. `command` is the environment wrapper or Pi binary the
  * research account runs through (it defaults to `run.pi.command`), `model` the cheapest model
  * configured for research, `timeoutMinutes` the bound on one run, `tokenBudget` the estimated
- * tokens one run may stream before it is stopped, and `questionDeadlineHours` how long a product
- * question waits for the operator before its recommendation stands unchallenged.
+ * tokens one run may stream before it is stopped, `questionDeadlineHours` how long a product
+ * question waits for the operator before its recommendation stands unchallenged, and
+ * `triageConcurrency` how many machine-filed items are triaged at once.
  */
 export const researchSettingsSchema = z.object({
   enabled: z.boolean().default(true),
@@ -90,6 +91,7 @@ export const researchSettingsSchema = z.object({
   timeoutMinutes: z.number().int().min(1).max(60).default(15),
   tokenBudget: z.number().int().min(1_000).max(5_000_000).default(200_000),
   questionDeadlineHours: z.number().min(0.25).max(168).default(4),
+  triageConcurrency: z.number().int().min(1).max(16).default(2),
 }).strict();
 export type ResearchSettings = z.infer<typeof researchSettingsSchema> & { command: string };
 /** The research settings in force: `run.research` over its defaults, Pi's command from `run.pi` when research names none. */
