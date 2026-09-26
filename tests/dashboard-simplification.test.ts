@@ -11,7 +11,7 @@ import { computeAttribution } from '../src/attribution.js';
 // @ts-expect-error Dependency-free fixture and screenshot script.
 import { busyFixtureWork as auditBusyWork, fixtureApi, fixtureStatus, fixtureWork as auditWork, flowApi, NOW, unexplainedWords, visibleWords } from '../scripts/dashboard-fixture.mjs';
 import { live } from '../browser-tests/ui-board.js';
-import { jargon, phaseLabel, phaseOf, phases, plainReason, plainStatus } from '../web/plain-status.js';
+import { jargon, phaseLabel, phaseOf, phases, plainReason, plainStatus } from '../src/model/plain-status.js';
 import { homeNumbers } from '../web/home-numbers.js';
 import { classify, groupLabel, groups, summarySentence } from '../web/groups.js';
 import WorkersPage from '../web/pages/workers.js';
@@ -356,7 +356,7 @@ test('integration:dashboard-capability-parity — nothing removed from a default
   for (const file of ['web/features.ts', 'web/flow-analytics.tsx', 'web/main.tsx', 'web/pages/create-work.tsx', 'web/pages/work-details.tsx'])
     for (const [, path] of (await read(file)).matchAll(/(?:api|request|read)\(`([^`$?]+)[`$?]/g)) assert.ok(matches(path.replace(/\/$/, '')) || matches(`${path}x`), `${file}: /api/${path}`);
   for (const path of ['delivery', 'validation', 'operator-agents', 'analytics/flow', 'analytics/flow/drilldown', 'work']) assert.ok(matches(path), path);
-  const source = (await Promise.all(['web/pages/work-details.tsx', 'web/plain-status.ts', 'web/home-numbers.ts'].map(read))).join('\n');
+  const source = (await Promise.all(['web/pages/work-details.tsx', 'src/model/plain-status.ts', 'web/home-numbers.ts'].map(read))).join('\n');
   assert.doesNotMatch(source, /api\((['`])work\/[^'`]*\/(stage|state)/, 'no client-controlled lifecycle state');
   // The fixture reproduces the audit's cases (the stage table in unit:plain-status-copy covers the rest), and the script the views.
   for (const phase of ['not-started', 'needs-worker', 'building', 'review', 'proof', 'shipped'] as const) assert.ok(work.some(w => phaseOf(w, NOW) === phase), phase);
