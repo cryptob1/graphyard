@@ -149,15 +149,18 @@ export const statusRoutes = defineRoutes('status', [
       const { actor, services: { engine } } = context;
       demand(['coordinator', 'admin', 'operator-agent'].includes(actor.role), 'Coordinator permission required', 403);
       const run = doctorRunRecordSchema.parse(await parseJson(context, 65_536));
-      await engine.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, doctorRunEvent, JSON.stringify(run)]);
-      const keys = [...new Set(run.findings.map(finding => finding.subject).filter(subject => /^GY-\d+$/.test(subject)))];
-      if (keys.length) {
-        const items = (await engine.store.pool.query(`SELECT id, document->>'key' AS key FROM work_items WHERE document->>'key' = ANY($1)`, [keys])).rows as { id: string; key: string }[];
+      // The summary and its per-item findings land in one transaction: a run is recorded whole or
+      // not at all, and the loop posts a refused run again.
+      await engine.store.transaction(async db => {
+        await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, doctorRunEvent, JSON.stringify(run)]);
+        const keys = [...new Set(run.findings.map(finding => finding.subject).filter(subject => /^GY-\d+$/.test(subject)))];
+        if (!keys.length) return;
+        const items = (await db.query(`SELECT id, document->>'key' AS key FROM work_items WHERE document->>'key' = ANY($1)`, [keys])).rows as { id: string; key: string }[];
         for (const finding of run.findings) {
           const item = items.find(entry => entry.key === finding.subject);
-          if (item) await engine.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [item.id, actor.id, doctorFindingEvent, JSON.stringify(finding)]);
+          if (item) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [item.id, actor.id, doctorFindingEvent, JSON.stringify(finding)]);
         }
-      }
+      });
       return { recorded: true, runs: 1 };
     },
   },

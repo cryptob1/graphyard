@@ -357,7 +357,13 @@ export const daemonStateSchema = z.object({
    * The pipeline doctor's last runs (GY-711, src/daemon/doctor.ts): each with what it found, did
    * and filed, and the runs it took. The newest is kept whole; the list is bounded below.
    */
-  doctor: z.object({ runs: z.array(doctorRunRecordSchema).default([]) }).strict().default(() => ({ runs: [] })),
+  doctor: z.object({
+    runs: z.array(doctorRunRecordSchema).default([]),
+    /** The runs (by `at`) the control plane has not yet accepted: posted again on later cycles until it does. */
+    unposted: z.array(z.string().max(40)).max(40).default([]),
+    /** When the approver remedy last read each open item's decision history, by item id. */
+    decisionsCheckedAt: z.record(z.string(), z.string()).default({}),
+  }).strict().default(() => ({ runs: [], unposted: [], decisionsCheckedAt: {} })),
   /**
    * The system invariants (GY-404): what the loop carries between cycles to judge them — base
    * refreshes per candidate, when each merge candidate was first seen mergeable, the builds and lease

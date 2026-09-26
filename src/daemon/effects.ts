@@ -131,7 +131,7 @@ export interface DaemonEffects {
    * A loop configured without these three keeps cycling: each routine decision is then recorded as
    * an escalation naming the command a master session runs, exactly as before.
    */
-  decide?: (work: Work, action: RoutineDecisionAction | 'unblock', reason: string, input?: Record<string, unknown>) => Promise<{ id: string }>;
+  decide?: (work: Work, action: RoutineDecisionAction, reason: string, input?: Record<string, unknown>) => Promise<{ id: string }>;
   /**
    * Launches the independent approver session for one requested decision, under the name
    * `approverSessionName` gives it, and reports the session so later cycles can supervise it.
@@ -277,6 +277,11 @@ export interface DaemonEffects {
    * only the deterministic remedies, and stuck work waits for the master, as before.
    */
   doctor?: DoctorEffects;
+  /**
+   * Clears an item's blocker as the master's operator-agent identity, bound to the revision the
+   * loop read (GY-711 remedy 2): only for a scope refusal plannedFiles already covers.
+   */
+  unblock?: (work: Work, reason: string) => Promise<Work>;
   /** The recurrence rule; the environment's (GRAPHYARD_FAULT_CLASS_*) or the shipped default when absent. */
   faultClassPolicy?: FaultClassPolicy;
   /**
@@ -503,11 +508,16 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     const settings = doctorSettings(config.run);
     return {
       settings, cwd: root,
-      env: { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: config.operatorAgent!.credentialFile, GRAPHYARD_HOST_ID: config.hostId },
+      env: { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: config.operatorAgent!.credentialFile, GRAPHYARD_HOST_ID: config.hostId, GRAPHYARD_DOCTOR_CLI: config.cliPath },
       runner: async attempt => {
         if (attempt === 'primary') {
           const fleet = await selectFleetSession(config, doctorRole, { name: doctorRole, principal: config.operatorAgent!.id }, {});
-          if (fleet) { const launch = registryHeadlessLaunch(fleet.account); return { runner: registryRunner(fleet.account), runtime: launch.command, model: launch.model, release: fleet.release }; }
+          if (fleet) {
+            const launch = registryHeadlessLaunch(fleet.account);
+            // The doctor's command allowlist is the Pi extension's: a registry doctor role on any other runtime would run unguarded, so it is not used.
+            if (launch.command === 'pi') return { runner: registryRunner(fleet.account), runtime: launch.command, model: launch.model, release: fleet.release };
+            await fleet.release(`the registry doctor role names runtime ${launch.command}; the doctor runs only on Pi, where its command allowlist applies`);
+          }
         }
         const model = attempt === 'primary' ? settings.model : settings.fallbackModel;
         return { runner: piRunner({ command: settings.command, model }), runtime: 'pi', model };
@@ -694,6 +704,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     },
     get fileFaultClass() { return current().operatorAgent ? (input: ReturnType<typeof faultClassItem>, key: string) => asOperatorAgent('POST', 'work', input, key) as Promise<Work> : undefined; },
     // The doctor acts only through the operator-agent identity, and only its sanctioned commands (GY-711).
+    get unblock() { return current().operatorAgent ? (work: Work, reason: string) => asOperatorAgent('POST', `work/${work.id}/unblock`, { reason, expectedRevision: work.revision }) as Promise<Work> : undefined; },
     get doctor() { const config = current(); return config.operatorAgent && doctorSettings(config.run).enabled ? doctor(config) : undefined; },
     containment: (work, observed) => assessContainment(work, { hostId: current().hostId, observedAt: observed.now, clockOffset: observed.clockOffset, probe: async target => annotatePaneShell(await probeSupervisorAbsence(target, { run }),
       work.find(item => item.key === target.key && item.containmentQuarantine?.epoch === target.epoch), pane => herdrJson(['pane', 'process-info', '--pane', pane], run), undefined, () => herdrJson(['pane', 'list'], run),

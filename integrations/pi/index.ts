@@ -180,37 +180,106 @@ export function graphyardTools(role: string | undefined = process.env.GRAPHYARD_
 export const doctorSanctionedCommands = ['scope', 'requirements', 'unblock', 'decide', 'approver', 'settle-containment', 'close', 'create', 'release'] as const;
 /** The master subcommands and root commands that only read. */
 export const doctorReadOnlyCommands = ['status', 'decisions', 'context', 'guide', 'board'] as const;
-/** Other read-only programs a doctor may consult, with the read-only subcommands of `git` and `gh`. */
-const doctorReadPrograms = new Set(['cat', 'ls', 'head', 'tail', 'grep', 'rg', 'wc', 'jq', 'sort', 'uniq', 'diff', 'stat']);
-const doctorReadSubcommands = new Map<string, ReadonlySet<string>>([
-  ['git', new Set(['log', 'show', 'diff', 'status', 'branch', 'rev-parse', 'blame', 'describe', 'shortlog', 'ls-files', 'worktree'])],
-  ['gh', new Set(['view', 'list', 'checks', 'diff'])],
+/**
+ * The read-only programs a doctor may consult, each with the options that would make it write, run
+ * another program or reach past the checkout, refused by name (`sort -o`, `rg --pre`).
+ */
+const doctorReadPrograms = new Map<string, RegExp | null>([
+  ['cat', null], ['ls', null], ['head', null], ['tail', null], ['grep', null], ['wc', null], ['jq', null], ['diff', null], ['stat', null],
+  ['rg', /^--pre(?:=|-glob|$)/], ['sort', /^(?:-o|--output|--compress-program)/],
 ]);
+/** Options git's read subcommands take that write a file or run a configured program. */
+const gitWriting = /^(?:--output|--ext-diff|--textconv|--open-files-in-pager|-O$)/;
+/** `git branch` options that only list; a positional is a pattern only once one of the listing options is present. */
+const gitBranchListing = /^(?:-a|-r|-l|-v|-vv|--all|--remotes|--list|--show-current|--contains|--no-contains|--merged|--no-merged|--points-at|--sort=.*|--format=.*|--color(?:=.*)?|--no-color|--column(?:=.*)?|--no-column|--verbose|--abbrev=.*|--omit-empty)$/;
+const gitReads = new Set(['log', 'show', 'diff', 'status', 'rev-parse', 'blame', 'describe', 'shortlog', 'ls-files', 'branch', 'worktree']);
+/** The provider CLI's read subcommands, under the groups a doctor reads. */
+const ghReads = new Map([['pr', new Set(['view', 'list', 'checks', 'diff'])], ['run', new Set(['view', 'list'])], ['issue', new Set(['view', 'list'])]]);
 /** The CLI programs a Graphyard command may be invoked through; the words after it are the CLI's own. */
 const doctorCliPrograms = new Set(['graphyard']);
 
+export interface DoctorGuardContext { cwd: string; home?: string; /** The Graphyard CLI the loop names in the prompt; `node` may run only this script. */ cli?: string }
+
 /**
- * Whether one shell segment is within the doctor role's allowlist. `graphyard` and `node <cli>`
- * invocations are judged by their command word: the sanctioned subcommands, the read-only ones,
- * and nothing else — `master merge`, `master dispatch`, an evidence submission and a lease
- * command are refused by name in the reason. Everything that is not a read is refused.
+ * Whether the raw command line redirects: a `<` or `>` outside quotes. A doctor reads; it never
+ * writes a file, and a redirection is how a read would (`cat x > y`), so any is refused.
  */
-export function doctorSegmentAllowed(words: ShellWord[]): GuardVerdict {
-  const { index } = commandIndex(words);
+export function doctorRedirects(line: string) {
+  let quote: '"' | '\'' | null = null;
+  for (let index = 0; index < line.length; index++) {
+    const char = line[index];
+    if (quote === '\'') { if (char === '\'') quote = null; continue; }
+    if (char === '\\') { index++; continue; }
+    if (quote === '"') { if (char === '"') quote = null; continue; }
+    if (char === '\'' || char === '"') quote = char;
+    else if (char === '<' || char === '>') return true;
+  }
+  return false;
+}
+
+/**
+ * Whether one shell segment is within the doctor role's allowlist (GY-711). The segment must name
+ * its program first — no assignment (`NODE_OPTIONS=…`), wrapper (`sudo`, `env`, `timeout`) or
+ * expansion (`$GRAPHYARD_TOKEN_FILE`, `$(…)`) whose value cannot be checked before it runs.
+ * `graphyard` and `node <the Graphyard CLI>` are judged by their command word: the sanctioned
+ * subcommands, the read-only ones, and nothing else — `master merge`, `master dispatch`, an
+ * evidence submission and a lease command are refused by name. `node` runs the Graphyard CLI
+ * script and nothing else: no option (`-e`, `--require`) and no other script. The read-only
+ * programs and git's and gh's read subcommands run with every path they name inside the checkout,
+ * so the operator-agent credential, which is kept outside every checkout, is never read.
+ */
+export function doctorSegmentAllowed(words: ShellWord[], context: DoctorGuardContext = { cwd: process.cwd(), cli: process.env.GRAPHYARD_DOCTOR_CLI }): GuardVerdict {
+  const { index, wrapped } = commandIndex(words);
   const program = words[index]?.value.split('/').pop() ?? '';
-  const rest = words.slice(index + 1);
+  if (index !== 0 || wrapped) return { allow: false, reason: doctorRefusal(`a command run through an assignment or ${words[index - 1]?.value ?? 'a wrapper'}`) };
+  const expanded = words.find(word => word.dynamic);
+  if (expanded) return { allow: false, reason: doctorRefusal(`the expansion "${expanded.value}", whose value cannot be checked before it runs,`) };
+  // The program by its bare name, found on PATH: never a script of the same name in the checkout.
+  if (words[0].value !== program) return { allow: false, reason: doctorRefusal(`${words[0].value} (run programs by their bare name)`) };
+  const rest = words.slice(1);
   if (doctorCliPrograms.has(program)) return doctorCommandWords(rest.map(word => word.value));
   if (program === 'node') {
-    // `node <cli> status GY-N`: the script may be an expansion ($GRAPHYARD_CLI); the first word
-    // after it that is not a node option is the CLI's command word.
-    const after = rest.findIndex(word => !word.value.startsWith('-'));
-    return doctorCommandWords(rest.slice(after + 1).map(word => word.value));
+    const script = rest[0]?.value ?? '';
+    if (!script || script.startsWith('-') || !doctorCliScript(script, context)) return { allow: false, reason: doctorRefusal(`node ${script || ''}`.trim() + ' (node runs only the Graphyard CLI script, with no node options)') };
+    return doctorCommandWords(rest.slice(1).map(word => word.value));
   }
-  if (doctorReadPrograms.has(program)) return { allow: true };
-  const reads = doctorReadSubcommands.get(program);
-  // `gh pr view 12`: the provider's read subcommands sit one word down under `pr`.
-  if (reads && (reads.has(rest[0]?.value ?? '') || (rest[0]?.value === 'pr' && reads.has(rest[1]?.value ?? '')))) return { allow: true };
-  return { allow: false, reason: doctorRefusal(program) };
+  const reads = doctorReadPrograms.get(program);
+  let allowed = reads !== undefined && !rest.some(word => reads?.test(word.value));
+  if (program === 'git') allowed = gitRead(rest.map(word => word.value));
+  if (program === 'gh') allowed = ghReads.get(rest[0]?.value ?? '')?.has(rest[1]?.value ?? '') ?? false;
+  if (!allowed) return { allow: false, reason: doctorRefusal(`${program}${rest[0] ? ` ${rest[0].value}` : ''}`) };
+  const outside = rest.find(word => doctorPathOutside(word.value, context));
+  return outside ? { allow: false, reason: doctorRefusal(`reading ${outside.value}, a path outside the checkout ${context.cwd},`) } : { allow: true };
+}
+function gitRead(args: string[]) {
+  const [subcommand, ...rest] = args;
+  if (!gitReads.has(subcommand ?? '') || rest.some(arg => gitWriting.test(arg))) return false;
+  if (subcommand === 'worktree') return rest.length === 1 && rest[0] === 'list' || rest[0] === 'list' && rest.slice(1).every(arg => ['--porcelain', '-v', '--verbose', '-z'].includes(arg));
+  if (subcommand === 'branch') {
+    const options = rest.filter(arg => arg.startsWith('-'));
+    if (!options.every(arg => gitBranchListing.test(arg))) return false;
+    return rest.length === options.length || options.some(arg => /^(?:-a|-r|-l|--all|--remotes|--list|--contains|--no-contains|--merged|--no-merged|--points-at)$/.test(arg));
+  }
+  return true;
+}
+/** Whether `script` is the Graphyard CLI the loop named, or, when it named none, a `graphyard.mjs` launcher. */
+function doctorCliScript(script: string, context: DoctorGuardContext) {
+  const physicalOf = (path: string) => { try { return realpathSync(resolve(context.cwd, path)); } catch { return resolve(context.cwd, path); } };
+  return context.cli ? physicalOf(script) === physicalOf(context.cli) : basename(script) === 'graphyard.mjs';
+}
+/** Whether a word names a path outside the checkout: absolute, home-relative, `..`, or a link that resolves out. `--opt=PATH` is judged by its PATH. */
+function doctorPathOutside(value: string, context: DoctorGuardContext) {
+  const path = value.startsWith('-') ? value.includes('=') ? value.slice(value.indexOf('=') + 1) : '' : value;
+  if (!path) return false;
+  const root = physical(resolve(context.cwd), true);
+  const within = (candidate: string) => candidate === root || inside(candidate, root);
+  if (path.startsWith('~')) return !within(physical(resolve(path.replace(/^~/, context.home ?? homedir())), true));
+  // A revision range or pathspec a git read names (`HEAD..main`, `:/src`) is not a file.
+  const absolute = path.startsWith('/'), parent = path.split('/').includes('..');
+  if (!absolute && !parent) {
+    try { statSync(resolve(context.cwd, path)); } catch { return false; }
+  }
+  return !within(physical(resolve(context.cwd, path), true));
 }
 function doctorCommandWords(words: string[]): GuardVerdict {
   const command = words.find(word => !word.startsWith('-') && word !== 'master');
@@ -416,8 +485,9 @@ export default function graphyard(pi: ExtensionApi) {
     // The doctor role is judged by its command allowlist (GY-711) before the destructive-command
     // guard: a command outside it is blocked with the reason to record, never run.
     if (process.env.GRAPHYARD_PI_ROLE === 'doctor') {
+      if (doctorRedirects(command)) return { block: true, reason: doctorRefusal('a redirection (< or >)') };
       for (const words of shellWords(command)) {
-        const verdict = doctorSegmentAllowed(words);
+        const verdict = doctorSegmentAllowed(words, { cwd: context.cwd, cli: process.env.GRAPHYARD_DOCTOR_CLI });
         if (!verdict.allow) return { block: true, reason: verdict.reason };
       }
     }

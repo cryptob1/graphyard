@@ -93,7 +93,7 @@ export interface DoctorInput {
 /** The interval one doctor run waits for, from the settings in force. */
 export const doctorIntervalMs = (settings: Pick<DoctorSettings, 'intervalMinutes'>) => settings.intervalMinutes * 60_000;
 /** Whether a doctor run is due: none is in flight and the last one started past the interval. */
-export function doctorDue(state: Pick<DaemonState, 'doctor'>, clock: number, settings: Pick<DoctorSettings, 'intervalMinutes' | 'enabled'>) {
+export function doctorDue(state: { doctor: { runs: DoctorRunRecord[] } }, clock: number, settings: Pick<DoctorSettings, 'intervalMinutes' | 'enabled'>) {
   if (!settings.enabled) return false;
   if (state.doctor.runs.some(entry => entry.state === 'running')) return false;
   const last = state.doctor.runs.at(-1);
@@ -121,35 +121,64 @@ export function doctorPrompt(config: { repository: string; cliPath: string }, in
     `- overdue: items overdue in any step, by the stage clocks the evidence shows`,
   ].join('\n');
   return `You are the Graphyard pipeline doctor for ${config.repository}. Find stuck and overdue work and fix it through your sanctioned commands, doing what the master would have done by hand. Read the evidence below and the control plane (${cli} status GY-N, ${cli} master status, ${cli} master decisions GY-N, gh pr view). `
-    + `Act only where a check below has passed its fault bound; leave what is merely moving. Your sanctioned commands are ${doctorSanctionedCommands.map(name => `${cli} master ${name}`).join(', ')}, as the master's operator-agent identity; every other mutation is refused by your command allowlist — never merge, dispatch, submit evidence or touch a lease — and a refused command is recorded in your report, never retried. Never weaken a requirement; never approve a decision you requested yourself (request it, then ${cli} master approver GY-N DECISION for an independent approver). `
+    + `Act only where a check below has passed its fault bound; leave what is merely moving. Your sanctioned commands are ${doctorSanctionedCommands.map(name => `${cli} master ${name}`).join(', ')}, as the master's operator-agent identity; every other mutation is refused by your command allowlist — never merge, dispatch, submit evidence or touch a lease — and a refused command is recorded in your report, never retried. Run each command by its bare program name with literal arguments: no variables, command substitution, redirection, wrappers or node options, and read only paths inside this checkout. Never weaken a requirement; never approve a decision you requested yourself (request it, then ${cli} master approver GY-N DECISION for an independent approver). `
     + `A finding you cannot act on — a human-only decision (goals and priorities, money or accounts, credentials for people), or a fault class with no item to act through — mark unactionable; for the latter name the fault item to file, which the loop files at P0/P1 only if no open item already covers it. `
-    + `Then call the ${doctorTool} tool exactly once: one finding per stuck or overdue item under its check, one action entry per sanctioned command you ran and what it changed, and one filed entry per fault item you are asking the loop to file. Stop after the call.\n\nThe checks and their bounds:\n${checklist}\n\nThe evidence, as JSON:\n${JSON.stringify(input).slice(0, 100_000)}`;
+    + `Then call the ${doctorTool} tool exactly once: one finding per stuck or overdue item under its check, one action entry per sanctioned command you ran and what it changed, and one filed entry per fault item you are asking the loop to file. Stop after the call.\n\nThe checks and their bounds:\n${checklist}\n\nThe evidence, as JSON:\n${JSON.stringify(boundedInput(input))}`;
+}
+
+/** The evidence within 100,000 characters, dropping whole lines from the end and saying how many, so it is always valid JSON. */
+export function boundedInput(input: DoctorInput, limit = 100_000): DoctorInput & { omitted?: string } {
+  const items = [...input.items], faults = [...input.faults];
+  let dropped = 0;
+  const shaped = () => ({ items, faults, ...(dropped ? { omitted: `${dropped} line(s) left out to fit the evidence bound; read them with master status` } : {}) });
+  while (JSON.stringify(shaped()).length > limit && (faults.length || items.length)) { (faults.length ? faults : items).pop(); dropped++; }
+  return shaped();
 }
 
 /** Run the primary attempt, and the fallback once when the primary returns no valid report. */
 async function runDoctor(effects: DoctorEffects, prompt: string) {
   const runs: DoctorRunRecord['runs'] = [], timeoutMs = effects.settings.timeoutMinutes * 60_000;
   for (const attempt of ['primary', 'fallback'] as const) {
+    if (stopping) { runs.push({ runtime: 'none', model: attempt, result: 'cancelled', detail: stopping.slice(0, 500) }); break; }
     let chosen: Awaited<ReturnType<DoctorEffects['runner']>>;
     try { chosen = await effects.runner(attempt); }
     catch (error) { runs.push({ runtime: 'none', model: attempt, result: 'spawn', detail: `No ${attempt} runner: ${message(error)}`.slice(0, 500) }); continue; }
-    const run = chosen.runner.start(prompt, { cwd: effects.cwd, env: { ...effects.env, GRAPHYARD_PI_ROLE: doctorRole }, tool: doctorTool, timeoutMs,
-      validate: payload => doctorReportPayloadSchema.parse(payload) });
-    const result = await run.result();
-    await Promise.resolve(chosen.release?.(`the ${attempt} doctor run ended`)).catch(() => {});
-    runs.push({ runtime: chosen.runtime, model: chosen.model, result: result.ok ? 'reported' : result.failure.reason,
-      detail: (result.ok ? `${result.payload.findings.length} finding(s), ${result.payload.actions.length} action(s), ${result.payload.filed.length} to file` : result.failure.detail).slice(0, 500) });
-    if (result.ok) return { runs, report: result.payload };
-    if (result.failure.reason === 'cancelled') break;
+    // The selected runner is released however its run ends, and a start that throws is a failed
+    // attempt the fallback follows, never a leaked registry session.
+    try {
+      const run = chosen.runner.start(prompt, { cwd: effects.cwd, env: { ...effects.env, GRAPHYARD_PI_ROLE: doctorRole }, tool: doctorTool, timeoutMs,
+        validate: payload => doctorReportPayloadSchema.parse(payload) });
+      active = run;
+      const result = await run.result();
+      runs.push({ runtime: chosen.runtime, model: chosen.model, result: result.ok ? 'reported' : result.failure.reason,
+        detail: (result.ok ? `${result.payload.findings.length} finding(s), ${result.payload.actions.length} action(s), ${result.payload.filed.length} to file` : result.failure.detail).slice(0, 500) });
+      if (result.ok) return { runs, report: result.payload };
+      if (result.failure.reason === 'cancelled') break;
+    } catch (error) {
+      runs.push({ runtime: chosen.runtime, model: chosen.model, result: 'spawn', detail: `The ${attempt} run failed to start: ${message(error)}`.slice(0, 500) });
+    } finally {
+      active = null;
+      await Promise.resolve().then(() => chosen.release?.(`the ${attempt} doctor run ended`)).catch(() => {});
+    }
   }
   return { runs, report: null };
 }
 
 /** One doctor run this process has in flight, settled: a test's way to wait for it. */
-let live: Promise<void> | null = null;
+let live: Promise<void> | null = null, active: { cancel(reason?: string): void } | null = null, stopping: string | null = null;
 export async function doctorRunsSettled() { await live; }
+/**
+ * The loop is stopping: the run in flight is cancelled, no fallback starts, and its outcome is
+ * recorded on the cursor before the loop releases its lock, so nothing continues past shutdown.
+ */
+export async function stopDoctorRuns(reason = 'the loop is stopping') {
+  if (!live) return;
+  stopping = reason;
+  active?.cancel(reason);
+  try { await live; } finally { stopping = null; }
+}
 /** Test seam: forget every run in flight. */
-export function clearDoctorRuns() { live = null; }
+export function clearDoctorRuns() { live = null; active = null; stopping = null; }
 
 const keyOf = (subjects: string[]) => `doctor:${createHash('sha256').update(subjects.sort().join(',')).digest('hex').slice(0, 24)}`;
 const subjectKey = (work: readonly Work[], subject: string) => work.find(item => item.key === subject || item.id === subject)?.key ?? null;
@@ -183,12 +212,14 @@ export function doctorFileItem(entry: DoctorFile, reason: string): DoctorFileInp
 export async function applyDoctorRun(cycle: Cycle, effects: DoctorEffects, run: DoctorRunRecord, payload: { findings: DoctorFinding[]; actions: DoctorAction[]; filed: DoctorFile[] }, now: () => number) {
   const { state, effects: daemon, snapshot, performed } = cycle;
   const key = keyOf([run.at, ...payload.findings.map(finding => finding.subject)]);
-  const note = async (subject: string, detail: string, outcome: DaemonAction['state'] = 'done') => {
+  const note = async (subject: string, detail: string, outcome: DaemonAction['state'] = 'done', kind: DaemonAction['kind'] = 'fault') => {
     const itemKey = subjectKey(snapshot.work, subject);
-    performed.push(await record(state, `${key}:${subject}:${performed.length}`, { kind: 'fault', work: itemKey, principal: null, state: outcome, detail, attempts: 1, cycle: state.cycle }, now(), daemon.persist));
+    performed.push(await record(state, `${key}:${subject}:${performed.length}`, { kind, work: itemKey, principal: null, state: outcome, detail, attempts: 1, cycle: state.cycle }, now(), daemon.persist));
   };
+  // A finding the doctor could not act on — a human-only decision, a fault with no item to act
+  // through — is raised as an escalation, which master status reports under the loop's escalations.
   for (const finding of payload.findings)
-    await note(finding.subject, `${finding.check} bound passed${finding.unactionable ? ', unactionable' : ''}: ${finding.detail}`.slice(0, 2000));
+    await note(finding.subject, `${finding.check} bound passed${finding.unactionable ? ', and the doctor could not act on it' : ''}: ${finding.detail}`.slice(0, 2000), 'done', finding.unactionable ? 'escalation' : 'fault');
   for (const action of payload.actions)
     await note(action.subject, `${action.outcome === 'applied' ? 'Ran' : 'Was refused'} \`${action.command}\`: ${action.detail}`.slice(0, 2000), action.outcome === 'applied' ? 'done' : 'failed');
   const deduped = dedupDoctorFiles(payload.filed, snapshot.work);
@@ -204,7 +235,26 @@ export async function applyDoctorRun(cycle: Cycle, effects: DoctorEffects, run: 
   run.detail = `${run.findings.length} finding(s), ${run.actions.length} action(s), ${run.filed.length} filed, ${deduped.filter(entry => entry.covered).length} deduplicated: ${run.detail}`.slice(0, 1000);
   // The run record is already on the cursor's list; only its state, summary and filings move here.
   performed.push(await record(state, key, { kind: 'fault', work: null, principal: null, state: 'done', detail: run.detail, attempts: 1, cycle: state.cycle }, now(), daemon.persist));
-  await effects.recordRun?.(run).catch(() => { /* the cursor's copy stands; the next run posts again */ });
+  await postRun(cycle, effects, run, now);
+}
+
+/**
+ * Post one settled run to the control plane. A refusal or an unreachable control plane is recorded
+ * as a failed action and the run is posted again on later cycles, until it is accepted or it
+ * leaves the retained runs: the dashboard and `master status` are never silently without it.
+ */
+export async function postRun(cycle: Pick<Cycle, 'state' | 'effects'>, effects: Pick<DoctorEffects, 'recordRun'>, run: DoctorRunRecord, now: () => number) {
+  const { state } = cycle;
+  if (!effects.recordRun) return;
+  const pending = new Set(state.doctor.unposted);
+  try {
+    await effects.recordRun(run);
+    pending.delete(run.at);
+  } catch (error) {
+    pending.add(run.at);
+    await record(state, `doctor:post:${run.at}`, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `The control plane did not accept the doctor run of ${run.at}; it is posted again next cycle: ${message(error)}`.slice(0, 2000), attempts: (state.actions[`doctor:post:${run.at}`]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), cycle.effects.persist);
+  }
+  state.doctor.unposted = [...pending].filter(at => state.doctor.runs.some(entry => entry.at === at)).slice(-40);
 }
 
 const retainedRuns = 20;
@@ -227,9 +277,12 @@ export async function doctorStep(cycle: Cycle) {
     inFlight.state = 'failed';
     inFlight.detail = `The doctor run started ${inFlight.at} never ended in this process; it is recorded as lost`.slice(0, 1000);
     await record(state, `doctor:${inFlight.at}`, { kind: 'fault', work: null, principal: null, state: 'failed', detail: inFlight.detail, attempts: 1, cycle: state.cycle }, now(), effects.persist);
-    await doctor.recordRun?.(inFlight).catch(() => {});
+    await postRun(cycle, doctor, inFlight, now);
     return;
   }
+  // Runs the control plane refused or never received are posted again, one per cycle.
+  const unposted = state.doctor.runs.find(entry => entry.state !== 'running' && state.doctor.unposted.includes(entry.at));
+  if (unposted && readyToRetry(state.actions[`doctor:post:${unposted.at}`], state.cycle)) await postRun(cycle, doctor, unposted, now);
   if (!doctorDue(state, clock, doctor.settings)) return;
   const run = doctorRunRecordSchema.parse({ at: new Date(clock).toISOString(), state: 'running', runs: [], findings: [], actions: [], filed: [], detail: '' });
   state.doctor.runs = [...state.doctor.runs, run].slice(-retainedRuns);
@@ -250,7 +303,7 @@ export async function doctorStep(cycle: Cycle) {
       if (!outcome.report) {
         current.state = 'failed';
         await record(state, `doctor:${current.at}`, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `The doctor run returned no report: ${current.detail}`, attempts: 1, cycle: state.cycle }, now(), effects.persist);
-        await doctor.recordRun?.(current).catch(() => {});
+        await postRun(cycle, doctor, current, now);
         return;
       }
       await applyDoctorRun(cycle, doctor, current, outcome.report, now);
@@ -271,25 +324,36 @@ const remedyKey = (remedy: string, id: string) => `remedy:${remedy}:${id}`;
 
 /**
  * Remedy 1: settle a lapsed containment whose attempt submitted. Its work is on the pull request,
- * so the dead supervisor protects nothing: the fence is lowered without the probe the
- * never-submitted case still requires.
+ * so the fence protects nothing once its supervisor is gone. The loop verifies that on this host
+ * with the same probe `master settle-containment` runs and settles through the same `autosettle`
+ * contract, carrying the probe's verification for the control plane to re-check: a supervisor
+ * still present, or a probe the control plane would refuse, is left standing and recorded.
  */
 export async function settleSubmittedContainment(cycle: Cycle) {
-  const { state, effects, now, snapshot, clock, performed, isolate } = cycle;
-  for (const item of snapshot.work.filter(item => item.stage !== 'done' && item.containmentQuarantine
+  const { state, effects, now, snapshot, clock, clockOffset, performed, isolate } = cycle;
+  if (!effects.containment || !effects.settleContainment) return;
+  for (const item of snapshot.work.filter(item => item.containmentQuarantine
     && item.submission?.epoch === item.containmentQuarantine.epoch && containmentPhase(item, clock)?.state === 'lapsed')) {
     await isolate('settle', item, item.key, async () => {
-      const quarantine = item.containmentQuarantine!, epoch = quarantine.epoch, key = remedyKey('settle', `${item.id}:${epoch}`);
+      const epoch = item.containmentQuarantine!.epoch, key = remedyKey('settle', `${item.id}:${epoch}`);
+      // The reclaim step settles a verified-dead fence itself; this remedy is not a second settler of the same one.
+      if (['done', 'started'].includes(state.actions[`settle:${item.id}:${epoch}`]?.state ?? '')) return;
       const previous = state.actions[key];
       if (previous && (previous.state === 'done' || !readyToRetry(previous, state.cycle))) return;
-      if (!effects.settleContainment) return;
-      await record(state, key, { kind: 'settle', work: item.key, principal: null, state: 'started', detail: `Settling the lapsed containment of ${item.key} epoch ${epoch}: the attempt submitted its work, so the fence protects nothing`, attempts: (previous?.attempts ?? 0) + 1, epoch, cycle: state.cycle }, now(), effects.persist);
+      const assessment = (await effects.containment!([item], { now: snapshot.now, clockOffset }))[item.id];
+      if (!assessment) return;
+      const attempts = (previous?.attempts ?? 0) + 1;
+      if (!assessment.settleable || !assessment.verification) {
+        const detail = `The lapsed containment of ${item.key} epoch ${epoch}, whose attempt submitted pull request #${item.submission!.pr}, is not verified settleable on this host: ${assessment.refusals.join('; ') || 'the probe returned no verification'}`.slice(0, 2000);
+        if (previous?.detail !== detail) performed.push(await record(state, key, { kind: 'settle', work: item.key, principal: null, state: 'failed', detail, attempts, epoch, cycle: state.cycle }, now(), effects.persist));
+        return;
+      }
+      await record(state, key, { kind: 'settle', work: item.key, principal: null, state: 'started', detail: `Settling the lapsed containment of ${item.key} epoch ${epoch}: the attempt submitted and its supervisor is verified gone`, attempts, epoch, cycle: state.cycle }, now(), effects.persist);
       try {
-        await effects.settleContainment(item, { key: item.id, id: item.id, epoch, owner: quarantine.owner, at: quarantine.at, host: cycle.config.hostId, workspacePath: null, scope: quarantine.scope ?? null,
-          settleable: true, refusals: [], attestation: 'the attempt submitted its work, so no supervisor remains to verify', verification: null });
-        performed.push(await record(state, key, { kind: 'settle', work: item.key, principal: null, state: 'done', detail: `Settled the lapsed containment of ${item.key} epoch ${epoch} without a probe: the attempt submitted, so its work is on pull request #${item.submission!.pr}`, attempts: 1, epoch, cycle: state.cycle }, now(), effects.persist));
+        await effects.settleContainment!(item, assessment);
+        performed.push(await record(state, key, { kind: 'settle', work: item.key, principal: null, state: 'done', detail: `Settled the lapsed containment of ${item.key} epoch ${epoch}: the attempt submitted pull request #${item.submission!.pr} and its supervisor is verified gone on ${assessment.host ?? cycle.config.hostId}`, attempts, epoch, cycle: state.cycle }, now(), effects.persist));
       } catch (error) {
-        performed.push(await record(state, key, { kind: 'settle', work: item.key, principal: null, state: 'failed', detail: `Could not settle the lapsed containment of ${item.key} epoch ${epoch} whose attempt submitted: ${message(error)}`, attempts: 1, epoch, cycle: state.cycle }, now(), effects.persist));
+        performed.push(await record(state, key, { kind: 'settle', work: item.key, principal: null, state: 'failed', detail: `Could not settle the lapsed containment of ${item.key} epoch ${epoch} whose attempt submitted: ${message(error)}`, attempts, epoch, cycle: state.cycle }, now(), effects.persist));
       }
     });
   }
@@ -297,27 +361,29 @@ export async function settleSubmittedContainment(cycle: Cycle) {
 
 /**
  * Remedy 2: clear a blocker whose named scope is already in plannedFiles. A scope refusal left the
- * item's blocker standing, and a widening since applied covers every path it names: the loop
- * requests the `unblock` decision as the master's operator-agent identity for the approver to apply.
+ * item's blocker standing, and a widening since applied covers every path it names. Clearing it
+ * weakens nothing, so the loop applies `unblock` itself as the master's operator-agent identity,
+ * bound to the revision it read — the non-weakening intent that identity owns, never requested.
  */
 export async function clearCoveredBlockers(cycle: Cycle) {
   const { state, effects, now, snapshot, performed, isolate } = cycle;
-  const decide = effects.decide;
-  if (!decide) return;
+  const unblock = effects.unblock;
+  if (!unblock) return;
   for (const item of snapshot.work.filter(item => item.stage !== 'done' && item.blocker?.startsWith(scopeRefusalBlocker))) {
     await isolate('decision', item, item.key, async () => {
       // The remedy is only for a scope refusal whose every named path a later widening covered.
       const named = item.blocker!.match(/[\w.@-]+(?:\/[\w.@-]+)+/g) ?? [];
       if (!named.length || unplannedPaths(item.plannedFiles, named).length) return;
-      const key = remedyKey('unblock', item.id);
+      // Keyed by the revision it read: a blocker set again later is a new situation.
+      const key = remedyKey('unblock', `${item.id}:${item.revision}`);
       const previous = state.actions[key];
       if (previous && (previous.state === 'done' || !readyToRetry(previous, state.cycle))) return;
-      await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'started', detail: `Requesting the unblock decision for ${item.key}: its blocker names only paths plannedFiles already covers`, attempts: (previous?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist);
+      const attempts = (previous?.attempts ?? 0) + 1;
       try {
-        const decision = await decide(item, 'unblock', `${item.key}'s blocker stands on scope plannedFiles already covers: ${item.blocker!.slice(0, 500)}. The loop requests it be cleared; nothing outside plannedFiles is asked for.`, { expectedRevision: item.revision });
-        performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `Requested unblock decision ${decision.id} for ${item.key}: the blocker names only paths plannedFiles already covers`, attempts: 1, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+        await unblock(item, `The loop cleared ${item.key}'s scope-refusal blocker: every path it names (${named.join(', ')}) is already in plannedFiles, so nothing is widened and nothing is weakened (GY-711).`);
+        performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `Cleared ${item.key}'s blocker as the operator-agent identity: its scope refusal names only paths plannedFiles already covers (${named.join(', ')})`.slice(0, 2000), attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
       } catch (error) {
-        performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'failed', detail: `Could not request the unblock decision for ${item.key}: ${message(error)}`, attempts: 1, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+        performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'failed', detail: `Could not clear ${item.key}'s covered scope-refusal blocker: ${message(error)}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
       }
     });
   }
@@ -335,7 +401,14 @@ export async function relaunchUnansweredApprovers(cycle: Cycle) {
   const { state, effects, now, snapshot, clock, performed, agents, isolate, launcher } = cycle;
   const { decisions, approver } = effects;
   if (!decisions || !approver) return;
+  const checked = state.doctor.decisionsCheckedAt;
+  for (const id of Object.keys(checked)) if (!snapshot.work.some(item => item.id === id && item.stage !== 'done')) delete checked[id];
   for (const item of snapshot.work.filter(item => item.stage !== 'done')) {
+    // One decision-history read per item per `decisionCheckMs`, not per cycle: a decision is only
+    // relaunched past ten minutes, so reading more often finds nothing new and loads the control plane.
+    const last = checked[item.id];
+    if (last && clock - Date.parse(last) < decisionCheckMs) continue;
+    checked[item.id] = new Date(clock).toISOString();
     await isolate('decision', item, item.key, async () => {
       const history = await decisions(item).then(result => result.decisions, () => []);
       for (const decision of history.filter(entry => entry.state === 'requested')) {
@@ -347,18 +420,25 @@ export async function relaunchUnansweredApprovers(cycle: Cycle) {
         if (watch && (watch.launches >= maxApproverLaunches || watch.exhaustedAt)) continue;
         const key = remedyKey('approver', decision.id);
         const previous = state.actions[key];
-        if (previous && (previous.state === 'done' || !readyToRetry(previous, state.cycle))) continue;
+        // A replacement that also left without judging is relaunched again once the decision has
+        // stood unanswered another ten minutes, within the launch bound every decision carries —
+        // whether or not the loop watches it, so a hand-requested decision is never given up on.
+        if (previous && (previous.attempts >= maxApproverLaunches || (previous.state === 'done' ? clock - Date.parse(previous.at) < unansweredDecisionMs : !readyToRetry(previous, state.cycle)))) continue;
+        const attempts = (previous?.attempts ?? 0) + 1;
         try {
           const launched = await approver(item, decision.id);
           if (watch) Object.assign(watch, { launches: watch.launches + 1, agentName: launched.agentName, pane: launched.pane, launchedAt: new Date(clock).toISOString() });
-          performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `Relaunched approver ${launched.agentName} for ${item.key}'s unanswered ${decision.action} decision ${decision.id} (requested ${decision.requestedAt}, unanswered past ${unansweredDecisionMs / 60_000} min)`, attempts: (previous?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+          performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `Relaunched approver ${launched.agentName} for ${item.key}'s unanswered ${decision.action} decision ${decision.id} (requested ${decision.requestedAt}, unanswered past ${unansweredDecisionMs / 60_000} min; launch ${attempts} of ${maxApproverLaunches})`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
         } catch (error) {
-          performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'failed', detail: `Could not relaunch the approver for ${item.key}'s unanswered decision ${decision.id}: ${message(error)}`, attempts: (previous?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+          performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'failed', detail: `Could not relaunch the approver for ${item.key}'s unanswered decision ${decision.id}: ${message(error)}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
         }
       }
     });
   }
 }
+
+/** How often the approver remedy reads one item's decision history. */
+export const decisionCheckMs = 2 * 60_000;
 
 /** The three deterministic remedies, every cycle, before the doctor itself is scheduled. */
 export async function routineRemedies(cycle: Cycle) {

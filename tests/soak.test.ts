@@ -18,6 +18,11 @@ import { Launcher } from '../src/daemon/cycle.js';
 import { successorWidening } from '../src/model/successors.js';
 import { systemInvariants, type InvariantCheck } from '../src/model/invariants.js';
 import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } from './helpers/soak-world.js';
+import { clearDoctorRuns, doctorRunsSettled, doctorSettings, type DoctorEffects } from '../src/daemon/doctor.js';
+import { containmentPhase } from '../src/master/containment.js';
+import { containmentSettlementRefusals, containmentVerificationSchema } from '../src/quarantine.js';
+import { scopeRefusalBlocker } from '../src/model/scope.js';
+import type { Runner } from '../src/runner/types.js';
 
 /**
  * GY-404: per-item gates cannot catch faults that emerge from interaction over time, so this runs
@@ -27,8 +32,11 @@ import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } f
  * (src/model/invariants.ts) holds. Fifteen items pass through it: released every fifteen minutes so
  * a merge lands about every fifteen, three sent back by their reviewer, two whose worker dies, two
  * production deploys, a file split on main that re-plans an item, one pull request GitHub reports
- * CLEAN at once and one UNSTABLE, and a reviewer bot out of quota that fails over. Every one of the
- * fifteen must be delivered. The loop carries one `Launcher` across its cycles (GY-616), as
+ * CLEAN at once and one UNSTABLE, and a reviewer bot out of quota that fails over. The pipeline
+ * doctor (GY-711) runs through the day every ten minutes and posts each run to the control plane,
+ * and its routine remedies fire on the faults placed for them: a submitted attempt's fence whose
+ * first settlement is refused, a scope-refusal blocker plannedFiles already covers, and an
+ * approver that leaves its decision unanswered. Every one of the fifteen must be delivered. The loop carries one `Launcher` across its cycles (GY-616), as
  * `runDaemon` does, so session launches run beside the cycle — outliving it, holding their profile
  * from hand-off, and reported by the next cycle — and the invariants hold on that detached path. A
  * change to the loop that breaks an invariant fails here, in CI, before
@@ -60,6 +68,8 @@ const plan = {
   items: 15, releaseEveryMs: 15 * minute, workMs: 20 * minute,
   rework: new Set([3, 7, 11]), deaths: new Set([5, 9]), deathAfterMs: 8 * minute,
   deploys: [2 * hour + 30 * minute, 5 * hour], split: { at: 45 * minute, item: 12 }, clean: 2, unstable: 4, slowRecompute: 8, exhaustedReviewer: 6,
+  // The pipeline doctor's routine remedies (GY-711): a fenced attempt, a covered scope blocker, and a lost approver on a rework round.
+  fenced: 10, coveredBlocker: 13, blockedAfterMs: 5 * minute, lostApprover: 7,
 };
 const file = (n: number) => `src/soak/item-${n}.ts`;
 
@@ -101,6 +111,7 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
 let days = 0;
 async function simulateDay(options: { hours: number; regression?: 'approvers-left-open' }) {
   const dayStart = clock.now();
+  clearDoctorRuns();
   const github = new SimulatedGitHub({ repository, baseBranch: 'main', appId: 1234, ciAppId: 15368, reviewerApps, ciMs: 5 * minute, reviewMs: 3 * minute, firstPullRequest: 100 * ++days },
     [...Array.from({ length: plan.items }, (_, index) => file(index + 1)), 'README.md']);
   const herdr = new SimulatedHerdr();
@@ -122,7 +133,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   github.exhaustedProfiles.add('claude-reviewer');
 
   // ---- Workers: the loop dispatches, the simulated session claims, works, pushes and submits (or dies). ----
-  interface Session { work: string; key: string; branch: string; profile: WorkerProfile; epoch: number; pane: string; pushAt: number; diesAt: number | null; state: 'working' | 'submitted' | 'dead' }
+  interface Session { work: string; key: string; branch: string; profile: WorkerProfile; epoch: number; pane: string; startedAt: number; pushAt: number; diesAt: number | null; blocked?: boolean; state: 'working' | 'submitted' | 'dead' }
   const sessions: Session[] = [], lost: string[] = [];
   const attempts = new Map<string, number>();
   const principalOf = (profile: WorkerProfile): Principal => ({ id: profile.principal, role: 'worker' });
@@ -134,14 +145,21 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     const branch = work.candidate?.branch ?? `graphyard/${key.toLowerCase()}-${epoch}`;
     await engine.execute(principal, 'workspace', work.id, { epoch, host: 'soak-host', path: `/tmp/soak/${key.toLowerCase()}-${epoch}`, branch }, id());
     const attempt = (attempts.get(key) ?? 0) + 1; attempts.set(key, attempt);
+    // The fenced item's supervisor raises its containment quarantine, as `watch` does at launch.
+    if (n === plan.fenced && attempt === 1) await engine.execute(principal, 'quarantine', work.id, { epoch, settlementHash: 'e'.repeat(64) }, id());
     const pane = herdr.open(profile.agentName);
-    sessions.push({ work: work.id, key, branch, profile, epoch, pane, pushAt: clock.now() + plan.workMs, diesAt: plan.deaths.has(n) && attempt === 1 ? clock.now() + plan.deathAfterMs : null, state: 'working' });
+    sessions.push({ work: work.id, key, branch, profile, epoch, pane, startedAt: clock.now(), pushAt: clock.now() + plan.workMs, diesAt: plan.deaths.has(n) && attempt === 1 ? clock.now() + plan.deathAfterMs : null, state: 'working' });
     return { key, epoch };
   };
   const workersTick = async (now: number) => {
     for (const session of sessions.filter(entry => entry.state === 'working')) {
       if (session.diesAt !== null && now >= session.diesAt) { herdr.kill(session.pane); session.state = 'dead'; continue; }
       const principal = principalOf(session.profile);
+      // A scope refusal left standing on an item whose plannedFiles already cover the path it names.
+      if (numberOf(session) === plan.coveredBlocker && !session.blocked && now >= session.startedAt + plan.blockedAfterMs) {
+        session.blocked = true;
+        await engine.execute(principal, 'blocked', session.work, { epoch: session.epoch, reason: `${scopeRefusalBlocker}: ${session.key} needs ${file(plan.coveredBlocker)} outside plannedFiles` }, id());
+      }
       if (now < session.pushAt) {
         // A renewal refused is lease loss: the supervisor stops the session, as `watch` does.
         try { await engine.execute(principal, 'heartbeat', session.work, { epoch: session.epoch }, id()); }
@@ -157,8 +175,13 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
 
   // ---- Approvers and producers: sessions the loop launches, each acting on the minute after. ----
   const pending: (() => Promise<void>)[] = [];
+  let approverLost = false;
+  const approverLaunches = new Map<string, number>();
   const approver: DaemonEffects['approver'] = async (work, decision) => {
     const agentName = approverSessionName(work, decision), pane = herdr.open(agentName);
+    approverLaunches.set(work.key, (approverLaunches.get(work.key) ?? 0) + 1);
+    // The first approver of the lost-approver item exits without judging, leaving its decision requested.
+    if (numberOf(work) === plan.lostApprover && !approverLost) { approverLost = true; pending.push(async () => { herdr.kill(pane); }); return { agentName, pane }; }
     pending.push(async () => { await api(principals.approver, 'POST', `work/${work.id}/approve`, { decision, reason: `Approved: the loop's routine ${decision} decision for ${work.key} rests on what it verified` }); herdr.status(pane, 'done'); });
     return { agentName, pane };
   };
@@ -183,6 +206,20 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   // One executor instance for the loop's process, and a fresh request per merge the loop asks for, as `master run` wires it.
   const executor = { principal: principals.coordinator.id, instance: `soak-${randomUUID()}` };
   const merge: DaemonEffects['merge'] = work => mergeExecutor(config, snapshot, transport, executor, randomUUID(), github.gh(repository))(work);
+  let settleRefused = false;
+  // The pipeline doctor: a headless run every ten minutes that reports what it found, posted to the
+  // real control plane as the master's identity.
+  const doctorRuns: string[] = [];
+  const doctor: DoctorEffects = {
+    settings: doctorSettings(config.run), cwd: '/tmp', env: {},
+    runner: async () => ({ runtime: 'pi', model: 'soak/model', runner: { name: 'pi', start: (_prompt: string, runOptions: { tool: string }) => {
+      const open = [...approverLaunches.keys()][0];
+      const report = { findings: open ? [{ subject: open, check: 'overdue' as const, detail: 'Simulated: the doctor looked and found this item moving', unactionable: false }] : [], actions: [], filed: [] };
+      return { id: 'soak-doctor', cancel: () => {}, result: async () => ({ ok: true as const, tool: runOptions.tool, payload: report, payloads: [report] }) };
+    } } as unknown as Runner }),
+    file: () => { throw new Error('the soak doctor files nothing'); },
+    recordRun: async run => { doctorRuns.push(run.at); return api(principals.operatorAgent, 'POST', 'doctor', run); },
+  };
   const effects: DaemonEffects = {
     agents: () => herdr.list(),
     herdr: () => ({ agents: herdr.list(), available: true }),
@@ -200,6 +237,22 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       return { source: 'endpoint', sha: production.sha, at: new Date(clock.now()).toISOString(), reason: null, deployed: serving.map(item => item.key), pending: delivered.filter(item => !serving.includes(item)).map(item => item.key) };
     },
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    // This host's containment probe: a fenced supervisor is gone once its session stopped working.
+    containment: (work, observed) => Object.fromEntries(work.filter(item => item.containmentQuarantine && containmentPhase(item, Date.parse(observed.now))?.state !== 'live').map(item => {
+      const quarantine = item.containmentQuarantine!, workspace = item.workspaces.find(entry => entry.epoch === quarantine.epoch)!;
+      const alive = sessions.some(session => session.work === item.id && session.epoch === quarantine.epoch && session.state === 'working');
+      const verification = containmentVerificationSchema.parse({ method: 'linux-proc-systemd', host: 'soak-host', uid: 1000, platform: 'linux', workspacePath: workspace.path, observedAt: new Date(clock.now()).toISOString(),
+        clockOffset: { min: 0, max: 0 }, processes: alive ? [{ pid: 4242, evidence: 'command' }] : [], scopes: [], inaccessible: 0, unverifiable: [] });
+      const refusals = containmentSettlementRefusals(item, verification, { now: clock.now() });
+      return [item.id, { key: item.key, id: item.id, epoch: quarantine.epoch, owner: quarantine.owner, at: quarantine.at, host: 'soak-host', workspacePath: workspace.path, scope: null, settleable: !refusals.length, refusals, attestation: 'attest', verification }];
+    })),
+    // The first settlement the control plane is asked for is lost in transit; the loop settles it again.
+    settleContainment: async (work, assessment) => {
+      if (!settleRefused) { settleRefused = true; throw new Error('Graphyard refused work/autosettle (503): the control plane is restarting'); }
+      return api(principals.coordinator, 'POST', `work/${work.id}/autosettle`, { epoch: assessment.epoch, settlementHash: work.containmentQuarantine!.settlementHash, reason: 'The soak host verified the supervisor gone', verification: assessment.verification });
+    },
+    unblock: (work, reason) => api(principals.operatorAgent, 'POST', `work/${work.id}/unblock`, { reason, expectedRevision: work.revision }),
+    doctor,
   };
 
   // ---- The day. ----
@@ -240,6 +293,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       // The interval between cycles is when a hand-off launch settles; the day's clock waits for
       // them so the world never acts on a half-finished launch.
       await launcher.idle();
+      await doctorRunsSettled();
       for (const check of state.invariants.report as InvariantCheck[]) {
         if (check.observed) observed.add(check.invariant);
         if (!check.holds) violations.push(`${new Date(now).toISOString()} (+${Math.round(elapsed / minute)} min) ${check.line}`);
@@ -251,12 +305,12 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   }
 
   const final = (await store.list()).filter(item => items.some(entry => entry.id === item.id));
-  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart };
+  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, doctorRuns, approverLaunches };
 }
 
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 180_000 }, async () => {
   const began = performance.now();
-  const { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
+  const { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, state, doctorRuns, approverLaunches } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
   const undelivered = final.filter(item => item.stage !== 'done' || !item.delivery);
   assert.deepEqual(undelivered.map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
@@ -281,6 +335,20 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   const reviewed = final.find(item => item.key === items[plan.exhaustedReviewer - 1].key)!;
   assert.ok(reviewed.reviewFailovers?.some(failover => failover.profile === 'claude-reviewer' && failover.exhaustion === 'usage-limit' && failover.nextProfile === 'cursor-reviewer'), `the exhausted reviewer bot failed over to the next profile: ${JSON.stringify(reviewed.reviewFailovers)}`);
   assert.ok(cycles > 24 * 6, `the loop cycled through the day (${cycles} cycles)`);
+  // The pipeline doctor (GY-711): a run about every ten minutes of simulated time, each accepted by
+  // the control plane and served on /api/status; and each routine remedy fired on its fault.
+  const hoursRun = Number(process.env.SOAK_HOURS ?? 24);
+  assert.ok(doctorRuns.length >= hoursRun * 6 * 0.9 && doctorRuns.length <= hoursRun * 6 + 1, `the doctor ran about every ten minutes (${doctorRuns.length} runs)`);
+  assert.deepEqual(state.doctor.unposted, [], 'every doctor run was accepted by the control plane');
+  assert.equal(Number((await store.pool.query(`SELECT count(*) AS n FROM events WHERE kind='doctor-run'`)).rows[0].n), doctorRuns.length, 'one summary event per doctor run');
+  assert.ok((await api(principals.operator, 'GET', 'status')).doctor.length > 0, 'the last runs are served on /api/status for master status and the Doctor panel');
+  const remedies = Object.entries(state.actions).filter(([key]) => key.startsWith('remedy:'));
+  const fenced = items[plan.fenced - 1], blocked = items[plan.coveredBlocker - 1], unanswered = items[plan.lostApprover - 1];
+  assert.ok(remedies.some(([key, action]) => key.startsWith('remedy:settle:') && action.work === fenced.key && action.state === 'done'), `the loop settled ${fenced.key}'s submitted fence after its first settlement was refused: ${JSON.stringify(remedies)}`);
+  assert.equal(final.find(item => item.id === fenced.id)!.containmentQuarantine, null, 'the fence is lowered');
+  assert.ok(remedies.some(([key, action]) => key.startsWith('remedy:unblock:') && action.work === blocked.key && action.state === 'done'), `the loop cleared ${blocked.key}'s covered scope blocker itself`);
+  assert.ok((approverLaunches.get(unanswered.key) ?? 0) >= 2, `the lost approver of ${unanswered.key} was replaced: ${JSON.stringify([...approverLaunches])}`);
+  assert.ok(remedies.every(([, action]) => action.state === 'done'), `no remedy was left failing: ${JSON.stringify(remedies.filter(([, action]) => action.state !== 'done'))}`);
   const seconds = (performance.now() - began) / 1000;
   assert.ok(seconds < 120, `the day runs well inside the three minutes the CI test job allows it (${seconds.toFixed(1)} s)`);
 });

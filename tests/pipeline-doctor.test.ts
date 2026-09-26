@@ -5,13 +5,16 @@ import { emptyDaemonState, type DaemonEffects, type DaemonState } from '../src/m
 import { Launcher, type Cycle } from '../src/daemon/cycle.js';
 import { Timings } from '../src/master/timings.js';
 import { approverSessionName } from '../src/master/autonomy.js';
-import { clearDoctorRuns, clearCoveredBlockers, doctorBounds, doctorDue, doctorIntervalMs, doctorPrompt, doctorRunsSettled, doctorSanctionedCommands, doctorStep, relaunchUnansweredApprovers, settleSubmittedContainment, unansweredDecisionMs, type DoctorEffects } from '../src/daemon/doctor.js';
+import { clearDoctorRuns, clearCoveredBlockers, decisionCheckMs, doctorBounds, doctorDue, doctorIntervalMs, doctorPrompt, doctorRunsSettled, doctorSanctionedCommands, doctorStep, relaunchUnansweredApprovers, settleSubmittedContainment, unansweredDecisionMs, type DoctorEffects } from '../src/daemon/doctor.js';
 import { doctorTool } from '../src/daemon/doctor.js';
 import { doctorRunRecordSchema, type DoctorRunRecord } from '../src/daemon/state.js';
 import { doctorSettingsSchema } from '../src/master/profiles.js';
-import { doctorSanctionedCommands as piSanctioned, doctorSegmentAllowed, graphyardTools as piTools } from '../integrations/pi/index.js';
+import { doctorSanctionedCommands as piSanctioned, doctorRedirects, doctorSegmentAllowed, graphyardTools as piTools } from '../integrations/pi/index.js';
 import type { Runner } from '../src/runner/types.js';
 import type { Work } from '../src/model.js';
+import { operatorAgentRouteGuard } from '../src/server/auth.js';
+import { Next } from '../src/server/routes.js';
+import { containmentSettlementRefusals, containmentVerificationSchema } from '../src/quarantine.js';
 
 // Each test is named for the proof it produces (GY-711): unit:doctor-scheduled-and-scoped,
 // unit:doctor-run-recorded and unit:loop-applies-routine-remedies.
@@ -94,6 +97,45 @@ test('unit:doctor-scheduled-and-scoped — the doctor runs every ten minutes by 
   for (const segments of [['graphyard', 'status', 'GY-74'], ['graphyard', 'master', 'status'], ['graphyard', 'master', 'decisions', 'GY-74'], ['git', 'log', '-5'], ['gh', 'pr', 'view', '12'], ['cat', 'README.md']]) {
     assert.deepEqual(doctorSegmentAllowed(words(...segments)), { allow: true }, `${segments.join(' ')} is read-only`);
   }
+  // No way around the allowlist: node runs only the Graphyard CLI script with no node options;
+  // nothing expands, wraps or assigns; reads stay inside the checkout, so the operator-agent
+  // credential kept outside it is never read; git and gh run their read subcommands only; and a
+  // redirection is refused on the raw line before any segment is judged.
+  const guard = { cwd: process.cwd(), cli: master.cliPath };
+  const dynamic = (value: string) => ({ value, dynamic: true, glob: false });
+  const refused: [string, ReturnType<typeof words>][] = [
+    ['node -e', words('node', '-e', 'require("child_process").execSync("git push")', 'status')],
+    ['node --require', words('node', '--require', '/tmp/x.js', master.cliPath, 'status')],
+    ['node another script', words('node', 'scripts/other.mjs', 'status')],
+    ['an assignment', words('NODE_OPTIONS=--require=/tmp/x.js', 'node', master.cliPath, 'status')],
+    ['a wrapper', words('env', 'cat', 'README.md')],
+    ['sudo', words('sudo', 'cat', '/etc/shadow')],
+    ['a script named like a read', words('./cat', 'README.md')],
+    ['the credential by variable', [...words('cat'), dynamic('$GRAPHYARD_TOKEN_FILE')]],
+    ['a path outside the checkout', words('cat', '/home/someone/.graphyard/operator-agent.token')],
+    ['a home path', words('grep', '-r', 'token', '~')],
+    ['a parent path', words('cat', '../../secrets.token')],
+    ['an option naming an outside path', words('rg', '--ignore-file=/etc/passwd', 'x')],
+    ['a separate argument naming an outside path', words('jq', '--rawfile', 't', '/etc/passwd', '.')],
+    ['git branch -D', words('git', 'branch', '-D', 'graphyard/gy-1-1')],
+    ['git branch create', words('git', 'branch', 'new-branch')],
+    ['git worktree remove', words('git', 'worktree', 'remove', '--force', '/work/GY-74-1')],
+    ['git worktree add', words('git', 'worktree', 'add', 'x')],
+    ['git -c', words('git', '-c', 'core.pager=sh', 'log')],
+    ['git log --output', words('git', 'log', '--output=src/x.ts')],
+    ['gh api', words('gh', 'api', '-X', 'DELETE', 'repos/o/p/git/refs/heads/main')],
+    ['gh pr merge', words('gh', 'pr', 'merge', '12')],
+    ['rg --pre', words('rg', '--pre', 'sh', 'x')],
+    ['sort -o', words('sort', '-o', 'src/x.ts', 'README.md')],
+  ];
+  for (const [label, segment] of refused) assert.equal(doctorSegmentAllowed(segment, guard).allow, false, `${label} is refused`);
+  for (const line of ['cat README.md > leaked.txt', 'cat "$GRAPHYARD_TOKEN_FILE" >> x', 'grep x README.md 2>&1', 'jq . < /etc/passwd']) assert.equal(doctorRedirects(line), true, `${line} redirects`);
+  for (const line of ["grep '->' README.md", 'jq ".a > 1" x.json', 'gh pr view 12 && git log -1']) assert.equal(doctorRedirects(line), false, `${line} does not redirect`);
+  for (const segment of [words('node', master.cliPath, 'master', 'status'), words('git', 'branch', '--show-current'), words('git', 'branch', '--list', 'graphyard/*'), words('git', 'worktree', 'list'),
+    words('git', 'diff', 'main...HEAD'), words('gh', 'pr', 'checks', '12'), words('rg', 'doctor', 'src'), words('cat', `${process.cwd()}/README.md`)])
+    assert.deepEqual(doctorSegmentAllowed(segment, guard), { allow: true }, `${segment.map(word => word.value).join(' ')} is a read inside the checkout`);
+  assert.equal(doctorSegmentAllowed(words('node', master.cliPath, 'master', 'merge', 'GY-74'), guard).allow, false, 'the named CLI still refuses merge');
+
   // The doctor session launched through the headless runner gets exactly the doctor tool.
   assert.deepEqual(piTools('doctor').map(tool => tool.name), [doctorTool]);
 
@@ -151,35 +193,96 @@ test('unit:doctor-run-recorded — a doctor run records one event per item it fo
   assert.deepEqual(run.filed.map(entry => entry.work), ['GY-91']);
   assert.ok(events.some(action => /already covered by an open item/.test(action.detail)), 'the deduplicated filing is recorded, not silently dropped');
 
+  // The live post is admitted: the operator-agent identity the loop posts as reaches /api/doctor.
+  assert.equal(await operatorAgentRouteGuard.handle({ actor: { id: 'operator', role: 'operator-agent' }, url: new URL('https://graphyard.example/api/doctor') } as any, undefined as any), Next, 'the operator-agent route guard admits the doctor run post');
+  // The finding the doctor could not act on raises attention: an escalation master status reports.
+  assert.ok(Object.values(first.state.actions).some(action => action.kind === 'escalation' && /could not act on it: every human-only park/.test(action.detail)), 'an unactionable finding is raised as an escalation');
+
   // The next run is due one interval later, not on the next cycle.
   const second = cycle(work, { doctor, state: first.state });
   await doctorStep(second);
   assert.equal(second.state.doctor.runs.length, 1, 'the doctor does not run again inside its interval');
   clearDoctorRuns();
+
+  // A run the control plane refuses is recorded as failed and posted again, never silently lost.
+  let refusals = 1;
+  const accepted: string[] = [];
+  const flaky: DoctorEffects = { ...doctor, recordRun: async run => { if (refusals-- > 0) throw new Error('Graphyard refused doctor (403): Route is not available to operator agents'); accepted.push(run.at); } };
+  const third = cycle(work, { doctor: flaky });
+  await doctorStep(third);
+  await doctorRunsSettled();
+  const refusedRun = third.state.doctor.runs[0];
+  assert.deepEqual(third.state.doctor.unposted, [refusedRun.at], 'the refused run is held for another post');
+  assert.ok(Object.values(third.state.actions).some(action => action.state === 'failed' && /did not accept the doctor run.*403/.test(action.detail)), 'the refusal is recorded, not swallowed');
+  third.state.cycle += 1;
+  await doctorStep(cycle(work, { doctor: flaky, state: third.state }));
+  assert.deepEqual(accepted, [refusedRun.at], 'the run is posted again on a later cycle');
+  assert.deepEqual(third.state.doctor.unposted, []);
+  clearDoctorRuns();
+
+  // A runner whose start throws is released, and the fallback runs.
+  const released: string[] = [];
+  const throwing: DoctorEffects = { ...doctor, runner: async attempt => attempt === 'primary'
+    ? { runtime: 'pi', model: 'registry/model', release: async reason => { released.push(reason); }, runner: { name: 'pi', start: () => { throw new Error('account key unreadable'); } } as unknown as Runner }
+    : doctor.runner(attempt) };
+  const fourth = cycle(work, { doctor: throwing });
+  await doctorStep(fourth);
+  await doctorRunsSettled();
+  assert.deepEqual(released, ['the primary doctor run ended'], 'the primary runner is released although its start threw');
+  assert.equal(fourth.state.doctor.runs[0].state, 'reported', 'the fallback ran and reported');
+  assert.deepEqual(fourth.state.doctor.runs[0].runs.map(entry => entry.result), ['spawn', 'reported']);
+  clearDoctorRuns();
 });
 
-test('unit:loop-applies-routine-remedies — the loop settles a lapsed containment whose attempt submitted, requests the unblock decision for a blocker whose named scope plannedFiles already covers, and relaunches an approver for a decision unanswered past ten minutes', async () => {
-  // Remedy 1: a lapsed fence on a submitted attempt settles without the supervisor probe.
-  const settled: string[] = [];
-  const submitted = item({ submission: { epoch: 1, pr: 12 },
-    containmentQuarantine: { owner: 'worker-a', epoch: 1, at: at(-3_600_000), settlementHash: 'a'.repeat(64), leaseExpiresAt: at(-600_000) } });
-  const unsubmitted = item({ id: 'id-GY-76', key: 'GY-76',
-    containmentQuarantine: { owner: 'worker-a', epoch: 1, at: at(-3_600_000), settlementHash: 'b'.repeat(64), leaseExpiresAt: at(-600_000) } });
-  const remedied = cycle([submitted, unsubmitted], { effects: { settleContainment: async (target, assessment) => {
-    settled.push(target.key);
-    assert.equal(assessment.settleable, true);
-  } } });
+test('unit:loop-applies-routine-remedies — the loop settles a lapsed containment whose attempt submitted, clears a blocker whose named scope plannedFiles already covers, and relaunches an approver for a decision unanswered past ten minutes', async () => {
+  // Remedy 1: a lapsed fence on a submitted attempt is verified on this host with the settle-containment
+  // probe and settled through autosettle with that verification, which the control plane re-checks.
+  const settled: string[] = [], probed: string[] = [];
+  const quarantine = (hash: string) => ({ owner: 'worker-a', epoch: 1, at: at(-3_600_000), settlementHash: hash.repeat(64), leaseExpiresAt: at(-600_000) });
+  const workspaces = [{ epoch: 1, host: 'machine-a', path: '/work/GY-74-1', branch: 'graphyard/gy-74-1' }] as Work['workspaces'];
+  const submitted = item({ submission: { epoch: 1, pr: 12 } as Work['submission'], workspaces, containmentQuarantine: quarantine('a') });
+  const unsubmitted = item({ id: 'id-GY-76', key: 'GY-76', workspaces, containmentQuarantine: quarantine('b') });
+  const stillHeld = item({ id: 'id-GY-80', key: 'GY-80', submission: { epoch: 1, pr: 13 } as Work['submission'], workspaces, containmentQuarantine: quarantine('c') });
+  const verification = (target: Work, processes: { pid: number; evidence: 'command' | 'workspace' }[] = []) => containmentVerificationSchema.parse({ method: 'linux-proc-systemd', host: 'machine-a', uid: 1000, platform: 'linux',
+    workspacePath: target.workspaces[0].path, observedAt, clockOffset: { min: 0, max: 0 }, processes, scopes: [], inaccessible: 0, unverifiable: [] });
+  const remedied = cycle([submitted, unsubmitted, stillHeld], { effects: {
+    containment: async (targets: Work[]) => Object.fromEntries(targets.map(target => {
+      probed.push(target.key);
+      const found = verification(target, target.key === 'GY-80' ? [{ pid: 4242, evidence: 'command' }] : []);
+      const refusals = containmentSettlementRefusals(target, found, { now: Date.parse(observedAt) });
+      return [target.id, { key: target.key, id: target.id, epoch: 1, owner: 'worker-a', at: at(-3_600_000), host: 'machine-a', workspacePath: target.workspaces[0].path, scope: null,
+        settleable: !refusals.length, refusals, attestation: 'attest', verification: found }];
+    })),
+    settleContainment: async (target, assessment) => {
+      // Exactly what the control plane's autosettle re-checks: a full verification with no refusal.
+      assert.ok(assessment.verification, 'the settlement carries the probe verification');
+      assert.deepEqual(containmentSettlementRefusals(target, containmentVerificationSchema.parse(assessment.verification), { now: Date.parse(observedAt) }), [], 'the control plane would accept this verification');
+      settled.push(target.key);
+    },
+  } });
   await settleSubmittedContainment(remedied);
-  assert.deepEqual(settled, ['GY-74'], 'only the fence whose attempt submitted is settled');
+  assert.deepEqual(probed.sort(), ['GY-74', 'GY-80'], 'only fences whose attempt submitted are probed by the remedy');
+  assert.deepEqual(settled, ['GY-74'], 'the submitted fence verified gone is settled; one whose supervisor is still present is not');
   assert.ok(Object.values(remedied.state.actions).some(action => action.kind === 'settle' && action.state === 'done' && action.work === 'GY-74'));
+  assert.ok(Object.values(remedied.state.actions).some(action => action.kind === 'settle' && action.state === 'failed' && action.work === 'GY-80' && /still present/.test(action.detail)), 'a fence still held is recorded with the probe refusal');
+  // Settled once: the next cycle does not settle it again.
+  await settleSubmittedContainment(remedied);
+  assert.deepEqual(settled, ['GY-74']);
 
-  // Remedy 2: a scope-refusal blocker whose paths a widening already planned is asked unblocked.
-  const decided: { key: string; action: string }[] = [];
+  // Remedy 2: a scope-refusal blocker whose paths a widening already planned is cleared by the loop
+  // itself as the operator-agent identity, bound to the revision it read — no decision, no approver.
+  const unblockedKeys: { key: string; revision: number }[] = [];
   const covered = item({ id: 'id-GY-77', key: 'GY-77', blocker: 'Scope request refused: GY-77 needs src/item.ts/extra and tests/extra outside plannedFiles', plannedFiles: ['src/item.ts', 'src/item.ts/extra', 'tests/extra'] });
   const stillUnplanned = item({ id: 'id-GY-78', key: 'GY-78', blocker: 'Scope request refused: GY-78 needs src/other.ts outside plannedFiles', plannedFiles: [] });
-  const unblocked = cycle([covered, stillUnplanned], { effects: { decide: async (target, action) => { decided.push({ key: target.key, action }); return { id: `d-${target.key}` }; } } });
+  const unblocked = cycle([covered, stillUnplanned], { effects: {
+    unblock: async target => { unblockedKeys.push({ key: target.key, revision: target.revision }); return { ...target, blocker: null }; },
+    decide: async () => { throw new Error('the remedy applies the unblock itself; it never requests a decision'); },
+  } });
   await clearCoveredBlockers(unblocked);
-  assert.deepEqual(decided, [{ key: 'GY-77', action: 'unblock' }], 'only the blocker whose every named path is planned is unblocked');
+  assert.deepEqual(unblockedKeys, [{ key: 'GY-77', revision: 3 }], 'only the blocker whose every named path is planned is cleared, at the revision read');
+  assert.ok(Object.values(unblocked.state.actions).some(action => action.work === 'GY-77' && action.state === 'done' && /Cleared GY-77's blocker/.test(action.detail)));
+  await clearCoveredBlockers(unblocked);
+  assert.equal(unblockedKeys.length, 1, 'cleared once per revision');
 
   // Remedy 3: a requested decision unanswered past ten minutes with no live approver gets one.
   const launched: string[] = [];
@@ -208,4 +311,22 @@ test('unit:loop-applies-routine-remedies — the loop settles a lapsed containme
   });
   await relaunchUnansweredApprovers(adopted);
   assert.deepEqual(launched, ['d-old'], 'a decision whose approver session is still live is left alone');
+
+  // A replacement that also leaves without judging is relaunched once the decision has stood
+  // another ten minutes, even with no approval watch for it, within the launch bound.
+  const state = approverCycle.state;
+  const later = (offset: number) => cycle([waiting], { state, clock: Date.parse(observedAt) + offset, agents: [], effects: {
+    decisions: async () => ({ decisions: [{ id: 'd-old', action: 'unblock', state: 'requested', input: null, approvedBy: null, requestedAt: asked }] }),
+    approver: async (_target, decision) => { launched.push(decision); return { agentName: 'approver-3', pane: null }; },
+  } });
+  await relaunchUnansweredApprovers(later(3 * 60_000));
+  assert.deepEqual(launched, ['d-old'], 'not relaunched again inside ten minutes of the last launch');
+  await relaunchUnansweredApprovers(later(unansweredDecisionMs + 60_000));
+  assert.deepEqual(launched, ['d-old', 'd-old'], 'relaunched when the replacement also left the decision unanswered');
+  // The decision history is read at most once per item per decisionCheckMs, not every cycle.
+  let reads = 0;
+  const throttled = cycle([waiting], { state, clock: Date.parse(observedAt) + unansweredDecisionMs + 90_000, effects: { decisions: async () => { reads++; return { decisions: [] }; }, approver: async () => ({ agentName: 'x', pane: null }) } });
+  await relaunchUnansweredApprovers(throttled);
+  assert.equal(reads, 0, 'the item read 30 s ago is not read again');
+  assert.ok(decisionCheckMs <= unansweredDecisionMs / 2, 'the throttle is well inside the ten-minute bound');
 });

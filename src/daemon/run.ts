@@ -9,6 +9,7 @@ import { boundedPersist, cycleCost, cycleTimes, cycleDelay, cycleFailureCeiling,
 import type { DaemonEffects } from './effects.js';
 import { Launcher, defaultLaunchConcurrency, runCycle } from './cycle.js';
 import { describeTimings } from '../master/timings.js';
+import { stopDoctorRuns } from './doctor.js';
 
 /**
  * The compact daemon view `master status` joins onto Graphyard truth. `faultPolicy` is the recurrence
@@ -174,6 +175,8 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
     // they did is logged here since no next cycle will report it.
     if (launcher.pending) log(`[graphyard-master] waiting for ${launcher.pending} launch(es) in flight before stopping`);
     await launcher.idle();
+    // A pipeline-doctor run in flight is cancelled and its outcome recorded before the lock is released (GY-711).
+    await stopDoctorRuns();
     for (const action of launcher.drain()) log(`[graphyard-master] launch ${action.kind} ${action.state}: ${action.detail}`);
     for (const signal of signals) host.off(signal, stop);
     host.off('unhandledRejection', onRejection); host.off('uncaughtException', onException);
