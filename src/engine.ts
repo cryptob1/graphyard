@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { stableJson } from './model/stable-json.js';
 import { z } from 'zod';
 import type { PoolClient } from 'pg';
 import { Store, save, wakeJob, documentBefore, eventWorkSql } from './store.js';
@@ -1590,7 +1591,7 @@ export class Engine {
       if (leftover && settleDelivered(work, all, now)) await save(db, work, 'graphyard', 'delivery.settled', now);
       return;
     }
-    const before = JSON.stringify(work);
+    const before = stableJson(work);
     // The liveness invariant (GY-201) is judged on the record as it stood, before this tick
     // touched it, so a violation the tick repairs is recorded rather than silently absorbed.
     const stranded = livenessOf(work, all, now).violation;
@@ -1635,7 +1636,7 @@ export class Engine {
     // Every violation found at the start of the tick is repaired by the evaluation above — the
     // derivation names its successor and the queue opens its row — and the ledger says so.
     if (stranded) ledger.push(livenessRepairEntry(stranded, work, all, now));
-    if (JSON.stringify(work) !== before) {
+    if (stableJson(work) !== before) {
       for (const entry of ledger) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', entry.kind, JSON.stringify({ details: { ...entry.details, at: now.toISOString() } })]);
       await this.recordDispatch(db, work, now);
       await save(db, work, 'graphyard', 'reconciled', now, ledger.length ? { ledger: ledger.map(entry => entry.kind) } : undefined);
