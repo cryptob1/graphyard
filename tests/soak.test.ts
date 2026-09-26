@@ -59,7 +59,7 @@ const start = Date.parse('2031-06-02T08:00:00Z');
 const plan = {
   items: 15, releaseEveryMs: 15 * minute, workMs: 20 * minute,
   rework: new Set([3, 7, 11]), deaths: new Set([5, 9]), deathAfterMs: 8 * minute,
-  deploys: [2 * hour + 30 * minute, 5 * hour], split: { at: 45 * minute, item: 12 }, clean: 2, unstable: 4, slowRecompute: 8, exhaustedReviewer: 6,
+  deploys: [2 * hour + 30 * minute, 5 * hour], restartMs: 30 * 1000, split: { at: 45 * minute, item: 12 }, clean: 2, unstable: 4, slowRecompute: 8, exhaustedReviewer: 6,
 };
 const file = (n: number) => `src/soak/item-${n}.ts`;
 
@@ -99,7 +99,8 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
  * effects, standing for a change that breaks an invariant, so the soak shows it would fail.
  */
 let days = 0;
-async function simulateDay(options: { hours: number; regression?: 'approvers-left-open'; handApprovers?: boolean }) {
+async function simulateDay(options: { hours: number; regression?: 'approvers-left-open'; handApprovers?: boolean; restartMs?: number }) {
+  const restartMs = options.restartMs ?? plan.restartMs;
   const dayStart = clock.now();
   const github = new SimulatedGitHub({ repository, baseBranch: 'main', appId: 1234, ciAppId: 15368, reviewerApps, ciMs: 5 * minute, reviewMs: 3 * minute, firstPullRequest: 100 * ++days },
     [...Array.from({ length: plan.items }, (_, index) => file(index + 1)), 'README.md']);
@@ -123,7 +124,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
 
   // ---- Workers: the loop dispatches, the simulated session claims, works, pushes and submits (or dies). ----
   interface Session { work: string; key: string; branch: string; profile: WorkerProfile; epoch: number; pane: string; pushAt: number; diesAt: number | null; state: 'working' | 'submitted' | 'dead' }
-  const sessions: Session[] = [], lost: string[] = [];
+  const sessions: Session[] = [], lost: string[] = [], swallowed: string[] = [];
   const attempts = new Map<string, number>();
   const principalOf = (profile: WorkerProfile): Principal => ({ id: profile.principal, role: 'worker' });
   const dispatch: DaemonEffects['dispatch'] = async (work, profile) => {
@@ -138,9 +139,12 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     sessions.push({ work: work.id, key, branch, profile, epoch, pane, pushAt: clock.now() + plan.workMs, diesAt: plan.deaths.has(n) && attempt === 1 ? clock.now() + plan.deathAfterMs : null, state: 'working' });
     return { key, epoch };
   };
-  const workersTick = async (now: number) => {
+  // `reachable` false is a control plane mid-restart: nothing a session sends reaches it, so the
+  // renewal or submission due fails in transport, and the supervisor retries it (as `watch` does).
+  const workersTick = async (now: number, reachable = true) => {
     for (const session of sessions.filter(entry => entry.state === 'working')) {
       if (session.diesAt !== null && now >= session.diesAt) { herdr.kill(session.pane); session.state = 'dead'; continue; }
+      if (!reachable) { swallowed.push(`${session.key} epoch ${session.epoch} at ${new Date(now).toISOString()}`); continue; }
       const principal = principalOf(session.profile);
       if (now < session.pushAt) {
         // A renewal refused is lease loss: the supervisor stops the session, as `watch` does.
@@ -246,11 +250,11 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     const deploying = deploys < plan.deploys.length && elapsed >= plan.deploys[deploys];
     if (deploying) { production.build = sha('build', ++deploys); production.sha = github.tip; production.deploys.push({ at: now, build: production.build, sha: production.sha }); }
     // The world moves: GitHub, then the sessions. A deploy restarts the control plane at the top of
-    // the minute: the renewals due inside the outage fail, and each session's supervisor retries
-    // them once the restart completes, later in the same minute — a renewal across the gap, on
-    // whatever the lease has left (GY-274). A restart that outlasted the lease would refuse the
-    // retry and lose the lease, and `deploy-lease-loss` with it; the loop itself stays down for
-    // the rest of the minute.
+    // the minute for `restartMs`: the renewals due then fail in transport, the clock moves through
+    // the outage, and each session's supervisor retries once the restart completes — a renewal
+    // across the gap, on whatever the lease taken a minute before has left (GY-274). A restart
+    // that outlasts it lapses the lease, the retry is refused and `deploy-lease-loss` is violated.
+    // The loop itself stays down until the next whole minute.
     github.tick(now);
     if (!deploying) {
       await workersTick(now);
@@ -273,22 +277,23 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
         if (!check.holds) violations.push(`${new Date(now).toISOString()} (+${Math.round(elapsed / minute)} min) ${check.line}`);
       }
     } else {
-      // The restart completes inside the minute: the supervisor's retry renews what the outage
-      // swallowed and submits anything due, while the lease taken before it still has time left.
-      await workersTick(now);
+      await workersTick(now, false);
+      elapsed += restartMs; await moveClock(restartMs);
+      await workersTick(clock.now());
     }
     const open = (await store.list()).filter(item => item.stage !== 'done').length;
-    const step = open ? minute : 10 * minute;
+    // A restart leaves the day off the minute: the next step brings it back onto one.
+    const step = (open ? minute : 10 * minute) - elapsed % minute;
     elapsed += step; await moveClock(step);
   }
 
   const final = (await store.list()).filter(item => items.some(entry => entry.id === item.id));
-  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, herdr, hand, escalations, spent };
+  return { items, final, github, sessions, lost, swallowed, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, herdr, hand, escalations, spent };
 }
 
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 180_000 }, async () => {
   const began = performance.now();
-  const { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
+  const { items, final, github, sessions, lost, swallowed, violations, observed, failures, production, cycles, reportedDispatches, dayStart } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
   const undelivered = final.filter(item => item.stage !== 'done' || !item.delivery);
   assert.deepEqual(undelivered.map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
@@ -309,6 +314,10 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   // per session, none lost between the hand-off and the drain.
   assert.equal(reportedDispatches, sessions.length, 'each settled dispatch launch was reported to a cycle');
   assert.equal(production.deploys.length, plan.deploys.length, 'two production deploys');
+  // The first deploy lands mid-flow: its outage swallowed live sessions' renewals, each retried
+  // across the gap without a lease lost (the second may find no session working).
+  const firstDeploy = new Date(production.deploys[0].at).toISOString();
+  assert.ok(swallowed.some(entry => entry.endsWith(firstDeploy)), `the deploy at ${firstDeploy} swallowed a renewal: ${swallowed.join(', ')}`);
   assert.ok(final.find(item => item.key === items[plan.split.item - 1].key)!.plannedFiles.includes(`src/soak/item-${plan.split.item}-a.ts`), 'the split file re-planned its item onto the successors');
   const reviewed = final.find(item => item.key === items[plan.exhaustedReviewer - 1].key)!;
   assert.ok(reviewed.reviewFailovers?.some(failover => failover.profile === 'claude-reviewer' && failover.exhaustion === 'usage-limit' && failover.nextProfile === 'cursor-reviewer'), `the exhausted reviewer bot failed over to the next profile: ${JSON.stringify(reviewed.reviewFailovers)}`);
@@ -335,6 +344,18 @@ test('unit:soak-invariants-hold — hand-launched approvers that vanish or stop 
     assert.ok(![...herdr.agents.values()].some(agent => agent.name === approverSessionName(final.find(item => item.key === key)!, decision)), `${key}: no approver session for it is left open`);
   }
   assert.equal([...hand.values()].reduce((total, entry) => total + entry.refused, 0), 1, 'one relaunch was refused by a registry timeout, and retried');
+});
+
+test('unit:soak-invariants-hold — a deploy whose restart outlasts the leases the sessions hold loses them, and the soak names it as deploy-lease-loss', { timeout: 120_000 }, async () => {
+  // A lease renewed a minute before the deploy has a minute left (the engine grants 120 s): a
+  // ninety-second restart lapses it, and the supervisor's retry after the restart is refused.
+  const { final, lost, swallowed, violations, production } = await simulateDay({ hours: 6, restartMs: 90 * 1000 });
+  // Every item is still delivered, so the day after starts from a clean board.
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}`), [], 'all fifteen items are delivered');
+  const at = new Date(production.deploys[0].at).toISOString();
+  assert.ok(swallowed.some(entry => entry.endsWith(at)), `the outage swallowed a renewal: ${swallowed.join(', ')}`);
+  assert.ok(lost.length > 0, 'the retry after the restart was refused: the lease was lost');
+  assert.ok(violations.some(line => /deploy-lease-loss: VIOLATED/.test(line)), `the soak names the lease lost to the deploy: ${violations.slice(0, 3).join('\n')}`);
 });
 
 test('unit:soak-invariants-hold — a loop change that breaks an invariant fails the soak: approver sessions the loop no longer closes are named within the hour', { timeout: 120_000 }, async () => {
