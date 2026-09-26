@@ -1,4 +1,4 @@
-import { baseRefreshConflict, conversationProtectionRefusal, latestCheck, restoringAfterEjection, tipValidation } from '../merge-queue.js';
+import { baseRefreshConflict, ciPendingReason, conversationProtectionRefusal, latestCheck, restoringAfterEjection, tipValidation } from '../merge-queue.js';
 import type { QueueEjection, QueueEntry, QueueHistoryEntry } from '../merge-queue.js';
 import type { Gate, Stage, Work } from './work.js';
 import { escalationRefusals } from './escalation.js';
@@ -110,9 +110,16 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[],
   // not the change going back to Test because the base moved (GY-292): its checks refuse the merge
   // gate, and the test gate, which judges the candidate's own change, stands. A batch member the
   // plan merges on its batch's passing combined tip needs no verdict on its own tip (GY-330).
+  //
+  // Ordering (GY-332): the test gate is settled only after `placeInQueue` has run on the gates as
+  // they stood, so an entry validating its tip was placed as ineligible. That is sound because
+  // `eligible` decides only whether an unqueued candidate enters the queue and whether it is told it
+  // has not; a queued entry leaves only by ejection, never for ineligibility, and `tipValidation`
+  // answers only for a queued entry whose tip is its candidate. Only the CI-pending refusals the tip
+  // accounts for are lifted; any other test-gate refusal stands.
   const test = gates.find(g => g.name === 'test')!;
   const validating = tipValidation(work, queueState.queue, test.reasons);
-  if (validating) { test.reasons = []; test.passed = true; }
+  if (validating) { test.reasons = test.reasons.filter(reason => !ciPendingReason(reason)); test.passed = !test.reasons.length; }
   // GitHub's `mergeable: null` is a computation it has not finished, not a refusal (GY-548): it is
   // named as such and read again on the next observation. A queued entry is not held on it at
   // all: what merges is its speculative tip, and that tip's own CI and merge decide.
