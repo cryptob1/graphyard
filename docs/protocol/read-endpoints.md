@@ -7,7 +7,7 @@
 - `GET /api/work/ID|KEY`: one whole document; `/api/work`: all.
 - `GET /api/interventions?window=7|30|90`: the window's ledger rows only (`ledger.since`).
 - `GET /api/events?work=UUID`: one item's events, newest first (`graphyard events GY-N --all` walks them). Without `work`, the whole ledger; operator agents must name an item unless they hold `decision:approve` over every item (the approver, verifying a decision; read only).
-- `GET /api/analytics/flow`, `/api/analytics/attribution`: bounded. Flow days: UTC midnights to today, the first holding earlier time. `window.covered`/`window.kinds`: scan and per-kind reach; `throughput[].covered: false`: unread, not zero. Merged is Deploy; `stepDwell[].sparse` (n<5): marked, unsplit.
+- `GET /api/analytics/flow`, `/api/analytics/attribution`: bounded. Flow days: UTC midnights to today, the first holding earlier time. `window.covered`/`window.kinds`: scan and per-kind reach; `throughput[].covered: false`: unread, not zero. Merged is Deploy; `stepDwell[].sparse` (n<5): marked, unsplit. Reports are cached 60 s per window and filters; a new step fact or deployment invalidates.
 - Interventions, flow, `/api/shipping-pulse`: 3-connection, 20s-timeout report pool.
 - `GET /api/deployments`: `POST /api/deployments` observations (`producer`/`admin`; `state` `succeeded`, `failed` or `rolled_back`; never moves a gate).
 - `GET /api/delegation`, `/api/proof-grants`, `/api/delivery`: slices, live proof authority, release state.
