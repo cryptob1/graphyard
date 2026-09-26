@@ -830,7 +830,7 @@ test('GY-161 review: where the production watch observes production, a merge wai
   // The server reads that name per request the way the flow analytics route does — the master's
   // published setting, else its own — and carries it on status.
   assert.match(await read('src/server/routes/status.ts'), /const productionEnvironment = await resolvedProductionEnvironment\(engine\.store\.pool\);[\s\S]*production\?\.status\(\) \?\? null, productionEnvironment,/);
-  assert.match(await read('src/server/routes/flow-analytics.ts'), /flowQuery\(url, await resolvedProductionEnvironment\(engine\.store\.pool\)\)/);
+  assert.match(await read('src/server/routes/flow-analytics.ts'), /flowQuery\(url, await resolvedProductionEnvironment\(engine\.store\.reportPool\)\)/);
   assert.equal(releasedAt(live, named), NOW - hour); assert.equal(prSteps(live, NOW, named).label, 'Live');
   assert.equal(groupOf(live, NOW, undefined, undefined, named), 'shipped', 'a verified release outranks a pending watch entry');
   assert.equal(releasedAt(live), null, 'under the default name it is not live');

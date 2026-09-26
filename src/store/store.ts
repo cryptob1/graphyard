@@ -7,7 +7,7 @@ import { releaseInfo, schemaVersion } from '../release.js';
 import { appendSave, resolvedPayloadSql } from './snapshot-delta.js';
 import { advisoryLocks } from './locks.js';
 import { coordinationDocumentSql, coordinationRelevance, coordinationTail, coordinationTrimSql, detoasted, type CoordinationTrim } from './coordination-sql.js';
-import { namedStatements } from './statements.js';
+import { namedPool, reportPool, type ReportPoolOptions } from './report-pool.js';
 import { closePool, leasePoolConnections, reserve, trackedPool } from './pools.js';
 
 export * from './snapshot-delta.js';
@@ -48,13 +48,13 @@ export class BackgroundLane {
 
 export class Store {
   pool: pg.Pool;
-  /** Lease commands only (pools.ts `leaseCommands`); `background` bounds the tick to half the main pool. */
-  leasePool: pg.Pool; readonly background: BackgroundLane;
-  constructor(url: string, options: { max?: number; leaseMax?: number } = {}) {
+  /** Lease commands only (pools.ts `leaseCommands`); `background` bounds the tick to half the main pool; `reportPool` serves report reads only (report-pool.ts). */
+  leasePool: pg.Pool; readonly background: BackgroundLane; reportPool: pg.Pool;
+  constructor(url: string, options: { max?: number; leaseMax?: number } & ReportPoolOptions = {}) {
     const max = Math.max(2, Math.floor(options.max ?? 12));
-    this.pool = trackedPool(namedStatements(new pg.Pool({ connectionString: url, max, connectionTimeoutMillis: storeConnectionTimeoutMs, statement_timeout: storeStatementTimeoutMs })));
+    this.pool = namedPool(url, max, storeConnectionTimeoutMs, storeStatementTimeoutMs);
     this.leasePool = trackedPool(new pg.Pool({ connectionString: url, max: Math.max(1, Math.floor(options.leaseMax ?? leasePoolConnections)), connectionTimeoutMillis: storeConnectionTimeoutMs, statement_timeout: storeStatementTimeoutMs }));
-    this.background = new BackgroundLane(Math.max(1, Math.floor(max / 2)));
+    this.background = new BackgroundLane(Math.max(1, Math.floor(max / 2))); this.reportPool = reportPool(url, options, storeConnectionTimeoutMs, storeStatementTimeoutMs);
   }
   /**
    * Apply the additive migration and record the schema generation it reached. Running
@@ -163,8 +163,8 @@ export class Store {
     return { version: Number(rows[0].version), digest: rows[0].digest };
   }
   async schema() { return Number((await this.pool.query('SELECT COALESCE(MAX(version),0) AS version FROM graphyard_schema')).rows[0].version); }
-  /** Resolves once every connection of both pools has closed (GY-483), so the database may be stopped right after. */
-  async close() { await Promise.all([closePool(this.pool, 'main'), closePool(this.leasePool, 'lease')]); }
+  /** Resolves once every connection of all three pools has closed (GY-483), so the database may be stopped right after. */
+  async close() { await Promise.all([closePool(this.pool, 'main'), closePool(this.leasePool, 'lease'), closePool(this.reportPool, 'report')]); }
   async transaction<T>(fn: (db: pg.PoolClient, now: Date) => Promise<T>, { lane = 'request', coordinationLock: takeCoordinationLock = true }: { lane?: StoreLane; coordinationLock?: boolean } = {}): Promise<T> {
     const permit = lane === 'background' ? await this.background.acquire() : null;
     const db = await (lane === 'lease' ? this.leasePool : this.pool).connect().catch(error => { permit?.(); throw error; });
