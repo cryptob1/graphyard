@@ -3,7 +3,7 @@ import { generateKeyPairSync } from 'node:crypto';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fakeTransport, type Transport } from '../src/install/transport.js';
+import { fakeTransport, type BundleFileRecord, type Transport } from '../src/install/transport.js';
 import type { InstallDependencies } from '../src/install/index.js';
 import type { Provider } from '../src/install/types.js';
 
@@ -27,6 +27,44 @@ export interface FakeState { installed: boolean; protection: any | null; deliver
 
 export const RAILWAY_WORKSPACES = [{ id: 'ws-graphyard-0001', name: 'Graphyard' }, { id: 'ws-personal-0002', name: "Installer's Projects" }];
 
+/**
+ * `hcloud server-type list -o json`, trimmed to what the installer reads: memory, architecture, and
+ * the gross monthly price per location. Prices are illustrative, not Hetzner's current list.
+ */
+export const HETZNER_SERVER_TYPES = JSON.stringify([
+  { name: 'cx22', cores: 2, memory: 4, architecture: 'x86', deprecation: null, prices: [{ location: 'nbg1', price_monthly: { net: '3.7900', gross: '4.5101' } }] },
+  { name: 'cx32', cores: 4, memory: 8, architecture: 'x86', deprecation: null, prices: [{ location: 'nbg1', price_monthly: { net: '6.8000', gross: '8.0920' } }] },
+  { name: 'cax31', cores: 8, memory: 16, architecture: 'arm', deprecation: null, prices: [{ location: 'nbg1', price_monthly: { net: '12.4900', gross: '14.8631' } }] },
+  { name: 'cx42', cores: 8, memory: 16, architecture: 'x86', deprecation: null, prices: [{ location: 'nbg1', price_monthly: { net: '16.4000', gross: '19.5160' } }] },
+  { name: 'cpx41', cores: 8, memory: 16, architecture: 'x86', deprecation: null, prices: [{ location: 'nbg1', price_monthly: { net: '26.9000', gross: '32.0110' } }] },
+  { name: 'cx52', cores: 16, memory: 32, architecture: 'x86', deprecation: null, prices: [{ location: 'nbg1', price_monthly: { net: '32.4000', gross: '38.5560' } }] },
+  { name: 'cx11', cores: 1, memory: 2, architecture: 'x86', deprecation: { announced: '2024-01-01T00:00:00Z' }, prices: [{ location: 'nbg1', price_monthly: { net: '3.2900', gross: '3.9151' } }] },
+]);
+
+/**
+ * The fixture host of a self-contained install (GY-717): a Linux machine reached as root, whose
+ * `cat` answers with what the installer wrote there (`files`, shared with the recording transport),
+ * so a second run reads its own credentials back exactly as a real host would.
+ */
+export function hostResponses(files: Map<string, BundleFileRecord>, state: { installed: boolean } = { installed: false }) {
+  return [
+    { match: 'id -u graphyard', result: '1001' },
+    { match: 'id -g graphyard', result: '1001' },
+    { match: 'systemctl --version', result: 'systemd 255 (255.4-1ubuntu8)' },
+    { match: 'hostname', result: 'graphyard-host' },
+    { match: 'command -v', result: (line: string) => `/usr/bin/${line.split(' ').pop()}` },
+    { match: 'workspace list', result: JSON.stringify({ id: 'cli:workspace:list', result: { type: 'workspace_list', workspaces: [] } }) },
+    { match: 'workspace create', result: JSON.stringify({ id: 'cli:workspace:create', result: { type: 'workspace_info', workspace: { workspace_id: 'w1', label: 'graphyard-owner-project' } } }) },
+    { match: 'is-active graphyard-postgres.service', result: 'active\nactive\nactive\n' },
+    { match: '--user is-active', result: 'active\nactive\nactive\nactive\n' },
+    { match: 'test -f', result: (line: string) => files.has(line.split(' ').pop()!) ? '' : { stdout: '', stderr: '', code: 1 } },
+    { match: 'cat /home/graphyard/', result: (line: string) => { const file = files.get(line.slice(4)); return file ? file.content : { stdout: '', stderr: 'No such file', code: 1 }; } },
+    { match: 'cat /opt/graphyard/', result: (line: string) => { const file = files.get(line.slice(4)); return file && state.installed ? file.content : { stdout: '', stderr: 'No such file', code: 1 }; } },
+    // Last: every command run as the graphyard account carries `$(id -u)` in its wrapper.
+    { match: 'id -u', result: '0' },
+  ];
+}
+
 /** Provider CLI transcripts. `installed` switches every probe to the "already there" answer. */
 export function providerResponses(provider: Provider, state: { installed: boolean; workdir: string; service: string; envFile?: string; workspaces?: { id: string; name: string }[] }) {
   const ps = JSON.stringify([{ Service: 'db', State: 'running' }, { Service: 'server', State: 'running' }]);
@@ -44,6 +82,7 @@ export function providerResponses(provider: Provider, state: { installed: boolea
     return [
       { match: 'hcloud version', result: 'hcloud v1.49.0' },
       { match: 'hcloud context active', result: 'graphyard' },
+      { match: 'hcloud server-type list', result: HETZNER_SERVER_TYPES },
       { match: 'hcloud server create', result: () => { created = true; return ''; } },
       { match: `hcloud server describe ${state.service}`, result: () => created ? JSON.stringify({ public_net: { ipv4: { ip: '203.0.113.10' } } }) : { stdout: '', stderr: 'server not found', code: 1 } },
       // cloud-init mounted the data volume; the installer refuses to deploy Postgres
@@ -88,6 +127,7 @@ export const satisfiedProtection = (appId: number | null, reviewCount = 1) => ({
 export interface Harness {
   root: string;
   configHome: string;
+  hostFiles: Map<string, BundleFileRecord>;
   transport: ReturnType<typeof fakeTransport>;
   remotes: Map<string, ReturnType<typeof fakeTransport>>;
   state: FakeState;
@@ -115,6 +155,14 @@ export interface HarnessOptions {
   configHome?: string;
   /** Railway only: the workspaces the fake account belongs to (default: exactly one). */
   workspaces?: { id: string; name: string }[];
+  /** A self-contained install on a created Hetzner server (the host provider is always one). */
+  selfContained?: boolean;
+  /** The remote host's files, to reuse a previous harness's host on a re-run. */
+  hostFiles?: Map<string, BundleFileRecord>;
+  /** Transcript lines consulted before the provider's own (first match wins). */
+  extraResponses?: { match: string; result: string | { stdout: string; stderr: string; code: number } | ((line: string, input?: string) => string | { stdout: string; stderr: string; code: number }) }[];
+  /** The agent registry the fake server holds (GET /api/agent-registry/document). */
+  registry?: any;
 }
 
 export async function harness(options: HarnessOptions): Promise<Harness> {
@@ -126,20 +174,26 @@ export async function harness(options: HarnessOptions): Promise<Harness> {
   const service = options.service ?? `graphyard-${installId}`;
   const workdir = options.workdir ?? (options.provider === 'compose' ? `${configHome}/${installId}/compose` : `/opt/graphyard/${installId}`);
   const state: FakeState = { installed: !!options.installed, protection: options.protection ?? null, deliveries: options.deliveries ?? [], hookConfig: null };
-  const responses = [...providerResponses(options.provider, { installed: state.installed, workdir, service, envFile: options.envFile, workspaces: options.workspaces }), ...githubResponses(state, repository)];
+  // One file store per remote host, shared with its fixture responses, so a host reads back what was written to it.
+  const hostFiles = options.hostFiles ?? new Map<string, BundleFileRecord>();
+  const selfContained = options.provider === 'host' || !!options.selfContained;
+  const responses = [...(selfContained ? hostResponses(hostFiles, { installed: state.installed }) : []), ...(options.extraResponses ?? []), ...providerResponses(options.provider === 'host' ? 'docker-host' : options.provider, { installed: state.installed, workdir, service, envFile: options.envFile, workspaces: options.workspaces }), ...githubResponses(state, repository)];
   const transport = fakeTransport({ responses });
   const remotes = new Map<string, ReturnType<typeof fakeTransport>>();
   const ssh = (host: string) => {
-    if (!remotes.has(host)) remotes.set(host, fakeTransport({ responses }));
+    if (!remotes.has(host)) remotes.set(host, fakeTransport({ responses, files: hostFiles }));
     return remotes.get(host)! as Transport;
   };
   const serverUrl = options.serverUrl ?? 'https://graphyard-owner-project.up.railway.app';
   const requests: { method: string; url: string; body?: string }[] = [];
+  const registry = options.registry ?? { version: 1, revision: 0, updatedAt: null, runtimes: [], models: [], accounts: [], roles: [], sessions: [], refusals: [], lastMutation: null };
   const fetchImpl = (async (input: any, init: any = {}) => {
     const url = String(input); const method = String(init.method ?? 'GET');
     requests.push({ method, url, ...(init.body ? { body: String(init.body) } : {}) });
     const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
     if (url.endsWith('/healthz')) return options.healthy === false ? json(503, { ok: false }) : json(200, { ok: true });
+    if (url.endsWith('/api/agent-registry/document')) return json(200, registry);
+    if (url.endsWith('/api/agent-registry/apply') && method === 'POST') return json(200, { applied: true });
     if (url.endsWith('/api/status')) return json(200, options.statusBody ?? { actor: { id: `${installId}-operator`, role: 'admin' }, repository, github: true, githubAppId: GRAPHYARD_APP_ID, githubInstallationId: 500 });
     if (url.includes('/app/installations/') && url.endsWith('/access_tokens')) return json(201, { token: 'installation-token-for-tests', expires_at: new Date(Date.now() + 3_600_000).toISOString() });
     if (url.endsWith('/app/hook/config') && method === 'PATCH') { state.hookConfig = JSON.parse(String(init.body)); return json(200, state.hookConfig); }
@@ -170,7 +224,7 @@ export async function harness(options: HarnessOptions): Promise<Harness> {
   };
 
   return {
-    root, configHome, transport, remotes, state, requests, deps,
+    root, configHome, hostFiles, transport, remotes, state, requests, deps,
     commandLines: () => transport.commands.map(command => [command.program, ...command.args].join(' ')),
     allCommandLines: () => [...transport.commands, ...[...remotes.values()].flatMap(remote => remote.commands)].map(command => [command.program, ...command.args].join(' ')),
     cleanup: async () => { if (reused) return; await rm(root, { recursive: true, force: true }); await rm(configHome, { recursive: true, force: true }); },

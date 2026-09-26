@@ -2,6 +2,7 @@ import { fingerprint, Vault } from './secrets.js';
 import { SERVER_CONTAINER_UID, shellQuote, type Transport } from './transport.js';
 import { SERVER_PORT, type EnvValue, type PlanAction, type PreflightItem, type Provider } from './types.js';
 import { packageVersion } from '../release.js';
+import { hetznerQuote, spendConsent, type PriceQuote, type QuoteResult } from './pricing.js';
 
 /** The versioned release image for the checkout's own version, as .github/workflows/release.yml publishes it. */
 export const DEFAULT_IMAGE = `ghcr.io/cryptob1/graphyard:${packageVersion}`;
@@ -22,6 +23,10 @@ export interface AdapterContext {
   /** Railway workspace chosen with --workspace; null lets the installer resolve a single-workspace account. */
   workspace: string | null;
   serverType: string;
+  /** False when no --server-type was given: a self-contained Hetzner host then takes the recommended type. */
+  serverTypeExplicit: boolean;
+  /** Concurrent agent sessions the machine is sized for: the workers plus one reviewer. */
+  plannedAgents: number;
   location: string;
   databasePassword: string;
   port: number;
@@ -34,6 +39,10 @@ export interface AdapterContext {
    * Graphyard project, and `railway up` can never upload the managed repository's tree.
    */
   railwayDir: string;
+  /** The self-contained host settings (GY-717); null for a server-only install. */
+  host: import('./host.js').HostSettings | null;
+  /** Spend consent for a server this install creates: a monthly cap, or the exact price confirmed. */
+  spend: { maxMonthly: number | null; confirmPrice: number | null };
   wait: (ms: number) => Promise<void>;
   transport: Transport;
   ssh: (host: string, user?: string) => Transport;
@@ -95,7 +104,11 @@ export const PRIVATE_KEY_FILE_VARIABLE = 'GITHUB_PRIVATE_KEY_FILE';
 export const PRIVATE_KEY_CONTAINER_PATH = '/run/graphyard/github-private-key.pem';
 const PRIVATE_KEY_BUNDLE_NAME = 'github-private-key.pem';
 
-export function composeBundle(ctx: AdapterContext, values: EnvValue[], publish: 'loopback' | 'proxy'): BundleFile[] {
+/**
+ * `databasePort` publishes Postgres on the host's loopback only: a self-contained host restores a
+ * migrated ledger into it with `graphyard db restore` before the server starts (GY-717).
+ */
+export function composeBundle(ctx: AdapterContext, values: EnvValue[], publish: 'loopback' | 'proxy', options: { databasePort?: number } = {}): BundleFile[] {
   // `GITHUB_PRIVATE_KEY` is a PEM that spans many lines, and docker compose reads an env file
   // as one `NAME=value` per line: every continuation line of a raw key would be refused as a
   // malformed variable name and the deploy would fail. The key is therefore written to its own
@@ -120,7 +133,7 @@ services:
     restart: unless-stopped
     env_file: [db.env]
     volumes: ["${ctx.dataPath ? `${ctx.dataPath}/postgres` : 'graphyard-data'}:/var/lib/postgresql/data"]
-    healthcheck:
+${options.databasePort ? `    ports: ["127.0.0.1:${options.databasePort}:5432"]\n` : ''}    healthcheck:
       test: ["CMD-SHELL", "pg_isready -U graphyard"]
       interval: 5s
       timeout: 3s
@@ -160,7 +173,7 @@ async function composeUp(ctx: AdapterContext, transport: Transport, pull: boolea
   await transport.exec('docker', ['compose', '--project-directory', ctx.workdir, '-f', `${ctx.workdir}/compose.yaml`, 'up', '-d', '--remove-orphans'], { timeout: 900_000 });
 }
 
-async function composeRunning(transport: Transport, ctx: AdapterContext) {
+export async function composeRunning(transport: Transport, ctx: AdapterContext) {
   const result = await transport.exec('docker', ['compose', '--project-directory', ctx.workdir, '-f', `${ctx.workdir}/compose.yaml`, 'ps', '--format', 'json'], { allowFailure: true, timeout: 120_000 });
   if (result.code !== 0) return { database: false, app: false };
   const rows = result.stdout.split('\n').map(line => line.trim()).filter(Boolean).flatMap(line => { try { const parsed = JSON.parse(line); return Array.isArray(parsed) ? parsed : [parsed]; } catch { return []; } });
@@ -168,7 +181,7 @@ async function composeRunning(transport: Transport, ctx: AdapterContext) {
   return { database: running('db'), app: running('server') };
 }
 
-async function readRemote(transport: Transport, path: string) {
+export async function readRemote(transport: Transport, path: string) {
   const result = await transport.exec('cat', [path], { allowFailure: true, timeout: 60_000 });
   return result.code === 0 ? result.stdout : null;
 }
@@ -355,6 +368,10 @@ async function waitForDataVolume(ctx: AdapterContext, remote: Transport, attempt
   throw new Error(`The data volume did not appear at ${ctx.dataPath} on ${ctx.service}, so Postgres would write to the root disk and lose the ledger on rebuild. Attach it with "hcloud volume attach ${ctx.service}-data --server ${ctx.service} --automount", then rerun graphyard install --apply.`);
 }
 
+const hetznerQuotes = new WeakMap<AdapterContext, QuoteResult>();
+/** The price the Hetzner preflight read for this install, for the plan to show; null before preflight or on failure. */
+export const quotedPrice = (ctx: AdapterContext): PriceQuote | null => hetznerQuotes.get(ctx)?.quote ?? null;
+
 export const hetznerAdapter: ProviderAdapter = {
   provider: 'hetzner',
   async preflight(ctx) {
@@ -365,6 +382,14 @@ export const hetznerAdapter: ProviderAdapter = {
     // passwords). Without a key Hetzner sets a root password, and provisioning would wait
     // out the SSH attempts before blaming cloud-init for a server it cannot log into.
     items.push({ name: 'SSH key', ok: !!ctx.sshKey, detail: ctx.sshKey ?? 'no SSH key selected; without one the server is created with a root password that key-only SSH cannot use', fix: 'Pass --ssh-key NAME (hcloud ssh-key list prints the names)' });
+    if (!items[0].ok || !items[1].ok) return items;
+    // The price is read from the provider API and shown before anything is created; creating the
+    // server needs the operator's consent to exactly that price (GY-717 AC-5).
+    const exists = (await ctx.transport.exec('hcloud', ['server', 'describe', ctx.service, '-o', 'json'], { allowFailure: true, timeout: 120_000 })).code === 0;
+    const quote = await hetznerQuote(ctx.transport, { location: ctx.location, agents: ctx.plannedAgents, explicit: ctx.serverTypeExplicit || !ctx.host ? ctx.serverType : null });
+    hetznerQuotes.set(ctx, quote);
+    if (quote.quote) ctx.serverType = quote.quote.serverType;
+    items.push(spendConsent(quote, ctx.spend, exists));
     return items;
   },
   async observe(ctx) {
@@ -419,7 +444,7 @@ export const hetznerAdapter: ProviderAdapter = {
   },
 };
 
-async function hetznerAddress(ctx: AdapterContext) {
+export async function hetznerAddress(ctx: AdapterContext) {
   const described = await ctx.transport.exec('hcloud', ['server', 'describe', ctx.service, '-o', 'json'], { timeout: 120_000 });
   const address = (() => { try { return JSON.parse(described.stdout)?.public_net?.ipv4?.ip ?? null; } catch { return null; } })();
   if (typeof address !== 'string' || !address) throw new Error(`Hetzner did not report a public address for ${ctx.service}`);
@@ -600,11 +625,16 @@ export const isProviderReference = (value: string) => providerReference.test(val
 export const carriesCredential = (name: string, value: string) => secretVariableNames.has(name) || (name === 'DATABASE_URL' && !providerReference.test(value.trim()));
 export const variableMarker = (name: string, value: string) => carriesCredential(name, value) ? `sha:${fingerprint(value)}` : value;
 
-export const adapters: Record<Provider, ProviderAdapter> = {
+export const adapters: Partial<Record<Provider, ProviderAdapter>> = {
   railway: railwayAdapter,
   hetzner: hetznerAdapter,
   'docker-host': dockerHostAdapter,
   compose: composeAdapter,
 };
 
-export const adapterFor = (provider: Provider) => adapters[provider];
+export const adapterFor = (provider: Provider) => {
+  const adapter = adapters[provider];
+  // `host` exists only as a self-contained install; src/install/host.ts wraps it.
+  if (!adapter) throw new Error(`The ${provider} target is installed by the self-contained host adapter (src/install/host.ts)`);
+  return adapter;
+};

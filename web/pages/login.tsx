@@ -6,6 +6,18 @@ export const VERIFY_TIMEOUT_MS = 10_000;
 export const REJECTED_NOTICE = 'That token was not accepted';
 export const HELPER_TEXT = 'Tokens are scoped to your role and kept for this browser session.';
 
+/** The single-use sign-in link a self-contained install prints ends in `#claim=CODE` (GY-717); null for any other fragment. */
+export const claimFromHash = (hash: string) => /^#claim=([A-Za-z0-9_-]{16,200})$/.exec(hash)?.[1] ?? null;
+export const CLAIM_REFUSED = 'That sign-in link was already used or is not valid; sign in with an admin token.';
+
+/** Trades the claim for the admin credential, once; null when the server refuses it. */
+export async function redeemClaim(code: string, fetcher: typeof fetch): Promise<string | null> {
+  const response = await fetcher('/api/signin/claim', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code }) });
+  if (!response.ok) return null;
+  const body = await response.json() as { token?: unknown };
+  return typeof body?.token === 'string' && body.token ? body.token : null;
+}
+
 /** What the sign-in page shows: the token form, the first status read in flight, or that read gone unanswered. */
 export type LoginState = { kind: 'form' } | { kind: 'verifying' } | { kind: 'unreachable'; host: string };
 export type VerifyOutcome = { kind: 'accepted'; status: unknown } | { kind: 'rejected' } | { kind: 'unreachable' };
@@ -69,6 +81,16 @@ export function LoginView({ state, error, draftToken, setDraftToken, submit, ret
 export default function LoginPage({ token, error, signOut, setError, sessionEpoch, setToken, draftToken, setDraftToken, host, onVerified }: Pick<Dashboard, 'token' | 'error' | 'signOut' | 'setError' | 'sessionEpoch'> & { setToken(token: string): void; draftToken: string; setDraftToken(value: string): void; host: string; onVerified(status: unknown, signal: AbortSignal): Promise<void> }) {
   const [unreachable, setUnreachable] = useState(false);
   const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    const code = claimFromHash(location.hash);
+    if (!code) return;
+    // The claim leaves the address bar before anything else happens: it is spent on first use.
+    history.replaceState(null, '', `${location.pathname}${location.search}`);
+    void redeemClaim(code, (input, init) => fetch(input, init)).then(value => {
+      if (!value) { setError(CLAIM_REFUSED); return; }
+      sessionEpoch.current++; setError(''); sessionStorage.setItem('graphyard-token', value); setToken(value);
+    }, () => setError(CLAIM_REFUSED));
+  }, []);
   useEffect(() => {
     if (!token) return;
     setUnreachable(false);

@@ -107,7 +107,3 @@ Run it as an OS identity whose GitHub credentials workers cannot read. `--browse
 `graphyard doctor --profile through-merge` names every missing piece. Create a small item: `master run` dispatches it; the loop merges once branch protection requires `Graphyard / merge`. `"systemDriven": false` allows [hand actions](master-agent.md#system-driven-items).
 
 CI workflows should cancel superseded pull-request runs: group each by `${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}` with `cancel-in-progress: ${{ github.event_name == 'pull_request' }}`; runs on main are never cancelled. `graphyard master protection` lists each required check whose workflow lacks cancel-in-progress under `advisories`.
-
-## What stays manual
-
-Logins (provider, GitHub, agent environments, browser profile), the App confirmation, plan approval, *Confirm access*, producer grants and the [human-only decisions](glossary.md#who-decides).

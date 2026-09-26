@@ -1,7 +1,7 @@
 <!-- page: Start here | 0 | the one command and upgrades. -->
 # Install Graphyard
 
-One command installs the control plane; an agent or person runs this runbook from one instruction:
+An agent or person runs this runbook from one instruction:
 
 > install Graphyard for OWNER/REPO on PROVIDER following docs/install.md
 
@@ -62,15 +62,23 @@ Dispatch a small item ([onboarding](onboarding.md#4-prove-the-first-pr)); after 
 
 `--plan` and `--apply` are idempotent: done actions show `"satisfied"`, differences `drift`; credentials never rotate.
 
+## Self-contained host
+
+`--target host --ssh-host HOST` or `--target hetzner` runs server, Postgres, loop, executors, Herdr, Claude Code, Codex, OpenCode, Pi on one machine under systemd, credentials `0600` in its `graphyard` account. Sign in once via `signIn`; connect accounts under **Agents**.
+
+**Sizing:** 3 GB per concurrent agent, 2 GB per verification slot, 2 GB base, plus max(10%, 4 GB) free. **Verify** `price`; apply with `--confirm-price X` or `--max-monthly N`.
+
+**Moving:** `--migrate` stops the old loop and restores a verified backup of `GRAPHYARD_MIGRATE_DATABASE_URL` there.
+
 ## Upgrading an existing installation
 
-A release needing a new App permission holds the jobs using it. [Back up, deploy](deployment.md#backup-upgrade-rollback), then on the machine holding `.graphyard/github-app.json`:
+[Back up, deploy](deployment.md#backup-upgrade-rollback); a new App permission holds its jobs until, on the machine holding `.graphyard/github-app.json`:
 
 ```sh
 node "$GRAPHYARD_CLI" github-setup --update-permissions --wait 600
 ```
 
-Confirm `doctor` shows `appPermissions.missing` empty; a re-run fixes `delegationLimits` drift such as `Set GRAPHYARD_MAX_REVIEWERS=N on the deployment`.
+Then `doctor` shows `appPermissions.missing` empty.
 
 ## Failure handling
 

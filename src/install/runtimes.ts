@@ -20,6 +20,7 @@ export const knownRuntimes: RuntimeDescriptor[] = [
   { kind: 'amp', program: 'amp', credentials: ['.config/amp/settings.json'] },
   { kind: 'droid', program: 'droid', credentials: ['.factory/auth.json'] },
   { kind: 'qwen', program: 'qwen', credentials: ['.qwen/oauth_creds.json'] },
+  { kind: 'pi', program: 'pi', credentials: ['.pi/agent/auth.json'] },
 ];
 
 /** `command -v` is a shell builtin, so PATH lookup runs through the target's shell. */

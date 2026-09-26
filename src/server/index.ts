@@ -19,6 +19,7 @@ import { Next, Sent, matchRoute, requestFailure, type RouteContext, type RouteMo
 import { authenticate, operatorAgentRouteGuard, operatorVisible } from './auth.js';
 import type { Credential } from './principals.js';
 import { healthRoutes } from './routes/health.js';
+import { signinClaimFromEnv, signinRoutes } from './routes/signin.js';
 import { githubRoutes } from './routes/github.js';
 import { operatorAgentRoutes } from './routes/operator-agents.js';
 import { proofGrantRoutes } from './routes/proof-grants.js';
@@ -39,7 +40,7 @@ import { staticRoutes } from './static.js';
 export { principalSchema, type Credential } from './principals.js';
 
 /** Routes that answer without a bearer token. */
-export const publicRoutes: readonly RouteModule[] = [healthRoutes, githubRoutes];
+export const publicRoutes: readonly RouteModule[] = [healthRoutes, githubRoutes, signinRoutes];
 /**
  * Every authenticated `/api/` route, in matching order. A resource adds its module here;
  * the identity-administration modules precede the operator-agent guard because they
@@ -98,7 +99,7 @@ export function assembleServices(engine: Engine, credentials: Credential[], gith
   const configured = credentials.map(({ token, ...actor }) => actor);
   engine.principals = configured;
   const proofGrants = new ProofGrants(engine.store, configured);
-  return { engine, github, repository, principals, limits: delegationLimits.limits, delegationLimits, build: buildIdentity(env), production: options.production ?? null, validation, delivery, operatorAgents, proofGrants, productionDelivery, agentRegistry: new AgentRegistry(engine.store), interventionPolicy: interventionPolicyFromEnv(env), responder: options.responder !== undefined ? options.responder : responderFromEnv(env) };
+  return { signinClaim: signinClaimFromEnv(env, credentials), engine, github, repository, principals, limits: delegationLimits.limits, delegationLimits, build: buildIdentity(env), production: options.production ?? null, validation, delivery, operatorAgents, proofGrants, productionDelivery, agentRegistry: new AgentRegistry(engine.store), interventionPolicy: interventionPolicyFromEnv(env), responder: options.responder !== undefined ? options.responder : responderFromEnv(env) };
 }
 
 export function server(engine: Engine, credentials: Credential[], github: GitHub | null = null, artifacts: ArtifactOptions = { backend: null, capacityBytes: artifactCapacityFromEnv() }, options: ServerOptions = {}) {

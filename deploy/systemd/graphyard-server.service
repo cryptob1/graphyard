@@ -1,0 +1,22 @@
+# The Graphyard control-plane server on a self-contained host (GY-717): the release image, with
+# the environment and GitHub key the installer wrote beside @WORKDIR@/compose.yaml (mode 0600).
+# It starts after Postgres and restarts forever; `graphyard install --apply` restarts it when the
+# environment changes.
+[Unit]
+Description=Graphyard server (@INSTALL@)
+Requires=docker.service graphyard-postgres.service
+After=docker.service graphyard-postgres.service network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=@WORKDIR@
+ExecStart=/usr/bin/docker compose --project-directory @WORKDIR@ -f @WORKDIR@/compose.yaml up --no-log-prefix server
+ExecStop=/usr/bin/docker compose --project-directory @WORKDIR@ -f @WORKDIR@/compose.yaml stop server
+Restart=always
+RestartSec=10
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target

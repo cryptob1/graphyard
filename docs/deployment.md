@@ -30,6 +30,7 @@ Tag `vX.Y.Z` publishes `ghcr.io/cryptob1/graphyard:X.Y.Z`. `/healthz` reports ve
 | `GRAPHYARD_BUILD_SHA` | The image's source commit (Railway supplies `RAILWAY_GIT_COMMIT_SHA`) |
 | `GRAPHYARD_ARTIFACT_BACKEND` | `postgres` or `s3` ([artifacts](recovery.md#artifact-backends-capacity-and-migration)) |
 | `RAILWAY_API_TOKEN` | Optional; records failed or missing deployments as incidents |
+| `GRAPHYARD_SIGNIN_CLAIM` | SHA-256 of a [host](install.md#self-contained-host)'s single-use sign-in link |
 
 Installers derive the four capacity limits from the deployed principals; an unset one is derived at start-up as `delegationLimits` drift.
 
@@ -45,7 +46,7 @@ Store its token as `GRAPHYARD_CI_PRODUCER_TOKEN`, with `GRAPHYARD_URL`, on the `
 
 ### Production deployment observation
 
-When the serving commit (`GRAPHYARD_BUILD_SHA`) changes, undeployed merges are compared once, recorded (`delivery.deployment-contained`, `production.deployment-pending`); a same-commit restart compares nothing. One unserved after five minutes is a `delivery.deployment-incident`; `master status` shows `main is N commits ahead of production`. Probe: `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`.
+On each new serving commit (`GRAPHYARD_BUILD_SHA`) undeployed merges are recorded (`delivery.deployment-contained`, `production.deployment-pending`); one unserved after five minutes is a `delivery.deployment-incident`; `master status` shows `main is N commits ahead of production`. Probe: `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`.
 
 ## Backup, upgrade, rollback
 
@@ -58,7 +59,7 @@ node bin/graphyard.mjs db verify FILE
 
 ## Manual fallback
 
-Only for an unsupported platform or existing deployment: set the variables table by hand, run `node "$GRAPHYARD_CLI" github-setup https://YOUR-DOMAIN`, and verify with `doctor`.
+For an unsupported platform or existing deployment: set the variables table by hand, run `node "$GRAPHYARD_CLI" github-setup https://YOUR-DOMAIN`, and verify with `doctor`.
 
 - Compose: `cp .env.example .env`, replace every secret, `docker compose --profile full up -d`; front 4310 with TLS, never expose Postgres.
 - Kubernetes: `helm install graphyard deploy/helm/graphyard --set secrets.existingSecret=graphyard-credentials …`.

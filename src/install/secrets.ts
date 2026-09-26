@@ -33,7 +33,11 @@ export const installRecordSchema = z.object({
   version: z.literal(1),
   installId: z.string().min(1),
   repository: z.string().min(1),
-  provider: z.enum(['railway', 'hetzner', 'docker-host', 'compose']),
+  provider: z.enum(['railway', 'hetzner', 'docker-host', 'compose', 'host']),
+  /** The installation runs everything on its host (GY-717); its credentials live there, not here. */
+  selfContained: z.boolean().default(false),
+  /** The installation this one was moved from with --migrate, by fingerprint only. */
+  migratedFrom: z.object({ provider: z.string().min(1), at: z.string().min(1), principals: z.array(z.object({ id: z.string().min(1), fingerprint: z.string().length(12) }).strict()) }).strict().nullable().default(null),
   baseBranch: z.string().min(1),
   reviewPolicy: z.enum(['github', 'agent']).default('github'),
   domain: z.string().nullable().default(null),
@@ -108,7 +112,7 @@ export async function readInstallRecord(directory: string): Promise<InstallRecor
   catch (error: any) { if (error.code === 'ENOENT') return null; throw error; }
 }
 
-export async function writeInstallRecord(directory: string, record: InstallRecord, vault: Vault) {
+export async function writeInstallRecord(directory: string, record: z.input<typeof installRecordSchema>, vault: Vault) {
   const serialized = JSON.stringify(installRecordSchema.parse(record), null, 2);
   vault.assertClean(serialized, 'install.json');
   const file = resolve(directory, 'install.json');
