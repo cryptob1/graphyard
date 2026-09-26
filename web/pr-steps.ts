@@ -61,18 +61,19 @@ const pendingCheck = new Set(['', 'pending', 'queued', 'in_progress', 'waiting',
  * waits pending until the loop records the failure. A recorded brief is done. A failed run is
  * skipped — build proceeds without a brief, so the step reads skipped, never failed. Where no run
  * exists at all, research is skipped for anything that will not be researched: a bug without
- * `"research": true`, an item opted out with `"research": false`, research not configured (no run
- * had started when a builder claimed it), and any item already building or handed in without a
- * brief. A feature released and not yet researched is pending: its run has still to start.
+ * `"research": true`, an item opted out with `"research": false`, any item on a loop that does not
+ * research (`configured`: the loop's published `run.research`, web/release.ts), and any item
+ * already building or handed in without a brief. Only on a loop that researches is a feature
+ * released and not yet researched pending: its run has still to start.
  */
-export function researchStepState(work: Pick<Work, 'type' | 'research' | 'researchBrief' | 'submission' | 'candidate' | 'lease'>, now: number): StepState {
+export function researchStepState(work: Pick<Work, 'type' | 'research' | 'researchBrief' | 'submission' | 'candidate' | 'lease'>, now: number, configured = false): StepState {
   const record = work.researchBrief ?? null;
   if (record?.state === 'running')
     return Number.isFinite(Date.parse(record.startedAt)) && now < Date.parse(record.startedAt) + record.timeoutMs + 60_000 ? 'current' : 'pending';
   if (record?.state === 'recorded') return 'done';
   if (record?.state === 'failed') return 'skipped';
   const wanted = work.research === true || work.type === 'feature' && work.research !== false;
-  if (!wanted || work.lease || work.submission || work.candidate) return 'skipped';
+  if (!wanted || !configured || work.lease || work.submission || work.candidate) return 'skipped';
   return 'pending';
 }
 
@@ -240,7 +241,7 @@ export function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: n
  * merging has no step at all.
  */
 export function prSteps(work: Work, now: number, release: ReleaseView = noRelease): PrSteps {
-  const research = researchStepState(work, now);
+  const research = researchStepState(work, now, release.researchConfigured);
   const make = (state: (id: StepId) => StepState, current: StepId | null, detail: string, who: string): PrSteps => ({
     steps: stepIds.map(id => ({ id, label: stepLabel[id], state: state(id) })), current,
     label: current ? `${stepVerb[current]} · ${detail}` : detail, detail, who,

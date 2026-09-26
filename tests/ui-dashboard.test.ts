@@ -427,10 +427,10 @@ test('unit:ui-insights-flow — Insights shows a Now view at each item\'s true s
   assert.equal(replayPlaces.length, 30); assert.equal(new Set(replayPlaces).size, 30, 'no two replay dots overlap');
   const laneHeight = Number(lane.match(/height:(\d+)px/)![1]);
   assert.ok(Math.max(...replayPlaces.map(place => Number(place.split('|')[1]))) < laneHeight, 'the replay lane grows to hold every row');
-  // On a phone the step heads keep the seven columns the lanes below are drawn in.
+  // On a phone the step heads keep the eight columns (Research to Deploy) the lanes below are drawn in.
   const cssFlow = await read('web/style.css');
-  assert.deepEqual([...cssFlow.matchAll(/\.flow-columns-head\{[^}]*grid-template-columns:repeat\((\d+)/g)].map(match => match[1]), ['7']);
-  assert.match(cssFlow, /\.flow-lane\{[^}]*calc\(100%\/7 - 1px\)/);
+  assert.deepEqual([...cssFlow.matchAll(/\.flow-columns-head\{[^}]*grid-template-columns:repeat\((\d+)/g)].map(match => match[1]), ['8']);
+  assert.match(cssFlow, /\.flow-lane\{[^}]*calc\(100%\/8 - 1px\)/);
   // Time per step honours the report's stage filter, like every other item-scoped figure.
   const dwellItem = (id: string, stage: string) => ({ id, key: id, stage, type: 'feature', createdAt: new Date(NOW - 10 * hour).toISOString(), stageEnteredAt: new Date(NOW - hour).toISOString(), policy: {}, gates: [], criteria: [] }) as unknown as Work;
   const fact = (workId: string, kind: string, ago: number, details: Record<string, unknown>) => ({ workId, workKey: workId, kind, observedAt: new Date(NOW - ago * hour).toISOString(), recordedAt: new Date(NOW - ago * hour).toISOString(), source: 'graphyard', details, dedupe: `${kind}:${workId}:${ago}` });

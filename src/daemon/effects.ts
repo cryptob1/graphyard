@@ -35,7 +35,7 @@ import type { daemonSummary } from './run.js';
 import { observeDeployment } from './deployment.js';
 import { serverCallName, timedCall, timedFetch, timedRun } from '../master/timings.js';
 import type { RunRecord, Runner } from '../runner/types.js';
-import type { ResearchEvent } from '../research.js';
+import { researchConfigured, type ResearchEvent } from '../research.js';
 
 /** A reviewer or producer session a launch ledger holds as pending, as the failover step reads it. */
 export interface LaunchedSession { role: 'reviewer' | 'producer'; record: string; profile: string; agentName: string; pane: string | null; work: string; requestId: string | null }
@@ -102,6 +102,12 @@ export interface DaemonEffects {
    * before the next merge.
    */
   publishMergeBatchSize?: () => Promise<unknown>;
+  /**
+   * Publishes whether this loop researches items before build (`run.research`, GY-434), so the
+   * dashboard reads a released feature's Research step as pending only where a run will start;
+   * sent only on a change.
+   */
+  publishResearch?: () => Promise<unknown>;
   /** Asks the provider to run the trusted smoke workflow against the observed deployment. */
   requestSmoke: (work: Work) => void | Promise<void>;
   /**
@@ -469,7 +475,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   // The same route, as the same requester: only the identity that asked may take a request back.
   const withdraw: DaemonEffects['withdraw'] = (work, decision, reason) => asOperatorAgent('POST', `work/${work.id}/decide`, { action: 'withdraw', decision, reason });
   const decisions: DaemonEffects['decisions'] = work => asOperatorAgent('GET', `work/${encodeURIComponent(work.id)}/decisions`);
-  let publishedEnvironment: string | null = null, publishedBatchSize: number | null = null;
+  let publishedEnvironment: string | null = null, publishedBatchSize: number | null = null, publishedResearch: boolean | null = null;
   return {
     agents: () => listHerdrAgents(run).catch(() => []),
     reconcileSessions: (runtime, finished) => reconcileFleetSessions(current(), runtime, finished),
@@ -588,6 +594,12 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       if (batchSize === publishedBatchSize) return;
       await mutate('merge-queue', { batchSize });
       publishedBatchSize = batchSize;
+    },
+    publishResearch: async () => {
+      const configured = researchConfigured(current().run);
+      if (configured === publishedResearch) return;
+      await mutate('research-settings', { configured });
+      publishedResearch = configured;
     },
     recordDeployment: (work, observation) => mutate(`work/${work.id}/deployment`, { sha: observation.sha, mergeSha: work.delivery!.mergeSha, source: observation.source, observedAt: observation.observedAt }),
     requestSmoke: async work => {

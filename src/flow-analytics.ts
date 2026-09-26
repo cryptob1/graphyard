@@ -463,7 +463,7 @@ export function coveredUntil(dataset: { to?: string; covered?: CoveredWindow; ki
   return dataset.kindCovered?.[kind] ?? (dataset.covered?.truncated ? dataset.covered.toCovered : dataset.to);
 }
 
-const carryKinds: FlowKind[] = ['stage.changed', 'gates.changed', 'work.created', 'work.released', 'delivered', 'merged', 'candidate.observed', 'lease.claimed', 'lease.released', 'lease.lost', 'dependencies.changed'];
+const carryKinds: FlowKind[] = ['stage.changed', 'gates.changed', 'work.created', 'work.released', 'delivered', 'merged', 'candidate.observed', 'lease.claimed', 'lease.released', 'lease.lost', 'dependencies.changed', 'research.recorded'];
 
 /**
  * Facts grouped by work id, oldest first as read, built once per fact array and reused: the
@@ -684,7 +684,7 @@ export const metricDefinitions: Record<string, { label: string; formula: string;
   phases: { label: 'Phase durations', formula: 'Per candidate episode (one commit under review), the interval between consecutive milestones. A milestone uses the independently observed provider timestamp when the provider supplies one. The production milestone is the earliest successful deployment of the configured production environment (report.productionEnvironment) that contains the merge commit; a deployment to any other environment never ends the phase.', sources: ['flow_facts:candidate.observed', 'flow_facts:review.submitted', 'flow_facts:review.completed', 'flow_facts:gates.changed', 'flow_facts:merge.authorized', 'flow_facts:merged', 'deployment_observations'] },
   ci: { label: 'CI duration, failure and retry', formula: 'Per check name and commit, the interval between the first pending observation and the first terminal observation. Durations are bounded by Graphyard observation intervals, not by provider start timestamps.', sources: ['flow_facts:check.observed'] },
   evidence: { label: 'Evidence wait, expiry and staleness', formula: 'Wait is review completion to the gate fact where acceptance stops refusing. Expiry counts recorded evidence whose expiry precedes the observation time; staleness counts evidence bound to a superseded commit.', sources: ['flow_facts:evidence.recorded', 'flow_facts:gates.changed'] },
-  research: { label: 'Research runs and effect', formula: 'Per item, one research run per requirements revision: the run\u2019s recorded start to its recorded brief or failure is the research dwell, and the brief, failure and duration are the run\u2019s own facts. The effect compares features researched in the window with features not researched, over rework rounds and review findings per item in each cohort.', sources: ['flow_facts:research.started', 'flow_facts:research.recorded', 'flow_facts:research.failed', 'flow_facts:rework.requested', 'flow_facts:review.submitted'] },
+  research: { label: 'Research runs and effect', formula: 'Per item, one research run per requirements revision: the run\u2019s recorded start to its recorded brief or failure is the research dwell, and the brief, failure and duration are the run\u2019s own facts. The effect compares features with a brief recorded by the window\u2019s end with features without one, over rework rounds and review findings per item in each cohort.', sources: ['flow_facts:research.started', 'flow_facts:research.recorded', 'flow_facts:research.failed', 'flow_facts:rework.requested', 'flow_facts:review.submitted'] },
   operations: { label: 'Operational analytics', formula: 'Counts of recorded blockers, gate refusal reasons, review rounds and findings, rework, lease lifecycle, and queue depth sampled at daily boundaries. Aggregates are never keyed by a person.', sources: ['flow_facts:blocker.set', 'flow_facts:gates.changed', 'flow_facts:review.submitted', 'flow_facts:rework.requested', 'flow_facts:lease.claimed'] },
   deployments: { label: 'Deployment frequency, latency, failure and rollback', formula: 'Deployment-provider observations of every environment join their independently observed contained merge SHAs to merged facts. Latency is deployment start minus the latest contained observed merge. Deployment observations are repository-wide, so slice, type and stage filters do not narrow them. Absent observations are reported as unavailable, never as zero.', sources: ['deployment_observations', 'deployment_merge_observations', 'flow_facts:merged'] },
   bottleneck: { label: 'Bottleneck summary', formula: 'Each undelivered item is classified by its latest durable gate fact into exactly one wait category.', sources: ['flow_facts:gates.changed', 'flow_facts:delivered'] },
@@ -1056,8 +1056,10 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
 
   // Research runs and their effect (GY-434). Duration is recorded on the end fact itself — the
   // run's start to its recorded brief or failure — so the aggregation reads one fact per stay.
-  // The effect compares features the window researched against features it did not, over the two
-  // counts that answer whether research pays: rework rounds and review findings per item.
+  // The effect compares researched features against unresearched ones, over the two counts that
+  // answer whether research pays: rework rounds and review findings per item. A feature is
+  // researched when a brief was ever recorded for it up to the window's end (`latest`), so one
+  // researched before the window opened never dilutes the unresearched cohort.
   const researchStarts = scopedFacts.filter(fact => fact.kind === 'research.started');
   const researchEndFacts = scopedFacts.filter(fact => fact.kind === 'research.recorded' || fact.kind === 'research.failed');
   const researchDurations: number[] = [];
@@ -1066,7 +1068,7 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
     if (value !== null && value >= 0) researchDurations.push(value);
     else exclude('research-duration-not-recorded', end.workKey);
   }
-  const researchedKeys = new Set(researchEndFacts.filter(fact => fact.kind === 'research.recorded').map(fact => fact.workKey));
+  const researchedKeys = new Set(stageScope.filter(item => latest.has(`${item.id}:research.recorded`)).map(item => item.key));
   const roundsByWorkKey = new Map<string, number>();
   for (const fact of scopedFacts.filter(fact => fact.kind === 'rework.requested')) roundsByWorkKey.set(fact.workKey, (roundsByWorkKey.get(fact.workKey) ?? 0) + 1);
   const findingsByWorkKey = new Map<string, number>();

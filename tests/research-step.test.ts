@@ -12,6 +12,7 @@ import WorkDetails from '../web/pages/work-details.js';
 import WorkersPage from '../web/pages/workers.js';
 import { LandedPerDay, ResearchEffect, WhereTimeGoes } from '../web/pages/insights-flow.js';
 import { groupOf, nextActor } from '../web/groups.js';
+import { noRelease, releaseView } from '../web/release.js';
 
 // GY-434: research is a first-class step. The step model leads with it — before Build — and every
 // step display shows it in order with its state: done once a brief is recorded, current while a
@@ -92,9 +93,22 @@ test('unit:research-step-rendered — the step model leads with research: done o
   assert.equal(bug.steps.every(step => step.state !== ('failed' as string)), true, 'no step reads as failed');
   // A failed research run is skipped too: the build proceeds without a brief.
   assert.equal(prSteps(failedResearch, NOW).steps[0].state, 'skipped', 'a failed run renders as skipped, never failed');
-  // Research not configured: a builder claimed the feature with no run recorded, so research was skipped.
+  // Research not configured: the loop publishes that it does not research (status
+  // `research.configured`), so a released feature no run will start for reads skipped — before a
+  // builder claims it and after. Only on a loop that researches is it pending, awaiting its run.
+  const configured = { ...noRelease, researchConfigured: true };
+  assert.equal(releaseView({ research: { configured: true } }).researchConfigured, true, 'the status read carries whether the loop researches');
+  assert.equal(releaseView({}).researchConfigured, false, 'a loop that never said so does not research');
+  const released = item({ id: '88888888-8888-4888-8888-888888888888', key: 'GY-8' });
+  assert.equal(researchStepState(released, NOW), 'skipped', 'unconfigured, before a claim: a released feature reads skipped, not pending');
+  assert.equal(prSteps(released, NOW).steps[0].state, 'skipped');
+  assert.equal(prSteps(released, NOW).current, 'build', 'with no research to wait for, the build is the step that waits');
+  assert.equal(researchStepState(released, NOW, true), 'pending', 'configured, before a claim: its run has still to start');
+  assert.equal(prSteps(released, NOW, configured).steps[0].state, 'pending');
   const claimedUnresearched = item({ id: '66666666-6666-4666-8666-666666666666', key: 'GY-6', lease: { owner: 'worker-1', epoch: 1, expiresAt: at(hour) } } as Partial<Work>);
-  assert.equal(researchStepState(claimedUnresearched, NOW), 'skipped', 'a feature built without research reads skipped, not pending');
+  assert.equal(researchStepState(claimedUnresearched, NOW), 'skipped', 'unconfigured, after a claim: a feature built without research reads skipped');
+  assert.equal(researchStepState(claimedUnresearched, NOW, true), 'skipped', 'configured, after a claim without a run: skipped, not pending');
+  assert.equal(prSteps(claimedUnresearched, NOW, configured).steps[0].state, 'skipped');
   assert.equal(researchStepState(item({ research: false } as Partial<Work>), NOW), 'skipped', 'research: false skips the step');
   // Handed in or merged without a brief, research still reads skipped, never done; with one, done.
   const handedIn = item({ id: '77777777-7777-4777-8777-777777777777', key: 'GY-7', type: 'bug', submission: { pr: 7, epoch: 1, submittedAt: at(-hour) } as any, gates: gates({ review: ['Independent approval of the current commit is required'] }) });
@@ -211,7 +225,7 @@ test('unit:research-in-flow-analytics — flow analytics record time in research
   const dataset = {
     observedAt: at(2 * minute), from: at(-7 * day), to: at(2 * minute), days: 7 as const,
     work: [researched, unresearched], included: [researched, unresearched], facts,
-    latest: ['work.created', 'work.released', 'gates.changed', 'lease.claimed', 'candidate.observed', 'rework.requested']
+    latest: ['work.created', 'work.released', 'gates.changed', 'lease.claimed', 'candidate.observed', 'rework.requested', 'research.recorded']
       .flatMap(kind => [latest(kind, researched.id), latest(kind, unresearched.id)]).filter((fact): fact is FlowFact => !!fact),
     carryIn: [], deployments: [], mergedForDeployments: [], scanned: facts.length, truncated: false, workTruncated: false, deploymentsTruncated: false, deploymentMergesTruncated: false,
     projection: { lastEvent: sequence, updatedAt: at(2 * minute), pendingEvents: 0, pendingCapped: false },
@@ -242,11 +256,28 @@ test('unit:research-in-flow-analytics — flow analytics record time in research
   assert.equal(report.research.effect.researched.reviewFindings.median, 0);
   assert.equal(report.research.effect.unresearched.reviewFindings.median, 1);
   assert.ok(report.definitions.research, 'the report defines the research metric');
+  // A feature researched before the window opened is researched, never counted as unresearched:
+  // its brief is in the item's latest facts even though the window holds none of its research facts.
+  const earlier = item({ id: '99999999-9999-4999-8999-999999999999', key: 'GY-9', researchBrief: brief('recorded', 10 * day + 30 * minute, 10 * day), createdAt: at(-11 * day) });
+  const earlierState = {};
+  const earlierFacts = [
+    event(earlier, 'create', -11 * day), event(earlier, 'ready', -11 * day + minute),
+    event({ ...earlier, researchBrief: brief('running', 10 * day + 30 * minute, null, null) }, 'research.started', -10 * day - 30 * minute),
+    event(earlier, 'research.recorded', -10 * day),
+  ].flatMap(ledgerEvent => deriveFacts(ledgerEvent, earlierState));
+  const earlierLatest = ['work.created', 'research.recorded'].map(kind => earlierFacts.filter(fact => fact.kind === kind).at(-1)!);
+  assert.equal(earlierLatest.length, 2);
+  const withEarlier = computeFlow({ ...dataset, work: [...dataset.work, earlier], included: [...dataset.included, earlier], latest: [...dataset.latest, ...earlierLatest] } as FlowDataset, { days: 7 });
+  assert.equal(withEarlier.research.runs, 1, 'the earlier run is outside the window');
+  assert.equal(withEarlier.research.effect.researched.items, 2, 'researched before the window still counts as researched');
+  assert.equal(withEarlier.research.effect.unresearched.items, 1, 'and never dilutes the unresearched cohort');
   // Insights draws research as a step: its median in where the time goes, and its effect panel.
   const insights = (element: ReactElement) => renderToStaticMarkup(element);
   assert.match(insights(createElement(WhereTimeGoes, { report })), /Research/, 'where the time goes lists the research step');
   const effect = insights(createElement(ResearchEffect, { report }));
   assert.match(effect, /1 run · 1 brief · 0 without a brief · median 30m/);
+  assert.match(effect, /<small>last 7 days<\/small>/);
+  assert.match(insights(createElement(ResearchEffect, { report: { ...report, window: { ...report.window, days: 30 } } })), /<small>last 30 days<\/small>/, 'the panel names the report window');
   assert.match(effect, /<tr data-cohort="researched"><th scope="row">Researched<\/th><td>1<\/td><td>0\.0<\/td><td>0\.0<\/td><\/tr>/);
   assert.match(effect, /<tr data-cohort="unresearched"><th scope="row">Not researched<\/th><td>1<\/td><td>1\.0<\/td><td>1\.0<\/td><\/tr>/);
   // Landed per day splits each day's deliveries by whether they were built from a brief.
@@ -259,9 +290,14 @@ test('unit:research-in-flow-analytics — flow analytics record time in research
   const failed = item({ id: '44444444-4444-4444-8444-444444444444', key: 'GY-4', researchBrief: brief('failed', 30 * minute, 16 * minute, null) });
   const waiting = item({ id: '55555555-5555-4555-8555-555555555555', key: 'GY-5' });
   const built = { ...unresearched, candidate: { pr: 501, sha: head, baseSha: base } } as Work;
-  const counts = researchStatus([researched, built, live, failed, waiting], NOW);
+  const claimed = item({ id: '66666666-6666-4666-8666-666666666666', key: 'GY-6', lease: { owner: 'worker-1', epoch: 1, expiresAt: at(hour) } } as Partial<Work>);
+  const counts = researchStatus([researched, built, live, failed, waiting, claimed], NOW, true);
   assert.deepEqual(counts.live.map(line => line.key), ['GY-3']);
   assert.equal(counts.live[0].model, 'zai/glm-5.3-flash');
   assert.deepEqual(counts.failed.map(line => line.key), ['GY-4']);
-  assert.deepEqual(counts.waiting.map(line => line.key), ['GY-5'], 'a released feature with no run is waiting for its research');
+  assert.deepEqual(counts.waiting.map(line => line.key), ['GY-5'], 'a released feature with no run is waiting for its research; one a builder holds is not');
+  // A loop that does not research has no run to wait for: nothing is waiting, before a claim or after.
+  const unconfigured = researchStatus([researched, built, live, failed, waiting, claimed], NOW, false);
+  assert.deepEqual(unconfigured.waiting, [], 'unconfigured, no released feature waits for research');
+  assert.deepEqual(unconfigured.live.map(line => line.key), ['GY-3'], 'a run already recorded is still reported as it stands');
 });

@@ -97,14 +97,15 @@ const perItem = (summary: any) => summary && typeof summary.average === 'number'
 /**
  * Research (GY-434): the step's runs over the window — briefs, runs that ended without one, and the
  * median time from a run's start to its brief — and its effect: rework rounds and review findings
- * per feature for features researched in the window against features that were not. The figures
+ * per feature for features with a recorded brief against features without one. The figures
  * are the flow report's own (`research`), computed from the recorded research facts.
  */
 export function ResearchEffect({ report }: { report: any }) {
   const research = report?.research;
   if (!research) return <section className="panel" aria-label="Research"><h2>Research</h2><p className="muted">{report ? 'No research run was recorded in this window.' : 'Reading the recorded research runs…'}</p></section>;
   const { researched, unresearched } = research.effect ?? {};
-  return <section className="panel research-effect" aria-label="Research"><h2>Research <small>last 7 days</small></h2>
+  const days = Number(report?.window?.days) || 7;
+  return <section className="panel research-effect" aria-label="Research"><h2>Research <small>last {days} {days === 1 ? 'day' : 'days'}</small></h2>
     <p data-research="runs">{research.runs} {research.runs === 1 ? 'run' : 'runs'} · {research.briefs} {research.briefs === 1 ? 'brief' : 'briefs'} · {research.skipped} without a brief · median {minutes(research.duration?.medianMs ?? null)}</p>
     <table className="research-effect-table"><thead><tr><th scope="col">Features</th><th scope="col">Items</th><th scope="col">Rework rounds per item</th><th scope="col">Review findings per item</th></tr></thead>
       <tbody>

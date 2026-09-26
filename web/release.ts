@@ -20,9 +20,15 @@ export interface ReleaseView extends ProductionHold {
    * only on a trusted App's own failure; null when status has not said.
    */
   ciAppIds: readonly number[] | null;
+  /**
+   * Whether the master loop researches items before build (`run.research`, as it last published it:
+   * status `research.configured`, GY-434). Without it a released feature's Research step is skipped,
+   * not pending: no run will start.
+   */
+  researchConfigured: boolean;
 }
 
-export const noRelease: ReleaseView = { environment: defaultProductionEnvironment, ...noProductionHold, ciAppIds: null };
+export const noRelease: ReleaseView = { environment: defaultProductionEnvironment, ...noProductionHold, ciAppIds: null, researchConfigured: false };
 
 /** The release view from the status read every page already has. */
 export function releaseView(status: any): ReleaseView {
@@ -34,6 +40,7 @@ export function releaseView(status: any): ReleaseView {
     // open deployment incident (blocked at Deploy), and when the watch last looked.
     ...productionHold(status?.production),
     ciAppIds: Array.isArray(status?.ciAppIds) ? status.ciAppIds.filter((id: unknown): id is number => typeof id === 'number') : null,
+    researchConfigured: status?.research?.configured === true,
   };
 }
 

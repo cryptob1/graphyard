@@ -51,7 +51,7 @@ another session's handle finished to free a slot.
 
 With `run.research` set (`model`, `timeoutMinutes` 15, `tokenBudget`), a feature (or `"research": true`) gets one read-only Pi session per requirements revision, briefing worker and reviewer: reusable code, prior art, risks, approach. Product questions go under Needs you with recommendation and deadline; build proceeds on it, a differing answer requests rework, failure never blocks.
 
-Research is the first of the [dashboard's steps](dashboard.md#the-status-sentence): the item page shows the brief and the run's model, duration and token spend, Workers lists live runs, and flow analytics time each run from its start to its brief (`research.started`, `research.recorded`, `research.failed` facts; the report's `research` metric compares rework and review findings for researched and unresearched features). `master status` → `research` lists runs `live`, `waiting` (released features whose run has not started, or a run past its bound) and `failed`.
+Research is the first [dashboard step](dashboard.md#the-status-sentence), skipped where `run.research` is unset (published via `POST /api/research-settings`); `master status` → `research` lists `live`, `waiting` and `failed` runs.
 
 ## Automatic dispatch at submit
 

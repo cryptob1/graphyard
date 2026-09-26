@@ -102,7 +102,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
   const [currentLeft, ...laterLeft] = left;
   const leftCount = left.reduce((sum, group) => sum + group.lines.length, 0);
   const overlap = overlapLine(item, work);
-  // The research brief the build started from (GY-259), collapsed by default: its sections, the
+  // The research brief the build started from (GY-434), collapsed by default: its sections, the
   // product questions with their state, and what the run cost — model, duration and token spend.
   const research = item.researchBrief ?? null;
   const researchMs = research ? research.endedAt ? Date.parse(research.endedAt) - Date.parse(research.startedAt) : now - Date.parse(research.startedAt) : 0;

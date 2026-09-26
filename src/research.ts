@@ -99,6 +99,24 @@ export function researchSettings(run: { research?: unknown; pi?: { command?: str
   return { ...parsed, command: parsed.command ?? run?.pi?.command ?? 'pi' };
 }
 
+/**
+ * Whether this loop researches items before build: `run.research` is set, valid and not disabled.
+ * The loop publishes it (POST /api/research-settings) so the dashboard's Research step reads
+ * skipped, not pending, for a feature no run will ever start for.
+ */
+export function researchConfigured(run: { research?: unknown; pi?: { command?: string } } | undefined): boolean {
+  if (!run?.research) return false;
+  try { return researchSettings(run).enabled; } catch { return false; }
+}
+
+/** The installation-ledger event recording whether the loop researches, as it last published it (POST /api/research-settings). */
+export const researchConfiguredEvent = 'installation.research-configured';
+/** Whether the loop researches, read back from the installation ledger: false until it has said so. */
+export async function publishedResearchConfigured(pool: pg.Pool): Promise<boolean> {
+  const row = (await pool.query('SELECT payload->>\'configured\' AS configured FROM events WHERE work_id IS NULL AND kind=$1 ORDER BY seq DESC LIMIT 1', [researchConfiguredEvent])).rows[0];
+  return row?.configured === 'true';
+}
+
 /** A feature is researched unless its intent says `"research": false`; a bug or chore only when it says `true`. */
 export const researchWanted = (work: Pick<Work, 'type' | 'research'>) => work.research === true || work.type === 'feature' && work.research !== false;
 /** The requirements revision: what the item asks for, digested. A new revision is researched afresh; nothing else starts a second run. */
@@ -346,11 +364,12 @@ export interface ResearchRunLine { key: string; model?: string; since?: string; 
 /**
  * The research step across the fleet, as `master status` reports it: `live` are the runs recorded
  * as running within their time limit (plus the grace to record their end), `waiting` the released
- * items whose run has still to start — and, past its bound, the recorded-but-unfinished run the
- * loop is about to fail — and `failed` the runs that ended without a brief, so their items built
- * from the criteria alone.
+ * items whose run has still to start — only on a loop that researches (`configured`), and never an
+ * item a builder already holds, which the dashboard reads as skipped — and, past its bound, the
+ * recorded-but-unfinished run the loop is about to fail; `failed` are the runs that ended without
+ * a brief, so their items built from the criteria alone.
  */
-export function researchStatus(work: readonly Work[], now: number): { live: ResearchRunLine[]; waiting: ResearchRunLine[]; failed: ResearchRunLine[] } {
+export function researchStatus(work: readonly Work[], now: number, configured: boolean): { live: ResearchRunLine[]; waiting: ResearchRunLine[]; failed: ResearchRunLine[] } {
   const live: ResearchRunLine[] = [], waiting: ResearchRunLine[] = [], failed: ResearchRunLine[] = [];
   for (const item of work) {
     if (item.stage === 'done' || isClosed(item) || !researchWanted(item)) continue;
@@ -362,7 +381,7 @@ export function researchStatus(work: readonly Work[], now: number): { live: Rese
     }
     if (record?.state === 'failed') { failed.push({ key: item.key, reason: record.failure?.reason ?? 'failed' }); continue; }
     if (record?.state === 'recorded') continue;
-    if (item.ready && !item.blocker && !item.submission && !item.candidate) waiting.push({ key: item.key });
+    if (configured && item.ready && !item.blocker && !item.lease && !item.submission && !item.candidate) waiting.push({ key: item.key });
   }
   return { live, waiting, failed };
 }

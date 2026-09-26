@@ -17,6 +17,7 @@ import { directMergeStatus } from '../../direct-merge.js';
 import { maxMergeBatchSize, mergeBatchSizeEvent } from '../../merge-queue.js';
 import { eventStats } from '../../store/snapshot-delta.js';
 import { productionEnvironmentEvent, productionEnvironmentName, resolvedProductionEnvironment } from '../../flow-analytics.js';
+import { publishedResearchConfigured, researchConfiguredEvent } from '../../research.js';
 import { boardFromStatus } from '../../model/board.js';
 
 /** Control-plane status and the work reads every client polls. */
@@ -69,6 +70,9 @@ export const statusRoutes = defineRoutes('status', [
         fleet: ['admin', 'coordinator', 'reader', 'slice-lead'].includes(actor.role) ? await services.agentRegistry.snapshot(executorHost(url, req)) : null,
         // Direct-merge mode (direct-merge.ts): the open windows and the one line master status shows while any is.
         directMerge: await directMergeStatus(engine.store.pool, engine.directMergeEnvironment, observedAt),
+        // Whether the master loop researches before build (GY-434), as it last published it: the
+        // dashboard's Research step is pending for a released feature only where a run will start.
+        research: { configured: await publishedResearchConfigured(engine.store.pool) },
         now: observedAt.toISOString(), release: releaseInfo(), schema: schemaVersion };
     },
   },
@@ -83,7 +87,23 @@ export const statusRoutes = defineRoutes('status', [
       const now = ((await engine.store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).getTime();
       const work = operatorVisible(await engine.store.list());
       return boardFromStatus(work, now, { humanOnly: openHumanOnly(await humanOnlySubjects(services, work), now), productionEnvironment: await resolvedProductionEnvironment(engine.store.pool),
-        production: actor.role === 'operator-agent' ? null : production?.status() ?? null, ciAppIds: engine.ciAppIds });
+        production: actor.role === 'operator-agent' ? null : production?.status() ?? null, ciAppIds: engine.ciAppIds, research: { configured: await publishedResearchConfigured(engine.store.pool) } });
+    },
+  },
+  {
+    // The master loop publishes whether it researches before build (`run.research`, GY-434), which
+    // lives only on the master's host. Recorded once per change in the installation ledger; the
+    // status and board reads carry it so the Research step reads skipped where no run will start.
+    method: 'POST', path: '/api/research-settings',
+    async handle(context) {
+      const { actor, services: { engine } } = context;
+      demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
+      const configured = (await parseJson(context, 4096, '{}'))?.configured;
+      demand(typeof configured === 'boolean', 'configured must be true or false', 400);
+      const latest = (await engine.store.pool.query('SELECT payload->>\'configured\' AS configured FROM events WHERE work_id IS NULL AND kind=$1 ORDER BY seq DESC LIMIT 1', [researchConfiguredEvent])).rows[0];
+      if (latest && (latest.configured === 'true') === configured) return { research: { configured }, recorded: false };
+      await engine.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, researchConfiguredEvent, JSON.stringify({ configured })]);
+      return { research: { configured }, recorded: true };
     },
   },
   {

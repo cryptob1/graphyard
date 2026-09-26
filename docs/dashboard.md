@@ -22,16 +22,16 @@ Running rows offer:
 - **Copy local**, on the launching host: `herdr agent attach w1V:pJD`.
 - **Copy remote**: `herdr --help` documents `herdr --machine <label-or-id> <command>` and `herdr --remote <ssh-target>`, and interactive attachment is not forwarded by `--machine`, so the form focuses the pane then attaches remotely: `herdr --machine vishrog agent focus w1V:pJD && herdr --remote vishrog`.
 
-A live [research run](master-agent.md#research-before-build) is its own row: role **Researches**, the model it runs on, its item and since when. It holds no session handle, so it is read from the item's research record and ends when the brief or the failure is recorded.
+A live [research run](master-agent.md#research-before-build) is its own row: role **Researches**, model, item, since.
 
 ## The status sentence
 
-Rows show the steps **Research, Build, Validate, Test, Review, Prove, Merge, Deploy** (`web/pr-steps.ts`). Research is *Researching* while its run is live or awaited (the item is Moving, the Research agent acts next), done once the brief is recorded, and **skipped** (a hatched segment, never missing or failed) for a bug, `"research": false`, research not configured, or a run that ended without a brief. A merged item reads *Merged*, then *Live* once production serves it (counted this week). Moving and Blocked rows past thirty minutes read `1h 12m overdue`.
+Rows show the steps **Research, Build, Validate, Test, Review, Prove, Merge, Deploy** (`web/pr-steps.ts`). Research reads **skipped** (hatched, never failed) for a bug, `"research": false`, a run without a brief, or a loop without `run.research`. A merged item reads *Merged*, then *Live* once production serves it (counted this week). Moving and Blocked rows past thirty minutes read `1h 12m overdue`.
 
 ## An item page
 
-Below the summary: **What is left** (unmet requirements and who clears each), **Requirements** (✓ or ○ per criterion), **Pull request** and **Activity**. **Research brief**, collapsed by default, shows the brief the build started from — approach, existing code (paths), patterns, risks and the product questions with their answer or recommendation — and on its summary line the run's model, duration and token spend. **Technical details** holds gates, sessions, evidence and overlaps (`Shares files with GY-166, GY-167 (tests/)`).
+Below the summary: **What is left** (unmet requirements and who clears each), **Requirements** (✓ or ○ per criterion), **Pull request** and **Activity**. **Research brief** (collapsed) shows the brief and the run's model, duration and tokens. **Technical details** holds gates, sessions, evidence and overlaps (`Shares files with GY-166, GY-167 (tests/)`).
 
 ## Insights
 
-Headline numbers, **Flow** replay (research to live, one column per step), landed per day (each day's hover names how many were built from a research brief), where time goes (Research is a step with its own median), and **Research**: runs, briefs, runs without a brief, median run time, and rework rounds and review findings per feature for researched against unresearched features over the window. Flow analytics' step dwell, step moves and *where work is waiting* (`Researching`) include research; **Show details** holds shipping pulse (PR-to-production from `POST /api/production-observations` or `master verify-deployment`) and flow analytics. **Shipped** holds **Interventions**, **Validation** and **Releases**; `GRAPHYARD_INTERVENTION_PATTERNS=1` files repeats as `bug` items. Missing values read `Unavailable`, never zero.
+Headline numbers, **Flow** replay, landed per day, where time goes (Research included), **Research** (runs, briefs, rework and findings: researched against not); **Show details** holds shipping pulse (PR-to-production from `POST /api/production-observations` or `master verify-deployment`) and flow analytics. **Shipped** holds **Interventions**, **Validation** and **Releases**; `GRAPHYARD_INTERVENTION_PATTERNS=1` files repeats as `bug` items. Missing values read `Unavailable`, never zero.
