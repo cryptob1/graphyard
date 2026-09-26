@@ -7,7 +7,7 @@ Follow [install](install.md): `node "$GRAPHYARD_CLI" install --provider railway 
 
 ## 2. Add machines
 
-Each concurrent session needs a worker identity and host ID: raise the installer's `--workers`, or connect a machine:
+Each concurrent session needs a worker identity and host ID: raise `install --workers`, or connect a machine:
 
 ```sh
 node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST --herdr --host-id UNIQUE_MACHINE_NAME --token-stdin
@@ -27,7 +27,7 @@ Agents treat Herdr's bracketed paste as untrusted data (prompt injection), so wi
 
 ### Agent environments
 
-Each agent account has a login home under `~/.coding_agents`, selected by `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_DATA_HOME` or `CURSOR_CONFIG_DIR` (Cursor). Tokens go in `~/.config/graphyard/workers/` and `producers/` (mode 0600):
+Each agent account has a login home under `~/.coding_agents`, selected by `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_DATA_HOME` or `CURSOR_CONFIG_DIR`. Tokens go in `~/.config/graphyard/workers/` and `producers/` (mode 0600):
 
 ```sh
 node "$GRAPHYARD_CLI" master environments --create claude,codex --apply  # new login homes
@@ -48,7 +48,7 @@ node "$GRAPHYARD_CLI" master registry propose --apply
 
 ### Add a runtime
 
-Write a dash-led value onto its flag with `=`:
+Join a dash-led value to its flag with `=`:
 
 ```sh
 node "$GRAPHYARD_CLI" master registry runtime set aider --kind aider --arg=--yes-always \
@@ -70,7 +70,7 @@ node "$GRAPHYARD_CLI" master registry account quota opencode-a exhausted --reaso
 
 ### Add a role
 
-Most preferred account first; policy applies next launch:
+Preferred account first; applies next launch:
 
 ```sh
 node "$GRAPHYARD_CLI" master registry role set worker claude-b,claude-c,codex-a --concurrency 4 --reason "Prefer Claude"
@@ -79,13 +79,13 @@ node "$GRAPHYARD_CLI" master registry role set reviewer codex-a,claude-c --concu
 
 ### Size review and proof capacity
 
-Each candidate needs one review and one producer session per proof group; a profile runs `"concurrency"` sessions at once, changed without a restart:
+Each candidate needs one review and one producer session per proof group; a profile's `"concurrency"` caps its sessions, changed without a restart:
 
 ```json
 "reviewers":[{"name":"claude-reviewer","agentName":"review-claude","kind":"claude","accounts":["claude-a","claude-b"],"concurrency":3}]
 ```
 
-When adding workers, for worker count `W` and `G` proof groups: at least `⌈W / 2⌉` review slots and `G × ⌈W / 2⌉` producer slots. Watch `longestWaitMs`.
+Adding workers? For worker count `W` and `G` proof groups: `⌈W / 2⌉` review slots and `G × ⌈W / 2⌉` producer slots. Watch `longestWaitMs`.
 
 ## 3. Start the master
 
@@ -100,7 +100,7 @@ Run it under an OS identity whose GitHub credentials workers cannot read. `--bro
 
 ### The loop must be supervised
 
-`master init` from the coordinator checkout writes `~/.config/systemd/user/graphyard-master.service`, runs `systemctl --user enable --now` and `loginctl enable-linger`; the unit restarts on crash, reboot and hang. It is never a side effect: worker checkouts and temporary directories are refused. To move it: `master init --token-stdin --replace-supervisor`. `master status` reports `setup.supervisor`.
+`master init` from the coordinator checkout writes `~/.config/systemd/user/graphyard-master.service`, runs `systemctl --user enable --now` and `loginctl enable-linger`; the unit restarts on crash, reboot and hang. It is never a side effect: worker checkouts and temporary directories are refused. Move it with `master init --token-stdin --replace-supervisor`. `master status` reports `setup.supervisor`.
 
 ## 4. Prove the first PR
 
