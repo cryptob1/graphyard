@@ -124,8 +124,8 @@ export function attestationExercise(work: Pick<Work, 'criteria' | 'candidate'>, 
 export const attestConfirmation = (baseSha?: string) =>
   `An attest decision carries an exercise record (criterion, behaviour removed, executed, result fail) that is yours to confirm: before approving it, run its proof against the candidate base${baseSha ? ` ${baseSha}` : ''} — the tree without the change — and see it fail, and against the candidate and see it pass; refuse it otherwise. `;
 /** The Pi approver's prompt, with the attestation confirmation before its call to decide. */
-export const piApproverWithAttestation = (config: MasterConfig, work: Work, decision: string, repository?: string) =>
-  piApproverPrompt(config, work.key, decision, config.approver!.id, repository).replace('Then call the graphyard_decide tool', `${attestConfirmation(work.candidate?.baseSha)}Then call the graphyard_decide tool`);
+export const piApproverWithAttestation = (config: MasterConfig, work: Work, decision: string, clone?: string) =>
+  piApproverPrompt(config, work.key, decision, config.approver!.id, clone).replace('Then call the graphyard_decide tool', `${attestConfirmation(work.candidate?.baseSha)}Then call the graphyard_decide tool`);
 /** With automatic merging off, the guarded merge runs only for a candidate an approver agent approved. */
 export function approvedMerge<T extends { action: string; state: string; input: any; approvedBy: string | null }>(work: Work, decisions: T[]): T | null {
   return decisions.find(decision => decision.action === 'merge' && decision.state === 'applied' && !!work.candidate
@@ -289,6 +289,21 @@ async function abandonLaunch(error: unknown, pane: string | undefined, tabId: st
  */
 export const approverSessionId = (decision: string) => `approver:${decision}`;
 /**
+ * The approver's own copy of the repository (GY-564): a clone that borrows the operator's objects
+ * but has its own refs, index and working tree, checked out detached at the candidate head (or the
+ * repository's current head when there is none, or it is not fetched), with no remote. Nothing the
+ * approver runs there — checkout, reset, clean, a redirection, a push — can reach the operator's
+ * checkout, and its prompt never names that checkout, so read-only is enforced rather than asked.
+ */
+export async function approverClone(root: string, target: string, sha?: string, run: ChildRun = defaultChildRun) {
+  await run('git', ['clone', '--quiet', '--shared', '--no-checkout', root, target], { cwd: root });
+  await run('git', ['-C', target, 'remote', 'remove', 'origin'], { cwd: target });
+  let detached = false;
+  if (sha) { try { await run('git', ['-C', target, 'checkout', '--quiet', '--detach', sha], { cwd: target }); detached = true; } catch { /* not in the operator's objects */ } }
+  if (!detached) await run('git', ['-C', target, 'checkout', '--quiet', '--detach', 'HEAD'], { cwd: target });
+  return target;
+}
+/**
  * A headless approver's run (GY-169), in a directory of its own under the managed worktree root
  * (GY-391) — never the operator's repository, which the destructive-command guard would otherwise
  * treat as the run's worktree and let it remove files in. The directory goes when the run ends,
@@ -298,8 +313,9 @@ async function startHeadlessApprover(root: string, config: MasterConfig, work: W
   const checkout = await allocateManagedCheckout(root, config, 'approval', work.key, work.candidate?.sha ?? '0'.repeat(40), randomUUID(), headless.filesystem);
   let started: ReturnType<typeof startNarrowRun>;
   try {
+    const clone = await approverClone(root, checkout.worktree, work.candidate?.sha);
     started = startNarrowRun({ runner, name, role: 'approver', work: work.key, subject: decision, checkout: checkout.directory,
-      prompt: piApproverWithAttestation(config, work, decision, root),
+      prompt: piApproverWithAttestation(config, work, decision, clone),
       options: approverRunOptions(checkout.directory, decision, { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: config.approver!.credentialFile, GRAPHYARD_HOST_ID: config.hostId }, piRuntimeSchema.parse(config.run.pi ?? {}).approverTimeoutMinutes * 60_000),
       apply: async result => result.ok ? [await applyDecision(config.url, token, work, result.payload, headless.fetcher)] : [] });
   } catch (error) { await settleCheckout(root, checkout.directory); throw error; }
