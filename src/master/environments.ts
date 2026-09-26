@@ -284,6 +284,8 @@ export async function recordEnvironmentLog(config: Pick<MasterConfig, 'credentia
  * A role the registry does not define yet launches from the profile's own accounts, as before.
  */
 export type LaunchAccount = AgentEnvironment | FleetLaunchAccount;
+/** The agent registry session a launch was chosen under, or undefined when no registry chose it. */
+export const registrySessionOf = (selected: Pick<LaunchSelection, 'account'> | null | undefined) => selected?.account && 'fleet' in selected.account ? selected.account.fleet.session : undefined;
 export interface LaunchSelection { account: LaunchAccount | null; health: EnvironmentHealth | null; skipped: AccountSkip[]; /** Gives a registry session back when the launch it was chosen for failed; false when the registry could not be told. */ release?: (reason: string) => Promise<boolean> }
 /**
  * The registry chooses from what this host reports of each login, so an account a session here saw

@@ -7,35 +7,43 @@ Follow [install](install.md): review `--plan`, then `install --provider railway 
 
 ## 2. Add machines
 
-Each concurrent session needs a worker identity and host ID; raise `install --workers` or connect one:
+Each concurrent session needs a worker identity and host ID (`install --workers` or a connected machine):
 
 ```sh
 node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST --herdr --host-id UNIQUE_MACHINE_NAME --token-stdin
 ```
 
-Commit `AGENTS.md`, `.gitignore`, `graphyard.json`; never `.graphyard/`. Without the master, `graphyard watch GY-N EPOCH -- COMMAND` runs a worker, stopped on lease loss.
+Commit `AGENTS.md`, `.gitignore`, `graphyard.json`; never `.graphyard/`.
 
 ### Documentation policy
 
-`init --scan --apply` writes the documentation paths found to `graphyard.json` (`{"documentation":{"paths":["site/"],"changelog":"CHANGELOG.md"}}`); deploy the printed `GRAPHYARD_DOCUMENTATION`. Items carry *Documentation reflects this change*: a diff there, or `--no-docs`.
+`init --scan --apply` writes the documentation paths found to `graphyard.json` (`{"documentation":{"paths":["site/"],"changelog":"CHANGELOG.md"}}`); deploy the printed `GRAPHYARD_DOCUMENTATION`; `doctor` reports `documentation.drift`. Features and bugs carry *Documentation reflects this change*, met by a diff there or `complete --no-docs "WHY"`.
 
 ### What the generated instructions authorize
 
-The managed `AGENTS.md` states **every session Graphyard launches receives its instruction as the session's own first request**; the only later paste — the loop's single re-prompt, or the reviewer's reminder — is acted on without confirmation. Herdr's bracketed paste is untrusted data (prompt injection); with the request on the command line sessions start without anybody sending `go`, and Claude Code reads the statement through `--append-system-prompt-file`. role files under `.graphyard/harness/` hold permissions, not instructions.
+The managed `AGENTS.md` states **every session Graphyard launches receives its instruction as the session's own first request**; the only later paste — the loop's single re-prompt, or the reviewer's reminder — comes from the same launcher, acted on without confirmation.
+
+Herdr's bracketed paste is untrusted data (prompt injection): sessions start without anybody sending `go`; Claude Code gets it through `--append-system-prompt-file`; role files under `.graphyard/harness/` hold permissions, not instructions.
 
 ### Connect an account
 
-Settings › **Agents** › **Connect an account**: pick a provider; paste a key or start a login. The browser seals a key to the host's public key (the server relays ciphertext only); the host writes the provider's auth file (mode 0600) and smoke-tests that provider and model; the card shows the result. A subscription login shows its URL and code while waiting; finish it in your browser; **Cancel** stops it. The host's executor must run; strong accounts join worker and reviewer, cheap ones (GLM, Flash-class) approver and the unit producer, appended to each failover order; research joins when the host makes the account's wrapper its research command; **change** edits roles.
+Settings › **Agents** › **Connect an account**: pick a provider; paste a key (sealed to the host's public key in the browser — the server relays ciphertext only) or start a login. The host writes the provider's auth file (0600) and smoke-tests that provider and model; the card shows the result. A subscription login shows its URL and code while waiting — finish it in your browser (**Cancel** stops it). The host's executor must run: strong accounts join worker and reviewer, cheap ones approver and producer; research joins when the host makes the account's wrapper its research command; **change** edits roles.
 
 ### Agent environments
 
-Each login home under `~/.coding_agents` is selected by `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_DATA_HOME` or `CURSOR_CONFIG_DIR`; Graphyard's tokens go in `~/.config/graphyard/` (mode 0600). `master environments --create claude` makes a fresh home; `--apply` reports quota and writes profiles.
+Each agent account has a login home under `~/.coding_agents`, selected by `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_DATA_HOME` or `CURSOR_CONFIG_DIR`. Tokens go in `~/.config/graphyard/` (0600). Then:
 
-Profiles run `"approvals": "auto"` (trade-off: unattended sessions); `"prompt"` is refused at launch ([approval modes](master-agent-sessions.md#approval-modes)).
+```sh
+node "$GRAPHYARD_CLI" master environments --create claude,codex --apply  # new login homes
+CLAUDE_CONFIG_DIR=~/.coding_agents/claude-a claude                       # /login once
+node "$GRAPHYARD_CLI" master environments --apply                        # report quota, write profiles
+```
+
+Profiles default to `"approvals": "auto"` (trade-off: unattended sessions); `"prompt"` is refused at launch ([approval modes](master-agent-sessions.md#approval-modes)).
 
 ### Configure the fleet
 
-The **agent registry** (Settings › **Agents**, forms under **Advanced**) records runtimes, accounts, roles and policies. Hosts with logged-in CLIs propose:
+The **agent registry** (Settings › **Agents**; forms under **Advanced**) records runtimes, accounts, roles and policies:
 
 ```sh
 node "$GRAPHYARD_CLI" master registry propose
@@ -82,20 +90,22 @@ Each candidate needs one review and one producer session per proof group; profil
 ```sh
 node "$GRAPHYARD_CLI" master init --url https://YOUR-GRAPHYARD-HOST --herdr-workspace HERDR_WORKSPACE_ID \
   --browser-profile Default --token-stdin < ~/.config/graphyard/INSTALL/tokens/INSTALL-master.token
-node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST
+node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST   # now installs the executors
 node "$GRAPHYARD_CLI" master start codex
 ```
 
-Run it under an OS identity whose GitHub credentials workers cannot read. `--browser-profile` is the administrator's GitHub-signed-in Chrome profile for `master browser` flows; *Confirm access* in GitHub Mobile stays human-only. Add the reviewer: `master reviewer setup`, `master reviewer add PROFILE` ([Claude](../examples/master/claude-reviewer.json)).
+Run it under an OS identity whose GitHub credentials workers cannot read. `--browser-profile` is the Chrome profile signed in to GitHub as admin, for `master browser` flows; *Confirm access* in GitHub Mobile stays human-only. Add the reviewer with `master reviewer setup` and `master reviewer add PROFILE` ([Claude](../examples/master/claude-reviewer.json) template); its manifest flow is the only App confirmation.
 
 ### The loop must be supervised
 
-`master init` from the coordinator checkout writes `~/.config/systemd/user/graphyard-master.service`, runs `systemctl --user enable --now` and `loginctl enable-linger`; the unit restarts on crash, reboot and hang. It is never a side effect: worker checkouts and temporary directories are refused. Move it with `master init --token-stdin --replace-supervisor` from the new checkout. `master status` reports `setup.supervisor` and the merger.
+`master init` from the coordinator checkout writes `~/.config/systemd/user/graphyard-master.service`, runs `systemctl --user enable --now` and `loginctl enable-linger`; the unit restarts on crash, reboot and hang, and is never a side effect: worker checkouts and temporary directories are refused. Move it with `master init --token-stdin --replace-supervisor`. `master status` reports `setup.supervisor` and the merger.
 
 ## 4. Prove the first PR
 
-`graphyard doctor --profile through-merge` names every missing piece. Create a small item; `master run` dispatches it; the loop merges once protection requires `Graphyard / merge`. CI workflows should cancel superseded pull-request runs: group each by `${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}` with `cancel-in-progress: ${{ github.event_name == 'pull_request' }}`; runs on main are never cancelled. `graphyard master protection` lists each required check whose workflow lacks cancel-in-progress under `advisories`.
+`graphyard doctor --profile through-merge` names every missing piece. Create a small item; `master run` dispatches it; the loop merges once protection requires `Graphyard / merge`. `"systemDriven": false` allows [hand actions](master-agent.md#system-driven-items).
+
+CI workflows should cancel superseded pull-request runs: group each by `${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}` with `cancel-in-progress: ${{ github.event_name == 'pull_request' }}`; runs on main are never cancelled. `graphyard master protection` lists each required check whose workflow lacks cancel-in-progress under `advisories`.
 
 ## What stays manual
 
-The subscription and GitHub logins behind each account, the App confirmation, plan approval, *Confirm access*, producer grants, and the [human-only decisions](glossary.md#who-decides).
+Logins, the App confirmation, plan approval, *Confirm access*, producer grants, and the [human-only decisions](glossary.md#who-decides).
