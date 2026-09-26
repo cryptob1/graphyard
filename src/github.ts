@@ -18,6 +18,7 @@ import { alreadyMergeableRefusal, baseRefreshNeeded, dismissedVerdict, enqueueRe
 import { blockedFeatures, controlPlanePermissions, describeShortfall, permissionShortfalls, requiredPermissions, type PermissionFeature, type PermissionLevel, type PermissionShortfall } from './github-permissions.js';
 import { agentOwner, type AttentionItem } from './master/attention.js';
 import type { IntegrationJob } from './coordination.js';
+import { docsSyncAdoption, outsideDocs, overlappingPaths, type DocsSync } from './model/docs-sync.js';
 
 /** Out-of-scope paths compared against the base tip per observation; the rest are refused as uncompared. */
 export const scopeLookupBudget = 200;
@@ -1476,8 +1477,41 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     if (!conflict) return record({ head: candidate!.sha, trigger: undefined, stale: { head: candidate!.sha, base: branch.tip, policyRevision: work.policyRevision, at: new Date().toISOString(),
       reading: `GitHub reported ${candidate!.sha.slice(0, 12)} conflicting with base branch tip ${branch.tip.slice(0, 12)}, but a test merge of the two is clean; the reading is stale and nothing was refreshed` } });
     // The confirmed conflict is the refresh's whole outcome: the provider merge onto the branch
-    // would be refused the same way, and nothing is written to it.
-    return record({ conflict: `Candidate ${candidate!.sha.slice(0, 12)} cannot be brought onto base branch tip ${branch.tip.slice(0, 12)} without resolving a conflict, which is content nobody reviewed or proved: ${conflict}. Run graphyard sync ${work.key}, resolve it and push; the approval and proofs bound to ${candidate!.sha.slice(0, 12)} do not survive the resolution.` });
+    // would be refused the same way, and nothing is written to it. The paths both sides changed
+    // are recorded with it (GY-566): the loop sends a conflict confined to docs pages to a
+    // docs-sync session rather than back to a worker.
+    const conflictPaths = overlappingPaths(await this.sideFiles(branch.tip, candidate!.sha), await this.sideFiles(candidate!.sha, branch.tip));
+    return record({ conflictPaths, conflict: `Candidate ${candidate!.sha.slice(0, 12)} cannot be brought onto base branch tip ${branch.tip.slice(0, 12)} without resolving a conflict, which is content nobody reviewed or proved: ${conflict}. Run graphyard sync ${work.key}, resolve it and push; the approval and proofs bound to ${candidate!.sha.slice(0, 12)} do not survive the resolution.` });
+  }
+  /**
+   * Records a docs-sync head (GY-566) as the outcome of the refresh whose conflict it resolved: the
+   * reviewed head and the base tip the conflict was confirmed on, the merge as GitHub describes it,
+   * and the patch-ids of the change's own diff outside docs/ on each side, from which the engine
+   * decides whether the approval is kept (model/docs-sync.ts `docsSyncCarry`).
+   */
+  async docsSyncRefresh(work: Work, adoption: NonNullable<ReturnType<typeof docsSyncAdoption>>): Promise<BaseRefresh> {
+    const { from, base, head, to } = adoption;
+    const merge = { ...await this.describeMerge(from.sha, head, from.baseSha, base), conflicts: true };
+    const commit = await this.request(`/commits/${base}`);
+    const docsSync: DocsSync = { paths: adoption.paths, to, reviewed: await this.nonDocsPatchId(from.baseSha, from.sha), synced: await this.nonDocsPatchId(base, head) };
+    return { from, base, baseTree: typeof commit?.commit?.tree?.sha === 'string' ? commit.commit.tree.sha : '', policyRevision: work.policyRevision, at: new Date().toISOString(),
+      head, conflict: null, merge, carry: null, trigger: 'docs sync', docsSync };
+  }
+  /** The paths `head` changed against its merge base with `base`, or null when GitHub could not list them completely. */
+  async sideFiles(base: string, head: string): Promise<string[] | null> {
+    try {
+      const files = (await this.request(`/compare/${base}...${head}`))?.files;
+      if (!Array.isArray(files) || files.length >= compareFileCap) return null;
+      return [...new Set(files.flatMap((file: any) => [file?.filename, file?.previous_filename]).filter((path: unknown): path is string => typeof path === 'string'))];
+    } catch { return null; }
+  }
+  /** The patch-id of `head`'s own change outside docs/ (GY-566); null when GitHub could not list the change completely. */
+  async nonDocsPatchId(base: string, head: string): Promise<string | null> {
+    try {
+      const files = base === head ? [] : (await this.request(`/compare/${base}...${head}`))?.files;
+      if (!Array.isArray(files) || files.length >= compareFileCap) return null;
+      return patchId(files.filter((file: any) => outsideDocs(String(file?.filename ?? '')) || (typeof file?.previous_filename === 'string' && outsideDocs(file.previous_filename))));
+    } catch { return null; }
   }
   /**
    * Whether `head` merges cleanly onto `base`, without writing to any branch a person or a check
@@ -1864,6 +1898,11 @@ export async function processJob(engine: Engine, github: GitHub): Promise<boolea
       if (deferral) { github.recordDeferral(work.id, deferral); await engine.store.deferJob(job.work_id, job.token, deferral.until); return true; }
       const previous = work.observation ?? null;
       const observation = await github.observe(work, all);
+      // A head pushed over a confirmed conflict by a docs-sync session (GY-566) is recorded as that
+      // refresh's outcome before the observation binds it, so its carry is decided from the reviewed
+      // head the approval was given on.
+      const synced = docsSyncAdoption(work, observation);
+      if (synced) work = await engine.bindBaseRefresh(work.id, work.revision, await github.docsSyncRefresh(work, synced), job.token);
       work = await engine.observe(work.id, work.revision, observation, job.token);
       schedule.cadence = observationCadence(work, all.map(item => item.id === work!.id ? work! : item), now, previous, github.steadyStateMs?.(now.getTime()));
       // A branch carrying another item's unlanded commits is restored by the control plane (GY-127):

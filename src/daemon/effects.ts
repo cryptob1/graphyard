@@ -36,6 +36,7 @@ import { observeDeployment } from './deployment.js';
 import { serverCallName, timedCall, timedFetch, timedRun } from '../master/timings.js';
 import type { RunRecord, Runner } from '../runner/types.js';
 import type { ResearchEvent } from '../research.js';
+import { launchDocsSync, localConflictPaths, type DocsSyncPlan } from '../docs-sync.js';
 
 /** A reviewer or producer session a launch ledger holds as pending, as the failover step reads it. */
 export interface LaunchedSession { role: 'reviewer' | 'producer'; record: string; profile: string; agentName: string; pane: string | null; work: string; requestId: string | null }
@@ -129,6 +130,13 @@ export interface DaemonEffects {
    * Never the requester.
    */
   approver?: (work: Work, decision: string) => Promise<{ agentName: string; pane: string | null; account?: string | null; runtime?: string | null; session?: string | null; run?: RunRecord | null; settled?: Promise<RunRecord> }>;
+  /**
+   * GY-566. Launches the docs-sync session for a conflict confined to docs pages
+   * (docs-sync.ts `launchDocsSync`); absent, every confirmed conflict goes to rework as before.
+   */
+  docsSync?: (work: Work, plan: DocsSyncPlan) => Promise<{ agentName: string; pane: string | null; account: string | null; runtime: string; session: string | null }>;
+  /** The paths git reports conflicting when `head` merges with `base`, from this checkout (docs-sync.ts `localConflictPaths`); null when it cannot tell. */
+  conflictPaths?: (work: Work, head: string, base: string) => Promise<string[] | null>;
   /** The account and runtime a listed approver session was launched on, so an adopted session's exhaustion holds the account it spent. */
   approverLaunch?: (agentName: string) => Promise<{ account: string | null; runtime: string | null; session?: string | null } | null>;
   /** Every approver launch recorded on this host, with the item and decision each judges (GY-403). */
@@ -463,6 +471,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   // would be a runtime read out of code, and the role would decide nothing.
   // The inventory says whether Herdr could be read (GY-205): one it could not judges no approver session gone.
   const approver: DaemonEffects['approver'] = async (work, decision) => { const launched = await launchApprover(root, work, decision, undefined, await observeHerdrAgents(run), run, {}, handle => mutate(`work/${work.id}/session`, handle)); return { agentName: launched.agentName, pane: launched.pane, account: launched.account?.environment ?? null, runtime: launched.runtime, session: launched.session, run: launched.run, settled: launched.settled }; };
+  const docsSync: DaemonEffects['docsSync'] = async (work, plan) => launchDocsSync(root, work, plan, await observeHerdrAgents(run), run, handle => mutate(`work/${work.id}/session`, handle));
+  const conflictPaths: DaemonEffects['conflictPaths'] = async (work, head, base) => work.candidate ? localConflictPaths(root, work.candidate.branch, head, base) : null;
   const endRegistrySession: DaemonEffects['endRegistrySession'] = async (session, reason) => {
     const config = current();
     if (config.url) await httpFleetClient({ url: config.url, credentialFile: config.credentialFile }).end(session, reason);
@@ -628,6 +638,9 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // on the next reload, with no restart.
     get decide() { return current().operatorAgent ? decide : undefined; },
     get approver() { return current().operatorAgent ? approver : undefined; },
+    // A docs-sync replaces a rework decision the loop could otherwise request (GY-566).
+    get docsSync() { return current().operatorAgent ? docsSync : undefined; },
+    conflictPaths,
     get withdraw() { return current().operatorAgent ? withdraw : undefined; },
     get decisions() { return current().operatorAgent ? decisions : undefined; },
     // A recurring fault class is filed as intent, by the same operator-agent identity (GY-173);

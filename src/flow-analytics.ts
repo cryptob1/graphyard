@@ -3,6 +3,7 @@ import type { Store } from './store.js';
 import { advisoryLocks } from './store/locks.js';
 import { stages, type Stage, type Work } from './model.js';
 import { queueSequencingReason } from './merge-queue.js';
+import { conflictHotspots, conflictHotspotWindowMs, ledgerConflicts, type ConflictOccurrence } from './model/conflict-hotspots.js';
 
 // Delivery-flow analytics.
 //
@@ -347,6 +348,8 @@ export interface FlowDataset {
    */
   stepEntries?: Record<string, string>;
   projection: { lastEvent: number; updatedAt: string | null; pendingEvents: number; pendingCapped: boolean };
+  /** Confirmed conflicts in the day before `to`, from the ledger (GY-566); absent reads as none. */
+  conflicts?: ConflictOccurrence[];
 }
 /**
  * How much of the requested window a bounded scan covered. The in-window scan reads facts in
@@ -560,7 +563,11 @@ export async function readFlow(store: Store, query: FlowQuery): Promise<FlowData
   const deploymentMergesTruncated = mergeRows.length > flowLimits.deploymentMerges;
   const mergedForDeployments = mergeRows.slice(0, flowLimits.deploymentMerges).map(rowToFact);
   const scanEnd = truncated && lastFact ? { observedAt: lastFact.observedAt, id: lastFact.id! } : undefined;
-  return { observedAt, from, to, days: query.days, work, included, facts, latest, carryIn, deployments, mergedForDeployments, scanned, truncated, workTruncated, deploymentsTruncated, deploymentMergesTruncated, covered, kindCovered, scanEnd, production, stepEntries: stepEntries(carryIn, entryFacts), projection };
+  // The conflict hotspots (GY-566) read the last day of confirmed conflicts and docs-sync refreshes.
+  const conflictRows = (await store.pool.query(`SELECT w.document->>'key' AS key, e.kind, e.created_at, e.payload->'details' AS details FROM events e JOIN work_items w ON w.id=e.work_id
+    WHERE e.kind IN ('base.conflict','base.refreshed') AND e.created_at>=$1 AND e.created_at<$2 ORDER BY e.seq LIMIT $3`, [new Date(time(to)! - conflictHotspotWindowMs).toISOString(), to, flowLimits.scan])).rows;
+  const conflicts = ledgerConflicts(conflictRows.map(row => ({ key: row.key, kind: row.kind, at: iso(row.created_at), details: row.details })));
+  return { observedAt, from, to, days: query.days, work, included, facts, latest, carryIn, deployments, mergedForDeployments, scanned, truncated, workTruncated, deploymentsTruncated, deploymentMergesTruncated, covered, kindCovered, scanEnd, production, stepEntries: stepEntries(carryIn, entryFacts), projection, conflicts };
 }
 
 export type WaitCategory = 'delivered' | 'backlog' | 'blocked' | 'dependency' | 'implementation' | 'review' | 'evidence' | 'merge-blocked' | 'merge-ready';
@@ -1141,6 +1148,8 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
     },
     coverage, exclusions, unavailable,
     stageDwell, stepDwell, wip, cumulativeFlow, throughput, leadTime, queueVsActive, mergeReadyDwell, phases, ci, evidence, operations, bottleneck,
+    // The paths most often conflicting in the last day and the items they sent back (GY-566).
+    conflictHotspots: conflictHotspots(dataset.conflicts ?? [], to),
   };
 }
 export type FlowReport = ReturnType<typeof computeFlow>;

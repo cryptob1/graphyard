@@ -4,6 +4,7 @@ import { reviewProviderOf } from './model/review.js';
 import { pathScopesOverlap } from './model/scope.js';
 import { queuedRegressions } from './regression-guard.js';
 import { missingAncestryReason, missingBaseAncestry } from './merge-base-ancestry.js';
+import type { DocsSync } from './model/docs-sync.js';
 
 // Graphyard publishes speculative tips outside refs/heads and refs/tags: the namespace is
 // owned by the App, is never a branch a worker can push, and never appears as a PR head.
@@ -391,6 +392,14 @@ export interface BaseRefresh {
   head: string | null;
   /** Why the base could not be merged into the candidate, named for the worker; null on success. */
   conflict: string | null;
+  /**
+   * With a confirmed conflict (GY-566): the paths both the head and the base changed since their
+   * merge base, which hold every conflicted path; null when GitHub could not list either side.
+   * The loop routes a conflict confined to docs pages to a docs-sync session (model/docs-sync.ts).
+   */
+  conflictPaths?: string[] | null;
+  /** Set when the head is a docs-sync of `from` onto `base` (GY-566): what the carry was decided from. */
+  docsSync?: DocsSync | null;
   /** How Graphyard produced the head, as GitHub reports the commit; null when nothing was merged. */
   merge?: TipMerge | null;
   /** Which bindings of the replaced head carried onto it, decided once when the refresh was bound. */
@@ -417,7 +426,7 @@ export interface BaseRefresh {
   stale?: StaleMergeability | null;
 }
 /** Why a branch was written by the control plane rather than by its worker (GY-375). */
-export type RefreshTrigger = 'conflict confirmed' | 'ejection restore' | 'repair';
+export type RefreshTrigger = 'conflict confirmed' | 'ejection restore' | 'repair' | 'docs sync';
 /**
  * A GitHub `mergeable: false` the control plane's own test merge showed to be clean (GY-375).
  * GitHub recomputes mergeability lazily after the base moves and can report a clean head

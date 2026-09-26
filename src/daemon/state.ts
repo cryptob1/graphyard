@@ -8,6 +8,7 @@ import { type MasterConfig, assertOutsideWorktrees, writeFailure, diskExhaustion
 import { boundDetail } from './decisions.js';
 import { classified, faultClasses, faultInstanceSchema, noteActionOutcome, type FaultKind } from '../model/fault-classes.js';
 import { timingsSchema } from '../master/timings.js';
+import { docsSyncWatchSchema, routedConflictSchema } from '../model/docs-sync.js';
 
 export const daemonActionKinds = ['close', 'dispatch', 'review', 'refresh', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session', 'reclaim', 'decision', 'scope', 'settle', 'failover', 'capacity', 'human', 'preserve', 'fault'] as const;
 export type DaemonActionKind = typeof daemonActionKinds[number];
@@ -305,6 +306,10 @@ export const daemonStateSchema = z.object({
   orphans: z.record(z.string(), orphanObservationSchema).default({}),
   /** Per decision action key, the request this loop put to an approver and what became of it. */
   approvals: z.record(z.string(), approvalWatchSchema).default({}),
+  /** Per item, head and base tip, the docs-sync session the loop launched for a docs-only conflict (GY-566). */
+  docsSyncs: z.record(z.string(), docsSyncWatchSchema).default({}),
+  /** Every confirmed conflict the loop routed, newest last: master status reads its hotspots from here (GY-566). */
+  conflicts: z.array(routedConflictSchema).default([]),
   /** Per work item, a live lease whose session Herdr no longer reports while no fence stands (see step 1d). */
   absences: z.record(z.string(), z.object({ epoch: z.number().int().min(0), owner: z.string().max(200), firstSeenAt: z.string(), cycle: z.number().int().min(0) }).strict()).default({}),
   /** How the loop itself has been failing, as distinct from the steps it runs (see `cycleFailureSchema`). */

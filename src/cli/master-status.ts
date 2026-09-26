@@ -34,6 +34,7 @@ import { throughputStatus } from '../throughput.js';
 import { Timings, timedApi, timedStep, withTimings } from '../master/timings.js';
 import { slowReportReader } from '../master/report-cache.js';
 import { repairLaneAttention } from '../master/repair-lane.js';
+import { hotspots } from './hotspots.js';
 
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
 // The cycle-budget measure is a daemon metric (src/daemon/metrics.ts); it is read from here,
@@ -106,6 +107,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const managedRoot = await timedStep('managed root', () => managedRootStatus(root, master, [...reviewRecords, ...producerRecords]));
   const diskAttention = [...diskPressureAttention(disk), ...managedRoot.attention];
   const daemonState = await readDaemonState(root, master).catch(error => ({ error: error instanceof Error ? error.message : 'Master daemon state is unreadable' }));
+  const hs = hotspots(daemonState);
   const intervalMs = master.run.intervalSeconds * 1000;
   const cycling = 'error' in daemonState ? null : daemonSummary(daemonState, Date.now(), intervalMs, master.hostId);
   const daemon = cycling ?? { running: false, error: (daemonState as { error: string }).error };
@@ -146,9 +148,9 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
       reports: 'bounded', reportBoundMs: dependencies.reportReadBoundMs, sections });
   // A merge pending on a head GitHub reports mergeable is named with the stalled items (GY-344).
   // A repair-lane merge stays in front of the master until a normal merge proves the merge path healthy (GY-406).
-  // The queue head going without an observation stalls the whole queue behind it (GY-492), so its lag is raised with them.
+  // The queue head going without an observation stalls the queue behind it (GY-492), so its lag is raised with them.
   const observation = observationThroughputStatus(coordinator, snapshot);
-  const stalledItems = [...derivedStalls, ...mergeStallAttention(snapshot), ...observation.attention, ...repairLaneAttention(snapshot.work)];
+  const stalledItems = [...derivedStalls, ...mergeStallAttention(snapshot), ...observation.attention, ...repairLaneAttention(snapshot.work), ...hs.attention];
   // Exactly one component merges (GY-245): the loop, where one is installed or running, else the executors.
   const merger = installationMerger({ loop: { configured: !!setup.supervisor.installed, running: !!cycling?.running, autoMerge: master.autoMerge },
     declaration: executors.supervision.declaration, served: executors.presence.served });
@@ -185,7 +187,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     terminalDecisions: decisions.listed, throughput, unansweredDecisions: decisions.unanswered,
     // The commits no reviewer session has ever obtained a verdict on, with the dismissed review.
     unobtainableReviews: unobtainable.map(item => ({ work: item.subject, ...item.review })),
-    merger: { merger: merger.merger, detail: merger.detail }, autoMerge: master.autoMerge, mergeQueue: { batchSize: mergeBatchSize(master) }, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'each merge needs an approved merge decision: graphyard master decide GY-N merge REASON, approved by the approver agent',
+    conflictHotspots: hs.report, merger: { merger: merger.merger, detail: merger.detail }, autoMerge: master.autoMerge, mergeQueue: { batchSize: mergeBatchSize(master) }, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'each merge needs an approved merge decision: graphyard master decide GY-N merge REASON, approved by the approver agent',
     // What the observation workers achieve and how far the queue head has drifted (GY-492).
     observationThroughput: observation,
     versionSkew: mergeProtocolSkew(coordinator, cli), cli,

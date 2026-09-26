@@ -1,6 +1,7 @@
 // Concern: cycle step 4 — dispatch claimable work under capacity and report base refreshes.
 import type { Work } from '../model.js';
 import { pendingBaseRefresh } from '../merge-queue.js';
+import { docsOnlyConflict } from '../model/docs-sync.js';
 import { dispatchOrder } from '../coordination.js';
 import { type CapacityRole, capacitySignature, standingCapacity, describeCapacity } from '../model/capacity.js';
 import { parkedOnHuman, humanDecisionLabel, answerCommand } from '../model/human-request.js';
@@ -216,7 +217,8 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
     // candidate, resolved when the control plane reports what its merge did.
     const target = pending ? { head: item.candidate!.sha, base: pending.baseTip } : refresh ? { head: refresh.from.sha, base: refresh.base } : null;
     if (!target) return;
-    const key = `refresh:${item.id}:${target.head}:${target.base}:${item.policyRevision}`;
+    // A docs-sync head (GY-566) is the same head and tip's second outcome, reported under its own key.
+    const key = `refresh:${item.id}:${target.head}:${target.base}:${item.policyRevision}${!pending && refresh?.docsSync ? ':docs-sync' : ''}`;
     if (pending) {
       if (state.actions[key]) return;
       performed.push(await record(state, key, { kind: 'refresh', work: item.key, principal: null, state: 'started',
@@ -232,7 +234,9 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
     const detail = refresh!.stale
       ? `${item.key}: ${refresh!.stale.reading}; it keeps its head, review and proofs (GY-375)`
       : refresh!.conflict
-      ? `${item.key}${trigger}: ${refresh!.from.sha.slice(0, 12)} cannot be brought onto base branch tip ${refresh!.base.slice(0, 12)} by Graphyard; it returns to the worker with the conflict named: ${refresh!.conflict}`
+      ? `${item.key}${trigger}: ${refresh!.from.sha.slice(0, 12)} cannot be brought onto base branch tip ${refresh!.base.slice(0, 12)} by Graphyard; ${docsOnlyConflict(refresh!.conflictPaths) ? `both sides changed only docs pages (${refresh!.conflictPaths!.join(', ')}), so a docs-sync session resolves it unless the loop's own merge finds code conflicting, when it returns to the worker` : 'it returns to the worker'} with the conflict named: ${refresh!.conflict}`
+      : refresh!.docsSync
+      ? `${item.key}${trigger}: a docs-sync session brought ${refresh!.from.sha.slice(0, 12)} onto base branch tip ${refresh!.base.slice(0, 12)} as ${(refresh!.head ?? '').slice(0, 12)} with no rework round; kept ${kept.join(', ') || 'nothing'}${again.length ? `; required afresh: ${again.join(', ')}` : ''}${carry && !carry.approval.carried ? ` (${carry.approval.reason})` : ''}`
       : `${item.key}${trigger}: brought ${refresh!.from.sha.slice(0, 12)} onto base branch tip ${refresh!.base.slice(0, 12)} as ${(refresh!.head ?? '').slice(0, 12)} with no rework round; kept ${kept.join(', ') || 'nothing'}${again.length ? `; required afresh: ${again.join(', ')}` : ''}`;
     performed.push(await record(state, key, { kind: 'refresh', work: item.key, principal: null, state: refresh!.conflict ? 'failed' : 'done', detail,
       attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
