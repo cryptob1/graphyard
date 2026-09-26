@@ -10,9 +10,9 @@ import { Refusal } from './model/refusal.js';
 import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
 import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
-import { branchContamination, disprovedConflict, currentRestore, decideIdentityCarry, defaultMergeBatchSize, mergeBatchSizeEvent, dismissedApproval, keptTipCarry, onto, pendingRestore, reviewedFilesOf, queueHistoryLimit, queueSequencingReason, reconciliationRefusalPrefix, tipReplacesHead, type BaseRefresh, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type QueueSpeculation, type RestoredApproval } from './merge-queue.js';
+import { branchContamination, nextQueueEntries, disprovedConflict, currentRestore, decideIdentityCarry, defaultMergeBatchSize, mergeBatchSizeEvent, dismissedApproval, keptTipCarry, onto, pendingRestore, reviewedFilesOf, queueHistoryLimit, queueSequencingReason, reconciliationRefusalPrefix, tipReplacesHead, type BaseRefresh, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type QueueSpeculation, type RestoredApproval } from './merge-queue.js';
 import { queueEjectionRecord } from './model/queue.js';
-import { githubFromEnv } from './github.js';
+import { githubFromEnv, mergeBandQueueDepth } from './github.js';
 import { regressionRefusals } from './regression-guard.js';
 import { ciFamilyAllows, ciProofFamilies, ciRunBindingSchema, ciRunRefusal, isCiProducer, refuseCiProducer, staleCiAttemptRefusal, type CiRunObservation } from './model/ci-proofs.js';
 import { decideScopeRequest, liveScopeWidening, scopeRefusalBlocker, type ScopeDecision } from './model/scope.js';
@@ -28,6 +28,7 @@ import { recordSession, sessionHandleSchema, sessionObservationFields } from './
 import { beginAttempt, endAttempt, endLapsedAttempt, recordIntervention, recordRework, recordSubmission } from './pipeline-speed.js';
 import { foldDecisions, type Decision } from './model/approval.js';
 import { coveringWindow, directMergeAuthorization, directMergeFromEnv, directMergeWindows, sweepDirectMerges, type DirectMergeWindow } from './direct-merge.js';
+import { repairAuditEvent, repairScopeRefusal, type RepairAudit } from './master/repair-lane.js';
 
 const epoch = z.number().int().positive();
 const sha = z.string().regex(/^[a-f0-9]{40}$/);
@@ -408,6 +409,8 @@ export class Engine {
         if (reviewProviderOf(data.policy) === 'agent') assertReviewerProfiles(data.policy.reviewerProfiles, this.reviewerApps, this.controlPlaneAppId);
         demand(data.dependencies.every((dep: string) => all.some(w => w.id === dep)), 'Unknown dependency');
         demand(new Set(data.criteria.map((ac: { id: string }) => ac.id)).size === data.criteria.length, 'Criterion IDs must be unique');
+        // A merge-path repair (GY-406) plans only files within the merge path.
+        const repairScope = repairScopeRefusal(data); demand(!repairScope, repairScope!, 422);
         const criteria = this.declareBootstrap(actor, data, [], 1, now);
         const scenarioRequirements: Work['scenarioRequirements'] = [];
         const proofNames: string[] = [...new Set<string>(data.criteria.flatMap((ac: { proofs: string[] }) => ac.proofs))];
@@ -1669,6 +1672,7 @@ export class Engine {
       let mergedAtRepository: string | null = null; let repositoryClockOffsetMs: number | null = null;
       let reconciliation: MergeReconciliation | null = null; let refusedReconciliation: { decision: string; reasons: string[] } | null = null;
       let operatorAuthorization: OperatorAuthorizedDelivery | null = null;
+      let repairLane: RepairAudit | null = null;
       if (observation.merged && observation.mergedAt && Number.isFinite(Date.parse(observation.mergedAt))) {
         const providerMergedTime = Date.parse(observation.mergedAt);
         // Never allow evidence from after the earliest possible merge instant.
@@ -1743,6 +1747,14 @@ export class Engine {
           const snapshot = past ?? structuredClone(work);
           authorizedSnapshot = snapshot; authorizationRevision = snapshot.revision;
           operatorAuthorization = directMergeAuthorization(directMerge, { sha: observation.mergeSha!, at: observation.mergedAt }, snapshot.revision, new Date(cutoff).toISOString(), historical);
+        }
+        // A merge the repair lane made (GY-406) is delivered on its audit entry, which the lane
+        // appended for exactly this head before it asked GitHub to merge (github.ts repairLaneStep).
+        const repaired = !authorizedSnapshot && observation.mergeSha ? (await db.query(`SELECT payload->'details' AS audit FROM events WHERE work_id=$1 AND kind=$2 AND payload->'details'->>'head'=$3 AND created_at<$4 ORDER BY seq DESC LIMIT 1`,
+          [id, repairAuditEvent, observation.candidate.sha, new Date(cutoff)])).rows[0]?.audit as RepairAudit | undefined : undefined;
+        if (repaired) {
+          const snapshot = past ?? structuredClone(work);
+          authorizedSnapshot = snapshot; authorizationRevision = snapshot.revision; repairLane = repaired;
         }
         if (!authorizedSnapshot && past && observation.mergeSha) {
           const decisions = await postMergeDecisions(db, work, observation, past.policyRevision, cutoff);
@@ -1822,12 +1834,13 @@ export class Engine {
           // recorded as a second violation.
           // An operator-authorized delivery is judged by the operator, not the gates: what the
           // record lacked is on the delivery, and the violation it owns leaves the record the same way.
-          if (reconciliation || operatorAuthorization) work.violations = work.violations.filter(entry => entry !== violation && !entry.startsWith(reconciliationRefusalPrefix));
+          if (reconciliation || operatorAuthorization || repairLane) work.violations = work.violations.filter(entry => entry !== violation && !entry.startsWith(reconciliationRefusalPrefix));
           else if (work.gates.some(g => !g.passed)) work.violations.push('Post-merge checks differ from the recorded authorization; follow-up required');
           work.stage = 'done'; work.stageEnteredAt = now.toISOString();
           const delivery: Work['delivery'] = { mergedAt: observation.mergedAt!, mergeSha: observation.mergeSha, authorizationRevision: authorizationRevision!, ...(evidenceAsOf ? { evidenceAsOf } : {}),
             ...(mergedAtRepository ? { mergedAtRepository, repositoryClockOffsetMs: repositoryClockOffsetMs! } : {}) };
           work.delivery = reconciliation ? Object.assign(delivery, { reconciliation }) : operatorAuthorization ? Object.assign(delivery, { operatorAuthorization }) : delivery;
+          if (repairLane) work.repairLane = repairLane;
           if (reconciliation) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, reconciliation.requestedBy, 'merge.reconciled',
             JSON.stringify({ details: { ...reconciliation, mergeSha: observation.mergeSha, mergedAt: observation.mergedAt, authorizationRevision, evidenceAsOf, gatesNow: work.gates.filter(gate => !gate.passed).map(gate => ({ name: gate.name, reasons: gate.reasons })), at: now.toISOString() } })]);
           if (operatorAuthorization) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, operatorAuthorization.operator, 'merge.operator-authorized',
@@ -1836,8 +1849,9 @@ export class Engine {
           // Delivered in this transaction: what it still owes is recomputed now, its leftover rows
           // retired and its queue entry cleared, so nothing retries against the delivery (GY-185).
           settleDelivered(work, all, now);
-          // The queue shifted: every entry behind this one has a new position and predicted base.
-          for (const behind of all) if (behind.queue && behind.id !== work.id) await wakeJob(db, behind.id);
+          // The queue shifted. The entries that can land next (the head and its batch) are woken now; the rest are observed on
+          // their own schedule and re-predict their base when they near the head.
+          for (const behind of nextQueueEntries(all, work.id, Math.max(mergeBandQueueDepth, this.mergeBatchSize))) await wakeJob(db, behind.id);
         } else {
           if (!work.violations.includes(violation)) work.violations.push(violation);
           if (refusedReconciliation) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'merge.reconciliation.refused',
@@ -1851,7 +1865,7 @@ export class Engine {
       if (queuedBefore !== null && !work.queue && work.queueEjection?.sequence === queuedBefore) {
         await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'queue.ejected',
           JSON.stringify({ details: { sequence: queuedBefore, reason: work.queueEjection.reason, ...(refusedReconciliation ? { decision: refusedReconciliation.decision, mergeSha: observation.mergeSha } : {}), at: now.toISOString() } })]);
-        for (const behind of all) if (behind.queue && behind.id !== work.id) await wakeJob(db, behind.id);
+        for (const behind of nextQueueEntries(all, work.id, Math.max(mergeBandQueueDepth, this.mergeBatchSize))) await wakeJob(db, behind.id);
       }
       await this.recordDispatch(db, work, now);
       await save(db, work, 'github', 'github.observed', now);

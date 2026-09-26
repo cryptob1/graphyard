@@ -1,0 +1,4 @@
+# Known false positives for the secrets scan (gitleaks fingerprints: commit:file:rule:line).
+# Only fake credentials in test fixtures belong here, never a real secret and never a src/ or config path.
+# GY-409: fake API key in the connect-an-account test fixture.
+31d6c0f2b6e173b2dfaaaf7ad473ceebe665de2a:tests/connect-account.test.ts:generic-api-key:25
