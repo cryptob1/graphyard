@@ -1,4 +1,5 @@
 import { readFile } from 'node:fs/promises';
+import { wholeDocument } from '../model/work-summary.js';
 import { inheritedObligations } from '../model.js';
 import { diagnose, fileConflicts, obligationLedger, proofAuthorization, proofPreview, resourceConflicts } from '../coordination.js';
 import { handoff } from '../repository-setup.js';
@@ -18,8 +19,10 @@ export const workCommands = defineCommands([
     name: 'diagnose',
     help: ['  diagnose GY-N                Explain blockers, overlap and required proof'],
     async run({ id, api, print }) {
-      const snapshot = await api('work-snapshot'); const item = snapshot.work.find((w: any) => w.id === id || w.key === id);
-      if (!item) throw new Error(`Unknown work item ${id}`);
+      const snapshot = await api('work-snapshot'), listed = snapshot.work.find((w: any) => w.id === id || w.key === id);
+      if (!listed) throw new Error(`Unknown work item ${id}`);
+      // A settled delivery is a summary in the snapshot (GY-422); its diagnosis reads the whole document.
+      const item = await wholeDocument(listed, api);
       // A required proof nobody is authorized to produce can never be satisfied; report it
       // alongside the other blockers rather than leaving it to be discovered at acceptance.
       let authorities: any[] = [];
