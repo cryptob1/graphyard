@@ -8,7 +8,7 @@ import { appendSave, resolvedPayloadSql } from './snapshot-delta.js';
 import { advisoryLocks } from './locks.js';
 import { coordinationDocumentSql, coordinationRelevance, coordinationTail, coordinationTrimSql, detoasted, type CoordinationTrim } from './coordination-sql.js';
 import { namedStatements } from './statements.js';
-import { closePool, reserve, trackedPool } from './pools.js';
+import { closePool, leasePoolConnections, reserve, trackedPool } from './pools.js';
 
 export * from './snapshot-delta.js';
 export type { CoordinationTrim } from './coordination-sql.js';
@@ -30,11 +30,11 @@ const literal = (text: string) => `'${text.replace(/'/g, "''")}'`;
 const newerSchema = (current: number) => new Error(`Database schema generation ${current} is newer than this release supports (${schemaVersion}); deploy the release that migrated it, or restore a backup taken at generation ${schemaVersion} or earlier`);
 
 /**
- * Which connections a transaction may use (GY-274). Lease renewals run on a reserved pool, so a
- * saturated main pool never lets a live worker's lease lapse; background work (the reconciliation
+ * Which connections a transaction may use (GY-274). Lease commands run on the lease pool (pools.ts, GY-558),
+ * so a saturated main pool never lets a live worker's lease lapse; background work (the reconciliation
  * tick, whose first pass after a deploy ran 65 s) holds at most half the main pool.
  */
-export type StoreLane = 'request' | 'lease' | 'background'; export const leaseLaneConnections = 2;
+export type StoreLane = 'request' | 'lease' | 'background';
 /** A counting semaphore over the background share; a waiter inherits a released permit directly. */
 export class BackgroundLane {
   private held = 0; private waiting: (() => void)[] = []; constructor(readonly limit: number) {}
@@ -48,12 +48,12 @@ export class BackgroundLane {
 
 export class Store {
   pool: pg.Pool;
-  /** Lease renewals only; `background` bounds the tick to half the main pool. */
+  /** Lease commands only (pools.ts `leaseCommands`); `background` bounds the tick to half the main pool. */
   leasePool: pg.Pool; readonly background: BackgroundLane;
-  constructor(url: string, options: { max?: number } = {}) {
+  constructor(url: string, options: { max?: number; leaseMax?: number } = {}) {
     const max = Math.max(2, Math.floor(options.max ?? 12));
     this.pool = trackedPool(namedStatements(new pg.Pool({ connectionString: url, max, connectionTimeoutMillis: storeConnectionTimeoutMs, statement_timeout: storeStatementTimeoutMs })));
-    this.leasePool = trackedPool(new pg.Pool({ connectionString: url, max: leaseLaneConnections, connectionTimeoutMillis: storeConnectionTimeoutMs, statement_timeout: storeStatementTimeoutMs }));
+    this.leasePool = trackedPool(new pg.Pool({ connectionString: url, max: Math.max(1, Math.floor(options.leaseMax ?? leasePoolConnections)), connectionTimeoutMillis: storeConnectionTimeoutMs, statement_timeout: storeStatementTimeoutMs }));
     this.background = new BackgroundLane(Math.max(1, Math.floor(max / 2)));
   }
   /**
