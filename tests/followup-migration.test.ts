@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { followUpItem, type LaunchThread } from '../src/review-threads.js';
-import { followUpEntries, followUpEntryKey, followUpParent, mergeDuplicateFollowUps } from '../src/model/machine-backlog.js';
+import { followUpEntries, followUpEntriesMax, followUpEntryKey, followUpParent, mergeDuplicateFollowUps, mergeFollowUpEntries } from '../src/model/machine-backlog.js';
 import { isClosed } from '../src/model/closure.js';
 import type { Work } from '../src/model.js';
 
@@ -62,4 +62,35 @@ test('unit:followup-migration-merges — three follow-up items of one parent mer
   assert.equal(operator.stage, 'backlog');
   // A second run finds nothing left to merge.
   assert.equal(mergeDuplicateFollowUps(all, 'graphyard-operator', new Date('2026-09-26T01:00:00Z')).merged, 0);
+});
+
+test('unit:followup-migration-merges — a leased follow-up item is neither closed nor merged into, and is named deferred; a later pass for its parent folds it once the lease ends (GY-431)', () => {
+  const older = legacy('GY-410', '2026-09-25T09:00:00Z', 'e5'.padEnd(40, 'f'), 505, [], [{ path: 'src/a.ts', line: 1, text: 'src/a.ts:1 — first' }]);
+  const younger = legacy('GY-411', '2026-09-25T10:00:00Z', 'f6'.padEnd(40, 'f'), 506, [], [{ path: 'src/b.ts', line: 2, text: 'src/b.ts:2 — second' }]);
+  const alone = legacy('GY-412', '2026-09-25T11:00:00Z', 'a7'.padEnd(40, 'f'), 507, [], [{ path: 'src/c.ts', line: 3, text: 'src/c.ts:3 — alone' }]);
+  alone.title = 'Follow-ups from the approved review of GY-300 (PR #210)';
+  older.lease = { owner: 'graphyard-claude-1', epoch: 1, expiresAt: '2026-09-26T02:00:00Z' } as Work['lease'];
+  alone.lease = older.lease;
+  const all = [older, younger, alone];
+  const first = mergeDuplicateFollowUps(all, 'graphyard-operator', new Date('2026-09-26T00:00:00Z'));
+  assert.equal(first.merged, 0);
+  assert.deepEqual(first.deferred, ['GY-410'], 'a leased item with no open sibling is not deferred');
+  assert.equal(younger.stage, 'backlog');
+  older.lease = null;
+  // A pass restricted to another parent leaves this one alone.
+  assert.equal(mergeDuplicateFollowUps(all, 'graphyard-operator', new Date('2026-09-26T03:00:00Z'), new Set(['GY-300'])).merged, 0);
+  const resumed = mergeDuplicateFollowUps(all, 'graphyard-operator', new Date('2026-09-26T03:00:00Z'), new Set(['GY-259']));
+  assert.deepEqual({ merged: resumed.merged, deferred: resumed.deferred }, { merged: 1, deferred: [] });
+  assert.equal(younger.closure?.ref, 'GY-410');
+  assert.equal(followUpEntries(older).length, 2);
+});
+
+test('unit:one-followup-per-parent — past the entry bound, a merge names as added only the findings the item holds and counts the rest dropped (GY-431)', () => {
+  const existing = Array.from({ length: followUpEntriesMax - 1 }, (_, index) => ({ path: 'src/a.ts', text: `finding ${index}` }));
+  const incoming = [{ path: 'src/a.ts', text: 'finding 3' }, { path: 'src/b.ts', text: 'fits' }, { path: 'src/c.ts', text: 'past the bound' }, { path: 'src/d.ts', text: 'also past' }];
+  const { findings, added, dropped } = mergeFollowUpEntries(existing, incoming);
+  assert.equal(findings.length, followUpEntriesMax);
+  assert.deepEqual(added.map(entry => entry.text), ['fits']);
+  assert.equal(dropped, 2);
+  assert.ok(added.every(entry => findings.includes(entry) || findings.some(held => held.text === entry.text)));
 });

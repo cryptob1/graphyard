@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Work } from '../src/model.js';
 import { backlogCounts, machineKind, overdueTriage, triageDeadlineMs, untriaged, type TriageJudgement } from '../src/model/machine-backlog.js';
-import { clearTriageRuns, triageSettled, triageStep, triageTool, untriagedAttention } from '../src/triage.js';
+import { clearTriageRuns, triageRetryMs, triageSettled, triageStep, triageTool, untriagedAttention } from '../src/triage.js';
 import { researchSettings } from '../src/research.js';
 import { neededDecision, routineDecision } from '../src/daemon/decisions.js';
 import { decisionInputs, decisionPrecondition } from '../src/model/approval.js';
@@ -98,4 +98,19 @@ test('unit:machine-backlog-triaged — the triage step judges each machine-filed
   const merge = { ...stale, triage: { judgement: { outcome: 'merge', into: 'GY-401', reason: 'the same findings' }, state: 'proposed', by: 'master', at } } as Work;
   assert.deepEqual(neededDecision(merge, { autoMerge: true })?.input, { kind: 'duplicate', ref: 'GY-401', reason: 'Merged into GY-401 by triage: the same findings', triageAt: at });
   assert.equal(neededDecision(stale, { autoMerge: true }), null, 'an item awaiting triage needs a judgement, not a decision');
+});
+
+test('unit:machine-backlog-triaged — a failed triage run backs off on the loop clock alone, from the first step that sees the failure (GY-431)', async t => {
+  t.after(clearTriageRuns);
+  const { runner, starts } = fakeRunner(() => null);
+  // The loop's clock is years from the wall clock: a back-off stamped with Date.now() would never, or always, retry.
+  const base = Date.parse('2031-01-01T00:00:00Z');
+  const step = (clock: number) => triageStep({ work: [stale], clock, settings: researchSettings({ research: {} }), config: { repository: 'owner/project' }, cwd: process.cwd(), runner, record: async () => {} });
+  assert.deepEqual(step(base).map(action => action.work), ['GY-396']);
+  await triageSettled();
+  const seen = base + 5 * 60_000;
+  assert.deepEqual(step(seen), [], 'the failure is stamped with this step\'s clock');
+  assert.deepEqual(step(seen + triageRetryMs - 1), [], 'still backing off');
+  assert.deepEqual(step(seen + triageRetryMs).map(action => action.work), ['GY-396'], 'judged again once the back-off has passed on the loop clock');
+  assert.equal(starts.length, 2);
 });
