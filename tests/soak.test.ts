@@ -223,11 +223,15 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     }
     const deploying = deploys < plan.deploys.length && elapsed >= plan.deploys[deploys];
     if (deploying) { production.build = sha('build', ++deploys); production.sha = github.tip; production.deploys.push({ at: now, build: production.build, sha: production.sha }); }
-    // The world moves: GitHub, then the sessions. A deploy restarts the control plane once the
-    // sessions have renewed: for the rest of that minute nothing reaches it, the loop included.
+    // The world moves: GitHub, then the sessions. A deploy restarts the control plane at the top of
+    // the minute: the renewals due inside the outage fail, and each session's supervisor retries
+    // them once the restart completes, later in the same minute — a renewal across the gap, on
+    // whatever the lease has left (GY-274). A restart that outlasted the lease would refuse the
+    // retry and lose the lease, and `deploy-lease-loss` with it; the loop itself stays down for
+    // the rest of the minute.
     github.tick(now);
-    await workersTick(now);
     if (!deploying) {
+      await workersTick(now);
       for (const act of pending.splice(0)) await act();
       await engine.reconcile();
       for (let guard = 0; guard < 200 && await jobsDue(); guard++) await processJob(engine, adapter);
@@ -244,6 +248,10 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
         if (check.observed) observed.add(check.invariant);
         if (!check.holds) violations.push(`${new Date(now).toISOString()} (+${Math.round(elapsed / minute)} min) ${check.line}`);
       }
+    } else {
+      // The restart completes inside the minute: the supervisor's retry renews what the outage
+      // swallowed and submits anything due, while the lease taken before it still has time left.
+      await workersTick(now);
     }
     const open = (await store.list()).filter(item => item.stage !== 'done').length;
     const step = open ? minute : 10 * minute;
