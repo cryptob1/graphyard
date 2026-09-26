@@ -19,7 +19,7 @@
 npm ci && npm run build && npm test
 ```
 
-`npm test` hides `GRAPHYARD_*`/`HERDR_*` variables and reserves free Postgres ports.
+`npm test` hides `GRAPHYARD_*`/`HERDR_*` variables, reserving free Postgres ports.
 
 ## Documentation
 
