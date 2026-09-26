@@ -9,7 +9,7 @@ Only three decisions are human-only: goals and priorities, spending money or ope
 
 ## Operate
 
-Keep cycling: status, dispatch, review, merge, deployment verification. Stop only when every in-scope item is Done or has a genuinely external blocker recorded in Graphyard, and every merged change is verified against the exact deployed release or has a recorded deployment blocker.
+Keep cycling: status, dispatch, review, merge, deployment verification. Stop only when every in-scope item is Done or has an external blocker recorded, and every merged change is verified against the exact deployed release or has a recorded deployment blocker.
 
 1. `master status`.
 2. `master run` dispatches ready work in `schedule.order`.
@@ -18,7 +18,7 @@ Keep cycling: status, dispatch, review, merge, deployment verification. Stop onl
 5. `master verify-deployment GY-N` after delivery ([refusals](operations-reference.md#perpetual-master-loop)). Railway: `master config productionEnvironment='graphyard / production'`.
 6. Close finished agent sessions.
 
-Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions. `controlPlane.production` flags main ahead of production.
+Review findings, rework, idle workers and proof setup are not stopping conditions. `controlPlane.production` flags main ahead of production.
 
 `master run` runs this loop under the `graphyard-master.service` unit ([supervision](onboarding.md#the-loop-must-be-supervised)); restart it (`systemctl --user restart graphyard-master`) when `daemon.liveness` is `stalled` or `absent`.
 
@@ -45,13 +45,12 @@ that host's loop. `sessions.unseen` lists stale handles. `dispatch.sessionReconc
 A closure decides no gate, ends no lease, and stops no process. A profile's concurrency is counted against live
 sessions only, and a name is busy only while a live session has it. A session past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) raises attention and is never closed.
 
-**So what an operator or a master does instead of closing sessions by hand:** nothing, for a session
-that finished or died (with the loop stopped, `graphyard master run --once` sweeps); for an overlong one, attach to it with the command on the handle. Never mark
+**Instead of closing sessions by hand:** do nothing for a finished or dead session (loop stopped: `graphyard master run --once` sweeps); attach to an overlong one with its handle's command. Never mark
 another session's handle finished to free a slot.
 
 ## Research before build
 
-With `run.research` set (`model`, `timeoutMinutes` 15, `tokenBudget`), a feature (or `"research": true`) gets one read-only Pi session per requirements revision, briefing both. Product questions go under Needs you, recommended and dated; build proceeds on it, a differing answer requests rework, failure never blocks.
+With `run.research` set (`model`, `timeoutMinutes` 15, `tokenBudget`), a feature (or `"research": true`) gets one read-only Pi session per requirements revision, briefing worker and reviewer. Product questions go under Needs you; build proceeds on the recommendation, a differing answer requests rework, failure never blocks.
 
 ## Automatic dispatch at submit
 
@@ -73,7 +72,7 @@ With a pass, the producer records `"exercise"`: the same proof run with the crit
 "exercise":{"criterion":"AC-1","behaviour":"the lease expiry check in claim()","result":"fail","executed":4}
 ```
 
-A pass is trusted only when that stripped run failed with a case executed; otherwise it is recorded as not exercising its criterion rather than as passing (`unexercised`, `evidence.exercise.refused`); the loop requests rework quoting it.
+A pass is trusted only when that stripped run failed with a case executed; otherwise it is recorded as not exercising its criterion rather than as passing (`unexercised`, `evidence.exercise.refused`); the loop requests rework quoting it. `decide attest` adds `exercise` (fails on base), approver-confirmed; unexercised `manual:` proofs: re-attest, never rework.
 
 ## Guarded merges
 
@@ -81,6 +80,6 @@ A pass is trusted only when that stripped run failed with a case executed; other
 
 ### Repair lane
 
-The sanctioned administrative-bypass exception: once a `"repair": "merge-path"` item (`mergePath` files only) stalls 15 minutes with checks passed and an approver agent's `master decide GY-N repair-merge REASON` naming the fault, the App's ruleset bypass merges its head, audited (`repair.merged`) and flagged until a normal merge.
+The sole exception to the no-admin-bypass rule: once a `"repair": "merge-path"` item (`mergePath` files only) stalls 15 minutes with checks passed and an approver agent's `master decide GY-N repair-merge REASON` naming the fault, the App's ruleset bypass merges its head, audited (`repair.merged`) and flagged until a normal merge.
 
 Unresolved review threads are the reviewer's inputs, not merge blockers (`reviewThreads`); its approval names each on `Resolved threads:`, `Follow-up threads:` or `Overridden threads:` ([rules](coordination.md#review-gate-verdicts-not-threads)).

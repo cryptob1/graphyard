@@ -147,7 +147,8 @@ export function scopeRoutineDecision(work: Work, now: number, judged: boolean): 
 export function routineDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>, now: number, assessment?: ContainmentAssessment | null): RoutineDecision | null {
   const needed = neededDecision(work, config);
   if (!needed) return null;
-  if (needed.action === 'merge') return needed;
+  // An attestation, like a merge, attests nothing about the worker: its approver judges the proof.
+  if (needed.action === 'merge' || needed.action === 'attest') return needed;
   // A lease-loss a newer attempt superseded rests on the record, not on this host: see supersededLeaseLoss.
   if (needed.action === 'resolve' && supersededLeaseLoss(work)?.superseded) return needed;
   const stopped = workerStopped(work, now, assessment);
@@ -191,6 +192,10 @@ export function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge
   // differs from that recommendation (GY-259): the head no longer builds what was asked.
   const research = researchRework(work);
   if (research) return { action: 'rework', ...research };
+  // An unexercised `manual:` proof is answered by an attestation carrying its exercise record
+  // (GY-523), never by rework: nothing in the change is wrong, only the record of the attestation.
+  const attestation = attestationDecision(work);
+  if (attestation) return attestation;
   // Unresolved review threads block no merge: the reviewer's verdict on the head is the review
   // gate and the threads are its inputs. A thread still open once the review of the current head
   // has settled — one it was not shown, or a policy with no review — is a finding the loop sends
@@ -261,7 +266,8 @@ export function proofRework(work: Work): { reason: string; binding: string } | n
   const candidate = work.candidate;
   if (!work.submission || work.reworkRequested || !candidate || work.stage === 'done' || work.observation?.merged) return null;
   const failed = mechanicalVerdicts(work, [work], new Date()).filter(verdict => verdict.outcome === 'failed');
-  const unexercised = unexercisedFindings(work);
+  // An unexercised `manual:` proof is not the worker's to fix: see attestationDecision.
+  const unexercised = unexercisedFindings(work).filter(entry => !entry.proof.startsWith('manual:'));
   if (!failed.length && !unexercised.length) return null;
   const threads = work.observation?.candidate.sha === candidate.sha ? work.observation.conversations?.unresolved ?? [] : [];
   const findings = [
@@ -272,6 +278,27 @@ export function proofRework(work: Work): { reason: string; binding: string } | n
   const open = threads.length ? ` ${threads.length} review thread${threads.length === 1 ? ' is' : 's are'} also unresolved on the pull request (${named.join('; ')}${threads.length > named.length ? `; and ${threads.length - named.length} more` : ''}); address them in the same round.` : '';
   return { reason: `${work.key}: ${findings.join('. ')}. No review judges a head whose proof did not pass, so the item returns to a worker now to fix what the proof found.${open}`,
     binding: `${candidate.sha}:proof:${[...failed.map(verdict => verdict.proof), ...unexercised.map(entry => `unexercised:${entry.proof}`)].sort().join(',')}` };
+}
+
+/**
+ * GY-523. The attestation an unexercised `manual:` proof on the current head calls for, or null.
+ * On 2026-09-26 GY-374's and GY-393's attestations were approved — GY-393's approver had run the
+ * proof against the base and the candidate — but carried no exercise record, so the control plane
+ * stored each pass as not exercising its criterion, and the loop asked for rework: the wrong
+ * remedy, which the GY-393 approver refused. The change was never at fault, only the record, so the
+ * loop asks for the attestation again, carrying the exercise record (`attestationExercise`) its
+ * approver confirms by running the proof against the candidate base.
+ */
+export function attestationDecision(work: Work): RoutineDecision | null {
+  const candidate = work.candidate;
+  if (!work.submission || work.reworkRequested || !candidate || work.stage === 'done' || work.observation?.merged) return null;
+  const entry = unexercisedFindings(work).filter(finding => finding.proof.startsWith('manual:')).sort((a, b) => a.proof.localeCompare(b.proof))[0];
+  if (!entry) return null;
+  const criterion = work.criteria.find(each => each.proofs.includes(entry.proof));
+  if (!criterion) return null;
+  const finding = entry.finding.length > 300 ? `${entry.finding.slice(0, 299)}…` : entry.finding;
+  return { action: 'attest', input: { proof: entry.proof }, binding: `${candidate.sha}:attest:${entry.proof}`,
+    reason: `${work.key}: the attestation of ${entry.proof} on ${candidate.sha.slice(0, 12)} was recorded as not exercising ${criterion.id} ("${finding}"). The change is not at fault, so rework is the wrong remedy: this attestation carries the exercise record — ${entry.proof} fails against the candidate base ${candidate.baseSha.slice(0, 12)}, the tree without the change — and the approver confirms it by running the proof there and against the candidate before approving.` };
 }
 
 /**
@@ -452,7 +479,7 @@ export function workerStopped(work: Work, now: number, assessment?: ContainmentA
 /** The decision an item needs but the loop will not request, because the stopped worker is unverified. */
 export function withheldDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>, now: number, assessment?: ContainmentAssessment | null): { action: RoutineDecisionAction; reason: string } | null {
   const needed = neededDecision(work, config);
-  if (!needed || needed.action === 'merge' || needed.action === 'resolve' && supersededLeaseLoss(work)?.superseded) return null;
+  if (!needed || needed.action === 'merge' || needed.action === 'attest' || needed.action === 'resolve' && supersededLeaseLoss(work)?.superseded) return null;
   const unverified = workerStopped(work, now, assessment).unverified;
   return unverified ? { action: needed.action, reason: `${work.key} needs a ${needed.action} decision, but it attests that the previous worker is stopped and that is not verified: ${unverified}` } : null;
 }
