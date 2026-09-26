@@ -14,11 +14,15 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import type { Principal, Work } from '../src/model.js';
-import { isSummary } from '../src/model/work-summary.js';
+import { isSummary, wholeDocument } from '../src/model/work-summary.js';
 import { buildMasterStatus, masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { emptyDaemonState, writeDaemonState } from '../src/master-daemon.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
 import { interventionReportPath } from '../src/master/report-cache.js';
+import { interventionLedgerLimit, interventionLedgerQuery, interventionLedgerSeedLimit, interventionLedgerSeedQuery, interventionLedgerSeedRowsQuery } from '../src/interventions.js';
+import { requiredReviewProtection } from '../src/protection.js';
+import { dispatchRaceRefusal, systemDriven } from '../src/cli/hand-actions.js';
+import { liveReviewRequest } from '../src/model/dispatch.js';
 import { predictQueue } from '../src/merge-queue.js';
 import { boardFromStatus } from '../src/model/board.js';
 import { views } from '../web/pages/index.js';
@@ -114,6 +118,17 @@ before(async () => {
     CROSS JOIN LATERAL (SELECT ('00000000-0000-4000-8000-' || lpad(pick.n::text, 12, '0'))::uuid AS id, pick.n) AS w
     CROSS JOIN LATERAL (SELECT CASE WHEN g % 40 = 0 THEN 'intervention.recorded' WHEN g % 40 = 1 THEN 'blocked' WHEN g % 40 = 2 THEN 'unblock' WHEN g % 2 = 0 THEN 'github.observed' ELSE 'heartbeat' END AS kind) AS k
     CROSS JOIN LATERAL (SELECT to_timestamp($2::double precision / 1000) - ((g % 2880) * interval '1 hour') - interval '30 minutes' AS at) AS t`, [EVENTS, seededAt]);
+  // Two needs the window alone would lose (GY-432): one opened before it and resolved inside it
+  // (the straddle the report folds silently), and one older than any read's reach that still
+  // stands on its item's document (the seed the report ages from the window's floor).
+  await store.pool.query(`INSERT INTO events(work_id, actor, kind, payload, created_at)
+    SELECT r.id, 'graphyard', r.kind,
+      jsonb_build_object('work', jsonb_build_object('key', 'GY-770', 'stage', 'build', 'title', 'Item', 'epoch', 1), 'details', jsonb_build_object('reason', CASE WHEN r.kind = 'blocked' THEN 'the staging database is unreachable' ELSE 'the staging database recovered' END, 'epoch', 1)), r.at
+    FROM (VALUES ($1::uuid, 'blocked', $2::timestamptz), ($1::uuid, 'unblock', $3::timestamptz)) AS r(id, kind, at)`,
+    [uuid(SETTLED + OPEN), iso(seededAt - 12 * day - 6 * hour), iso(seededAt - 6 * day - 12 * hour)]);
+  await store.pool.query(`INSERT INTO events(work_id, actor, kind, payload, created_at) VALUES ($1::uuid, 'graphyard', 'blocked', $2::jsonb, $3::timestamptz)`,
+    [uuid(SETTLED + OPEN - 1), JSON.stringify({ work: { key: 'GY-769', stage: 'build', title: 'Item', epoch: 1 }, details: { reason: 'the vendor never answered', epoch: 1 } }), iso(seededAt - 100 * day - 6 * hour)]);
+  await store.pool.query(`UPDATE work_items SET document = jsonb_set(document, '{blocker}', to_jsonb('the vendor never answered'::text)) WHERE id = $1::uuid`, [uuid(SETTLED + OPEN - 1)]);
   await store.pool.query('ANALYZE');
 });
 after(async () => {
@@ -131,13 +146,24 @@ async function read(path: string, token = tokens.coordinator) {
 
 test('unit:interventions-bounded — the intervention report reads only its window of the ledger, through the (kind, created_at) index, and answers within 2 s over 200,000 events and 3,000 sessions', async () => {
   const seeded = (await store.pool.query('SELECT count(*)::int AS events FROM events')).rows[0].events;
-  assert.equal(seeded, EVENTS);
+  assert.equal(seeded, EVENTS + 3, 'the routine history plus the two straddle/seed needs of GY-432');
   const sessions = (await store.pool.query("SELECT sum(jsonb_array_length(document->'sessions'))::int AS sessions FROM work_items")).rows[0].sessions;
   assert.ok(sessions >= 3_000, `the store holds ${sessions} sessions`);
 
-  // The window's rows come from the index on kind and time, never a walk of the ledger newest-first.
-  const plan = (await store.pool.query(`EXPLAIN SELECT * FROM events WHERE kind = ANY($1) AND created_at >= $2::timestamptz ORDER BY seq DESC LIMIT 20001`, [['blocked', 'unblock', 'intervention.recorded'], iso(seededAt - 7 * day)])).rows.map(row => row['QUERY PLAN']).join('\n');
+  // The window's rows come from the index on kind and time, never a walk of the ledger
+  // newest-first — and the statement explained is the route's own (GY-432), unbound work and
+  // window parameters included, not a lookalike without them.
+  const query = interventionLedgerQuery(interventionLedgerLimit, null, iso(seededAt - 7 * day));
+  const plan = (await store.pool.query(`EXPLAIN ${query.text}`, query.values as any[])).rows.map(row => row['QUERY PLAN']).join('\n');
   assert.match(plan, /events_kind_created/, plan);
+  // The straddle read keeps to the same index (GY-432): per kind, newest first by time, stopping
+  // at its bound; its wide read then takes exactly those rows, one lookup each, never a walk.
+  const seedQuery = interventionLedgerSeedQuery(interventionLedgerSeedLimit, iso(seededAt - 7 * day));
+  const seedPlan = (await store.pool.query(`EXPLAIN ${seedQuery.text}`, seedQuery.values as any[])).rows.map(row => row['QUERY PLAN']).join('\n');
+  assert.match(seedPlan, /events_kind_created/, seedPlan);
+  const widePlan = (await store.pool.query(`EXPLAIN ${interventionLedgerSeedRowsQuery}`, [[1]])).rows.map(row => row['QUERY PLAN']).join('\n');
+  assert.match(widePlan, /events_pkey/, widePlan);
+  assert.doesNotMatch(widePlan, /Seq Scan on events/, widePlan);
 
   const report = await read('interventions?window=7');
   assert.equal(report.status, 200, JSON.stringify(report.body));
@@ -152,7 +178,28 @@ test('unit:interventions-bounded — the intervention report reads only its wind
   assert.equal(report.body.ledger.rows, windowRows, 'the report folded exactly the window\'s rows of the kinds it reads');
   assert.equal(report.body.ledger.truncated, false);
   assert.ok(Date.parse(report.body.ledger.since) >= seededAt - 7 * day, `the ledger read starts at the window: ${report.body.ledger.since}`);
+  assert.ok(report.body.ledger.seed.rows > 0, 'the straddle read reached before the window');
   assert.ok(report.body.deliveries > 0, 'deliveries in the window are counted from the settled summaries');
+
+  // A need recorded before the window and resolved inside it still pairs: its wait is measured
+  // from the moment the product needed someone, from the straddle rows folded silently ahead of
+  // the window's (GY-432).
+  const straddled = await read('interventions?window=7&work=GY-770');
+  const paired = straddled.body.interventions.find((entry: { resolvedAt: string | null }) => entry.resolvedAt !== null);
+  assert.ok(paired, JSON.stringify(straddled.body));
+  assert.equal(paired.sources[0]?.kind, 'blocked');
+  assert.equal(paired.resolvedBy, 'graphyard');
+  assert.equal(paired.resolution, 'the staging database recovered');
+  assert.ok(Date.parse(paired.requestedAt) <= seededAt - 11 * day, `the wait starts when the need was recorded: ${paired.requestedAt}`);
+  assert.equal(paired.waitedMs, Date.parse(paired.resolvedAt) - Date.parse(paired.requestedAt));
+  // A need older than every read's reach is seeded from the item document that still shows it:
+  // open at the window's floor, aging in the report instead of vanishing at its edge (GY-432).
+  const standing = await read('interventions?window=7&work=GY-769');
+  const seededNeed = standing.body.interventions.find((entry: { blocked: string }) => entry.blocked === 'the vendor never answered');
+  assert.ok(seededNeed, JSON.stringify(standing.body));
+  assert.equal(seededNeed.resolvedAt, null);
+  assert.equal(seededNeed.sources.length, 0);
+  assert.ok(Date.parse(seededNeed.requestedAt) >= seededAt - 7 * day, `it opens at the window floor: ${seededNeed.requestedAt}`);
 
   // The thirty-day window stays inside the same bound.
   const month = await read('interventions?window=30');
@@ -200,6 +247,20 @@ test('unit:snapshot-bounded — the work snapshot sends open items whole and set
     assert.ok(entry.evidence!.every(record => !('artifacts' in record)));
     assert.equal(entry.pipeline!.attempts.length, SESSIONS_PER_SETTLED);
     assert.deepEqual(Object.keys(entry.pipeline!.attempts[0]).sort(), ['claimedAt', 'endedAt']);
+    // The timeline keeps exactly what the speed report measures (GY-432), as the comment in
+    // src/store/summary-sql.ts says: nothing else of the timeline or of each attempt survives.
+    assert.deepEqual(Object.keys(entry.pipeline!).sort(), ['attempts', 'backfill', 'interventions', 'reworkRounds', 'submittedAt']);
+  }
+  // The master's settled-item readers read a snapshot entry only through fields the summary
+  // keeps (GY-432): protection filters entries by stage before reading them, the hand-action
+  // guards read systemDriven and find no ask row or dispatch race in a settled entry, and no
+  // live review request hides in one. verify-deployment reads stage, identity and the delivery
+  // with its merge facts — asserted above on `delivered`.
+  assert.doesNotThrow(() => requiredReviewProtection(summaries as Work[]));
+  for (const entry of summaries) {
+    assert.equal(systemDriven(entry), false);
+    assert.equal(dispatchRaceRefusal(entry, new Date(snapshot.body.now), { intervalMs: 60_000, releasedAt: null }), null);
+    assert.ok(!liveReviewRequest(entry), `${entry.key} hides no live review request in its summary`);
   }
   const recent = summaries.flatMap(entry => entry.sessions!);
   assert.ok(recent.length > 0 && recent.length <= 2 * SESSIONS_PER_SETTLED * Math.ceil(SETTLED / 120), `the last day's ${recent.length} sessions of settled items are kept for the Workers page, not the 3,000 before them`);
@@ -215,11 +276,16 @@ test('unit:snapshot-bounded — the work snapshot sends open items whole and set
   const stored = (await store.pool.query('SELECT document FROM work_items WHERE id=$1', [open[0].id])).rows[0].document;
   assert.deepEqual(open[0], stored);
 
-  // A settled item's history is available on request, by id or key.
+  // A settled item's history is available on request, by id or key — the one read the master's
+  // wholeDocument routing performs behind a summary (GY-432); an open entry is its own document.
   const history = await read(`work/${delivered.key}`);
   assert.equal(history.status, 200);
   assert.equal(history.body.sessions.length, SESSIONS_PER_SETTLED);
   assert.equal(history.body.evidence.length, 6);
+  const behind = await wholeDocument(delivered, async (path: string) => (await read(path)).body);
+  assert.equal(behind.key, delivered.key);
+  assert.equal(behind.sessions!.length, SESSIONS_PER_SETTLED);
+  assert.equal(await wholeDocument(open[0], async () => { throw new Error('an open entry is never re-read'); }), open[0]);
   assert.equal((await read(`work/${delivered.id}`)).body.key, delivered.key);
   assert.equal((await read('work/GY-999999')).status, 404);
 

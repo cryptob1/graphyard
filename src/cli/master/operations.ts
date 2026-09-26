@@ -7,6 +7,7 @@ import { readDaemonState } from '../../master-daemon.js';
 import { verificationEffects, verifyDeployment } from '../../master-verification.js';
 import { cycleBudget, masterStatusReport } from '../master-status.js';
 import { assertHandAction, assertHandDispatch, systemDriven } from '../hand-actions.js';
+import { wholeDocument } from '../../model/work-summary.js';
 import { unhandled, type MasterSession } from './session.js';
 
 /** Reading status and acting on one item: settle a quarantine, dispatch, merge, verify a deployment. */
@@ -20,7 +21,9 @@ export async function operationsCommand(session: MasterSession): Promise<unknown
   if (id === 'settle-containment') {
     if (!args[0] || !args.slice(1).join(' ').trim()) throw new Error('Use master settle-containment GY-N REASON');
     const { snapshot, clockOffset } = await snapshotWithClock(() => masterApi('work-snapshot'));
-    const work = snapshot.work.find((item: any) => item.id === args[0] || item.key === args[0]);
+    // A settled delivery is a summary in the snapshot; the fields these commands read are read
+    // from the whole document (GY-432), never assumed to survive the summary.
+    const work = await wholeDocument(snapshot.work.find((item: any) => item.id === args[0] || item.key === args[0]), masterApi);
     if (!work) throw new Error(`Unknown work item ${args[0]}`);
     if (!work.containmentQuarantine) throw new Error(`${work.key} has no containment quarantine to settle`);
     const assessment = await verifyContainmentDeath(work, { hostId: master.hostId, observedAt: snapshot.now, clockOffset });
@@ -40,7 +43,7 @@ export async function operationsCommand(session: MasterSession): Promise<unknown
     const { positionals } = parseArgs({ args, options: {}, allowPositionals: true });
     if (!positionals[0]) throw new Error('Use master dispatch GY-N PROFILE');
     const requestedAt = Date.now(), snapshot = await masterApi('work-snapshot');
-    const work = snapshot.work.find((item: any) => item.id === positionals[0] || item.key === positionals[0]);
+    const work = await wholeDocument(snapshot.work.find((item: any) => item.id === positionals[0] || item.key === positionals[0]), masterApi);
     const profile = master.workers.find(item => item.name === positionals[1]);
     if (!work) throw new Error(`Unknown work item ${positionals[0]}`);
     const { claimBy } = await assertHandDispatch(work, snapshot.now, master.run.dispatchIntervalSeconds, path => masterApi(path), requestedAt);
@@ -72,7 +75,7 @@ export async function operationsCommand(session: MasterSession): Promise<unknown
   if (id === 'verify-deployment') {
     if (!args[0]) throw new Error('Use master verify-deployment GY-N');
     const snapshot = await masterApi('work-snapshot');
-    const work = snapshot.work.find((item: any) => item.id === args[0] || item.key === args[0]);
+    const work = await wholeDocument(snapshot.work.find((item: any) => item.id === args[0] || item.key === args[0]), masterApi);
     if (!work) throw new Error(`Unknown work item ${args[0]}`);
     const result = await verifyDeployment(work, verificationEffects(master, { root, snapshot: () => masterApi('work-snapshot'), mutate: masterMutation }));
     if (result.result === 'refused') process.exitCode = 1;

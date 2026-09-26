@@ -3,7 +3,7 @@
 
 ## Master coordination loop
 
-Restart `graphyard master run` freely; it never dispatches twice. `master status` → `daemon` gives health; `journalctl --user -u graphyard-master`, the log. `daemon.metrics.timings` and status `timings` time steps and calls over 1s; status reads a cached intervention report. Failed server requests log their route and SQL statement.
+Restart `graphyard master run` freely; it never dispatches twice. `master status` → `daemon` gives health; `journalctl --user -u graphyard-master`, the log. `daemon.metrics.timings` and status `timings` time steps and calls over 1s; status reads a cached intervention report. Failed requests log their route and SQL statement.
 
 ### Perpetual master loop
 
@@ -94,7 +94,7 @@ graphyard grants grant ci "integration:*,unit:*" "CI proofs"
 graphyard grants revoke ci "integration:claim-safety" "Runner decommissioned"
 ```
 
-Only an `admin` grants, only to `producer` principals. Patterns: an exact name, `kind:*`, or a prefix (`manual:gy-43/*`).
+Only an `admin` grants or revokes, only to `producer` principals. Patterns: an exact name, `kind:*`, or a prefix (`manual:gy-43/*`).
 
 ## Setup proposals and drift
 
