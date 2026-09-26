@@ -15,7 +15,7 @@ import { artifactCapacityFromEnv, type ArtifactBackend } from '../artifacts.js';
 import { buildIdentity } from '../protocol-version.js';
 import type { ProductionWatch } from '../production-watch.js';
 import { responderFromEnv, type Responder } from '../closed-question.js';
-import { Next, Sent, matchRoute, type RouteContext, type RouteModule, type Services } from './routes.js';
+import { Next, Sent, matchRoute, requestFailure, type RouteContext, type RouteModule, type Services } from './routes.js';
 import { authenticate, operatorAgentRouteGuard, operatorVisible } from './auth.js';
 import type { Credential } from './principals.js';
 import { healthRoutes } from './routes/health.js';
@@ -142,7 +142,7 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
       if (error instanceof Refusal) return send(error.status, { ...error.details, error: error.message });
       if (error instanceof z.ZodError) return send(400, { error: 'Invalid input', issues: error.issues });
       if (error instanceof SyntaxError || error instanceof URIError) return send(400, { error: 'Malformed request' });
-      console.error('request failed', error instanceof Error ? error.message : 'unknown');
+      console.error(requestFailure(req.method, req.url, error));
       send(500, { error: 'Internal error; consult server logs' });
     }
   }), { services });
