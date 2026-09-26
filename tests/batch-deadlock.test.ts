@@ -10,6 +10,7 @@ import { Engine } from '../src/engine.js';
 import { GitHub, processJob } from '../src/github.js';
 import { describeMergeBatches, predictQueue, queueRef } from '../src/merge-queue.js';
 import { diagnose } from '../src/coordination.js';
+import { buildMasterStatus } from '../src/master/status.js';
 import { CHECK_NAME, Refusal, ReconciliationRetry, type Principal, type Work } from '../src/model.js';
 
 // GY-506: the merge-queue deadlock. Every test is named for the proof it produces.
@@ -240,11 +241,17 @@ test('unit:no-observation-recorded — every claimed job that saves no observati
   const starved = diagnose(await reload(work), snapshot.work, Date.parse(snapshot.now), snapshot.jobs).find(entry => entry.kind === 'observation-starved');
   assert.ok(starved, 'the third no-observation finish raises the attention item');
   assert.match(starved!.message, new RegExp(`${work.key}'s observation job has finished 3 times in a row without saving an observation; last reschedule: Task changed while GitHub was being observed`), 'naming the item and the path taken');
+  // Master status raises it on its own, from what /api/status reports: nobody has to suspect the
+  // item and run diagnose on it first.
+  const raised = buildMasterStatus(snapshot, [], [], {}, {}, undefined, 'main', { starvedJobs: await store.starvedJobs() }).attentionItems.find(item => item.subject === work.key && item.kind === 'integration-job');
+  assert.ok(raised, 'master status raises an attention item for the starved observation job');
+  assert.match(raised!.text, new RegExp(`${work.key}'s observation job has finished 3 times in a row without saving an observation; last reschedule: Task changed while GitHub was being observed`), 'naming the item and the path taken');
   // A run that saves an observation resets the count and the attention item goes.
   work = await cycle(github, work);
   assert.equal((await jobRow(work)).unobserved, 0);
   const after = await store.workSnapshot();
   assert.equal(diagnose(await reload(work), after.work, Date.parse(after.now), after.jobs).some(entry => entry.kind === 'observation-starved'), false);
+  assert.deepEqual(await store.starvedJobs(), [], 'the saved observation clears the master-status item');
 });
 
 test('unit:stuck-batch-dissolved — a batch in testing with no published tip for over ten minutes is dissolved: its members validate singly in their existing order and the head publishes its own tip', async () => {

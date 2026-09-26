@@ -2014,7 +2014,9 @@ export async function processJob(engine: Engine, github: GitHub): Promise<boolea
     if (cadence && work) github.recordObservation?.(work.id, { requests, uncached, band: cadence.band, cadenceMs: cadence.ms });
     if (settled) return true;
     if (work?.stage === 'done') await engine.store.pool.query('DELETE FROM jobs WHERE work_id=$1 AND token=$2', [job.work_id, job.token]);
-    if (held) await engine.store.holdJob(job.work_id, job.token, held, permissionHoldMs, heldOn());
+    if (held) await engine.store.holdJob(job.work_id, job.token, held, permissionHoldMs, heldOn(), observed);
+    // An item with no submission has nothing to observe: the job says so and is not counted as starved.
+    else if (work && !work.submission && work.stage !== 'done') await engine.store.deferJob(job.work_id, job.token, new Date(Date.now() + idleObservationSeconds * 1000).toISOString(), 'no submission to observe', null);
     else await engine.store.finishJob(job.work_id, job.token, undefined, false, cadence?.ms ?? (head ? headObservationSeconds : idleObservationSeconds) * 1000, observed);
   } catch (error) {
     const message = error instanceof Error ? error.message : 'GitHub reconciliation failed';
