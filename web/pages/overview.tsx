@@ -7,6 +7,7 @@ import { groupLabel, mergedAt, shippedThisWeek, groupMeaning, groups, summarySen
 import { leftFlowAt, releaseView } from '../../src/model/release';
 import { stalledCards } from '../../src/model/actionless';
 import { groupFaults, statusFaults, workFaults } from '../../src/model/fault-classes';
+import { backlogCounts } from '../../src/model/machine-backlog';
 import type { Dashboard } from './dashboard';
 
 const week = 7 * 24 * 60 * 60 * 1000;
@@ -61,6 +62,9 @@ export default function OverviewPage({ work, board, status, query, setQuery, set
     {group === 'moving' && <div className="row-head" aria-hidden="true"><span/><span/><span className="row-steps"><StepNames/></span><span>Who acts next</span><span>In step</span></div>}
     <div className="rows">{byGroup[group].map(w => row(w, group))}</div>
   </section>;
+  // The backlog split the way master status splits it (GY-402): the operator's own unreleased
+  // items apart from the machine-filed follow-ups and fault items still waiting for triage.
+  const backlog = backlogCounts(byGroup.backlog, now);
   const admin = status?.actor?.role === 'admin';
   return <>
     <div className="page-heading"><div><h1>Work</h1><p className="summary">{board ? summarySentence(counts) : 'Reading the board…'}</p></div>
@@ -87,7 +91,7 @@ export default function OverviewPage({ work, board, status, query, setQuery, set
       {section('moving')}
       {section('up-next')}
       {shown('backlog') && byGroup.backlog.length > 0 && <details className="work-group group-backlog" aria-label="Backlog" data-group-section="backlog" open={only === 'backlog'}>
-        <summary><GroupDot group="backlog"/>Backlog <span className="count">{byGroup.backlog.length}</span><small>no clock runs</small></summary>
+        <summary><GroupDot group="backlog"/>Backlog <span className="count">{byGroup.backlog.length}</span><small data-backlog-split={`${backlog.operator}/${backlog.machineUntriaged}`}>{backlog.machineUntriaged > 0 && `${backlog.operator} yours · ${backlog.machineUntriaged} machine-filed awaiting triage${backlog.overdue > 0 ? ` (${backlog.overdue} past a day)` : ''} · `}no clock runs</small></summary>
         <div className="rows">{byGroup.backlog.map(w => row(w, 'backlog'))}</div>
       </details>}
       {board && groups.every(group => counts[group] === 0) && <p className="muted">{query ? 'No open item matches.' : 'Nothing is open.'}</p>}
