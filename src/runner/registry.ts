@@ -1,4 +1,6 @@
 import type { Run, RunRecord } from './types.js';
+import type { LaunchedRun } from '../session-tail.js';
+import { surfacePane } from './herdr-surface.js';
 
 /**
  * The runs this process started (GY-169). A headless run has no pane, so Herdr cannot list it;
@@ -16,6 +18,8 @@ export interface RegisteredRun {
   run: Run<unknown>;
   /** The managed directory the run works in, when it was given one (the approver's, GY-391): a reclaim pass leaves it while the run lives. */
   checkout?: string;
+  /** The runner's name and when the run started, for the live session view (GY-713). */
+  runtime?: string; startedAt?: string;
   /** Filled in when the run ends and its payload was applied. */
   record: RunRecord | null;
   endedAt: number | null;
@@ -53,6 +57,13 @@ export function runnerAgents(): { name: string; agent: string; agent_status: str
 export function withRunnerAgents<A extends { name?: string }>(agents: A[]): (A | ReturnType<typeof runnerAgents>[number])[] {
   const named = new Set(agents.map(agent => agent.name));
   return [...agents, ...runnerAgents().filter(agent => !named.has(agent.name))];
+}
+
+/** The live runs as the loop's session-tail roster reads them (GY-713): their log, and their pane when they run in Herdr. */
+export function launchedRuns(): LaunchedRun[] {
+  prune();
+  return [...runs.values()].filter(entry => entry.endedAt === null).map(entry => ({ name: entry.name, work: entry.work, role: entry.role, runtime: entry.runtime ?? 'pi',
+    startedAt: entry.startedAt ?? new Date().toISOString(), log: entry.run.log ?? null, pane: surfacePane(entry.run.id) }));
 }
 
 /** Test seam: forget every run. */

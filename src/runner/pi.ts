@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
+import { appendFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { StringDecoder } from 'node:string_decoder';
 import { fileURLToPath } from 'node:url';
@@ -67,6 +68,17 @@ export interface PiRunnerOptions {
   args?: string[];
   /** Variables every run of this runner starts with: a registry account's login home. */
   environment?: Record<string, string>;
+  /**
+   * The per-run log (GY-713): every byte the run writes to stdout and stderr is appended to the file
+   * this returns for the run's name, so the loop can publish a live tail of a run that has no pane.
+   * A run whose surface is a Herdr pane writes the same file from its pane.
+   */
+  log?: (run: { id: string; cwd: string }) => string | null;
+  /**
+   * Where the run's process runs (GY-713): by default a child of this process; a surface returns the
+   * spawn that starts it elsewhere — a Herdr pane (`herdrSurface`) — and writes the run's log itself.
+   */
+  surface?: (run: { id: string; log: string | null }) => typeof spawn;
 }
 
 export function piRunner(configured: PiRunnerOptions = {}): Runner {
@@ -75,6 +87,10 @@ export function piRunner(configured: PiRunnerOptions = {}): Runner {
     name: 'pi',
     start<T>(prompt: string, options: RunOptions<T>): Run<T> {
       const id = randomUUID(), events: RunEvent[] = [], listeners = new Set<(event: RunEvent) => void>();
+      let log: string | null = null;
+      try { log = configured.log?.({ id, cwd: options.cwd }) ?? null; } catch { log = null; }
+      // A log that cannot be written never stops the run; the tail simply stays empty.
+      const record = (chunk: Buffer) => { if (log && !configured.surface) try { appendFileSync(log, chunk, { mode: 0o600 }); } catch { /* best effort */ } };
       const accepted: T[] = [];
       let invalid: string | null = null, lastError: string | null = null, cancelled: string | null = null, timedOut = false, settled = false;
       let child: ChildProcess | null = null, resolveResult!: (result: RunResult<T>) => void, done = false;
@@ -104,7 +120,7 @@ export function piRunner(configured: PiRunnerOptions = {}): Runner {
       };
 
       try {
-        child = (configured.spawn ?? spawn)(command, [...(configured.commandArgs ?? []), ...piArgs(prompt, { model, extension: configured.extension, args: configured.args })], {
+        child = (configured.surface?.({ id, log }) ?? configured.spawn ?? spawn)(command, [...(configured.commandArgs ?? []), ...piArgs(prompt, { model, extension: configured.extension, args: configured.args })], {
           cwd: options.cwd, env: runEnvironment(process.env, { ...configured.environment, ...options.env }), stdio: ['ignore', 'pipe', 'pipe'] });
       } catch (error) {
         queueMicrotask(() => fail({ reason: 'spawn', detail: `${command} could not be started: ${error instanceof Error ? error.message : String(error)}` }));
@@ -116,12 +132,13 @@ export function piRunner(configured: PiRunnerOptions = {}): Runner {
         // Pi's framing is strict JSONL: records split on LF only (never readline, which also splits
         // on Unicode separators that are valid inside JSON strings), with an optional CR stripped.
         child.stdout!.on('data', (chunk: Buffer) => {
+          record(chunk);
           buffer += decoder.write(chunk);
           let index: number;
           while ((index = buffer.indexOf('\n')) >= 0) { handle(buffer.slice(0, index).replace(/\r$/, '')); buffer = buffer.slice(index + 1); }
         });
         let stderr = '';
-        child.stderr!.on('data', (chunk: Buffer) => { stderr = (stderr + chunk.toString('utf8')).slice(-4000); });
+        child.stderr!.on('data', (chunk: Buffer) => { record(chunk); stderr = (stderr + chunk.toString('utf8')).slice(-4000); });
         child.on('error', error => fail({ reason: 'spawn', detail: `${command} could not be started: ${error.message}` }));
         child.on('close', (code, signal) => {
           buffer += decoder.end();
@@ -138,7 +155,7 @@ export function piRunner(configured: PiRunnerOptions = {}): Runner {
         });
       }
       return {
-        id, events,
+        id, events, log,
         onEvent(listener) { for (const event of [...events]) listener(event); listeners.add(listener); return () => { listeners.delete(listener); }; },
         cancel(reason = 'the run was cancelled') { if (done || cancelled !== null) return; cancelled = reason; if (child) stop(); else fail({ reason: 'cancelled', detail: reason }); },
         result: () => result,

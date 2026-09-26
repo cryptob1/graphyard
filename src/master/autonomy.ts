@@ -28,6 +28,7 @@ import { liveReviewRequest } from '../model/dispatch.js';
 import { narrowRoleRuntime, piRuntimeSchema } from '../runner/payloads.js';
 import { applyDecision, approverRunOptions, narrowRunner, piApproverPrompt, registryRunner, startNarrowRun } from '../runner/roles.js';
 import type { Runner, RunRecord } from '../runner/types.js';
+import { headlessSurface } from '../runner/surface.js';
 import { autonomyPlan, autonomyReason, humanOnlyDecisions, masterHarness } from './harness.js';
 
 type AutonomyFetch = typeof fetch;
@@ -330,7 +331,7 @@ export async function launchApprover(root: string, work: Work, decision: string,
   const registry = explicitKind ? null : await selectFleetSession(config, 'approver', { name: approverProfile, principal: config.approver!.id }, await heldAwareProbe(config, { runtime: herdr, ...probe, work: work.key }));
   if (registry && registry.account.kind === 'pi') {
     let started: Awaited<ReturnType<typeof startHeadlessApprover>>;
-    try { started = await startHeadlessApprover(root, config, work, decision, name, token, headless.runner ?? registryRunner(registry.account), headless); }
+    try { started = await startHeadlessApprover(root, config, work, decision, name, token, headless.runner ?? registryRunner(registry.account, headlessSurface(root, config, 'approver', name)), headless); }
     catch (error) { await registry.release(`approver run for ${work.key} failed to start: ${failureText(error).slice(0, 300)}`); throw error; }
     // The run is the session: the registry's slot is given back the moment it ends.
     const settled = started.settled.finally(() => registry.release(`the headless approver run for ${work.key} ended`));
@@ -340,7 +341,7 @@ export async function launchApprover(root: string, work: Work, decision: string,
       run: started.record, settled: settled as Promise<RunRecord> | undefined };
   }
   if (!registry && !explicitKind && narrowRoleRuntime(config.run, 'approver') === 'pi') {
-    const started = await startHeadlessApprover(root, config, work, decision, name, token, headless.runner ?? narrowRunner(config.run.pi), headless);
+    const started = await startHeadlessApprover(root, config, work, decision, name, token, headless.runner ?? narrowRunner(config.run.pi, headlessSurface(root, config, 'approver', name)), headless);
     return { agentName: name, work: work.key, decision, identity: config.approver!.id, pane: null as string | null, runtime: 'pi' as const, delivery: 'request' as RequestDelivery, focusChanged: false, session: null, account: null,
       run: started.record, settled: started.settled as Promise<RunRecord> | undefined };
   }

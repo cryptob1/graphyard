@@ -18,6 +18,7 @@ import { liveRun, registeredRun } from './runner/registry.js';
 import { narrowRunner, piProducerPrompt, producerRunOptions, registryRunner, startNarrowRun, submitEvidence } from './runner/roles.js';
 import { liveRunCheckouts } from './runner/registry.js';
 import { runRecordSchema, type RunRecord, type Runner } from './runner/types.js';
+import { headlessSurface } from './runner/surface.js';
 
 /**
  * Producer sessions launched for the control plane's producer requests (model/dispatch.ts).
@@ -366,7 +367,7 @@ async function launchHeadlessProducer(root: string, config: MasterConfig, work: 
   // The runner and the name evidence is attributed to come from the registry's choice when it made one.
   // A launch the registry's contract refuses (a tools allowlist with no tools flag) gives its session back.
   let runner: Runner;
-  try { runner = dependencies.runner ?? (registry ? registryRunner(registry.account) : narrowRunner(pi)); }
+  try { runner = dependencies.runner ?? (registry ? registryRunner(registry.account, headlessSurface(root, config, 'producer', session.agentName)) : narrowRunner(pi, headlessSurface(root, config, 'producer', session.agentName))); }
   catch (error) { await registry?.release(`producer run for ${binding.key} was refused before it started: ${error instanceof Error ? error.message : String(error)}`.slice(0, 400)); throw error; }
   const via = registry ? `${registry.account.fleet.runtime} ${registry.account.fleet.modelId ?? registry.account.fleet.model} on ${registry.account.name}` : `pi ${pi.model} via ${pi.command}`;
   let checkout: Awaited<ReturnType<typeof allocateManagedCheckout>>;
