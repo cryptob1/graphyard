@@ -87,8 +87,13 @@ export async function verifyContainmentDeath(
   // The probe is told the exact scope the launch recorded, so it can hold everything that
   // scope still contains and attribute a neighbour's scope to its own live supervisor.
   const probe = await (options.probe ?? probeSupervisorAbsence)({ key: work.key, epoch: quarantine.epoch, workspacePath: workspace.path, scope: quarantine.scope ?? null });
-  const verification = containmentVerificationSchema.parse({ ...probe, host: options.hostId, observedAt: (options.localNow ?? new Date()).toISOString(), clockOffset: options.clockOffset });
-  const refusals = containmentSettlementRefusals(work, verification, { now: Date.parse(options.observedAt) });
+  const localNow = options.localNow ?? new Date();
+  const verification = containmentVerificationSchema.parse({ ...probe, host: options.hostId, observedAt: localNow.toISOString(), clockOffset: options.clockOffset });
+  // Judged at the control-plane time of the probe, not of the snapshot the cycle began with: the probe
+  // runs late in a cycle that can take tens of seconds, and measuring it against the snapshot's time
+  // refused every automatic settlement as "dated after the control-plane clock" (2026-09-26).
+  // Local time less the smallest measured offset is the latest control-plane time the probe could have run at.
+  const refusals = containmentSettlementRefusals(work, verification, { now: Math.max(Date.parse(options.observedAt), localNow.getTime() - options.clockOffset.min) });
   return { ...assessment, settleable: !refusals.length, refusals, verification };
 }
 /** Verify every lapsed quarantine this host is responsible for, keyed by work id; a live worker's is not probed. */

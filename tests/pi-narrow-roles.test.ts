@@ -2,17 +2,18 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Work } from '../src/model.js';
 import { launchApprover, listHerdrAgents, loadMasterConfig, masterConfigSchema, saveProducerProfile, setupMaster } from '../src/master.js';
 import { approvalStep, approvalWatchSchema } from '../src/master-daemon.js';
-import { launchProducer, readProducerLedger, reconcileProducers } from '../src/producer.js';
+import { launchProducer, readProducerLedger, reclaimCheckouts, reconcileProducers } from '../src/producer.js';
 import { narrowRoleRuntime, piRuntimeSchema } from '../src/runner/payloads.js';
-import { clearRuns, liveRun } from '../src/runner/registry.js';
+import { clearRuns, liveRun, registerRun } from '../src/runner/registry.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
+import { attestConfirmation, piApproverWithAttestation } from '../src/master/autonomy.js';
 import type { FilesystemProbe } from '../src/install/worktree-root.js';
 
 // GY-169 AC-3, proof integration:pi-narrow-roles. The master config selects the runtime of each
@@ -120,16 +121,17 @@ test('integration:pi-narrow-roles the master config selects each narrow role\'s 
 });
 
 test('integration:pi-narrow-roles with pi selected the approver runs headless and its verdict is applied as the approver identity on the approve route, and the server still judges it', async () => {
-  const { root, scenario, posted, fetcher, answer, cleanup } = await installation({ approver: 'pi' });
+  const { root, managed, scenario, posted, fetcher, answer, cleanup } = await installation({ approver: 'pi' });
   try {
     const item = work('GY-88', 'unit', ['unit:pi-graphyard-tools']);
     const reason = 'the requested rework is grounded in the reviewer finding';
     await writeFile(scenario, JSON.stringify({ calls: [
       { tool: 'bash', input: { command: 'node bin/graphyard.mjs master decisions GY-88' } },
+      { tool: 'bash', input: { command: `rm -f ${root}/README.md` } },
       { tool: 'graphyard_decide', input: { decision, approve: 'yes', reason } },
       { tool: 'graphyard_decide', input: { decision, approve: true, reason } },
     ] }));
-    const launched = await launchApprover(root, item, decision, undefined, { agents: [], available: true }, herdr(), {}, undefined, { fetcher });
+    const launched = await launchApprover(root, item, decision, undefined, { agents: [], available: true }, herdr(), {}, undefined, { fetcher, filesystem: durable });
     assert.equal(launched.runtime, 'pi');
     assert.equal(launched.pane, null, 'no terminal pane');
     // While it runs, the loop's inventory lists it under its session name, so supervision waits on it.
@@ -147,6 +149,13 @@ test('integration:pi-narrow-roles with pi selected the approver runs headless an
     assert.deepEqual(posted, [{ url: 'https://graphyard.example/api/work/id-GY-88/approve', auth: `Bearer ${approverToken}`, body: { decision, reason } }]);
     const launch = JSON.parse(await readFile(`${scenario}.launched`, 'utf8'));
     assert.equal(launch.role, 'approver');
+    // GY-391: the approver works in a directory of its own under the managed root, never in the
+    // operator's repository, and the directory goes when the run ends.
+    assert.notEqual(launch.cwd, root, 'the approver does not run in the operator\'s repository');
+    assert.equal(dirname(launch.cwd), managed);
+    assert.match(basename(launch.cwd), /^graphyard-approval-gy-88-/);
+    assert.equal(await stat(launch.cwd).catch(() => null), null, 'the approver\'s directory is removed when its run ends');
+    assert.ok(record.events.some(event => event.kind === 'tool-end' && (event as any).error === true && /outside the worktree/.test(JSON.stringify(event))), 'rm inside the operator\'s repository is refused');
     assert.deepEqual(launch.args.slice(0, 2), ['--mode', 'json']);
     assert.equal(launch.args[launch.args.indexOf('--extension') + 1], extension);
     assert.equal(launch.args[launch.args.indexOf('--model') + 1], 'zai/glm-5.3-flash');
@@ -159,7 +168,7 @@ test('integration:pi-narrow-roles with pi selected the approver runs headless an
     posted.length = 0;
     answer(() => new Response(JSON.stringify({ error: 'The approver must not have produced evidence for this work' }), { status: 403 }));
     await writeFile(scenario, JSON.stringify({ calls: [{ tool: 'graphyard_decide', input: { decision, approve: false, reason: 'not justified' } }] }));
-    const refused = await (await launchApprover(root, item, decision, undefined, { agents: [], available: true }, herdr(), {}, undefined, { fetcher })).settled!;
+    const refused = await (await launchApprover(root, item, decision, undefined, { agents: [], available: true }, herdr(), {}, undefined, { fetcher, filesystem: durable })).settled!;
     assert.equal(posted.length, 1);
     assert.deepEqual(posted[0].body, { action: 'refuse', decision, reason: 'not justified' });
     assert.equal(refused.applied[0].outcome, 'refused');
@@ -168,9 +177,19 @@ test('integration:pi-narrow-roles with pi selected the approver runs headless an
     // A verdict for another decision is not this run's submission, so nothing is applied.
     posted.length = 0;
     await writeFile(scenario, JSON.stringify({ calls: [{ tool: 'graphyard_decide', input: { decision: 'another-decision', approve: true, reason } }] }));
-    const stray = await (await launchApprover(root, item, decision, undefined, { agents: [], available: true }, herdr(), {}, undefined, { fetcher })).settled!;
+    const stray = await (await launchApprover(root, item, decision, undefined, { agents: [], available: true }, herdr(), {}, undefined, { fetcher, filesystem: durable })).settled!;
     assert.equal(stray.result?.ok === false && stray.result.reason, 'invalid-payload');
     assert.deepEqual(posted, []);
+
+    // A live run's directory is its own: the reclaim pass leaves it, and takes it once the run ends.
+    const held = join(managed, 'graphyard-approval-gy-88-ccccccc-0123abcd');
+    await mkdir(held, { recursive: true });
+    const never = { id: 'r', events: [], onEvent: () => () => {}, cancel: () => {}, result: () => new Promise<never>(() => {}) };
+    registerRun({ name: 'approve-held', role: 'approver', work: 'GY-88', subject: decision, run: never, checkout: held });
+    const config = await loadMasterConfig(root);
+    assert.deepEqual((await reclaimCheckouts(root, config, { graceMs: 0, probe: durable })).removed, [], 'a live approver\'s directory is not reclaimed');
+    clearRuns();
+    assert.deepEqual((await reclaimCheckouts(root, config, { graceMs: 0, probe: durable })).removed, [held], 'an orphaned approver directory is reclaimed');
   } finally { await cleanup(); }
 });
 
@@ -248,4 +267,12 @@ test('integration:pi-narrow-roles without the setting, and for non-unit proof gr
     assert.equal(launched.pane, 'pane-1', 'an integration group still launches in Herdr');
     assert.equal(existsSync(`${selected.scenario}.launched`), false);
   } finally { await selected.cleanup(); }
+});
+
+test('integration:pi-narrow-roles the headless approver\'s prompt names the read-only repository and still carries the attestation confirmation (GY-523)', () => {
+  const config = { repository: 'owner/project', cliPath: launcher, approver: { id: 'approver' } } as any;
+  const work = { key: 'GY-88', candidate: { sha: H, baseSha: B } } as unknown as Work;
+  const prompt = piApproverWithAttestation(config, work, 'd1', '/repo');
+  assert.ok(prompt.includes('the repository is at /repo and is read-only'), 'the approver is told the repository is not its to write');
+  assert.ok(prompt.includes(attestConfirmation(B)) && prompt.indexOf(attestConfirmation(B)) < prompt.indexOf('graphyard_decide'), 'and is told to confirm an exercise record before it decides');
 });

@@ -11,7 +11,7 @@ import { autonomyContract } from '../../src/autonomy';
  * never run blindly. Nothing here asks a person anything: there is no UI call anywhere in this
  * file, and a refused call returns its reason to the agent so it retries safely.
  *
- * `GRAPHYARD_PI_ROLE` (approver | producer | research) selects the role's tool; unset, the approver's
+ * `GRAPHYARD_PI_ROLE` (approver | producer | research | triage) selects the role's tool; unset, the approver's
  * and the producer's are registered.
  * The tools submit nothing to the control plane themselves: the runner hands the validated payload
  * to the loop, which applies it through the same routes a terminal session uses, and the gates
@@ -29,7 +29,7 @@ export interface ExtensionApi {
 
 // ---- Tool schemas and their validation -------------------------------------------------------
 export type JsonSchema = { type: 'object' | 'string' | 'boolean' | 'integer' | 'number' | 'array'; description?: string; properties?: Record<string, JsonSchema>; required?: string[];
-  additionalProperties?: boolean; enum?: readonly string[]; minLength?: number; maxLength?: number; pattern?: string; minimum?: number; items?: JsonSchema; minItems?: number; maxItems?: number };
+  additionalProperties?: boolean; enum?: readonly string[]; minLength?: number; maxLength?: number; pattern?: string; minimum?: number; maximum?: number; items?: JsonSchema; minItems?: number; maxItems?: number };
 
 const text = (maxLength: number, description: string): JsonSchema => ({ type: 'string', minLength: 1, maxLength, description });
 const sha = (description: string): JsonSchema => ({ type: 'string', pattern: '^[0-9a-fA-F]{40}$', description });
@@ -73,6 +73,18 @@ export const researchParameters: JsonSchema = {
   },
 };
 
+/** The triage judgement (GY-402, src/model/machine-backlog.ts triageJudgementSchema): release at a priority, close with a reason, or merge into another item. */
+export const triageParameters: JsonSchema = {
+  type: 'object', additionalProperties: false, required: ['outcome', 'reason'],
+  properties: {
+    outcome: { type: 'string', enum: ['release', 'close', 'merge'], description: 'release: real work still worth doing; close: already fixed or not worth doing; merge: another open item already covers it' },
+    priority: { type: 'integer', minimum: 0, maximum: 4, description: 'For release only: 0 is the most urgent, 4 the least' },
+    ref: text(40, 'For close only, when already fixed: the delivered item that fixed it, such as GY-123; omit when it is not worth doing'),
+    into: text(40, 'For merge only: the open item that already covers it, such as GY-123'),
+    reason: text(2000, 'Why, with the evidence an approver can check'),
+  },
+};
+
 /** Every reason `value` does not match `schema`; empty when it does. */
 export function schemaErrors(schema: JsonSchema, value: unknown, path = 'input'): string[] {
   const type = Array.isArray(value) ? 'array' : value === null ? 'null' : typeof value;
@@ -85,6 +97,7 @@ export function schemaErrors(schema: JsonSchema, value: unknown, path = 'input')
     if (schema.enum && !schema.enum.includes(value)) errors.push(`${path} must be one of ${schema.enum.join(', ')}`);
   }
   if (typeof value === 'number' && schema.minimum !== undefined && value < schema.minimum) errors.push(`${path} must be at least ${schema.minimum}`);
+  if (typeof value === 'number' && schema.maximum !== undefined && value > schema.maximum) errors.push(`${path} must be at most ${schema.maximum}`);
   if (Array.isArray(value)) {
     if (schema.minItems !== undefined && value.length < schema.minItems) errors.push(`${path} must have at least ${schema.minItems} entries`);
     if (schema.maxItems !== undefined && value.length > schema.maxItems) errors.push(`${path} must have at most ${schema.maxItems} entries`);
@@ -124,6 +137,8 @@ export function graphyardTools(role: string | undefined = process.env.GRAPHYARD_
   const evidence = tool('graphyard_submit_evidence', 'Graphyard evidence', 'Submit one proof\'s result on the exact head, base and policy revision you were given, with the exercise run against the tree with the criterion\'s behaviour removed. Call it once per proof, pass or fail.', evidenceParameters, params => `proof ${params.proof}`, false);
   // The research session's brief (GY-259) is registered for its own role only.
   if (role === 'research') return [tool('graphyard_research_brief', 'Graphyard research brief', 'Record the research brief for the item you were asked to research: existing code to reuse, patterns and prior art with sources, risks, the approach you recommend, and the operator\'s product questions with your recommended answers. Call it exactly once; it is your result.', researchParameters, () => 'the brief', true)];
+  // The triage session's judgement of a machine-filed backlog item (GY-402), likewise for its own role only.
+  if (role === 'triage') return [tool('graphyard_triage_decision', 'Graphyard triage decision', 'Record your judgement of the machine-filed backlog item you were asked to triage: release it with a priority, close it with a reason (naming the delivered item that already fixed it, if any), or merge it into another open item. Call it exactly once; it is your result.', triageParameters, () => 'the judgement', true)];
   return role === 'approver' ? [decide] : role === 'producer' ? [evidence] : [decide, evidence];
 }
 
@@ -278,12 +293,23 @@ export function guardCommand(command: string, context: GuardContext): GuardVerdi
   return { allow: true };
 }
 
-/** Directories a mktemp call printed: kept only when each is a real directory under the temporary root. */
+/**
+ * The directory a `mktemp -d` call printed. Only a command that is nothing but that one mktemp
+ * invocation counts, and only its single line of output (GY-391): a line a second command printed
+ * beside it (`mktemp -d && ls -d /tmp/*`) is not a directory the session created. The line is kept
+ * only when it is a real directory under the temporary root.
+ */
 export function mktempDirectories(command: string, output: string, root = tmpdir()): string[] {
-  if (!/\bmktemp\b/.test(command)) return [];
-  const base = resolve(root);
-  return output.split('\n').map(line => line.trim()).filter(line => isAbsolute(line) && inside(resolve(line), base) && !resolve(line).split(sep).includes('..'))
-    .filter(line => { try { return statSync(line).isDirectory(); } catch { return false; } });
+  const segments = shellWords(command);
+  if (segments.length !== 1) return [];
+  const [program, ...words] = segments[0];
+  if (program.dynamic || program.value.split('/').pop() !== 'mktemp' || words.some(word => word.dynamic)) return [];
+  if (!words.some(word => word.value === '--directory' || /^-[A-Za-z]*d[A-Za-z]*$/.test(word.value))) return [];
+  const lines = output.split('\n').map(line => line.trim()).filter(Boolean);
+  if (lines.length !== 1) return [];
+  const [line] = lines, base = resolve(root);
+  if (!isAbsolute(line) || !inside(resolve(line), base) || resolve(line).split(sep).includes('..')) return [];
+  try { return statSync(line).isDirectory() ? [line] : []; } catch { return []; }
 }
 
 // ---- The extension -----------------------------------------------------------------------------

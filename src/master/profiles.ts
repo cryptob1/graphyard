@@ -185,6 +185,11 @@ export const masterRunSchema = z.object({
   // producer requests (the launch bound is 30 seconds from the request), which reviewer profile
   // answers a request when more than one is configured, and how long a producer session may run.
   dispatchIntervalSeconds: z.number().int().min(5).max(30).default(10),
+  // How many session launches — worker dispatches, approvers, failover relaunches — the launcher
+  // beside the loop's cycle runs at once (GY-616). The cycle hands launches over and never waits on
+  // them; the rest queue. Each launch creates a Herdr pane, so this bounds the host's launch load.
+  // Unset: 3 (`defaultLaunchConcurrency`).
+  launchConcurrency: z.number().int().min(1).max(20).optional(),
   reviewerProfile: profileName.optional(),
   producerTimeoutMinutes: z.number().int().min(5).max(1440).default(120),
   /**

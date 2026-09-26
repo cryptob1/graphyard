@@ -15,7 +15,7 @@ import { mergeBatchSize, rerunFailedChecks } from '../master/profiles.js';
 import type { CapacityRole, PartialWork } from '../model/capacity.js';
 import { readProducerLedger, saveProducerLedger, independentProducerProfiles, launchProducer, reclaimCheckouts } from '../producer.js';
 import { followUpThreadIds, readReviewLedger, updateReviewLedger, launchReview } from '../reviewer.js';
-import { type ReviewFinding, type SuccessionRead, readReviewFindings, basePaths, baseText, successionReader } from '../review-scope.js';
+import { type ReviewFinding, type SuccessionRead, readReviewFindings, basePaths, baseText, baseMentions, successionReader } from '../review-scope.js';
 import { defaultAwaitReviewers, launchedSessionHandle } from '../auto-dispatch.js';
 import type { DispatchRequest } from '../model/dispatch.js';
 import { registeredLaunch } from '../model/session-state.js';
@@ -37,6 +37,7 @@ import { observeDeployment } from './deployment.js';
 import { serverCallName, timedCall, timedFetch, timedRun } from '../master/timings.js';
 import type { RunRecord, Runner } from '../runner/types.js';
 import type { ResearchEvent } from '../research.js';
+import type { TriageJudgement } from '../model/machine-backlog.js';
 
 /** A reviewer or producer session a launch ledger holds as pending, as the failover step reads it. */
 export interface LaunchedSession { role: 'reviewer' | 'producer'; record: string; profile: string; agentName: string; pane: string | null; work: string; requestId: string | null }
@@ -67,6 +68,8 @@ export interface DaemonEffects {
   basePaths?: (paths: readonly string[]) => Promise<Set<string>>;
   /** A file's text on the base branch as `basePaths` fetched it, or null when it has none: what the pinning-test rule reads (GY-199). */
   baseText?: (path: string) => Promise<string | null>;
+  /** How many files on the base branch mention an identifier: the base-tree search the criteria-implied rule weighs a call by (GY-438). */
+  baseMentions?: (identifier: string) => Promise<number>;
   /**
    * The master's own additive scope widening — the revision `master scope` applies — with its
    * audited reason, bound to the scope request it answers (`answeringWidening`).
@@ -188,6 +191,10 @@ export interface DaemonEffects {
    */
   recordResearch?: (work: Work, event: ResearchEvent) => Promise<unknown>;
   research?: { cwd: string; runner?: Runner };
+  /** Records a triage judgement on a machine-filed item as the coordinator (GY-402, POST work/ID/triage). */
+  recordTriage?: (work: Work, body: { judgement: TriageJudgement; runtime?: string }) => Promise<unknown>;
+  /** Asks the control plane for the one-time follow-up migration (GY-402, POST followups/migrate) as the operator agent. */
+  migrateFollowUps?: () => Promise<{ merged: number; already?: boolean }>;
   /** The reviewer and producer sessions the launch ledgers hold as pending. */
   launchedSessions?: () => Promise<LaunchedSession[]>;
   /** The account the profile's current session was launched on, as its launcher recorded it. */
@@ -493,6 +500,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     reportCapacity: (work, event) => mutate(`work/${work.id}/capacity`, event),
     recordResearch: (work, event) => mutate(`work/${work.id}/research`, event),
     research: { cwd: root },
+    recordTriage: (work, body) => mutate(`work/${work.id}/triage`, body),
+    migrateFollowUps: () => asOperatorAgent('POST', 'followups/migrate', {}, 'graphyard-followups-migration'),
     launchedSessions: async () => [
       ...(await readReviewLedger(root)).reviews.filter(entry => entry.state === 'pending' && !entry.launching).map(entry => ({ role: 'reviewer' as const, record: entry.id, profile: entry.profile, agentName: entry.agentName, pane: entry.pane, work: entry.key, requestId: entry.requestId ?? null })),
       ...(await readProducerLedger(root)).producers.filter(entry => entry.state === 'pending').map(entry => ({ role: 'producer' as const, record: entry.id, profile: entry.profile, agentName: entry.agentName, pane: entry.pane, work: entry.key, requestId: entry.requestId })),
@@ -567,6 +576,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       trusted: current().run.awaitReviewers ?? defaultAwaitReviewers.logins }, run) : [],
     basePaths: paths => basePaths(root, current().baseBranch, paths, run),
     baseText: path => baseText(root, current().baseBranch, path, run),
+    baseMentions: identifier => baseMentions(root, current().baseBranch, identifier, run),
     baseSuccessions: (() => { let reader: ReturnType<typeof successionReader> | null = null, branch = ''; return (since: string) => {
       if (!reader || branch !== current().baseBranch) { branch = current().baseBranch; reader = successionReader(root, branch, run); }
       return reader(since);

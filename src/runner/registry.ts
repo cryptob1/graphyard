@@ -14,6 +14,8 @@ export interface RegisteredRun {
   /** The producer ledger record id, or the decision id, the run answers. */
   subject: string;
   run: Run<unknown>;
+  /** The managed directory the run works in, when it was given one (the approver's, GY-391): a reclaim pass leaves it while the run lives. */
+  checkout?: string;
   /** Filled in when the run ends and its payload was applied. */
   record: RunRecord | null;
   endedAt: number | null;
@@ -40,6 +42,8 @@ export const registeredRun = (name: string) => { prune(); return runs.get(name) 
 export const registeredRunFor = (subject: string) => { prune(); return [...runs.values()].find(entry => entry.subject === subject) ?? null; };
 export const liveRun = (name: string) => { const entry = registeredRun(name); return entry && entry.endedAt === null ? entry : null; };
 
+/** The managed directories live runs work in: not a reclaim pass's to take. */
+export const liveRunCheckouts = () => { prune(); return [...runs.values()].filter(entry => entry.endedAt === null && entry.checkout).map(entry => entry.checkout!); };
 /** The live runs as Herdr-shaped sessions: no pane, and a working status. */
 export function runnerAgents(): { name: string; agent: string; agent_status: string }[] {
   prune();

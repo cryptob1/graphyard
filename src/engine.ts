@@ -18,6 +18,7 @@ import { githubFromEnv, mergeBandQueueDepth } from './github.js';
 import { regressionRefusals } from './regression-guard.js';
 import { ciFamilyAllows, ciProofFamilies, ciRunBindingSchema, ciRunRefusal, isCiProducer, refuseCiProducer, staleCiAttemptRefusal, type CiRunObservation } from './model/ci-proofs.js';
 import { decideScopeRequest, liveScopeWidening, scopeRefusalBlocker, type ScopeDecision } from './model/scope.js';
+import { mergedScopeRequest, plannedFilesCovered } from './model/scope-collapse.js';
 import { configuredDocumentation, documentationObligation, recordDocumentationSubmission, type DocumentationPolicy } from './model/documentation.js';
 import { liveDispatchHandleIds, reconcileAutoDispatch, type DispatchTransition } from './model/dispatch.js';
 import { reconcileReviewConflict, type ReviewConflictTransition } from './model/review-conflict.js';
@@ -486,7 +487,31 @@ export class Engine {
     const work = all.find(w => w.id === id || w.key === id);
     if (!work || work.stage === 'done' || !work.workspaces.some(w => w.epoch === data.epoch)) return null;
     // Every item goes with it: the landing check reads other items' unlanded candidates (GY-97).
-    return this.submissionObserver({ ...work, submission: { epoch: data.epoch, pr: data.pr } }, all);
+    const observation = await this.submissionObserver({ ...work, submission: { epoch: data.epoch, pr: data.pr } }, all);
+    await this.reconcileLanded(observation, all);
+    return observation;
+  }
+  /**
+   * GY-744. Reconcile at once the merge of every peer an observation's landing check found already
+   * on the base branch tip while its item still records it unlanded: the peer's pull request is
+   * observed and that observation saved, so the ordinary delivery path records it merged, with its
+   * merge commit, now rather than whenever its own observation comes round — and the stale state
+   * that named it unlanded does not recur. A failure is logged and left to that later observation.
+   */
+  async reconcileLanded(observation: Observation | null, all: Work[], observer = this.submissionObserver) {
+    const reconciled: Work[] = [];
+    if (!observer) return reconciled;
+    for (const entry of observation?.landing?.landed ?? []) {
+      const peer = all.find(item => item.key === entry.key && item.stage !== 'done' && item.submission?.pr === entry.pr);
+      if (!peer) continue;
+      try {
+        const seen = await observer(peer, all);
+        if (seen.merged) reconciled.push(await this.observe(peer.id, peer.revision, seen));
+      } catch (error) {
+        console.error(`[landing] reconciling ${entry.key}'s landed pull request #${entry.pr} failed: ${(error as Error).message}`);
+      }
+    }
+    return reconciled;
   }
   /**
    * Bootstrap deferral is an operator act. It requires the explicit policy:bootstrap capability,
@@ -757,7 +782,8 @@ export class Engine {
         if (actor.role === 'operator-agent') {
           demand(work.criteria.every(previous => data.criteria.some((next: typeof previous) => next.id === previous.id && next.text === previous.text && JSON.stringify(next.proofs) === JSON.stringify(previous.proofs))), 'Operator agents may add requirements but cannot weaken or rewrite existing criteria');
           demand(work.dependencies.every(dependency => data.dependencies.includes(dependency)), 'Operator agents cannot remove dependencies');
-          demand(work.plannedFiles.every(path => data.plannedFiles.includes(path)), 'Operator agents cannot remove planned-file containment');
+          // Folding planned files into a directory that contains them keeps their containment (GY-549).
+          demand(plannedFilesCovered(work.plannedFiles, data.plannedFiles), 'Operator agents cannot remove planned-file containment');
           demand((work.exclusiveResources ?? []).every(resource => data.exclusiveResources.includes(resource)), 'Operator agents cannot remove exclusive-resource containment');
         }
         demand(data.criteria.every((ac: { id: string }) => !work!.retiredCriterionIds?.includes(ac.id)), 'Retired criterion IDs cannot be reused');
@@ -967,9 +993,10 @@ export class Engine {
           const outside = data.paths.filter((path: string) => !(work.plannedFiles ?? []).some(planned => pathScopeContains(planned, path)));
           demand(outside.length || data.remove?.length || data.criteria?.length, 'Every named path is already inside plannedFiles; no scope request is needed');
           // A fresh ask is undecided by construction: the loop decides it on its next cycle, and
-          // a standing refusal keeps blocking the item until that decision replaces it.
-          work.scopeRequest = { epoch: data.epoch, paths: data.paths, reason: data.reason, requestedBy: actor.id, at: now.toISOString(),
-            ...(data.remove?.length ? { remove: data.remove } : {}), ...(data.criteria?.length ? { criteria: data.criteria } : {}) };
+          // a standing refusal keeps blocking the item until that decision replaces it. An ask while
+          // this attempt's earlier one is still pending is merged into it, so one decision covers both.
+          work.scopeRequest = mergedScopeRequest(work.scopeRequest, { epoch: data.epoch, paths: data.paths, reason: data.reason, requestedBy: actor.id, at: now.toISOString(),
+            ...(data.remove?.length ? { remove: data.remove } : {}), ...(data.criteria?.length ? { criteria: data.criteria } : {}) }, work.plannedFiles);
         }
       }
       if (command === 'autoscope') {
@@ -1066,7 +1093,7 @@ export class Engine {
           if (data.type === 'scope-request') {
             const outside = data.paths!.filter((path: string) => !(work!.plannedFiles ?? []).some(planned => pathScopeContains(planned, path)));
             demand(outside.length, 'Every named path is already inside plannedFiles; no scope request is needed');
-            work.scopeRequest = { epoch: data.epoch, paths: data.paths, reason: data.reason, requestedBy: actor.id, at: now.toISOString() };
+            work.scopeRequest = mergedScopeRequest(work.scopeRequest, { epoch: data.epoch, paths: data.paths, reason: data.reason, requestedBy: actor.id, at: now.toISOString() }, work.plannedFiles);
             // A scope ask names a deterministic rule as its decider, and the session is about to
             // exit: applying that rule here answers it before anybody waits on it. The verdict is
             // the same one the loop's `autoscope` computes — recomputed from the item's own
@@ -1209,6 +1236,8 @@ export class Engine {
       await save(db, work, actor.id, command, now, command === 'settle' ? { epoch: data.epoch }
         : command === 'autoscope' ? { ...data, decision, before: { plannedFiles: before?.plannedFiles ?? [], blocker: before?.blocker ?? null } }
         : actor.role === 'operator-agent' ? { before, intent: data, reason: data.reason ?? null, ...(command === 'requirements' ? { liveScopeWidening: widening } : {}), ...(closedScope ? { closedScopeRequest: closedScope } : {}) }
+        // A requirements revision an approved decision applies records whether it was a live widening too (GY-549).
+        : command === 'requirements' ? { ...data, liveScopeWidening: widening, before: { plannedFiles: before?.plannedFiles ?? [] }, ...(closedScope ? { closedScopeRequest: closedScope } : {}) }
         : closedScope ? { ...data, closedScopeRequest: closedScope } : data);
       if (work.submission && !postDeployment && !deliveredSessionClosure && !['heartbeat', 'release', 'claim', 'workspace'].includes(command)) await wakeJob(db, work.id);
       // A renewal's replay needs only the lease, not a whole document per renewal.
@@ -1939,12 +1968,16 @@ export class Engine {
       ledger.push({ kind: 'escalation.auto-settled', details: { trigger: settled.escalation.trigger, epoch: settled.epoch, escalation: settled.escalation, note: settled.note, cause: settled.cause, attestation: settled.attestation, submission: work.submission } });
     }
     const queuedBefore = work.queue?.sequence ?? null;
+    const dissolvedBefore = work.queue?.batchDissolved ?? null;
     this.evaluate(work, all, now);
     // A queue entry the evaluation derived out — here, a merged entry whose reconciliation a
     // standing refusal already answered (GY-94) — is recorded as an ejection, and the entries
     // behind it are woken to predict against the real base.
     const ejected = queuedBefore !== null && !work.queue && work.queueEjection?.sequence === queuedBefore;
     if (ejected) ledger.push({ kind: 'queue.ejected', details: { sequence: queuedBefore, reason: work.queueEjection!.reason } });
+    // A stuck batch the evaluation dissolved (GY-506) is recorded on the ledger once, when it happened.
+    const dissolved = work.queue?.batchDissolved ?? null;
+    if (dissolved && JSON.stringify(dissolved) !== JSON.stringify(dissolvedBefore)) ledger.push({ kind: 'queue.batch-dissolved', details: { ...dissolved } });
     // Every violation found at the start of the tick is repaired by the evaluation above — the
     // derivation names its successor and the queue opens its row — and the ledger says so.
     if (stranded) ledger.push(livenessRepairEntry(stranded, work, all, now));
@@ -1978,6 +2011,7 @@ export class Engine {
       demand(work.workspaces.some(w => w.epoch === work.submission!.epoch && w.branch === observation.candidate.branch), 'PR branch does not match the assigned workspace');
       if (work.stage === 'done') return work;
       const queuedBefore = work.queue?.sequence ?? null;
+      const dissolvedBefore = work.queue?.batchDissolved ?? null;
       let authorizedSnapshot: Work | null = null; let authorizationRevision: number | null = null;
       // The repository-clock instant at which this authorization's evidence was judged
       // applicable. The provider merge timestamp cannot stand in for it: the two clocks
@@ -2197,6 +2231,11 @@ export class Engine {
       // a speculative tip, the ejection is its refused reconciliation (GY-94): nothing is delivered,
       // and the ledger keeps the refusal and the exit side by side.
       await this.recordEjection(db, work, all, queuedBefore, now, refusedReconciliation ? { decision: refusedReconciliation.decision, mergeSha: observation.mergeSha } : {});
+      // A stuck batch the evaluation dissolved (GY-506) is recorded on the ledger once, when it happened.
+      const dissolved = work.queue?.batchDissolved ?? null;
+      if (dissolved && JSON.stringify(dissolved) !== JSON.stringify(dissolvedBefore)) {
+        await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'queue.batch-dissolved', JSON.stringify({ details: { ...dissolved } })]);
+      }
       await this.recordDispatch(db, work, now);
       await save(db, work, 'github', 'github.observed', now);
       return work;

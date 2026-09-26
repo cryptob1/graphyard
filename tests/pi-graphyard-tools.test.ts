@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import graphyard, { guardCommand, systemPromptSection, type ExtensionApi, type ToolDefinition } from '../integrations/pi/index.js';
+import graphyard, { guardCommand, mktempDirectories, systemPromptSection, type ExtensionApi, type ToolDefinition } from '../integrations/pi/index.js';
 import { autonomyContract } from '../src/autonomy.js';
 import { decidePayloadSchema, evidencePayloadSchema } from '../src/runner/payloads.js';
 import { piArgs, piRunner } from '../src/runner/pi.js';
@@ -165,6 +165,20 @@ test('unit:pi-destructive-guard the tool-call guard refuses rm on a statically u
     await emit('tool_result', { toolName: 'bash', input: { command: `echo ${other}` }, content: [{ type: 'text', text: other }] }, worktree);
     assert.equal((await call(`rm -rf ${other}`))?.block, true);
     await rm(other, { recursive: true, force: true });
+    // GY-391: only the mktemp invocation's own line counts. A command that merely mentions mktemp
+    // and prints other existing directories beside it widens nothing.
+    const listed = await mkdtemp(join(tmpdir(), 'graphyard-pi-guard-listed-'));
+    try {
+      for (const command of [`mktemp -d && ls -d ${listed}`, `mktemp -d; echo ${listed}`, `echo mktemp; ls -d ${listed}`, `ls -d ${listed} # mktemp`, `D=$(mktemp -d) && echo ${listed}`, 'mktemp', 'mktemp -u'])
+        await emit('tool_result', { toolName: 'bash', input: { command }, content: [{ type: 'text', text: `${session}\n${listed}\n` }] }, worktree);
+      await emit('tool_result', { toolName: 'bash', input: { command: 'mktemp -d && ls -d /tmp' }, content: [{ type: 'text', text: listed }] }, worktree);
+      assert.equal((await call(`rm -rf ${listed}`))?.block, true, 'a directory another command printed is not a session directory');
+      assert.deepEqual(mktempDirectories(`mktemp -d && ls -d ${listed}`, `${session}\n${listed}`), []);
+      assert.deepEqual(mktempDirectories('mktemp -d', `${session}\n${listed}`), [], 'mktemp -d prints one line; more is not its output');
+      for (const command of ['mktemp -d', 'mktemp -d -t x.XXXXXX', 'mktemp -dt x.XXXXXX', '/usr/bin/mktemp --directory', 'mktemp -qd'])
+        assert.deepEqual(mktempDirectories(command, `${listed}\n`), [listed], command);
+      assert.deepEqual(mktempDirectories('mktemp', `${listed}\n`), [], 'a file mktemp is not a directory the session created');
+    } finally { await rm(listed, { recursive: true, force: true }); }
 
     // Symbolic links are followed as rm follows them: a trailing slash on a link to a directory outside deletes outside.
     const outside = await mkdtemp(join(tmpdir(), 'graphyard-pi-guard-outside-'));
