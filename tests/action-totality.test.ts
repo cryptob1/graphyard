@@ -16,7 +16,7 @@ import { actionAccount, actionJudgment, gateRefusalCatalogue, nextAction, refusa
 import { accountOutcome, actionlessItems, stallBoundMs, stalledItems, type AccountOutcome } from '../src/model/action-account.js';
 import { stalledItemAttention } from '../src/cli/master-status.js';
 import { actionableSubjects } from '../src/master-daemon.js';
-import { actionlessCards, stalledCards } from '../web/pages/actionless.js';
+import { actionlessCards, stalledCards } from '../src/model/actionless.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
 import OverviewPage from '../web/pages/overview.js';
 import { boardFromStatus } from '../src/model/board.js';
