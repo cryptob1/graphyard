@@ -10,7 +10,7 @@ import { stopLaunchSupervisor } from '../src/master/containment.js';
 import { loadMasterConfig } from '../src/master/config.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { probeSupervisorAbsence } from '../src/containment-probe.js';
-import { annotatePaneShell, closablePane, containmentSettlementRefusals, isHerdrServer, type ContainmentVerification } from '../src/quarantine.js';
+import { annotatePaneShell, closablePane, containmentSettlementRefusals, herdrServerPid, isHerdrServer, type ContainmentVerification } from '../src/quarantine.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -154,19 +154,28 @@ function stranded(overrides: Partial<Work> = {}) {
   return work('GY-393', { stage: 'build', epoch: 1, workspaces: [workspace], sessions: [],
     containmentQuarantine: { owner: 'worker-a', epoch: 1, at: launchAt, settlementHash: 'a'.repeat(64), launchAcknowledgedAt: launchAt, launchExpiresAt: launchAt, leaseExpiresAt: launchAt }, ...overrides } as Partial<Work>);
 }
-type Row = { argv: string[]; cwd: string; ppid: number; stdin?: string };
-/** The host as the probe reads it: Herdr's server, the pane's bash in the worktree, and whatever `extra` adds. */
+type Row = { argv: string[]; cwd: string; ppid: number; stdin?: string; fds?: string[] };
+const herdrSocket = '/home/vish/.config/herdr/herdr.sock', listenerInode = 211562023;
+/** /proc/net/unix with Herdr's listener, a client connected to it, and an unrelated listener. */
+const unixSockets = [
+  'Num       RefCount Protocol Flags    Type St Inode Path',
+  '0000000066271e3f: 00000002 00000000 00010000 0001 01 ' + listenerInode + ' ' + herdrSocket,
+  '00000000c59ed635: 00000003 00000000 00000000 0001 03 406254592 ' + herdrSocket,
+  '000000006e1003ae: 00000002 00000000 00010000 0001 01 69591 /run/user/1000/wayland-1',
+].join('\n');
+/** The host as the probe reads it: Herdr's server holding its API socket, the pane's bash in the worktree, and whatever `extra` adds. */
 function host(extra: Record<number, Row> = {}) {
-  const table: Record<number, Row> = { [herdrServer]: { argv: ['/home/vish/.local/bin/herdr', 'server'], cwd: '/home/vish', ppid: 1 }, [shellPid]: { argv: ['/usr/bin/bash'], cwd: workspace.path, ppid: herdrServer, stdin: '/dev/pts/18' }, ...extra };
+  const table: Record<number, Row> = { [herdrServer]: { argv: ['/home/vish/.local/bin/herdr', 'server'], cwd: '/home/vish', ppid: 1, fds: ['/dev/null', `socket:[${listenerInode}]`] }, [shellPid]: { argv: ['/usr/bin/bash'], cwd: workspace.path, ppid: herdrServer, stdin: '/dev/pts/18' }, ...extra };
   const present = (pid: number) => { const entry = table[pid]; if (!entry) throw Object.assign(new Error('gone'), { code: 'ENOENT' }); return entry; };
-  const deps = { listProcesses: () => Object.keys(table), readParent: (pid: number) => present(pid).ppid, readCommand: (pid: number) => present(pid).argv.join('\0'), readStdin: (pid: number) => present(pid).stdin ?? '/dev/null' };
+  const deps = { listProcesses: () => Object.keys(table), readParent: (pid: number) => present(pid).ppid, readCommand: (pid: number) => present(pid).argv.join('\0'), readStdin: (pid: number) => present(pid).stdin ?? '/dev/null',
+    readUnixSockets: () => unixSockets, readDescriptors: (pid: number) => present(pid).fds ?? [] };
   const probe = async () => {
     const probed = await probeSupervisorAbsence({ key: 'GY-393', epoch: 1, workspacePath: workspace.path, scope: null }, {
       platform: 'linux', uid: 1000, resolvePath: value => value, listProcesses: deps.listProcesses, readCommand: deps.readCommand, processOwner: () => 1000, readCwd: pid => present(pid).cwd, readParent: deps.readParent, readCgroup: () => '',
       run: (_command, args) => args.includes('show-environment') ? 'LANG=C\n' : '' });
     const asked: string[] = [];
     const annotated = await annotatePaneShell(probed, stranded(), async paneId => { asked.push(paneId); return { process_info: { pane_id: paneId, shell_pid: shellPid, foreground_process_group_id: shellPid } }; }, deps,
-      async () => ({ panes: [{ pane_id: 'w3:p2', cwd: '/home/vish/code/dr' }, { pane_id: pane, cwd: workspace.path }] }));
+      async () => ({ panes: [{ pane_id: 'w3:p2', cwd: '/home/vish/code/dr' }, { pane_id: pane, cwd: workspace.path }] }), async () => ({ status: 'running', socket: herdrSocket }));
     return { verification: { ...annotated, host: 'coordinator-host', observedAt, clockOffset: { min: 0, max: 1 } } as ContainmentVerification, asked };
   };
   return { table, probe };
@@ -207,6 +216,8 @@ test('unit:idle-pane-shell-not-a-worker — the interactive shell of a Herdr pan
   assert.deepEqual(asked, [pane], 'Herdr is asked only about the pane whose working directory is the shell\'s');
   assert.deepEqual(verification.paneShell, { pane, pid: shellPid, foregroundGroup: shellPid }, 'the pane is found in Herdr\'s own inventory, though the ledger recorded none');
   assert.equal(verification.held.find(entry => entry.pid === shellPid)?.parent, '/home/vish/.local/bin/herdr server');
+  assert.equal(verification.held.find(entry => entry.pid === shellPid)?.parentPid, herdrServer);
+  assert.equal(verification.herdrServer, herdrServer, 'the parent is the process holding Herdr\'s listening API socket');
   assert.deepEqual(refusals(stranded(), verification), [], 'the idle pane shell holds no fence');
   assert.equal(closablePane(stranded(), verification), pane);
 
@@ -240,6 +251,31 @@ test('unit:idle-pane-shell-not-a-worker — a pane shell with a live runtime chi
   const foreign = (await tmux.probe()).verification;
   assert.equal('paneShell' in foreign, false, 'a shell that is not a Herdr pane\'s is not looked up');
   assert.match(refusals(stranded(), foreign).join('\n'), still, 'and still holds the fence');
+
+  // GY-418: a process that renames itself `herdr server` without holding Herdr's listening socket
+  // is not Herdr: its childless shell is never looked up and never excused, even where Herdr would
+  // name that shell a pane's. Holding a client connection to the socket proves nothing either.
+  const impostor = 700;
+  for (const fds of [[], ['socket:[406254592]'], ['socket:[69591]']]) {
+    const spoofed = host({ [impostor]: { argv: ['herdr', 'server'], cwd: workspace.path, ppid: 1, fds }, [shellPid]: { argv: ['/usr/bin/bash'], cwd: workspace.path, ppid: impostor, stdin: '/dev/pts/18' } });
+    const { verification: forged, asked } = await spoofed.probe();
+    assert.equal(forged.held.find(entry => entry.pid === shellPid)?.parent, 'herdr server', 'the argv matches');
+    assert.equal(forged.herdrServer, undefined, `an impostor holding ${JSON.stringify(fds)} is not Herdr's server`);
+    assert.deepEqual(asked, [], 'its shell is not looked up in Herdr\'s inventory');
+    assert.match(refusals(stranded(), forged).join('\n'), still, 'and still holds the fence');
+    // Even a paneShell that names the shell does not excuse it without the server's pid.
+    assert.match(refusals(stranded(), { ...forged, paneShell: { pane, pid: shellPid, foregroundGroup: shellPid } }).join('\n'), still);
+    assert.equal(closablePane(stranded(), { ...forged, paneShell: { pane, pid: shellPid, foregroundGroup: shellPid } }), null);
+  }
+  // The real server's pid recorded beside a shell whose parent is another process excuses nothing.
+  const genuine = (await host().probe()).verification;
+  assert.match(refusals(stranded(), { ...genuine, held: genuine.held.map(entry => entry.pid === shellPid ? { ...entry, parentPid: 700 } : entry) }).join('\n'), still);
+  assert.match(refusals(stranded(), { ...genuine, herdrServer: undefined }).join('\n'), still, 'a probe that did not establish the server excuses nothing');
+  // Herdr's status unavailable, or naming no socket: nothing is established.
+  assert.equal(herdrServerPid('/elsewhere.sock', [herdrServer], { readUnixSockets: () => unixSockets, readDescriptors: () => [`socket:[${listenerInode}]`] }), null);
+  assert.equal(herdrServerPid(herdrSocket, [herdrServer], { readUnixSockets: () => { throw new Error('EACCES'); }, readDescriptors: () => [`socket:[${listenerInode}]`] }), null);
+  assert.equal(herdrServerPid(herdrSocket, [herdrServer], { readUnixSockets: () => unixSockets, readDescriptors: () => { throw new Error('EACCES'); } }), null);
+  assert.equal(herdrServerPid(herdrSocket, [herdrServer], { readUnixSockets: () => unixSockets, readDescriptors: () => [`socket:[${listenerInode}]`] }), herdrServer);
 
   // A recorded scope that is still live keeps every shell fenced, as before GY-413.
   const scoped = stranded({ containmentQuarantine: { ...stranded().containmentQuarantine!, scope: { unit: 'graphyard-watch-900-abc.scope', pid: 900 } } } as Partial<Work>);
