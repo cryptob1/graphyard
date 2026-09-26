@@ -1,7 +1,7 @@
-<!-- page: Start here | 0 | the one command, step by step, and upgrades. -->
+<!-- page: Start here | 0 | the one command and upgrades. -->
 # Install Graphyard
 
-One command installs the whole control plane. An agent or person runs this runbook from one instruction:
+One command installs the control plane; an agent or person runs this runbook from one instruction:
 
 > install Graphyard for OWNER/REPO on PROVIDER following docs/install.md
 
@@ -13,7 +13,7 @@ A person is asked for exactly four things: **Which provider** (and `--workspace`
 - **One principal per role.** Use `--workers N`; never share a worker credential.
 - **Workers never receive an admin, coordinator, or producer credential.**
 - **Proof producers get explicit grants only** (`--producer-proof NAME`, one per proof).
-- Credentials live only under `~/.config/graphyard/<install>/`: directory `0700`, files `0600`.
+- Credentials live only in `~/.config/graphyard/<install>/`: directory `0700`, files `0600`.
 
 ## Preconditions
 
@@ -28,7 +28,7 @@ Workers and non-Actions unit-proof hosts install dependencies only under bubblew
 - `docker-host`: `ssh USER@HOST 'curl -fsSL https://get.docker.com | sh'`; needs `--ssh-host` and `--domain`.
 - `compose`: `curl -fsSL https://get.docker.com | sh`; local evaluation only.
 
-## Step 1 — print the plan
+## Step 1: print the plan
 
 ```sh
 node "$GRAPHYARD_CLI" install --provider PROVIDER --repo OWNER/REPO --plan
@@ -38,35 +38,35 @@ Common options: `--workers N`, `--producer-proof NAME`, `--required-check NAME`,
 
 **Verify:** `secretsRedacted` is `true` and every `preflight[].ok` is `true` (else run its `fix` and re-plan).
 
-## Step 2 — approve the plan
+## Step 2: approve the plan
 
-Show the human the plan and any `drift`. **Verify** their explicit approval; an agent never approves for them.
+Show the human the plan and any `drift`. **Verify** their explicit approval; an agent never approves.
 
-## Step 3 — apply
+## Step 3: apply
 
 ```sh
 node "$GRAPHYARD_CLI" install --provider PROVIDER --repo OWNER/REPO --apply
 ```
 
-It writes credentials, sets [deployment variables](deployment.md#variables), deploys, runs the App flow, applies [branch protection](github.md#require-the-check). **Verify** `GET /healthz` answers.
+It writes credentials, sets [variables](deployment.md#variables), deploys, runs the App flow, applies [branch protection](github.md#require-the-check). **Verify** `GET /healthz` answers.
 
-## Step 4 — the GitHub App confirmation
+## Step 4: the GitHub App confirmation
 
 The installer prints `Open http://127.0.0.1:4311 ...`; the human registers and installs the App. **Verification:** the page reports *App registered and installation verified*.
 
-## Step 5 — read the summary
+## Step 5: read the summary
 
 **Verify:** `health` `true`, `status.role` `admin`, `webhook.delivered` `true` (a `compose` install polls instead), `profiles.master.configured` `true`. Then follow `nextSteps`; never read a `tokenFile`.
 
-## Step 6 — the first pull request
+## Step 6: the first pull request
 
 Dispatch a small item ([onboarding](onboarding.md#4-prove-the-first-pr)); after `Graphyard / merge` first appears, rerun `--apply` when `nextSteps` says so. **Verify** the check is required on the base branch.
 
-`--plan` and `--apply` are idempotent: done actions show `"satisfied"`, differences show in `drift`, credentials are never rotated.
+`--plan` and `--apply` are idempotent: done actions show `"satisfied"`, differences `drift`; credentials never rotate.
 
 ## Upgrading an existing installation
 
-A release needing a new App permission holds the jobs that need it. [Back up and deploy](deployment.md#backup-upgrade-rollback), then on the machine holding `.graphyard/github-app.json`:
+A release needing a new App permission holds the jobs using it. [Back up, deploy](deployment.md#backup-upgrade-rollback), then on the machine holding `.graphyard/github-app.json`:
 
 ```sh
 node "$GRAPHYARD_CLI" github-setup --update-permissions --wait 600
@@ -78,8 +78,8 @@ Confirm `doctor` shows `appPermissions.missing` empty; `delegationLimits` drift 
 
 | Symptom | Action |
 | --- | --- |
-| `Preflight is incomplete` | nothing was created; run the item's `fix`, rerun |
-| `Railway workspace` preflight `false` | rerun with `--workspace` from the listed names |
+| `Preflight is incomplete` | nothing created; run its `fix`, rerun |
+| `Railway workspace` preflight `false` | rerun with a listed `--workspace` |
 | `... must be able to read ...github-private-key.pem` | connect as `root` or run the printed `chown 1000:1000` |
 | `did not become healthy` | `install --provider PROVIDER --repo OWNER/REPO --logs` |
 | `The GitHub App confirmation did not complete in time` | rerun `--apply`; it resumes |
@@ -90,8 +90,8 @@ Confirm `doctor` shows `appPermissions.missing` empty; `delegationLimits` drift 
 
 ## Agent execution contract
 
-Run the preconditions and `--plan`, await approval, `--apply`, then report verification and `nextSteps`. Never read a token file or weaken a gate to finish.
+Run the preconditions and `--plan`, await approval, `--apply`, report verification and `nextSteps`. Never read a token file or weaken a gate to finish.
 
 ## Manual fallback for unsupported platforms
 
-Set the variables table in [deployment](deployment.md#manual-fallback).
+See [deployment](deployment.md#manual-fallback).
