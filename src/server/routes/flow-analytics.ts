@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { demand, stages } from '../../model.js';
-import { computeFlow, flowDrilldown, flowExport, flowWindows, projectFlow, resolvedProductionEnvironment, readFlow, type FlowWindow } from '../../flow-analytics.js';
+import { flowDrilldown, flowExport, flowWindows, invalidateFlowReports, pooledFlowReport, resolvedProductionEnvironment, type FlowWindow } from '../../flow-analytics.js';
 import { Sent, defineRoutes, parseJson } from '../routes.js';
 
 /** Roles that may see exact pull-request, commit and evidence identities behind an aggregate. */
@@ -50,11 +50,9 @@ export const flowAnalyticsRoutes = defineRoutes('flow-analytics', [
       // where the board (grouped by the same report on /api/status) does.
       // The environment is the one the master verifies deployments under (as /api/status reads it).
       const query = { ...flowQuery(url, await resolvedProductionEnvironment(engine.store.reportPool)), production: production?.status() ?? null };
-      // Bounded catch-up keeps the read current without blocking on a full backfill. Like the read,
-      // it runs on the report pool (GY-491), never on connections coordination needs.
-      await projectFlow(engine.store, { batches: 3, pool: engine.store.reportPool });
-      const dataset = await readFlow(engine.store, query);
-      const report = computeFlow(dataset, query);
+      // The report cache answers for up to a minute per window and filter set; the bounded catch-up
+      // runs on the report pool on every read (GY-491), so a new step event recomputes at once (GY-705).
+      const { dataset, report } = await pooledFlowReport(engine.store, query);
       if (!part) return report;
       const drilldown = flowDrilldown(dataset, report, { metric: query.metric ?? 'bottleneck', key: query.key ?? null, authorized: auditRoles.includes(actor.role) });
       if (part === 'drilldown') return drilldown;
@@ -94,6 +92,8 @@ export const flowAnalyticsRoutes = defineRoutes('flow-analytics', [
           demand(sameObservation && JSON.stringify(existing) === JSON.stringify(normalized), 'A duplicate deployment observation must exactly replay every immutable field', 409);
         }
         await client.query('COMMIT');
+        // A deployment moves merged items to Live without a flow fact, so pooled reports are recomputed.
+        if (inserted.rowCount === 1) invalidateFlowReports(engine.store);
         return { recorded: inserted.rowCount === 1, id: deploymentId, duplicate: inserted.rowCount === 0 };
       } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error; }
       finally { client.release(); }
