@@ -29,6 +29,7 @@ export async function main() {
   const startedAt = Date.now(); const mark = (step: string) => console.log(`startup ${step} at ${Date.now() - startedAt} ms`);
   mark('store.init'); await store.init(); mark('store.init done');
   const engine = new Engine(store, (process.env.GITHUB_CI_APP_IDS ?? '15368').split(',').map(Number));
+  engine.reconcileBatchMs = reconcileBatchMs(process.env.GRAPHYARD_RECONCILE_BATCH_MS);
   engine.reviewerApps = parseReviewerApps(process.env.GRAPHYARD_REVIEWER_APPS);
   mark('github'); const github = await githubFromEnv();
   // GitHub answers persist across restarts, so a deploy starts warm instead of re-spending the budget.
@@ -180,4 +181,14 @@ export function startReconciliation(tick: (step: ReconciliationStep) => Promise<
     finally { running = false; tickStep = 'idle'; }
   }, intervalMs);
   return { stop: () => clearInterval(timer) };
+}
+
+/**
+ * How long one reconcile batch may run before it yields (default 250 ms). Each batch re-reads the
+ * fleet (GY-392), so a large installation reads less with longer batches, at the cost of a lease
+ * renewal waiting up to one batch. Bounded to 100..5000 ms; anything else keeps the default.
+ */
+export function reconcileBatchMs(value: string | undefined, fallback = 250): number {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= 100 && parsed <= 5000 ? parsed : fallback;
 }
