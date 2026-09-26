@@ -5,7 +5,7 @@ import type pg from 'pg';
 import { Store } from '../src/store.js';
 import { failedStatement } from '../src/store/statements.js';
 import { summaryOmitted } from '../src/store/summary-sql.js';
-import { obligationDocuments } from '../src/model/work-summary.js';
+import { obligationDocuments } from '../src/cli/work.js';
 import { inheritedObligations, type Work } from '../src/model.js';
 import { obligationLedger } from '../src/coordination.js';
 

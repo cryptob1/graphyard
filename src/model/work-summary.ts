@@ -24,14 +24,3 @@ export const isSummary = <T>(work: T): work is T & WorkSummary => !!work && type
 export async function wholeDocument<T extends { id: string }>(entry: T, read: (path: string) => Promise<any>): Promise<Work> {
   return isSummary(entry) ? read(`work/${encodeURIComponent(entry.id)}`) : entry as unknown as Work;
 }
-
-/**
- * The snapshot as the obligation readers (`obligations`, `diagnose`) need it (GY-447): each entry
- * with the criteria, planned files and candidate-binding evidence that bootstrap obligations derive
- * from. A settled delivery's summary carries all three, so it is used as it is; a summary served
- * without its criteria is read whole, so a bootstrap obligation declared on, or discharged by, a
- * delivered item never drops out of the ledger because the snapshot trimmed it.
- */
-export async function obligationDocuments<T extends { id: string }>(entries: T[], read: (path: string) => Promise<any>): Promise<Work[]> {
-  return Promise.all(entries.map(entry => isSummary(entry) && !Array.isArray((entry as Partial<Work>).criteria) ? wholeDocument(entry, read) : entry as unknown as Work));
-}
