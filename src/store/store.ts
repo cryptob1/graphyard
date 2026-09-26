@@ -302,8 +302,13 @@ export class Store {
 /** How long a due observation job may wait behind the claim-priority list before it is claimed first. */
 export const observationStarvedAfterMs = 5 * 60_000;
 
+/**
+ * Make an item's observation job due now. A wake never moves a job that is already due later: an
+ * item saved every minute would otherwise look freshly due forever and never reach the starvation
+ * bound `takeJob` claims ahead of the priority list (2026-09-26: items stuck for an hour on stale reads).
+ */
 export async function wakeJob(db: pg.PoolClient, id: string) {
-  await db.query('INSERT INTO jobs(work_id) VALUES($1) ON CONFLICT(work_id) DO UPDATE SET available_at=now(),generation=jobs.generation+1', [id]);
+  await db.query('INSERT INTO jobs(work_id) VALUES($1) ON CONFLICT(work_id) DO UPDATE SET available_at=LEAST(jobs.available_at, now()),generation=jobs.generation+1', [id]);
 }
 
 export async function save(db: pg.PoolClient, work: Work, actor: string, kind: string, now: Date, details?: unknown) {
