@@ -28,6 +28,14 @@ export const approveCapability: OperatorCapability = 'decision:approve';
 const sha = z.string().regex(/^[a-f0-9]{40}$/);
 const revision = z.number().int().positive();
 const principalId = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$/);
+/**
+ * The bound on the grounds binding a situated request may name (the loop's rework binding): a
+ * refusal bars a later request only when it names the same candidate head, the same base and the
+ * same grounds (GY-407), so the binding travels in the request's input, which the refusal match
+ * compares. The loop truncates what it sends to exactly this bound.
+ */
+export const decisionBindingMax = 2000;
+const groundsBinding = z.string().trim().min(1).max(decisionBindingMax);
 /** What each action binds. The engine re-validates every field when the decision is applied. */
 export const decisionInputs = {
   release: z.object({ expectedRevision: revision }).strict(),
@@ -41,9 +49,11 @@ export const decisionInputs = {
   resolve: z.object({ trigger: z.enum(escalationTriggers), expectedRevision: revision }).strict(),
   attest: z.object({ proof: proofSchema.refine(proof => proof.startsWith('manual:'), 'Only manual: proofs are attested; automated proofs come from producers'), sha, baseSha: sha, policyRevision: revision, result: z.enum(['pass', 'fail']), executed: z.number().int().min(0), skipped: z.number().int().min(0), url: z.url().max(2000).optional(), exercise: proofExerciseSchema.optional() }).strict(),
   merge: z.object({ sha, baseSha: sha, policyRevision: revision }).strict(),
-  // Both carry the requester's attestation that the previous worker is stopped.
-  rework: z.object({ previousWorkerStopped: z.literal(true) }).strict(),
-  recover: z.object({ previousWorkerStopped: z.literal(true) }).strict(),
+  // Both carry the requester's attestation that the previous worker is stopped, and the grounds
+  // binding the request judges (GY-407): the refusal match compares inputs, so a refusal bars
+  // only the same head, base and grounds, never another ground on the same head.
+  rework: z.object({ previousWorkerStopped: z.literal(true), binding: groundsBinding.optional() }).strict(),
+  recover: z.object({ previousWorkerStopped: z.literal(true), binding: groundsBinding.optional() }).strict(),
   grant: z.object({ principal: principalId, patterns: z.array(z.string().min(1).max(200)).min(1).max(50), expectedRevision: z.number().int().min(0).optional() }).strict(),
   // Head-bound: the repair lane merges exactly this head (expectedHeadOid) and nothing else.
   'repair-merge': z.object({ sha }).strict(),
@@ -86,9 +96,10 @@ export interface Decision {
 }
 /**
  * What a rework or recover request judged: the item's candidate head and the base it was built
- * on when the request was made. The server records it with the request, and a refusal stands only
- * against a request made for the same pair (GY-229): their input is otherwise the bare attestation
- * `{ previousWorkerStopped: true }`, identical for every request on the item.
+ * on when the request was made; the grounds it judges travel in the request's `binding` input
+ * (GY-407). The server records both with the request, and a refusal stands only against a request
+ * made for the same pair and the same grounds (GY-229, GY-407): their input is otherwise the bare
+ * attestation `{ previousWorkerStopped: true }`, identical for every request on the item.
  */
 export interface DecisionSituation { sha: string | null; baseSha: string | null }
 export const situatedDecisionActions: readonly DecisionAction[] = ['rework', 'recover'];
@@ -98,9 +109,12 @@ const sameSituation = (recorded: DecisionSituation | null | undefined, current: 
   !recorded || ((recorded.sha ?? null) === (current?.sha ?? null) && (recorded.baseSha ?? null) === (current?.baseSha ?? null));
 /**
  * Whether a refused decision judged the same situation as a new request. Only rework and recover
- * are situated; any other action's input already names what it binds. A refusal recorded before
- * situations were kept judged a candidate nobody can name any more, so it still stands against
- * every request until one cites it, as it always did; the loop cites it with its new grounds.
+ * are situated; any other action's input already names what it binds. For a situated action the
+ * grounds binding is part of that input (GY-407), so a refusal on one ground never matches a
+ * request whose binding differs, whatever the head. A refusal recorded before situations were
+ * kept judged a candidate nobody can name any more, so it still stands against every request
+ * whose input it shares — today, one that names no binding — until one cites it, as it always
+ * did; the loop cites it with its new grounds.
  */
 const judgedSame = (action: DecisionAction, decision: { situation?: DecisionSituation | null }, situation: DecisionSituation | null | undefined) =>
   !situatedDecisionActions.includes(action) || sameSituation(decision.situation, situation);
@@ -168,8 +182,10 @@ export function approvalConflict(decision: Pick<Decision, 'id' | 'action' | 'inp
  * cited: it was accepted only by answering them, so a request cites the newest refusals and the
  * chain carries the rest — a history of refusals never outgrows the reason bound (GY-163). Anything
  * else is the same unjustified request retried, and it is refused naming the prior refusal.
- * A rework or recover refusal judged one candidate and base (`situation`, GY-229): a request made
- * for another candidate or base is a new request, not a retry, whatever its input.
+ * A rework or recover refusal judged one candidate and base (`situation`, GY-229) and the grounds
+ * binding its request named (`binding`, GY-407): a request made for another candidate or base is
+ * a new request, not a retry, and one whose binding differs names grounds the refusal never
+ * judged, so neither is barred by it whatever the rest of its input.
  */
 export function unansweredRefusal(decisions: (Pick<Decision, 'id' | 'action' | 'input' | 'reason' | 'refusal'> & { state: string; precedent?: string[]; situation?: DecisionSituation | null })[], action: DecisionAction, input: unknown, reason: string, same: (a: unknown, b: unknown) => boolean, precedent: string[] = [], situation?: DecisionSituation | null): string | null {
   const refused = decisions.filter(decision => decision.state === 'refused' && decision.action === action && same(decision.input, input) && judgedSame(action, decision, situation));
@@ -193,7 +209,8 @@ export function unansweredRefusal(decisions: (Pick<Decision, 'id' | 'action' | '
  * The refusals a new request must cite itself: those no other refused request of the same action
  * and input already cited. Citing these answers the rest through the chain `unansweredRefusal`
  * follows. Newest first, as the history lists them. Only refusals of the same situation count: one
- * judged for another candidate or base does not stand against the request.
+ * judged for another candidate or base, or on other grounds than the request's binding names
+ * (GY-407), does not stand against the request.
  */
 export function uncitedRefusals(decisions: { id: string; action: string; input: unknown; reason: string; state: string; precedent?: string[]; situation?: DecisionSituation | null }[], action: DecisionAction, input: unknown, same: (a: unknown, b: unknown) => boolean, situation?: DecisionSituation | null): string[] {
   const refused = decisions.filter(decision => decision.state === 'refused' && decision.action === action && same(decision.input, input) && judgedSame(action, decision, situation));
