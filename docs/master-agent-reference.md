@@ -23,7 +23,7 @@ Dispatch is optimistic (overlap holds nothing), smallest planned scope first; `g
 
 **A merge-base dismissal is not a reviewer withdrawing a verdict.** An approval of the current head dismissed with `The merge-base changed after approval.` is restored (`observation.reviews[].dismissal`); no other dismissal is.
 
-**A branch must never keep another item's unlanded commits.** Tips build from the reviewed head; an ejection restores the branches it leaves (`baseRefresh.restore`).
+**A branch must never keep another item's unlanded commits.** Tips build from the reviewed head; an ejection restores the branches it leaves (`baseRefresh.restore`). A tip behind an entry that left unlanded waits (`Restoring after predecessor ejection`) until its restored head is observed; files another item carried are that item's (`Carried from another item's tip`), not rework.
 
 #### A contaminated branch
 
@@ -33,7 +33,7 @@ A worker restores its own with `git reset --hard REVIEWED_HEAD`, `graphyard sync
 
 ## GitHub administration through the browser
 
-Protection reconciles through `master protection --apply`; where GitHub offers only a page, `master browser FLOW` drives the `master init --browser-profile` profile: `master browser app-permissions`, `master browser installation-accept` or `master browser protection`.
+Protection reconciles through `master protection --apply`; where GitHub offers only a page, `master browser FLOW` drives the `master init --browser-profile` profile.
 
 | Flow | What it does |
 | --- | --- |
@@ -41,7 +41,7 @@ Protection reconciles through `master protection --apply`; where GitHub offers o
 | `installation-accept` | Accepts the pending permission request |
 | `protection` | Reconciles branch protection |
 
-Each flow records `record.json` under `.graphyard/master-actions/` and appends to `ledger.json`. Approving its *Confirm access* GitHub Mobile code on the device is human-only. The master never stores the profile's cookies, and must never use a merge bypass, push code or read a worker credential.
+Each flow records `record.json` under `.graphyard/master-actions/` and appends to `ledger.json`. Approving its *Confirm access* GitHub Mobile code is human-only. The master never stores the profile's cookies, uses a merge bypass, pushes code or reads a worker credential.
 
 ## Harness permissions
 
@@ -51,7 +51,7 @@ A harness classifier refuses routine administration; `master harness claude --ap
 
 Each item has one typed action (`nextAction`): `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment` or `escalate`. Executors claim rows under their own credential; `escalate` and `request-rework` are judgements (`actions.needsHuman`).
 
-Three failures with an unchanged reason mark a row stalled rather than retrying (a fleet that looks idle): once in no count and no list, it shows in `actions.stalled` and on the item's own card; backoff, doubling from one minute, never outlives it. Eight escalate it (half-hourly); ticks requeue ownerless items (`liveness.violations`).
+Three failures with an unchanged reason mark a row stalled, shown in `actions.stalled` and on the item's card; backoff, doubling from one minute, never outlives it. Eight escalate it (half-hourly); ticks requeue ownerless items (`liveness.violations`).
 
 ### Loop failure recovery
 
