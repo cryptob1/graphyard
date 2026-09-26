@@ -9,7 +9,7 @@ import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { sessionName } from '../session-name.js';
 import { launchPlan, assertNoApprovalOptOut, LaunchRefusedError } from '../harness.js';
 import { type CapacityRole, type CapacityAccount, capacityRetryAt, quotaRoles } from '../model/capacity.js';
-import { type FleetLaunchAccount, type FleetProbe, selectFleetSession, fleetRoleHealth, httpFleetClient, fleetRequest, connectProvider, connectDefaultRoles, parseLoginOutput, redactKey, relaySubscriptionLogin as fleetRelaySubscriptionLogin, type ConnectProvider } from '../fleet.js';
+import { type FleetLaunchAccount, type FleetProbe, selectFleetSession, fleetRoleHealth, httpFleetClient, fleetRequest, connectProvider, connectDefaultRoles, redactKey, relaySubscriptionLogin, type ConnectProvider } from '../fleet.js';
 import { type AgentEnvironment, agentEnvironmentSchema, type EnvironmentKind, environmentKinds, environmentVariable, type MasterConfig, masterConfigSchema, producerProfileSchema, reviewerProfileSchema, workerProfileSchema } from './profiles.js';
 import { atomicPrivateText, atomicPrivateWrite, externalCredential, loadMasterConfig, readCredentialFile } from './config.js';
 import { failureText } from './worktrees.js';
@@ -385,9 +385,19 @@ export function agentLaunchPlan(kind: string | undefined, approvals: 'auto' | 'p
 export function registryLaunchArgs(account: FleetLaunchAccount) {
   const { contract, policy, modelId } = account.fleet, args = [...contract.args, ...(policy?.args ?? [])];
   const model = contract.modelFlag && modelId && !args.includes(contract.modelFlag) ? [contract.modelFlag, modelId] : [];
-  const tools = policy?.tools ?? [];
-  if (tools.length && !contract.toolsFlag) throw new LaunchRefusedError(account.kind, `Graphyard refuses to launch account ${account.name}: role ${account.fleet.role ?? 'unknown'} limits its sessions to ${tools.join(', ')}, but runtime ${account.fleet.runtime} names no tools flag, so the session would run with every tool. Set it with master registry runtime set ${account.fleet.runtime} --tools-flag=FLAG.`);
-  return [...args, ...model, ...(tools.length ? [contract.toolsFlag!, tools.join(',')] : [])];
+  return [...args, ...model, ...registryToolsArgs(account)];
+}
+
+/**
+ * The role policy's tool allowlist on the runtime's tools flag. A policy that limits tools on a
+ * runtime whose contract names no tools flag is refused, on the Herdr path and the headless one alike
+ * (GY-397): guessing a flag the runtime may not know would start the session with every tool.
+ */
+export function registryToolsArgs(account: FleetLaunchAccount) {
+  const { contract, policy } = account.fleet, tools = policy?.tools ?? [];
+  if (!tools.length) return [];
+  if (!contract.toolsFlag) throw new LaunchRefusedError(account.kind, `Graphyard refuses to launch account ${account.name}: role ${account.fleet.role ?? 'unknown'} limits its sessions to ${tools.join(', ')}, but runtime ${account.fleet.runtime} names no tools flag, so the session would run with every tool. Set it with master registry runtime set ${account.fleet.runtime} --tools-flag=FLAG.`);
+  return [contract.toolsFlag, tools.join(',')];
 }
 
 /**
@@ -619,7 +629,6 @@ export async function setupAgentEnvironments(root: string, input: { directory?: 
       : 'Every environment is logged in and every profile uses it; master run checks login and quota before each launch and fails over between them' };
 }
 
-// ---------------------------------------------------------------------------
 // Connect an account from the UI (GY-409).
 //
 // The operator pastes a key or starts a subscription login in Settings › Agents; the control plane
@@ -628,8 +637,8 @@ export async function setupAgentEnvironments(root: string, input: { directory?: 
 // own auth file at mode 0600 inside a new login home under the agent environment root, relays a
 // subscription login's URL and code, runs the one-line smoke prompt, and reports the card healthy
 // or the provider's error. The plaintext key lives in this function's scope alone and is redacted
-// from everything that is reported.
-// ---------------------------------------------------------------------------
+// from everything that is reported. A subscription login is started and relayed by fleet.ts's
+// `relaySubscriptionLogin`, since the loop's modules run children only through the async runner.
 
 /** The host's connect key: the private half stays beside the coordinator credential, never sent anywhere. */
 const connectKeyPath = (credentialFile: string, file?: string) => file ?? resolve(dirname(credentialFile), `${basename(credentialFile).replace(/\.token$/, '')}.connect.key`);
@@ -693,13 +702,6 @@ export async function runSmokePrompt(provider: ConnectProvider, home: string, op
 }
 
 /**
- * Start the provider's own login in a fresh login home and relay what it prints (see fleet.ts's
- * `relaySubscriptionLogin`, which lives there because the loop's modules run children only
- * through the asynchronous runner).
- */
-export const relaySubscriptionLogin = fleetRelaySubscriptionLogin;
-
-/**
  * Research joins through a Pi wrapper (GY-409 AC-4): `pi-<letter>` reads the provider key at run
  * time from the account's login home and execs `pi`, so a cheap account can serve research without
  * the key being copied anywhere. An existing wrapper is never overwritten; null says there was
@@ -732,10 +734,8 @@ interface ConnectAssignment { id: string; state: string; provider: string; name?
 export interface ConnectWorkerReport { id: string; provider: string; state: 'healthy' | 'failed' | 'skipped'; detail: string }
 export interface ConnectAccountOptions {
   fetch?: typeof fetch; now?: () => number;
-  /** The smoke prompt's runner; a test hands in a stub. */
-  runner?: ChildRun;
-  /** Overrides for tests: where login homes are created, where the host key lives, and every bound. */
-  root?: string; keyFile?: string; pollMs?: number; loginTimeoutMs?: number; smokeTimeoutMs?: number;
+  /** Test overrides: the smoke prompt's runner, where login homes and the host key live, and every bound. */
+  runner?: ChildRun; root?: string; keyFile?: string; pollMs?: number; loginTimeoutMs?: number; smokeTimeoutMs?: number;
 }
 const connectOpen = (state: string) => state === 'pending' || state === 'claimed' || state === 'connecting';
 /**

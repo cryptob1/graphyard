@@ -7,7 +7,7 @@ Follow [install](install.md): review `--plan`, then `install --provider railway 
 
 ## 2. Add machines
 
-Each session needs a worker identity and host ID:
+Each concurrent session needs a worker identity and host ID: raise `install --workers`, or connect a machine:
 
 ```sh
 node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST --herdr --host-id UNIQUE_MACHINE_NAME --token-stdin
@@ -25,17 +25,17 @@ The managed `AGENTS.md` states **every session Graphyard launches receives its i
 
 ### Connect an account
 
-No shell: Settings › **Agents** › **Connect an account**. Pick a provider; paste its key or start its login. A pasted key is sealed to the host's public key in the browser (the server relays ciphertext only); the host writes it into the provider's auth file (mode 0600) and smoke-tests it; the card shows healthy or the error. A subscription login shows its URL and code while it waits; finish it in your browser. **Cancel** stops an unfinished connect. The host's executor must be running. Strong accounts default to worker and reviewer, cheap models (GLM, Flash-class) to research, approver and the unit producer — appended to each failover order; **change** opens the role editor.
+Settings › **Agents** › **Connect an account**: pick a provider; paste a key or start a login. The browser seals a key to the host's public key (the server relays ciphertext only); the host writes the provider's auth file (mode 0600) and smoke-tests it; the card shows the result. A subscription login shows its URL and code while waiting; finish it in your browser; **Cancel** stops it. The host's executor must run; strong accounts join worker and reviewer, cheap ones (GLM, Flash-class) research, approver and the unit producer, appended to each failover order; **change** edits roles.
 
 ### Agent environments
 
-Every account has a login home under `~/.coding_agents`, selected by `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_DATA_HOME` or `CURSOR_CONFIG_DIR`; Graphyard's tokens go in `~/.config/graphyard/` (mode 0600). `master environments --create claude` makes a fresh home; `--apply` reports quota and writes profiles.
+Each account's login home under `~/.coding_agents` is selected by `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_DATA_HOME` or `CURSOR_CONFIG_DIR`; Graphyard's tokens go in `~/.config/graphyard/` (mode 0600). `master environments --create claude` makes a fresh home; `--apply` reports quota and writes profiles.
 
 Profiles run `"approvals": "auto"` (trade-off: unattended sessions); `"prompt"` is refused at launch ([approval modes](master-agent-sessions.md#approval-modes)).
 
 ### Configure the fleet
 
-The **agent registry** (Settings › **Agents**) records runtimes, accounts, roles and policies; **Advanced** holds its forms. A host with logged-in CLIs can propose:
+The **agent registry** (Settings › **Agents**, forms under **Advanced**) records runtimes, accounts, roles and policies. Hosts with logged-in CLIs propose:
 
 ```sh
 node "$GRAPHYARD_CLI" master registry propose
@@ -44,7 +44,7 @@ node "$GRAPHYARD_CLI" master registry propose --apply
 
 ### Add a runtime
 
-Advanced, or the CLI (dash-led values take `=`):
+Advanced, or the CLI (join a dash-led value to its flag with `=`):
 
 ```sh
 node "$GRAPHYARD_CLI" master registry runtime set aider --kind aider --arg=--yes-always \
@@ -54,7 +54,7 @@ node "$GRAPHYARD_CLI" master registry runtime set aider --kind aider --arg=--yes
 
 ### Add an account
 
-Connect it in the UI; the CLI records an existing login:
+Connect it in the UI, or record a login:
 
 ```sh
 node "$GRAPHYARD_CLI" master registry model set opus --provider Anthropic --id claude-opus-5 \
@@ -66,12 +66,16 @@ node "$GRAPHYARD_CLI" master registry account quota opencode-a exhausted --reset
 
 ### Add a role
 
-Most preferred account first; policy applies next launch:
+Preferred account first:
 
 ```sh
 node "$GRAPHYARD_CLI" master registry role set worker claude-b,claude-c,codex-a --concurrency 4 --reason "Prefer Claude; Codex is overflow"
 node "$GRAPHYARD_CLI" master registry role set reviewer codex-a,claude-c --concurrency 2 --tool Read --model opus --reason "Read-only, frontier model"
 ```
+
+### Size review and proof capacity
+
+Each candidate needs one review and one producer session per proof group; a profile's `"concurrency"` caps its sessions without a restart. Adding workers? For worker count `W` and `G` proof groups: `⌈W / 2⌉` review and `G × ⌈W / 2⌉` producer slots over 2+ producer principals; watch `longestWaitMs`.
 
 ## 3. Start the master
 
@@ -86,11 +90,7 @@ Run it under an OS identity whose GitHub credentials workers cannot read. `--bro
 
 ### The loop must be supervised
 
-`master init` writes `~/.config/systemd/user/graphyard-master.service`, runs `systemctl --user enable --now` and `loginctl enable-linger`; the unit restarts on crash, reboot and hang, and is never a side effect. To move it, run `master init --token-stdin --replace-supervisor`. `master status` reports `setup.supervisor`.
-
-### Size review and proof capacity
-
-Each candidate needs one review and one producer session per proof group; a profile's `"concurrency"` bounds how many run at once, without a restart. Adding workers: for worker count `W` and `G` proof groups, at least `⌈W / 2⌉` review and `G × ⌈W / 2⌉` producer slots, over two or more producer principals; watch `longestWaitMs`.
+`master init` from the coordinator checkout writes `~/.config/systemd/user/graphyard-master.service`, runs `systemctl --user enable --now` and `loginctl enable-linger`; the unit restarts on crash, reboot and hang. It is never a side effect: worker checkouts and temporary directories are refused. Move it with `master init --token-stdin --replace-supervisor` from the new checkout. `master status` reports `setup.supervisor` and the merger.
 
 ## 4. Prove the first PR
 
