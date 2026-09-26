@@ -173,8 +173,10 @@ export async function scopeStep(cycle: Cycle) {
       }
       if (decision.state === 'refused' && !routed) {
         const escalationKey = `escalation:scope:${item.id}:${request.at}`;
+        // A partial widening just granted some paths: the escalation names only the ones still refused.
+        const remaining = unplannedPaths((settled.get(item.id) ?? decided).plannedFiles, request.paths);
         performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done',
-          detail: `${item.key} is blocked on scope: ${request.requestedBy} asked for ${request.paths.length ? namePaths(request.paths) : 'a requirements change'} because ${boundDetail(request.reason, 400)}, and the loop refused it because ${boundDetail(decision.reason, 500)}. Decide it with graphyard master scope ${item.key} REASON, or graphyard master requirements ${item.key} FILE REASON for anything that is not purely additive`,
+          detail: `${item.key} is blocked on scope: ${request.requestedBy} asked for ${remaining.length ? namePaths(remaining) : 'a requirements change'} because ${boundDetail(request.reason, 400)}, and the loop refused it because ${boundDetail(decision.reason, 500)}. Decide it with graphyard master scope ${item.key} REASON, or graphyard master requirements ${item.key} FILE REASON for anything that is not purely additive`,
           attempts: 1, cycle: state.cycle }, now(), effects.persist));
       }
     } catch (error) {
