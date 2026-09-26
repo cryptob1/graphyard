@@ -27,7 +27,7 @@ Dispatch is optimistic (overlap holds nothing), smallest planned scope first; `g
 
 #### A contaminated branch
 
-A branch carrying another item's unlanded commits is listed under `branches.contaminated`: run `master repair GY-42 REASON`.
+One is listed under `branches.contaminated`: run `master repair GY-42 REASON`.
 
 A worker restores its own with `git reset --hard REVIEWED_HEAD`, `graphyard sync GY-N`, then `graphyard restore-branch GY-N EPOCH`.
 
@@ -73,13 +73,13 @@ Review and proof checkouts live under `run.worktreeRoot` (default `~/.local/shar
 
 A dead supervisor fences its item; `containment` lists each surviving process's pid, cmdline and cwd. With `settleable: true` run `master settle-containment GY-N REASON`; otherwise stop the recorded scope unit (`containment.scope`) and request `rework`.
 
-An unexplained lapsed lease raises `lease-loss` (`blocked-awaiting-operator` and `stopped-by-attestation` lapses are history); any admin settles an explained one with `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"` ([who may settle what](delegation.md#who-may-settle-what)). 
+An unexplained lapsed lease raises `lease-loss` (`blocked-awaiting-operator` and `stopped-by-attestation` lapses are history); an admin settles explained ones: `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"` ([who may settle what](delegation.md#who-may-settle-what)). 
 
 `master escalation GY-N` spawns a handler answering with `master decide GY-N resolve … --context FINGERPRINT REASON`.
 
 ## Fault classes
 
-Faults carry `faultClass` (`master status` `faults`); recurring classes file one item (`GRAPHYARD_FAULT_CLASS_*`). A section whose route fails is listed in `unavailable` (section, route, error); the report still returns.
+Faults carry `faultClass` (`master status` `faults`); recurring classes file one item (`GRAPHYARD_FAULT_CLASS_*`). A failing route's section is listed in `unavailable` (section, route, error); the report still returns.
 
 ## Pipeline speed
 

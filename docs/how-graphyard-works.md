@@ -1,7 +1,7 @@
 <!-- page: Start here | 1 | the lifecycle and who holds which authority. -->
 # How Graphyard works
 
-Graphyard decides whether work may advance; runtimes such as Herdr run the sessions doing it ([glossary](glossary.md)).
+Graphyard decides whether work may advance; runtimes such as Herdr run the sessions ([glossary](glossary.md)).
 
 ## One trip from setup to Done
 
@@ -16,13 +16,13 @@ A card stops at its first refusing gate, saying what is missing; nothing sets a 
 
 ![Bootstrap versus normal operation: one supervised worker, then a fleet with separate credentials.](diagrams/bootstrap-vs-normal.svg)
 
-Text equivalent: in bootstrap the human operator supervises one worker while the gates are activated; normally the master dispatches to many workers, each with its own credential and worktree, and reviewers and producers judge candidates under the same gates.
+Text equivalent: in bootstrap the operator supervises one worker while the gates are activated; normally the master dispatches to many workers, each with its own credential and worktree, and reviewers and producers judge under the same gates.
 
 ## Who holds which authority
 
 ![Who holds which authority: the operator, Graphyard, Herdr-hosted sessions, reviewer and producer.](diagrams/roles-and-authority.svg)
 
-Text equivalent: the human operator sends human-only decisions to Graphyard. Herdr hosts the master (`coordinator`), slice lead and worker (epoch, worktree); the reviewer is a GitHub identity and the producer holds a grant. Each session commands Graphyard under its own credential; Graphyard merges only through the guarded path. Colours follow the [legend](glossary.md#diagram-legend).
+Text equivalent: the operator sends human-only decisions to Graphyard. Herdr hosts the master (`coordinator`), slice lead and worker (epoch, worktree); the reviewer is a GitHub identity and the producer holds a grant. Each session commands Graphyard under its own credential; Graphyard merges only through the guarded path. Colours follow the [legend](glossary.md#diagram-legend).
 
 ## Correctness rules
 
