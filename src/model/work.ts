@@ -121,12 +121,7 @@ export interface Observation {
   // is tree-identical to it. A review is only requested for a head that does.
   baseTipContained?: boolean;
   protected: boolean; files: string[]; at: string;
-  /**
-   * The status checks the base branch's protection and active rulesets require, other than
-   * Graphyard's own `Graphyard / merge` (GY-430). GitHub refuses a merge while any of them has not
-   * passed, so the test gate and the failed-CI rework rule read them alongside the policy's checks.
-   * `appId` is the app protection binds the check to, or null for any source.
-   */
+  /** The status checks the base branch's protection and active rulesets require, other than Graphyard's own `Graphyard / merge` (GY-430): GitHub refuses a merge while any has not passed, so the test gate and the failed-CI rework rule read them alongside the policy's checks. `appId` is the app protection binds the check to, or null for any source. */
   requiredChecks?: { name: string; appId: number | null }[];
   /** The candidate diff compared against its bound base; see regression-guard.ts. */
   scopeFiles?: ScopeFile[];
