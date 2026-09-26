@@ -5,7 +5,7 @@ import { dirname, resolve } from 'node:path';
 import { z } from 'zod';
 import { consentAnswerSchema } from './consent-prompt.js';
 import { defaultChildRun, type ChildRun } from './child-runner.js';
-import { closeFailedLaunch, launchStartMs, withLaunchClose, accountLaunch, acknowledgeLaunch, agentToken, acknowledgementMs, agentLaunchPlan, allocateManagedCheckout, assertOutsideWorktrees, atomicPrivateWrite, autonomousSession, createdHerdrTab, deliverPrompt, herdrJson, loadMasterConfig, markReprompted, neverStarted, onSelectedSession, prepareSessionHarness, privateFile, profileAtLimit, profileConcurrency, profileSessions, readSessionScreen, reviewerIdentitySchema, reviewerProfileSchema, closeHerdrPane, selectAccount, sessionActivity, sessionAgentName, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, writeFailure, type HerdrAgent, type PromptDelivery, type StartBounds, type MasterConfig, type RequestDelivery, type ReviewerIdentity, type ReviewerProfile } from './master.js';
+import { closeFailedLaunch, launchStartMs, withLaunchClose, accountLaunch, acknowledgeLaunch, agentToken, acknowledgementMs, agentLaunchPlan, allocateManagedCheckout, assertOutsideWorktrees, atomicPrivateWrite, autonomousSession, createdHerdrTab, deliverPrompt, herdrJson, loadMasterConfig, markReprompted, neverStarted, onSelectedSession, prepareSessionHarness, privateFile, profileAtLimit, profileConcurrency, registrySessionOf, profileSessions, readSessionScreen, reviewerIdentitySchema, reviewerProfileSchema, closeHerdrPane, selectAccount, sessionActivity, sessionAgentName, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, writeFailure, type HerdrAgent, type PromptDelivery, type StartBounds, type MasterConfig, type RequestDelivery, type ReviewerIdentity, type ReviewerProfile } from './master.js';
 import { criteriaRuleSection, fileFollowUpThreads, followUpCreateKey, plannedScope, followUpFindingLimit, followUpFindingMax, listedThreadLimit, readUnresolvedThreads, resolveNamedThreads, threadReadFailureSection, threadSection, unaccountedThreads, type CreateFollowUpItem, type FollowUpCreateStore, type FollowUpFiling, type LaunchThread, type PendingFollowUpCreate, type ThreadResolution } from './review-threads.js';
 import type { FleetProbe } from './fleet.js';
 import { carriedApproval, type Work } from './model.js';
@@ -39,6 +39,8 @@ export const reviewRecordSchema = z.object({
   requestId: z.string().min(1).max(64).optional(),
   /** Which launch for the request this is: a failed or expired session is relaunched as the next attempt. */
   attempt: z.number().int().min(1).max(50).optional(),
+  /** The agent registry session the launch was chosen under (GY-205): ended once this record settles, so the role's slot frees with it. */
+  session: z.string().min(1).max(200).optional(),
   /** When the loop saw the control plane no longer request `requestId`; until then the record is pinned (boundSessionLedger). */
   requestClosedAt: z.string().min(1).max(40).optional(),
   /** When the loop saw `sha` stop being the undelivered candidate of `key`; until then a record with a verdict is pinned (boundSessionLedger). */
@@ -476,6 +478,26 @@ export function reviewRoundSection(sha: string, history?: ReviewHistory) {
     + (history.changesRequested >= reviewRoundCap ? `This pull request has already had ${history.changesRequested} rounds of requested changes under this policy revision, the most review holds a change for: this round only an unmet acceptance criterion may request changes, and every other finding must be listed as a FOLLOW-UP. ` : '');
 }
 
+/**
+ * The paths whose changes run on every loop cycle, head and item (GY-404): the loop, the master,
+ * the merge queue, the GitHub adapter and review-thread filing. A fault there passes the change's own
+ * gates and appears only when the behaviour repeats, so the review asks what repetition does.
+ */
+export const repeatingPaths = ['src/daemon/', 'src/master/', 'src/merge-queue.ts', 'src/github.ts', 'src/review-threads.ts'] as const;
+export const touchesRepeatingPath = (files: readonly string[]) => files.some(file => repeatingPaths.some(path => path.endsWith('/') ? file.startsWith(path) : file === path));
+/**
+ * The question the review asks of a change to a repeating path: what it does across many cycles,
+ * heads and items, and that `tests/soak.test.ts` covers any repeating behaviour it adds. Files
+ * unknown (no observation of this head), the question is asked conditionally.
+ */
+export function repetitionReviewSection(files?: readonly string[] | null) {
+  if (files && !touchesRepeatingPath(files)) return '';
+  const question = 'ask what it does when repeated across many cycles, heads and items: one follow-up per approval becomes 170 for 40 parents, one refresh per merge becomes one per merge for every open candidate, one session per decision stays open unless something closes it. '
+    + 'Any new behaviour that repeats per cycle, per head or per item must be covered by tests/soak.test.ts, which runs the real loop over a simulated day and asserts the system invariants (docs/master-agent.md#system-invariants); a change that adds one without that coverage is a BLOCKING finding. ';
+  return files ? `This change touches ${files.filter(file => touchesRepeatingPath([file])).slice(0, 5).join(', ')}, which run on every loop cycle: ${question}`
+    : `If this change touches ${repeatingPaths.join(', ')}, which run on every loop cycle, ${question}`;
+}
+
 /** `checkout` is the session directory a launch allocated under the managed worktree root, when it allocated one. */
 /**
  * `documentation` is the item's standard documentation criterion (GY-215) and the files the observed
@@ -489,6 +511,7 @@ export function reviewPrompt(config: Pick<MasterConfig, 'repository'>, binding: 
     + reviewRoundSection(binding.sha, history)
     + criteriaRuleSection(binding.key, binding.sha, criteria)
     + (documentation ? documentationReviewSection(documentation.obligation, documentation.files) : '')
+    + repetitionReviewSection(documentation?.files)
     + (research ? researchReviewSection(research) : '')
     + (threads?.failure ? threadReadFailureSection(threads.failure) : threads?.unresolved.length ? threadSection(binding.sha, threads.unresolved, threads.total) : '')
     + (checkout ? `When judging the diff needs the surrounding code, read it from a detached checkout of the exact head, created only at the path Graphyard allocated for this session under its managed worktree root and never under a temporary directory: git fetch origin ${binding.sha} && git worktree add --detach ${checkout.worktree} ${binding.sha}. Read there and change nothing; Graphyard removes ${checkout.directory} when this session ends. ` : '')
@@ -660,7 +683,7 @@ export async function launchReview(root: string, work: Work, profileName: string
         record = await updateReviewLedger(root, ledger => {
           const index = ledger.reviews.findIndex(entry => entry.id === id);
           const { launching: _launching, ...reserved } = index >= 0 ? ledger.reviews[index] : reservation.record;
-          const settled: ReviewRecord = reviewRecordSchema.parse({ ...reserved, pane: pane ?? null, tokenExpiresAt: minted.expiresAt, delivery, ...(consent.length ? { consent } : {}), checkout: checkout.directory, criteriaOnly: true, ...(threadReadFailure ? { threadReadFailure } : { threadsListed: listed.map(thread => thread.id) }) });
+          const settled: ReviewRecord = reviewRecordSchema.parse({ ...reserved, pane: pane ?? null, tokenExpiresAt: minted.expiresAt, delivery, ...(registrySessionOf(selected) ? { session: registrySessionOf(selected) } : {}), ...(consent.length ? { consent } : {}), checkout: checkout.directory, criteriaOnly: true, ...(threadReadFailure ? { threadReadFailure } : { threadsListed: listed.map(thread => thread.id) }) });
           if (index >= 0) ledger.reviews[index] = settled; else ledger.reviews.push(settled);
           return settled;
         });
