@@ -22,11 +22,11 @@ npm ci && npm run build && npm test
 
 ## Documentation
 
-`docs/README.md` and `docs/protocol.md` are generated in full from each page's `<!-- page: Section | order | summary -->` line by `npm run docs:check -- --write`; never edit them by hand; the regression guard exempts them via `GRAPHYARD_GENERATED_FILES` (what `scripts/check-docs.mjs --list` prints). README.md and `docs/` stay within 12,000 words, no page over 1,200, and each topic lives on one page (`tests/docs-budget.test.ts`): link, never restate.
+`docs/README.md` and `docs/protocol.md` are generated in full from each page's `<!-- page: Section | order | summary -->` line by `npm run docs:check -- --write`; never edit them ([`GRAPHYARD_GENERATED_FILES`](coordination.md#generated-files-never-conflict)). README.md and `docs/` stay within 12,000 words, no page over 1,200, and each topic lives on one page (`tests/docs-budget.test.ts`): link, never restate.
 
 ### Documentation that rarely conflicts
 
-Add a self-contained paragraph or section; reword shared sentences only when wrong. GitHub's conflict reading waits for the control plane's test merge; a confirmed conflict only in `docs/**/*.md` gets a docs-sync session, not rework: it merges the base keeping both meanings in budget, touching only conflicted paragraphs; the approval stays if the diff outside `docs/` is unchanged. `master status` and Insights rank 24-hour conflict hotspots; 5 on one path is raised.
+Add a self-contained paragraph or section; reword shared sentences only when wrong. A conflict the control plane's test merge confirms only in `docs/**/*.md` gets a docs-sync session, not rework: it merges the base keeping both meanings in budget, touching only conflicted paragraphs; the approval stays if the diff outside `docs/` is unchanged. `master status` and Insights rank 24-hour conflict hotspots; 5 on one path is raised.
 
 ## Trusted contracts
 

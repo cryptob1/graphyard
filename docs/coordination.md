@@ -41,4 +41,4 @@ The [routine target](master-agent-reference.md#pipeline-speed) comes from `sync`
 
 ## Explain stalls
 
-`graphyard diagnose GY-N` explains the first refusing gate and anything else holding it; `base-behind` and `base-conflict` get rework, except a conflict confined to `docs/**/*.md`, which a docs-sync session resolves ([development](development.md#documentation-that-rarely-conflicts)).
+`graphyard diagnose GY-N` explains the first refusing gate and anything else holding it; `base-behind` and `base-conflict` get rework, or a [docs-sync](development.md#documentation-that-rarely-conflicts) when only docs conflict.
