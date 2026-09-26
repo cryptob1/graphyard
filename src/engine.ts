@@ -22,6 +22,7 @@ import { configuredDocumentation, documentationObligation, recordDocumentationSu
 import { liveDispatchHandleIds, reconcileAutoDispatch, type DispatchTransition } from './model/dispatch.js';
 import { reconcileReviewConflict, type ReviewConflictTransition } from './model/review-conflict.js';
 import { nextAction, nextActionKinds, sameAction } from './model/next-action.js';
+import type { ObservationJobState } from './model/action-kinds.js';
 import { claimCandidatesParams, claimCandidatesSql } from './model/action-candidates.js';
 import { claimAction, openActions, reconcileActions, renewClaim, settleAction, settleDelivered, type ActionRow } from './model/actions.js';
 import { livenessFallback, livenessOf, livenessRepairEntry } from './model/liveness.js';
@@ -132,6 +133,9 @@ const actionSettleSchema = z.object({ executor: executorName.optional(), result:
 // A renewal carries no result: it says only that the executor named on the claim is still
 // inside the handler, and asks for the lease it already holds to run on.
 const actionRenewSchema = z.object({ executor: executorName.optional(), leaseSeconds: z.number().int().min(10).max(900).optional() }).strict();
+// A resync names the instant its claim was made, so the answer says whether an observation saved
+// since then satisfies it; `wake: false` only reads, for an executor waiting on the job it woke.
+const resyncSchema = z.object({ since: z.string().datetime({ offset: true }).optional(), wake: z.boolean().optional() }).strict();
 const pullAssignmentSchema = z.object({ host: executorName.optional(), work: z.string().min(1).max(200).optional() }).strict();
 // The merge request names the executor instance that recorded it — one daemon process or one
 // interactive `master merge` request — bound here to the principal that authenticates it (GY-92).
@@ -237,6 +241,30 @@ function applyScopeDecision(work: Work, request: NonNullable<Work['scopeRequest'
 
 /** The violation an observed merge records when no valid execution covered it. */
 export const unauthorizedMergeViolation = 'Merge observed without a prior authorization for this candidate';
+/**
+ * Whether two readings of one item differ only in action-queue bookkeeping (GY-607). Claiming,
+ * renewing, completing or failing a row moves the item's rows, its revision and its `updatedAt`,
+ * and nothing a gate reads; everything else is compared by its stable JSON, so any other change
+ * still counts.
+ */
+export function sameBesideActions(read: Work, current: Work): boolean {
+  const rest = ({ actionQueue: _queue, revision: _revision, updatedAt: _updated, ...others }: Work) => stableJson(others);
+  return rest(read) === rest(current);
+}
+/** How many saves behind a reader may be and still have its read resolved from the ledger. */
+export const actionOnlyLookback = 20;
+/**
+ * Whether the item as it stood at `revision` — every save appends the document it wrote to the
+ * ledger — differs from `work` only in action-queue bookkeeping. A writer that read the item at
+ * that revision may then still write: what it read is what it would read now.
+ */
+async function onlyActionsMovedSince(db: { query: (text: string, values: unknown[]) => Promise<{ rows: any[] }> }, work: Work, revision: number): Promise<boolean> {
+  const behind = work.revision - revision;
+  if (!Number.isInteger(behind) || behind <= 0 || behind > actionOnlyLookback) return false;
+  const read = (await db.query(`SELECT ${eventWorkSql('saved')} AS work FROM (SELECT work_id, payload FROM events WHERE work_id=$1 AND (payload ? 'work' OR payload ? 'delta') ORDER BY seq DESC OFFSET $2 LIMIT 1) saved`, [work.id, behind])).rows[0]?.work as Work | undefined;
+  return !!read && read.revision === revision && sameBesideActions(read, work);
+}
+
 /**
  * How a delivery that recovered from that violation was judged (GY-92): the two-party merge
  * decision it rests on, the cutoff the history was re-checked at, and the judgement itself.
@@ -541,6 +569,8 @@ export class Engine {
           demand(!leaseLive, 'Stop and release the active worker before revising requirements');
         }
         demand(data.expectedPolicyRevision === work.policyRevision, 'Policy revision changed; reload before revising');
+        // A merge-path repair (GY-406) keeps its plannedFiles within the merge path on every revision, not only at creation (GY-428).
+        const repairScope = repairScopeRefusal({ plannedFiles: data.plannedFiles, repair: work.repair, key: work.key }); demand(!repairScope, repairScope!, 422);
         // A widening that answers one attempt's scope request (the loop's, on a review finding)
         // holds only while that request is open, its attempt holds a live lease and the head the
         // findings were read for is still the candidate: a claim, a lease end or a push changes
@@ -1172,17 +1202,36 @@ export class Engine {
    * look again. It decides nothing itself; it schedules the observation the server already knows
    * how to make and runs the reconciliation that clears a lapsed lease, then returns the item as
    * it now stands, so the executor reports what its attempt actually achieved.
+   *
+   * A re-read that saves nothing satisfies no `resync` (GY-607): the executor passes `since`, the
+   * instant its claim was made, and the answer says whether an observation newer than that has been
+   * saved (`observed`) and what the item's observation job is doing (`job`), which is what the
+   * executor waits on — reading again with `wake: false` — and what it names when none arrives.
    */
-  async resyncWork(actor: Principal, id: string) {
+  async resyncWork(actor: Principal, id: string, input: unknown = {}) {
     demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
+    const data = resyncSchema.parse(input ?? {});
     const before = (await this.store.list()).find(item => item.id === id || item.key === id);
     demand(before, `Unknown work item ${id}`, 404);
+    const wake = data.wake !== false;
     // The observation job only exists for an item with a candidate to observe; waking it for one
     // without a submission would schedule a read of nothing.
-    if (before!.submission) await this.store.transaction(async db => { await wakeJob(db, before!.id); });
-    await this.reconcile();
+    if (wake && before!.submission) await this.store.transaction(async db => { await wakeJob(db, before!.id); });
+    if (wake) await this.reconcile();
     const work = (await this.store.list()).find(item => item.id === before!.id)!;
-    return { work, observationScheduled: !!before!.submission, revision: work.revision, changed: work.revision !== before!.revision };
+    // Without `since`, the claim of the item's own `resync` row is the instant a reading must beat.
+    const since = data.since ?? work.actionQueue?.actions.find(row => row.kind === 'resync' && row.state === 'claimed')?.claim?.claimedAt ?? null;
+    const observedAt = work.observation?.at ?? null;
+    const observed = !!since && !!observedAt && Date.parse(observedAt) > Date.parse(since);
+    return { work, observationScheduled: wake && !!before!.submission, revision: work.revision, changed: work.revision !== before!.revision,
+      since, observedAt, observed, job: await this.observationJob(work.id) };
+  }
+  /** The item's durable observation job as the queue holds it, or null when it has none. */
+  async observationJob(id: string): Promise<ObservationJobState | null> {
+    const row = (await this.store.pool.query('SELECT available_at, locked_until, attempts, error, held_until, held_reason FROM jobs WHERE work_id=$1', [id])).rows[0];
+    if (!row) return null;
+    const iso = (value: Date | null) => value ? new Date(value).toISOString() : null;
+    return { availableAt: iso(row.available_at), lockedUntil: iso(row.locked_until), attempts: Number(row.attempts), error: row.error ?? null, heldUntil: iso(row.held_until), heldReason: row.held_reason ?? null };
   }
   /**
    * GitHub executes merges; Graphyard only gates them (GY-258). The coordinator's merge step records
@@ -1738,6 +1787,15 @@ export class Engine {
       if (ejected) for (const behind of all) if (behind.queue && behind.id !== work.id) await wakeJob(db, behind.id);
     }
   }
+  /**
+   * Save a provider observation of the item, read at `expectedRevision`.
+   *
+   * An item that moved since that read refuses the observation, except where every move was
+   * action-queue bookkeeping (`onlyActionsMovedSince`): an executor claiming or settling the item's
+   * `resync` row saves the item, and refusing the observation over that write discarded the very
+   * reading the row was waiting for, so the item stayed stale and the row was claimed again,
+   * forever (GY-607).
+   */
   async observe(id: string, expectedRevision: number, observation: Observation, jobToken?: string) {
     return this.store.transaction(async (db, now) => {
       if (jobToken) {
@@ -1746,7 +1804,7 @@ export class Engine {
       }
       const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
       const work = all.find(w => w.id === id);
-      requireCurrent(work && work.revision === expectedRevision, 'Task changed while GitHub was being observed; retry');
+      requireCurrent(work && (work.revision === expectedRevision || await onlyActionsMovedSince(db, work, expectedRevision)), 'Task changed while GitHub was being observed; retry');
       demand(work.submission?.pr === observation.candidate.pr, 'Unassigned pull request');
       demand(work.workspaces.some(w => w.epoch === work.submission!.epoch && w.branch === observation.candidate.branch), 'PR branch does not match the assigned workspace');
       if (work.stage === 'done') return work;
