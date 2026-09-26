@@ -508,6 +508,8 @@ export function withheldDecision(work: Work, config: Pick<MasterConfig, 'autoMer
  * and an actionable silence rather than as a relaunch every few minutes forever.
  */
 export const approverJudgeBoundMs = 600_000, approverSettleMs = 60_000, maxApproverLaunches = 3, maxApproverCloses = 3, maxDecisionRequests = 3;
+/** Consecutive approver launches refused for a reason other than capacity before the decision is escalated (GY-589). */
+export const maxApproverRefusals = 3;
 export type ApprovalStep =
   | { step: 'wait'; detail: string }
   | { step: 'settled'; detail: string }

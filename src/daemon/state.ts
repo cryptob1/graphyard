@@ -247,6 +247,8 @@ export const approvalWatchSchema = z.object({
   reportedExhaustion: z.string().max(200).nullable().default(null),
   /** The decision and launch whose spent-account hold alone is written (GY-489): a capacity report that failed after it is retried without writing the hold again. */
   heldExhaustion: z.string().max(200).nullable().default(null),
+  /** Approver launches refused in a row for a reason other than capacity (GY-589), and the last refusal: past `maxApproverRefusals` the decision is escalated. */
+  refusals: z.number().int().min(0).default(0), refusal: z.string().max(300).nullable().default(null),
 }).strict();
 export type ApprovalWatch = z.infer<typeof approvalWatchSchema>;
 /**
@@ -254,7 +256,7 @@ export type ApprovalWatch = z.infer<typeof approvalWatchSchema>;
  * it runs on, so a retained session's exhaustion holds the account it spent (GY-182).
  */
 export const carriedSession = (prior: ApprovalWatch) => ({ launches: prior.launches, agentName: prior.agentName, pane: prior.pane, launchedAt: prior.launchedAt,
-  exhaustedAt: prior.exhaustedAt, account: prior.account, runtime: prior.runtime, session: prior.session });
+  exhaustedAt: prior.exhaustedAt, account: prior.account, runtime: prior.runtime, session: prior.session, refusals: prior.refusals, refusal: prior.refusal });
 
 /**
  * The loop's own failures (GY-119). A cycle that throws — a control-plane read that timed out, a
