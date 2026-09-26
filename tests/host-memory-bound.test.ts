@@ -8,7 +8,7 @@ import { delimiter, join } from 'node:path';
 import type { Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
 import type { NextActionKind } from '../src/model/next-action.js';
-import { classifyAttention } from '../src/model/fault-classes.js';
+import { classifyAttention, trackFaults, type FaultRecord } from '../src/model/fault-classes.js';
 import { masterConfigSchema, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { daemonSummary } from '../src/daemon/run.js';
@@ -152,6 +152,15 @@ test('unit:dispatch-defers-on-host-memory — below the memory floor the loop de
   assert.match(attention[0].text, /top consumers: node 14\.0 GB, claude 5\.7 GB/);
   const faults = cycleFaults(state, [ready], at, { config }).filter(fault => fault.faultClass === 'resources');
   assert.deepEqual(faults.map(fault => fault.kind), ['memory-pressure']);
+  // The fault stands as one instance for the whole dip even as the consumers' ranking moves between
+  // cycles (GY-612): a fault is its wording, so the fault's wording carries no consumer list — the
+  // attention item keeps it — and trackFaults opens nothing new on the reshuffle.
+  const record: FaultRecord = { instances: [], open: {}, failing: {} };
+  trackFaults(record, faults, iso(at));
+  state.memory = { ...state.memory!, consumers: [...state.memory!.consumers].reverse() };
+  const opened = trackFaults(record, cycleFaults(state, [ready], at + 60_000, { config }).filter(fault => fault.faultClass === 'resources'), iso(at + 60_000));
+  assert.deepEqual(opened.map(instance => instance.kind), [], 'the moved consumer ranking reopens nothing');
+  assert.equal(record.instances.length, 1, 'one memory-pressure instance stands for the whole dip');
 
   // Still low: still deferred, and the crossing is not recorded again.
   await runCycle(config, state, loopEffects(log, () => memory));

@@ -70,7 +70,7 @@ Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROF
 
 Heavy verification runs a session starts (`npm test`, `npm run test:browser`, `npm run typecheck`, `tsc --noEmit`, `npx tsc`) take a host slot first: a lock directory, `.verification-slots` under the managed worktree root. Default slots: max(2, floor(total memory GB / 8)); set `GRAPHYARD_VERIFICATION_SLOTS` in the loop's environment on that host. A run finding every slot held prints that it waits, naming the directory and holders. Runs outside sessions (CI, your shell) are unbounded.
 
-Below max(10% of total, 4 GB) available, the loop, dispatcher and executors launch no worker, reviewer or producer on that host, recording `Launches deferred` (`escalation:dispatch:memory`) and one `memory` attention item (class `resources`) naming the top consumers; launches resume, recorded, once memory recovers. Running sessions are untouched.
+Below max(10% of total, 4 GB) available, the loop, dispatcher and executors launch no worker, reviewer or producer on that host, recording `Launches deferred` (`escalation:dispatch:memory`) and one `memory` attention item (class `resources`) naming the top consumers; launches resume, recorded, once memory recovers. Running sessions are untouched. The dip stands as one `memory-pressure` fault instance however the consumers' ranking moves between cycles: the fault's text is fixed, and the attention item keeps the moving detail.
 
 ## Bootstrap mode for a self-proving change
 

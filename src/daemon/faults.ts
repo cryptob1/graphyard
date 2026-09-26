@@ -66,8 +66,10 @@ export function cycleFaults(state: DaemonState, work: Work[], now: number, sourc
     const reclaim = state.reclaim, below = (free: number | null | undefined, bound: number) => free !== null && free !== undefined && free < bound;
     if (reclaim && (below(reclaim.freeBytes, diskThresholdBytes(config)) || below(reclaim.rootFreeBytes, worktreeRootMinFreeBytes(config))))
       derived.push({ ...classified('disk-pressure'), subject: 'disk', text: `Free space below its configured bound at the last reclaim (${reclaim.at})` });
-    // A host below its memory floor defers every launch on it (GY-612): one instance while it stands.
-    for (const item of hostMemoryAttention(state.memory)) derived.push({ ...classified('memory-pressure'), subject: item.subject, text: item.text.slice(0, 500) });
+    // A host below its memory floor defers every launch on it (GY-612): one instance for the whole dip. A fault is its
+    // wording, and the attention item's text names consumers whose ranking moves from cycle to cycle, so this wording
+    // carries none of it — the attention item keeps the moving detail, and the instance stands until memory recovers.
+    for (const item of hostMemoryAttention(state.memory)) derived.push({ ...classified('memory-pressure'), subject: item.subject, text: 'Host memory is below its floor: new session launches on this host are deferred until it recovers (the memory attention item names the current top consumers)' });
   }
   // The reported attention names each unserved executor kind on the item it holds, and master status already derived its installation
   // lines from the same status: the status's copy of those lines is not a second fault (distinct faults of one kind stay distinct).
