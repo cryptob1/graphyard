@@ -49,9 +49,10 @@ export const flowAnalyticsRoutes = defineRoutes('flow-analytics', [
       // The watch's report as this request reads it, so the flow holds merges at Deploy exactly
       // where the board (grouped by the same report on /api/status) does.
       // The environment is the one the master verifies deployments under (as /api/status reads it).
-      const query = { ...flowQuery(url, await resolvedProductionEnvironment(engine.store.pool)), production: production?.status() ?? null };
-      // Bounded catch-up keeps the read current without blocking on a full backfill.
-      await projectFlow(engine.store, { batches: 3 });
+      const query = { ...flowQuery(url, await resolvedProductionEnvironment(engine.store.reportPool)), production: production?.status() ?? null };
+      // Bounded catch-up keeps the read current without blocking on a full backfill. Like the read,
+      // it runs on the report pool (GY-491), never on connections coordination needs.
+      await projectFlow(engine.store, { batches: 3, pool: engine.store.reportPool });
       const dataset = await readFlow(engine.store, query);
       const report = computeFlow(dataset, query);
       if (!part) return report;
