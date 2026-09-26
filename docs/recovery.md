@@ -47,4 +47,4 @@ An `unknown` outcome blocks every successor until an `admin` settles it with evi
  "evidence":"https://railway.app/project/example/deployments/01J8Q5"}
 ```
 
-With `"automaticRollback": true` in the environment's `delivery` policy, a degraded generation rolls back to the last verified release when a fenced, automatic executor covers every service; otherwise `automaticRollbackRefusal` says why.
+`"automaticRollback": true` in the environment's `delivery` policy rolls a degraded generation back to the last verified release when a fenced, automatic executor covers every service; otherwise `automaticRollbackRefusal` says why.
