@@ -3,10 +3,11 @@ import { stableJson } from './model/stable-json.js';
 import { z } from 'zod';
 import type { PoolClient } from 'pg';
 import { Store, save, wakeJob, documentBefore, eventWorkSql } from './store.js';
+import { leaseCommands } from './store/pools.js';
 import { compactHeartbeatReceipt } from './store/receipts.js';
 import { authorizedForProof, unauthorizedProofs } from './proof-grants.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, submittedEpoch, type Attestation, requireCurrent, createSchema, criterionSchema, bindingApproval, carriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type ApprovalIdentity, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
+import { activeLease, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, submittedEpoch, type Attestation, requireCurrent, createSchema, criterionSchema, bindingApproval, carriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type ApprovalIdentity, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type Lease, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
 import { Refusal } from './model/refusal.js';
 import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
@@ -359,6 +360,45 @@ function operatorAuthorizing(decision: PostMergeDecision, refused: Set<string>):
   return operator ? { operator, refusedDecision: cited }
     : { refusal: `an operator-authorized delivery needs an admin credential as requester or approver; ${decision.requestedBy} is ${decision.requesterRole ?? 'of unrecorded role'} and ${decision.approvedBy} is ${decision.approverRole ?? 'of unrecorded role'}` };
 }
+/** The ledger kind of a lease renewal that failed server-side (GY-558). */
+export const renewalFaultEvent = 'lease.renewal-failed';
+/** A lease carrying the server-side renewal fault that extended it (GY-558); cleared by the next renewal. */
+type GracedLease = Lease & { renewalFault?: { at: string; error: string } };
+/** A renewal that failed server-side: 503, with the grace its recorded fault earned, if any. */
+export class RenewalFault extends Refusal {
+  constructor(message: string, readonly grace: { at: string; graceUntil: string; now: string } | null) { super(message, 503); }
+}
+/** How far back heartbeat health looks, and the p95 latency above which `master status` raises it (GY-558). */
+export const leaseHealthWindowMs = 10 * 60_000, heartbeatLatencyAttentionMs = 5_000;
+/**
+ * Heartbeat latency and the renewals refused or failed server-side, over the last ten minutes in
+ * this server process (GY-558), reported by GET /api/status as `leaseHealth`.
+ */
+export class LeaseHealth {
+  private samples: { at: number; ms: number; outcome: 'renewed' | 'refused' | 'failed' }[] = [];
+  record(outcome: 'renewed' | 'refused' | 'failed', ms: number, at = Date.now()) {
+    this.samples.push({ at, ms: Math.max(0, ms), outcome });
+    this.prune(at);
+    if (this.samples.length > 20_000) this.samples.splice(0, this.samples.length - 20_000);
+  }
+  private prune(now: number) {
+    const since = now - leaseHealthWindowMs;
+    const first = this.samples.findIndex(sample => sample.at >= since);
+    this.samples.splice(0, first < 0 ? this.samples.length : first);
+  }
+  report(now = Date.now()) {
+    this.prune(now);
+    const sorted = this.samples.map(sample => sample.ms).sort((a, b) => a - b);
+    const percentile = (p: number) => sorted.length ? sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(p * sorted.length) - 1))] : null;
+    const p50Ms = percentile(0.5), p95Ms = percentile(0.95);
+    const refused = this.samples.filter(sample => sample.outcome === 'refused').length, failed = this.samples.filter(sample => sample.outcome === 'failed').length;
+    const attention = p95Ms !== null && p95Ms > heartbeatLatencyAttentionMs
+      ? `Lease renewals are slow: heartbeat p95 ${p95Ms} ms (p50 ${p50Ms} ms) over the last 10 minutes exceeds ${heartbeatLatencyAttentionMs} ms across ${sorted.length} renewal(s), ${failed} failed server-side and ${refused} refused; a renewal slower than the lease loses it — find what holds the coordination lock or the lease pool in the server logs`
+      : null;
+    return { windowMs: leaseHealthWindowMs, renewals: sorted.length, p50Ms, p95Ms, refused, failed, thresholdMs: heartbeatLatencyAttentionMs, attention };
+  }
+}
+
 export class Engine {
   operatorAuthorizer?: (db: any, now: Date, actor: Principal) => Promise<Principal>;
   /** The direct-merge window the deployment environment declares (direct-merge.ts), read once at construction. */
@@ -400,8 +440,9 @@ export class Engine {
     if (this.submissionObserver === undefined) { const github = await githubFromEnv(); this.submissionObserver = github ? (probe, peers) => github.observe(probe, peers) : null; }
     if (!this.submissionObserver || !id) return null;
     // A replayed submission returns its receipt; it must not depend on the provider again.
-    if ((await this.store.pool.query('SELECT 1 FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rowCount) return null;
-    const all = await this.store.list();
+    // `complete` is a lease command (GY-558): its reads take the lease pool, like its transaction.
+    if ((await this.store.leasePool.query('SELECT 1 FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rowCount) return null;
+    const all: Work[] = (await this.store.leasePool.query('SELECT document FROM work_items ORDER BY number')).rows.map(row => row.document);
     const work = all.find(w => w.id === id || w.key === id);
     if (!work || work.stage === 'done' || !work.workspaces.some(w => w.epoch === data.epoch)) return null;
     // Every item goes with it: the landing check reads other items' unlanded candidates (GY-97).
@@ -436,7 +477,79 @@ export class Engine {
       demand(!renewed, `${renewed?.id}: ${obligation.proof} is already a bootstrap obligation inherited from ${obligation.key} ${obligation.criterionId} and cannot be deferred again`);
     }
   }
+  /**
+   * Run one command. A renewal is timed and counted in `leaseHealth` (GY-558), and one that fails
+   * server-side — a connection or statement timeout, a lost connection — is recorded against its
+   * lease (`recordRenewalFault`) and answered 503 with the grace that record earned.
+   */
   async execute(actor: Principal, command: Command, id: string | null, input: unknown, key: string, context: { observation?: Observation; ciRun?: CiRunObservation | null } = {}) {
+    if (command !== 'heartbeat') return this.executeCommand(actor, command, id, input, key, context);
+    const started = new Date();
+    try {
+      const work = await this.executeCommand(actor, command, id, input, key, context);
+      this.leaseHealth.record('renewed', Date.now() - started.getTime());
+      return work;
+    } catch (error) {
+      const fault = !(error instanceof Refusal && error.status < 500) && !(error instanceof z.ZodError);
+      this.leaseHealth.record(fault ? 'failed' : 'refused', Date.now() - started.getTime());
+      if (!fault || !id) throw error;
+      throw await this.recordRenewalFault(actor, id, Number((input as { epoch?: unknown } | null)?.epoch), started, error);
+    }
+  }
+  /** Heartbeat latency and the renewals refused or failed server-side, in this server process (GY-558). */
+  readonly leaseHealth = new LeaseHealth();
+  /**
+   * Record a renewal that failed server-side inside its lease's expiry window (GY-558), on the
+   * lease pool and without the coordination lock: a `lease.renewal-failed` event naming the owner,
+   * epoch and the time the renewal arrived. `renewalGrace` then keeps the lease valid until the next
+   * successful renewal or one further lease period from that time, whichever comes first. A record
+   * the database refuses is retried in the background until that period has passed. The returned
+   * refusal carries the grace, so the worker's supervisor keeps retrying through it.
+   */
+  private async recordRenewalFault(actor: Principal, id: string, epoch: number, at: Date, error: unknown) {
+    const reason = (error instanceof Error ? error.message : String(error)).slice(0, 300);
+    console.error(`[lease] renewal of ${id} epoch ${epoch} by ${actor.id} failed server-side: ${reason}`);
+    const payload = JSON.stringify({ owner: actor.id, epoch, at: at.toISOString(), error: reason });
+    const until = at.getTime() + this.leaseSeconds * 1000;
+    // Only a live lease of this owner and epoch earns a grace; the refusal says what it earned.
+    const write = async () => (await this.store.leasePool.query(`WITH live AS (
+        SELECT id, CASE WHEN document->'lease' ? 'renewalFault' THEN (document->'lease'->>'expiresAt')::timestamptz
+          ELSE GREATEST((document->'lease'->>'expiresAt')::timestamptz, $7::timestamptz) END AS grace_until
+        FROM work_items WHERE (id::text=$1 OR document->>'key'=$1) AND document->'lease'->>'owner'=$2
+          AND (document->'lease'->>'epoch')::int=$5 AND (document->'lease'->>'expiresAt')::timestamptz>=$6::timestamptz LIMIT 1),
+      recorded AS (INSERT INTO events(work_id,actor,kind,payload) SELECT id, $2, $3, $4::jsonb FROM live RETURNING work_id)
+      SELECT live.grace_until, clock_timestamp() AS now FROM live JOIN recorded ON recorded.work_id=live.id`,
+    [id, actor.id, renewalFaultEvent, payload, Number.isSafeInteger(epoch) ? epoch : -1, at.toISOString(), new Date(until).toISOString()])).rows[0] as { grace_until: Date; now: Date } | undefined;
+    let recorded: { grace_until: Date; now: Date } | undefined, unrecorded: string | null = null;
+    try { recorded = await write(); } catch (failure) {
+      unrecorded = (failure as Error).message;
+      const retry = () => setTimeout(() => { if (Date.now() < until) write().catch(retry); }, 1000).unref();
+      retry();
+    }
+    const grace = recorded ? { at: at.toISOString(), graceUntil: recorded.grace_until.toISOString(), now: recorded.now.toISOString() } : null;
+    return new RenewalFault(grace
+      ? `Lease renewal failed server-side (${reason}); the failure is recorded and the lease stays valid until ${grace.graceUntil} or the next successful renewal`
+      : `Lease renewal failed server-side (${reason})${unrecorded ? `; the failure could not be recorded yet (${unrecorded.slice(0, 200)})` : '; no live lease of this owner and epoch was found to keep'}`, grace);
+  }
+  /**
+   * A lease past its expiry that a recorded server-side renewal fault still covers (GY-558): the
+   * first fault after its last renewal and inside its expiry window extends it to one lease period
+   * after that fault, once — a later fault before a successful renewal extends nothing. A lease
+   * whose worker stopped renewing has no such record and expires as before.
+   */
+  private async renewalGrace(db: PoolClient, work: Work, now: Date) {
+    const lease = work.lease as GracedLease | null;
+    if (!lease || lease.renewalFault || Date.parse(lease.expiresAt) > now.getTime()) return false;
+    const leaseMs = this.leaseSeconds * 1000, expires = Date.parse(lease.expiresAt);
+    const fault = (await db.query(`SELECT payload->>'at' AS at, payload->>'error' AS error FROM events WHERE kind=$1 AND created_at>$2::timestamptz AND work_id=$3
+      AND payload->>'owner'=$4 AND (payload->>'epoch')::int=$5 AND (payload->>'at')::timestamptz>$2::timestamptz AND (payload->>'at')::timestamptz<=$6::timestamptz
+      ORDER BY (payload->>'at')::timestamptz LIMIT 1`, [renewalFaultEvent, new Date(expires - leaseMs).toISOString(), work.id, lease.owner, lease.epoch, lease.expiresAt])).rows[0] as { at: string; error: string } | undefined;
+    if (!fault) return false;
+    lease.renewalFault = { at: new Date(fault.at).toISOString(), error: fault.error };
+    lease.expiresAt = new Date(Math.max(expires, Date.parse(fault.at) + leaseMs)).toISOString();
+    return true;
+  }
+  private async executeCommand(actor: Principal, command: Command, id: string | null, input: unknown, key: string, context: { observation?: Observation; ciRun?: CiRunObservation | null } = {}) {
     demand(Object.hasOwn(commands, command), 'Unknown command', 404);
     // Leads coordinate through rulings; no lifecycle command is lead-permitted.
     demand(actor.role !== 'slice-lead' || leadMay(command), 'Slice leads cannot perform lifecycle mutations', 403);
@@ -497,6 +610,8 @@ export class Engine {
         this.refuseRenewedDeferral(work!, all);
       }
       demand(work, 'Work item not found', 404);
+      // A lease past its expiry that a recorded server-side renewal fault still covers stays live (GY-558).
+      await this.renewalGrace(db, work, now);
       if (actor.role === 'operator-agent') {
         authorizeOperatorCommand(actor, command, data, work, this.repository);
         if (command === 'ready' || command === 'unblock') demand(data.expectedRevision === work.revision, 'Task revision changed; reload before mutating');
@@ -782,7 +897,7 @@ export class Engine {
       if ((command === 'heartbeat' || command === 'release') && !work.lease && submittedEpoch(work, data.epoch))
         demand(false, `Implementation lease for epoch ${data.epoch} ended when ${work.key} was submitted; stop heartbeating after complete`);
       if (['heartbeat', 'release', 'workspace', 'submit', 'blocked', 'scope', 'quarantine', 'launch'].includes(command)) activeLease(work, actor, data.epoch, now);
-      if (command === 'heartbeat') work.lease!.expiresAt = new Date(now.getTime() + this.leaseSeconds * 1000).toISOString();
+      if (command === 'heartbeat') { work.lease!.expiresAt = new Date(now.getTime() + this.leaseSeconds * 1000).toISOString(); delete (work.lease as GracedLease).renewalFault; }
       if (command === 'quarantine') {
         demand(!work.containmentQuarantine || work.containmentQuarantine.owner === actor.id && work.containmentQuarantine.epoch === data.epoch
           && work.containmentQuarantine.settlementHash === data.settlementHash, 'Containment quarantine already exists and cannot be replaced');
@@ -1074,9 +1189,9 @@ export class Engine {
       // A renewal's replay needs only the lease, not a whole document per renewal.
       await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(command === 'heartbeat' ? compactHeartbeatReceipt(work) : work)]);
       return work;
-    // A worker's lease renewal takes the reserved connection (GY-274): however busy the pool is, a
-    // live worker is never stopped because its heartbeat could not reach the database.
-    }, command === 'heartbeat' ? { lane: 'lease' } : undefined);
+    // Lease commands take the lease pool (GY-274, GY-558): however busy every other pool is, a live
+    // worker is never stopped because its renewal, claim, completion or blocker could not reach the database.
+    }, leaseCommands.has(command) ? { lane: 'lease' } : undefined);
   }
 
   /** The one item holding action row `id`, found by containment rather than by loading every document. */
@@ -1765,6 +1880,8 @@ export class Engine {
     // touched it, so a violation the tick repairs is recorded rather than silently absorbed.
     const stranded = livenessOf(work, all, now).violation;
     preserveAssignment(work); retainQuarantineFence(work);
+    // A recorded server-side renewal fault keeps the lease for one more period (GY-558).
+    await this.renewalGrace(db, work, now);
     const leaseLost = !!work.lease && Date.parse(work.lease.expiresAt) <= now.getTime();
     // GitHub executes merges (GY-258): a merge execution recorded before that stays in the
     // ledger, where delivery attribution reads it, and no longer holds the record.
