@@ -149,10 +149,10 @@ export const producerRunOptions = (cwd: string, binding: { sha: string; baseSha:
   },
 });
 
-export function piApproverPrompt(config: { repository: string; cliPath: string }, key: string, decision: string, identity: string, repository?: string) {
+export function piApproverPrompt(config: { repository: string; cliPath: string }, key: string, decision: string, identity: string, clone?: string) {
   const cli = `node ${config.cliPath}`;
   return `You are the independent Graphyard approver for ${config.repository}, acting as ${identity}. Judge decision ${decision} on ${key}: run ${cli} master decisions ${key}, read the item with ${cli} status ${key}, its pull request and history, and weigh the requester's reason against the item's criteria and the operator's goals. `
-    + (repository ? `Your working directory is a scratch directory of your own; the repository is at ${repository} and is read-only to you: read it with git -C ${repository}, never write, move or remove anything in it. ` : '')
+    + (clone ? `Your working directory is a scratch directory of your own. Read the code in ${clone}, a clone of the repository made for this run alone and removed when it ends: it shares no refs, index or working tree with anyone's checkout and has no remote, so nothing you run there reaches another checkout. Work only there and in your working directory. ` : '')
     + `Then call the graphyard_decide tool exactly once with decision "${decision}", approve true if the decision is justified or false if it is not, and your reason; a decline is a call with approve false, never an exit without one. Graphyard applies your verdict as ${identity}, so do not run master approve or master refuse yourself. `
     + 'Never approve a decision you requested, implemented, or produced evidence for; never edit, push, merge, review, or submit evidence. Stop after the call.';
 }

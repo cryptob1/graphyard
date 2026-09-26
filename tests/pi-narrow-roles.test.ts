@@ -33,11 +33,15 @@ const durable: FilesystemProbe = async path => ({ probed: path, volatile: null, 
 const decision = '4cb51514-4cb5-4f21-9b0e-0f2a6c8d4e15';
 
 /** A Pi stand-in: loads the extension named by --extension and runs the scenario's tool calls through its guard and tools, printing Pi's JSONL. */
-const fakePi = `import { readFileSync, writeFileSync } from 'node:fs';
+const fakePi = `import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 const args = process.argv.slice(2);
 const scenario = JSON.parse(readFileSync(process.env.FAKE_PI_SCENARIO, 'utf8'));
-writeFileSync(process.env.FAKE_PI_SCENARIO + '.launched', JSON.stringify({ args, cwd: process.cwd(), role: process.env.GRAPHYARD_PI_ROLE ?? null, tokenFile: process.env.GRAPHYARD_TOKEN_FILE ?? null }));
+const git = (...words) => { try { return execFileSync('git', words, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { return null; } };
+const clone = process.cwd() + '/checkout';
+writeFileSync(process.env.FAKE_PI_SCENARIO + '.launched', JSON.stringify({ args, cwd: process.cwd(), role: process.env.GRAPHYARD_PI_ROLE ?? null, tokenFile: process.env.GRAPHYARD_TOKEN_FILE ?? null,
+  clone: existsSync(clone + '/README.md') ? { remotes: git('-C', clone, 'remote'), branch: git('-C', clone, 'symbolic-ref', '-q', 'HEAD'), toplevel: git('-C', clone, 'rev-parse', '--show-toplevel') } : null }));
 const out = record => process.stdout.write(JSON.stringify(record) + '\\n');
 const tools = new Map(), handlers = {};
 (await import(pathToFileURL(args[args.indexOf('--extension') + 1]).href)).default({ registerTool: tool => tools.set(tool.name, tool), on: (event, handler) => (handlers[event] ??= []).push(handler) });
@@ -156,6 +160,11 @@ test('integration:pi-narrow-roles with pi selected the approver runs headless an
     assert.match(basename(launch.cwd), /^graphyard-approval-gy-88-/);
     assert.equal(await stat(launch.cwd).catch(() => null), null, 'the approver\'s directory is removed when its run ends');
     assert.ok(record.events.some(event => event.kind === 'tool-end' && (event as any).error === true && /outside the worktree/.test(JSON.stringify(event))), 'rm inside the operator\'s repository is refused');
+    // GY-564: read-only is enforced, not asked. The approver reads a clone of its own with no
+    // remote, and its prompt never names the operator's checkout.
+    assert.deepEqual(launch.clone, { remotes: '', branch: null, toplevel: join(launch.cwd, 'checkout') }, 'a detached clone of its own with no remote');
+    assert.ok(launch.args.at(-1).includes(join(launch.cwd, 'checkout')), 'the prompt names the clone');
+    assert.ok(!launch.args.at(-1).includes(root), 'the prompt does not name the operator\'s repository');
     assert.deepEqual(launch.args.slice(0, 2), ['--mode', 'json']);
     assert.equal(launch.args[launch.args.indexOf('--extension') + 1], extension);
     assert.equal(launch.args[launch.args.indexOf('--model') + 1], 'zai/glm-5.3-flash');
@@ -269,10 +278,10 @@ test('integration:pi-narrow-roles without the setting, and for non-unit proof gr
   } finally { await selected.cleanup(); }
 });
 
-test('integration:pi-narrow-roles the headless approver\'s prompt names the read-only repository and still carries the attestation confirmation (GY-523)', () => {
+test('integration:pi-narrow-roles the headless approver\'s prompt names only its own clone and still carries the attestation confirmation (GY-523)', () => {
   const config = { repository: 'owner/project', cliPath: launcher, approver: { id: 'approver' } } as any;
   const work = { key: 'GY-88', candidate: { sha: H, baseSha: B } } as unknown as Work;
-  const prompt = piApproverWithAttestation(config, work, 'd1', '/repo');
-  assert.ok(prompt.includes('the repository is at /repo and is read-only'), 'the approver is told the repository is not its to write');
+  const prompt = piApproverWithAttestation(config, work, 'd1', '/managed/approval/checkout');
+  assert.ok(prompt.includes('Read the code in /managed/approval/checkout, a clone of the repository made for this run alone'), 'the approver reads its own clone');
   assert.ok(prompt.includes(attestConfirmation(B)) && prompt.indexOf(attestConfirmation(B)) < prompt.indexOf('graphyard_decide'), 'and is told to confirm an exercise record before it decides');
 });
