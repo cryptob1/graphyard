@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { accountKeySchema, notSecret, secretPaths, smokeObservationSchema, type AccountSmoke, type RunOutcome, type UnjudgedRuns } from './registry-keys.js';
 
 /**
  * The agent registry: the fleet as control-plane state (GY-91).
@@ -20,11 +21,6 @@ const text = (max: number) => z.string().trim().min(1).max(max).refine(value => 
 // Pure string check, so the dashboard can share this module without a Node import.
 const isAbsolute = (value: string) => /^(\/|[A-Za-z]:[\\/])/.test(value);
 const secretName = /(TOKEN|SECRET|PASSWORD|PRIVATE|API_KEY|CREDENTIAL)/;
-// What a pasted credential looks like: provider key prefixes, a bearer header, a PEM block, a JWT.
-const secretValue = /^(sk-|ghp_|gho_|ghs_|github_pat_|xox[abp]-|Bearer\s)|-----BEGIN|^eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\./;
-const notSecret = (value: string) => !secretValue.test(value);
-/** Whether a value looks like a pasted credential: the dashboard refuses to send one, and the registry to store one. */
-export const looksLikeSecret = (value: string) => secretValue.test(value.trim());
 
 const launchEnvironment = z.record(
   z.string().regex(/^[A-Z_][A-Z0-9_]*$/)
@@ -100,6 +96,8 @@ export const accountSchema = z.object({
   credential: z.object({
     host: hostName,
     home: z.string().min(1).max(500).refine(isAbsolute, 'An account home is an absolute path on its host').refine(value => !/[\u0000-\u001f\u007f]/.test(value), 'Control characters are not allowed').nullable().default(null),
+    /** How an API-key runtime's key reaches a headless run (GY-446): a reference, never the key. */
+    key: accountKeySchema.optional(),
   }).strict(),
   enabled: z.boolean().default(true),
   /** How many sessions may run on this account at once, across every role; null is unbounded. */
@@ -107,7 +105,7 @@ export const accountSchema = z.object({
   note: text(300).optional(),
 }).strict();
 export type FleetAccountInput = z.infer<typeof accountSchema>;
-export interface FleetAccount extends FleetAccountInput { quota: ObservedQuota }
+export interface FleetAccount extends FleetAccountInput { quota: ObservedQuota; smoke?: AccountSmoke | null; unjudged?: Partial<Record<FleetRoleName, UnjudgedRuns>> }
 
 export const fleetRoles = ['worker', 'reviewer', 'producer', 'approver', 'escalation-handler'] as const;
 export type FleetRoleName = typeof fleetRoles[number];
@@ -149,6 +147,8 @@ export interface FleetSession {
   group?: string | null;
   selectedAt: string; selectedBy: string; reason: string; skipped: SessionSkip[];
   endedAt: string | null; endReason: string | null;
+  /** For a headless run, whether it ended with a result (GY-446); recorded once. */
+  outcome?: RunOutcome;
 }
 export interface FleetRefusal { at: string; role: string; host: string; work: string | null; by: string; reason: string; skipped: SessionSkip[] }
 
@@ -187,7 +187,7 @@ export const selectionRequestSchema = z.object({
   /** The proof group a producer request answers; every other role names none. */
   group: z.string().trim().min(1).max(40).nullable().default(null),
   /** What the executor just observed about the accounts that live on its host. */
-  observations: z.array(z.object({ account: entryName, quota: quotaObservationSchema }).strict()).max(200).default([]),
+  observations: z.array(z.object({ account: entryName, quota: quotaObservationSchema, smoke: smokeObservationSchema.optional() }).strict()).max(200).default([]),
 }).strict();
 export type SelectionRequest = z.infer<typeof selectionRequestSchema>;
 
@@ -213,14 +213,17 @@ export function applyRegistryMutation(current: AgentRegistry, kind: RegistryMuta
       for (const session of next.sessions) if (session.account === name && !session.endedAt) { session.endedAt = context.at; session.endReason = `account ${name} was removed from the registry`; }
     }
   };
-  const setRuntime = (runtime: FleetRuntime) => { upsert(next.runtimes, runtime); demandRegistry(next.runtimes.length <= registryLimits.runtimes, `The registry holds at most ${registryLimits.runtimes} runtimes`); };
-  const setModel = (model: FleetModel) => { upsert(next.models, model); demandRegistry(next.models.length <= registryLimits.models, `The registry holds at most ${registryLimits.models} models`); };
+  const retest = (names: (account: FleetAccount) => boolean) => { for (const account of next.accounts) if (names(account)) { delete account.smoke; delete account.unjudged; } };
+  const setRuntime = (runtime: FleetRuntime) => { upsert(next.runtimes, runtime); retest(account => account.runtime === runtime.name); demandRegistry(next.runtimes.length <= registryLimits.runtimes, `The registry holds at most ${registryLimits.runtimes} runtimes`); };
+  const setModel = (model: FleetModel) => { upsert(next.models, model); retest(account => account.model === model.name); demandRegistry(next.models.length <= registryLimits.models, `The registry holds at most ${registryLimits.models} models`); };
   const setAccount = (account: FleetAccountInput) => {
     demandRegistry(next.runtimes.some(runtime => runtime.name === account.runtime), `Unknown runtime ${account.runtime}; add the runtime before its accounts`);
     demandRegistry(next.models.some(model => model.name === account.model), `Unknown model ${account.model}; add the model before the accounts that run it`);
     const existing = next.accounts.find(entry => entry.name === account.name);
     // A login that moved is a different login: what was observed about the old one says nothing about it.
     const sameLogin = existing && existing.runtime === account.runtime && existing.credential.host === account.credential.host && existing.credential.home === account.credential.home;
+    // Any change to an account is tested again before it takes a session (GY-446), and clears the
+    // holds its earlier runs set: the change is what an operator makes to fix it.
     upsert(next.accounts, { ...account, quota: sameLogin ? existing.quota : { ...unobservedQuota } });
     demandRegistry(next.accounts.length <= registryLimits.accounts, `The registry holds at most ${registryLimits.accounts} accounts`);
   };
@@ -272,6 +275,10 @@ export function applyRegistryMutation(current: AgentRegistry, kind: RegistryMuta
     demandRegistry(data.runtimes.length + data.models.length + data.accounts.length + data.roles.length > 0, 'The proposal is empty; nothing to apply');
     data.runtimes.forEach(setRuntime); data.models.forEach(setModel); data.accounts.forEach(setAccount); data.roles.forEach(setRole);
   }
+  // Past each field's own check, the registry holds references, never secrets: a write carrying
+  // anything that looks like a credential, in any field, is refused whole (GY-446).
+  const pasted = secretPaths(input);
+  demandRegistry(!pasted.length, `${pasted.join(', ')} look${pasted.length === 1 ? 's' : ''} like a credential; the registry stores references (a key file and the variable it is read into), never the key`);
   next.revision = current.revision + 1; next.updatedAt = context.at;
   next.lastMutation = { kind, actor: context.actor, at: context.at, reason: reasonText };
   return { registry: next, removed };
@@ -299,5 +306,6 @@ export function foldObservation(account: FleetAccount, observed: QuotaObservatio
 }
 
 // Session liveness, eligibility, selection and the status view; and what setup proposes.
+export * from './registry-keys.js';
 export * from './registry-sessions.js';
 export * from './registry-proposal.js';
