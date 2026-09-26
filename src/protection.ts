@@ -157,26 +157,52 @@ const repositoryMerge = Symbol.for('graphyard.repositoryMerge');
 // answers the queue ruleset with HTTP 422. There GitHub merges through auto-merge instead, which
 // Graphyard enables per pull request once every gate passes, so the repository must allow it.
 export type MergeMode = 'queue' | 'auto-merge';
-/** The repository settings the merge mode depends on, as GitHub's repository document reports them. */
-export interface RepositoryMergeSettings { ownerType: string; allowAutoMerge: boolean }
+/**
+ * The repository settings the merge mode depends on, as GitHub's repository document reports them,
+ * and whether the repository carries Graphyard's queue-refusal marker (GY-459): true when it does,
+ * false when GitHub answered that it does not, null or absent when the marker was not read.
+ */
+export interface RepositoryMergeSettings { ownerType: string; allowAutoMerge: boolean; queueRefused?: boolean | null }
 /** The merge settings of a repository document, or null when it does not say who owns the repository. */
-export function repositoryMergeSettings(repository: unknown): RepositoryMergeSettings | null {
+export function repositoryMergeSettings(repository: unknown, queueRefused?: boolean | null): RepositoryMergeSettings | null {
   const owner = (repository as any)?.owner?.type;
-  return typeof owner === 'string' ? { ownerType: owner, allowAutoMerge: (repository as any).allow_auto_merge === true } : null;
+  return typeof owner === 'string' ? { ownerType: owner, allowAutoMerge: (repository as any).allow_auto_merge === true, ...(queueRefused === undefined ? {} : { queueRefused }) } : null;
 }
 /**
  * How GitHub merges on this repository: through a merge queue when the base branch already has one;
- * through auto-merge when the repository is user-owned, or organization-owned with auto-merge
- * already allowed — `allow_auto_merge` is the persistent record of a queue ruleset GitHub refused
- * with HTTP 422 (GY-350), which every 422 fallback writes, so a later plan, apply or install reads
- * the settled mode back from GitHub instead of retrying the refused ruleset; through the queue
- * otherwise. Unread settings keep the queue, the mode every earlier protection planned.
+ * through auto-merge when the repository is user-owned, or organization-owned and GitHub refused
+ * the queue ruleset with HTTP 422. That refusal is recorded by a dedicated marker, the repository
+ * variable GRAPHYARD_MERGE_QUEUE_REFUSED, which every 422 fallback writes beside allow_auto_merge
+ * (GY-350, GY-459), so a later plan, apply or install reads the settled mode back from GitHub
+ * instead of retrying the refused ruleset. An organization repository that allows auto-merge
+ * without the marker enabled it on its own, so it is given its one queue attempt; only when the
+ * marker could not be read does allow_auto_merge alone stand for the refusal, as it did before the
+ * marker existed. Unread settings keep the queue, the mode every earlier protection planned.
  */
 export function mergeMode(settings: RepositoryMergeSettings | null, rules: unknown): MergeMode {
   if (Array.isArray(rules) && rules.some((rule: any) => rule?.type === 'merge_queue')) return 'queue';
   if (!settings) return 'queue';
   if (settings.ownerType !== 'Organization') return 'auto-merge';
-  return settings.allowAutoMerge ? 'auto-merge' : 'queue';
+  if (settings.queueRefused === true) return 'auto-merge';
+  return settings.allowAutoMerge && settings.queueRefused !== false ? 'auto-merge' : 'queue';
+}
+/** The repository variable that records GitHub refusing Graphyard's merge-queue ruleset (GY-459). */
+export const queueRefusalVariable = 'GRAPHYARD_MERGE_QUEUE_REFUSED';
+/** The `gh` arguments that read the refusal marker; GitHub answers 404 when it was never written. */
+export const readQueueRefusalArgs = (repository: string) => ['api', `repos/${repository}/actions/variables/${queueRefusalVariable}`];
+/** The `gh` arguments that create the refusal marker, and those that overwrite one already there. */
+export const recordQueueRefusalArgs = (repository: string, update = false) => update
+  ? ['api', '--method', 'PATCH', `repos/${repository}/actions/variables/${queueRefusalVariable}`, '-f', `name=${queueRefusalVariable}`, '-f', 'value=HTTP 422']
+  : ['api', '--method', 'POST', `repos/${repository}/actions/variables`, '-f', `name=${queueRefusalVariable}`, '-f', 'value=HTTP 422'];
+/** Whether a failed read is GitHub answering that the resource does not exist (HTTP 404). */
+export function notFound(detail: string) { return /\bHTTP 404\b|\(404\)|\b404 Not Found/i.test(detail); }
+/** Whether the repository carries the refusal marker: null when GitHub did not say either way. */
+export function readQueueRefusal(repository: string, run: ProtectionRun = protectionRun): boolean | null {
+  try { run('gh', readQueueRefusalArgs(repository)); return true; } catch (error: any) { return notFound(`${error?.message ?? ''}\n${error?.stderr ?? ''}`) ? false : null; }
+}
+/** Record GitHub's refusal of the queue ruleset in the repository itself, creating or overwriting the marker. */
+export function recordQueueRefusal(repository: string, run: ProtectionRun = protectionRun) {
+  try { run('gh', recordQueueRefusalArgs(repository)); } catch { run('gh', recordQueueRefusalArgs(repository, true)); }
 }
 /** Whether a failed queue ruleset write is GitHub refusing merge queues on this repository (HTTP 422). */
 export function queueRulesetRefused(detail: string) { return /\bHTTP 422\b|\(422\)|\b422 Unprocessable/i.test(detail); }
@@ -245,7 +271,7 @@ export function readProtection(config: { repository: string; baseBranch: string 
   try { rules = JSON.parse(run('gh', ['api', `repos/${config.repository}/rules/branches/${encodeURIComponent(config.baseBranch)}`])); } catch { rules = null; }
   // Who owns the repository decides whether it can have a merge queue at all.
   let settings: RepositoryMergeSettings | null = null;
-  try { settings = repositoryMergeSettings(JSON.parse(run('gh', ['api', `repos/${config.repository}`]))); } catch { settings = null; }
+  try { settings = repositoryMergeSettings(JSON.parse(run('gh', ['api', `repos/${config.repository}`])), readQueueRefusal(config.repository, run)); } catch { settings = null; }
   // The queue ruleset's bypass actors are only on the ruleset's own document.
   let queueRuleset: unknown = null;
   try {
@@ -265,7 +291,7 @@ export function readProtection(config: { repository: string; baseBranch: string 
  * `master protection --apply`, which writes the queue ruleset once the App publishes the check.
  */
 export function ensureMergeMode(repository: string, run: ProtectionRun = protectionRun): { mode: MergeMode; enabled: boolean } {
-  const settings = repositoryMergeSettings(JSON.parse(run('gh', ['api', `repos/${repository}`])));
+  const settings = repositoryMergeSettings(JSON.parse(run('gh', ['api', `repos/${repository}`])), readQueueRefusal(repository, run));
   if (!settings) throw new Error(`GitHub did not report who owns ${repository}`);
   const mode = mergeMode(settings, null);
   if (mode === 'queue' || settings.allowAutoMerge) return { mode, enabled: false };
@@ -313,10 +339,12 @@ export async function applyProtection(config: { repository: string; baseBranch: 
   if (plan.mergeQueue && (!plan.mergeQueue.queue || !plan.mergeQueue.requiredCheck || plan.repairBypass?.configured === false)) {
     try { applyMergeQueue(config, run); } catch (error: any) {
       // GitHub refused the queue ruleset (HTTP 422): this repository cannot have a merge queue, so it
-      // merges through auto-merge. Switching auto-merge on records the settled mode in the repository
-      // itself (GY-350): the verify below re-plans from it, and no later plan or apply retries the write.
+      // merges through auto-merge. The refusal marker and allow_auto_merge record the settled mode in
+      // the repository itself (GY-350, GY-459): the verify below re-plans from them, and no later
+      // plan or apply retries the write.
       if (!queueRulesetRefused(`${error?.message ?? ''}\n${error?.stderr ?? ''}`)) throw error;
       queueRefused = true;
+      recordQueueRefusal(config.repository, run);
     }
   }
   if (queueRefused || (plan.autoMerge && !plan.autoMerge.enabled)) run('gh', enableAutoMergeArgs(config.repository));
