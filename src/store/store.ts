@@ -230,15 +230,15 @@ export class Store {
     return (await this.pool.query(`SELECT seq, work_id, actor, kind, ${resolvedPayloadSql()} AS payload, created_at FROM events WHERE ($1::uuid IS NULL OR work_id=$1) ORDER BY seq DESC LIMIT 300`, [id ?? null])).rows;
   }
   /**
-   * Claim the next due job. `woken` says the claim follows a webhook delivery (the generation
-   * moved since the job was last claimed) rather than the schedule its last run set: a woken job
-   * is observed at once whatever its cadence and whatever is left of the GitHub budget.
+   * Claim the next due job. `order` names work ids in claim-priority order (GY-492) — the
+   * merge-queue head and its batch, then items whose next action waits on an observation; the
+   * unnamed keep the available_at order. `woken` says the claim follows a webhook delivery, observed at once.
    */
-  async takeJob() {
+  async takeJob(order: string[] = []) {
     const token = randomUUID();
-    const result = await this.pool.query(`WITH picked AS (SELECT work_id, generation<>claimed_generation AS woken FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now()) ORDER BY available_at FOR UPDATE SKIP LOCKED LIMIT 1)
-      UPDATE jobs SET token=$1, locked_until=now()+interval '90 seconds', attempts=attempts+1,claimed_generation=generation
-      FROM picked WHERE jobs.work_id=picked.work_id RETURNING jobs.*, picked.woken`, [token]);
+    const result = await this.pool.query(`WITH picked AS (SELECT work_id, generation<>claimed_generation AS woken FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now()) ORDER BY array_position($1::uuid[], work_id), available_at FOR UPDATE SKIP LOCKED LIMIT 1)
+      UPDATE jobs SET token=$2, locked_until=now()+interval '90 seconds', attempts=attempts+1,claimed_generation=generation
+      FROM picked WHERE jobs.work_id=picked.work_id RETURNING jobs.*, picked.woken`, [order.length ? order : null, token]);
     return result.rows[0] as { work_id: string; token: string; attempts: number; woken: boolean } | undefined;
   }
   /**
