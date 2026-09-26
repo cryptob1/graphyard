@@ -321,7 +321,7 @@ test('dispatch starts a supervised worker with its runtime approval contract, an
     assert.deepEqual(optOutCalls, [], 'nothing reached Herdr'); assert.equal(prepared, false, 'nothing was claimed');
     const opencodeCalls: string[][] = [];
     await dispatchWork(root, ready(), { ...profile, kind: 'opencode', agentName: 'eng-opencode-1' }, [], (_command, args) => { opencodeCalls.push(args); return run(_command, args); }, [ready()], async () => ({ epoch: 6, path: join(root, 'assigned-3'), base: 'e'.repeat(40) }));
-    assert.ok(opencodeCalls[0].some(value => value.startsWith('OPENCODE_PERMISSION=')), 'runtimes configured by environment get their contract in the tab environment');
+    assert.ok(opencodeCalls.find(call => call[0] === 'tab')!.some(value => value.startsWith('OPENCODE_PERMISSION=')), 'runtimes configured by environment get their contract in the tab environment');
   } finally { await cleanup(); }
 });
 

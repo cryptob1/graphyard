@@ -15,7 +15,7 @@ import { sweepDirectMerges, type DirectMergeWindow } from '../src/direct-merge.j
 import { queueRef, type QueueSpeculation } from '../src/merge-queue.js';
 import { assertDispatchable } from '../src/master.js';
 import { actionReport, stalledActionAttention } from '../src/cli/master-status.js';
-import { plainStatus, stalledStep } from '../web/plain-status.js';
+import { plainStatus, stalledStep } from '../src/model/plain-status.js';
 import WorkCard from '../web/components/work-card.js';
 import { readMasterGuide } from './helpers/master-guide.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';

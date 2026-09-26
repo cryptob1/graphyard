@@ -14,7 +14,7 @@ import { statusRoutes } from '../src/server/routes/status.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { classify } from '../web/groups.js';
-import { releaseView } from '../web/release.js';
+import { releaseView } from '../src/model/release.js';
 import OverviewPage from '../web/pages/overview.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
 import { NOW, boardStatus, boardWork } from '../browser-tests/ui-board.js';
@@ -78,7 +78,7 @@ test('unit:board-api-matches-dashboard — GET /api/board gives each open item i
   };
   expect('GY-172', 'blocked', 'master', 'graphyard master scope GY-172');
   expect('GY-174', 'blocked', 'master', 'graphyard master decide GY-174 resolve REASON');
-  expect('GY-175', 'up-next', 'executor', null);
+  expect('GY-175', 'up-next', 'held', null);
   expect('GY-21', 'moving', 'executor', 'graphyard master merge GY-21');
   const request = work.find(item => item.key === 'GY-20')!.humanRequest!;
   expect('GY-20', 'needs-you', 'human-only', `graphyard answer GY-20 ${request.id} ANSWER`);
@@ -125,11 +125,17 @@ test('unit:master-status-board-owed — master status lists what the master owes
   const work = scenario();
   const { root, master, dispose } = await masterFixture();
   try {
-    const report = async (serveBoard: boolean) => masterStatusReport(root, master, async (path: string) =>
-      path === 'work-snapshot' ? { work, now: at(0) } : path === 'board' && serveBoard ? served(work) : { decisions: [] },
-    { actor: { id: 'coordinator-1' }, humanOnly: humanRows(work) }, { commit: null });
-    const status = await report(true);
-    const owed = status.board.owed;
+    const failing = (status: number) => Object.assign(new Error(JSON.stringify({ error: status === 404 ? 'Route not found' : 'Internal error' })), { status });
+    const report = async (board: 'served' | number) => masterStatusReport(root, master, async (path: string) => {
+      if (path === 'work-snapshot') return { work, now: at(0) };
+      if (path !== 'board') return { decisions: [] };
+      if (board === 'served') return served(work);
+      throw failing(board);
+    }, { actor: { id: 'coordinator-1' }, humanOnly: humanRows(work) }, { commit: null });
+    const status = await report('served');
+    const shown = status.board;
+    if ('error' in shown) assert.fail(shown.error);
+    const owed = shown.owed;
     const scope = owed.find(item => item.key === 'GY-172');
     assert.ok(scope, `the refused scope request is owed by the master: ${JSON.stringify(owed.map(item => item.key))}`);
     assert.equal(scope.command, 'graphyard master scope GY-172');
@@ -138,14 +144,20 @@ test('unit:master-status-board-owed — master status lists what the master owes
     // Only the master's items are in the owed list; everything else follows it, and nothing is dropped.
     assert.ok(owed.every(item => item.actor === 'master'));
     assert.ok(!owed.some(item => item.key === 'GY-21' || item.key === 'GY-20'), 'a merge the queue is running and a human-only decision are not the master\'s');
-    assert.ok(status.board.others.every(item => item.actor !== 'master'));
-    assert.ok(Object.keys(status.board).indexOf('owed') < Object.keys(status.board).indexOf('others'), 'the owed list comes first');
+    assert.ok(shown.others.every(item => item.actor !== 'master'));
+    assert.ok(Object.keys(shown).indexOf('owed') < Object.keys(shown).indexOf('others'), 'the owed list comes first');
     const board = await served(work);
-    assert.equal(owed.length + status.board.others.length, board.open);
-    assert.deepEqual(status.board.counts, board.counts);
+    assert.equal(owed.length + shown.others.length, board.open);
+    assert.deepEqual(shown.counts, board.counts);
     // A server that predates the route: the same module builds the same board from the snapshot and status.
-    const fallback = await report(false);
+    const fallback = await report(404);
     assert.deepEqual(fallback.board, status.board);
+    // Any other failure of the route is reported, not rebuilt around (GY-371): a 500 or an auth refusal surfaces.
+    for (const code of [500, 401]) {
+      const failed = (await report(code)).board;
+      assert.ok('error' in failed, `a ${code} is not papered over with a locally built board`);
+      assert.match(String(failed.error), /GET \/api\/board failed/, `a ${code} is reported`);
+    }
   } finally { await dispose(); }
 });
 
@@ -195,4 +207,15 @@ test('unit:dashboard-uses-board-api — the Work page renders the groups GET /ap
   assert.match(main, /api\('board'\)/, 'the refresh after an action fetches it too');
   assert.doesNotMatch(overview, /\bclassify\(|\bgroupOf\(|humanOnlyIds\(/, 'the Work page derives no group itself');
   assert.match(docs, /GET \/api\/board/, 'docs/dashboard.md documents the endpoint');
+});
+
+test('unit:server-does-not-import-web — the layering runs web → src only: no module under src imports from web/, so the runtime image needs no web tree (GY-371)', async () => {
+  const sources = execFileSync('git', ['ls-files', 'src'], { cwd: fileURLToPath(new URL('..', import.meta.url)), encoding: 'utf8' }).split('\n').filter(path => /\.tsx?$/.test(path));
+  const offenders: string[] = [];
+  for (const path of sources) {
+    const source = await readFile(new URL(`../${path}`, import.meta.url), 'utf8');
+    if (/(?:from\s+|import\(\s*)['"](?:\.\.\/)+web\//.test(source)) offenders.push(path);
+  }
+  assert.deepEqual(offenders, [], 'src imports nothing from web/');
+  assert.doesNotMatch(await readFile(new URL('../Dockerfile', import.meta.url), 'utf8'), /COPY web /, 'the runtime image does not copy web/');
 });

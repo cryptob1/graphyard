@@ -14,8 +14,8 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // @ts-expect-error Dependency-free fixture and screenshot script.
 import { fixtureApi, fixtureStatus, fixtureWork, NOW, visibleWords } from '../scripts/dashboard-fixture.mjs';
 import { live } from '../browser-tests/ui-board.js';
-import { OVERDUE_MINUTES, formatDuration, statusDuration } from '../web/duration.js';
-import { phaseOf, phaseLabel, statusHeld, statusSince } from '../web/plain-status.js';
+import { OVERDUE_MINUTES, formatDuration, statusDuration } from '../src/model/duration.js';
+import { phaseOf, phaseLabel, statusHeld, statusSince } from '../src/model/plain-status.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
 import OverviewPage from '../web/pages/overview.js';
 import { boardFromStatus } from '../src/model/board.js';
@@ -137,17 +137,17 @@ test('unit:overdue-threshold-applied — twenty-nine minutes is not red, thirty-
 
   // And the value is configured once rather than repeated per view: no other source carries a
   // threshold of its own, and each view reaches the verdict through the one call.
-  const sources = ['web/duration.ts', 'web/plain-status.ts', 'web/components/status-age.tsx', 'web/components/work-card.tsx', 'web/pages/work-details.tsx', 'web/pages/overview.tsx'];
+  const sources = ['src/model/duration.ts', 'src/model/plain-status.ts', 'web/components/status-age.tsx', 'web/components/work-card.tsx', 'web/pages/work-details.tsx', 'web/pages/overview.tsx'];
   const definitions: string[] = [];
   for (const path of sources) {
     const source = await read(path);
     if (/OVERDUE_MINUTES\s*=/.test(source)) definitions.push(path);
-    if (path === 'web/duration.ts') continue;
+    if (path === 'src/model/duration.ts') continue;
     // Outside the one definition, nothing compares a duration with a number of its own.
     assert.doesNotMatch(source.replace(/^\s*(\/\/|\*|\/\*).*$/gm, ''), /\bminutes\s*[<>]=?\s*\d/, `${path} judges nothing against its own number`);
     assert.doesNotMatch(source, /overdue\s*[:=]\s*(?!false\b)[^;,)]*\d/, `${path} derives overdue rather than computing it`);
   }
-  assert.deepEqual(definitions, ['web/duration.ts'], 'the threshold has one home');
+  assert.deepEqual(definitions, ['src/model/duration.ts'], 'the threshold has one home');
   // Every view reaches the verdict through the one call.
   for (const path of ['web/components/work-card.tsx', 'web/pages/work-details.tsx']) assert.match(await read(path), /stepHeld\(item, now, stepMoves(, release)?\)/);
   assert.match(await read('web/components/status-age.tsx'), /held\.overdue/);
