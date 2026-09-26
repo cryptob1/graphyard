@@ -1759,6 +1759,11 @@ export function waitsOnObservation(work: Work, all: Work[], now = new Date()): b
 }
 /** A submitted item the control plane has never read: its first observation is what every later gate waits on. */
 export const firstObservationOwed = (work: Work) => !!work.submission && !work.observation && !work.candidate && work.stage !== 'done';
+/** How many of the claim order's leading ids are the queue-head band, which no starved job overtakes. */
+export function observationHeadCount(all: Work[], batchSize: number, now = Date.now()): number {
+  const band = headClaimBand(batchSize);
+  return predictQueue(all, now).filter(placement => placement.position < band).length;
+}
 /**
  * The order observation jobs are claimed in (GY-492): merge-queue entries within the head band
  * first, in queue position, then submissions never observed, then items whose next action waits on
@@ -1825,7 +1830,7 @@ export async function processJob(engine: Engine, github: GitHub): Promise<boolea
   // due, the merge-queue head's job is claimed first however recently it became due, instead of
   // waiting behind every older entry for a worker to reach it.
   const all = await engine.store.list();
-  const job = await engine.store.takeJob(observationClaimOrder(all, engine.mergeBatchSize));
+  const job = await engine.store.takeJob(observationClaimOrder(all, engine.mergeBatchSize), observationHeadCount(all, engine.mergeBatchSize));
   if (!job) return false;
   const startedAt = Date.now();
   let work: Work | undefined;
