@@ -7,7 +7,7 @@ import { defaultPiModel, piRunner } from './runner/pi.js';
 import { roleSurfaces } from './runner/role-surface.js';
 import { herdrSurface, surfacePane } from './runner/herdr-surface.js';
 import { agentRuntimeRun } from './master/herdr.js';
-import { runLogFile, type LaunchedRun } from './session-tail.js';
+import { commandAccount, runLogFile, type LaunchedRun } from './session-tail.js';
 import type { Run, RunResult, Runner } from './runner/types.js';
 import { save } from './store.js';
 import type { Services } from './server/routes.js';
@@ -257,12 +257,12 @@ export function researchReviewSection(work: Pick<Work, 'key' | 'title' | 'descri
 // ---- The loop's step -----------------------------------------------------------------------------
 
 export interface ResearchStepAction { work: string; state: 'started' | 'done' | 'failed'; detail: string }
-interface LiveResearch { revision: string; run: Run<ResearchBrief>; settled: Promise<void>; startedAt: string; runtime: string }
+interface LiveResearch { revision: string; run: Run<ResearchBrief>; settled: Promise<void>; startedAt: string; runtime: string; account: string }
 const live = new Map<string, LiveResearch>();
 /** The research run this process has live for an item, if any. */
 export const researchRunning = (workId: string) => live.get(workId) ?? null;
 /** The research runs this process has live, as the loop's session-tail roster reads them (GY-713). */
-export const researchRuns = (): LaunchedRun[] => [...live.entries()].map(([work, entry]) => ({ name: `research-${entry.run.id.slice(0, 8)}`, work, role: 'research', runtime: entry.runtime,
+export const researchRuns = (): LaunchedRun[] => [...live.entries()].map(([work, entry]) => ({ name: `research-${entry.run.id.slice(0, 8)}`, work, role: 'research', runtime: entry.runtime, account: entry.account,
   startedAt: entry.startedAt, log: entry.run.log ?? null, pane: surfacePane(entry.run.id) }));
 /** Test seam: stop and forget every research run. */
 export function clearResearchRuns() { for (const entry of live.values()) entry.run.cancel('the research runs were cleared'); live.clear(); }
@@ -331,7 +331,7 @@ export async function researchStep(input: ResearchStepInput): Promise<{ held: Se
       if (streamed > input.settings.tokenBudget && !overBudget) { overBudget = true; run.cancel(`the run streamed about ${streamed} tokens, over its ${input.settings.tokenBudget}-token budget`); }
     });
     const settled = run.result().then(result => settleResearch(input, work, revision, result, overBudget)).catch(() => {}).finally(() => { if (live.get(work.id)?.run === run) live.delete(work.id); });
-    live.set(work.id, { revision, run, settled, startedAt: new Date().toISOString(), runtime: input.runner.name });
+    live.set(work.id, { revision, run, settled, startedAt: new Date().toISOString(), runtime: input.runner.name, account: commandAccount(input.settings.command) });
     actions.push({ work: work.key, state: 'started', detail: `Researching ${work.key} on ${input.settings.model} before build (at most ${input.settings.timeoutMinutes} minutes and ${input.settings.tokenBudget} tokens); dispatch waits for its brief` });
   }
   return { held, actions };

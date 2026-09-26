@@ -21,9 +21,13 @@ export async function closeStep(cycle: Cycle) {
   const { config, state, effects, now, snapshot, clock, performed, isolate, agents, open, owns, heldBy } = cycle;
   // 0. Live session tails (GY-713): the sessions this loop launched — the running handles this host
   //    registered, whose panes Herdr lists under their own names, and the headless runs this process
-  //    started — and nothing else, handed to the publisher that reads and publishes their tails.
-  effects.sessionTails?.observe(launchedTailSources(snapshot.work, agents, config.hostId, [...launchedRuns(), ...researchRuns()],
-    config.workers.filter(worker => worker.mode === 'launch').map(worker => ({ principal: worker.principal, agentName: worker.agentName }))));
+  //    started — and nothing else, handed to the publisher that reads and publishes their tails. A
+  //    pane's account is the one this host's environment log recorded choosing for its launch.
+  if (effects.sessionTails) {
+    const choices = await effects.sessionTails.accounts?.().catch(() => ({})) ?? {};
+    effects.sessionTails.observe(launchedTailSources(snapshot.work, agents, config.hostId, [...launchedRuns(), ...researchRuns()],
+      config.workers.filter(worker => worker.mode === 'launch').map(worker => ({ principal: worker.principal, agentName: worker.agentName })), choices));
+  }
   // 1. Close finished worker sessions. Authority stops at the lease, so a launched agent with no
   //    active assignment has nothing left to do and its pane must not linger holding a provider seat.
   for (const profile of config.workers.filter(worker => worker.mode === 'launch')) await isolate('close', null, profile.name, async () => {

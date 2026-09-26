@@ -1,7 +1,7 @@
 // Concern: live session tails (GY-713) — what the loop reads of the sessions it launched, and how
 // often it publishes that to the control plane for the dashboard's read-only viewer.
 import { mkdirSync, readdirSync, statSync, unlinkSync, openSync, readSync, closeSync, fstatSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { basename, resolve } from 'node:path';
 import { z } from 'zod';
 import { redactString } from './evidence-replay.js';
 import type { Work } from './model.js';
@@ -60,15 +60,22 @@ const logRetentionMs = 24 * 60 * 60_000;
 export function runLogFile(root: string, name: string, now = Date.now()) {
   const directory = runLogDirectory(root);
   mkdirSync(directory, { recursive: true, mode: 0o700 });
-  // A day of logs is kept; older ones are removed as new runs start, so the directory stays bounded.
+  // A day of logs is kept; older ones, and any sidecar a Herdr-surface run left, are removed as new
+  // runs start, so the directory stays bounded.
   try {
     for (const entry of readdirSync(directory)) {
       const path = resolve(directory, entry);
-      try { if (entry.endsWith('.log') && now - statSync(path).mtimeMs > logRetentionMs) unlinkSync(path); } catch { /* removed by another run */ }
+      try { if (/\.log(\.(sh|stderr|exit))?$/.test(entry) && now - statSync(path).mtimeMs > logRetentionMs) unlinkSync(path); } catch { /* removed by another run */ }
     }
   } catch { /* an unreadable directory keeps its logs */ }
   return resolve(directory, `${name.replace(/[^A-Za-z0-9._-]/g, '-')}-${now}.log`);
 }
+
+/**
+ * The account a headless run on no registry account is on, as the live view names it: the login of
+ * the environment wrapper (`pi-a`) or runtime binary it runs through.
+ */
+export const commandAccount = (command: string) => `${basename(command.trim().split(/\s+/)[0] || 'pi')} login`;
 
 /** Where a session's tail is read from: a Herdr pane, or a headless run's log. */
 export const tailSurfaces = ['herdr', 'headless'] as const;
@@ -82,20 +89,34 @@ export interface TailSource {
   role: TailRole; runtime: string; account: string | null;
   /** The identity the session works as, when its handle names one. */
   principal: string | null;
-  startedAt: string;
+  /** When the session started; null when its launcher recorded no start. */
+  startedAt: string | null;
   /** Where a Herdr pane is read from, or the log a headless run writes. */
   surface: { kind: 'herdr'; pane: string } | { kind: 'headless'; log: string };
   attach: string | null; transcript: string | null;
 }
 
 /** A headless run this process started, as the run registry and the research step hold it. */
-export interface LaunchedRun { name: string; work: string; role: TailRole; runtime: string; account?: string | null; startedAt: string; log: string | null; pane?: string | null }
+export interface LaunchedRun { name: string; work: string; role: TailRole; runtime: string; account?: string | null; startedAt: string | null; log: string | null; pane?: string | null }
 
 const handleRole = (kind: string, role: string | null): TailRole => {
   const slot = (role ?? '').split(/[:\s]/)[0];
   if (['worker', 'reviewer', 'producer', 'approver', 'doctor', 'research'].includes(slot)) return slot as TailRole;
   return kind === 'implementation' ? 'worker' : kind === 'review' ? 'reviewer' : kind === 'proof' ? 'producer' : 'coordination';
 };
+
+/** One launch's account choice, as the host's environment log records it under `role:profile`. */
+export interface AccountChoice { environment: string | null; at: string; work: string | null }
+/**
+ * The account a Herdr session was launched on: the host's latest recorded choice for its role and
+ * item made no later than it started; a choice of no named account is its profile's own login.
+ */
+export function chosenAccount(choices: Readonly<Record<string, AccountChoice>>, item: Pick<Work, 'id' | 'key'>, role: TailRole, startedAt: string | null): string | null {
+  const started = startedAt ? Date.parse(startedAt) : Number.POSITIVE_INFINITY;
+  const found = Object.entries(choices).filter(([key, choice]) => key.startsWith(`${role}:`) && (choice.work === item.key || choice.work === item.id) && !(Date.parse(choice.at) > started + 60_000))
+    .sort((a, b) => Date.parse(b[1].at) - Date.parse(a[1].at))[0];
+  return found ? found[1].environment ?? `${found[0].slice(role.length + 1)} own login` : null;
+}
 
 /**
  * The sessions this loop may read, and nothing else. A Herdr pane qualifies only through a running
@@ -104,20 +125,25 @@ const handleRole = (kind: string, role: string | null): TailRole => {
  * only when this process started it. `runs` name their item by key or id.
  */
 export function launchedTailSources(work: readonly Work[], agents: readonly { name?: string; pane_id?: string }[], hostId: string, runs: readonly LaunchedRun[] = [],
-  profiles: readonly { principal: string; agentName: string }[] = []): TailSource[] {
-  const sources: TailSource[] = [], seen = new Set<string>();
+  profiles: readonly { principal: string; agentName: string }[] = [], choices: Readonly<Record<string, AccountChoice>> = {}): TailSource[] {
+  const sources: TailSource[] = [], seen = new Set<string>(), read = new Set<string>();
   for (const item of work) {
     for (const handle of item.sessions ?? []) {
       if (handle.state !== 'running' || handle.host !== hostId || !handle.launch) continue;
       // A worker's handle is registered by its supervisor without Herdr coordinates: the pane is the
-      // one Herdr lists under the name of the launch profile this loop runs that principal on.
+      // one Herdr lists under the name of the launch profile this loop runs that principal on — and
+      // only while the handle's attempt holds the item's lease, since the profile's pane moves on to
+      // the principal's next item while an earlier handle may still read as running.
+      const byProfile = !handle.agentName;
+      if (byProfile && (item.lease?.owner !== handle.principal || item.lease?.epoch !== handle.epoch)) continue;
       const name = handle.agentName ?? profiles.find(profile => profile.principal === handle.principal)?.agentName;
       const agent = name ? agents.find(entry => entry.name === name && !!entry.pane_id && (!handle.pane || entry.pane_id === handle.pane)) : undefined;
-      if (!name || !agent?.pane_id) continue;
+      if (!name || !agent?.pane_id || read.has(agent.pane_id)) continue;
       const id = `${item.id}/${name}`;
       if (seen.has(id)) continue;
-      seen.add(id);
-      sources.push({ work: item.id, session: name, role: handleRole(handle.kind, handle.role), runtime: handle.runtime, account: null, principal: handle.principal, startedAt: handle.startedAt,
+      seen.add(id); read.add(agent.pane_id);
+      const role = handleRole(handle.kind, handle.role);
+      sources.push({ work: item.id, session: name, role, runtime: handle.runtime, account: chosenAccount(choices, item, role, handle.startedAt), principal: handle.principal, startedAt: handle.startedAt,
         surface: { kind: 'herdr', pane: agent.pane_id }, attach: handle.attach, transcript: handle.transcript });
     }
   }
@@ -179,6 +205,8 @@ export class SessionTailPublisher {
     this.timer.unref?.();
   }
   stop() { if (this.timer) clearInterval(this.timer); this.timer = null; }
+  /** Whether the refresh timer runs: only while the roster holds a session. */
+  get running() { return this.timer !== null; }
 
   /** The sessions due now: watched ones after 3 s, the rest after 30 s. */
   due(now: number) {
@@ -214,6 +242,29 @@ export class SessionTailPublisher {
   }
 }
 
+/** The loop's session-tail effect: what a cycle hands its roster to, and where a pane's account is read. */
+export interface SessionTailEffect {
+  observe: (sources: TailSource[]) => void;
+  /** The host's recorded account choices (`role:profile`), for naming a pane's account. */
+  accounts?: () => Promise<Readonly<Record<string, AccountChoice>>>;
+}
+/**
+ * The effect the loop runs: one publisher for the process, created on the first roster, whose one
+ * timer runs while the roster holds a session and stops when it is empty.
+ */
+export function tailPublisherEffect(host: () => string, deps: TailPublisherDeps, accounts?: SessionTailEffect['accounts']): SessionTailEffect & { publisher: () => SessionTailPublisher | null } {
+  let tails: SessionTailPublisher | null = null;
+  return {
+    observe: sources => {
+      tails ??= new SessionTailPublisher(host(), deps);
+      tails.observe(sources);
+      if (sources.length) tails.start(); else tails.stop();
+    },
+    ...(accounts ? { accounts } : {}),
+    publisher: () => tails,
+  };
+}
+
 /*
  * The control plane's side (routes/work.ts serves it): tails are transient runtime output, not
  * coordination state. They are held in memory beside the engine, bounded in count and size, dropped
@@ -229,7 +280,7 @@ const text = (max: number) => z.string().max(max);
 const tailSchema = z.object({
   work: text(120).min(1), session: text(200).min(1),
   role: z.enum(['worker', 'reviewer', 'producer', 'approver', 'doctor', 'research', 'coordination']),
-  runtime: text(80), account: text(200).nullable(), principal: text(200).nullable(), startedAt: text(40),
+  runtime: text(80), account: text(200).nullable(), principal: text(200).nullable(), startedAt: text(40).nullable(),
   surface: z.enum(tailSurfaces),
   attach: text(500).nullable(), transcript: text(1000).nullable(),
   lines: z.array(z.string()).max(sessionTailLines), readAt: text(40), error: text(500).nullable(),

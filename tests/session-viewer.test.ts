@@ -1,13 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { readdirSync, utimesSync, writeFileSync } from 'node:fs';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { Work } from '../src/model.js';
-import { idleRefreshMs, launchedTailSources, runLogFile, SessionTailPublisher, SessionTails, sessionTailLines, tailLines, tailWatchMs, watchedRefreshMs, type PublishedTail } from '../src/session-tail.js';
+import { chosenAccount, commandAccount, idleRefreshMs, launchedTailSources, runLogFile, SessionTailPublisher, SessionTails, sessionTailLines, tailLines, tailWatchMs, watchedRefreshMs, type PublishedTail } from '../src/session-tail.js';
 import { workRoutes } from '../src/server/routes/work.js';
 import { matchRoute } from '../src/server/routes.js';
 import { masterRunSchema } from '../src/master/profiles.js';
@@ -16,7 +17,9 @@ import { roleSurface } from '../src/runner/role-surface.js';
 import { headlessSurface } from '../src/runner/surface.js';
 import { herdrSurface, surfacePane } from '../src/runner/herdr-surface.js';
 import { piRunner } from '../src/runner/pi.js';
-import SessionViewer, { LiveSessions } from '../web/session-viewer.js';
+import { startNarrowRun } from '../src/runner/roles.js';
+import { clearRuns, launchedRuns } from '../src/runner/registry.js';
+import SessionViewer, { LiveSessions, sessionLine } from '../web/session-viewer.js';
 
 // GY-713: watching any running agent session from the dashboard. The loop publishes a bounded,
 // redacted tail of every session it launched (and of nothing else) at a cadence that follows the
@@ -27,7 +30,7 @@ const token = 'ghp_abcdefghijklmnopqrstuvwxyz0123456789';
 const handle = (overrides: Record<string, unknown>) => ({ id: 'h', kind: 'review', principal: 'reviewer-a', epoch: null, runtime: 'claude', host: HOST, workspace: 'w1', tab: null, pane: 'p-review', agentName: 'gy-7-review',
   role: 'review', head: null, attach: 'herdr pane attach p-review', transcript: '/t/review.jsonl', subject: 'Review GY-7', startedAt: new Date(T0).toISOString(), updatedAt: new Date(T0).toISOString(), endedAt: null,
   state: 'running', outcome: null, launch: 'abcdef0123456789', ...overrides });
-const item = (sessions: unknown[]) => ({ id: 'work-7', key: 'GY-7', sessions } as unknown as Work);
+const item = (sessions: unknown[], extra: Record<string, unknown> = {}) => ({ id: 'work-7', key: 'GY-7', sessions, ...extra } as unknown as Work);
 
 test('unit:session-tail-published — the tail is the last 200 lines, stripped of terminal control sequences and redacted by the evidence redaction', () => {
   const text = [...Array.from({ length: 250 }, (_, index) => `line ${index + 1}`), `\u001b[31mexport GH_TOKEN=${token}\u001b[0m`, `Authorization: Bearer ${token}`, ''].join('\r\n');
@@ -45,11 +48,13 @@ test('unit:session-tail-published — only sessions this loop launched are sourc
   const work = [item([
     handle({}),
     // A worker's handle carries no Herdr coordinates; its pane is the loop's launch profile's.
-    handle({ id: 'graphyard-claude-1:3', kind: 'implementation', principal: 'graphyard-claude-1', agentName: null, pane: null, role: null, attach: null, transcript: null }),
+    handle({ id: 'graphyard-claude-1:3', kind: 'implementation', principal: 'graphyard-claude-1', epoch: 3, agentName: null, pane: null, role: null, attach: null, transcript: null }),
     handle({ id: 'other', agentName: 'other-host', pane: 'p-other', host: 'host-b' }),
     handle({ id: 'no-token', agentName: 'no-token', pane: 'p-no-token', launch: undefined }),
     handle({ id: 'ended', agentName: 'operator-shell', pane: 'p-operator', state: 'finished' }),
-  ])];
+  ], { lease: { owner: 'graphyard-claude-1', epoch: 3, expiresAt: new Date(T0 + 60_000).toISOString() } }),
+    // The same principal's earlier item: its handle still reads running, but the profile's pane has moved on to GY-7.
+    { ...item([handle({ id: 'graphyard-claude-1:1', kind: 'implementation', principal: 'graphyard-claude-1', epoch: 1, agentName: null, pane: null, role: null })]), id: 'work-5', key: 'GY-5' } as unknown as Work];
   const sources = launchedTailSources(work, agents, HOST, [{ name: 'gy-7-approver', work: 'GY-7', role: 'approver', runtime: 'pi', startedAt: new Date(T0).toISOString(), log: '/logs/approver.log' },
     { name: 'gy-9-producer', work: 'GY-9', role: 'producer', runtime: 'pi', startedAt: new Date(T0).toISOString(), log: '/logs/other.log' }], [{ principal: 'graphyard-claude-1', agentName: 'graphyard-claude-1' }]);
   assert.deepEqual(sources.map(source => [source.session, source.role, source.surface]), [
@@ -199,6 +204,8 @@ test('unit:headless-surface-configurable — with surface herdr the run starts i
     const runner = piRunner({ command: process.execPath, commandArgs: [script], model: 'm', environment: { FAKE_ACCOUNT: 'pi-a' }, log: () => log,
       surface: herdrSurface({ run: herdr, workspace: 'w1', label: 'Approver · gy-7-approver', pollMs: 50 }) });
     const run = runner.start('Judge', { cwd: directory, tool: 'graphyard_decide', validate: payload => payload as any, timeoutMs: 15_000 });
+    let livePane: string | null = null;
+    run.onEvent(() => { livePane ??= surfacePane(run.id); });
     const result = await run.result();
     assert.equal(result.ok, true, JSON.stringify(result));
     assert.deepEqual(result.ok && result.payload, { ok: true, account: 'pi-a', leaked: [] }, 'the pane run has the account environment and none of the loop identity');
@@ -206,13 +213,15 @@ test('unit:headless-surface-configurable — with surface herdr the run starts i
     assert.deepEqual([created[created.indexOf('--workspace') + 1], created[created.indexOf('--label') + 1]], ['w1', 'Approver · gy-7-approver']);
     assert.ok(created.includes('FAKE_ACCOUNT=pi-a'), 'the environment travels on Herdr\'s command line, not typed into the pane');
     assert.deepEqual(calls.filter(args => args[0] === 'pane' && args[1] === 'run').map(args => args[2]), ['p-run']);
-    assert.equal(surfacePane(run.id), 'p-run');
+    assert.equal(livePane, 'p-run', 'the run\'s pane is known while it runs');
+    assert.equal(surfacePane(run.id), null, 'and forgotten once it has settled');
+    assert.deepEqual(readdirSync(directory).filter(name => name.startsWith('run.log.')), [], 'the sidecars (script, stderr, exit status) are removed; the log stays');
     assert.equal(run.log, log);
     assert.match(await readFile(log, 'utf8'), /judging in a pane/, 'the pane tees its output into the per-run log');
     assert.ok(run.events.some(event => event.kind === 'stderr' && /a warning on stderr/.test(event.text)));
     assert.ok(calls.some(args => args[0] === 'pane' && args[1] === 'close' && args[2] === 'p-run'), 'the pane is closed once the run has exited');
     // The live view reads it: a run in a pane is a Herdr source, a child run a headless one.
-    const sources = launchedTailSources([item([])], [], HOST, [{ name: 'gy-7-approver', work: 'GY-7', role: 'approver', runtime: 'pi', startedAt: new Date(T0).toISOString(), log, pane: surfacePane(run.id) }]);
+    const sources = launchedTailSources([item([])], [], HOST, [{ name: 'gy-7-approver', work: 'GY-7', role: 'approver', runtime: 'pi', startedAt: new Date(T0).toISOString(), log, pane: livePane }]);
     assert.deepEqual(sources.map(source => [source.surface, source.attach]), [[{ kind: 'herdr', pane: 'p-run' }, 'herdr pane attach p-run']]);
 
     // The default surface: a child of the loop, writing the same log.
@@ -220,5 +229,47 @@ test('unit:headless-surface-configurable — with surface herdr the run starts i
     const child = piRunner({ command: process.execPath, commandArgs: [script], model: 'm', log: () => childLog }).start('Judge', { cwd: directory, tool: 'graphyard_decide', validate: payload => payload as any, timeoutMs: 15_000 });
     assert.equal((await child.result()).ok, true);
     assert.match(await readFile(childLog, 'utf8'), /judging in a pane[\s\S]*a warning on stderr/);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('unit:session-viewer-read-only — every session names its account: a registry run the account it was started on, a Herdr session the account its launch recorded choosing, a run on no named account its login', async () => {
+  const run = { id: 'r-1', events: [], log: '/logs/producer.log', onEvent: () => () => {}, cancel: () => {}, result: () => new Promise(() => {}) } as any;
+  const runner = { name: 'pi', start: () => run };
+  // A registry-selected producer: the account is the one the launcher passed, carried through the run registry.
+  startNarrowRun({ runner, name: 'gy-7-producer', role: 'producer', work: 'GY-7', subject: 'p-1', prompt: 'Prove', options: {} as any, account: 'pi-b', apply: async () => [] });
+  startNarrowRun({ runner: { name: 'pi', start: () => ({ ...run, id: 'r-2', log: '/logs/approver.log' }) }, name: 'gy-7-approver', role: 'approver', work: 'GY-7', subject: 'd-1', prompt: 'Judge', options: {} as any, account: commandAccount('/usr/local/bin/pi-a --flag'), apply: async () => [] });
+  try {
+    const runs = launchedRuns().filter(entry => entry.work === 'GY-7');
+    assert.deepEqual(runs.map(entry => [entry.name, entry.account, typeof entry.startedAt]), [['gy-7-producer', 'pi-b', 'string'], ['gy-7-approver', 'pi-a login', 'string']]);
+    // A Herdr worker's account is the host's recorded choice for its role and item, made when it launched.
+    const choices = {
+      'worker:claude-1': { environment: 'claude-b', at: new Date(T0 - 60_000).toISOString(), work: 'GY-7' },
+      'worker:claude-2': { environment: 'claude-c', at: new Date(T0 - 60_000).toISOString(), work: 'GY-9' },
+      'reviewer:claude-review': { environment: null, at: new Date(T0 - 30_000).toISOString(), work: 'GY-7' },
+    };
+    const work = [item([handle({ id: 'worker-a:1', kind: 'implementation', principal: 'worker-a', agentName: 'gy-7-worker', pane: 'p-worker' }), handle({})])];
+    const sources = launchedTailSources(work, [{ name: 'gy-7-worker', pane_id: 'p-worker' }, { name: 'gy-7-review', pane_id: 'p-review' }], HOST, runs, [], choices);
+    assert.deepEqual(sources.map(source => [source.session, source.account]), [['gy-7-worker', 'claude-b'], ['gy-7-review', 'claude-review own login'], ['gy-7-producer', 'pi-b'], ['gy-7-approver', 'pi-a login']]);
+    // A choice recorded after the session started is another launch's.
+    assert.equal(chosenAccount({ 'worker:x': { environment: 'late', at: new Date(T0 + 10 * 60_000).toISOString(), work: 'GY-7' } }, work[0], 'worker', new Date(T0).toISOString()), null);
+    // The account reaches the dashboard: the list and the viewer show it; a run with no recorded start says so rather than "0s".
+    const tail = { work: 'work-7', session: 'gy-7-producer', role: 'producer', runtime: 'pi', account: 'pi-b', principal: null, startedAt: null, surface: 'headless', attach: null, transcript: '/logs/producer.log',
+      host: HOST, publishedAt: new Date(T0).toISOString(), readAt: new Date(T0).toISOString(), stale: false, error: null };
+    assert.equal(sessionLine(tail as any, T0), 'Proves requirements · pi · pi-b · running · start not recorded');
+    assert.equal(sessionLine({ ...tail, startedAt: new Date(T0 - 125_000).toISOString() } as any, T0), 'Proves requirements · pi · pi-b · running · started 2m ago');
+    assert.equal(launchedRuns().find(entry => entry.name === 'gy-7-producer')!.account, 'pi-b');
+  } finally { clearRuns(); }
+});
+
+test('unit:session-tail-published — per-run logs stay bounded: a day-old log and any sidecar a Herdr-surface run left are removed as new runs start; a live one stays', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'graphyard-runs-'));
+  try {
+    const old = runLogFile(directory, 'old', T0), fresh = runLogFile(directory, 'fresh', T0);
+    for (const path of [old, `${old}.sh`, `${old}.stderr`, `${old}.exit`, fresh]) writeFileSync(path, 'x');
+    for (const path of [old, `${old}.sh`, `${old}.stderr`, `${old}.exit`]) utimesSync(path, new Date(T0 - 2 * 86_400_000), new Date(T0 - 2 * 86_400_000));
+    utimesSync(fresh, new Date(T0), new Date(T0));
+    const next = runLogFile(directory, 'next', T0 + 60_000);
+    assert.deepEqual(readdirSync(join(directory, '.graphyard', 'runs')).sort(), [fresh.split('/').at(-1)]);
+    assert.match(next, /next-\d+\.log$/);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });

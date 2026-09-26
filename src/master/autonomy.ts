@@ -29,6 +29,7 @@ import { narrowRoleRuntime, piRuntimeSchema } from '../runner/payloads.js';
 import { applyDecision, approverRunOptions, narrowRunner, piApproverPrompt, registryRunner, runOutcome, startNarrowRun } from '../runner/roles.js';
 import type { Runner, RunRecord } from '../runner/types.js';
 import { headlessSurface } from '../runner/surface.js';
+import { commandAccount } from '../session-tail.js';
 import { autonomyPlan, autonomyReason, humanOnlyDecisions, masterHarness } from './harness.js';
 
 type AutonomyFetch = typeof fetch;
@@ -295,11 +296,11 @@ export const approverSessionId = (decision: string) => `approver:${decision}`;
  * treat as the run's worktree and let it remove files in. The directory goes when the run ends,
  * and a reclaim pass takes back one a dead master left behind.
  */
-async function startHeadlessApprover(root: string, config: MasterConfig, work: Work, decision: string, name: string, token: string, runner: Runner, headless: { fetcher?: typeof fetch; filesystem?: FilesystemProbe }) {
+async function startHeadlessApprover(root: string, config: MasterConfig, work: Work, decision: string, name: string, token: string, runner: Runner, account: string, headless: { fetcher?: typeof fetch; filesystem?: FilesystemProbe }) {
   const checkout = await allocateManagedCheckout(root, config, 'approval', work.key, work.candidate?.sha ?? '0'.repeat(40), randomUUID(), headless.filesystem);
   let started: ReturnType<typeof startNarrowRun>;
   try {
-    started = startNarrowRun({ runner, name, role: 'approver', work: work.key, subject: decision, checkout: checkout.directory,
+    started = startNarrowRun({ runner, name, role: 'approver', work: work.key, subject: decision, checkout: checkout.directory, account,
       prompt: piApproverWithAttestation(config, work, decision, root),
       options: approverRunOptions(checkout.directory, decision, { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: config.approver!.credentialFile, GRAPHYARD_HOST_ID: config.hostId }, piRuntimeSchema.parse(config.run.pi ?? {}).approverTimeoutMinutes * 60_000),
       apply: async result => result.ok ? [await applyDecision(config.url, token, work, result.payload, headless.fetcher)] : [] });
@@ -331,7 +332,7 @@ export async function launchApprover(root: string, work: Work, decision: string,
   const registry = explicitKind ? null : await selectFleetSession(config, 'approver', { name: approverProfile, principal: config.approver!.id }, await heldAwareProbe(config, { runtime: herdr, ...probe, work: work.key }));
   if (registry && registry.account.kind === 'pi') {
     let started: Awaited<ReturnType<typeof startHeadlessApprover>>;
-    try { started = await startHeadlessApprover(root, config, work, decision, name, token, headless.runner ?? registryRunner(registry.account, headlessSurface(root, config, 'approver', name)), headless); }
+    try { started = await startHeadlessApprover(root, config, work, decision, name, token, headless.runner ?? registryRunner(registry.account, headlessSurface(root, config, 'approver', name)), registry.account.name, headless); }
     catch (error) { await registry.release(`approver run for ${work.key} failed to start: ${failureText(error).slice(0, 300)}`); throw error; }
     // The run is the session: the registry's slot is given back the moment it ends.
     // Its outcome counts toward the account's runs without a result (GY-446).
@@ -343,7 +344,7 @@ export async function launchApprover(root: string, work: Work, decision: string,
       run: started.record, settled: settled as Promise<RunRecord> | undefined };
   }
   if (!registry && !explicitKind && narrowRoleRuntime(config.run, 'approver') === 'pi') {
-    const started = await startHeadlessApprover(root, config, work, decision, name, token, headless.runner ?? narrowRunner(config.run.pi, headlessSurface(root, config, 'approver', name)), headless);
+    const started = await startHeadlessApprover(root, config, work, decision, name, token, headless.runner ?? narrowRunner(config.run.pi, headlessSurface(root, config, 'approver', name)), commandAccount(piRuntimeSchema.parse(config.run.pi ?? {}).command), headless);
     return { agentName: name, work: work.key, decision, identity: config.approver!.id, pane: null as string | null, runtime: 'pi' as const, delivery: 'request' as RequestDelivery, focusChanged: false, session: null, account: null,
       run: started.record, settled: started.settled as Promise<RunRecord> | undefined };
   }

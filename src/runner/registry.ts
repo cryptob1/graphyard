@@ -18,8 +18,8 @@ export interface RegisteredRun {
   run: Run<unknown>;
   /** The managed directory the run works in, when it was given one (the approver's, GY-391): a reclaim pass leaves it while the run lives. */
   checkout?: string;
-  /** The runner's name and when the run started, for the live session view (GY-713). */
-  runtime?: string; startedAt?: string;
+  /** The runner's name, the account it runs on and when it started, for the live session view (GY-713). */
+  runtime?: string; account?: string | null; startedAt?: string;
   /** Filled in when the run ends and its payload was applied. */
   record: RunRecord | null;
   endedAt: number | null;
@@ -63,7 +63,7 @@ export function withRunnerAgents<A extends { name?: string }>(agents: A[]): (A |
 export function launchedRuns(): LaunchedRun[] {
   prune();
   return [...runs.values()].filter(entry => entry.endedAt === null).map(entry => ({ name: entry.name, work: entry.work, role: entry.role, runtime: entry.runtime ?? 'pi',
-    startedAt: entry.startedAt ?? new Date().toISOString(), log: entry.run.log ?? null, pane: surfacePane(entry.run.id) }));
+    account: entry.account ?? null, startedAt: entry.startedAt ?? null, log: entry.run.log ?? null, pane: surfacePane(entry.run.id) }));
 }
 
 /** Test seam: forget every run. */

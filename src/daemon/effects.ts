@@ -37,7 +37,7 @@ import { observeDeployment } from './deployment.js';
 import { serverCallName, timedCall, timedFetch, timedRun } from '../master/timings.js';
 import type { RunRecord, Runner } from '../runner/types.js';
 import type { ResearchEvent } from '../research.js';
-import { SessionTailPublisher, type TailSource } from '../session-tail.js';
+import { tailPublisherEffect, type SessionTailEffect } from '../session-tail.js';
 
 /** A reviewer or producer session a launch ledger holds as pending, as the failover step reads it. */
 export interface LaunchedSession { role: 'reviewer' | 'producer'; record: string; profile: string; agentName: string; pane: string | null; work: string; requestId: string | null }
@@ -194,7 +194,7 @@ export interface DaemonEffects {
    * (`launchedTailSources`); it reads and publishes their tails beside the cycles, every 3 s while a
    * dashboard viewer watches one and every 30 s otherwise. A loop wired without it publishes none.
    */
-  sessionTails?: { observe: (sources: TailSource[]) => void };
+  sessionTails?: SessionTailEffect;
   research?: { cwd: string; runner?: Runner };
   /** The reviewer and producer sessions the launch ledgers hold as pending. */
   launchedSessions?: () => Promise<LaunchedSession[]>;
@@ -493,18 +493,11 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     if (!response.ok) throw new Error(`Graphyard refused ${path} (${response.status}): ${(result as any)?.error ?? ''}`);
     return result as any;
   };
-  let tails: SessionTailPublisher | null = null;
-  const sessionTails = {
-    observe: (sources: TailSource[]) => {
-      tails ??= new SessionTailPublisher(current().hostId, {
-        readPane: async (pane, lines) => tailRun('herdr', ['pane', 'read', pane, '--source', 'recent-unwrapped', '--lines', String(lines), '--format', 'text']),
-        publish: (host, batch) => asTailPublisher('POST', 'session-tails', { host, tails: batch }),
-        watched: async () => (await asTailPublisher('GET', 'session-tails/watched')).watched ?? [],
-      });
-      tails.observe(sources);
-      if (sources.length) tails.start(); else tails.stop();
-    },
-  };
+  const sessionTails = tailPublisherEffect(() => current().hostId, {
+    readPane: async (pane, lines) => tailRun('herdr', ['pane', 'read', pane, '--source', 'recent-unwrapped', '--lines', String(lines), '--format', 'text']),
+    publish: (host, batch) => asTailPublisher('POST', 'session-tails', { host, tails: batch }),
+    watched: async () => (await asTailPublisher('GET', 'session-tails/watched')).watched ?? [],
+  }, async () => (await readEnvironmentLog(current())).selected ?? {});
   return {
     sessionTails,
     agents: () => listHerdrAgents(run).catch(() => []),

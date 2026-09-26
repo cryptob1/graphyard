@@ -13,7 +13,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 
 export interface TailSummary {
   work: string; session: string; role: string; runtime: string; account: string | null; principal: string | null;
-  startedAt: string; surface: 'herdr' | 'headless'; attach: string | null; transcript: string | null;
+  startedAt: string | null; surface: 'herdr' | 'headless'; attach: string | null; transcript: string | null;
   host: string; publishedAt: string; readAt: string; stale: boolean; error: string | null; lineCount?: number;
 }
 export interface Tail extends TailSummary { lines: string[] }
@@ -32,7 +32,12 @@ export function sessionAge(iso: string, now: number) {
   const minutes = Math.floor(seconds / 60);
   return minutes < 60 ? `${minutes}m` : `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, '0')}m`;
 }
+/** How long a session has run, or that its launcher recorded no start. */
+const startedText = (startedAt: string | null, now: number) => startedAt ? `started ${sessionAge(startedAt, now)} ago` : 'start not recorded';
 const stateOf = (tail: TailSummary) => tail.stale ? 'not seen recently' : 'running';
+/** A session's role, runtime, account, state and age, as one line. */
+export const sessionLine = (tail: TailSummary, now: number) =>
+  `${roleWords[tail.role] ?? tail.role} · ${tail.runtime} · ${tail.account ?? tail.principal ?? 'account not recorded'} · ${stateOf(tail)} · ${startedText(tail.startedAt, now)}`;
 
 /**
  * The live terminal view of one session: its last lines, following the end as they arrive unless
@@ -61,7 +66,7 @@ export default function SessionViewer({ api, work, session, onClose, pollMs = vi
   return <section className="session-viewer" role="region" aria-label={`Live view of ${session}`} data-session={session}>
     <div className="session-viewer-head">
       <div><h2>{session}</h2>
-        {tail && <p className="muted">{roleWords[tail.role] ?? tail.role} · {tail.runtime}{tail.account || tail.principal ? ` · ${tail.account ?? tail.principal}` : ''} · {stateOf(tail)} · started {sessionAge(tail.startedAt, now)} ago · updated {sessionAge(tail.readAt, now)} ago on {tail.host}</p>}</div>
+        {tail && <p className="muted">{sessionLine(tail, now)} · updated {sessionAge(tail.readAt, now)} ago on {tail.host}</p>}</div>
       <button type="button" className="text-button" onClick={onClose}>Close</button>
     </div>
     <p className="muted session-viewer-note">Read-only live view. Nothing typed here reaches the session; attach locally to act on it.</p>
@@ -95,7 +100,7 @@ export function LiveSessions({ api, work, title = 'Live sessions' }: { api: Api;
     {tails && !tails.length && <p className="muted">No running session has a live view yet. The loop that launches a session publishes its tail within 30 seconds.</p>}
     {!!tails?.length && <ul className="live-session-list">{tails.map(tail => <li key={`${tail.work}/${tail.session}`} data-live-session={tail.session}>
       <span className="live-session-name mono">{tail.session}</span>
-      <span>{roleWords[tail.role] ?? tail.role} · {tail.runtime} · {tail.account ?? tail.principal ?? 'account not recorded'} · {stateOf(tail)} · started {sessionAge(tail.startedAt, now)} ago</span>
+      <span>{sessionLine(tail, now)}</span>
       <button type="button" className="text-button watch" onClick={() => setOpen({ work: tail.work, session: tail.session })}>Watch live</button>
     </li>)}</ul>}
     {open && <SessionViewer api={api} work={open.work} session={open.session} onClose={() => setOpen(null)}/>}

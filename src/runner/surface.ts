@@ -13,6 +13,6 @@ export function headlessSurface(root: string, config: { run?: { approver?: { sur
   role: 'approver' | 'producer', name: string, run: ChildRun = agentRuntimeRun()): RunSurface {
   return {
     log: () => runLogFile(root, name),
-    ...(roleSurface(config.run, role) === 'herdr' ? { surface: herdrSurface({ run, workspace: config.herdrWorkspace ?? null, label: `${role === 'approver' ? 'Approver' : 'Producer'} · ${name}` }) } : {}),
+    ...(roleSurface(config.run, role) === 'herdr' ? { surface: herdrSurface({ run, root, workspace: config.herdrWorkspace ?? null, label: `${role === 'approver' ? 'Approver' : 'Producer'} · ${name}` }) } : {}),
   };
 }

@@ -1,11 +1,10 @@
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { resolve } from 'node:path';
+import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, rmSync, writeFileSync } from 'node:fs';
 import type { ChildProcess, spawn } from 'node:child_process';
 import type { ChildRun } from '../child-runner.js';
 import { createdHerdrTab, herdrJson } from '../master/herdr.js';
+import { runLogFile } from '../session-tail.js';
 
 /**
  * A headless role run inside a Herdr pane (GY-713, `run.<role>.surface = 'herdr'`). The run is the
@@ -28,12 +27,17 @@ export interface HerdrSurfaceOptions {
   label: string;
   /** How often the run's files are read back; 200 ms by default. */
   pollMs?: number;
+  /** The checkout whose managed runs directory holds the log of a run given none; the loop's working directory by default. */
+  root?: string;
 }
 
 /** A spawn for `PiRunnerOptions.surface`: it starts the command in a new Herdr tab and returns a child that mirrors it. */
 export function herdrSurface(options: HerdrSurfaceOptions) {
   return ({ id, log }: { id: string; log: string | null }): typeof spawn => ((command: string, args: readonly string[], spawnOptions: { cwd?: string; env?: NodeJS.ProcessEnv }) => {
-    const out = log ?? resolve(tmpdir(), `graphyard-run-${id}.log`), err = `${out}.stderr`, exit = `${out}.exit`, script = `${out}.sh`;
+    // A run given no log still writes one, in the managed runs directory where retention removes it.
+    const out = log ?? runLogFile(options.root ?? process.cwd(), `run-${id.slice(0, 8)}`), err = `${out}.stderr`, exit = `${out}.exit`, script = `${out}.sh`;
+    // The sidecars carry the command (with its prompt) and the run's stderr and status: they go once the run has settled; the log stays.
+    const removeSidecars = () => { for (const path of [err, exit, script]) rmSync(path, { force: true }); };
     const child = new EventEmitter() as ChildProcess & EventEmitter;
     const stdout = new PassThrough(), stderr = new PassThrough();
     Object.assign(child, { stdout, stderr, stdin: null, pid: undefined, exitCode: null, signalCode: null });
@@ -56,10 +60,12 @@ export function herdrSurface(options: HerdrSurfaceOptions) {
       closed = true;
       if (timer) clearInterval(timer);
       try { drain(out, stdout, 'out'); drain(err, stderr, 'err'); } catch { /* the files are gone */ }
+      try { removeSidecars(); } catch { /* removed already */ }
       Object.assign(child, { exitCode: code, signalCode: signal });
       stdout.end(); stderr.end();
       // The pane has shown the run through; the log keeps it.
       if (pane) void herdrJson(['pane', 'close', pane], options.run).catch(() => {});
+      panes.delete(id);
       setImmediate(() => child.emit('close', code, signal));
     };
     child.kill = ((signal: NodeJS.Signals = 'SIGTERM') => { if (!closed) finish(null, signal); return true; }) as ChildProcess['kill'];
@@ -77,9 +83,12 @@ export function herdrSurface(options: HerdrSurfaceOptions) {
         `{ ${[command, ...args].map(quote).join(' ')} 2>>${quote(err)} </dev/null; echo $? >${quote(exit)}; } | tee -a ${quote(out)}`, ''].join('\n'), { mode: 0o700 });
       const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(options.workspace ? ['--workspace', options.workspace] : []), '--cwd', spawnOptions.cwd ?? process.cwd(),
         '--label', options.label, ...set, '--no-focus'], options.run));
+      // A run cancelled or timed out while its tab was being created never starts: the new pane is closed unused.
+      if (closed) { void herdrJson(['pane', 'close', created.pane], options.run).catch(() => {}); return; }
       pane = created.pane;
       panes.set(id, pane);
       await herdrJson(['pane', 'run', pane, `sh ${quote(script)}`], options.run);
+      if (closed) return;
       timer = setInterval(() => {
         try {
           drain(out, stdout, 'out'); drain(err, stderr, 'err');
@@ -89,10 +98,12 @@ export function herdrSurface(options: HerdrSurfaceOptions) {
             setTimeout(() => finish(Number.isFinite(code) ? code : 1, null), options.pollMs ?? 200);
             if (timer) clearInterval(timer);
           }
-        } catch (error) { if (!closed) { closed = true; child.emit('error', error); } }
+        } catch (error) { if (!closed) { closed = true; if (timer) clearInterval(timer); panes.delete(id); child.emit('error', error); } }
       }, options.pollMs ?? 200);
     })().catch(error => {
       if (pane) void herdrJson(['pane', 'close', pane], options.run).catch(() => {});
+      panes.delete(id);
+      try { removeSidecars(); } catch { /* removed already */ }
       if (!closed) { closed = true; child.emit('error', error instanceof Error ? error : new Error(String(error))); }
     });
     return child;

@@ -17,6 +17,7 @@ import { narrowRoleRuntime, piRuntimeSchema } from './runner/payloads.js';
 import { liveRun, liveRunCheckouts, registeredRun } from './runner/registry.js';
 import { narrowRunner, piProducerPrompt, producerRunOptions, registryRunner, runOutcome, startNarrowRun, submitEvidence } from './runner/roles.js';
 import { runRecordSchema, type RunRecord, type Runner } from './runner/types.js';
+import { commandAccount } from './session-tail.js';
 import { headlessSurface } from './runner/surface.js';
 
 /**
@@ -385,7 +386,7 @@ async function launchHeadlessProducer(root: string, config: MasterConfig, work: 
   const environment = { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: profile.credentialFile, GRAPHYARD_HOST_ID: config.hostId, GRAPHYARD_PRODUCER: `${binding.key}@${binding.sha}` };
   let started: ReturnType<typeof startNarrowRun>;
   try {
-    started = startNarrowRun({ runner, name: session.agentName, role: 'producer', work: binding.key, subject: session.id,
+    started = startNarrowRun({ runner, name: session.agentName, role: 'producer', work: binding.key, subject: session.id, account: registry ? registry.account.name : commandAccount(pi.command),
       prompt: piProducerPrompt(config, binding, work.criteria, checkout, root),
       options: producerRunOptions(checkout.directory, binding, environment, timeoutMs),
       apply: async result => { const applied = []; for (const payload of result.payloads) applied.push(await submitEvidence(config.url, session.credential, { id: binding.id }, payload, via, dependencies.fetcher)); return applied; } });
