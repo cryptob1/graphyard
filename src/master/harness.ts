@@ -1,5 +1,6 @@
 // Concern: session and worker harness permissions, and starting the master session.
 import { lstat, mkdir } from 'node:fs/promises';
+import { mkdirSync } from 'node:fs';
 import { dirname, resolve, basename } from 'node:path';
 import { type ChildRun, defaultChildRun } from '../child-runner.js';
 import { nameForLaunch } from '../session-name.js';
@@ -13,7 +14,7 @@ import { type RequestDelivery, startAgentSession } from './launch.js';
 import { createdHerdrTab, type HerdrAgent, herdrJson, stopCreatedHerdrTab } from './herdr.js';
 import type { PreparedWorker } from './dispatch.js';
 import { worktreeRoot } from '../install/worktree-root.js';
-import { verificationEnvironment } from './verification-slots.js';
+import { verificationEnvironment, verificationSlotsDirectory } from './verification-slots.js';
 
 /**
  * The master's harness rules cover everything the master owns, not only the coordination loop:
@@ -146,6 +147,18 @@ async function repositoryCarriesClaudeSettings(root: string) {
 /** A session's verification slot variables (GY-612), or none when the managed worktree root cannot be written: master status reports that root. */
 export function sessionVerificationEnvironment(root: string, config: Pick<MasterConfig, 'repository' | 'run'>): Record<string, string> {
   try { return verificationEnvironment(worktreeRoot(root, config)); } catch { return {}; }
+}
+/**
+ * The lock directory every session must be able to write to take a slot, created now so a sandboxed
+ * runtime (Codex under workspace-write) can be granted it with `--add-dir`: without the grant its
+ * `mkdir slot-N` is refused and the run goes ahead unbounded. None when the root cannot be written.
+ */
+export function sessionSlotsGrant(root: string, config: Pick<MasterConfig, 'repository' | 'run'>): string[] {
+  // Only under a managed root that exists: setup creates and verifies it, and a launch never makes one.
+  let directory: string;
+  try { directory = verificationSlotsDirectory(worktreeRoot(root, config)); } catch { return []; }
+  try { mkdirSync(directory); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') return []; }
+  return [directory];
 }
 export async function prepareSessionHarness(root: string, config: MasterConfig, input: Omit<SessionHarnessInput, 'cliPath' | 'repository' | 'baseBranch' | 'credentialHome' | 'credentialDirectories'> & { profile: string; credentialFiles?: string[] }) {
   const plan = sessionHarnessPlan({ ...input, cliPath: config.cliPath, repository: config.repository, baseBranch: config.baseBranch, credentialHome: dirname(dirname(config.credentialFile)),

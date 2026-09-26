@@ -102,7 +102,7 @@ test('integration:managed-worktree-root — producer and reviewer checkouts are 
     assert.ok(existsSync(produced.checkout));
     assert.equal((await readProducerLedger(root)).producers[0].checkout, produced.checkout, 'the session record owns the checkout');
     const produceStart = launchOf(produceCalls).args;
-    assert.deepEqual(produceStart.slice(produceStart.indexOf('--add-dir'), -1), ['--add-dir', produced.checkout, '--add-dir', await sharedGitDirectory(root)]);
+    assert.deepEqual(produceStart.slice(produceStart.indexOf('--add-dir'), -1), ['--add-dir', produced.checkout, '--add-dir', await sharedGitDirectory(root), '--add-dir', join(managed, '.verification-slots')]);
     assert.equal(launchOf(produceCalls).stem, join(produced.checkout, '.graphyard/launch/produce-a'), 'the request file lives in the session\'s own checkout');
     const producerText = promptOf(produceCalls);
     assert.ok(producerText.includes(`git worktree add --detach ${join(produced.checkout, 'checkout')} ${H}`));
@@ -117,7 +117,7 @@ test('integration:managed-worktree-root — producer and reviewer checkouts are 
     assert.match(reviewed.checkout, /\/graphyard-review-gy-89-aaaaaaa-[0-9a-f]{8}$/);
     assert.equal((await readReviewLedger(root)).reviews[0].checkout, reviewed.checkout);
     const reviewStart = launchOf(reviewCalls).args;
-    assert.deepEqual(reviewStart.slice(reviewStart.indexOf('--add-dir'), -1), ['--add-dir', reviewed.checkout, '--add-dir', await sharedGitDirectory(root)]);
+    assert.deepEqual(reviewStart.slice(reviewStart.indexOf('--add-dir'), -1), ['--add-dir', reviewed.checkout, '--add-dir', await sharedGitDirectory(root), '--add-dir', join(managed, '.verification-slots')]);
     assert.ok(promptOf(reviewCalls).includes(`git worktree add --detach ${join(reviewed.checkout, 'checkout')} ${H}`));
     const plan = sessionHarnessPlan({ role: 'reviewer', kind: 'claude', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', credentialHome: scratch, credentialDirectories: [], pr: 88, checkout: join(reviewed.checkout, 'checkout') });
     assert.ok(plan.allow.some(entry => entry.rule === `Bash(git worktree add --detach ${join(reviewed.checkout, 'checkout')}:*)`), 'a reviewer may add a worktree at its allocated path and nowhere else');
@@ -231,7 +231,7 @@ test('integration:ephemeral-checkout-reclaim — every checkout is removed when 
     const unlucky = request();
     await assert.rejects(launchProducer(root, producing('GY-109', unlucky), unlucky, { ...config.producers[0], agentName: 'produce-gy-109' }, [], new Date().toISOString(), { run: broken, filesystem: durable }), /herdr pane run failed/);
     await assert.rejects(launchReview(root, work('GY-110'), 'reviewer-a', [], new Date().toISOString(), { run: broken, mint, filesystem: durable }), /herdr pane run failed/);
-    assert.deepEqual(await readdir(managed).catch(() => []), [], 'every resolved or failed launch is gone from the root');
+    assert.deepEqual(await readdir(managed).catch(() => []), ['.verification-slots'], 'every resolved or failed launch is gone from the root; the host verification lock directory stays');
 
     // A session that died with its master: a checkout no record owns. One live session is left
     // pending beside it, and a directory that is not Graphyard's sits in the same root.
@@ -297,7 +297,8 @@ test('integration:ephemeral-checkout-reclaim — every checkout is removed when 
     await rm(join(managed, 'operator-notes'), { recursive: true });
     const last = await allocateSessionCheckout(managed, 'proof', 'GY-115', H, randomUUID());
     await removeSessionCheckout(root, managed, last.directory);
-    assert.equal(existsSync(managed), false, 'an installation with no session leaves no directory behind');
+    assert.deepEqual(await readdir(managed), ['.verification-slots'], 'an installation with no session leaves nothing behind but the host verification lock directory (GY-612)');
+    assert.deepEqual(await readdir(join(managed, '.verification-slots')), [], 'and that holds no slot');
   } finally { await cleanup(); }
 });
 
@@ -434,7 +435,7 @@ test('unit:disk-exhaustion-message — a write that failed for want of room is r
     });
     await assert.rejects(launchReview(root, work('GY-88'), 'reviewer-a', [], new Date().toISOString(), { run: exhausted, mint: async () => ({ token: 'ghs_session_token_value', expiresAt: future(3_000_000) }), filesystem: durable }),
       new RegExp(`^Error: Launching the GY-88 reviewer session .* failed because the volume is full \\(ENOSPC\\) at ${managed}/graphyard-review-gy-88-aaaaaaa-[0-9a-f]{8}: .*graphyard master run --once`));
-    assert.equal(existsSync(managed), false);
+    assert.deepEqual(await readdir(managed).catch(() => []), ['.verification-slots'], 'no checkout is left behind, only the host verification lock directory');
   } finally { await cleanup(); }
 
   // And the loop records it that way: an action that failed for want of room carries its own

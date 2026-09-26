@@ -15,7 +15,8 @@ import { closedQuestionFor } from './model/closed-question.js';
 import { paneAlreadyGone, withPaneGone } from './request-settlement.js';
 import { narrowRoleRuntime, piRuntimeSchema } from './runner/payloads.js';
 import { liveRun, liveRunCheckouts, registeredRun } from './runner/registry.js';
-import { sessionVerificationEnvironment } from './master/harness.js';
+import { sessionSlotsGrant, sessionVerificationEnvironment } from './master/harness.js';
+import { withVerificationPath } from './master/verification-slots.js';
 import { narrowRunner, piProducerPrompt, producerRunOptions, registryRunner, runOutcome, startNarrowRun, submitEvidence } from './runner/roles.js';
 import { runRecordSchema, type RunRecord, type Runner } from './runner/types.js';
 
@@ -305,13 +306,13 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
     // session directory is allocated under the managed worktree root — durable storage with room
     // left, outside every worktree — and is the only place beside the Git directory it may write.
     const checkout = await allocateManagedCheckout(root, config, 'proof', binding.key, binding.sha, id, dependencies.filesystem);
-    const launch = accountLaunch(profile, selected.account, { writable: [checkout.directory, await sharedGitDirectory(root)].filter((path): path is string => !!path) });
+    const launch = accountLaunch(profile, selected.account, { writable: [checkout.directory, await sharedGitDirectory(root), ...sessionSlotsGrant(root, config)].filter((path): path is string => !!path) });
     // The producer loads its own role rules, never the master's. The harness follows the account's
     // runtime, so a cross-runtime failover keeps its role rules.
     let pane: string | undefined, tabId: string | undefined, delivery: RequestDelivery | undefined, consent: z.infer<typeof consentAnswerSchema>[] = [];
     try {
       const harness = await prepareSessionHarness(root, config, { role: 'producer', kind: launch.kind, profile: profile.name, credentialFiles: [profile.credentialFile] });
-      const environment = { ...harness.environment, ...launch.environment, GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: profile.credentialFile, GRAPHYARD_HOST_ID: config.hostId, GRAPHYARD_PRODUCER: `${binding.key}@${binding.sha}`,
+      const environment = { ...withVerificationPath(harness.environment, launch.environment), GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: profile.credentialFile, GRAPHYARD_HOST_ID: config.hostId, GRAPHYARD_PRODUCER: `${binding.key}@${binding.sha}`,
         GRAPHYARD_PRODUCER_BINDING: `${binding.key}@${binding.sha}@${binding.baseSha}@${binding.policyRevision}` };
       const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root,
         '--label', `${binding.key} ${binding.group} proofs · ${agentName}`, ...Object.entries(environment).flatMap(([name, value]) => ['--env', `${name}=${value}`]), '--no-focus'], dependencies.run));

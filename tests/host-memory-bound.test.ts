@@ -16,7 +16,10 @@ import { cycleFaults } from '../src/daemon/faults.js';
 import { memoryActionKey } from '../src/daemon/cycle-dispatch.js';
 import { emptyDispatchCursor, launchingKinds, runDispatchTick, runExecutorTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { hostMemoryAttention, hostMemoryFloor, hostMemoryHold, memoryConsumers, type HostMemoryReading } from '../src/master-resources.js';
-import { acquireVerificationSlot, defaultVerificationSlots, heavyCommand, heldSlots, verificationBin, verificationEnvironment, verificationSlotsDirectory } from '../src/master/verification-slots.js';
+import { acquireVerificationSlot, defaultVerificationSlots, heavyCommand, heldSlots, verificationBin, verificationEnvironment, verificationSlotsDirectory, withVerificationPath } from '../src/master/verification-slots.js';
+import { sessionSlotsGrant } from '../src/master/harness.js';
+import { accountLaunch } from '../src/master/environments.js';
+import { grantWorkerPaths, verifyWorkerSandbox } from '../src/worker-sandbox.js';
 
 /**
  * GY-612: concurrent agent test runs exhausted host memory. On a 62 GB host fourteen full suites
@@ -91,6 +94,42 @@ test('unit:host-verification-slots — heavy verification runs started by a sess
     }));
     assert.equal(most, 2);
     assert.ok(lines.some(line => line.includes('waits for a host verification slot')));
+  } finally { await rm(scratch, { recursive: true, force: true }); }
+});
+
+test('unit:host-verification-slots — a sandboxed session is granted the lock directory, and an account PATH keeps the wrappers first', async () => {
+  const scratch = await mkdtemp(join(tmpdir(), 'gy-slots-grant-'));
+  try {
+    // Codex under workspace-write refuses `mkdir slot-N` outside its grants, and the run would go
+    // ahead unbounded: every session role grants the lock directory, created before launch.
+    const managedRoot = join(scratch, 'managed'), directory = verificationSlotsDirectory(managedRoot), worktree = join(scratch, 'worktree');
+    const settings = { repository: 'owner/project', run: { worktreeRoot: managedRoot } } as unknown as MasterConfig;
+    assert.deepEqual(sessionSlotsGrant(scratch, settings), [], 'a launch never creates the managed root itself');
+    await mkdir(managedRoot);
+    const grant = sessionSlotsGrant(scratch, settings);
+    assert.deepEqual(grant, [directory]);
+    assert.deepEqual(sessionSlotsGrant(scratch, settings), [directory], 'an existing lock directory is granted again');
+    assert.ok(existsSync(directory), 'the lock directory exists before the sandbox is asked to grant it');
+
+    // Reviewer and producer: the reach accountLaunch adds to the Codex sandbox.
+    const launch = accountLaunch({ kind: 'codex', approvals: 'auto', agentArgs: [], environment: {} }, null, { writable: ['/checkout', ...grant] });
+    assert.equal(launch.args[launch.args.indexOf('--sandbox') + 1], 'workspace-write');
+    assert.ok(launch.args.some((arg, index) => arg === '--add-dir' && launch.args[index + 1] === directory), `reviewer/producer launch grants ${directory}: ${launch.args.join(' ')}`);
+
+    // Worker: its writable paths are granted and proved by the sandbox probe before it starts.
+    const args = grantWorkerPaths('codex', ['--sandbox', 'workspace-write'], [worktree, ...grant], worktree);
+    const probed: string[][] = [];
+    verifyWorkerSandbox({ kind: 'codex', args }, worktree, [worktree, ...grant], (command, probeArgs) => { probed.push(probeArgs); return 'writable\n'; });
+    assert.ok(probed[0].some(arg => arg.includes(`${JSON.stringify(directory)}="write"`)), 'the probe checks the lock directory is writable inside the sandbox');
+    assert.ok(probed[0].includes(directory), 'and writes into it');
+
+    // An account environment's own PATH never drops the wrappers.
+    const harness = verificationEnvironment(managedRoot, { PATH: '/usr/bin' });
+    const tab = withVerificationPath(harness, { PATH: '/account/bin:/usr/bin', OTHER: 'x' });
+    assert.deepEqual(tab.PATH.split(delimiter), [verificationBin, '/account/bin', '/usr/bin']);
+    assert.equal(tab.OTHER, 'x');
+    assert.equal(withVerificationPath(harness, {}).PATH, harness.PATH);
+    assert.equal(withVerificationPath({}, { PATH: '/account/bin' }).PATH, '/account/bin', 'no slots, no wrappers');
   } finally { await rm(scratch, { recursive: true, force: true }); }
 });
 

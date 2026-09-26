@@ -154,7 +154,7 @@ export function onPathOf(name: string, path: string) {
 /**
  * The wrapper directory a session's PATH starts with: `tsc` and `npx` scripts shipped in this
  * installation (bin/verification), each running bin/graphyard-verify.mjs with its command's name.
- * Nothing is written at launch: the lock directory itself is created by the first run that takes a slot.
+ * The lock directory is created at launch (sessionSlotsGrant) so a sandboxed runtime can be granted it.
  */
 export const verificationBin = fileURLToPath(new URL('../../bin/verification', import.meta.url));
 
@@ -162,6 +162,17 @@ export const verificationBin = fileURLToPath(new URL('../../bin/verification', i
 export function verificationEnvironment(managedRoot: string, environment: NodeJS.ProcessEnv = process.env): Record<string, string> {
   return { [slotsDirectoryVariable]: verificationSlotsDirectory(managedRoot), [slotsVariable]: String(configuredVerificationSlots(environment)),
     PATH: [verificationBin, pathWithout(environment.PATH, verificationBin)].filter(Boolean).join(delimiter) };
+}
+
+/**
+ * A session's tab environment: the harness's variables with the launch's own laid over them, except
+ * that a launch which sets its own PATH keeps the wrappers first on it, so an account environment
+ * never takes a session's `tsc` and `npx tsc` out of the bound.
+ */
+export function withVerificationPath(harness: Record<string, string>, launch: Record<string, string>): Record<string, string> {
+  const merged = { ...harness, ...launch };
+  if (harness[slotsDirectoryVariable] && launch.PATH !== undefined) merged.PATH = [verificationBin, pathWithout(launch.PATH, verificationBin)].filter(Boolean).join(delimiter);
+  return merged;
 }
 
 /**
