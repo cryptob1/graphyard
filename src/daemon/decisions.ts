@@ -7,6 +7,7 @@ import { unexercisedFindings } from '../auto-dispatch.js';
 import { decisionBindingMax } from '../model/approval.js';
 import { guardBroadScope, type MasterConfig, type ContainmentAssessment, containmentPhase, type HerdrAgent } from '../master.js';
 import { researchRework } from '../research.js';
+import { triageClosure } from '../model/machine-backlog.js';
 import { actionDetailMax, type ApprovalWatch, message } from './state.js';
 
 // ---- Routine decisions ---------------------------------------------------------------------
@@ -113,7 +114,7 @@ export function observationWakeDue(work: Work, wokenAt: string | null | undefine
   return now - woken >= observationWakeRetryMs;
 }
 
-export const routineDecisionActions = ['rework', 'recover', 'merge', 'resolve', 'requirements', 'attest'] as const;
+export const routineDecisionActions = ['rework', 'recover', 'merge', 'resolve', 'requirements', 'close', 'attest'] as const;
 export type RoutineDecisionAction = typeof routineDecisionActions[number];
 /** `input` is what the decision names beyond what `decisionInput` derives from the item: a resolve's trigger, and the grounds binding a situated request judges (GY-407). */
 /** `escalation` is the one standing escalation a resolve settles: a standing request for any other is not this decision. */
@@ -164,8 +165,9 @@ export function scopeRoutineDecision(work: Work, now: number, judged: boolean): 
 export function routineDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>, now: number, assessment?: ContainmentAssessment | null): RoutineDecision | null {
   const needed = neededDecision(work, config);
   if (!needed) return null;
-  // An attestation, like a merge, attests nothing about the worker: its approver judges the proof.
-  if (needed.action === 'merge' || needed.action === 'attest') return needed;
+  // None attests anything about a worker: a merge is of a mergeable candidate, a triage closure of an unreleased backlog item,
+  // and an attestation's approver judges the proof.
+  if (needed.action === 'merge' || needed.action === 'close' || needed.action === 'attest') return needed;
   // A lease-loss a newer attempt superseded rests on the record, not on this host: see supersededLeaseLoss.
   if (needed.action === 'resolve' && supersededLeaseLoss(work)?.superseded) return needed;
   const stopped = workerStopped(work, now, assessment);
@@ -188,6 +190,11 @@ export function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge
     return work.containmentQuarantine
       ? { action: 'recover', reason: `${work.key} is delivered and still fenced by its epoch ${work.containmentQuarantine.epoch} containment quarantine; recovery releases it without touching the delivery.`, binding: String(work.containmentQuarantine.epoch) } : null;
   }
+  // A triage closure the triage agent proposed for a machine-filed item (GY-402) is applied only
+  // once the independent approver agrees; the decision binds the judgement it applies.
+  const closure = work.triage?.state === 'proposed' ? triageClosure(work.triage.judgement) : null;
+  if (closure) return { action: 'close', reason: `${work.key} is a machine-filed backlog item the triage agent judged should be closed (${closure.kind}${closure.ref ? ` of ${closure.ref}` : ''}): ${closure.reason}`.slice(0, 2000),
+    binding: `triage:${work.triage!.at}`, input: { ...closure, triageAt: work.triage!.at } };
   // A stale speculative tip waits for the control plane's restore (GY-568): a conflict, a verdict,
   // a failed check or proof, or a thread on it judged a tree that holds another item's unlanded
   // work, so none of them is grounds to send it to a worker. Only a lease-loss is still settled.
