@@ -64,7 +64,7 @@ function App() {
       try {
         const read = async (path: string) => {
           const response = await fetch(`/api/${path}`, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15000)]) });
-          if (response.status === 401) throw Object.assign(new Error(REJECTED_NOTICE), { unauthorized: true });
+          if (response.status === 401 || response.status === 403) throw Object.assign(new Error(REJECTED_NOTICE), { unauthorized: true });
           if (!response.ok) throw new Error(`Unable to load dashboard (${response.status}). Retrying automatically.`);
           return response.json();
         };
