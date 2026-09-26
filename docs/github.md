@@ -36,7 +36,7 @@ The gate requires CI checks from `GITHUB_CI_APP_IDS` Apps, current-head approval
 
 ## Merge queue
 
-Once gated, a candidate's speculative tip (predicted base merged in), pushed onto the candidate branch and `refs/graphyard/queue/KEY`, binds every check, review and proof. A failed check, requested changes, a revoked proof, a conflict or rework ejects it to re-enter at the back. One conflicting only with entries ahead of it re-enters unchanged once one lands or leaves; one leaving validation is skipped until revalidated. The App passes the check for an authorized head and its merge group, then asks GitHub to merge (queue, auto-merge or [direct](#direct-merges)); protection decides; withdrawal fails and dequeues; `master status` names `merge.enqueue.refused`.
+Once gated, a candidate's speculative tip (predicted base merged in), pushed onto the candidate branch and `refs/graphyard/queue/KEY`, binds every check, review and proof. A failed check, requested changes, a revoked proof, a conflict or rework ejects it to re-enter at the back; a tip failure a predecessor explains (failing alone, or alone changing a named file) ejects that predecessor instead. One conflicting only with entries ahead of it re-enters unchanged once one lands or leaves, as does one a predecessor failed; one leaving validation is skipped until revalidated. The App passes the check for an authorized head and its merge group, then asks GitHub to merge (queue, auto-merge or [direct](#direct-merges)); protection decides; withdrawal fails and dequeues; `master status` names `merge.enqueue.refused`.
 
 ### Bindings and carry
 
