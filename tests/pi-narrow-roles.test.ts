@@ -129,7 +129,7 @@ test('integration:pi-narrow-roles with pi selected the approver runs headless an
       { tool: 'graphyard_decide', input: { decision, approve: 'yes', reason } },
       { tool: 'graphyard_decide', input: { decision, approve: true, reason } },
     ] }));
-    const launched = await launchApprover(root, item, decision, undefined, [], herdr(), {}, undefined, { fetcher });
+    const launched = await launchApprover(root, item, decision, undefined, { agents: [], available: true }, herdr(), {}, undefined, { fetcher });
     assert.equal(launched.runtime, 'pi');
     assert.equal(launched.pane, null, 'no terminal pane');
     // While it runs, the loop's inventory lists it under its session name, so supervision waits on it.
@@ -159,7 +159,7 @@ test('integration:pi-narrow-roles with pi selected the approver runs headless an
     posted.length = 0;
     answer(() => new Response(JSON.stringify({ error: 'The approver must not have produced evidence for this work' }), { status: 403 }));
     await writeFile(scenario, JSON.stringify({ calls: [{ tool: 'graphyard_decide', input: { decision, approve: false, reason: 'not justified' } }] }));
-    const refused = await (await launchApprover(root, item, decision, undefined, [], herdr(), {}, undefined, { fetcher })).settled!;
+    const refused = await (await launchApprover(root, item, decision, undefined, { agents: [], available: true }, herdr(), {}, undefined, { fetcher })).settled!;
     assert.equal(posted.length, 1);
     assert.deepEqual(posted[0].body, { action: 'refuse', decision, reason: 'not justified' });
     assert.equal(refused.applied[0].outcome, 'refused');
@@ -168,7 +168,7 @@ test('integration:pi-narrow-roles with pi selected the approver runs headless an
     // A verdict for another decision is not this run's submission, so nothing is applied.
     posted.length = 0;
     await writeFile(scenario, JSON.stringify({ calls: [{ tool: 'graphyard_decide', input: { decision: 'another-decision', approve: true, reason } }] }));
-    const stray = await (await launchApprover(root, item, decision, undefined, [], herdr(), {}, undefined, { fetcher })).settled!;
+    const stray = await (await launchApprover(root, item, decision, undefined, { agents: [], available: true }, herdr(), {}, undefined, { fetcher })).settled!;
     assert.equal(stray.result?.ok === false && stray.result.reason, 'invalid-payload');
     assert.deepEqual(posted, []);
   } finally { await cleanup(); }
@@ -236,7 +236,7 @@ test('integration:pi-narrow-roles without the setting, and for non-unit proof gr
     assert.ok(calls.some(args => args[0] === 'tab' && args[1] === 'create'));
     assert.equal((await readProducerLedger(root)).producers[0].runtime, undefined);
     // The approver with no setting takes today's Herdr path, which needs a registry runtime.
-    await assert.rejects(launchApprover(root, item, decision, undefined, [], herdr()), /No runtime is configured for the approver/);
+    await assert.rejects(launchApprover(root, item, decision, undefined, { agents: [], available: true }, herdr()), /No runtime is configured for the approver/);
     assert.equal(existsSync(`${scenario}.launched`), false, 'Pi was never started');
   } finally { await cleanup(); }
 
