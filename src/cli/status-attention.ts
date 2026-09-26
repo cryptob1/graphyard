@@ -1,5 +1,6 @@
 import { agentOwner, humanOwner, type AttentionItem } from '../master.js';
 import type { Work } from '../model.js';
+import { mergeStalls } from '../merge-queue.js';
 import { stallBoundMs, stalledItems, type ActionlessItem } from '../model/action-account.js';
 import { elapsed } from '../model/sessions.js';
 
@@ -83,3 +84,7 @@ export function routedScopeRequests(approvals: readonly { work: string; action: 
   const routed = new Set(approvals.filter(watch => watch.action === 'requirements' && watch.scope).map(watch => `${watch.work}:${watch.scope!.epoch}:${watch.scope!.at}`));
   return (work: { key: string; scopeRequest?: { epoch: number; at: string } | null }) => !!work.scopeRequest && routed.has(`${work.key}:${work.scopeRequest.epoch}:${work.scopeRequest.at}`);
 }
+
+/** A merge pending 5 min on a mergeable head (GY-344), or 10 on a BLOCKED auto-merge (GY-430). */
+export const mergeStallAttention = (snapshot: { work: Work[]; now: string }): AttentionItem[] =>
+  mergeStalls(snapshot.work, Date.parse(snapshot.now)).map(stall => ({ subject: stall.key, text: stall.text, ...agentOwner('master', stall.next) }));
