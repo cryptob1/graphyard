@@ -122,9 +122,7 @@ export interface Observation {
   // The head contains that base tip: by ancestry, or as a published queue tip whose bound base
   // is tree-identical to it. A review is only requested for a head that does.
   baseTipContained?: boolean;
-  protected: boolean; files: string[]; at: string;
-  /** The status checks the base branch's protection and active rulesets require, other than Graphyard's own `Graphyard / merge` (GY-430): GitHub refuses a merge while any has not passed, so the test gate and the failed-CI rework rule read them alongside the policy's checks. `appId` is the app protection binds the check to, or null for any source. */
-  requiredChecks?: { name: string; appId: number | null }[];
+  protected: boolean; files: string[]; at: string; requiredChecks?: { name: string; appId: number | null }[]; // base protection's and rulesets' required checks bar `Graphyard / merge` (GY-430); appId null = any source
   /** The candidate diff compared against its bound base; see regression-guard.ts. */
   scopeFiles?: ScopeFile[];
   /** The same judgement against the commit the candidate would land on, and the unlanded work its head carries; see merge-queue.ts LandingCheck. */
