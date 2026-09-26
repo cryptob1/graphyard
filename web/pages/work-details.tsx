@@ -207,3 +207,5 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
     </details>
   </article>;
 }
+// The document this page renders: a settled delivery's is read when it is opened (GY-422).
+export { useOpenedWork } from '../opened-work';

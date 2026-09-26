@@ -40,7 +40,7 @@ function effects(work: Work[], agents: HerdrAgent[], decisions: Record<string, {
     closeSession: pane => { closed.push(pane); },
     dispatch: async () => {},
     requestProof: () => {},
-    merge: async () => ({ result: 'merged' }),
+    merge: async () => ({ result: 'merged', merged: true }),
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {},
     requestSmoke: () => {},

@@ -8,7 +8,7 @@ Autonomy is the default: agents act without asking and agents approve agents. Th
 
 Domain mutations must be transactional, append history, and enforce principal identity and lease epochs. Never add a client-controlled arbitrary lifecycle-state endpoint. Do not grant implementation workers trusted evidence-producer credentials. Never weaken a task's requirements to make its implementation pass.
 
-Run `npm run build` and `npm test` for domain/API changes. Tests run a temporary real Postgres database; do not substitute production data. Update the relevant guide under `docs/` when behavior changes. Keep external I/O outside coordination transactions.
+Run `npm run build` and `npm test` for domain/API changes. Tests run a temporary real Postgres database; do not substitute production data. A test that stops its embedded Postgres awaits `store.close()` first (never `store.pool.end()`, which returns before its connections close); `tests/db-test-shutdown-order.test.ts` enforces this. Update the relevant guide under `docs/` when behavior changes. Keep external I/O outside coordination transactions.
 
 No secrets belong in Git. `.graphyard/credentials.json` and `.env` are local-only. Installation credentials belong under `~/.config/graphyard/<install>/` with mode 0600, never in a repository. Installation and deployment changes go through `src/install/`, the Dockerfile, `compose.yaml` and `deploy/helm/graphyard`; `.railway/railway.ts` describes this project's own personal Railway deployment and is not part of the generic path. Preview infrastructure changes with `graphyard install --plan` before applying, and keep the release contract (`scripts/verify-image-release.mjs`) and the chart exercise passing.
 
@@ -165,6 +165,8 @@ requested it for, and `graphyard master merge` refuses a candidate the approver 
 has not approved. Otherwise opted-out items may also use `graphyard master merge --all`. The guarded merge rechecks the exact current
 candidate, every configured gate, and GitHub state immediately before merging. Unapproved decisions, stale observations, failures, and
 changed commits remain blocking. Never use an administrative merge bypass, edit a candidate, or read a
-worker credential. Read `docs/master-agent.md`
+worker credential. The one sanctioned exception is the audited repair lane: the Graphyard App's own
+ruleset bypass merges a `"repair": "merge-path"` item whose normal merge has stalled, after an
+approved `repair-merge` decision naming the fault. Read `docs/master-agent.md`
 in Graphyard or run `graphyard master guide` for the complete operating loop.
 <!-- /graphyard-master -->
