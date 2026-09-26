@@ -222,6 +222,8 @@ export interface GitHubBudget {
     jobs: { work: string; at: string; requests: number; uncached: number; band: CadenceBand; cadenceMs: number }[] };
   /** Observations the reserve is holding back, until when and why. */
   deferrals: { work: string; until: string; reason: string }[];
+  /** The shared pace the observation workers start jobs at (GY-567): tier, requests per minute, spacing, estimate in flight. */
+  pace: ReturnType<ObservationPacer['report']>;
 }
 
 /**
@@ -315,6 +317,91 @@ export function reserveDecision(band: CadenceBand, budget: Pick<GitHubBudget, 'r
   if (!Number.isFinite(reset) || reset <= now.getTime()) return null;
   const until = new Date(reset + 2000).toISOString();
   return { until, reason: `GitHub budget is below the ${budget.reserve}-request merge-path reserve (${budget.remaining} remaining, reset ${budget.resetAt}); this ${band}-cadence observation is rescheduled to ${until} rather than spent, so the merge path, webhook wakes and merge verification keep the reserve` };
+}
+/**
+ * Pacing the aggregate spend (GY-567). The reserve above gates each job on what is left, but not
+ * how fast the workers together spend it: on 2026-09-26 four workers spent ~600 requests a minute,
+ * drained the hour in half of it and the queue head read stale for the other half. So every worker
+ * waits for one shared pace before it claims a job: the budget above the reserve, less what jobs
+ * in flight are expected to spend, spread evenly over the time to the reset. Jobs start at most
+ * one per `estimate / rate`, so the spend above the reserve reaches zero at the reset and never
+ * before it, whatever the concurrency; a small burst (`paceBurstShare`) lets a backlog drain first. A job the spendable budget cannot afford waits for a reset
+ * under a minute away (cheaper than the reserve); further off, it is paced from the reserve
+ * itself, where `reserveDecision` lets only the merge path and webhook wakes spend.
+ */
+export const paceResetWaitMs = 60_000;
+/**
+ * The burst the pace allows on top of its rate: up to this share of the spendable budget may be
+ * spent back to back (a backlog drained after a deploy), after which starts are spaced again. The
+ * rate is recomputed from what is left, so a burst is paid for by the spacing after it.
+ */
+export const paceBurstShare = 0.1;
+export type PaceTier = 'unpaced' | 'spendable' | 'reserve' | 'reset';
+/** The rate jobs may start at (requests per millisecond), or when the next may start if none can. */
+export function observationPace(budget: { remaining: number | null; resetAt: number | null; reserve: number }, inFlight: number, estimate: number, now: number): { tier: PaceTier; rate: number | null; until?: number; burst?: number } {
+  // An unknown budget (none read yet, or its reset has passed) is never held against: the first
+  // response after a reset is what reads the new one.
+  if (budget.remaining === null || budget.resetAt === null || budget.resetAt <= now) return { tier: 'unpaced', rate: null };
+  const toReset = Math.max(1, budget.resetAt - now), cost = Math.max(1, estimate);
+  const spendable = budget.remaining - budget.reserve - inFlight;
+  if (spendable > cost) return { tier: 'spendable', rate: spendable / toReset, burst: spendable * paceBurstShare };
+  const reserve = budget.remaining - inFlight;
+  if (toReset <= paceResetWaitMs || reserve < cost) return { tier: 'reset', rate: 0, until: budget.resetAt + 1000 };
+  return { tier: 'reserve', rate: reserve / toReset };
+}
+/**
+ * The one pace every observation worker of a process shares. `start` either takes the next slot
+ * (and counts the job's estimate in flight) or says how long to wait; `settle` returns the slot
+ * with what the job actually charged, so a deferral that spent nothing gives its time back and a
+ * costly job pushes the next start out by what it overspent.
+ */
+export class ObservationPacer {
+  private nextAt = 0;
+  inFlight = 0;
+  last: { tier: PaceTier; rate: number | null; estimate: number } = { tier: 'unpaced', rate: null, estimate: assumedObservationRequests };
+  start(budget: Parameters<typeof observationPace>[0], estimate: number, now: number): { wait: number; settle?: undefined } | { wait: 0; settle: (charged?: number, at?: number) => void } {
+    const pace = observationPace(budget, this.inFlight, estimate, now);
+    this.last = { tier: pace.tier, rate: pace.rate, estimate };
+    if (pace.until !== undefined) return { wait: Math.max(1, pace.until - now) };
+    // A token bucket: idle time banks up to the burst, and each start spends one spacing of it.
+    const credit = pace.rate && pace.burst ? pace.burst / pace.rate : 0;
+    const from = Math.max(this.nextAt, now - credit);
+    if (from > now) return { wait: from - now };
+    // An unpaced start (no reading yet) spends no credit: the bucket is full when the first reading lands.
+    if (pace.rate) this.nextAt = from + estimate / pace.rate;
+    this.inFlight += estimate;
+    let settled = false;
+    return { wait: 0, settle: (charged = estimate, at = now) => {
+      if (settled) return; settled = true;
+      this.inFlight = Math.max(0, this.inFlight - estimate);
+      if (pace.rate) this.nextAt += (charged - estimate) / pace.rate;
+    } };
+  }
+  /** The pace in force, per minute, for the status an operator reads. */
+  report() {
+    const perMinute = this.last.rate === null ? null : Math.round(this.last.rate * 60_000 * 100) / 100;
+    return { tier: this.last.tier, perMinute, intervalMs: this.last.rate ? Math.round(this.last.estimate / this.last.rate) : this.last.rate === 0 ? null : 0, inFlight: this.inFlight, estimate: this.last.estimate };
+  }
+}
+/**
+ * Whether the budget is tight (GY-567): below the reserve, projected to run out before the reset,
+ * or paced under the steady-state share per minute. Then idle observations are left to webhooks
+ * and conditional reads, and the claim order puts sessions that are running ahead of the rest.
+ */
+export function budgetTight(budget: Pick<GitHubBudget, 'belowReserve' | 'exhaustsBeforeReset' | 'steadyStateBudget' | 'pace'> | null | undefined) {
+  if (!budget) return false;
+  const steadyPerMinute = (budget.steadyStateBudget ?? defaultHourlyLimit * steadyStateShare) / 60;
+  return budget.belowReserve || budget.exhaustsBeforeReset || budget.pace.perMinute !== null && budget.pace.perMinute < steadyPerMinute;
+}
+/**
+ * Under a tight budget an idle observation (nothing GitHub can move) that no webhook woke is not
+ * polled: it waits for the reset or its next webhook delivery, whichever comes first.
+ */
+export function tightBudgetDecision(band: CadenceBand, budget: Pick<GitHubBudget, 'belowReserve' | 'exhaustsBeforeReset' | 'steadyStateBudget' | 'pace' | 'resetAt'> | null | undefined, woken: boolean, now: Date): { until: string; reason: string } | null {
+  if (band !== 'idle' || woken || !budgetTight(budget)) return null;
+  const reset = budget!.resetAt ? Date.parse(budget!.resetAt) : NaN;
+  const until = new Date(Number.isFinite(reset) && reset > now.getTime() ? reset + 2000 : now.getTime() + observationCadenceMs.idle).toISOString();
+  return { until, reason: `GitHub budget is tight (paced at ${budget!.pace.perMinute ?? '?'}/min, reset ${budget!.resetAt ?? 'unknown'}); this idle observation is left to webhook wakes and conditional reads until ${until}` };
 }
 /** The id of every review on a pull request GitHub reports as dismissed, from its full review list. */
 export function dismissedReviewIds(reviews: readonly { id?: unknown; state?: unknown }[]): number[] {
@@ -439,6 +526,8 @@ export class GitHub {
   private pauseReason = '';
   /** The open candidates the last reconciliation pass counted, which sizes the steady-state bound. */
   private fleet = 0;
+  /** The one pace every observation worker of this process starts jobs at (GY-567). */
+  private readonly pacer = new ObservationPacer();
   /** Counts the requests one measured stretch of work makes, and the ones that cost budget. */
   private readonly requestMeter = new AsyncLocalStorage<{ requests: number; uncached: number }>();
   constructor(public config: GitHubConfig) {}
@@ -499,6 +588,16 @@ export class GitHub {
     this.jobDurations = [...this.jobDurations, { at: now, ms: Math.max(0, Math.floor(ms)) }].filter(entry => now - entry.at <= budgetLedgerMs);
     if (this.jobDurations.length > 512) this.jobDurations = this.jobDurations.slice(this.jobDurations.length - 512);
   }
+  /**
+   * Wait for the shared pace before claiming an observation job (GY-567): `wait` is how long to
+   * sleep before asking again, or a started slot whose `settle` takes what the job charged.
+   */
+  paceObservation(now = Date.now()) {
+    const expired = this.rate.resetAt !== null && this.rate.resetAt <= now;
+    const charged = this.samples.filter(sample => now - sample.at <= budgetLedgerMs).map(sample => sample.uncached);
+    const estimate = charged.length ? Math.max(1, charged.reduce((total, value) => total + value, 0) / charged.length) : assumedObservationRequests;
+    return this.pacer.start({ remaining: expired ? null : this.rate.remaining, resetAt: expired ? null : this.rate.resetAt, reserve: mergePathReserve }, estimate, now);
+  }
   /** The open candidates the steady-state bound is sized for, as the last pass counted them. */
   noteFleet(openCandidates: number) { this.fleet = Math.max(0, Math.floor(openCandidates)); }
   /** The steady-state poll interval the fleet can afford right now (see `steadyStateInterval`). */
@@ -551,6 +650,7 @@ export class GitHub {
       observations: { count: samples.length, meanRequests: mean(samples.map(sample => sample.requests)), meanUncached: mean(samples.map(sample => sample.uncached)),
         jobs: [...this.costs].map(([work, cost]) => ({ work, at: new Date(cost.at).toISOString(), requests: cost.requests, uncached: cost.uncached, band: cost.band, cadenceMs: cost.cadenceMs })) },
       deferrals: [...this.deferred].flatMap(([work, entry]) => Date.parse(entry.until) > now ? [{ work, until: entry.until, reason: entry.reason }] : []),
+      pace: this.pacer.report(),
     };
   }
   /**
@@ -1948,33 +2048,46 @@ export function waitsOnObservation(work: Work, all: Work[], now = new Date()): b
   const kind = nextAction(work, all, now)?.kind;
   return kind === 'request-rework' || kind === 'request-review';
 }
+/** Whether a session is running on the item now: a worker, reviewer or producer whose result an observation reads. */
+export const runningSession = (work: Work) => (work.sessions ?? []).some(session => session.state === 'running' && !session.endedAt);
 /** A submitted item the control plane has never read: its first observation is what every later gate waits on. */
 export const firstObservationOwed = (work: Work) => !!work.submission && !work.observation && !work.candidate && work.stage !== 'done';
-/** How many of the claim order's leading ids are the queue-head band, which no starved job overtakes. */
+/** When the item's current submission was made: the documentation record's time for that PR, else when its stage was entered. */
+const submittedAt = (work: Work) => work.documentation?.submission?.pr === work.submission?.pr && work.documentation?.submission?.at ? work.documentation.submission.at : work.stageEnteredAt;
+/**
+ * How many of the claim order's leading ids are the merge path — the queue-head band and any merge
+ * in flight (GY-567) — which no starved job overtakes.
+ */
 export function observationHeadCount(all: Work[], batchSize: number, now = Date.now()): number {
   const band = headClaimBand(batchSize);
-  return predictQueue(all, now).filter(placement => placement.position < band).length;
+  const head = new Set(predictQueue(all, now).filter(placement => placement.position < band).map(placement => placement.id));
+  for (const work of all) if (mergeAuthorized(work)) head.add(work.id);
+  return head.size;
 }
 /**
  * The order observation jobs are claimed in (GY-492): merge-queue entries within the head band
- * first, in queue position, then submissions never observed, then items whose next action waits on
- * an observation, then the rest
- * by available_at — the order `Store.takeJob` falls back to for a job this list does not name.
+ * first, in queue position, and any merge in flight (an authorized head GitHub may merge now);
+ * then submissions never observed; then items whose next action waits on an observation, then
+ * items with a running session, then the rest by available_at — the order `Store.takeJob` falls
+ * back to for a job this list does not name. Under a `tight` budget (GY-567) running sessions come
+ * straight after the first reads, which stay behind only the merge path whatever the budget.
  * `available_at` still gates every claim: priority reorders due jobs, never makes one due.
  */
-export function observationClaimOrder(all: Work[], batchSize: number, now = Date.now()): string[] {
+export function observationClaimOrder(all: Work[], batchSize: number, now = Date.now(), tight = false): string[] {
   const band = headClaimBand(batchSize);
   const ranked: string[] = [];
   for (const placement of predictQueue(all, now)) {
     if (placement.position < band) ranked.push(placement.id);
   }
-  const rankedSet = new Set(ranked);
+  for (const work of all) if (mergeAuthorized(work) && !ranked.includes(work.id)) ranked.push(work.id);
+  const open = all.filter(work => work.stage !== 'done' && !ranked.includes(work.id));
   // A submission never observed has no candidate, so no gate, review or proof can start until it
-  // is read once. Ranked after the head band: behind the review-waiting items, which come due again
-  // every cycle, one worker never reached it (2026-09-26: eight submitted PRs unread for hours).
-  const firstReads = all.filter(work => !rankedSet.has(work.id) && firstObservationOwed(work)).map(work => work.id);
-  const firstSet = new Set(firstReads);
-  return [...ranked, ...firstReads, ...all.filter(work => !rankedSet.has(work.id) && !firstSet.has(work.id) && waitsOnObservation(work, all, new Date(now))).map(work => work.id)];
+  // is read once. Behind the review-waiting items, which come due again every cycle, one worker
+  // never reached it (2026-09-26: eight submitted PRs unread for hours).
+  const firstReads = open.filter(firstObservationOwed).map(work => work.id);
+  const waiting = open.filter(work => waitsOnObservation(work, all, new Date(now))).map(work => work.id);
+  const running = open.filter(runningSession).map(work => work.id);
+  return [...new Set([...ranked, ...firstReads, ...(tight ? [running, waiting] : [waiting, running]).flat()])];
 }
 
 /** How long a lag is, in the unit a reader reads: a minute and change, or seconds. */
@@ -1988,9 +2101,15 @@ const observationLag = (ms: number) => ms >= 60_000 ? `${Math.floor(ms / 60_000)
  * missing or older than that is raised as attention naming the head, its lag, and what the
  * workers have actually been achieving.
  */
-export function observationThroughputStatus(coordinator: { githubBudget?: { throughput?: { jobsPerMinute?: number; medianDurationMs?: number | null; p90DurationMs?: number | null } | null } | null } | null | undefined,
+export function observationThroughputStatus(coordinator: { githubBudget?: ({ throughput?: { jobsPerMinute?: number; medianDurationMs?: number | null; p90DurationMs?: number | null } | null } & Partial<Pick<GitHubBudget, 'remaining' | 'limit' | 'resetAt' | 'perMinute' | 'projectedExhaustionAt' | 'exhaustsBeforeReset' | 'reserve'>> & { pace?: Partial<GitHubBudget['pace']> | null }) | null } | null | undefined,
   snapshot: { work: Work[]; now: string; jobs?: IntegrationJob[] }, now = Date.parse(snapshot.now)) {
   const throughput = coordinator?.githubBudget?.throughput ?? null;
+  const reading = coordinator?.githubBudget ?? null;
+  // The budget the workers are paced against (GY-567): what is left, when it resets, the spend
+  // rate, the pace allowed, and when the spend rate would exhaust it.
+  const budget = reading ? { remaining: reading.remaining ?? null, limit: reading.limit ?? null, resetAt: reading.resetAt ?? null, reserve: reading.reserve ?? null,
+    perMinute: reading.perMinute ?? null, pacedPerMinute: reading.pace?.perMinute ?? null, paceTier: reading.pace?.tier ?? null,
+    projectedExhaustionAt: reading.projectedExhaustionAt ?? null, exhaustsBeforeReset: !!reading.exhaustsBeforeReset } : null;
   const oldestDueJobMs = (snapshot.jobs ?? []).reduce<number | null>((oldest, job) => {
     const locked = job.locked_until !== null && Date.parse(job.locked_until) > now, held = job.held_until != null && Date.parse(job.held_until) > now;
     if (locked || held) return oldest;
@@ -2000,8 +2119,12 @@ export function observationThroughputStatus(coordinator: { githubBudget?: { thro
   const head = predictQueue(snapshot.work, now).find(placement => placement.position === 0) ?? null;
   const headObservation = head ? snapshot.work.find(work => work.id === head.id)?.observation ?? null : null;
   const headObservationAgeMs = head ? headObservation?.at ? Math.max(0, now - Date.parse(headObservation.at)) : null : null;
-  const report = { jobsPerMinute: throughput?.jobsPerMinute ?? null, medianDurationMs: throughput?.medianDurationMs ?? null,
-    p90DurationMs: throughput?.p90DurationMs ?? null, oldestDueJobMs, head: head?.key ?? null, headObservationAgeMs };
+  // The oldest submission never observed (GY-567): nothing can review or prove it until it is read once.
+  const unobserved = snapshot.work.filter(firstObservationOwed).map(work => ({ key: work.key, pr: work.submission!.pr, submittedAt: submittedAt(work) }))
+    .sort((a, b) => Date.parse(a.submittedAt) - Date.parse(b.submittedAt));
+  const oldestUnobservedSubmission = unobserved[0] ? { ...unobserved[0], ageMs: Math.max(0, now - Date.parse(unobserved[0].submittedAt)), count: unobserved.length } : null;
+  const report = { budget, jobsPerMinute: throughput?.jobsPerMinute ?? null, medianDurationMs: throughput?.medianDurationMs ?? null,
+    p90DurationMs: throughput?.p90DurationMs ?? null, oldestDueJobMs, head: head?.key ?? null, headObservationAgeMs, oldestUnobservedSubmission };
   const attention: AttentionItem[] = head && (headObservationAgeMs === null || headObservationAgeMs > observationFreshnessMs)
     ? [{ subject: 'github',
         text: `The merge-queue head ${head.key} has ${headObservationAgeMs === null ? 'no observation at all' : `gone ${observationLag(headObservationAgeMs)} without an observation`} while the merge gate refuses anything older than two minutes${oldestDueJobMs !== null ? `; the oldest due job has waited ${observationLag(oldestDueJobMs)}` : ''}${report.jobsPerMinute !== null ? `, and the server has been observing ${report.jobsPerMinute} job(s)/min (median ${report.medianDurationMs ?? '?'} ms, p90 ${report.p90DurationMs ?? '?'} ms)`: ''}: the queue stalls until its head is observed`,
@@ -2009,7 +2132,11 @@ export function observationThroughputStatus(coordinator: { githubBudget?: { thro
     : [];
   return { ...report, attention };
 }
-export async function processJob(engine: Engine, github: GitHub): Promise<boolean> {
+/**
+ * Claim and run one due observation job. `spent`, when given, is told what the job charged the
+ * budget (its non-304 requests), which is what the worker returns its paced slot with (GY-567).
+ */
+export async function processJob(engine: Engine, github: GitHub, spent?: (charged: number) => void): Promise<boolean> {
   // The batch size is the master's configuration, published to the installation ledger; a
   // restarted server reads it back here before the next evaluation it runs.
   const readAt = batchSizeRead.get(engine);
@@ -2033,7 +2160,7 @@ export async function processJob(engine: Engine, github: GitHub): Promise<boolea
   // due, the merge-queue head's job is claimed first however recently it became due, instead of
   // waiting behind every older entry for a worker to reach it.
   const all = await engine.store.list();
-  const job = await engine.store.takeJob(observationClaimOrder(all, engine.mergeBatchSize), observationHeadCount(all, engine.mergeBatchSize));
+  const job = await engine.store.takeJob(observationClaimOrder(all, engine.mergeBatchSize, Date.now(), budgetTight(github.budget?.())), observationHeadCount(all, engine.mergeBatchSize));
   if (!job) return false;
   const startedAt = Date.now();
   let work: Work | undefined;
@@ -2076,6 +2203,9 @@ export async function processJob(engine: Engine, github: GitHub): Promise<boolea
       const budget = github.budget?.(now.getTime());
       const deferral = budget && !budget.paused ? reserveDecision(observationBand(work, all, now).band, budget, !!job.woken, now) : null;
       if (deferral) { github.recordDeferral(work.id, deferral); await engine.store.deferJob(job.work_id, job.token, deferral.until); return true; }
+      // A tight budget leaves idle observations to webhook wakes and conditional reads (GY-567).
+      const idle = budget && !budget.paused ? tightBudgetDecision(observationBand(work, all, now).band, budget, !!job.woken, now) : null;
+      if (idle) { github.recordDeferral(work.id, idle); await engine.store.deferJob(job.work_id, job.token, idle.until); return true; }
       const previous = work.observation ?? null;
       const observation = await github.observe(work, all);
       work = await engine.observe(work.id, work.revision, observation, job.token);
@@ -2156,6 +2286,7 @@ export async function processJob(engine: Engine, github: GitHub): Promise<boolea
       }
       return false;
     });
+    spent?.(uncached);
     // The schedule: the merge-queue head every 20 s and everything else at the 300 s backstop a
     // webhook wake short-circuits; GY-117's fleet bound only ever stretches that backstop for an
     // unchanged candidate, never shortens it.
