@@ -19,4 +19,4 @@ export { automaticScopeGrounds, successorStep } from './daemon/cycle-scope.js';
 export { closeEndedWorkerPanes } from './daemon/cycle-reclaim.js';
 export { mergeRaceRetries, waitingInMergeQueue, mergeRetryBaseMs, mergeRetryCapMs, mergeRetryDue } from './daemon/cycle-delivery.js';
 export { deploymentPageSize, deploymentListingPages, maxDeploymentRequests, productionEnvironmentRecord, observeDeployment } from './daemon/deployment.js';
-export { daemonSummary, noteConfigReload, noteWatchdog, runDaemon, codeReloadBetweenCycles } from './daemon/run.js';
+export { daemonSummary, noteConfigReload, noteWatchdog, runDaemon } from './daemon/run.js';
