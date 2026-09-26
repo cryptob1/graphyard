@@ -2,7 +2,7 @@
 import { createHash } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 import { z } from 'zod';
-import { defaultMergeBatchSize, maxMergeBatchSize } from '../merge-queue.js';
+import { defaultMergeBatchSize, defaultParallelTips, maxMergeBatchSize, maxParallelTips } from '../merge-queue.js';
 import { narrowRoleRuntimeSchema, piRuntimeSchema } from '../runner/payloads.js';
 import { researchSettingsSchema } from '../research.js';
 import { sessionNameField, sessionNameLimit, assertSessionName, sessionNameDigestLength, SessionNameRefusedError } from '../session-name.js';
@@ -267,7 +267,10 @@ export const masterConfigSchema = z.object({
   run: masterRunSchema.prefault({}),
   // The merge queue (GY-330): how many consecutive entries one combined tip validates (default 4;
   // 1 validates every entry on its own tip). The loop publishes it to the control plane every change.
-  mergeQueue: z.object({ batchSize: z.number().int().min(1).max(maxMergeBatchSize).optional() }).strict().optional(),
+  // `parallelTips` (GY-498) is how many queue positions are validated at once instead: speculative
+  // tips for the first that many positions all published and CI'd concurrently, an entry whose tip
+  // and every tip ahead of it passed merging as soon as it heads the queue (default 4).
+  mergeQueue: z.object({ batchSize: z.number().int().min(1).max(maxMergeBatchSize).optional(), parallelTips: z.number().int().min(1).max(maxParallelTips).optional() }).strict().optional(),
   // The operator's own authenticated browser profile, used only by master browser flows.
   browser: masterBrowserSchema.optional(),
   // The master's own operator-agent identity, and the separate approver identity whose session
@@ -279,6 +282,11 @@ export type MasterConfig = z.infer<typeof masterConfigSchema>;
 /** The merge queue's batch size under this master config: `mergeQueue.batchSize`, or the default of 4. */
 export function mergeBatchSize(config: Pick<MasterConfig, 'mergeQueue'> | null | undefined): number {
   return config?.mergeQueue?.batchSize ?? defaultMergeBatchSize;
+}
+
+/** The parallel-tip window under this master config: `mergeQueue.parallelTips`, or the default of 4 (GY-498). */
+export function mergeParallelTips(config: Pick<MasterConfig, 'mergeQueue'> | null | undefined): number {
+  return config?.mergeQueue?.parallelTips ?? defaultParallelTips;
 }
 
 export function assertMasterBinding(config: MasterConfig, status: any) {

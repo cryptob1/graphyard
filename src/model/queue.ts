@@ -1,4 +1,4 @@
-import { baseRefreshConflict, defaultMergeBatchSize, ejectedTipRestore, ejectionReason, nextQueueSequence, pendingBaseRefresh, pendingRestore, predecessorWait, predecessorWaitText, queueHistoryLimit, queueBatch, queuePlacement, speculativeConflictReason } from '../merge-queue.js';
+import { baseRefreshConflict, defaultMergeBatchSize, describeTipWindow, ejectedTipRestore, ejectionReason, nextQueueSequence, pendingBaseRefresh, pendingRestore, predictQueue, predecessorWait, predecessorWaitText, queueHistoryLimit, queueBatch, queuePlacement, speculativeConflictReason, windowBatchView } from '../merge-queue.js';
 import type { QueueEjection, QueueHistoryEntry, QueuePlacement } from '../merge-queue.js';
 import type { Work } from './work.js';
 import { behindBaseHold } from './behind-base.js';
@@ -12,7 +12,7 @@ import { requiredProofs } from './bootstrap.js';
  * place, reorder, or hold a position. An entry leaves only by merging or by an explicit,
  * observed validation failure, and a re-entry always starts a new sequence at the back.
  */
-export function placeInQueue(work: Work, all: Work[], now: Date, ciAppIds: number[], eligible: boolean, batchSize = defaultMergeBatchSize) {
+export function placeInQueue(work: Work, all: Work[], now: Date, ciAppIds: number[], eligible: boolean, batchSize = defaultMergeBatchSize, parallelTips?: number) {
   const history = [...(work.queueHistory ?? [])];
   const candidate = work.candidate;
   let queue = work.queue ?? null, queueSequence = work.queueSequence ?? 0, ejection = work.queueEjection ?? null;
@@ -22,9 +22,12 @@ export function placeInQueue(work: Work, all: Work[], now: Date, ciAppIds: numbe
   };
   const probe = { ...work, queue, queueSequence, gates: [], violations: work.violations } as Work;
   // The batch plan (GY-330) decides which failed tip ejects: it is read from the queue as it
-  // stands, with this entry's own record as just observed.
-  const batchOf = (subject: Work) => queueBatch(subject, all.map(item => item.id === subject.id ? subject : item), now.getTime(), batchSize, ciAppIds);
-  const reason = queue ? ejectionReason(probe, ciAppIds, all, batchOf(probe)) : null;
+  // stands, with this entry's own record as just observed. Under a parallel-tip window (GY-498)
+  // the window's prefix verdicts decide instead: the first failing tip isolates its own entry.
+  const peersOf = (subject: Work) => all.map(item => item.id === subject.id ? subject : item);
+  const batchOf = (subject: Work) => queueBatch(subject, peersOf(subject), now.getTime(), batchSize, ciAppIds);
+  const windowOf = (subject: Work) => parallelTips ? describeTipWindow(peersOf(subject), predictQueue(peersOf(subject), now.getTime()), parallelTips, ciAppIds).get(subject.key) ?? null : null;
+  const reason = queue ? ejectionReason(probe, ciAppIds, all, parallelTips ? null : batchOf(probe), windowOf(probe)) : null;
   if (queue && reason) {
     ejection = { at: now.toISOString(), sequence: queue.sequence, reason, sha: candidate?.sha ?? null, policyRevision: work.policyRevision };
     record('ejected', reason, queue.speculation?.tip ?? candidate?.sha);
@@ -39,9 +42,11 @@ export function placeInQueue(work: Work, all: Work[], now: Date, ciAppIds: numbe
   const shadow = { ...work, queue, queueSequence } as Work;
   const placement = queue ? queuePlacement(shadow, all.map(item => item.id === work.id ? shadow : item), now.getTime()) : null;
   if (queue) {
-    const batch = batchOf(shadow);
-    const { batch: _previous, ...entry } = queue;
-    queue = batch ? { ...entry, batch } : entry;
+    const view = windowOf(shadow);
+    const batch = parallelTips ? view ? windowBatchView(work.key, view, parallelTips) : null : batchOf(shadow);
+    const tips = parallelTips ? view?.tips ?? null : undefined;
+    const { batch: _previous, tips: _previousTips, ...entry } = queue;
+    queue = { ...entry, ...(batch ? { batch } : {}), ...(tips ? { tips } : {}) } as typeof queue;
   }
   const reasons = placement ? placement.reasons
     : work.observation?.merged || work.stage === 'done' ? []

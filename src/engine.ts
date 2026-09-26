@@ -10,7 +10,7 @@ import { Refusal } from './model/refusal.js';
 import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
 import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
-import { branchContamination, nextQueueEntries, disprovedConflict, currentRestore, decideIdentityCarry, defaultMergeBatchSize, mergeBatchSizeEvent, dismissedApproval, keptTipCarry, onto, pendingRestore, reviewedFilesOf, queueHistoryLimit, queueSequencingReason, reconciliationRefusalPrefix, tipReplacesHead, type BaseRefresh, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type QueueSpeculation, type RestoredApproval } from './merge-queue.js';
+import { branchContamination, nextQueueEntries, disprovedConflict, currentRestore, decideIdentityCarry, defaultMergeBatchSize, defaultParallelTips, mergeBatchSizeEvent, mergeParallelTipsEvent, reconcileWindow, dismissedApproval, keptTipCarry, onto, pendingRestore, reviewedFilesOf, queueHistoryLimit, queueSequencingReason, reconciliationRefusalPrefix, tipReplacesHead, type BaseRefresh, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type QueueSpeculation, type RestoredApproval } from './merge-queue.js';
 import { queueEjectionRecord } from './model/queue.js';
 import { githubFromEnv, mergeBandQueueDepth } from './github.js';
 import { regressionRefusals } from './regression-guard.js';
@@ -332,6 +332,21 @@ export class Engine {
     const row = (await this.store.pool.query('SELECT (payload->>\'batchSize\')::int AS size FROM events WHERE work_id IS NULL AND kind=$1 ORDER BY seq DESC LIMIT 1', [mergeBatchSizeEvent])).rows[0];
     this.mergeBatchSize = Number.isSafeInteger(row?.size) && row.size >= 1 ? row.size : defaultMergeBatchSize;
     return this.mergeBatchSize;
+  }
+  /**
+   * How many queue positions are validated at once (GY-498): the master's `mergeQueue.parallelTips`
+   * as it last published it, read back from the installation ledger by `loadParallelTips` (the
+   * deployment environment's GRAPHYARD_MERGE_PARALLEL_TIPS before any publication), else the
+   * default of 4. Every evaluation validates the first that many speculative tips at once.
+   */
+  parallelTips = defaultParallelTips;
+  /** Reads the parallel-tip window the master last published from the installation ledger. */
+  async loadParallelTips() {
+    const row = (await this.store.pool.query('SELECT (payload->>\'parallelTips\')::int AS tips FROM events WHERE work_id IS NULL AND kind=$1 ORDER BY seq DESC LIMIT 1', [mergeParallelTipsEvent])).rows[0];
+    const configured = Number.parseInt(process.env.GRAPHYARD_MERGE_PARALLEL_TIPS ?? '', 10);
+    this.parallelTips = Number.isSafeInteger(row?.tips) && row.tips >= 1 ? row.tips
+      : Number.isSafeInteger(configured) && configured >= 1 ? configured : defaultParallelTips;
+    return this.parallelTips;
   }
   constructor(public store: Store, public ciAppIds: number[] = [15368], public leaseSeconds = 120, public repository = process.env.GITHUB_REPOSITORY ?? '', public launchFence = launchFenceMs) {}
   private async observeSubmission(actor: Principal, id: string | null, data: { epoch: number; pr: number }, key: string): Promise<Observation | null> {
@@ -1508,8 +1523,12 @@ export class Engine {
     // are recorded as a conflict and withheld from the observation before any gate reads it.
     this.conflictTransitions.set(work, [...(this.conflictTransitions.get(work) ?? []), ...reconcileReviewConflict(work, now)]);
     const result = evaluate(work, all, now, this.ciAppIds, this.mergeBatchSize);
-    if (work.stage !== result.stage) work.stageEnteredAt = now.toISOString();
-    Object.assign(work, result);
+    // The queue layer is re-derived under the parallel-tip window (GY-498): entries carry the tips
+    // they merge behind, ejection is decided by prefix attribution, and the test and merge gates
+    // read the window's validation instead of the batch's combined tip.
+    const windowed = reconcileWindow(result, work, all, now, this.ciAppIds, this.mergeBatchSize, this.parallelTips);
+    if (work.stage !== windowed.stage) work.stageEnteredAt = now.toISOString();
+    Object.assign(work, windowed);
     if (work.gates.some(g => !g.passed) || work.violations.length) work.mergeAuthorization = null;
     else if (work.candidate && !work.observation?.merged && (!work.mergeAuthorization || work.mergeAuthorization.sha !== work.candidate.sha || work.mergeAuthorization.baseSha !== work.candidate.baseSha)) {
       work.mergeAuthorization = { sha: work.candidate.sha, baseSha: work.candidate.baseSha, policyRevision: work.policyRevision, at: now.toISOString() };
@@ -1851,7 +1870,7 @@ export class Engine {
           settleDelivered(work, all, now);
           // The queue shifted. The entries that can land next (the head and its batch) are woken now; the rest are observed on
           // their own schedule and re-predict their base when they near the head.
-          for (const behind of nextQueueEntries(all, work.id, Math.max(mergeBandQueueDepth, this.mergeBatchSize))) await wakeJob(db, behind.id);
+          for (const behind of nextQueueEntries(all, work.id, Math.max(mergeBandQueueDepth, this.mergeBatchSize, this.parallelTips))) await wakeJob(db, behind.id);
         } else {
           if (!work.violations.includes(violation)) work.violations.push(violation);
           if (refusedReconciliation) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'merge.reconciliation.refused',
@@ -1865,7 +1884,7 @@ export class Engine {
       if (queuedBefore !== null && !work.queue && work.queueEjection?.sequence === queuedBefore) {
         await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'queue.ejected',
           JSON.stringify({ details: { sequence: queuedBefore, reason: work.queueEjection.reason, ...(refusedReconciliation ? { decision: refusedReconciliation.decision, mergeSha: observation.mergeSha } : {}), at: now.toISOString() } })]);
-        for (const behind of nextQueueEntries(all, work.id, Math.max(mergeBandQueueDepth, this.mergeBatchSize))) await wakeJob(db, behind.id);
+        for (const behind of nextQueueEntries(all, work.id, Math.max(mergeBandQueueDepth, this.mergeBatchSize, this.parallelTips))) await wakeJob(db, behind.id);
       }
       await this.recordDispatch(db, work, now);
       await save(db, work, 'github', 'github.observed', now);
