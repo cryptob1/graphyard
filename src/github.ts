@@ -29,7 +29,7 @@ export const compareFileCap = 300;
 /** Re-requests of a pull request GitHub answered with `mergeable: null`, `mergeabilityRetryMs` apart: at most 10 seconds (GY-548). */
 export const mergeabilityRetries = 3, mergeabilityRetryIntervalMs = 3_000;
 /** One file of a GitHub compare, as far as a patch-id reads it. */
-export interface CompareFile { filename?: unknown; previous_filename?: unknown; status?: unknown; patch?: unknown; changes?: unknown }
+export interface CompareFile { filename?: unknown; previous_filename?: unknown; status?: unknown; patch?: unknown; changes?: unknown; sha?: unknown }
 /**
  * The patch-id of a change as GitHub's compare lists it (GY-330): a hash of every file's path,
  * rename source, status and textual patch, with hunk line numbers removed as `git patch-id`
@@ -38,8 +38,13 @@ export interface CompareFile { filename?: unknown; previous_filename?: unknown; 
  * carriage return and trailing whitespace are ignored. The same change applied to a base that
  * moved elsewhere — even in another hunk of the same file — has the same patch-id; any edit to the
  * change itself gives another.
- * Null when the list is not the whole change: truncated at compareFileCap, or a file GitHub gives
- * no textual patch for (binary, or too large), apart from a pure rename, which has none to give.
+ * A file GitHub gives no textual patch for (binary, or too large) is compared by the blob it
+ * leaves (GY-384): the same path, status and resulting blob SHA is the same change to that file.
+ * That is stricter than a patch — a base that edited another part of an oversized file changes
+ * its blob — but never looser, and a binary file the base also changed conflicts, which is never
+ * carried. Null when the list is not the whole change: truncated at compareFileCap (the files past
+ * the cap are unknown, so no partial comparison can show them unchanged), or a patchless file with
+ * no blob SHA, apart from a pure rename, which has nothing to give.
  */
 export function patchId(files: CompareFile[] | null | undefined): string | null {
   if (!Array.isArray(files) || files.length >= compareFileCap) return null;
@@ -47,8 +52,9 @@ export function patchId(files: CompareFile[] | null | undefined): string | null 
   for (const file of files) {
     if (typeof file?.filename !== 'string') return null;
     const renamed = file.status === 'renamed' && (file.changes ?? 0) === 0;
-    if (typeof file.patch !== 'string' && !renamed) return null;
-    const body = typeof file.patch === 'string' ? file.patch.split('\n').map(line => line.startsWith('@@') ? '@@' : line.replace(/\s+$/, '')).join('\n') : '';
+    const blob = typeof file.sha === 'string' && /^[0-9a-f]{40,64}$/.test(file.sha) ? file.sha : null;
+    if (typeof file.patch !== 'string' && !renamed && !blob) return null;
+    const body = typeof file.patch === 'string' ? file.patch.split('\n').map(line => line.startsWith('@@') ? '@@' : line.replace(/\s+$/, '')).join('\n') : blob ? `\u0002blob ${blob}` : '';
     parts.push(`${typeof file.previous_filename === 'string' ? file.previous_filename : file.filename}\u0000${file.filename}\u0000${String(file.status ?? '')}\u0000${body}`);
   }
   return createHash('sha1').update(parts.sort().join('\u0001')).digest('hex');
@@ -308,6 +314,10 @@ export function reserveDecision(band: CadenceBand, budget: Pick<GitHubBudget, 'r
   if (!Number.isFinite(reset) || reset <= now.getTime()) return null;
   const until = new Date(reset + 2000).toISOString();
   return { until, reason: `GitHub budget is below the ${budget.reserve}-request merge-path reserve (${budget.remaining} remaining, reset ${budget.resetAt}); this ${band}-cadence observation is rescheduled to ${until} rather than spent, so the merge path, webhook wakes and merge verification keep the reserve` };
+}
+/** The id of every review on a pull request GitHub reports as dismissed, from its full review list. */
+export function dismissedReviewIds(reviews: readonly { id?: unknown; state?: unknown }[]): number[] {
+  return reviews.flatMap(review => review.state === 'DISMISSED' && Number.isSafeInteger(review.id) && (review.id as number) > 0 ? [review.id as number] : []);
 }
 export interface GitHubConfig { repository: string; base: string; appId: number; installationId: number; privateKey: string; reviewerApps?: ReviewerApp[] }
 /**
@@ -942,6 +952,10 @@ export class GitHub {
         ...(Number.isSafeInteger(c.id) ? { id: c.id } : {}), ...(Number.isSafeInteger(c.run_attempt) ? { attempt: c.run_attempt } : {}) })),
       ...(agentReview ? { agentReview } : {}),
       reviewIds: reviews.every(r => Number.isSafeInteger(r.id) && r.id > 0) ? reviews.map(r => r.id) : undefined,
+      // Every review GitHub now reports dismissed, not only each identity's latest (GY-486): an
+      // approval dismissed and then re-posted by the same identity is hidden behind the re-post in
+      // `reviews`, and review-conflict.ts must still read it as withdrawn rather than standing.
+      dismissedReviewIds: dismissedReviewIds(reviews),
       reviews: [...latest.values()].map(r => ({ id: r.id, reviewer: r.user.login, sha: r.commit_id, state: r.state, submittedAt: r.submitted_at,
         ...(r.state === 'DISMISSED' && dismissalOf(r.id) ? { dismissal: dismissalOf(r.id)! } : {}) })),
       prState: pr.state, draft: pr.draft, prCreatedAt: pr.created_at, merged: pr.merged, mergeSha: pr.merge_commit_sha, mergedAt: pr.merged_at, mergeable: pr.mergeable === true && !pr.draft && pr.state === 'open', conflicting: pr.mergeable === false && pr.state === 'open',
@@ -1753,6 +1767,11 @@ export function waitsOnObservation(work: Work, all: Work[], now = new Date()): b
 }
 /** A submitted item the control plane has never read: its first observation is what every later gate waits on. */
 export const firstObservationOwed = (work: Work) => !!work.submission && !work.observation && !work.candidate && work.stage !== 'done';
+/** How many of the claim order's leading ids are the queue-head band, which no starved job overtakes. */
+export function observationHeadCount(all: Work[], batchSize: number, now = Date.now()): number {
+  const band = headClaimBand(batchSize);
+  return predictQueue(all, now).filter(placement => placement.position < band).length;
+}
 /**
  * The order observation jobs are claimed in (GY-492): merge-queue entries within the head band
  * first, in queue position, then submissions never observed, then items whose next action waits on
@@ -1819,7 +1838,7 @@ export async function processJob(engine: Engine, github: GitHub): Promise<boolea
   // due, the merge-queue head's job is claimed first however recently it became due, instead of
   // waiting behind every older entry for a worker to reach it.
   const all = await engine.store.list();
-  const job = await engine.store.takeJob(observationClaimOrder(all, engine.mergeBatchSize));
+  const job = await engine.store.takeJob(observationClaimOrder(all, engine.mergeBatchSize), observationHeadCount(all, engine.mergeBatchSize));
   if (!job) return false;
   const startedAt = Date.now();
   let work: Work | undefined;
