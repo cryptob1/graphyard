@@ -97,6 +97,11 @@ export const transientLockError = (error: unknown, cancelledLockWait = true) => 
 /** The backoff before a migration's retry: doubling from 100 ms, capped at 2 s so retries still fit the lock budget. */
 export const migrationBackoffMs = (attempt: number) => Math.min(100 * 2 ** Math.max(0, attempt), 2_000);
 
+/** Retry only deadlocks (40P01), at once, while `retryable` holds: what a restore needs, which has no lock budget to back off within. */
+export async function retryDeadlocks(migrate: () => Promise<void>, retryable: () => boolean, rollback: () => Promise<unknown>) {
+  return retryLockFailures(migrate, retryable, rollback, async () => {}, error => (error as { code?: string }).code === '40P01');
+}
+
 /**
  * Run the migration, retrying transient lock failures with backoff while `retryable` holds (the
  * migration's deadline): each attempt that fails rolls its locks back at once before waiting, so
