@@ -3,7 +3,7 @@
 
 ## Daily checklist
 
-- `/healthz` is healthy at the expected `commit`; `/api/status` shows no persistent job errors, `delegationLimits.attention` or `production.incidents`.
+- `/healthz` healthy at the expected `commit`; `/api/status` without persistent job errors, `delegationLimits.attention` or `production.incidents`.
 - `graphyard master status`: `daemon.liveness` `running`, every attention item owned.
 - A recent `graphyard db backup` verified.
 
@@ -11,7 +11,7 @@
 
 - **Item not moving**: fix the refusal's cause. Never weaken requirements.
   - Escalation: a declared human session runs `graphyard resolve GY-N TRIGGER "reason"`. No AI principal can alone, except an `admin` settling an explained `lease-loss` with `--attestation`.
-  - Lease expired unsubmitted: [lost worker](operations-reference.md#lost-worker-before-submission). Needs another attempt: [rework](operations-reference.md#submitted-implementation-needs-rework). Fenced: [quarantine](operations-reference.md#supervisor-died-leaving-a-containment-quarantine).
+  - Lease expired unsubmitted: [lost worker](operations-reference.md#lost-worker-before-submission). Another attempt: [rework](operations-reference.md#submitted-implementation-needs-rework). Fenced: [quarantine](operations-reference.md#supervisor-died-leaving-a-containment-quarantine).
 - **Merge refused**: wait or repair the cause; never bypass.
 - **Merged outside Graphyard**: [merge bypass](operations-reference.md#merge-bypass).
 - **Wrong accepted evidence**: [revoke it](operations-reference.md#accepted-evidence-turns-out-to-be-wrong).
