@@ -3,7 +3,9 @@
 
 ## Master coordination loop
 
-Restart `graphyard master run` freely; it never dispatches twice. `master status` → `daemon` gives health; `journalctl --user -u graphyard-master`, the log. `daemon.metrics.timings` and status `timings` time steps and calls over 1s; status reads a cached intervention report. Failed server requests log their route and SQL statement.
+Restart `graphyard master run` freely; it never dispatches twice. `master status` → `daemon` gives health; `journalctl --user -u graphyard-master`, the log. `daemon.metrics.timings` and status `timings` time steps and calls over 1s; `daemon.cycleTime` gives p50/p95 cycle time over 30 minutes; a cycle over 60 s raises `loop` attention naming its three slowest steps. Status reads a cached intervention report. Failed server requests log their route and SQL statement.
+
+Cycles never wait on session launches (dispatch, approvers, failover relaunches): a launcher runs `run.launchConcurrency` (default 3) at once, holding each launch's profile, and the next cycle reports results.
 
 ### Perpetual master loop
 
