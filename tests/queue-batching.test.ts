@@ -12,7 +12,7 @@ import { daemonEffects } from '../src/master-daemon.js';
 import { batchStep, defaultMergeBatchSize, describeMergeBatches, predictQueue, queueBatch, queueRef, runMergeBatches, tipValidationPrefix, tipVerdict, type TipVerdict } from '../src/merge-queue.js';
 import { buildMasterStatus, masterConfigSchema, mergeBatchSize } from '../src/master.js';
 import { decideCarry, evaluate, type Evidence, type Work } from '../src/model.js';
-import { prSteps } from '../web/pr-steps.js';
+import { prSteps } from '../src/model/pr-steps.js';
 
 // GY-330: the merge queue tests several entries on one combined tip and bisects only on failure.
 // Each test is named for the proof it produces.
