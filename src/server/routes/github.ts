@@ -2,7 +2,12 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import { demand } from '../../model.js';
 import { defineRoutes } from '../routes.js';
 
-/** GitHub webhook: HMAC-verified, deduplicated in Postgres, wakes the durable jobs. */
+/**
+ * GitHub webhook: HMAC-verified, deduplicated in Postgres, wakes the durable jobs. Observation
+ * events (pull_request, pull_request_review, check_run, check_suite, push) also mark the woken items
+ * due ahead of polled jobs, and base-branch pushes and protection events end the adapter's shared
+ * reads (GY-806).
+ */
 export const githubRoutes = defineRoutes('github', [
   {
     method: 'POST', path: '/api/github/webhook',
@@ -18,16 +23,20 @@ export const githubRoutes = defineRoutes('github', [
       // Our own check publications must not create an endless webhook/publish loop.
       if (payload.check_run?.app?.id === github?.config.appId) return context.send(202, { accepted: true, ignored: 'own check' });
       const delivery = String(req.headers['x-github-delivery'] ?? ''); demand(delivery && delivery.length < 200, 'Missing delivery ID', 400);
-      await engine.store.transaction(async db => {
+      const event = String(req.headers['x-github-event'] ?? '');
+      const delivered = await engine.store.transaction(async db => {
         const result = await db.query('INSERT INTO webhook_receipts(id) VALUES($1) ON CONFLICT DO NOTHING RETURNING id', [delivery]);
-        if (!result.rowCount) return;
+        if (!result.rowCount) return null;
         // Wake only the items the event is about; a move of the base branch or a queue ref touches them all.
         const { all, prs, shas } = webhookSubjects(payload, github?.config.base ?? 'main');
-        if (!all && !prs.length && !shas.length) return;
-        await db.query(`UPDATE jobs SET available_at=LEAST(available_at, now()),generation=generation+1 WHERE $1::boolean OR work_id IN (SELECT id FROM work_items
-          WHERE document->'submission'->>'pr' = ANY($2::text[]) OR document->'candidate'->>'sha' = ANY($3::text[]) OR document->'queue'->'speculation'->>'tip' = ANY($3::text[]))`,
+        if (!all && !prs.length && !shas.length) return [];
+        const woken = await db.query(`UPDATE jobs SET available_at=LEAST(available_at, now()),generation=generation+1 WHERE $1::boolean OR work_id IN (SELECT id FROM work_items
+          WHERE document->'submission'->>'pr' = ANY($2::text[]) OR document->'candidate'->>'sha' = ANY($3::text[]) OR document->'queue'->'speculation'->>'tip' = ANY($3::text[])) RETURNING work_id`,
           [all, prs.map(String), shas]);
+        return woken.rows.map(row => String(row.work_id));
       });
+      // Only after the wake committed, and once per delivery: the adapter's own state is not the ledger's.
+      if (delivered) github?.noteWebhook?.(event, payload, delivered);
       return context.send(202, { accepted: true });
     },
   },

@@ -188,6 +188,36 @@ const requestKinds: [RegExp, string][] = [
   [/^\/rate_limit/, 'rate-limit'],
 ];
 export const requestKind = (path: string) => requestKinds.find(([pattern]) => pattern.test(path))?.[1] ?? 'other';
+/** The endpoint a request spent on, with its SHAs, numbers and ranges generalised: `GET /pulls/:n`, `GET /compare/:range`. */
+export const requestEndpoint = (method: string, path: string) => `${method} ${path.replace(/^\/repos\/[^/]+\/[^/]+/, '').replace(/\?.*$/, '').replace(/[a-f0-9]{40}/g, ':sha').replace(/\/\d+/g, '/:n').replace(/^\/contents\/.*/, '/contents/:path').replace(/^\/compare\/.*/, '/compare/:range').replace(/^\/git\/ref\/heads\/.*/, '/git/ref/heads/:branch').replace(/^\/branches\/.*\/protection$/, '/branches/:branch/protection')}`;
+/**
+ * A GET whose answer never changes (GY-806): a commit read by its SHA, or a compare between two
+ * exact SHAs. Such a read is asked of GitHub once and then served from the immutable cache with no
+ * request at all — not even a conditional one — for as long as the entry is kept.
+ */
+export const immutableRead = (path: string) => /^\/repos\/[^/]+\/[^/]+\/(commits\/[a-f0-9]{40}|compare\/[a-f0-9]{40}\.\.\.[a-f0-9]{40}(\?[^/]*)?)$/.test(path)
+  // `contains` keeps the one answer it needs from its `?per_page=1` compare in the ancestry cache already.
+  && !/\?per_page=1$/.test(path);
+/**
+ * One observation cycle (GY-806): every observation that starts within it shares one read of the
+ * base branch's ref, instead of each item re-reading it. A push to the base branch (webhook) or a
+ * ref this adapter writes itself ends the cycle early. Sharing needs a live webhook — one delivered
+ * within `webhookLiveMs` — since only its push event says the base moved; without one each
+ * observation reads the ref and protection itself, and only reads already in flight are shared.
+ */
+export const baseRefCycleMs = 15_000;
+/** How recently a webhook must have been delivered for the per-cycle reads to be shared. */
+export const webhookLiveMs = 60 * 60_000;
+/** How long one read of the base branch's protection is shared; a protection or repository webhook ends it early. */
+export const protectionShareMs = 5 * 60_000;
+/** The share of one token's hourly limit the recorded workload must stay under once replayed (GY-806). */
+export const billableBudgetShare = 0.6;
+/** The events that drive an observation at once, ahead of polled jobs (GY-806). */
+export const observationEvents = ['pull_request', 'pull_request_review', 'check_run', 'check_suite', 'push'] as const;
+/** The events that end the shared protection read. */
+export const protectionEvents = ['branch_protection_rule', 'branch_protection_configuration', 'repository_ruleset', 'repository'] as const;
+/** How long a webhook wake waits to be claimed before it is dropped from the priority list (its job stays due). */
+export const webhookWakeTtlMs = 10 * 60_000;
 
 /** The live budget, the rate it is being spent at, and what the control plane is doing about it. */
 export interface GitHubBudget {
@@ -213,6 +243,12 @@ export interface GitHubBudget {
   paused: { since: string; until: string; reason: string } | null;
   /** What the last hour was spent on, which is what a pause incident names. */
   lastHour: { requests: number; byKind: { kind: string; requests: number }[] };
+  /**
+   * Billable requests over the last hour against the hourly budget, by endpoint (GY-806):
+   * `perHour` is what the last hour charged, `limit` the token's hourly limit (GitHub's default
+   * when none was read yet), `share` their ratio, and `target` the share the fleet must stay under.
+   */
+  billable: { perHour: number; limit: number; share: number; target: number; byEndpoint: { endpoint: string; requests: number; share: number }[] };
   /** The schedule in force, and what each observation cost the job that made it. */
   cadence: Record<CadenceBand, number>;
   /** The throughput the observation workers have been achieving (GY-492), from the job durations of the last window. */
@@ -571,7 +607,7 @@ export class GitHub {
     const u = this.usage;
     u.token = token || u.token;
     u.total++; if (response.status === 304) u.notModified++;
-    const kind = `${method} ${path.replace(/^\/repos\/[^/]+\/[^/]+/, '').replace(/\?.*$/, '').replace(/[a-f0-9]{40}/g, ':sha').replace(/\/\d+/g, '/:n').replace(/^\/contents\/.*/, '/contents/:path').replace(/^\/compare\/.*/, '/compare/:range')}`;
+    const kind = requestEndpoint(method, path);
     u.byKind.set(kind, (u.byKind.get(kind) ?? 0) + 1);
     u.remaining = response.headers.get('x-ratelimit-remaining') ?? u.remaining; u.reset = response.headers.get('x-ratelimit-reset') ?? u.reset;
     if (Date.now() - u.since < 60_000) return;
@@ -581,14 +617,27 @@ export class GitHub {
   }
   private blobs = new Map<string, string | null>();
   private histories = new Map<string, Set<string> | null>();
+  /** Whole responses of immutable reads (`immutableRead`): a commit by SHA, a compare of two exact SHAs (GY-806). */
+  private immutable = new Map<string, unknown>();
+  private immutableReads = new Map<string, Promise<any>>();
+  /** The clock the shared per-cycle reads are timed on; a replay drives it. */
+  clock: () => number = Date.now;
+  /** The base branch's ref, read once per observation cycle and shared by every item's observation (GY-806). */
+  private sharedRef: { at: number; read: Promise<{ tip: string; tree: string }> } | null = null;
+  /** The base branch's protection, read at most every `protectionShareMs` and shared (GY-806). */
+  private sharedProtection: { at: number; read: Promise<any> } | null = null;
+  /** Items a webhook made due, by work id, with when it arrived: claimed ahead of polled jobs (GY-806). */
+  private webhookWakes = new Map<string, number>();
+  /** Items a webhook-driven observation refreshed, and the poll interval that observation scheduled (GY-806). */
+  private webhookRefreshes = new Map<string, { at: number; pollMs: number }>();
   /** The persisted cold layer under the four maps above (src/github-cache.ts), when attached. */
   private persisted: GitHubCacheStore | null = null;
   private warming: Promise<void> | null = null;
   /** Load the persisted caches into the maps and write new entries behind. Resolves once loaded; never rejects. */
   attachCache(store: GitHubCacheStore) {
     this.persisted = store;
-    const warming = store.load({ etag: this.cache, ancestry: this.ancestry, blob: this.blobs, history: this.histories },
-      { etag: etagCacheEntries, ancestry: ancestryEntries, blob: ancestryEntries, history: historyEntries }).then(() => { if (this.warming === warming) this.warming = null; });
+    const warming = store.load({ etag: this.cache, ancestry: this.ancestry, blob: this.blobs, history: this.histories, immutable: this.immutable },
+      { etag: etagCacheEntries, ancestry: ancestryEntries, blob: ancestryEntries, history: historyEntries, immutable: immutableEntries }).then(() => { if (this.warming === warming) this.warming = null; });
     this.warming = warming;
     return warming;
   }
@@ -611,7 +660,7 @@ export class GitHub {
   /** The limit, what is left of it and when it resets, as the last installation response said. */
   private rate: { limit: number | null; remaining: number | null; used: number | null; resetAt: number | null; observedAt: number | null } = { limit: null, remaining: null, used: null, resetAt: null, observedAt: null };
   /** Every request that cost budget in the last hour, with the endpoint family it spent on. */
-  private charges: { at: number; kind: string }[] = [];
+  private charges: { at: number; kind: string; endpoint: string }[] = [];
   /** What each item's last observation cost, against the job that made it. */
   private costs = new Map<string, { at: number; requests: number; uncached: number; band: CadenceBand; cadenceMs: number }>();
   /** The same costs as a fleet sample, for the mean an operator reads. */
@@ -651,7 +700,7 @@ export class GitHub {
    * Only installation requests report the budget this class is spending; App-level calls
    * (`/app`, token refresh) are counted as requests against a different allowance.
    */
-  private record(path: string, response: Response, tracked: boolean, now = Date.now(), charged = true, token: string | null = null) {
+  private record(path: string, response: Response, tracked: boolean, now = Date.now(), charged = true, token: string | null = null, method = 'GET') {
     const resource = response.headers.get('x-ratelimit-resource');
     const number = (name: string) => { const value = Number(response.headers.get(name)); return Number.isFinite(value) ? value : null; };
     const remaining = number('x-ratelimit-remaining');
@@ -669,7 +718,7 @@ export class GitHub {
     if (response.status === 304 || !charged || response.status === 429 || response.status === 403 && remaining === 0) return;
     // A measured stretch is an observation job the pace started; every other request is spend the pace must leave room for.
     if (tracked && token !== null) this.budgets.charge(token, now, !!meter);
-    this.charges.push({ at: now, kind: requestKind(path) });
+    this.charges.push({ at: now, kind: requestKind(path), endpoint: requestEndpoint(method, path) });
     if (this.charges.length > 8192) this.charges = this.charges.filter(charge => now - charge.at <= budgetLedgerMs);
   }
   /** Run `fn` counting the requests it makes and the ones that actually cost budget. */
@@ -736,8 +785,9 @@ export class GitHub {
     const used = expired ? null : this.rate.used;
     const resetAt = expired ? null : this.rate.resetAt;
     const exhaustion = remaining !== null && perMinute > 0 ? now + (remaining / perMinute) * 60_000 : null;
-    const counts = new Map<string, number>();
-    for (const charge of this.charges) counts.set(charge.kind, (counts.get(charge.kind) ?? 0) + 1);
+    const counts = new Map<string, number>(), endpoints = new Map<string, number>();
+    for (const charge of this.charges) { counts.set(charge.kind, (counts.get(charge.kind) ?? 0) + 1); endpoints.set(charge.endpoint, (endpoints.get(charge.endpoint) ?? 0) + 1); }
+    const hourly = limit ?? defaultHourlyLimit, share = (requests: number) => Math.round(requests / hourly * 10_000) / 10_000;
     const samples = this.samples.filter(sample => now - sample.at <= budgetLedgerMs);
     const mean = (values: number[]) => values.length ? Math.round(values.reduce((total, value) => total + value, 0) / values.length * 100) / 100 : null;
     return {
@@ -754,6 +804,8 @@ export class GitHub {
       paused: this.blockedUntil > now ? { since: new Date(this.pausedSince || now).toISOString(), until: new Date(this.blockedUntil).toISOString(),
         reason: this.pauseReason || 'GitHub refused a request for rate limiting' } : null,
       lastHour: { requests: this.charges.length, byKind: [...counts].map(([kind, requests]) => ({ kind, requests })).sort((a, b) => b.requests - a.requests || a.kind.localeCompare(b.kind)) },
+      billable: { perHour: this.charges.length, limit: hourly, share: share(this.charges.length), target: billableBudgetShare,
+        byEndpoint: [...endpoints].map(([endpoint, requests]) => ({ endpoint, requests, share: share(requests) })).sort((a, b) => b.requests - a.requests || a.endpoint.localeCompare(b.endpoint)) },
       cadence: { ...observationCadenceMs },
       throughput: observationThroughput(this.jobDurations, now),
       observations: { count: samples.length, meanRequests: mean(samples.map(sample => sample.requests)), meanUncached: mean(samples.map(sample => sample.uncached)),
@@ -847,7 +899,7 @@ export class GitHub {
       const response = await fetch(`https://api.github.com/app/installations/${this.config.installationId}/access_tokens`, {
         method: 'POST', headers: this.appHeaders(), signal: AbortSignal.timeout(15_000),
       });
-      this.record('/app/installations/access_tokens', response, false);
+      this.record('/app/installations/access_tokens', response, false, Date.now(), true, null, 'POST');
       const refused = await this.refusal(response, 'installation authentication');
       if (refused instanceof GitHubPermissionRefusal) this.authenticationRefusal = { until: Date.now() + 60_000, error: refused };
       if (refused) throw refused;
@@ -873,9 +925,43 @@ export class GitHub {
     return this.apiRequest(`/repos/${this.config.repository}${path}`, method, body);
   }
   private async apiRequest(path: string, method = 'GET', body?: unknown): Promise<any> {
+    if (method === 'GET' && immutableRead(path)) return this.immutableRequest(path);
+    // A ref this adapter moves itself ends the shared base-ref read (GY-806): the next observation reads the new tip.
+    if (method !== 'GET' && /\/(git\/refs|merges$|pulls\/\d+\/merge$)/.test(path)) this.sharedRef = null;
+    return this.send(path, method, body, true);
+  }
+  /**
+   * A commit by SHA or a compare of two exact SHAs (GY-806): asked of GitHub once, then served from
+   * the immutable cache with no request, however many observations ask. Concurrent first reads of
+   * the same path share one request. A cached answer needs no token, so it is served through a pause.
+   */
+  private async immutableRequest(path: string): Promise<any> {
+    await this.warm();
+    if (this.immutable.has(path)) {
+      const value = this.immutable.get(path);
+      this.immutable.delete(path); this.immutable.set(path, value);
+      this.persisted?.touch('immutable', path);
+      return structuredClone(value);
+    }
+    let reading = this.immutableReads.get(path);
+    if (!reading) {
+      reading = this.send(path, 'GET', undefined, false).then(value => {
+        if (value !== null && value !== undefined) {
+          this.immutable.set(path, structuredClone(value));
+          this.persisted?.put('immutable', path, value);
+          if (this.immutable.size > immutableEntries) this.immutable.delete(this.immutable.keys().next().value!);
+        }
+        return value;
+      }).finally(() => this.immutableReads.delete(path));
+      this.immutableReads.set(path, reading);
+    }
+    return structuredClone(await reading);
+  }
+  /** One request to GitHub. `conditional` uses and keeps the ETag cache; an immutable read needs neither. */
+  private async send(path: string, method: string, body: unknown, conditional: boolean): Promise<any> {
     await this.authenticate();
     if (method === 'GET') await this.warm();
-    const cached = method === 'GET' ? this.cache.get(path) : undefined;
+    const cached = method === 'GET' && conditional ? this.cache.get(path) : undefined;
     const started = Date.now(), bearer = this.token, token = tokenIdentity(bearer);
     let response: Response;
     try {
@@ -890,7 +976,7 @@ export class GitHub {
     // A slow request is named so a stalled observation can be traced to the call that held it.
     if (Date.now() - started > 5_000) console.error(`GitHub ${method} ${path} took ${Date.now() - started} ms (${response.status})`);
     this.meter(method, path, response, token);
-    this.record(path, response, true, Date.now(), true, token);
+    this.record(path, response, true, Date.now(), true, token, method);
     // A 304 costs no rate budget. Refresh the entry's recency so a full observation round stays cached.
     if (response.status === 304 && cached) { this.rateFailures = 0; this.cache.delete(path); this.cache.set(path, cached); this.persisted?.touch('etag', path); return structuredClone(cached.value); }
     const refused = await this.refusal(response, `${method} ${path}`);
@@ -900,7 +986,7 @@ export class GitHub {
     const etag = response.headers.get('etag');
     if (method === 'GET') {
       this.cache.delete(path);
-      if (etag) {
+      if (etag && conditional) {
         this.cache.set(path, { etag, value: structuredClone(value) });
         this.persisted?.put('etag', path, value, etag);
         if (this.cache.size > etagCacheEntries) this.cache.delete(this.cache.keys().next().value!);
@@ -950,7 +1036,7 @@ export class GitHub {
    */
   async branchProtection(requireNativeReview = false): Promise<{ protected: boolean; conversationResolution: boolean }> {
     try {
-      const p = await this.request(`/branches/${encodeURIComponent(this.config.base)}/protection`);
+      const p = await this.sharedProtectionRead();
       // `strict` must be off: a queued tip is deliberately behind the base branch, and the merge
       // queue supersedes that setting with a published tip that already contains its validated base.
       const verified = (!requireNativeReview || p.required_pull_request_reviews?.required_approving_review_count >= 1 && p.required_pull_request_reviews?.dismiss_stale_reviews && p.required_pull_request_reviews?.require_last_push_approval) && p.required_status_checks?.strict === false && !!p.enforce_admins?.enabled && !p.allow_force_pushes?.enabled && !p.allow_deletions?.enabled
@@ -1004,6 +1090,73 @@ export class GitHub {
    * root cause of approvals dismissed for a merge base that had not actually changed.
    */
   async baseBranch(): Promise<{ tip: string; tree: string }> {
+    const now = this.clock();
+    if (!this.sharedRef || now - this.sharedRef.at >= this.shareMs(baseRefCycleMs, now) || now < this.sharedRef.at) {
+      const entry = { at: now, read: this.readBaseBranch() };
+      this.sharedRef = entry;
+      // A failed read is not shared past its own callers, and an unshared one only while in flight.
+      const done = () => { if (this.sharedRef === entry && !this.webhookLive(this.clock())) this.sharedRef = null; };
+      entry.read.then(done, () => { if (this.sharedRef === entry) this.sharedRef = null; });
+    }
+    return { ...await this.sharedRef.read };
+  }
+  /** The last verified webhook delivery this adapter was told of. */
+  private webhookSeenAt: number | null = null;
+  private webhookLive(now: number) { return this.webhookSeenAt !== null && now - this.webhookSeenAt <= webhookLiveMs && now >= this.webhookSeenAt; }
+  /** How long a shared read is kept: `ms` while the webhook is live, otherwise only while it is in flight. */
+  private shareMs(ms: number, now: number) { return this.webhookLive(now) ? ms : 0; }
+  /**
+   * The base branch's protection as GitHub returns it, read at most every `protectionShareMs` and
+   * shared by every observation (GY-806); a protection or repository webhook ends the share early.
+   */
+  private sharedProtectionRead(): Promise<any> {
+    const now = this.clock();
+    if (!this.sharedProtection || now - this.sharedProtection.at >= this.shareMs(protectionShareMs, now) || now < this.sharedProtection.at) {
+      const entry = { at: now, read: this.request(`/branches/${encodeURIComponent(this.config.base)}/protection`) };
+      this.sharedProtection = entry;
+      const done = () => { if (this.sharedProtection === entry && !this.webhookLive(this.clock())) this.sharedProtection = null; };
+      entry.read.then(done, () => { if (this.sharedProtection === entry) this.sharedProtection = null; });
+    }
+    return this.sharedProtection.read.then(value => structuredClone(value));
+  }
+  /**
+   * What a verified webhook delivery means for this adapter (GY-806): a push to the base branch ends
+   * the shared ref read, a protection or repository event ends the shared protection read, and an
+   * observation event marks the named items due ahead of polled jobs. `work` is the items the
+   * delivery woke, as the webhook route resolved them.
+   */
+  noteWebhook(event: string, payload: any, work: string[] = [], now = this.clock()) {
+    this.webhookSeenAt = now;
+    const ref = typeof payload?.ref === 'string' ? payload.ref : '';
+    if (event === 'push' && ref === `refs/heads/${this.config.base}`) this.sharedRef = null;
+    if ((protectionEvents as readonly string[]).includes(event)) this.sharedProtection = null;
+    if (!(observationEvents as readonly string[]).includes(event)) return;
+    for (const id of work) { this.webhookWakes.delete(id); this.webhookWakes.set(id, now); }
+  }
+  /** The items a webhook made due, oldest delivery first: the claim order puts them ahead of every polled job. */
+  webhookDue(now = this.clock()): string[] {
+    for (const [id, at] of this.webhookWakes) if (now - at > webhookWakeTtlMs) this.webhookWakes.delete(id);
+    return [...this.webhookWakes.keys()];
+  }
+  /** Take an item's webhook wake as its job is claimed: true when the claim is webhook-driven. */
+  takeWebhookWake(work: string): boolean { return this.webhookWakes.delete(work); }
+  /** Record that a webhook-driven observation refreshed the item and when its poll is next due. */
+  noteWebhookRefresh(work: string, pollMs: number, now = this.clock()) {
+    this.webhookRefreshes.set(work, { at: now, pollMs });
+    if (this.webhookRefreshes.size > 1000) for (const [id, entry] of this.webhookRefreshes) if (now - entry.at > entry.pollMs) this.webhookRefreshes.delete(id);
+  }
+  /**
+   * When a polled observation of the item is skipped because a webhook refreshed it within its poll
+   * interval: the time the poll is next due, or null when the poll should run.
+   */
+  webhookRefreshedUntil(work: string, now = this.clock()): number | null {
+    const refreshed = this.webhookRefreshes.get(work);
+    if (!refreshed) return null;
+    const until = refreshed.at + refreshed.pollMs;
+    if (now >= until || now < refreshed.at) { this.webhookRefreshes.delete(work); return null; }
+    return until;
+  }
+  private async readBaseBranch(): Promise<{ tip: string; tree: string }> {
     const ref = await this.request(`/git/ref/heads/${this.config.base.split('/').map(encodeURIComponent).join('/')}`);
     const tip = ref?.object?.sha;
     demand(ref?.object?.type === 'commit' && typeof tip === 'string' && /^[a-f0-9]{40}$/.test(tip), `GitHub did not return a readable head for refs/heads/${this.config.base}`, 502);
@@ -1993,6 +2146,8 @@ export const etagCacheEntries = 4096;
 export const ancestryEntries = 16384;
 /** Commit-pair histories kept; each is immutable. */
 export const historyEntries = 2048;
+/** Whole immutable responses kept (commits by SHA, compares of two SHAs); the oldest-used is evicted past this. */
+export const immutableEntries = 4096;
 /** Peer containment compares one observation keeps in flight. */
 export const peerContainmentConcurrency = 8;
 async function boundedMap<T, R>(items: T[], limit: number, run: (item: T) => Promise<R>): Promise<R[]> {
@@ -2087,7 +2242,7 @@ const observationLag = (ms: number) => ms >= 60_000 ? `${Math.floor(ms / 60_000)
  * missing or older than that is raised as attention naming the head, its lag, and what the
  * workers have actually been achieving.
  */
-export function observationThroughputStatus(coordinator: { githubBudget?: ({ throughput?: { jobsPerMinute?: number; medianDurationMs?: number | null; p90DurationMs?: number | null } | null } & Partial<Pick<GitHubBudget, 'remaining' | 'limit' | 'resetAt' | 'perMinute' | 'projectedExhaustionAt' | 'exhaustsBeforeReset' | 'reserve' | 'tokens'>> & { pace?: Partial<GitHubBudget['pace']> | null }) | null } | null | undefined,
+export function observationThroughputStatus(coordinator: { githubBudget?: ({ throughput?: { jobsPerMinute?: number; medianDurationMs?: number | null; p90DurationMs?: number | null } | null } & Partial<Pick<GitHubBudget, 'remaining' | 'limit' | 'resetAt' | 'perMinute' | 'projectedExhaustionAt' | 'exhaustsBeforeReset' | 'reserve' | 'tokens' | 'billable'>> & { pace?: Partial<GitHubBudget['pace']> | null }) | null } | null | undefined,
   snapshot: { work: Work[]; now: string; jobs?: IntegrationJob[] }, now = Date.parse(snapshot.now)) {
   const throughput = coordinator?.githubBudget?.throughput ?? null;
   const reading = coordinator?.githubBudget ?? null;
@@ -2097,7 +2252,9 @@ export function observationThroughputStatus(coordinator: { githubBudget?: ({ thr
     perMinute: reading.perMinute ?? null, pacedPerMinute: reading.pace?.perMinute ?? null, paceTier: reading.pace?.tier ?? null,
     projectedExhaustionAt: reading.projectedExhaustionAt ?? null, exhaustsBeforeReset: !!reading.exhaustsBeforeReset,
     // Each token's own remaining, reset and projection at that reset (GY-690).
-    tokens: (reading.tokens ?? []).map(token => ({ token: token.token, current: token.current, remaining: token.remaining, resetAt: token.resetAt, perMinute: token.perMinute, otherPerMinute: token.otherPerMinute, projectedAtReset: token.projectedAtReset, belowReserveAtReset: token.belowReserveAtReset })) } : null;
+    tokens: (reading.tokens ?? []).map(token => ({ token: token.token, current: token.current, remaining: token.remaining, resetAt: token.resetAt, perMinute: token.perMinute, otherPerMinute: token.otherPerMinute, projectedAtReset: token.projectedAtReset, belowReserveAtReset: token.belowReserveAtReset })),
+    // Billable requests over the last hour against the hourly budget, by endpoint (GY-806).
+    billable: reading.billable ?? null } : null;
   const oldestDueJobMs = (snapshot.jobs ?? []).reduce<number | null>((oldest, job) => {
     const locked = job.locked_until !== null && Date.parse(job.locked_until) > now, held = job.held_until != null && Date.parse(job.held_until) > now;
     if (locked || held) return oldest;
@@ -2136,8 +2293,21 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
   // due, the merge-queue head's job is claimed first however recently it became due, instead of
   // waiting behind every older entry for a worker to reach it.
   const all = await engine.store.list();
-  const job = await engine.store.takeJob(observationClaimOrder(all, engine.mergeBatchSize, Date.now(), budgetTight(github.budget?.())), observationHeadCount(all, engine.mergeBatchSize));
+  // Items a webhook made due are claimed ahead of every polled job, the queue head included (GY-806).
+  const open = new Set(all.filter(work => work.stage !== 'done').map(work => work.id));
+  const woken = (github.webhookDue?.() ?? []).filter(id => open.has(id));
+  const polled = observationClaimOrder(all, engine.mergeBatchSize, Date.now(), budgetTight(github.budget?.())).filter(id => !woken.includes(id));
+  const job = await engine.store.takeJob([...woken, ...polled], woken.length + observationHeadCount(all, engine.mergeBatchSize));
   if (!job) return false;
+  const viaWebhook = github.takeWebhookWake?.(job.work_id) ?? false;
+  // A poll of an item a webhook-driven observation refreshed within its poll interval is skipped
+  // (GY-806): nothing is asked of GitHub, and the job is due again when that interval ends. A job
+  // woken by a state change or a webhook is never skipped.
+  const refreshedUntil = !job.woken && !viaWebhook ? github.webhookRefreshedUntil?.(job.work_id) ?? null : null;
+  if (refreshedUntil !== null) {
+    await engine.store.deferJob(job.work_id, job.token, new Date(refreshedUntil).toISOString(), `poll skipped: a webhook refreshed this item; next poll ${new Date(refreshedUntil).toISOString()}`, null);
+    return true;
+  }
   const startedAt = Date.now();
   let work: Work | undefined;
   const guard = (snapshot: Work, success: boolean) => async () => {
@@ -2279,6 +2449,7 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
     const cadence = schedule.cadence && (head ? { ...schedule.cadence, band: 'merge' as const, ms: headObservationSeconds * 1000 }
       : { ...schedule.cadence, band: schedule.cadence.band === 'merge' ? 'active' as const : schedule.cadence.band, ms: Math.max(idleObservationSeconds * 1000, schedule.cadence.ms) });
     if (cadence && work) github.recordObservation?.(work.id, { requests, uncached, band: cadence.band, cadenceMs: cadence.ms });
+    if (viaWebhook && observed && !settled && !held && cadence && work) github.noteWebhookRefresh?.(work.id, cadence.ms);
     if (settled) return true;
     if (work?.stage === 'done') await engine.store.pool.query('DELETE FROM jobs WHERE work_id=$1 AND token=$2', [job.work_id, job.token]);
     if (held) await engine.store.holdJob(job.work_id, job.token, held, permissionHoldMs, heldOn(), observed);

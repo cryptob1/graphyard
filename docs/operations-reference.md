@@ -52,6 +52,12 @@ Budgets are per token (`githubBudget.tokens`); one projected below the reserve a
 
 About ten requests uncached; unchanged, none.
 
+### Reads that are not repeated
+
+- **Immutable:** a commit by SHA (`GET /commits/:sha`) and a compare of two exact SHAs (`GET /compare/A...B`) are fetched once, then answered from the cache (persisted in `github_cache`) with no request at all.
+- **Shared per cycle:** while a webhook has been delivered in the last hour, every observation starting within one 15-second cycle shares one read of the base branch ref. A push to the base branch, or a ref Graphyard writes, starts a new cycle. Branch protection is read at most every 5 minutes, or again after a `branch_protection_rule`, `branch_protection_configuration`, `repository_ruleset` or `repository` event. With no live webhook, each observation reads both itself.
+- **Webhook-driven:** a `pull_request`, `pull_request_review`, `check_run`, `check_suite` or `push` delivery makes the named items' jobs due at once, claimed ahead of polled jobs. A webhook-driven observation also skips the item's next poll if it falls within that observation's poll interval; the job reads `poll skipped: a webhook refreshed this item`.
+
 ### What a pause means for gates
 
 A rate-limit `403`/`429` pauses requests; gates read stale until it lifts.
@@ -59,6 +65,16 @@ A rate-limit `403`/`429` pauses requests; gates read stale until it lifts.
 ### Reading the budget
 
 `graphyard status` (or `GET /api/status`) → `githubBudget`; `master status` attention items with subject `github`.
+
+`githubBudget.billable` (in `master status` as `observationThroughput.budget.billable`) reports:
+
+- `perHour`: billable requests in the last hour.
+- `limit`: the token's hourly limit.
+- `share`: `perHour` as a fraction of `limit`.
+- `target`: 0.6, the share the fleet must stay under.
+- `byEndpoint`: the spend per endpoint, such as `GET /pulls/:n` or `GET /compare/:range`.
+
+`tests/github-budget.test.ts` replays the 2026-09-26 request mix (5,399 calls in the hour, over the 5,000/h limit): the replay now bills about 2,700 requests (54%).
 
 ### Webhook liveness
 

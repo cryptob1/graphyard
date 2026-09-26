@@ -6,7 +6,8 @@ import type pg from 'pg';
  * after each restart spent ~400 billable requests a minute re-reading answers that had not
  * changed. The in-memory maps in src/github.ts stay the hot layer; this is the cold one.
  *
- * - Immutable answers (ancestry of a SHA pair, a blob at a SHA, a history between two SHAs) are
+ * - Immutable answers (ancestry of a SHA pair, a blob at a SHA, a history between two SHAs, and
+ *   the whole response to a commit read by SHA or a compare of two exact SHAs, GY-806) are
  *   loaded once and never expire. ETag entries are loaded with their ETag and still revalidated
  *   with If-None-Match, which GitHub answers with a free 304.
  * - Reads happen once, at attach; writes are batched write-behind on a timer, one pool query at
@@ -16,12 +17,14 @@ import type pg from 'pg';
  * - A database failure never fails an observation: the maps stay as they are and the adapter
  *   asks GitHub, exactly as it did before the cache was persisted.
  */
-export type GitHubCacheKind = 'etag' | 'ancestry' | 'blob' | 'history';
+export type GitHubCacheKind = 'etag' | 'ancestry' | 'blob' | 'history' | 'immutable';
 export interface GitHubCacheMaps {
   etag: Map<string, { etag: string; value: any }>;
   ancestry: Map<string, boolean>;
   blob: Map<string, string | null>;
   history: Map<string, Set<string> | null>;
+  /** Optional so a caller that keeps no whole-response layer loads none of it. */
+  immutable?: Map<string, unknown>;
 }
 export interface GitHubCacheOptions { flushMs?: number; pruneMs?: number; maxRows?: number; maxBytes?: number; maxValueBytes?: number; maxPending?: number }
 type Pending = { kind: GitHubCacheKind; etag: string | null; value: string } | 'touch';
@@ -46,13 +49,13 @@ export class GitHubCacheStore {
     console.error(`GitHub cache ${what} failed; requests fall back to GitHub: ${error instanceof Error ? error.message : String(error)}`);
   }
   /** Fill the maps from the table, newest last so each map's insertion order stays its recency order. Never throws. */
-  async load(maps: GitHubCacheMaps, caps: Record<GitHubCacheKind, number>): Promise<number> {
+  async load(maps: GitHubCacheMaps, caps: Record<Exclude<GitHubCacheKind, 'immutable'>, number> & { immutable?: number }): Promise<number> {
     try {
       const prefix = `${this.scope.replace(/[\\%_]/g, '\\$&')}:%`;
       const rows = (await this.pool.query(`SELECT key, kind, etag, value FROM (
   SELECT key, kind, etag, value, updated_at, row_number() OVER (PARTITION BY kind ORDER BY updated_at DESC, key) AS n FROM github_cache WHERE key LIKE $1
-) t WHERE n <= CASE kind WHEN 'etag' THEN $2::int WHEN 'ancestry' THEN $3::int WHEN 'blob' THEN $4::int WHEN 'history' THEN $5::int ELSE 0 END
-ORDER BY updated_at, key`, [prefix, caps.etag, caps.ancestry, caps.blob, caps.history])).rows;
+) t WHERE n <= CASE kind WHEN 'etag' THEN $2::int WHEN 'ancestry' THEN $3::int WHEN 'blob' THEN $4::int WHEN 'history' THEN $5::int WHEN 'immutable' THEN $6::int ELSE 0 END
+ORDER BY updated_at, key`, [prefix, caps.etag, caps.ancestry, caps.blob, caps.history, maps.immutable ? caps.immutable ?? 0 : 0])).rows;
       let loaded = 0;
       for (const row of rows) {
         const kind = row.kind as GitHubCacheKind;
@@ -61,12 +64,13 @@ ORDER BY updated_at, key`, [prefix, caps.etag, caps.ancestry, caps.blob, caps.hi
         else if (kind === 'ancestry' && typeof row.value === 'boolean' && !maps.ancestry.has(key)) maps.ancestry.set(key, row.value);
         else if (kind === 'blob' && (typeof row.value === 'string' || row.value === null) && !maps.blob.has(key)) maps.blob.set(key, row.value);
         else if (kind === 'history' && (Array.isArray(row.value) || row.value === null) && !maps.history.has(key)) maps.history.set(key, row.value ? new Set(row.value.map(String)) : null);
+        else if (kind === 'immutable' && row.value !== null && row.value !== undefined && maps.immutable && !maps.immutable.has(key)) maps.immutable.set(key, row.value);
         else continue;
         loaded++;
       }
       for (const kind of Object.keys(caps) as GitHubCacheKind[]) {
-        const map = maps[kind] as Map<string, unknown>;
-        while (map.size > caps[kind]) map.delete(map.keys().next().value!);
+        const map = maps[kind] as Map<string, unknown> | undefined;
+        while (map && map.size > (caps[kind] ?? 0)) map.delete(map.keys().next().value!);
       }
       return loaded;
     } catch (error) { this.report('load', error); return 0; }
