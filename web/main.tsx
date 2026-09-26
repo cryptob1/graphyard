@@ -12,7 +12,7 @@ import { primaryEntry, viewFor, views } from './pages';
 import TopBar from './components/top-bar';
 import { useFeatures } from './features';
 import LoginPage, { REJECTED_NOTICE } from './pages/login';
-import WorkDetails from './pages/work-details';
+import WorkDetails, { useOpenedWork } from './pages/work-details';
 import CreateWork from './pages/create-work';
 import { readsFlowAnalytics, useStepMoves } from './step-moves';
 
@@ -83,7 +83,7 @@ function App() {
   useEffect(() => { setEvents([]); setEditingRequirements(false); window.scrollTo?.(0, 0); }, [selected, token]);
   useEffect(() => { let active = true; const epoch = sessionEpoch.current; if (selected) void api(`events?work=${selected}`).then(rows => { if (active && epoch === sessionEpoch.current) setEvents(rows); }).catch(e => { if (active && epoch === sessionEpoch.current) setError(e.message); }); return () => { active = false; }; }, [selected, work]);
   const codexAvailable = status?.reviewProviders?.includes('codex') === true;
-  const item = work.find(w => w.id === selected);
+  const item = useOpenedWork(work, selected, token, api, sessionEpoch, setError);
   const queue = predictQueue(work, observedAt);
   async function action(id: string, command: string, data: unknown = {}) { const epoch = sessionEpoch.current; setBusy(true); try { await api(`work/${id}/${command}`, data); if (epoch !== sessionEpoch.current) return; await refresh(epoch); } catch (e) { if (epoch === sessionEpoch.current) setError((e as Error).message); } finally { if (epoch === sessionEpoch.current) setBusy(false); } }
   const { features, operatorAgents, operatorAgentsError } = useFeatures(token, !!status, api, status?.actor?.role === 'admin', work.some(w => w.scenarioRequirements?.length > 0));
