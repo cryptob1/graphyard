@@ -22,6 +22,7 @@ import { ghCheckAnnotations, qualifyTimingFailures } from './timing-failures.js'
 import { setupHealth } from './master-setup.js';
 import { stuckRequestReport, withStuckRequests } from './stuck-requests.js';
 import { nameUnresolvedThreads } from '../merge-queue.js';
+import { reworkRoundsWithOwnCauses } from '../flow-analytics.js';
 import { observationThroughputStatus } from '../github.js';
 import type { LoopSupervisorHost } from '../supervisor.js';
 import { attributeAttention, derivedAttention, faulted, ledgerRefusalAttention, resourceStatus } from '../master-status.js';
@@ -38,10 +39,9 @@ import { slowReportReader } from '../master/report-cache.js';
 import { repairLaneAttention } from '../master/repair-lane.js';
 
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
-// The cycle-budget measure is a daemon metric (src/daemon/metrics.ts); it is read from here,
-// as it always was, by `master status` and its tests.
+// The cycle-budget daemon metric (src/daemon/metrics.ts), read from here as it always was.
 export { cycleBudget } from '../daemon/metrics.js';
-// `master scope` lives in its own module; it is read from here as it always was.
+// `master scope` lives in its own module, read from here as it always was.
 export { approveScopeRequest } from './master-scope.js';
 
 // Observation throughput and the queue head's lag live beside the observation schedule they read
@@ -75,8 +75,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   let reviewRecords = (await readReviewLedger(root)).reviews, reviewRuntime = { available: true, reason: null as string | null };
   const { snapshot, clockOffset } = await timedStep('snapshot', () => snapshotWithClock(() => masterApi('work-snapshot')));
   const sections = new ReportSections(); // optional sections (GY-422)
-  // Sessions the automatic dispatcher launched are settled against this same snapshot: a
-  // head change cancels them here as well as in the loop, so status never shows a stale one.
+  // Sessions the dispatcher launched are settled against this snapshot: a head change cancels them here too.
   try { reviewRecords = (await timedStep('reconcile reviews', () => reconcileReviews(root, master, { work: snapshot.work, agents: runtime.available ? runtime.agents : null }))).reviews; }
   catch (error) { reviewRuntime = { available: false, reason: `Reviewer verdicts could not be reconciled with GitHub: ${error instanceof Error ? error.message : 'unknown reason'}` }; }
   let producerRecords = (await readProducerLedger(root)).producers;
@@ -86,8 +85,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const retries = [...sessionRetries(reviewRecords, Date.now()), ...sessionRetries(producerRecords, Date.now())];
   // Setup that silently stops every launch, and the loop's supervision (GY-114), read from the host.
   const { setup, attention: setupItems } = await timedStep('setup', () => setupHealth(root, master, dependencies.supervisorHost));
-  // Status reads the cursor as the loop would, repairing an over-long string in memory; the loop
-  // is what logs and persists that repair, so status reports the cursor rather than announcing it.
+  // Status reads the cursor as the loop would; the loop logs and persists any repair it makes.
   const dispatchCursor = await readDispatchCursor(root, master, () => {}).catch(error => ({ error: error instanceof Error ? error.message : 'Master dispatch cursor is unreadable' }));
   const stuck = stuckRequestReport({ reviews: reviewRecords, producers: producerRecords }, Date.now());
   const dispatch = 'error' in dispatchCursor ? { running: false, failures: [] as { requestId: string; kind: string; attempts: number; reason: string; at: string; nextAt: string }[], error: dispatchCursor.error } : withStuckRequests(dispatchSummary(dispatchCursor, Date.now(), master.run.dispatchIntervalSeconds * 1000, master.run.awaitReviewers ?? defaultAwaitReviewers.logins), stuck.stuck);
@@ -95,9 +93,8 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const dispatchItems = dispatchFailureAttention(dispatch);
   const containment = await timedStep('containment', () => assessContainment(snapshot.work, { hostId: master.hostId, observedAt: snapshot.now, clockOffset }));
   // Disk is reported from the host, not from the cursor: the loop may be stopped, and the volume
-  // filling is exactly the condition that stops it. The plan is the one `master reclaim` computes,
-  // over the inventory the loop's reclaim step cached (GY-360): walking a thousand trees here, on
-  // every call, is what made status take minutes.
+  // filling is what stops it. The plan is `master reclaim`'s, over the inventory the loop's reclaim
+  // step cached (GY-360): walking a thousand trees per call is what made status take minutes.
   const worktrees = worktreesDirectory(root);
   const inventory = await timedStep('worktrees', () => statusWorktreeInventory(root).catch(() => ({ entries: [], at: null, cached: false }))), trees = inventory.entries, reclaimPlan = planWorktreeReclaim(trees, snapshot.work, { now: Date.now(), idleMs: reclaimIdleMs(master) });
   const disk = diskPressure(worktrees, await freeBytes(worktrees), diskThresholdBytes(master), reclaimPlan);
@@ -109,9 +106,8 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const intervalMs = master.run.intervalSeconds * 1000;
   const cycling = 'error' in daemonState ? null : daemonSummary(daemonState, Date.now(), intervalMs, master.hostId);
   const daemon = cycling ?? { running: false, error: (daemonState as { error: string }).error };
-  // The loop's own health comes before every work item: a coordinator that is absent or stalled is
-  // why nothing else on this list is moving, and no other attention item would say so; a cycle that
-  // outgrew its interval names its costly step and whether it computed or waited.
+  // The loop's own health comes before every work item: an absent or stalled coordinator is why
+  // nothing else on this list is moving; a cycle past its interval names its costly step.
   const loopItems: AttentionItem[] = cycling
     ? [...loopAttention({ liveness: cycling.liveness, silence: cycling.silence, budget: cycling.budget, failures: cycling.failures, cost: cycling.cost }), ...slowCycleAttention(cycling), ...approverLaunchAttention(cycling)]
     : [{ subject: 'loop', text: `The master loop's cursor cannot be read, so whether it is cycling is unknown: ${(daemonState as { error: string }).error}`, ...agentOwner('master', 'graphyard master restart (a supervised deployment restarts it on its own: systemctl --user restart graphyard-master)') }];
@@ -126,8 +122,10 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     snapshot.work, master.workers, runtime, Date.parse(snapshot.now)));
   // A check failed on the clock says so, against its budget; a routed scope request, its approver.
   const status = routedScopeStatus(await timedStep('timing failures', () => qualifyTimingFailures(sessions, snapshot.work, master.repository, ghCheckAnnotations(master.repository))), snapshot.work, cycling?.approvals);
-  // A waiting sudo prompt is the operator confirming their own GitHub credential on their device,
-  // the one step no agent may take for them; a timed-out one is the master's to rerun.
+  // Rework rounds by cause (GY-643), out-of-item causes removed; a failed read marks the section.
+  try { status.speed.reworkRounds = await reworkRoundsWithOwnCauses(status.speed.reworkRounds, masterApi, snapshot); }
+  catch (error) { sections.mark('rework causes', 'GET /api/events?kind=rework', error); }
+  // A waiting sudo prompt is the operator confirming their own GitHub credential on their device.
   const sudo = administration.sudo;
   // A request whose session settled without satisfying its gate: nothing runs for it, nothing
   // refused, and nothing will launch again until it is named here with the command that answers it.

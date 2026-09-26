@@ -3,6 +3,7 @@ import type { Store } from './store.js';
 import { advisoryLocks } from './store/locks.js';
 import { stages, type Stage, type Work } from './model.js';
 import { queueSequencingReason } from './merge-queue.js';
+import { eventHistoryLimits } from './events-history.js';
 
 // Delivery-flow analytics.
 //
@@ -1564,4 +1565,225 @@ export function flowExport(report: FlowReport, drilldown: ReturnType<typeof flow
   const header = drilldown.columns.join(',');
   const body = drilldown.rows.map(entry => drilldown.columns.map(column => csvCell(entry[column])).join(','));
   return [...preamble, header, ...body].join('\n') + '\n';
+}
+
+// Rework-round causes (GY-643).
+//
+// A rework round is one `rework` ledger row for an item that had already submitted a candidate —
+// the same round the pipeline timeline counts (`recordRework`). Every row records the reason the
+// candidate returned to a worker, and that recorded text is the only input this classifier reads:
+// no live claim, no gate re-evaluation, exactly as every other figure here is read back from the
+// ledger. The taxonomy is closed. One class, `own-change`, covers the rounds caused by what the
+// candidate itself changed — the only rounds a pipeline change such as GY-115's pre-review
+// mechanical verification can hope to remove. Every other named class is a cause outside the
+// item's own change; `other` keeps a round the ledger text does not tie to a named class counted
+// rather than guessed away. Rules run in order and the first match wins, so a base-caused CI
+// failure is base breakage before it is anything else, and a docs-budget finding is the docs
+// budget before it is a review finding.
+
+export type ReworkCause = 'own-change' | 'base-breakage' | 'conflict' | 'docs-budget' | 'lost-approval-or-proof' | 'ci-flake' | 'other';
+
+export const reworkCauses: { id: ReworkCause; label: string; definition: string }[] = [
+  { id: 'own-change', label: 'Review finding on the item’s own change', definition: 'A reviewer verdict, unresolved thread, or a finding about what the candidate itself changed — including a required check its own diff broke.' },
+  { id: 'base-breakage', label: 'Base breakage', definition: 'A required check failing on a merge of a base the item did not break, fixed on the base after the candidate branched; the remedy is a sync, not a change.' },
+  { id: 'conflict', label: 'Conflict with the base', definition: 'The base or the merge queue moved under the candidate: a merge conflict, a stale candidate behind the base tip, or an ejection for the speculative tip.' },
+  { id: 'docs-budget', label: 'Docs budget', definition: 'The documentation word budget or a docs-page conflict, whatever the item’s own code did.' },
+  { id: 'lost-approval-or-proof', label: 'Lost approval or proof', definition: 'An approval dismissed, or evidence that expired, went stale, missed its criterion, failed, or was never produced.' },
+  { id: 'ci-flake', label: 'CI flake', definition: 'A flaky or hung CI or launch-infrastructure failure outside the item’s own change.' },
+  { id: 'other', label: 'Other', definition: 'A round the ledger text does not tie to a named cause: session and lease mechanics, operator requests, unattributed check failures. Counted, never assumed out of the item.' },
+];
+
+/** The causes outside the item's own change: the rounds a pipeline change like GY-115 cannot affect. */
+export const outsideItemReworkCauses: ReadonlySet<ReworkCause> = new Set(['base-breakage', 'conflict', 'docs-budget', 'lost-approval-or-proof', 'ci-flake']);
+
+export interface ReworkCauseRule { cause: ReworkCause; marker: string; pattern: RegExp }
+/** Ordered first-match rules over the recorded rework reason; `marker` names what matched. */
+export const reworkCauseRules: ReworkCauseRule[] = [
+  { cause: 'docs-budget', marker: 'docs word budget named in the reason', pattern: /\bdocs?-word-budget\b/i },
+  { cause: 'docs-budget', marker: 'docs budget named in the reason', pattern: /\bdocs (word |page )?budget\b/i },
+  { cause: 'docs-budget', marker: 'word budget named in the reason', pattern: /\bword budget\b/i },
+  { cause: 'docs-budget', marker: 'docs and budget in one sentence', pattern: /\bdocs\b[^.\n]{0,80}\bbudget\b/i },
+  { cause: 'docs-budget', marker: 'budget and docs in one sentence', pattern: /\bbudget\b[^.\n]{0,80}\bdocs\b/i },
+  { cause: 'docs-budget', marker: 'docs page over budget', pattern: /\bdocs (page|file)s?\b[^.\n]{0,60}\b(over|exceed|too long|too big|budget)\b/i },
+  { cause: 'docs-budget', marker: 'word count against the budget', pattern: /\b[\d,]+ words\b[^.\n]{0,60}\bbudget\b/i },
+  { cause: 'base-breakage', marker: 'base-refresh-only rework', pattern: /\bBase refresh only\b/ },
+  { cause: 'base-breakage', marker: 'main has since fixed the failure', pattern: /\bmain has since fixed\b/i },
+  { cause: 'base-breakage', marker: 'stale base named as the cause', pattern: /\bstale base\b/i },
+  { cause: 'base-breakage', marker: 'not the patch', pattern: /\bnot the patch\b/i },
+  { cause: 'base-breakage', marker: 'failure inherited from main', pattern: /\binherited from (main|base)\b/i },
+  { cause: 'base-breakage', marker: 'base tip that broke the check', pattern: /\b(main|base) tip that broke\b/i },
+  { cause: 'base-breakage', marker: 'failure comes from the base or main', pattern: /\b(failure|breakage)( is| comes)? from (the )?(base|main)\b/i },
+  { cause: 'base-breakage', marker: 'base branch broken', pattern: /\bbase branch (is|was) broken\b/i },
+  { cause: 'lost-approval-or-proof', marker: 'proof does not exercise its criterion', pattern: /\bdoes not exercise (its|the|AC)\b/i },
+  { cause: 'lost-approval-or-proof', marker: 'evidence does not exercise its criterion', pattern: /evidence that does not exercise/i },
+  { cause: 'lost-approval-or-proof', marker: 'trusted fail recorded', pattern: /\brecorded (a )?trusted fail/i },
+  { cause: 'lost-approval-or-proof', marker: 'producer evidence failed', pattern: /\bproducer FAILED\b/ },
+  { cause: 'lost-approval-or-proof', marker: 'proof expired, stale, invalid or missing', pattern: /\bproofs?\b[^.\n]{0,60}\b(expired|stale|no longer|does not|invalid)\b/i },
+  { cause: 'lost-approval-or-proof', marker: 'evidence expired, stale, revoked or failed', pattern: /\bevidences?\b[^.\n]{0,80}\b(expired|stale|revoked|does not|missing|failing|fail)\b/i },
+  { cause: 'lost-approval-or-proof', marker: 'proof recorded as FAILED', pattern: /\bproof\b[^.\n]{0,140}\bFAILED\b/ },
+  { cause: 'lost-approval-or-proof', marker: 'approval dismissed, lost, void or stale', pattern: /\bapprovals?\b[^.\n]{0,60}\b(dismiss|lost|no longer|stale|void)/i },
+  { cause: 'lost-approval-or-proof', marker: 'candidate cannot hold an approval', pattern: /\bcannot hold an approval\b/i },
+  { cause: 'lost-approval-or-proof', marker: 'producer mutation check', pattern: /\bproducer mutation check\b/i },
+  { cause: 'lost-approval-or-proof', marker: 'failed proof returns the head', pattern: /\bfailed proof\b/i },
+  { cause: 'lost-approval-or-proof', marker: 'rounds stranded without evidence', pattern: /\bwithout (unit-proof )?evidence\b/i },
+  { cause: 'lost-approval-or-proof', marker: 'proof producer attempts exhausted', pattern: /\b(independent |unit-)?producer attempts?\b/i },
+  { cause: 'lost-approval-or-proof', marker: 'evidence missing or invalid', pattern: /\bevidence is (missing|invalid)\b/i },
+  { cause: 'lost-approval-or-proof', marker: 'only the evidence is owed', pattern: /\bonly the evidence\b/i },
+  { cause: 'lost-approval-or-proof', marker: 'trusted fail bound to the head', pattern: /\btrusted (fail|evidence .{0,60}fail)/i },
+  { cause: 'ci-flake', marker: 'flake named in the reason', pattern: /\b(flake|flaky)\b/i },
+  { cause: 'ci-flake', marker: 'CI job hangs', pattern: /\bhangs\b/i },
+  { cause: 'ci-flake', marker: 'transient failure', pattern: /\btransient(ly)? (fail|blocked|refus)/i },
+  { cause: 'ci-flake', marker: 'launch-readiness flake', pattern: /\blaunch readiness\b/i },
+  { cause: 'ci-flake', marker: 'CI infrastructure named', pattern: /\bCI (infrastructure|runner|infra)\b/i },
+  { cause: 'ci-flake', marker: 'deterministic hang or kill', pattern: /\bdeterministic(ally)? .{0,30}(hang|kill|exit 1\d\d)/i },
+  { cause: 'conflict', marker: 'conflicts with the base or main', pattern: /\bconflicts? with (the )?(base|main)\b/i },
+  { cause: 'conflict', marker: 'conflicts with base branch tip', pattern: /conflicts with base branch tip/i },
+  { cause: 'conflict', marker: 'conflict needs a sync to resolve', pattern: /without resolving a conflict/i },
+  { cause: 'conflict', marker: 'GitHub reports the candidate conflicting', pattern: /\bCONFLICTING (with|against)\b/ },
+  { cause: 'conflict', marker: 'conflicted with a speculative merge', pattern: /conflicted with (the )?(base|main|tip|speculative)/i },
+  { cause: 'conflict', marker: 'merge queue ejected the candidate', pattern: /\bmerge queue ejected\b/i },
+  { cause: 'conflict', marker: 'ejected from the merge queue', pattern: /ejected from the merge queue/i },
+  { cause: 'conflict', marker: 'queue ejected the candidate', pattern: /ejected candidate/i },
+  { cause: 'conflict', marker: 'queue ejection named as the gate', pattern: /\bqueue ejection\b/i },
+  { cause: 'conflict', marker: 'candidate behind the base or main', pattern: /\bbehind (the )?(base|main)\b/i },
+  { cause: 'conflict', marker: 'candidate does not contain the base tip', pattern: /does not contain the base (branch )?tip/i },
+  { cause: 'conflict', marker: 'candidate remains behind', pattern: /\bremains? BEHIND\b/ },
+  { cause: 'conflict', marker: 'base branch tip moved', pattern: /\bbase (branch )?(tip|branch) moved\b/i },
+  { cause: 'conflict', marker: 'carried content from a merge', pattern: /carried content from a merge/i },
+  { cause: 'conflict', marker: 'speculative merge conflicted', pattern: /\bspeculative (merge|tip) .{0,60}conflic/i },
+  { cause: 'conflict', marker: 'no longer mergeable against the base', pattern: /no longer mergeable against (the )?(current )?base/i },
+  { cause: 'conflict', marker: 'candidate cannot be brought onto the base tip', pattern: /cannot be brought onto base (tip|branch tip)/i },
+  { cause: 'conflict', marker: 'queue pushed a speculative tip', pattern: /queue pushed a (speculative )?tip/i },
+  { cause: 'own-change', marker: 'reviewer requested changes', pattern: /requested changes on/i },
+  { cause: 'own-change', marker: 'reviewer requested changes', pattern: /(review|reviewer) requested changes/i },
+  { cause: 'own-change', marker: 'CHANGES_REQUESTED verdict', pattern: /\bCHANGES_REQUESTED\b/ },
+  { cause: 'own-change', marker: 'review findings or verdict', pattern: /\breview (finding|findings|verdict)\b/i },
+  { cause: 'own-change', marker: 'unresolved threads or findings', pattern: /\bunresolved (review threads?|inline findings|threads?|findings)\b/i },
+  { cause: 'own-change', marker: 'threads unresolved', pattern: /\bthreads? (is|are) unresolved\b/i },
+  { cause: 'own-change', marker: 'change outside planned files', pattern: /\boutside [\w-]+('s)? planned files\b/i },
+  { cause: 'own-change', marker: 'failure from the item’s own addition', pattern: /\bown addition\b/i },
+  { cause: 'own-change', marker: 'the item’s own defect', pattern: /\b(its|the item's) own defect\b/i },
+  { cause: 'own-change', marker: 'check fails because of the change', pattern: /\bfails? because the change\b/i },
+  { cause: 'own-change', marker: 'module budget exceeded by the change', pattern: /\bmodule budget\b/i },
+  { cause: 'own-change', marker: 'blocking defect, finding or regression', pattern: /\bblocking (defect|finding|findings|regression)\b/i },
+  { cause: 'own-change', marker: 'findings require another round', pattern: /\bfindings require (another|rework|a|resolution)\b/i },
+  { cause: 'own-change', marker: 'out-of-scope regression', pattern: /\bout-of-scope regression\b/i },
+  { cause: 'own-change', marker: 'carries its own edit', pattern: /\bcarries? (its )?own edit of\b/i },
+];
+
+/** The cause of one rework round, read from the recorded reason text alone. */
+export function classifyReworkReason(reason: string): { cause: ReworkCause; marker: string | null } {
+  const text = String(reason ?? '');
+  for (const rule of reworkCauseRules) if (rule.pattern.test(text)) return { cause: rule.cause, marker: rule.marker };
+  return { cause: 'other', marker: null };
+}
+
+export interface ReworkRound { workId: string; key: string | null; seq: string; at: string; cause: ReworkCause; marker: string | null }
+
+/** Cause counts, shares of the whole, and the causes ranked largest first (ties keep declaration order). */
+export function reworkRoundsByCause(rounds: readonly ReworkRound[]) {
+  const counts = Object.fromEntries(reworkCauses.map(cause => [cause.id, 0])) as Record<ReworkCause, number>;
+  for (const round of rounds) counts[round.cause] = (counts[round.cause] ?? 0) + 1;
+  const total = rounds.length;
+  const share = (count: number) => total ? Number((count / total).toFixed(4)) : null;
+  const shares = Object.fromEntries(reworkCauses.map(cause => [cause.id, share(counts[cause.id])])) as Record<ReworkCause, number | null>;
+  const largest = [...reworkCauses].map(cause => ({ cause: cause.id, label: cause.label, count: counts[cause.id], share: shares[cause.id] }))
+    .sort((a, b) => b.count - a.count || reworkCauses.findIndex(c => c.id === a.cause) - reworkCauses.findIndex(c => c.id === b.cause));
+  return { total, counts, shares, largest };
+}
+
+/** Nearest-rank percentile, the same estimator the pipeline-speed summary uses. */
+const nearestRank = (values: number[], percentile: number) => {
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted.length ? sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * percentile / 100) - 1))] : 0;
+};
+const roundDistribution = (values: number[]) => {
+  const buckets: Record<string, number> = {};
+  for (const count of values) { const bucket = count >= 2 ? '2+' : String(count); buckets[bucket] = (buckets[bucket] ?? 0) + 1; }
+  return buckets;
+};
+
+export interface ReworkSplitItem { key: string; mergedAt: string | null; measured: boolean; rounds: readonly ReworkRound[] }
+/**
+ * The rework-round split the pipeline-speed figures are reported against (GY-643 AC-2): the same
+ * rounds the raw median counts, each classified, so the median can be reported again with the
+ * causes outside the item's own change (`outsideItemReworkCauses`) removed — the rounds a change
+ * like GY-115 can affect. Unmeasured items (no recorded submission) hold no rounds anywhere and
+ * are named rather than silently dropped.
+ */
+export function summarizeReworkSplit(items: readonly ReworkSplitItem[]) {
+  const byItem = reworkRoundsByCause(items.flatMap(item => item.rounds));
+  const measured = items.filter(item => item.measured);
+  const rawCounts = measured.map(item => item.rounds.length);
+  const ownCounts = measured.map(item => item.rounds.filter(round => !outsideItemReworkCauses.has(round.cause)).length);
+  return {
+    items: items.length, measured: measured.length, unmeasured: items.length - measured.length,
+    rounds: byItem.total, outsideItem: ownCounts.reduce((total, own, index) => total + (rawCounts[index] - own), 0), ownChange: ownCounts.reduce((a, b) => a + b, 0),
+    byCause: byItem.counts, shares: byItem.shares, largest: byItem.largest,
+    rawMedian: nearestRank(rawCounts, 50), rawP90: nearestRank(rawCounts, 90),
+    median: nearestRank(ownCounts, 50), p90: nearestRank(ownCounts, 90),
+    rawDistribution: roundDistribution(rawCounts), ownChangeDistribution: roundDistribution(ownCounts),
+  };
+}
+export type ReworkSplitSummary = ReturnType<typeof summarizeReworkSplit>;
+
+/**
+ * The last `count` delivered items by accepted merge instant, and the earliest instant their
+ * rework rounds can sit at: the first submission among them, so a bounded ledger read covers every
+ * round the population holds. The accepted merge is the repository clock when the delivery carried
+ * it, else the provider's — the same merge instant the pipeline-speed summary orders by.
+ */
+export function recentDelivered(work: Work[], count: number): { items: Work[]; since: string | null } {
+  const at = (item: Work) => time(item.stage === 'done' && item.delivery ? item.delivery.mergedAtRepository ?? item.delivery.mergedAt ?? '' : '');
+  const delivered = work.filter(item => at(item) !== null).sort((a, b) => at(a)! - at(b)!);
+  const items = delivered.slice(-Math.max(0, count));
+  const submissions = items.map(item => item.pipeline?.submittedAt ?? null).filter((value): value is string => !!value && Number.isFinite(Date.parse(value)));
+  const instants = [...items.map(item => at(item)!), ...submissions].map(value => Date.parse(String(value))).filter(Number.isFinite);
+  return { items, since: instants.length ? new Date(Math.min(...instants)).toISOString() : null };
+}
+
+/** Rework-cause ledger reads are bounded: pages of `kind=rework` rows per read (GY-643). */
+export const reworkEventPages = 10;
+
+/**
+ * The rework rounds master status reports (GY-643 AC-2), with the split attached: the last `items`
+ * delivered items, every rework round their ledgers hold classified from the recorded reason alone,
+ * so the median is reported again with the causes outside the item's own change removed. The read
+ * walks `kind=rework` rows from the earliest first submission in the population, so one bounded
+ * paged read covers every round the population can hold; a bound it hit is disclosed, not hidden.
+ * An item with no recorded submission holds no measurable round (`recordRework`'s own rule) and is
+ * named as unmeasured. A failed events read throws, so the caller marks its section unavailable.
+ */
+export async function reworkRoundsWithOwnCauses<T extends Record<string, any>>(rounds: T, readEvents: (path: string) => Promise<any>, snapshot: { work: Work[]; now: string }, items = 100): Promise<T> {
+  const population = recentDelivered(snapshot.work, items);
+  if (!population.items.length) return rounds;
+  const byId = new Map(population.items.map(item => [item.id, item]));
+  const classified: ReworkRound[] = [];
+  let cursor: string | null = null, complete = false, pages = 0;
+  while (cursor !== null || pages === 0) {
+    const params = new URLSearchParams({ kind: 'rework', order: 'asc', payload: 'details', view: 'history', limit: String(eventHistoryLimits.page) });
+    if (population.since) params.set('since', population.since);
+    if (cursor) params.set('cursor', cursor);
+    const history = await readEvents(`events?${params}`);
+    for (const event of history.events ?? []) {
+      const item = byId.get(event.work_id);
+      if (!item) continue;
+      const at = event.created_at instanceof Date ? event.created_at.toISOString() : String(event.created_at ?? '');
+      const submittedAt = item.pipeline?.submittedAt ?? null;
+      if (!submittedAt || !Number.isFinite(Date.parse(at)) || Date.parse(at) < Date.parse(submittedAt)) continue;
+      classified.push({ workId: item.id, key: item.key, seq: String(event.seq), at, ...classifyReworkReason(String(event.details?.reason ?? '')) });
+    }
+    pages++;
+    complete = !history.page?.hasMore;
+    cursor = complete ? null : history.page?.nextCursor ?? null;
+    if (pages >= reworkEventPages) break;
+  }
+  const summary = summarizeReworkSplit(population.items.map(item => {
+    const submittedAt = item.pipeline?.submittedAt ?? null;
+    return { key: item.key, mergedAt: item.delivery ? item.delivery.mergedAtRepository ?? item.delivery.mergedAt ?? null : null,
+      measured: !!submittedAt && Number.isFinite(Date.parse(submittedAt)),
+      rounds: classified.filter(round => round.workId === item.id) };
+  }));
+  return { ...rounds, ownChange: { ...summary, window: { since: population.since, until: snapshot.now }, eventsComplete: complete, pages,
+    statement: complete ? null : `The rework-cause read reached its ${reworkEventPages}-page bound: rounds recorded before the last row read were not examined, so the split is a floor.` } } as T;
 }
