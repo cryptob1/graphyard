@@ -31,8 +31,6 @@ A required check failing on a tip or head reruns once per sha (*rerun failed job
 
 ## GitHub request budget
 
-Observation spends the hourly limit, webhook-first.
-
 ### The live budget
 
 `x-ratelimit-remaining`, `-limit` and `-reset` project exhaustion (`projectedExhaustionAt`).
@@ -108,7 +106,7 @@ Admins grant, to `producer` principals only. Patterns: exact name, `kind:*`, or 
 
 ## Scale limits
 
-Four provider jobs per replica tick; watch lock wait, job lag, budget.
+Observation claims `GRAPHYARD_OBSERVATION_CONCURRENCY` jobs at once (default 4, capped at half the pool), each `SKIP LOCKED`: queue head and `max(2, batchSize)` band first, then review/rework waits, then `available_at`; `master status` raises `github` once the head's observation passes two minutes. Watch `observationThroughput` lag, budget.
 
 ### Concurrent reconciliation
 
