@@ -18,7 +18,7 @@ import type { Principal, Work } from '../src/model.js';
 // Each test is named for the proof it produces (GY-274): a transient renewal failure never stops a
 // worker, the first reconcile after boot cannot starve renewals, and a deploy loses no worker.
 const renewal = (duration: number) => ({ updatedAt: new Date().toISOString(), lease: { epoch: 1, expiresAt: new Date(Date.now() + duration).toISOString() } });
-const refusal = (status: number, error: string) => Object.assign(new Error(JSON.stringify({ error })), { confirmedRefusal: isConfirmedCoordinationRefusal(status, { error }) });
+const refusal = (status: number, error: string) => Object.assign(new Error(JSON.stringify({ error })), { status, confirmedRefusal: isConfirmedCoordinationRefusal(status, { error }) });
 const quiet = { visible: () => null, unconsented: () => null };
 /** A worker that runs until the test says it is done, and exits 0 on its own. */
 const worker = (marker: string) => [process.execPath, ['-e', `const fs = require('node:fs'); setInterval(() => { if (fs.existsSync(${JSON.stringify(marker)})) process.exit(0); }, 20);`]] as const;
@@ -81,10 +81,33 @@ test('unit:renewal-transient-tolerated a renewal that keeps failing stops the wo
   await rm(dir, { recursive: true, force: true });
 });
 
+test('unit:renewal-transient-tolerated an orphaned session is surrendered during a renewal outage, not after the backoff', async () => {
+  const dir = await scratch(); const marker = join(dir, 'done');
+  let calls = 0, visible = true; const surrendered: string[] = [];
+  const [command, args] = worker(marker);
+  const started = performance.now();
+  // A 60 s lease and a 2 s backoff cap: the renewal would keep retrying for about 45 s.
+  const code = await supervise(command, [...args], 1, async () => {
+    if (++calls === 1) return renewal(60_000);
+    // The session vanishes once the outage has begun (GY-392).
+    if (calls === 3) visible = false;
+    throw Object.assign(new Error('Service Unavailable'), { status: 503 });
+  }, { intervalMs: 50, retryMs: 100, retryMaxMs: 2000, safetyMarginMs: 15_000, graceMs: 50,
+    session: { visible: () => visible, unconsented: () => null, surrender: async cause => { surrendered.push(cause); } } });
+  assert.equal(code, 1, 'the supervisor stopped the orphaned worker');
+  assert.ok(performance.now() - started < 10_000, `surrendered inside the backoff, at ${Math.round(performance.now() - started)} ms`);
+  assert.deepEqual(surrendered, ['Herdr no longer reports this agent session']);
+  await rm(dir, { recursive: true, force: true });
+});
+
 test('unit:renewal-transient-tolerated only a server refusal is definite', () => {
   assert.equal(definiteRenewalRefusal(refusal(409, 'epoch superseded')), true);
-  assert.equal(definiteRenewalRefusal(refusal(403, 'not the lease owner')), true);
-  assert.equal(definiteRenewalRefusal(Object.assign(new Error('x'), { status: 404 })), true);
+  assert.equal(definiteRenewalRefusal(refusal(409, 'Lease missing, expired, or superseded; claim the task again')), true);
+  // GY-392: an auth or routing 4xx says nothing about the lease, so the lease decides.
+  assert.equal(definiteRenewalRefusal(refusal(401, 'A valid Graphyard bearer token is required')), false);
+  assert.equal(definiteRenewalRefusal(refusal(403, 'Worker or operator required')), false);
+  assert.equal(definiteRenewalRefusal(Object.assign(new Error('x'), { status: 404 })), false);
+  assert.equal(definiteRenewalRefusal(Object.assign(new Error('x'), { confirmedRefusal: true })), true, 'without a status the client classification stands');
   assert.equal(definiteRenewalRefusal(refusal(503, 'unavailable')), false);
   assert.equal(definiteRenewalRefusal(refusal(429, 'slow down')), false);
   assert.equal(definiteRenewalRefusal(Object.assign(new Error('x'), { status: 408 })), false);
@@ -178,7 +201,7 @@ test('integration:worker-survives-deploy a worker keeps running through a 60 s s
     try {
       const response = await fetch(`${url}/api/work/${work.id}/heartbeat`, { method: 'POST', headers: { Authorization: `Bearer ${tokens[engineer.id]}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, body: JSON.stringify({ epoch: work.epoch }), signal: AbortSignal.timeout(30_000) });
       const body = await response.json();
-      if (!response.ok) throw Object.assign(new Error(JSON.stringify(body)), { confirmedRefusal: isConfirmedCoordinationRefusal(response.status, body) });
+      if (!response.ok) throw Object.assign(new Error(JSON.stringify(body)), { status: response.status, confirmedRefusal: isConfirmedCoordinationRefusal(response.status, body) });
       outcomes.push({ at: performance.now(), ok: true });
       return body;
     } catch (error) { outcomes.push({ at: performance.now(), ok: false }); throw error; }
