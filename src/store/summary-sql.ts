@@ -16,8 +16,10 @@ import { detoasted } from './coordination-sql.js';
  * the research brief, answered human requests), and with the three things the readers derive
  * figures from, each bounded:
  *
- * - `pipeline`: the timeline reduced to what the speed report measures (each attempt's claim and
- *   end, the submission, rework rounds, hand-offs, the reconstruction's coverage);
+ * - `pipeline`: the timeline reduced to exactly what `compactPipeline` keeps and the speed report
+ *   measures — the submission (`submittedAt`), rework rounds, the hand-off counts (`interventions`),
+ *   the reconstruction's coverage (`backfill`), and each attempt's `claimedAt` and `endedAt`, with
+ *   every other field of the timeline and of each attempt dropped;
  * - `sessions`: only those that ended in the last `summarySessionWindowMs`, which the Workers page
  *   counts per account;
  * - `completedActions`: how many action rows it completed, which the action report totals.
