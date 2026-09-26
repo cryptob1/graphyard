@@ -1,4 +1,4 @@
-<!-- page: Operate Graphyard | 3 | what each page and marker means. -->
+<!-- page: Operate Graphyard | 3 | pages and markers. -->
 # Reading the dashboard
 
 ## Navigation
@@ -7,7 +7,7 @@ One sidebar: **Work**, **Workers**, **Shipped**, **Tests** (planned, GY-162), **
 
 ## Work: one classification
 
-Each open item is in one group: **Needs you** (only you may decide), **Blocked**, **Moving**, **Up next** or **Backlog**. Tiles filter by group.
+Each open item is in one group: **Needs you** (only you may decide), **Blocked**, **Moving**, **Up next** or **Backlog**; a tile counts and filters one.
 
 `GET /api/board` (`src/model/board.ts`) serves these groups, not the page. Items carry `group`, `stage`, `owner`, `actor` (`worker`, `reviewer`, `producer`, `approver`, `master`, `executor` or `human-only`), `command` (or null), `since` and `overdue` (past `overdueAfterMs`). `master status` lists the master's items as `board.owed`.
 
@@ -30,7 +30,7 @@ Rows show the steps **Research, Build, Validate, Test, Review, Prove, Merge, Dep
 
 ## An item page
 
-Below the summary: **What is left** (unmet requirements and who clears each), **Requirements** (✓ or ○ per criterion), **Pull request** and **Activity**. **Research brief** (collapsed): model, duration, tokens. **Technical details** holds gates, sessions, evidence and overlaps (`Shares files with GY-166, GY-167 (tests/)`).
+Below the summary: **What is left** (unmet requirements, who clears each), **Requirements** (✓ or ○ per criterion), **Pull request** and **Activity**. **Research brief** (collapsed): model, duration, tokens. **Technical details** holds gates, sessions, evidence and overlaps (`Shares files with GY-166, GY-167 (tests/)`).
 
 ## Insights
 
