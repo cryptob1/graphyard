@@ -1,7 +1,8 @@
 import { spawn } from 'node:child_process';
-import { readdirSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseShard, readDurations, shardFiles } from '../../scripts/ci-tests.mjs';
 import { isolatedTestEnvironment, reserveTestPorts, testPortEnvironment, type ReserveOptions } from '../../src/cli/test-isolation.js';
 
 // The suite's own runner (GY-174): `npm test` and `npm run test:browser` start here, so a clean run
@@ -9,6 +10,11 @@ import { isolatedTestEnvironment, reserveTestPorts, testPortEnvironment, type Re
 //
 //   node --import tsx tests/helpers/run-tests.ts [FILE...]            the Node suite (default tests/*.test.ts)
 //   node --import tsx tests/helpers/run-tests.ts --browser [ARGS...]  the Playwright suite
+//
+// Three runner options select and measure the Node suite's files (GY-499), as CI's shard jobs do:
+//   --files-from LIST   run the files LIST names, one per line (an empty list runs nothing)
+//   --shard I/N         run only shard I of N, balanced by tests/helpers/timing-baseline.json
+//   --durations FILE    also write each file's wall time to FILE (tests/helpers/file-durations.mjs)
 //
 // Every GRAPHYARD_* and HERDR_* variable the caller carries is withheld from the tests except the
 // harness controls in src/cli/test-isolation.ts; GRAPHYARD_TEST_PORT is a window of free ports this
@@ -29,17 +35,55 @@ export interface RunOptions {
 }
 export interface RunResult { code: number; base: number; environment: Record<string, string>; stdout: string; stderr: string }
 
+/** The runner's own options, taken out of the arguments `node --test` receives. */
+function runnerOptions(args: string[]) {
+  const rest: string[] = [], options: { filesFrom?: string; shard?: string; durations?: string } = {};
+  const flags = { '--files-from': 'filesFrom', '--shard': 'shard', '--durations': 'durations' } as const;
+  for (let at = 0; at < args.length; at++) {
+    const [flag, inline] = args[at].split(/=(.*)/s, 2) as [string, string | undefined];
+    const key = flags[flag as keyof typeof flags];
+    if (!key) { rest.push(args[at]); continue; }
+    const value = inline ?? args[++at];
+    if (!value) throw new Error(`${flag} needs a value`);
+    options[key] = value;
+  }
+  return { rest, ...options };
+}
+
+/**
+ * The `node --test` arguments for these runner arguments: the files named, else every
+ * tests/*.test.ts, narrowed to one shard. Without --files-from or --shard every argument passes
+ * through in its order, as before those options existed.
+ */
+export function nodeTestArgs(cwd: string, args: string[]) {
+  const { rest, filesFrom, shard, durations } = runnerOptions(args);
+  const reporters = durations ? ['--test-reporter=spec', '--test-reporter-destination=stdout', `--test-reporter=${fileURLToPath(new URL('./file-durations.mjs', import.meta.url))}`, `--test-reporter-destination=${resolve(cwd, durations)}`] : [];
+  const all = () => readdirSync(resolve(cwd, 'tests')).filter(name => name.endsWith('.test.ts')).sort().map(name => `tests/${name}`);
+  if (!filesFrom && !shard) return { args: [...reporters, ...rest, ...(rest.some(arg => !arg.startsWith('-')) ? [] : all())], empty: false };
+  const listed = filesFrom ? readFileSync(resolve(cwd, filesFrom), 'utf8').split(/\r?\n/).map(line => line.trim()).filter(Boolean) : [];
+  const named = [...rest.filter(arg => !arg.startsWith('-')), ...listed];
+  let files = named.length || filesFrom ? named : all();
+  if (shard) { const { index, count } = parseShard(shard); files = shardFiles(files, readDurations(cwd), count)[index - 1].files; }
+  return { args: [...reporters, ...rest.filter(arg => arg.startsWith('-')), ...files], empty: !files.length };
+}
+
 export async function runTests(options: RunOptions = {}): Promise<RunResult> {
   const cwd = resolve(options.cwd ?? process.cwd()), args = options.args ?? [];
+  const selection = options.browser ? null : nodeTestArgs(cwd, args);
+  // An empty selection (a shard with nothing assigned, a change that affects no test) runs nothing:
+  // `node --test` with no files would run every file it discovers instead.
+  if (selection?.empty) {
+    if (options.stdio !== 'pipe') console.log('No test files selected for this run.');
+    return { code: 0, base: 0, environment: {}, stdout: '', stderr: '' };
+  }
   // The browser window is the dev server's port and the sentinel above it that holds the window.
   const reservation = await reserveTestPorts(options.browser ? { first: defaultBrowserPort, span: 2, last: 65_000, ...options.ports } : options.ports);
   try {
     const set = options.browser ? { GRAPHYARD_BROWSER_PORT: String(reservation.base) } : testPortEnvironment(reservation.base);
     const environment = isolatedTestEnvironment(options.environment ?? process.env, set);
-    const files = args.some(arg => !arg.startsWith('-')) ? [] : readdirSync(resolve(cwd, 'tests')).filter(name => name.endsWith('.test.ts')).sort().map(name => `tests/${name}`);
-    const [command, commandArgs] = options.browser
+    const [command, commandArgs] = options.browser || !selection
       ? [process.execPath, [fileURLToPath(import.meta.resolve('@playwright/test/cli')), 'test', ...args]]
-      : [process.execPath, ['--import', import.meta.resolve('tsx'), '--test', ...args, ...files]];
+      : [process.execPath, ['--import', import.meta.resolve('tsx'), '--test', ...selection.args]];
     const child = spawn(command, commandArgs, { cwd, env: environment, stdio: options.stdio === 'pipe' ? ['ignore', 'pipe', 'pipe'] : 'inherit' });
     let stdout = '', stderr = '';
     child.stdout?.on('data', chunk => { stdout += chunk; });
