@@ -11,6 +11,17 @@ import { Launcher, defaultLaunchConcurrency, runCycle } from './cycle.js';
 import { describeTimings } from '../master/timings.js';
 
 /**
+ * Why the loop should exit between cycles so its supervisor restarts it on the checkout's code, or
+ * null (GY-531). Only a supervised loop reloads, and never while a launch it handed over is still in
+ * flight: exiting would cut that launch short. The soak (tests/soak.test.ts) drives this same gate.
+ */
+export async function codeReloadBetweenCycles(supervised: boolean, launcher: Pick<Launcher, 'pending'>, codeReload: (() => string | null | Promise<string | null>) | undefined, log: (line: string) => void): Promise<string | null> {
+  if (!supervised || !codeReload || launcher.pending) return null;
+  try { return await codeReload(); }
+  catch (error) { log(`[graphyard-master] the loaded revision could not be compared with the checkout: ${message(error)}`); return null; }
+}
+
+/**
  * The compact daemon view `master status` joins onto Graphyard truth. `faultPolicy` is the recurrence
  * rule the faults are reported under: the loop passes the one it files by (effects.faultClassPolicy),
  * so the reported window and threshold are the filing ones; absent, the environment's.
@@ -174,10 +185,8 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
       if (options.once || stopping) break;
       // Under a supervisor that restarts it, a loop behind its checkout exits between cycles so the
       // supervisor starts it on the code the checkout holds; the cursor is written on the way out.
-      if (watchdog.supervised && options.codeReload) {
-        try { reloading = await options.codeReload(); } catch (error) { log(`[graphyard-master] the loaded revision could not be compared with the checkout: ${message(error)}`); }
-        if (reloading) { log(`[graphyard-master] reloading: ${reloading}`); break; }
-      }
+      reloading = await codeReloadBetweenCycles(watchdog.supervised, launcher, options.codeReload, log);
+      if (reloading) { log(`[graphyard-master] reloading: ${reloading}`); break; }
       try { await delay(wait, undefined, { signal: waking.signal }); } catch { /* woken to stop */ }
     } while (!stopping);
   } finally {

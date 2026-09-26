@@ -1,7 +1,7 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdir, mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,7 +13,8 @@ import { server } from '../src/server.js';
 import { processJob } from '../src/github.js';
 import { Refusal, type Principal, type Work } from '../src/model.js';
 import { approverSessionName, decisionInput, masterConfigSchema, mergeExecutor, type MasterConfig, type WorkerProfile } from '../src/master.js';
-import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { codeReloadBetweenCycles, emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { codeReloadReason, needsAttention, readReclaimSightings, readResources, reclaimResources, resourceRegistry, revisionReloadGraceMs } from '../src/master-resources.js';
 import { Launcher } from '../src/daemon/cycle.js';
 import { successorWidening } from '../src/model/successors.js';
 import { systemInvariants, type InvariantCheck } from '../src/model/invariants.js';
@@ -32,7 +33,10 @@ import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } f
  * `runDaemon` does, so session launches run beside the cycle — outliving it, holding their profile
  * from hand-off, and reported by the next cycle — and the invariants hold on that detached path. A
  * change to the loop that breaks an invariant fails here, in CI, before
- * it merges; a new behaviour that repeats per cycle, head or item belongs in this world.
+ * it merges; a new behaviour that repeats per cycle, head or item belongs in this world. So the loop
+ * runs supervised (GY-531): after each cycle it asks the real reload gate whether to exit onto the
+ * checkout's code, which every merge moves, and a reload restarts it; and every cycle runs the real
+ * reclaim pass, recording the profile names it sees held by nothing live.
  */
 const repository = 'owner/project';
 const PROOF = 'unit:soak-behaves';
@@ -174,8 +178,12 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     pending.push(async () => { await api(principals.approver, 'POST', `work/${work.id}/approve`, { decision, reason: `Approved: the loop's routine ${decision} decision for ${work.key} rests on what it verified` }); herdr.status(pane, 'done'); });
     return { agentName, pane };
   };
+  // A proof run stands for a headless run the loop started: a child process until it posts.
+  let headless = 0;
   const requestProof: DaemonEffects['requestProof'] = work => {
+    headless += 1;
     pending.push(async () => {
+      headless -= 1;
       const current = (await store.list()).find(item => item.id === work.id)!;
       if (!current.candidate || current.candidate.sha !== work.candidate?.sha || current.stage === 'done') return;
       await engine.execute(principals.producer, 'evidence', current.id, { proof: PROOF, sha: current.candidate.sha, baseSha: current.candidate.baseSha, policyRevision: current.policyRevision, result: 'pass', executed: 4, skipped: 0,
@@ -212,14 +220,25 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       return { source: 'endpoint', sha: production.sha, at: new Date(clock.now()).toISOString(), reason: null, deployed: serving.map(item => item.key), pending: delivered.filter(item => !serving.includes(item)).map(item => item.key) };
     },
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    // The real reclaim pass (GY-531), on a checkout of its own, recording what it sees each cycle.
+    reclaimResources: (work, agents) => reclaimResources(root, config, { work, agents }, { now: clock.now(), closePane: pane => herdr.close(pane) }),
   };
+  const root = await mkdtemp(join(tmpdir(), 'graphyard-soak-root-'));
+  await mkdir(join(root, '.graphyard'), { recursive: true });
 
   // ---- The day. ----
   const state = emptyDaemonState(config);
   // Session launches run beside the cycle (GY-616): the loop carries one launcher across its
   // cycles, the way `runDaemon` does, and a launch settles in the interval after the cycle that
   // handed it over — here, before the simulated clock moves on.
-  const launcher = new Launcher();
+  let launcher = new Launcher();
+  // The supervised loop's own code (GY-531): the revision it loaded, when the checkout (main, which
+  // every merge moves) first went ahead of it, each reload, and what was running when it was asked.
+  let loaded = github.tip, behindSince: number | null = null, deferred = 0;
+  const reloads: { at: number; from: string; to: string; lagMs: number; launches: number; children: number }[] = [], moves = new Set<string>();
+  const resourceFaults: string[] = [], sightings: string[] = [];
+  const codeReload = () => codeReloadReason(root, process.pid, {
+    revision: () => ({ loaded, checkout: github.tip, behind: loaded === github.tip ? 0 : 1 }), children: () => headless });
   const violations: string[] = [], observed = new Set<string>(), failures: string[] = [], escalations: string[] = [], spent = new Set<string>();
   let released = 0, split = false, deploys = 0, cycles = 0, reportedDispatches = 0;
   const jobsDue = async () => Number((await store.pool.query('SELECT count(*) AS due FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now())')).rows[0].due);
@@ -261,6 +280,24 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
         if (process.env.SOAK_TRACE) for (const action of result.actions) console.error(`+${Math.round(elapsed / minute)} ${action.kind} ${action.state} ${action.work ?? ''}: ${action.detail.slice(0, 300)}`);
       }
       catch (error) { failures.push(`${new Date(now).toISOString()}: ${error instanceof Error ? error.message : String(error)}`); }
+      // Between cycles, as runDaemon asks it: a reload restarts the loop on the checkout's code.
+      if (github.tip !== loaded) { moves.add(github.tip); behindSince ??= clock.now(); }
+      const launches = launcher.pending, children = headless;
+      const reloading = await codeReloadBetweenCycles(true, launcher, codeReload, () => {});
+      if (reloading) {
+        reloads.push({ at: clock.now(), from: loaded, to: github.tip, lagMs: clock.now() - behindSince!, launches, children });
+        // runDaemon logs what the settled launches did on its way out, since no next cycle of it will.
+        reportedDispatches += launcher.drain().filter(action => action.kind === 'dispatch' && action.state === 'done').length;
+        loaded = github.tip; behindSince = null; launcher = new Launcher();
+      } else if (github.tip !== loaded) deferred += 1;
+      // What the loop's resource readings say of it: neither its code nor a name it gives back
+      // itself may warn while what undoes it is still inside its bound.
+      const seen = await readReclaimSightings(root), agents = herdr.list();
+      const readings = readResources({ now: clock.now(), reviews: [], producers: [], profiles: { workers: config.workers, reviewers: config.reviewers ?? [], producers: config.producers ?? [] }, agents, work: (await store.list()), plane: null, loop: null,
+        revision: { loaded, checkout: github.tip, behind: loaded === github.tip ? 0 : 1, movedAt: behindSince }, disk: null, unowned: seen }, resourceRegistry.filter(entry => entry.id === 'agent-names' || entry.id === 'loaded-revision'));
+      for (const reading of readings.filter(needsAttention)) resourceFaults.push(`+${Math.round(elapsed / minute)} min ${reading.id}: ${reading.detail}`);
+      const names = new Set(agents.map(agent => agent.name));
+      for (const key of Object.keys(seen ?? {})) if (!key.startsWith('unowned:') || !names.has(key.slice('unowned:'.length))) sightings.push(`+${Math.round(elapsed / minute)} min ${key} is recorded but nothing holds it`);
       // The interval between cycles is when a hand-off launch settles; the day's clock waits for
       // them so the world never acts on a half-finished launch.
       await launcher.idle();
@@ -275,12 +312,13 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   }
 
   const final = (await store.list()).filter(item => items.some(entry => entry.id === item.id));
-  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, herdr, hand, escalations, spent };
+  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, herdr, hand, escalations, spent,
+    supervised: { reloads, moves, deferred, loaded, resourceFaults, sightings, seen: await readReclaimSightings(root) } };
 }
 
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 180_000 }, async () => {
   const began = performance.now();
-  const { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
+  const { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, supervised } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
   const undelivered = final.filter(item => item.stage !== 'done' || !item.delivery);
   assert.deepEqual(undelivered.map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
@@ -305,6 +343,18 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   const reviewed = final.find(item => item.key === items[plan.exhaustedReviewer - 1].key)!;
   assert.ok(reviewed.reviewFailovers?.some(failover => failover.profile === 'claude-reviewer' && failover.exhaustion === 'usage-limit' && failover.nextProfile === 'cursor-reviewer'), `the exhausted reviewer bot failed over to the next profile: ${JSON.stringify(reviewed.reviewFailovers)}`);
   assert.ok(cycles > 24 * 6, `the loop cycled through the day (${cycles} cycles)`);
+  // GY-531: supervised, the loop reloaded onto each checkout move between cycles — at most once per
+  // move, never while a launch or a headless run it started was live, well inside the reading's grace.
+  const { reloads, moves, deferred, loaded, resourceFaults, sightings, seen } = supervised;
+  assert.ok(reloads.length > 0 && reloads.length <= moves.size, `a reload per checkout move at most (${reloads.length} reloads, ${moves.size} moves)`);
+  assert.ok(reloads.every(reload => reload.from !== reload.to), 'no reload onto the code already loaded');
+  assert.deepEqual(reloads.filter(reload => reload.launches || reload.children), [], 'no reload while a launch or a headless run was live');
+  assert.ok(deferred > 0, 'a reload waited for a live launch or headless run at least once');
+  assert.ok(Math.max(...reloads.map(reload => reload.lagMs)) < revisionReloadGraceMs, `each reload came inside the grace: ${reloads.map(reload => Math.round(reload.lagMs / 1000)).join(', ')} s`);
+  assert.equal(loaded, github.tip, 'the loop ends the day on the code the checkout holds');
+  assert.deepEqual(resourceFaults, [], 'neither the loaded revision nor a name the loop gives back itself raised attention');
+  assert.deepEqual(sightings, [], 'the reclaim pass records only names still held: its sightings stay bounded');
+  assert.ok(Object.keys(seen ?? {}).length <= workers.length, `the sightings left are at most one per worker name: ${JSON.stringify(seen)}`);
   const seconds = (performance.now() - began) / 1000;
   assert.ok(seconds < 120, `the day runs well inside the three minutes the CI test job allows it (${seconds.toFixed(1)} s)`);
 });

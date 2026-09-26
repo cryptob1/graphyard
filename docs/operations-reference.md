@@ -68,7 +68,7 @@ After an hour without deliveries `master status` points to `https://github.com/s
 
 Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow the volume and `GRAPHYARD_DATABASE_MAX_BYTES`; `loaded-revision`, `graphyard master restart`.
 
-Self-correcting readings raise no attention (`overdue: false`): a supervised loop behind its checkout reloads after a childless cycle (`stopped: "reloading"`), warning after 30 minutes, or at once without a reflog date; an unowned name warns after 180 s (`unowned:NAME`, `.graphyard/resource-reclaims.json`).
+Self-correcting readings raise no attention (`overdue: false`): a supervised loop behind its checkout reloads after a cycle with no child process or launch in flight (`stopped: "reloading"`), warning after 30 minutes, or at once without a reflog date; an unowned name warns after 180 s (`unowned:NAME`, `.graphyard/resource-reclaims.json`).
 
 ## Bootstrap mode for a self-proving change
 
