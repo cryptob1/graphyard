@@ -11,7 +11,7 @@ The `admin` credential holder declaring `sessionKind: "human"`, who alone decide
 
 ### 2. AI agent
 
-A model acting through a runtime, with only its credential's authority.
+A model acting through a runtime with only its credential's authority.
 
 **Canonical usage:** name the role (*worker*, *master*, *approver*, *reviewer*, *proof producer*).
 
