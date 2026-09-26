@@ -16,13 +16,13 @@ A card stops at its first refusing gate, naming what is missing; nothing sets st
 
 ![Bootstrap versus normal operation: one supervised worker, then a fleet with separate credentials.](diagrams/bootstrap-vs-normal.svg)
 
-Text equivalent: in bootstrap the operator supervises one worker while gates activate; normally the master dispatches many workers, each with its own credential and worktree; reviewers and producers judge candidates under the same gates.
+Text equivalent: in bootstrap the human operator supervises one worker while gates activate; normally the master dispatches many workers, each with its own credential and worktree; reviewers and producers judge candidates under the same gates.
 
 ## Who holds which authority
 
 ![Who holds which authority: the operator, Graphyard, Herdr-hosted sessions, reviewer and producer.](diagrams/roles-and-authority.svg)
 
-Text equivalent: the operator sends human-only decisions to Graphyard; Herdr hosts the master (`coordinator`), slice lead and worker (epoch, worktree); the reviewer is a GitHub identity, the producer holds a grant. Each session uses its own credential; merges go only through the guarded path. Colours follow the [legend](glossary.md#diagram-legend).
+Text equivalent: the operator sends human-only decisions to Graphyard; Herdr hosts the master (`coordinator`), slice lead and worker (epoch, worktree); the reviewer is a GitHub identity, the producer holds a grant. Merges go only through the guarded path. Colours follow the [legend](glossary.md#diagram-legend).
 
 ## Correctness rules
 
@@ -30,7 +30,7 @@ Text equivalent: the operator sends human-only decisions to Graphyard; Herdr hos
 
 Text equivalent: sessions, the dashboard and producers call the API; the engine applies each mutation in one locked Postgres transaction, appending an event; the reconciliation worker syncs GitHub, publishes the required check and merges; the webhook only wakes a job.
 
-- Gates deterministically check one candidate, `(PR, head SHA, base SHA)`, under the current policy revision; a push or base change invalidates old evidence.
+- Gates are deterministic checks of one candidate, `(PR, head SHA, base SHA)`, under the current policy revision; a push or base change invalidates old evidence.
 - Every claim increments the epoch; commands from an old epoch or expired lease are refused.
 - Evidence is attributed to its authenticated producer; the latest trusted record per proof and candidate wins, even a failure.
 - History is append-only; a retried command replays its original result.
