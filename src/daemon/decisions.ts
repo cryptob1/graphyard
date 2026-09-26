@@ -1,7 +1,7 @@
 // Concern: routine decisions — standing verdicts, decision reasons and the approver step.
 import { type Work, type AgentReview, reviewProviderOf, standingEscalations, leaseLossEpoch, RefusedResponse } from '../model.js';
 import { routableScopeRequest, scopeDecisionBinding, scopeDecisionReason } from '../model/scope.js';
-import { baseRefreshConflict, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, restoringAfterEjectionPrefix, speculativeConflictReason, type ReviewThread, describeThread } from '../merge-queue.js';
+import { baseRefreshConflict, failedCheckResults, latestCheckRun, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, restoringAfterEjectionPrefix, speculativeConflictReason, type ReviewThread, describeThread } from '../merge-queue.js';
 import { mechanicalFailure, mechanicalVerdicts } from '../model/mechanical-proofs.js';
 import { unexercisedFindings } from '../auto-dispatch.js';
 import { decisionBindingMax } from '../model/approval.js';
@@ -245,11 +245,13 @@ export function failedCheckRework(work: Work): { reason: string; binding: string
   if (!work.submission || work.reworkRequested || !candidate || !observation || work.stage === 'done') return null;
   if (observation.candidate.sha !== candidate.sha || observation.merged || observation.prState === 'closed') return null;
   const failed = work.policy.checks.filter(name => {
-    const runs = observation.checks.filter(check => check.name === name);
-    const latest = runs.length ? runs.reduce((newest, check) => (check.attempt ?? 0) >= (newest.attempt ?? 0) ? check : newest) : null;
-    return !!latest && ['failure', 'timed_out', 'action_required', 'cancelled'].includes(latest.result);
+    const latest = latestCheckRun(work, name);
+    return !!latest && failedCheckResults.includes(latest.result);
   }).sort();
   if (!failed.length) return null;
+  // A head behind the base tip is first brought onto it by the control plane (GY-534): the failure
+  // may be one main already fixed, and a rework asked for it is refused on exactly those grounds.
+  if (pendingBaseRefresh(work)?.check) return null;
   return { reason: `${work.key}: required CI check${failed.length === 1 ? '' : 's'} ${failed.join(', ')} failed on candidate ${candidate.sha.slice(0, 12)}. No gate passes a head whose required checks failed, so the item returns to a worker to fix what CI found.`,
     binding: `${candidate.sha}:ci:${failed.join(',')}` };
 }

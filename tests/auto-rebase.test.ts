@@ -97,8 +97,8 @@ test('integration:auto-rebase-clean-candidate — a candidate the base branch mo
   const conflicting = await f.github.observe(f.work);
   assert.deepEqual([conflicting.candidate.baseSha, conflicting.conflicting], [boundBase, true]);
   const work = { ...f.work, observation: conflicting, candidate: conflicting.candidate };
-  assert.deepEqual(baseRefreshNeeded(work), { head, boundBase, baseTip: movedTo });
-  assert.deepEqual(pendingBaseRefresh(work), { baseTip: movedTo, boundBase });
+  assert.deepEqual(baseRefreshNeeded(work), { head, boundBase, baseTip: movedTo, trigger: 'conflict confirmed', check: null });
+  assert.deepEqual(pendingBaseRefresh(work), { baseTip: movedTo, boundBase, trigger: 'conflict confirmed', check: null });
 
   // The control plane confirms GitHub's reading first (GY-375): the test merge of the head onto
   // the new tip, on a scratch branch, is clean, so the reading is stale and the candidate's own
@@ -264,7 +264,7 @@ test('integration:auto-rebase-clean-candidate — the reconciliation job leaves 
   const stale = (item: Work) => seen(item, { sha: head, baseSha: main }, inFlight({ baseTip: moved, baseTree: treeOf(moved), baseTipContained: false, ...conflicts }));
   work = await engine.observe(work.id, work.revision, stale(work));
   assert.deepEqual([work.stage, gate(work, 'review').passed, gate(work, 'acceptance').passed], [before.stage, true, true]);
-  assert.deepEqual(pendingBaseRefresh(work), { baseTip: moved, boundBase: main });
+  assert.deepEqual(pendingBaseRefresh(work), { baseTip: moved, boundBase: main, trigger: 'conflict confirmed', check: null });
 
   await onlyJob(work);
   const run = adapter(stale, item => refreshRecord(item, { head: refreshedHead, base: moved }));
@@ -354,7 +354,7 @@ test('integration:loop-acts-on-stale-base — an item that is only waiting for a
   const status = buildMasterStatus(snapshot, [], []);
   const row = status.work.find(entry => entry.key === work.key)!;
   assert.equal(row.attention, null, 'nobody is asked to do anything about a base the control plane is absorbing');
-  assert.deepEqual(row.base!.pending, { baseTip: moved, boundBase: main });
+  assert.deepEqual(row.base!.pending, { baseTip: moved, boundBase: main, trigger: 'conflict confirmed', check: null });
   assert.equal(status.attentionItems.some(item => item.subject === work.key), false);
 
   const config = { url: 'http://localhost', repository: 'owner/repo', workers: [], autoMerge: false, run: {} } as unknown as MasterConfig;

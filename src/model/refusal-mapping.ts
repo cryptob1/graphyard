@@ -1,4 +1,4 @@
-import { queueSequencingReason } from '../merge-queue.js';
+import { baseRefreshNeeded, failedCheckResults, latestCheckRun, queueSequencingReason } from '../merge-queue.js';
 import { reviewNeed } from './dispatch.js';
 import { standingEscalations } from './escalation.js';
 import { leadHoldRefusal } from './delegation.js';
@@ -124,16 +124,20 @@ export function reviewStandstill(work: Work, all: Work[] = [work], now = new Dat
 
 /**
  * The single action kind a refusal maps to. `work` decides the three cases the refusal text cannot:
- * a CI check that reported a failure (rework) rather than one still to answer (re-read), a
+ * a CI check that reported a failure (rework, or a re-read that runs the base refresh when the head
+ * is behind the base tip) rather than one still to answer (re-read), a
  * merge-gate refusal raised by a standing escalation or lead hold rather than by the queue, and a
  * review refusal standing over a head no review can be asked for (`reviewStandstill`).
  */
 export function refusalAction(work: Work, gate: string, refusal: string, all: Work[] = [work], now = new Date()): NextActionKind {
   if (gate === 'test' && /^Required CI check (.+) has not passed on the current candidate$/.test(refusal)) {
     const name = refusal.match(/^Required CI check (.+) has not passed on the current candidate$/)![1];
-    const runs = (work.observation?.checks ?? []).filter(check => check.name === name);
-    const latest = runs.length ? runs.reduce((newest, check) => (check.attempt ?? 0) >= (newest.attempt ?? 0) ? check : newest) : null;
-    return latest && ['failure', 'timed_out', 'action_required', 'cancelled'].includes(latest.result) ? 'request-rework' : 'resync';
+    const latest = latestCheckRun(work, name);
+    if (!latest || !failedCheckResults.includes(latest.result)) return 'resync';
+    // A failed check on a head behind the base tip is answered by the control plane's own base
+    // refresh (GY-534), which the fresh reading runs: the failure may be one main already fixed,
+    // and a rework decision owed for it is refused on exactly those grounds.
+    return baseRefreshNeeded(work)?.trigger === 'failed check behind base' ? 'resync' : 'request-rework';
   }
   if (gate === 'review') {
     const standstill = reviewStandstill(work, all, now);

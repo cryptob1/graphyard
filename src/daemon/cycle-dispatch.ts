@@ -226,7 +226,9 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
     if (pending) {
       if (state.actions[key]) return;
       performed.push(await record(state, key, { kind: 'refresh', work: item.key, principal: null, state: 'started',
-        detail: `${item.key}: base branch moved from ${pending.boundBase.slice(0, 12)} to ${pending.baseTip.slice(0, 12)} and GitHub reports ${item.candidate!.sha.slice(0, 12)} conflicting with it; the control plane is confirming the conflict with a test merge. No rework round, no review round and no proof round is requested unless that merge conflicts.`,
+        detail: pending.check
+          ? `${item.key}: required check ${pending.check} failed on ${item.candidate!.sha.slice(0, 12)}, which does not contain base branch tip ${pending.baseTip.slice(0, 12)}; the control plane is merging the base into it so CI answers again against the tip (GY-534). No rework round is requested unless that merge conflicts or the check fails again on the refreshed head.`
+          : `${item.key}: base branch moved from ${pending.boundBase.slice(0, 12)} to ${pending.baseTip.slice(0, 12)} and GitHub reports ${item.candidate!.sha.slice(0, 12)} conflicting with it; the control plane is confirming the conflict with a test merge. No rework round, no review round and no proof round is requested unless that merge conflicts.`,
         attempts: 1, cycle: state.cycle }, now(), effects.persist));
       return;
     }
