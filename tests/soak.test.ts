@@ -319,7 +319,7 @@ test('unit:soak-docs-trim-once — a saturated base files the docs-trim item onc
   assert.ok(docsActions.length <= 4, `a bounded number of loop actions for ${docsTrimActionKey} (${docsActions.length}): ${JSON.stringify(docsActions)}`);
   assert.equal(docsActions.filter(action => action.state === 'done').length, 1, 'the one filing is the one done action');
   assert.equal(state.actions[docsTrimActionKey]?.state, 'done', 'the filing stands done on the loop cursor');
-  assert.ok(state.docsTrim, 'the episode the filing opened stays open while the set is saturated');
+  assert.match(state.actions[docsTrimActionKey]?.detail ?? '', /^Filed /, 'the filing stands as the open episode on the loop cursor');
   const trim = (await store.list()).find(item => item.title.startsWith(docsTrimTitle));
   assert.equal(trim?.closure?.kind, 'obsolete', 'the trim item is the one the day closed');
   // Days run against one store, so this day inherits the regression day's lingering approver

@@ -326,12 +326,6 @@ export const daemonStateSchema = z.object({
    * losses seen — and the last cycle's report, one line per invariant, for `master status`.
    */
   invariants: invariantRecordSchema.default(emptyInvariantRecord),
-  /**
-   * The docs-trim episode the loop is in (GY-574): the base and total of the trim item it filed,
-   * set on filing and cleared the first cycle the counted set is no longer saturated, so one
-   * saturation episode files once however the total drifts or the filed item ends.
-   */
-  docsTrim: z.object({ base: z.string().max(300), total: z.number().int().min(0) }).strict().nullable().default(null),
 }).strict();
 export type DaemonState = z.infer<typeof daemonStateSchema>;
 
