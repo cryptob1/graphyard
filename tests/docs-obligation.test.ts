@@ -14,7 +14,7 @@ import { collectScanInput } from '../src/onboarding.js';
 import { proposeDocumentation, readDocumentationConfig, writeDocumentationConfig } from '../src/repository-setup.js';
 import { documentationGlobMatches } from '../src/model/documentation-glob.js';
 import { decideScopeRequest, documentationScopes } from '../src/model/scope.js';
-import { configuredDocumentation, defaultDocumentationPolicy, documentationAssignment, documentationCheck, documentationCriterionTitle, documentationObligation, repositoryConfigFile, type DocumentationPolicy } from '../src/model/documentation.js';
+import { configuredDocumentation, defaultDocumentationPolicy, documentationAssignment, documentationCheck, documentationCriterionTitle, documentationDrift, documentationObligation, repositoryConfigFile, type DocumentationPolicy } from '../src/model/documentation.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 
 // GY-215: every ticket keeps its project's documentation current. Documentation is a
@@ -37,21 +37,22 @@ before(async () => {
   engine = new Engine(store, [15368], 300, 'owner/site-repository'); engine.submissionObserver = null;
 });
 after(async () => {
-  await store?.pool.end();
+  await store?.close();
   await database?.stop();
   await rm(dataDirectory, { recursive: true, force: true });
 });
 
 const create = (type: 'feature' | 'bug' | 'chore', title: string) => engine.execute(operator, 'create', null,
   { title, type, plannedFiles: ['src/cli/deploy.ts'], criteria: [{ id: 'AC-1', text: 'The deploy command takes --region', proofs: ['unit:deploy-region'] }] }, randomUUID());
-async function submitted(work: Work, files: string[], statement?: string) {
+async function submitted(work: Work, files: string[] | null, statement?: string) {
   work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
   work = await engine.execute(implementer, 'claim', work.id, {}, randomUUID());
   work = await engine.execute(implementer, 'workspace', work.id, { epoch: work.epoch, host: 'docs-host', path: `/tmp/docs-obligation/${work.id}`, branch: `graphyard/${work.key.toLowerCase()}-${work.epoch}` }, randomUUID());
   const pr = 2150 + work.epoch + Number(work.key.slice(3));
   const observed: Observation = { clockOffset: { min: 0, max: 0 }, candidate: { sha: head, baseSha: base, pr, branch: work.workspaces[0].branch, author: implementer.id },
-    checks: [], reviews: [], protected: true, mergeable: true, merged: false, mergeSha: null, files, scopeFiles: [], at: new Date().toISOString() };
-  return engine.execute(implementer, 'submit', work.id, { epoch: work.epoch, pr, ...(statement ? { documentation: statement } : {}) }, randomUUID(), { observation: observed });
+    checks: [], reviews: [], protected: true, mergeable: true, merged: false, mergeSha: null, files: files ?? [], scopeFiles: [], at: new Date().toISOString() };
+  // No files: the submission is recorded without an observation, as when no GitHub App observes it.
+  return engine.execute(implementer, 'submit', work.id, { epoch: work.epoch, pr, ...(statement ? { documentation: statement } : {}) }, randomUUID(), files ? { observation: observed } : {});
 }
 
 test('unit:docs-paths-per-repository — the repository configuration names its documentation paths, onboarding proposes them from the checkout, and scope reads them instead of the hardcoded default', async () => {
@@ -133,6 +134,32 @@ test('unit:docs-obligation-on-every-item — create stamps "Documentation reflec
   assert.equal(neither.documentation!.submission!.satisfiedBy, null);
   assert.deepEqual(neither.documentation!.submission!.files, []);
   engine.documentation = defaultDocumentationPolicy;
+});
+
+test('unit:docs-unobserved-submission-refreshed — a submission recorded without an observation takes its documentation files from the first observation of its pull request (GY-293)', async () => {
+  engine.documentation = siteRepository;
+  const work = await submitted(await create('feature', 'Document the region flag'), null);
+  const recorded = work.documentation!.submission!;
+  assert.equal(recorded.files, null, 'nothing was observed at submission');
+  assert.equal(recorded.satisfiedBy, null);
+  const observed: Observation = { clockOffset: { min: 0, max: 0 }, candidate: { sha: head, baseSha: base, pr: work.submission!.pr, branch: work.workspaces[0].branch, author: implementer.id },
+    checks: [], reviews: [], protected: true, mergeable: true, merged: false, mergeSha: null, files: ['src/cli/deploy.ts', 'site/guide/deploy.md'], scopeFiles: [], at: new Date().toISOString() };
+  const refreshed = await engine.observe(work.id, work.revision, observed);
+  assert.deepEqual(refreshed.documentation!.submission, { ...recorded, files: ['site/guide/deploy.md'], satisfiedBy: 'diff' }, 'the docs diff now reads as satisfied, at the original submission time');
+  // A later observation never rewrites what an observed submission recorded.
+  const again = await engine.observe(work.id, refreshed.revision, { ...observed, files: ['src/cli/deploy.ts'] });
+  assert.deepEqual(again.documentation!.submission, refreshed.documentation!.submission);
+  engine.documentation = defaultDocumentationPolicy;
+});
+
+test('unit:docs-policy-drift — doctor reports a committed graphyard.json the control plane does not serve, with the assignment that fixes it (GY-293)', () => {
+  assert.equal(documentationDrift(null, siteRepository), null, 'a checkout that commits no policy has nothing to drift from');
+  assert.equal(documentationDrift(siteRepository, { ...siteRepository }), null);
+  assert.equal(documentationDrift({ paths: ['README.md', 'docs/'], changelog: null }, { paths: ['docs/', 'README.md'], changelog: null }), null, 'path order is not drift');
+  const drift = documentationDrift(siteRepository, defaultDocumentationPolicy)!;
+  assert.deepEqual(drift.committed, siteRepository); assert.deepEqual(drift.deployed, defaultDocumentationPolicy);
+  assert.ok(drift.attention.includes(documentationAssignment(siteRepository).line), drift.attention);
+  assert.ok(documentationDrift({ ...siteRepository, changelog: null }, siteRepository), 'a changelog difference is drift');
 });
 
 test('unit:reviewer-checks-docs — the reviewer prompt carries the documentation check with the repository\'s paths, and a CLI change with no docs diff and no statement is flagged', () => {
