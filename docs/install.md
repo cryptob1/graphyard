@@ -64,11 +64,11 @@ Dispatch a small item ([onboarding](onboarding.md#4-prove-the-first-pr)); after 
 
 ## Self-contained host
 
-`--target host --ssh-host HOST` or `--target hetzner` runs server, Postgres, loop, executors, Herdr, Claude Code, Codex, OpenCode, Pi on one machine under systemd, credentials `0600` in its `graphyard` account. Sign in once via `signIn`; connect accounts under **Agents**.
+`--target host --ssh-host HOST` or `--target hetzner` runs server, Postgres, loop, executors, Herdr, Claude Code, Codex, OpenCode, Pi on one machine under systemd, credentials `0600` for user `graphyard`; sign in via `signIn`.
 
-**Sizing:** 3 GB per concurrent agent, 2 GB per verification slot, 2 GB base, plus max(10%, 4 GB) free. **Verify** `price`; apply with `--confirm-price X` or `--max-monthly N`.
+**Sizing:** 3 GB per concurrent agent, 2 GB per verification slot, 2 GB base, max(10%, 4 GB) spare. Confirm `price`: `--confirm-price X` or `--max-monthly N`.
 
-**Moving:** `--migrate` stops the old loop and restores a verified backup of `GRAPHYARD_MIGRATE_DATABASE_URL` there.
+**Moving:** `--migrate` stops the old loop, restoring `GRAPHYARD_MIGRATE_DATABASE_URL` there.
 
 ## Upgrading an existing installation
 
@@ -78,7 +78,7 @@ Dispatch a small item ([onboarding](onboarding.md#4-prove-the-first-pr)); after 
 node "$GRAPHYARD_CLI" github-setup --update-permissions --wait 600
 ```
 
-Then `doctor` shows `appPermissions.missing` empty.
+Then `doctor` shows `appPermissions.missing` empty; a re-run fixes `delegationLimits` drift such as `GRAPHYARD_MAX_REVIEWERS`.
 
 ## Failure handling
 

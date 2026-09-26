@@ -5,35 +5,51 @@
 
 ### 1. Human operator (human authority)
 
-The `admin` credential holder declaring `sessionKind: "human"`, who alone decides goals and priorities, spending money or opening accounts, and credentials for people; bare *operator* means this person.
+The `admin` credential holder declaring `sessionKind: "human"`, who alone decides goals and priorities, spending money or opening accounts, and credentials for people.
+
+**Canonical usage:** *human operator*; bare *operator* means this person.
 
 ### 2. AI agent
 
-A model acting through a runtime with only its credential's authority; name its role (*worker*, *master*, *approver*, *reviewer*, *proof producer*).
+A model acting through a runtime with only its credential's authority.
+
+**Canonical usage:** name the role (*worker*, *master*, *approver*, *reviewer*, *proof producer*).
 
 ### 3. Agent session (Herdr-managed session or runtime)
 
-One running agent instance in a *runtime*.
+One running agent instance in a runtime.
+
+**Canonical usage:** *session*; *runtime* for the hosting software.
 
 ### 4. Principal, role, and credential
 
-A *principal* is an authenticated identity, its *role* the authority class, its *credential* (*token*) the secret, one per concurrent session.
+A *principal* is an authenticated identity, its *role* the authority class, its *credential* (*token*) the secret.
+
+**Canonical usage:** one principal per concurrent session.
 
 ### 5. Worker lease and worktree
 
 A *lease* is one worker's time-limited ownership of one item at one *epoch*; the *assigned worktree* is the registered `(host, path)` checkout with a reserved branch.
 
+**Canonical usage:** *lease*, *epoch*, *assigned worktree*.
+
 ### 6. Independent reviewer and proof producer
 
 A *reviewer* is a non-author GitHub identity approving the exact head; a *proof producer*, a `producer` principal granted exact proof names; neither implements it.
 
+**Canonical usage:** *reviewer*, *proof producer*.
+
 ### 7. Graphyard control plane
 
-The server, database, dashboard and CLI: Graphyard *records*, *refuses*, *authorizes*; it never *runs* a session.
+The server, database, dashboard and CLI.
+
+**Canonical usage:** Graphyard *records*, *refuses*, *authorizes*; it never *runs* a session.
 
 ### 8. Herdr runtime
 
 The supervisor that launches sessions and reports their liveness.
+
+**Canonical usage:** *Herdr*; other runtimes by product name.
 
 ## The roles at a glance
 
