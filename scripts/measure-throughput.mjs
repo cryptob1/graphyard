@@ -75,7 +75,9 @@ export async function main(argv = process.argv.slice(2), env = process.env, deps
   // The release identity comes from the deployment itself, never from the checkout this runs in:
   // what is serving is the thing under measurement.
   const status = await read('/api/status', 'control-plane status');
-  const snapshot = await read('/api/work-snapshot', 'work snapshot');
+  // Admission reads each delivery's action rows and sessions, which the default snapshot leaves out
+  // of a settled delivery's summary (GY-422): this periodic measurement reads the whole documents.
+  const snapshot = await read('/api/work-snapshot?view=full', 'work snapshot');
   const now = Date.parse(snapshot.now ?? status.now ?? new Date().toISOString());
   const claim = snapshot.work.find(item => item.key === options.claim);
   // A build that never stamped a release revision still names its commit in the build identity
