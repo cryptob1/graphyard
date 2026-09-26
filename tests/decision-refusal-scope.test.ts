@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
-import { decisionSituation, foldDecisions, unansweredRefusal, type DecisionEvent } from '../src/model/approval.js';
+import { decisionSituation, foldDecisions, standingRefusal, unansweredRefusal, type DecisionEvent } from '../src/model/approval.js';
+import { Refusal, RefusedResponse } from '../src/model/refusal.js';
 import { requestDecision } from '../src/server/decisions.js';
 import { canonical } from '../src/server/decision-ledger.js';
 import { emptyDaemonState, refusalNamedIn, runCycle, type DaemonEffects } from '../src/master-daemon.js';
@@ -185,4 +186,72 @@ test('unit:loop-rework-not-blocked-by-stale-refusal — the loop\'s rework reque
   assert.ok(!result.actions.some(action => action.kind === 'decision' && action.state === 'failed'), 'nothing is recorded as failed');
   assert.equal(refusalNamedIn(`Decision ${onB} (rework) with this input for candidate ${shaB.slice(0, 12)} on base ${base.slice(0, 12)} was refused by x`), onB);
   assert.equal(refusalNamedIn('Decision is already requested'), null);
+});
+
+/**
+ * GY-265, the follow-ups of GY-229's review: a legacy refusal's message tells a hand `master decide`
+ * to cite it by id; the server names the standing refusal as a field of its 409 body, so the loop's
+ * retry survives any rewording of the message; and a recover request answers a refusal its history
+ * read missed exactly as a rework does.
+ */
+test('unit:legacy-refusal-names-its-citation — a refusal recorded before situations were kept tells a hand request to cite it, and the 409 body names it as a field', async () => {
+  const legacyId = '68a66582-0000-4000-8000-0000000000aa';
+  const legacy = [{ id: legacyId, action: 'rework' as const, state: 'refused', input, reason: 'Legacy', refusal: null }];
+  const found = standingRefusal(legacy, 'rework', input, 'Other grounds', same, [], decisionSituation('rework', item(shaB)))!;
+  assert.equal(found.decision, legacyId);
+  assert.equal(found.legacy, true);
+  assert.match(found.message, new RegExp(`stands against every candidate of this item until a request cites it: pass --precedent ${legacyId}`));
+  // A refusal that recorded its candidate carries no such note.
+  const situated = [{ ...legacy[0], situation: { sha: shaB, baseSha: base } }];
+  const current = standingRefusal(situated, 'rework', input, 'Other grounds', same, [], decisionSituation('rework', item(shaB)))!;
+  assert.equal(current.legacy, false);
+  assert.doesNotMatch(current.message, /--precedent/);
+
+  // The request route answers with the refused decision as a field beside the message.
+  const work = { current: item(shaA) };
+  const { events, services } = ledger(work);
+  const refused = await request(services, work.current, 'Candidate A needs another round');
+  events.push({ actor: 'graphyard-approver', kind: 'decision.declined', payload: { id: refused.id, reason: 'Not yet' }, created_at: iso(1000) });
+  await assert.rejects(request(services, work.current, 'Candidate A needs another round, again'),
+    (error: unknown) => error instanceof Refusal && error.status === 409 && (error.details as any)?.standingRefusal?.decision === refused.id && (error.details as any).standingRefusal.action === 'rework');
+});
+
+test('unit:refusal-named-structurally — the loop reads the standing refusal from the response body, for rework and recover, whatever the message says', () => {
+  const id = '68a66582-0000-4000-8000-0000000000bb';
+  const body = (action: string) => ({ error: 'Reworded entirely: no decision id in this prose', standingRefusal: { decision: id, action, legacy: false } });
+  assert.equal(refusalNamedIn(new RefusedResponse('Graphyard refused work/x/decide (409): reworded', 409, body('rework')), 'rework'), id);
+  assert.equal(refusalNamedIn(new RefusedResponse('Graphyard refused work/x/decide (409): reworded', 409, body('recover')), 'recover'), id);
+  assert.equal(refusalNamedIn(new RefusedResponse('reworded', 409, body('recover')), 'rework'), null, 'a refusal of another action is not this request\'s to answer');
+  assert.equal(refusalNamedIn(new RefusedResponse('reworded', 409, { error: 'x', standingRefusal: { decision: 'not-an-id', action: 'rework' } }), 'rework'), null);
+  // A server predating the field is still read from its message, for either situated action.
+  assert.equal(refusalNamedIn(new Error(`Decision ${id} (recover) with this input was refused by x`), 'recover'), id);
+  assert.equal(refusalNamedIn(new Error(`Decision ${id} (recover) with this input was refused by x`), 'rework'), null);
+});
+
+test('unit:loop-recover-answers-missed-refusal — a loop recover request refused on a refusal its history read missed cites it and is accepted', async () => {
+  const onEpoch = '68a66582-0000-4000-8000-0000000000cc';
+  const delivered = { ...item(shaB), stage: 'done', lease: null,
+    containmentQuarantine: { at: iso(-3 * 60 * minute), epoch: 1, owner: 'graphyard-worker-1', scope: null, leaseExpiresAt: iso(-2 * 60 * minute), launchExpiresAt: iso(-2 * 60 * minute), launchAcknowledgedAt: iso(-3 * 60 * minute), settlementHash: 'f'.repeat(64) } } as unknown as Work;
+  const history: Recorded[] = [{ id: onEpoch, action: 'recover', state: 'refused', input: { previousWorkerStopped: true, binding: '1' }, reason: 'Earlier grounds', precedent: [], approvedBy: null,
+    refusal: { approver: 'graphyard-approver', reason: 'Not yet' }, situation: { sha: shaB, baseSha: base } }];
+  const sent: string[] = [];
+  const recoverEffects: DaemonEffects = {
+    ...effects(delivered, history, 'fails', sent),
+    containment: () => ({ [delivered.id]: { key: delivered.key, id: delivered.id, epoch: 1, owner: 'graphyard-worker-1', at: iso(0), host: 'machine-a', workspacePath: null, scope: null, settleable: true, refusals: [], attestation: 'supervisor gone', verification: null } }),
+    // The server's own match, answered with a message that names no id: only the field can.
+    decide: async (target, action, reason, given) => {
+      sent.push(reason);
+      const situation = decisionSituation(action, target);
+      const found = standingRefusal(history as any, action as 'recover', { previousWorkerStopped: true, ...(given ?? {}) }, reason, same, [], situation);
+      if (found) throw new RefusedResponse('Graphyard refused work/x/decide (409): refused, reworded', 409, { error: 'refused, reworded', standingRefusal: { decision: found.decision, action: found.action, legacy: found.legacy } });
+      const id = `5d8a8b9e-0000-4000-8000-${String(history.length).padStart(12, '0')}`;
+      history.push({ id, action, state: 'requested', input: given, reason, precedent: [], approvedBy: null, refusal: null, situation });
+      return { id };
+    },
+  };
+  const result = await runCycle(config(), emptyDaemonState(config()), recoverEffects, () => clock);
+  assert.equal(sent.length, 2, `one uncited request, then one citing the refusal the server named: ${JSON.stringify(result.actions.filter(action => action.kind === 'decision'))}`);
+  assert.ok(!sent[0].includes(onEpoch) && sent[1].includes(onEpoch) && /refused recover decision/.test(sent[1]), sent[1]);
+  assert.equal(history.at(-1)!.state, 'requested');
+  assert.ok(!result.actions.some(action => action.kind === 'decision' && action.state === 'failed'), 'nothing is recorded as failed');
 });
