@@ -13,7 +13,7 @@ The control-plane App holds (`src/github-permissions.ts`):
 | Issues | Read | receive `issue_comment` webhooks carrying review results (comment webhooks) |
 | Metadata | Read | read the managed repository (repository access) |
 | Pull requests | Read and write | read pull requests and reviews (pull request observation); post review request comments (review dispatch) |
-A reviewer App is never granted Contents: write, Checks, or Administration; worker identities are not Apps. It holds:
+A reviewer App is never granted Contents: write, Checks, or Administration; worker identities are not Apps at all. It holds:
 
 | Permission | Access | Needed to |
 | --- | --- | --- |
@@ -22,7 +22,7 @@ A reviewer App is never granted Contents: write, Checks, or Administration; work
 | Metadata | Read | read the managed repository (repository access) |
 | Pull requests | Read and write | post the verdict comment (review dispatch) |
 
-Grants are rechecked every five minutes and on a 403; a shortfall (`appPermissions`) holds its jobs, **not retried** (`integration-held`), until `master browser app-permissions` or `installation-accept` fixes it.
+Grants are rechecked every five minutes and on a 403; a shortfall (`appPermissions`) holds its jobs, **not retried** (`integration-held`), until `master browser app-permissions` or `master browser installation-accept` fixes it.
 
 ## The reviewer App
 
@@ -36,7 +36,7 @@ The gate requires `GITHUB_CI_APP_IDS` CI checks, current-head approval, trusted 
 
 ## Merge queue
 
-Once gated, a candidate's speculative tip (predicted base merged in), pushed onto the candidate branch and `refs/graphyard/queue/KEY`, binds every check, review and proof. A failed check, requested changes, a revoked proof, a conflict or rework ejects it to the back. One conflicting only with entries ahead re-enters unchanged once one lands or leaves; one leaving validation is skipped until revalidated. The App passes the check for an authorized head and merge group and asks GitHub to merge (queue, auto-merge or [direct](#direct-merges)); protection decides; withdrawal fails and dequeues; `master status` names `merge.enqueue.refused`.
+Once gated, a candidate's speculative tip (predicted base merged in), pushed onto the candidate branch and `refs/graphyard/queue/KEY`, binds every check, review and proof. A failed check, requested changes, a revoked proof, a conflict or rework ejects it to the back. One conflicting only with entries ahead of it re-enters unchanged once one lands or leaves; one leaving validation is skipped until revalidated. The App passes the check for an authorized head and merge group and asks GitHub to merge (queue, auto-merge or [direct](#direct-merges)); protection decides; withdrawal fails and dequeues; `master status` names `merge.enqueue.refused`.
 
 ### Bindings and carry
 
