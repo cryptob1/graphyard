@@ -90,13 +90,9 @@ function tipChecks(work: Work): string[] {
  * The batch a queued entry is validated in (GY-330), as the control plane recorded it on the queue
  * entry under the batch size the master published: its number, and the members ahead of it whose
  * combination its tip already holds. Null outside a batch, and for the first member of a batch,
- * whose tip holds no other member yet. Under a parallel-tip window, the entry's own tip position
- * and the entries ahead that tip holds.
+ * whose tip holds no other member yet.
  */
-export function batchedWith(work: Work): { number: number; ahead: string[]; window?: true } | null {
-  // Under a parallel-tip window (GY-498) each entry has its own tip, numbered by queue position.
-  const own = work.queue?.tips?.find(tip => tip.entries.at(-1) === work.key);
-  if (own) return own.entries.length > 1 ? { number: own.position, ahead: own.entries.slice(0, -1), window: true } : null;
+export function batchedWith(work: Work): { number: number; ahead: string[] } | null {
   const batch = work.queue?.batch, at = batch?.members.indexOf(work.key) ?? -1;
   return batch && at > 0 ? { number: batch.batch, ahead: batch.members.slice(0, at) } : null;
 }
@@ -183,7 +179,7 @@ export function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: n
       if (tipChecks(work).length) {
         const checks = checkStates(work, release.ciAppIds);
         const batch = batchedWith(work);
-        return { detail: `validating the combined tip${batch ? ` ${batch.window ? 'at position' : 'of batch'} ${batch.number} with ${batch.ahead.join(', ')}` : ''} · ${checks.filter(check => check.state === 'passed').length} of ${checks.length} checks done`, who: 'Automated checks' };
+        return { detail: `validating the combined tip${batch ? ` of batch ${batch.number} with ${batch.ahead.join(', ')}` : ''} · ${checks.filter(check => check.state === 'passed').length} of ${checks.length} checks done`, who: 'Automated checks' };
       }
       const queued = reasons.map(reason => reason.match(/^Merge queue position (\d+) of \d+: (\S+) is ahead$/)).find(Boolean);
       if (queued) return { detail: `${ordinal(Number(queued[1]))} in line, after ${queued[2]}`, who: 'Graphyard (automatic)' };

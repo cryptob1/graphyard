@@ -194,9 +194,9 @@ test('unit:parallel-tips-visible — status shows each in-flight tip (position, 
   const fourthView = windowBatchView('GY-4', windowViews.get('GY-4')!, window);
   assert.equal(fourthView.state, 'waiting', 'entry 4 waits: the first failing tip is not its own');
   assert.match(fourthView.summary, /tip 2 \(GY-1, GY-2\) passed; tip 3 \(GY-1, GY-2, GY-3\) failed test/, 'the summary names every in-flight tip with its entries and CI state');
-  const steps = prSteps({ ...third, queue: { ...third.queue!, batch: thirdView, tips: windowViews.get('GY-3')!.tips } } as Work, now);
+  const steps = prSteps({ ...third, queue: { ...third.queue!, batch: thirdView } } as Work, now);
   assert.equal(steps.current, 'merge');
-  assert.match(steps.label, /Merging · validating the combined tip at position 3 with GY-1, GY-2/, 'the dashboard shows the entry\'s own tip position and the entries it holds');
+  assert.match(steps.label, /Merging · validating the combined tip of batch 1 with GY-1, GY-2/, 'the dashboard shows the entries the tip holds');
   // Insights: merges per hour and the median queue wait.
   const mergedSince = (key: string, minutesAgo: number) => entry(0, [pass], { key, id: `id-${key}`, stage: 'done', queue: null,
     observation: { clockOffset: { min: 0, max: 0 }, candidate: { sha: sha40(key), baseSha: B0, pr: 1, branch: 'b', author: 'a' }, baseTip: B0, checks: [pass], reviews: [], protected: true, mergeable: true, merged: true, mergeSha: sha40(`m${key}`), mergedAt: new Date(now - minutesAgo * 60_000).toISOString(), files: [], scopeFiles: [], at: new Date(now - minutesAgo * 60_000).toISOString() } } as unknown as Work);
