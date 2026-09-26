@@ -312,6 +312,18 @@ test('unit:loop-applies-routine-remedies — the loop settles a lapsed containme
   await relaunchUnansweredApprovers(adopted);
   assert.deepEqual(launched, ['d-old'], 'a decision whose approver session is still live is left alone');
 
+  // A decision the loop's approval supervision watches is relaunched there (GY-551), never here too.
+  const watchedCycle = cycle([waiting], {
+    agents: [],
+    effects: {
+      decisions: async () => ({ decisions: [{ id: 'd-watched', action: 'unblock', state: 'requested', input: null, approvedBy: null, requestedAt: asked }] }),
+      approver: async (_target, decision) => { launched.push(decision); return { agentName: 'approver-w', pane: null }; },
+    },
+  });
+  watchedCycle.state.approvals['hand:d-watched'] = { decision: 'd-watched' } as never;
+  await relaunchUnansweredApprovers(watchedCycle);
+  assert.deepEqual(launched, ['d-old'], 'a watched decision is left to its approval supervision');
+
   // A replacement that also leaves without judging is relaunched once the decision has stood
   // another ten minutes, even with no approval watch for it, within the launch bound.
   const state = approverCycle.state;

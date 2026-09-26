@@ -416,18 +416,19 @@ export async function relaunchUnansweredApprovers(cycle: Cycle) {
         const name = approverSessionName(item, decision.id);
         if (agents.some(agent => agent.name === name && !stoppedStates.includes(agent.agent_status ?? ''))) continue;
         if (launcher.busy(`launch:approver:${decision.id}`)) continue;
-        const watch = Object.values(state.approvals).find(entry => entry.decision === decision.id);
-        if (watch && (watch.launches >= maxApproverLaunches || watch.exhaustedAt)) continue;
+        // A decision the loop watches — its own request, or a `master approver` session it adopted —
+        // is relaunched and escalated by its approval supervision (GY-551); a second launcher here
+        // would double its sessions and spend its bound twice. This remedy covers the rest.
+        if (Object.values(state.approvals).some(entry => entry.decision === decision.id)) continue;
         const key = remedyKey('approver', decision.id);
         const previous = state.actions[key];
         // A replacement that also left without judging is relaunched again once the decision has
-        // stood unanswered another ten minutes, within the launch bound every decision carries —
-        // whether or not the loop watches it, so a hand-requested decision is never given up on.
+        // stood unanswered another ten minutes, within the launch bound every decision carries, so a
+        // decision requested with no approver at all is never given up on.
         if (previous && (previous.attempts >= maxApproverLaunches || (previous.state === 'done' ? clock - Date.parse(previous.at) < unansweredDecisionMs : !readyToRetry(previous, state.cycle)))) continue;
         const attempts = (previous?.attempts ?? 0) + 1;
         try {
           const launched = await approver(item, decision.id);
-          if (watch) Object.assign(watch, { launches: watch.launches + 1, agentName: launched.agentName, pane: launched.pane, launchedAt: new Date(clock).toISOString() });
           performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `Relaunched approver ${launched.agentName} for ${item.key}'s unanswered ${decision.action} decision ${decision.id} (requested ${decision.requestedAt}, unanswered past ${unansweredDecisionMs / 60_000} min; launch ${attempts} of ${maxApproverLaunches})`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
         } catch (error) {
           performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'failed', detail: `Could not relaunch the approver for ${item.key}'s unanswered decision ${decision.id}: ${message(error)}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));

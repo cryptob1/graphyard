@@ -47,15 +47,15 @@ Each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `linge
 
 ### The pipeline doctor
 
-Every `run.doctor.intervalMinutes` (10 by default) the loop launches the **doctor**: a headless Pi session (the registry's `doctor` role when it runs Pi, else `run.doctor`'s model, then its stronger fallback) with the master's read access and the operator-agent identity's sanctioned commands only — `master scope`, `requirements`, `unblock`, `decide` + `approver`, `settle-containment`, `close`, `create`, `release`; never merge, dispatch, evidence or leases. Its allowlist also refuses variables, command substitution, redirection, wrappers, node options and paths outside the checkout; a refused command is recorded, not run. Each run posts to `/api/doctor` (retried until accepted): an event per item and a summary in `master status` and the dashboard's Doctor panel. Findings it cannot act on become loop escalations or P0/P1 fault items, deduplicated against open items. Every cycle the loop itself also settles a submitted attempt's lapsed fence once the host probe verifies it, clears a scope-refusal blocker `plannedFiles` already covers (`unblock` as the operator-agent), and relaunches an approver for a decision unanswered 10 minutes, up to the launch bound. Off: `run.doctor.enabled=false`.
+Every `run.doctor.intervalMinutes` (10 by default) the loop launches the **doctor**: a headless Pi session (the registry's `doctor` role if on Pi, else `run.doctor`'s model, then its stronger fallback) with the master's read access and the operator-agent identity's sanctioned commands only — `master scope`, `requirements`, `unblock`, `decide` + `approver`, `settle-containment`, `close`, `create`, `release`; never merge, dispatch, evidence or leases. Its allowlist also refuses variables, command substitution, redirection, wrappers, node options and paths outside the checkout; a refused command is recorded, not run. Each run posts to `/api/doctor` (retried until accepted): an event per item and a summary in `master status` and the dashboard's Doctor panel. Unactionable findings become loop escalations or P0/P1 fault items, deduplicated against open items. Each cycle the loop also settles a submitted attempt's lapsed fence once the host probe verifies it, clears a scope-refusal blocker `plannedFiles` already covers (`unblock` as the operator-agent), and relaunches an approver for an unwatched decision unanswered 10 minutes, up to the launch bound. Off: `run.doctor.enabled=false`.
 
 ## Research before build
 
-With `run.research` set, a feature (or `"research": true`) gets one read-only Pi briefing per revision. Product questions are Needs you; failure never blocks.
+With `run.research` set (`model`, `timeoutMinutes` 15, `tokenBudget`), a feature (or `"research": true`) gets one read-only Pi briefing per revision. Product questions: Needs you; build follows the recommendation, a differing answer reworks, failure never blocks.
 
 ## Machine-filed backlog
 
-One follow-up item per parent; approvals append their findings. With `run.research`, Pi triages machine-filed items (release, close, merge; closure needs approval). Untriaged past 24h raises attention; status counts `machineUntriaged`/`operatorBacklog`.
+One follow-up item per parent; approvals append their findings. With `run.research`, Pi triages machine-filed items (release, close, merge; closure needs approval), `triageConcurrency` (default 2) at once. Untriaged past 24h raises attention; status counts `machineUntriaged`/`operatorBacklog`.
 
 ## Automatic dispatch at submit
 
@@ -67,6 +67,8 @@ A candidate passing the build gate gets, in `autoDispatch`, one producer request
 
 **Every role, approvers too, fails over on spent quota** or waits as one `capacity` line.
 
+**Unjudged approvers relaunch** (hand-launched too): 3 per decision, timeouts uncounted, then escalate (`session N:` ends).
+
 The master never launches reviews or producers by hand, except `master review GY-N [PROFILE]` once the loop stops relaunching.
 
 ### Proofs must exercise their criterion
@@ -77,10 +79,10 @@ A pass is trusted only when that stripped run failed with a case executed; other
 
 ## Guarded merges
 
-`master merge GY-N|--all` asks [GitHub to merge](github.md#merge-queue) only under a current authorization for the exact head, base and policy. Protocol skew refuses (`server runs <sha>, CLI expects <sha>: deploy main first`).
+`master merge GY-N|--all` asks [GitHub to merge](github.md#merge-queue) only under current authorization for the exact head, base and policy. Protocol skew refuses (`server runs <sha>, CLI expects <sha>: deploy main first`).
 
 ### Repair lane
 
-The sole no-admin-bypass exception: a `"repair": "merge-path"` item (`mergePath` files only) stalled 15 minutes with checks passed and an approver agent's `master decide GY-N repair-merge REASON` naming the fault: the App's ruleset bypass merges its head, audited (`repair.merged`), flagged until a normal merge.
+The sole no-admin-bypass exception: a `"repair": "merge-path"` item (`mergePath` files only) stalled 15 minutes, checks passed, given an approver's `master decide GY-N repair-merge REASON` naming the fault, merges through the App's ruleset bypass, audited (`repair.merged`) and flagged until a normal merge.
 
-Unresolved review threads are the reviewer's inputs, not merge blockers (`reviewThreads`); its approval names them (`Resolved threads:` / `Overridden threads:`) ([rules](coordination.md#review-gate-verdicts-not-threads)).
+Unresolved review threads are the reviewer's inputs, not merge blockers (`reviewThreads`); its approval names each on `Resolved threads:`, `Follow-up threads:` or `Overridden threads:` ([rules](coordination.md#review-gate-verdicts-not-threads)).
