@@ -16,8 +16,8 @@ import { type EscalationContext, contextFingerprint, escalationAction, handleEsc
 import { type AgentEnvironment, agentKindSchema, type EnvironmentKind, environmentKinds, type MasterConfig, masterConfigSchema, type WorkerProfile } from './profiles.js';
 import { assertOutsideWorktrees, atomicPrivateText, atomicPrivateWrite, externalCredential, loadMasterConfig, privateFile, readCredentialFile } from './config.js';
 import { type AccountSkip, accountLaunch, agentLaunchPlan, describeObservedExhaustion, type EnvironmentProbe, heldAwareProbe, inspectProfileAccounts, type LaunchRole, NoHealthyAccountError, observedExhaustions, ownLoginHold, type ProfileAccountHealth, recordEnvironmentLog, selectAccount, setupAgentEnvironments } from './environments.js';
-import { type RequestDelivery, startAgentSession } from './launch.js';
-import { createdHerdrTab, type HerdrAgent, herdrJson, stopCreatedHerdrTab } from './herdr.js';
+import { closeFailedLaunch, launchStartMs, type RequestDelivery, startAgentSession, withLaunchClose } from './launch.js';
+import { createdHerdrTab, type HerdrAgent, herdrJson } from './herdr.js';
 import { failureText } from './worktrees.js';
 import { herdrAttach } from './dispatch.js';
 import type { SessionHandleInput } from '../model/sessions.js';
@@ -244,8 +244,13 @@ export async function heldRuntimeLogin(config: MasterConfig, role: LaunchRole, p
  * (`registrySession`), so the caller keeps the only id that can free the role's slot later.
  */
 async function abandonLaunch(error: unknown, pane: string | undefined, tabId: string | undefined, selected: { release: (reason: string) => Promise<boolean>; account: FleetLaunchAccount } | null, reason: string, run?: ChildRun) {
-  if (pane || tabId) try { await stopCreatedHerdrTab(pane, tabId, run); } catch { /* the launch error is the report */ }
-  const failure = error instanceof Error ? error : new Error(failureText(error));
+  // Closed through the loop's own close path before the session is given back, and the failure
+  // records it (GY-413); a close Herdr could not confirm is recorded too.
+  let failure = error instanceof Error ? error : new Error(failureText(error));
+  if (pane || tabId) {
+    try { failure = withLaunchClose(failure, await closeFailedLaunch(pane, tabId, run)); }
+    catch (closeError) { failure = withLaunchClose(failure, `Herdr could not confirm ${pane ? `pane ${pane}` : `tab ${tabId}`} closed: ${failureText(closeError).slice(0, 200)}`); }
+  }
   if (selected && !await selected.release(reason)) Object.assign(failure, { registrySession: selected.account.fleet.session });
   return failure;
 }
@@ -329,7 +334,7 @@ export async function launchApprover(root: string, work: Work, decision: string,
     // observes this approver like every other session and closes it once it is gone.
     ({ delivery } = await registeredLaunch(register, { id: approverSessionId(decision), kind: 'coordination', role: 'approver', principal: config.approver!.id, runtime: kind, host: config.hostId,
       agentName: name, pane: created.pane, attach: herdrAttach(created.pane, config.herdrWorkspace), ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}),
-      subject: `${work.key}: judge decision ${decision}`, state: 'running' }, () => startAgentSession(name, kind, created.pane, launch.args, prompt, run, { directory: root, retry, contract: launch.contract, environment: launch.environment }), () => undefined));
+      subject: `${work.key}: judge decision ${decision}`, state: 'running' }, () => startAgentSession(name, kind, created.pane, launch.args, prompt, run, { directory: root, retry, contract: launch.contract, environment: launch.environment, timeoutMs: launchStartMs(config) }), () => undefined));
   } catch (error) {
     throw await abandonLaunch(error, pane, tabId, selected, `approver launch for ${work.key} failed: ${failureText(error).slice(0, 300)}`, run);
   }
@@ -521,7 +526,7 @@ export async function launchEscalationHandler(root: string, config: MasterConfig
     // Registered first, like every launched session (GY-172 AC-2).
     ({ delivery } = await registeredLaunch(register, { id: `escalation:${context.escalation.trigger}:${context.fingerprint.slice(0, 12)}`, kind: 'coordination', role: 'escalation', principal: config.operatorAgent!.id, runtime, host: config.hostId,
       agentName: name, pane: created.pane, attach: herdrAttach(created.pane, config.herdrWorkspace), ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}),
-      subject: `${context.key}: handle the ${context.escalation.trigger} escalation`, state: 'running' }, () => startAgentSession(name, runtime, created.pane, launch.args, prompt, run, { directory: root, retry: escalationRetry, environment: launch.environment }), () => undefined));
+      subject: `${context.key}: handle the ${context.escalation.trigger} escalation`, state: 'running' }, () => startAgentSession(name, runtime, created.pane, launch.args, prompt, run, { directory: root, retry: escalationRetry, environment: launch.environment, timeoutMs: launchStartMs(config) }), () => undefined));
   } catch (error) {
     const failure = await abandonLaunch(error, pane, tabId, selected, `escalation handler launch for ${context.key} failed: ${failureText(error).slice(0, 300)}`, run);
     // A registry session that could not be ended is kept on a record due now: the loop ends it

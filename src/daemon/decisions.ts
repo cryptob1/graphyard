@@ -4,6 +4,7 @@ import { routableScopeRequest, scopeDecisionBinding, scopeDecisionReason } from 
 import { baseRefreshConflict, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, speculativeConflictReason, type ReviewThread, describeThread } from '../merge-queue.js';
 import { mechanicalFailure, mechanicalVerdicts } from '../model/mechanical-proofs.js';
 import { unexercisedFindings } from '../auto-dispatch.js';
+import { decisionBindingMax } from '../model/approval.js';
 import { guardBroadScope, type MasterConfig, type ContainmentAssessment, containmentPhase, type HerdrAgent } from '../master.js';
 import { researchRework } from '../research.js';
 import { triageClosure } from '../model/machine-backlog.js';
@@ -97,7 +98,7 @@ export function reworkObservationWait(work: Work, now: number, pause: GitHubPaus
 
 export const routineDecisionActions = ['rework', 'recover', 'merge', 'resolve', 'requirements', 'close'] as const;
 export type RoutineDecisionAction = typeof routineDecisionActions[number];
-/** `input` is what the decision names beyond what `decisionInput` derives from the item (a resolve's trigger). */
+/** `input` is what the decision names beyond what `decisionInput` derives from the item: a resolve's trigger, and the grounds binding a situated request judges (GY-407). */
 /** `escalation` is the one standing escalation a resolve settles: a standing request for any other is not this decision. */
 /** `scope` is the worker request a `requirements` decision answers; `input.answers` binds the decision to it. */
 export interface RoutineDecision { action: RoutineDecisionAction; reason: string; binding: string; input?: Record<string, unknown>; escalation?: { trigger: string; at: string }; scope?: NonNullable<ApprovalWatch['scope']> }
@@ -106,6 +107,16 @@ export interface RoutineDecision { action: RoutineDecisionAction; reason: string
  * the input as jsonb, which does not keep key order, so a serialised comparison never matches.
  */
 export const sameAnswers = (a: any, b: any) => !a || !b ? !a && !b : a.epoch === b.epoch && a.at === b.at;
+/**
+ * The input a rework or recover request carries: the routine input plus the grounds binding, so
+ * the server's refusal match sees what the watch key already keys (GY-407). A refusal judged on
+ * one ground — the binding is part of what it judged — never bars the same head's rework on
+ * another, by the server's own match and not only by this loop's keys.
+ */
+export const situatedInput = (decision: Pick<RoutineDecision, 'action' | 'binding' | 'input'>): RoutineDecision['input'] =>
+  decision.action === 'rework' || decision.action === 'recover'
+    ? { ...(decision.input ?? {}), binding: decision.binding.slice(0, decisionBindingMax) }
+    : decision.input;
 /**
  * The scope decision one item needs right now, or null (GY-176). A worker's additive request the
  * implication rule refused and no review finding grounds (`judged`: the loop has read the findings
@@ -142,8 +153,10 @@ export function routineDecision(work: Work, config: Pick<MasterConfig, 'autoMerg
   if (needed.action === 'resolve' && supersededLeaseLoss(work)?.superseded) return needed;
   const stopped = workerStopped(work, now, assessment);
   // The grounds travel with the request: the approver cannot verify this host, so it is told
-  // exactly what the requester verified and judges the attestation on that.
-  return stopped.stopped ? { ...needed, reason: `${needed.reason} The previous worker is stopped: ${stopped.grounds}.` } : null;
+  // exactly what the requester verified and judges the attestation on that. A situated request
+  // also names its binding in the input, so the server's refusal match refuses a repeat only of
+  // the same head, base and grounds (GY-407) — not of every request the item ever carried.
+  return stopped.stopped ? { ...needed, input: situatedInput(needed), reason: `${needed.reason} The previous worker is stopped: ${stopped.grounds}.` } : null;
 }
 /** What the item calls for, before asking whether the loop may attest that its worker is stopped. */
 export function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>): RoutineDecision | null {
@@ -163,7 +176,8 @@ export function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge
   // A rework binding names its grounds as well as the head: a refused request on one ground (the
   // approver judged it premature) must not bar the same head's rework on another. On 2026-09-24
   // GY-163's thread rework was refused before its reviewer had judged the head; the reviewer then
-  // requested changes, and the loop never asked again because both keyed on the head alone.
+  // requested changes, and the loop never asked again because both keyed on the head alone. Since
+  // GY-407 the binding rides the request's input, so the server's refusal match sees it too.
   if (conflict) return { action: 'rework', reason: `${work.key}: ${conflict}. Only a fresh attempt can resolve it, so the candidate returns to a worker.`, binding: `${work.candidate!.sha}:conflict` };
   // A head GitHub reports conflicting with the base, or one the merge queue ejected because its
   // speculative merge conflicts, is not waited on either (GY-191): nothing but a sync can move it,

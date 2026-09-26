@@ -3,7 +3,7 @@
 
 ## Master coordination loop
 
-Restart `graphyard master run` freely: it reconciles and never dispatches twice. `master status` → `daemon` gives health; `journalctl --user -u graphyard-master` the log. `daemon.metrics.timings` and status `timings` time steps and calls over 1s; logs name slowest; status reads a cached intervention report.
+Restart `graphyard master run` freely: it never dispatches twice. `master status` → `daemon` gives health; `journalctl --user -u graphyard-master` the log. `daemon.metrics.timings` and status `timings` time steps and calls over 1s; logs name slowest; status reads a cached intervention report.
 
 ### Perpetual master loop
 
@@ -15,7 +15,7 @@ A lease expires 120 seconds after the last heartbeat; the next claim gets a high
 
 ## Supervisor died leaving a containment quarantine
 
-On the worker's machine, `graphyard master settle-containment GY-N "reason"` verifies no process survives (`containment.held` lists them); only the loop excuses idle pane shells. If refused, confirm the stop, then `graphyard rework GY-N --previous-worker-stopped "reason"`, or `graphyard recover-containment GY-N --previous-worker-stopped "reason"` once delivered.
+On the worker's machine, `graphyard master settle-containment GY-N "reason"` verifies no process survives (`containment.held` lists them); only the loop excuses an idle pane shell (childless, parent `herdr server`), closing its pane. If refused, confirm the stop, then `graphyard rework GY-N --previous-worker-stopped "reason"`, or `graphyard recover-containment GY-N --previous-worker-stopped "reason"` once delivered.
 
 ## Submitted implementation needs rework
 
@@ -27,7 +27,7 @@ Stop the worker, then `graphyard rework GY-N --previous-worker-stopped "reason"`
 
 ## GitHub request budget
 
-Observation spends the App installation's hourly limit, webhook-first.
+Observation spends the App's hourly limit, webhook-first.
 
 ### The live budget
 
@@ -50,7 +50,7 @@ Below **500 requests** by default, `GRAPHYARD_GITHUB_RESERVE` on the deployment,
 
 ### What an observation costs
 
-About ten requests uncached; unchanged ones cost none.
+About ten requests uncached; unchanged, none.
 
 ### What a pause means for gates
 
@@ -78,7 +78,7 @@ The item stays Done, marked **delivered with failure**. Revert through a new ite
 
 ## Merged but not deployed
 
-A merge production never served is a `delivery.deployment-incident` ([observation](deployment.md#production-deployment-observation)). Fix the deployment; the incident recovers when a release serves the merge.
+A merge production never served is a `delivery.deployment-incident` ([observation](deployment.md#production-deployment-observation)). Fix the deployment; it recovers once a release serves the merge.
 
 ## Merge bypass
 
@@ -86,7 +86,7 @@ An ungated merge is a permanent violation: never backfill evidence; repair acces
 
 ## Credentials
 
-Add or rotate principals in `GRAPHYARD_PRINCIPALS` and redeploy. Scoped operator agents hold only listed capabilities: `graphyard operator-agent setup|list|rotate|revoke`.
+Rotate principals in `GRAPHYARD_PRINCIPALS` and redeploy. Operator agents hold only listed capabilities: `graphyard operator-agent setup|list|rotate|revoke`.
 
 ## Proof authority grants
 
@@ -104,7 +104,7 @@ Only an `admin` grants or revokes, only to `producer` principals. A pattern is a
 
 ## Scale limits
 
-Four provider jobs per tick per replica; watch lock wait, job lag and the request budget before scaling.
+Four provider jobs per tick per replica; watch lock wait, job lag and request budget.
 
 ### Concurrent reconciliation
 
