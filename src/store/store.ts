@@ -7,9 +7,9 @@ import { releaseInfo, schemaVersion } from '../release.js';
 import { appendSave, resolvedPayloadSql } from './snapshot-delta.js';
 import { advisoryLocks } from './locks.js';
 import { coordinationDocumentSql, coordinationRelevance, coordinationTail, coordinationTrimSql, detoasted, type CoordinationTrim } from './coordination-sql.js';
+import { namedStatements } from './statements.js';
 
 export * from './snapshot-delta.js';
-export { advisoryLocks } from './locks.js';
 export type { CoordinationTrim } from './coordination-sql.js';
 
 /**
@@ -65,7 +65,7 @@ export class Store {
   leasePool: pg.Pool; readonly background: BackgroundLane;
   constructor(url: string, options: { max?: number } = {}) {
     const max = Math.max(2, Math.floor(options.max ?? 12));
-    this.pool = new pg.Pool({ connectionString: url, max, connectionTimeoutMillis: storeConnectionTimeoutMs, statement_timeout: storeStatementTimeoutMs });
+    this.pool = namedStatements(new pg.Pool({ connectionString: url, max, connectionTimeoutMillis: storeConnectionTimeoutMs, statement_timeout: storeStatementTimeoutMs }));
     this.leasePool = new pg.Pool({ connectionString: url, max: leaseLaneConnections, connectionTimeoutMillis: storeConnectionTimeoutMs, statement_timeout: storeStatementTimeoutMs });
     this.background = new BackgroundLane(Math.max(1, Math.floor(max / 2)));
   }
