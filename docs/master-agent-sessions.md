@@ -11,7 +11,7 @@ Add reviewers with `master reviewer setup` and `master reviewer add FILE` ([Clau
 
 ### Session handles
 
-Each session's handle (runtime, host, pane, transcript, attach command) is under `sessions` in `master status`.
+`master status` `sessions` lists each handle (runtime, host, pane, transcript, attach command).
 
 ### Approval modes
 
@@ -23,7 +23,7 @@ Codex's sandbox gets `.git/worktrees/GY-N-E` and the shared `.git` via `--add-di
 
 ## Accounts and failover
 
-A profile's `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`) in failover order, unless the [agent registry](onboarding.md#configure-the-fleet) defines the role. Each launch takes the first account logged in and under `run.quotaCeilingPercent` (default 95); one failing a check **fails over** to the next (`dispatch.accounts`).
+A profile's `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`) in failover order, unless the [agent registry](onboarding.md#configure-the-fleet) defines the role. A launch takes the first account logged in and under `run.quotaCeilingPercent` (default 95), else **fails over** to the next (`dispatch.accounts`).
 
 On a mid-session limit notice the loop commits a worker's changes as unpushed `WIP:`, records `capacity.exhausted` (not `lease-loss`) and relaunches on the next account; a role with none left pauses until the first reset.
 
@@ -49,7 +49,7 @@ The runtime is **ready** when Herdr reports it working, idle or done with no pro
 
 #### First-run consent prompts
 
-A runtime stopped on a first-run prompt is **`awaiting consent`**. The launcher answers only `hooks-continue-untrusted` (**Continue without trusting**; hooks do not run) and `telemetry-decline`, always with the least-privilege option and never one that grants hook execution or a sandbox escape. Everything else is escalated, above all a **credential** or **payment** prompt. A worker is held in `.graphyard/launch/NAME.consent`, and `master status` names `herdr pane attach P --workspace W`. After **15 minutes** the watch supervisor stops renewing, releases the lease and stops the session, so the item is dispatchable again.
+A runtime stopped on a first-run prompt is **`awaiting consent`**. The launcher answers only `hooks-continue-untrusted` (**Continue without trusting**) and `telemetry-decline`, with the least-privilege option, never one that grants hook execution or a sandbox escape; everything else, above all a **credential** or **payment** prompt, is escalated. A worker is held in `.graphyard/launch/NAME.consent` (`master status` names `herdr pane attach P --workspace W`); after **15 minutes** the supervisor stops renewing, releases the lease and stops the session, so the item is dispatchable again.
 
 ### Acknowledgement, the one re-prompt, and never started
 
