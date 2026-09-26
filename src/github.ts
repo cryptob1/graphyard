@@ -1757,9 +1757,12 @@ export function waitsOnObservation(work: Work, all: Work[], now = new Date()): b
   const kind = nextAction(work, all, now)?.kind;
   return kind === 'request-rework' || kind === 'request-review';
 }
+/** A submitted item the control plane has never read: its first observation is what every later gate waits on. */
+export const firstObservationOwed = (work: Work) => !!work.submission && !work.observation && !work.candidate && work.stage !== 'done';
 /**
  * The order observation jobs are claimed in (GY-492): merge-queue entries within the head band
- * first, in queue position, then items whose next action waits on an observation, then the rest
+ * first, in queue position, then submissions never observed, then items whose next action waits on
+ * an observation, then the rest
  * by available_at — the order `Store.takeJob` falls back to for a job this list does not name.
  * `available_at` still gates every claim: priority reorders due jobs, never makes one due.
  */
@@ -1770,7 +1773,12 @@ export function observationClaimOrder(all: Work[], batchSize: number, now = Date
     if (placement.position < band) ranked.push(placement.id);
   }
   const rankedSet = new Set(ranked);
-  return [...ranked, ...all.filter(work => !rankedSet.has(work.id) && waitsOnObservation(work, all, new Date(now))).map(work => work.id)];
+  // A submission never observed has no candidate, so no gate, review or proof can start until it
+  // is read once. Ranked after the head band: behind the review-waiting items, which come due again
+  // every cycle, one worker never reached it (2026-09-26: eight submitted PRs unread for hours).
+  const firstReads = all.filter(work => !rankedSet.has(work.id) && firstObservationOwed(work)).map(work => work.id);
+  const firstSet = new Set(firstReads);
+  return [...ranked, ...firstReads, ...all.filter(work => !rankedSet.has(work.id) && !firstSet.has(work.id) && waitsOnObservation(work, all, new Date(now))).map(work => work.id)];
 }
 
 /** How long a lag is, in the unit a reader reads: a minute and change, or seconds. */
