@@ -220,7 +220,7 @@ async function resolveInTransaction(services: Services, db: Db, now: Date, work:
   return `Resolved ${decision.input.trigger} on ${work.key}`;
 }
 
-async function applyThroughEngine(services: Services, decision: DecisionRecord, approver: Principal, approvalReason: string) {
+export async function applyThroughEngine(services: Services, decision: DecisionRecord, approver: Principal, approvalReason: string) {
   // The requester acts, with the authority the two-party decision grants for this one input.
   const actor: Principal = { id: decision.requestedBy, role: 'admin', sessionKind: 'ai', displayName: `${decision.requestedBy} (decision ${decision.id} approved by ${approver.id})` };
   const reason = `${decision.reason} [decision ${decision.id}, requested by ${decision.requestedBy}, approved by ${approver.id}: ${approvalReason}]`.slice(0, 2000);
@@ -231,7 +231,7 @@ async function applyThroughEngine(services: Services, decision: DecisionRecord, 
     case 'requirements': { const work = await engine.execute(actor, 'requirements', decision.workId, { ...input, reason }, key); return `Requirements revised to policy revision ${work.policyRevision}`; }
     case 'rework': await engine.execute(actor, 'rework', decision.workId, { reason, previousWorkerStopped: true }, key); return 'Rework authorized';
     case 'recover': await engine.execute(actor, 'recover', decision.workId, { reason, previousWorkerStopped: true }, key); return 'Containment quarantine recovered';
-    case 'attest': await engine.execute(actor, 'evidence', decision.workId, input, key); return `${input.proof} attested ${input.result} for ${input.sha}`;
+    case 'attest': await engine.execute(actor, 'evidence', decision.workId, input, key, { attestation: { decision: decision.id, requestedBy: decision.requestedBy, approvedBy: approver.id } }); return `${input.proof} attested ${input.result} for ${input.sha}`;
     case 'grant': { const grant = await services.proofGrants.grant(actor, input.principal, { patterns: input.patterns, reason, ...(input.expectedRevision === undefined ? {} : { expectedRevision: input.expectedRevision }) }, key); return `Granted ${input.patterns.join(', ')} to ${input.principal} (grant revision ${grant.revision})`; }
     default: throw new Error(`No engine application for ${decision.action}`);
   }
