@@ -3,27 +3,31 @@
 
 ## Master coordination loop
 
-Restart `graphyard master run` freely: it never dispatches twice. `master status` → `daemon` gives health; `journalctl --user -u graphyard-master` the log. `daemon.metrics.timings` and status `timings` time steps and calls over 1s; logs name slowest; status reads a cached intervention report.
+Restart `graphyard master run` freely: it never dispatches twice. `master status` → `daemon` gives health; `journalctl --user -u graphyard-master` the log. `timings` time steps and calls over 1s.
 
 ### Perpetual master loop
 
 `master verify-deployment GY-N` refuses a release that is *unobserved* (set `--deployment-url`), *stale* (rerun), not yet serving the merge (keep cycling), or *already records deployment* (use a follow-up item).
 
+### Self-upgrade to the merged release
+
+Between cycles a verified deployment has the loop fetch and check out the base tip — clean detached checkouts only; anything else raises an `upgrade` attention item untouched. A diff touching `src/`, `scripts/`, `bin/`, `package.json` restarts the executors (`master executors restart`), then the loop through its supervisor; docs-only merges restart nothing. `master status` → `releaseLag` shows loaded releases against the base tip, naming anything >1 delivery behind past 10 minutes.
+
 ## Lost worker before submission
 
-A lease expires 120 seconds after the last heartbeat; the next claim gets a higher epoch, keeping the old worktree. An unexplained lapse raises `lease-loss` ([classification](protocol/leases.md#how-a-lease-ends)), blocking merge until settled ([settling](delegation.md#who-may-settle-what)).
+An unexplained lapse raises `lease-loss` ([classification](protocol/leases.md#how-a-lease-ends)), blocking merge until settled ([settling](delegation.md#who-may-settle-what)); the next claim gets a higher epoch, keeping the old worktree.
 
 ## Supervisor died leaving a containment quarantine
 
-On the worker's machine, `graphyard master settle-containment GY-N "reason"` verifies no process survives (`containment.held` lists them); only the loop excuses an idle pane shell (childless, parent `herdr server`), closing its pane. If refused, confirm the stop, then `graphyard rework GY-N --previous-worker-stopped "reason"`, or `graphyard recover-containment GY-N --previous-worker-stopped "reason"` once delivered.
+On the worker's machine, `graphyard master settle-containment GY-N "reason"` verifies no process survives (`containment.held`); refusal means confirming the stop, then `graphyard rework GY-N --previous-worker-stopped "reason"` (or `recover-containment` once delivered).
 
 ## Submitted implementation needs rework
 
-Stop the worker, then `graphyard rework GY-N --previous-worker-stopped "reason"`; the next worker resubmits the same PR.
+Stop the worker, then `graphyard rework GY-N --previous-worker-stopped "reason"`; the next worker resubmits the PR.
 
 ## Accepted evidence turns out to be wrong
 
-`graphyard revoke GY-N revoke.json` ([body](protocol/evidence.md#revocation)): the gate closes at once and the queue ejects the entry.
+`graphyard revoke GY-N revoke.json`: the gate closes at once; the queue ejects the entry.
 
 ## GitHub request budget
 
@@ -31,18 +35,18 @@ Observation spends the App's hourly limit, webhook-first.
 
 ### The live budget
 
-From the `x-ratelimit-remaining`, `-limit` and `-reset` headers the plane projects when the budget runs out (`projectedExhaustionAt`).
+Budget exhaustion is projected (`projectedExhaustionAt`) from the `x-ratelimit-remaining`, `-limit` and `-reset` headers.
 
 ### Observation cadence by state
 
 | Band | State | Cadence |
 | --- | --- | --- |
-| `merge` | heads the queue or passes every other gate | 20 seconds |
-| `active` | waiting on a check, review, base refresh or rework | 1 minute |
-| `steady` | unchanged since the last observation | 5 minutes, stretched by the fleet bound |
-| `idle` | next action is dispatch or escalation | 5 minutes, stretched when unchanged |
+| `merge` | queue heads or all-gates passing | 20 seconds |
+| `active` | waiting on a check, review, refresh or rework | 1 minute |
+| `steady` | unchanged since last observation | 5 minutes, stretched by the fleet bound |
+| `idle` | next action dispatch or escalation | 5 minutes, stretched when unchanged |
 
-Unchanged non-merge candidates together spend **at most 40%** (`steadyStateShare`) of the hourly limit.
+Unchanged non-merge candidates spend **at most 40%** (`steadyStateShare`) of the hourly limit.
 
 ### The merge-path reserve
 
@@ -50,15 +54,15 @@ Below **500 requests** by default, `GRAPHYARD_GITHUB_RESERVE` on the deployment,
 
 ### What an observation costs
 
-About ten requests uncached; unchanged, none.
+About ten uncached; unchanged, none.
 
 ### What a pause means for gates
 
-A rate-limit `403`/`429` pauses every request until the reset, and gates read stale until it lifts: nothing merges on an observation older than two minutes.
+A rate-limit `403`/`429` pauses every request until the reset; gates read stale until it lifts, nothing merges on an observation older than two minutes.
 
 ### Reading the budget
 
-`graphyard status` (or `GET /api/status`) → `githubBudget`; `master status` attention items with subject `github`.
+`graphyard status` (or `GET /api/status`) → `githubBudget`; `master status` items with subject `github`.
 
 ### Webhook liveness
 
@@ -66,7 +70,7 @@ After an hour without deliveries, `master status` points to `https://github.com/
 
 ## Control-plane resources
 
-Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow the volume and `GRAPHYARD_DATABASE_MAX_BYTES`.
+Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow the volume/`GRAPHYARD_DATABASE_MAX_BYTES`.
 
 ## Bootstrap mode for a self-proving change
 
@@ -78,33 +82,32 @@ The item stays Done, marked **delivered with failure**. Revert through a new ite
 
 ## Merged but not deployed
 
-A merge production never served is a `delivery.deployment-incident` ([observation](deployment.md#production-deployment-observation)). Fix the deployment; it recovers once a release serves the merge.
+A merge production never served is a `delivery.deployment-incident`; fix the deployment, once a release serves the merge.
 
 ## Merge bypass
 
-An ungated merge is a permanent violation: never backfill evidence; repair access and open a follow-up item. An admin opens a deliberate direct-merge window with `graphyard operator direct-merges on --since ISO REASON`.
+An ungated merge is a permanent violation: repair access, open a follow-up item. An admin opens a deliberate direct-merge window with `graphyard operator direct-merges on --since ISO REASON`.
 
 ## Credentials
 
-Rotate principals in `GRAPHYARD_PRINCIPALS` and redeploy. Operator agents hold only listed capabilities: `graphyard operator-agent setup|list|rotate|revoke`.
+Rotate principals in `GRAPHYARD_PRINCIPALS`; redeploy; operator agents hold only listed capabilities: `graphyard operator-agent setup|list|rotate|revoke`.
 
 ## Proof authority grants
 
 ```sh
-graphyard grants                                   # live authority
-graphyard grants grant ci "integration:*,unit:*" "CI proves integration and unit"
+graphyard grants grant ci "integration:*" "CI proves integration"
 graphyard grants revoke ci "integration:claim-safety" "Runner decommissioned"
 ```
 
-Only an `admin` grants or revokes, only to `producer` principals. A pattern is an exact name, `kind:*`, or a prefix such as `manual:gy-43/*`.
+Only an `admin` grants or revokes, only to `producer` principals. A pattern is an exact name, `kind:*`, or a prefix like `manual:gy-43/*`.
 
 ## Setup proposals and drift
 
-`graphyard init --scan` writes `.graphyard/setup-proposal.json`; `--apply` applies exactly that proposal. Later scans and `doctor --profile through-merge|preview-validation|production-verification` report drift without repairing it.
+`graphyard init --scan` writes `.graphyard/setup-proposal.json`; `--apply` applies exactly that. Later scans and `doctor --profile through-merge|preview-validation|production-verification` report drift without repairing it.
 
 ## Scale limits
 
-Four provider jobs per tick per replica; watch lock wait, job lag and request budget.
+Four provider jobs per tick per replica; watch lock wait, job lag, request budget.
 
 ### Concurrent reconciliation
 

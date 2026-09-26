@@ -33,6 +33,8 @@ import { readCredentialFile } from '../master.js';
 import { onceAnnotations, timingFaultAttention, type ReportedAttention } from './faults.js';
 import type { daemonSummary } from './run.js';
 import { observeDeployment } from './deployment.js';
+import { detectLoopSupervisorUnit, performSelfUpgrade, type SelfUpgradeOutcome } from './upgrade.js';
+import { restartExecutors } from '../executor-fleet.js';
 import { serverCallName, timedCall, timedFetch, timedRun } from '../master/timings.js';
 import type { RunRecord, Runner } from '../runner/types.js';
 import type { ResearchEvent } from '../research.js';
@@ -104,6 +106,14 @@ export interface DaemonEffects {
   publishMergeBatchSize?: () => Promise<unknown>;
   /** Asks the provider to run the trusted smoke workflow against the observed deployment. */
   requestSmoke: (work: Work) => void | Promise<void>;
+  /**
+   * GY-437: between cycles, aligns this checkout with the verified deployed release — fetches the
+   * base branch, checks out its tip when the checkout is a clean detached checkout, and, when the
+   * diff touches code the loop or the executors load, restarts the fleet and then re-executes the
+   * loop through its own supervisor. A loop wired without it keeps cycling exactly as before, on
+   * the release it loaded.
+   */
+  selfUpgrade?: (state: DaemonState) => Promise<SelfUpgradeOutcome>;
   /**
    * Removes the dependency directories of finished assignment worktrees. A loop configured
    * without it keeps cycling; it simply never reclaims. It touches no checkout, no branch, and
@@ -470,6 +480,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   const withdraw: DaemonEffects['withdraw'] = (work, decision, reason) => asOperatorAgent('POST', `work/${work.id}/decide`, { action: 'withdraw', decision, reason });
   const decisions: DaemonEffects['decisions'] = work => asOperatorAgent('GET', `work/${encodeURIComponent(work.id)}/decisions`);
   let publishedEnvironment: string | null = null, publishedBatchSize: number | null = null;
+  const persistLoop = (state: DaemonState) => writeDaemonState(current(), state);
   return {
     agents: () => listHerdrAgents(run).catch(() => []),
     reconcileSessions: (runtime, finished) => reconcileFleetSessions(current(), runtime, finished),
@@ -651,7 +662,22 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // 180s against a cycle of at most 30s: a healthy loop would have to lose six in a row.
     // The keep-alive is a child too: it runs through the same runner, awaited on the event loop
     // and bounded like every other child, and a keep-alive that fails is logged by the loop.
+    // GY-437: the loop upgrades its own checkout between cycles. The executors come first,
+    // through the shipped restart command — a refusal (a claim in flight, another restart's
+    // fence) leaves the owed restarts on the cursor for the next cycle — and the loop
+    // re-executes itself only through the supervisor unit it actually runs under, detected from
+    // its own cgroup like an executor's.
+    selfUpgrade: state => performSelfUpgrade(current(), state, {
+      root, run,
+      restartExecutors: to => restartExecutors(current(), { actions: () => asCoordinator('actions'), coordinatorCommit: to }),
+      restartSelf: async () => {
+        const unit = detectLoopSupervisorUnit();
+        if (!unit) throw new Error('this loop runs under no graphyard-master supervisor unit, so it cannot re-execute itself; run it under the packaged unit (examples/master/graphyard-master.service), or restart it by hand with systemctl --user restart graphyard-master');
+        await run('systemctl', ['--user', 'restart', unit]);
+      },
+      persist: persistLoop,
+    }),
     notify: async state => { await run('systemd-notify', state === 'ready' ? ['--ready'] : ['WATCHDOG=1']); },
-    persist: state => writeDaemonState(current(), state),
+    persist: persistLoop,
   };
 }

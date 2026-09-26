@@ -9,7 +9,7 @@ import { boundDetail } from './decisions.js';
 import { classified, faultClasses, faultInstanceSchema, noteActionOutcome, type FaultKind } from '../model/fault-classes.js';
 import { timingsSchema } from '../master/timings.js';
 
-export const daemonActionKinds = ['close', 'dispatch', 'review', 'refresh', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session', 'reclaim', 'decision', 'scope', 'settle', 'failover', 'capacity', 'human', 'preserve', 'fault'] as const;
+export const daemonActionKinds = ['close', 'dispatch', 'review', 'refresh', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session', 'reclaim', 'decision', 'scope', 'settle', 'failover', 'capacity', 'human', 'preserve', 'fault', 'upgrade'] as const;
 export type DaemonActionKind = typeof daemonActionKinds[number];
 /** A failed action is a pipeline fault; its kind in the fault catalogue (GY-173) follows the action's kind. */
 export const daemonActionFaultKind = (kind: DaemonActionKind) => `action:${kind}` as FaultKind;
@@ -281,6 +281,30 @@ export const cycleFailureSchema = z.object({
 }).strict();
 export type CycleFailures = z.infer<typeof cycleFailureSchema>;
 
+/**
+ * The release this loop's own process loaded, read once at startup exactly as an executor reads
+ * its (GY-437): what every action this process takes runs, until its supervisor replaces it.
+ */
+export const loopReleaseSchema = z.object({ commit: z.string().regex(/^[0-9a-f]{40}$/).nullable(), dirty: z.boolean().nullable() }).strict();
+export type LoopRelease = z.infer<typeof loopReleaseSchema>;
+
+/**
+ * The between-cycles self-upgrade (GY-437), on the cursor so a restarted loop resumes it instead
+ * of repeating it: which verified release the checkout was aligned with, what restarts a previous
+ * alignment still owes, what the last one did, and why a checkout was left untouched.
+ */
+export const upgradeStateSchema = z.object({
+  /** The verified deployed release the checkout was last aligned with: a new sha is a new trigger. */
+  alignedRelease: z.string().regex(/^[0-9a-f]{7,40}$/).nullable().default(null),
+  /** The checkout moved to `to` and the restarts it owes are not done yet: the fleet, then the loop itself. */
+  pending: z.object({ from: z.string().nullable(), to: z.string(), code: z.boolean() }).strict().nullable().default(null),
+  /** The last alignment that completed: what was checked out, whether loaded code moved, and what was restarted. */
+  last: z.object({ at: z.string(), from: z.string().nullable(), to: z.string(), code: z.boolean(), executors: z.string().max(300).nullable(), self: z.boolean() }).strict().nullable().default(null),
+  /** Why the checkout was left untouched (dirty, not detached): master status names it until it clears. */
+  refused: z.object({ at: z.string(), reason: z.string().max(500), commit: z.string().nullable() }).strict().nullable().default(null),
+}).strict().default(() => ({ alignedRelease: null, pending: null, last: null, refused: null }));
+export type UpgradeState = z.infer<typeof upgradeStateSchema>;
+
 export const daemonStateSchema = z.object({
   version: z.literal(1), url: z.string(), repository: z.string(),
   lock: z.object({ id: z.string(), pid: z.number().int().positive(), host: z.string(), startedAt: z.string(), heartbeatAt: z.string() }).strict().nullable().default(null),
@@ -290,6 +314,10 @@ export const daemonStateSchema = z.object({
   profiles: z.record(z.string(), z.object({ failures: z.number().int().min(0), reason: z.string().max(500).nullable(), cooldownUntil: z.string().nullable() }).strict()).default({}),
   metrics: z.array(cycleMetricsSchema).default([]),
   deployment: deploymentObservationSchema.nullable().default(null),
+  /** The release this loop's process loaded, recorded once at startup (GY-437). */
+  release: loopReleaseSchema.nullable().default(null),
+  /** The between-cycles self-upgrade's progress (GY-437). */
+  upgrade: upgradeStateSchema,
   /** The last reload of .graphyard/master.json: what the running loop adopted, or why it refused. */
   config: z.object({ at: z.string(), changed: z.array(z.string().max(100)).max(100), refused: z.string().max(1000).nullable() }).strict().nullable().default(null),
   /** The last worktree reclamation: what it removed and how much room the host has. */
@@ -418,6 +446,11 @@ export function boundDaemonState(state: DaemonState): DaemonState {
   }
   for (const profile of Object.values(state.profiles)) profile.reason = cut(profile.reason, 500);
   if (state.deployment) state.deployment = boundDeployment(state.deployment);
+  if (state.upgrade) {
+    state.upgrade.refused = state.upgrade.refused ? { ...state.upgrade.refused, reason: cut(state.upgrade.refused.reason, 500) } : null;
+    if (state.upgrade.pending) state.upgrade.pending = { ...state.upgrade.pending, from: cut(state.upgrade.pending.from, 40), to: cut(state.upgrade.pending.to, 40) };
+    if (state.upgrade.last) state.upgrade.last = { ...state.upgrade.last, from: cut(state.upgrade.last.from, 40), to: cut(state.upgrade.last.to, 40), executors: cut(state.upgrade.last.executors, 300) };
+  }
   if (state.config) state.config = { ...state.config, changed: state.config.changed.slice(0, 100).map(entry => cut(entry, 100)), refused: cut(state.config.refused, 1000) };
   if (state.reclaim) state.reclaim.errors = state.reclaim.errors.slice(0, 20).map(entry => cut(entry, 500));
   for (const clock of Object.values(state.clocks)) clock.key = cut(clock.key, 40);

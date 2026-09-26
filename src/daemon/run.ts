@@ -1,6 +1,7 @@
 // Concern: the long-running loop — cycle scheduling, config reload, the watchdog and its summary.
 import { setTimeout as delay } from 'node:timers/promises';
 import type { ConfigReload, MasterConfig } from '../master.js';
+import { readRelease } from '../executor-fleet.js';
 import { acquireDaemonLock, type DaemonAction, type DaemonState, message, storeAction } from './state.js';
 import { faultClassPolicyFromEnv } from '../model/fault-classes.js';
 import { faultRecurrenceReport } from './faults.js';
@@ -8,6 +9,7 @@ import { latencyBudget, silenceReport } from './metrics.js';
 import { boundedPersist, cycleCost, cycleDelay, cycleFailureCeiling, describeFailingCall, loopLiveness, namedEffects, noteCycleFailure, noteCycleSuccess, noteUnhandled, watchdogPlan } from './liveness.js';
 import type { DaemonEffects } from './effects.js';
 import { runCycle } from './cycle.js';
+import { describeSelfUpgrade } from './upgrade.js';
 import { describeTimings } from '../master/timings.js';
 
 /** The compact daemon view `master status` joins onto Graphyard truth. */
@@ -36,6 +38,9 @@ export function daemonSummary(state: DaemonState, now: number, intervalMs: numbe
     // shorten or a provider to look at, never a loop to restart.
     cost: cycleCost(state.metrics.at(-1) ?? null, intervalMs),
     deployment: state.deployment,
+    // The release this process loaded, and what the between-cycles self-upgrade has done (GY-437).
+    release: state.release,
+    upgrade: state.upgrade,
     profiles: state.profiles,
     config: state.config,
     reclaim: state.reclaim,
@@ -93,6 +98,8 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
   environment?: Record<string, string | undefined>;
   /** Re-reads .graphyard/master.json before each cycle, so profiles, workspace, run settings and autoMerge apply without a restart. */
   reload?: () => Promise<ConfigReload>;
+  /** The coordinator checkout, whose base tip the loop aligns itself with between cycles (GY-437); also where its own loaded release is read. */
+  root?: string;
   /** The process whose unhandled rejections and uncaught exceptions the loop catches; defaults to this one. */
   process?: Pick<NodeJS.Process, 'on' | 'off'> } ) {
   // Progress goes to stderr so stdout stays the machine-readable result the CLI prints.
@@ -100,6 +107,9 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
   const interval = () => typeof options.intervalMs === 'function' ? options.intervalMs() : options.intervalMs;
   const effects = boundedPersist(namedEffects(raw)), host = options.process ?? process;
   acquireDaemonLock(state, options.identity, now(), interval());
+  // The release this process loaded, recorded like an executor's: what its actions run until the
+  // supervisor replaces it (GY-437).
+  if (options.root) state.release = readRelease(options.root);
   await effects.persist(state);
   // Under a supervisor that watches for keep-alives, a hung cycle is a restart rather than a
   // silent pipeline; a window that would restart a healthy loop is recorded and left to the
@@ -151,6 +161,15 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
         failed.push({ cycle: failure.cycle, call: failure.call, reason: failure.reason, delayMs: failure.delayMs });
         log(`[graphyard-master] cycle ${failure.cycle} failed in ${describeFailingCall(failure)}: ${failure.reason}; ${state.failures.consecutive} consecutive failure(s), the next cycle runs in ${Math.round(failure.delayMs / 1000)}s at ${failure.nextAt}`);
         wait = failure.delayMs;
+      }
+      // GY-437: between cycles — never mid-cycle — align this checkout with the verified deployed
+      // release. An alignment that re-executes the loop through its supervisor ends this process
+      // here: the supervisor starts the next one on the code the checkout now holds.
+      if (effects.selfUpgrade && !stopping) {
+        try {
+          const upgraded = await effects.selfUpgrade(state);
+          if (upgraded.outcome !== 'skipped') log(`[graphyard-master] upgrade ${describeSelfUpgrade(upgraded)}`);
+        } catch (error) { log(`[graphyard-master] upgrade failed: ${message(error)}`); }
       }
       // The keep-alive says the process is alive, which a failed cycle leaves true: the watchdog
       // is for a cycle that hangs, and a thrown one has just proved it did not.
