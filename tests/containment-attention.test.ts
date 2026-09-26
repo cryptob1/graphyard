@@ -308,3 +308,15 @@ test('unit:ended-worker-pane-closed settlement after a close comes only from a p
   assert.deepEqual(next.settled, []);
   assert.match(next.state.actions[`escalation:containment:${work.id}:1`]?.detail ?? '', still, 'the survivor is escalated on the next cycle, not settled');
 });
+
+test('unit:containment-settle-probe-time a probe run late in a long cycle is judged at the control-plane time it ran at, so a lapsed quarantine settles; a skewed host clock is still refused', async () => {
+  // The lease lapsed long past the grace window; the cycle read its snapshot at observedAt and probed 40 s later.
+  const lapsed = launched(at(-600_000), at(-3_600_000));
+  const assess = (clockOffset: { min: number; max: number }) => assessContainment([lapsed], { hostId: 'coordinator-host', observedAt, clockOffset, localNow: new Date(Date.parse(observedAt) + 40_000), probe: () => clean } as any);
+  const settled = (await assess({ min: -300, max: 500 }))[lapsed.id];
+  assert.deepEqual(settled.refusals, [], 'a probe 40 s into the cycle is not dated after the control-plane clock');
+  assert.equal(settled.settleable, true);
+  const skewed = (await assess({ min: 9_000, max: 9_400 }))[lapsed.id];
+  assert.equal(skewed.settleable, false, 'a host clock 9 s ahead of the control plane still disagrees');
+  assert.ok(skewed.refusals.some(reason => /clocks disagree/.test(reason)));
+});

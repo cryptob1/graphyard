@@ -6,7 +6,9 @@ import { homedir } from 'node:os';
 import { NoHealthyAccountError, agentEnvironmentRoot, atomicPrivateWrite, checkAgentEnvironment, discoverAgentEnvironments, environmentKinds, readCredentialFile,
   type AccountSkip, type AccountSkipCause, type AgentEnvironment, type EnvironmentHealth, type EnvironmentKind, type EnvironmentProbe, type MasterConfig } from './master.js';
 import { sessionName } from './session-name.js';
-import { accountIneligibility, fleetRoles, liveSessions, proposedConcurrency, proposedRuntimeRoles, proposedRuntimes, rolePolicy, type AgentRegistry, type RolePolicy, type FleetAccount, type FleetAccountInput, type FleetModel, type FleetRole, type FleetRoleName, type FleetRuntime, type FleetSession, type LaunchContract, type QuotaObservation, type SessionSkip } from './model/registry.js';
+import { smokeRegistryAccount } from './runner/roles.js';
+import type { SmokeResult } from './runner/pi.js';
+import { accountIneligibility, fleetRoles, liveSessions, proposedConcurrency, proposedRuntimeRoles, proposedRuntimes, rolePolicy, type AccountKey, type AgentRegistry, type RolePolicy, type FleetAccount, type FleetAccountInput, type FleetModel, type FleetRole, type FleetRoleName, type FleetRuntime, type FleetSession, type LaunchContract, type QuotaObservation, type RunOutcome, type SessionSkip, type SmokeObservation } from './model/registry.js';
 
 /**
  * The executor's side of the agent registry (GY-91).
@@ -22,14 +24,18 @@ import { accountIneligibility, fleetRoles, liveSessions, proposedConcurrency, pr
 export type FleetConfig = Pick<MasterConfig, 'credentialFile'> & Partial<Pick<MasterConfig, 'url' | 'hostId' | 'run'>>;
 export interface FleetProbe extends EnvironmentProbe { work?: string; principal?: string; /** The proof group a producer launch answers; one live session per group, not per item. */ group?: string; /** Replaces the HTTP client, for executors embedded beside the control plane and for tests. */ registry?: FleetClient;
   /** The runtime sessions Herdr lists on this host right now: a registry session whose runtime session is gone does not count toward its role (GY-190). */
-  runtime?: RuntimeInventory }
+  runtime?: RuntimeInventory;
+  /** Runs the one-prompt smoke test of an account (GY-446); replaced by tests. */
+  smoke?: (account: FleetLaunchAccount) => Promise<SmokeResult>;
+  smokeTimeoutMs?: number }
 /** What Herdr listed on the executor's own host, and whether it could be read at all. */
 export interface RuntimeInventory { agents: { name?: string | null }[]; available: boolean }
 /** The three calls an executor makes. */
 export interface FleetClient {
   document(): Promise<AgentRegistry>;
-  select(request: { role: FleetRoleName; host: string; work: string | null; group: string | null; principal: string | null; observations: { account: string; quota: QuotaObservation }[] }): Promise<FleetSelection>;
-  end(session: string, reason: string): Promise<void>;
+  select(request: { role: FleetRoleName; host: string; work: string | null; group: string | null; principal: string | null; observations: { account: string; quota: QuotaObservation; smoke?: SmokeObservation }[] }): Promise<FleetSelection>;
+  /** `outcome` is how a headless run on the session ended: with a result or without one (GY-446). */
+  end(session: string, reason: string, outcome?: RunOutcome): Promise<void>;
 }
 export interface FleetSelection { selected: boolean; reason: string; skipped: SessionSkip[]; session: FleetSession | null; account: FleetAccount | null; runtime: FleetRuntime | null; model: FleetModel | null;
   /** The role's launch policy the choice was made under (GY-170); a server that predates it sends none, and the document's is used. */
@@ -38,7 +44,9 @@ export interface FleetSelection { selected: boolean; reason: string; skipped: Se
  * The account a launch runs on, as `accountLaunch` reads it: the login home, the registry's launch
  * contract, the model, and the role's launch policy, all from the registry revision it was chosen in.
  */
-export interface FleetLaunchAccount { name: string; kind: string; home: string | null; fleet: { runtime: string; contract: LaunchContract; model: string; modelId: string | null; session: string; reason: string;
+export interface FleetLaunchAccount { name: string; kind: string; home: string | null;
+  /** Where the account's provider key is read from at launch, by reference (GY-446). */
+  key?: AccountKey | null; fleet: { runtime: string; contract: LaunchContract; model: string; modelId: string | null; session: string; reason: string;
   role?: FleetRoleName; policy?: RolePolicy; revision?: number } }
 
 export class FleetUnreachableError extends Error {}
@@ -107,7 +115,7 @@ export function httpFleetClient(config: Required<Pick<FleetConfig, 'url'>> & Pic
     if (!response.ok || parsed === null) throw new FleetUnreachableError(`The agent registry at ${config.url} answered ${response.status}${parsed?.error ? `: ${parsed.error}` : ''}`);
     return parsed;
   };
-  return { document: () => call('agent-registry/document'), select: request => call('agent-registry/select', request), end: async (session, reason) => { await call(`agent-registry/sessions/${session}/end`, { reason }); } };
+  return { document: () => call('agent-registry/document'), select: request => call('agent-registry/select', request), end: async (session, reason, outcome) => { await call(`agent-registry/sessions/${session}/end`, { reason, ...(outcome ? { outcome } : {}) }); } };
 }
 
 // The registry as this executor last read it, kept beside the coordinator's other private state.
@@ -168,6 +176,13 @@ export async function observeAccount(account: FleetAccount, runtime: FleetRuntim
 }
 
 /**
+ * Whether an account is smoke-tested before a session is chosen on it: an account of a headless
+ * runtime (Pi, the narrow roles' runner) with no result since it last changed. An interactive
+ * runtime's session is its own check — a session that cannot start fails its launch.
+ */
+export const needsSmoke = (account: FleetAccount, runtime: FleetRuntime) => runtime.launch.kind === 'pi' && account.enabled && !account.smoke;
+
+/**
  * The session a launch runs on, chosen by the control plane — or null when the registry does not
  * decide this role, and the caller launches from its local profile. A refusal is the same error a
  * profile without a healthy account raises, so callers that fail over between profiles still do.
@@ -183,7 +198,23 @@ export async function selectFleetSession(config: FleetConfig, role: FleetRoleNam
     const runtime = registry.runtimes.find(entry => entry.name === account.runtime);
     return runtime ? { account: account.name, ...await observeAccount(account, runtime, { ...probe, ceilingPercent: ceiling }) } : null;
   }));
-  const observations = observed.filter((entry): entry is NonNullable<typeof entry> => !!entry);
+  const observations: { account: string; quota: QuotaObservation; health: EnvironmentHealth | null; smoke?: SmokeObservation }[] = observed.filter((entry): entry is NonNullable<typeof entry> => !!entry);
+  // An account is smoke-tested before it is first chosen and again after any registry change to it
+  // (the change clears its result), so a login that cannot answer is ineligible with the runtime's
+  // own error before any session launches on it (GY-446).
+  await Promise.all(local.map(async account => {
+    const runtime = registry.runtimes.find(entry => entry.name === account.runtime), model = registry.models.find(entry => entry.name === account.model);
+    const observation = observations.find(entry => entry.account === account.name);
+    if (!runtime || !model || !needsSmoke(account, runtime) || observation?.quota.loggedIn === false) return;
+    const target: FleetLaunchAccount = { name: account.name, kind: runtime.launch.kind, home: account.credential.home, key: account.credential.key ?? null,
+      fleet: { runtime: runtime.name, contract: runtime.launch, model: model.name, modelId: model.id, session: 'smoke', reason: 'smoke test', role, revision: registry.revision } };
+    let result: SmokeResult;
+    try { result = await (probe.smoke ?? (target => smokeRegistryAccount(target, { timeoutMs: probe.smokeTimeoutMs })))(target); }
+    catch (error) { result = { ok: false, error: error instanceof Error ? error.message : String(error) }; }
+    const smoke: SmokeObservation = { result: result.ok ? 'pass' : 'fail', reason: result.ok ? null : (result.error?.replace(/[\u0000-\u001f\u007f\s]+/g, ' ').trim() || 'the smoke test failed without an error').slice(0, 500) };
+    if (observation) observation.smoke = smoke;
+    else observations.push({ account: account.name, quota: { loggedIn: null, state: 'unknown', usage: [], resetsAt: null, reason: null }, health: null, smoke });
+  }));
   // A session of this role whose runtime session is gone is ended before the choice, so the role's
   // count is of sessions that actually run and a finished approver never refuses the next one.
   const now = probe.now?.() ?? Date.now();
@@ -191,7 +222,7 @@ export async function selectFleetSession(config: FleetConfig, role: FleetRoleNam
     const gone = runtimeSessionGone(session, probe.runtime, host, now);
     if (gone) await client.end(session.id, gone).catch(() => {});
   }
-  const chosen = await client.select({ role, host, work: probe.work ?? null, group: probe.group ?? null, principal: probe.principal ?? profile.principal ?? null, observations: observations.map(({ account, quota }) => ({ account, quota })) });
+  const chosen = await client.select({ role, host, work: probe.work ?? null, group: probe.group ?? null, principal: probe.principal ?? profile.principal ?? null, observations: observations.map(({ account, quota, smoke }) => ({ account, quota, ...(smoke ? { smoke } : {}) })) });
   const at = new Date(now).toISOString();
   const skipped: AccountSkip[] = chosen.skipped.map(entry => ({ at, role: role as AccountSkip['role'], profile: profile.name, environment: entry.account, reason: entry.reason, work: probe.work ?? null, cause: skipCause(entry.reason) }));
   if (!chosen.selected || !chosen.account || !chosen.runtime || !chosen.model || !chosen.session)
@@ -199,9 +230,9 @@ export async function selectFleetSession(config: FleetConfig, role: FleetRoleNam
   // `release` ends the selected session and says whether the registry was told: a caller that
   // cannot end it keeps its id, the only way to free the role's slot later.
   const policy = chosen.policy ?? rolePolicy(registry.roles.find(entry => entry.name === role));
-  const account: FleetLaunchAccount = { name: chosen.account.name, kind: chosen.runtime.launch.kind, home: chosen.account.credential.home,
+  const account: FleetLaunchAccount = { name: chosen.account.name, kind: chosen.runtime.launch.kind, home: chosen.account.credential.home, key: chosen.account.credential.key ?? null,
     fleet: { runtime: chosen.runtime.name, contract: chosen.runtime.launch, model: chosen.model.name, modelId: chosen.model.id, session: chosen.session.id, reason: chosen.reason, role, policy, revision: chosen.revision } };
-  return { account, health: observations.find(entry => entry.account === chosen.account!.name)?.health ?? null, skipped, selection: chosen, release: (reason: string) => client.end(chosen.session!.id, reason).then(() => true, () => false) };
+  return { account, health: observations.find(entry => entry.account === chosen.account!.name)?.health ?? null, skipped, selection: chosen, release: (reason: string, outcome?: RunOutcome) => client.end(chosen.session!.id, reason, outcome).then(() => true, () => false) };
 }
 
 /**
