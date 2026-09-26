@@ -121,7 +121,10 @@ export function recordRunOutcome(registry: AgentRegistry, session: Pick<FleetSes
     if (!held) return false;
     delete account.unjudged![session.role]; return true;
   }
-  const runs = (held?.until && Date.parse(held.until) > Date.parse(at) ? 0 : held?.runs ?? 0) + 1;
+  // A run that started before the hold and ends unjudged during it leaves the hold as it is: the
+  // account stays barred from the role for the whole hour, however many overlapping runs end.
+  if (held?.until && Date.parse(held.until) > Date.parse(at)) return false;
+  const runs = (held?.until ? 0 : held?.runs ?? 0) + 1;
   (account.unjudged ??= {})[session.role] = runs >= unjudgedRunLimit
     ? { runs: 0, until: new Date(Date.parse(at) + unjudgedHoldMs).toISOString(), reason: reason.slice(0, 300) }
     : { runs, until: null, reason: reason.slice(0, 300) };

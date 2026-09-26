@@ -279,6 +279,13 @@ test('unit:account-smoke-gate — two consecutive approver runs on one account t
   model.accounts.find(entry => entry.name === 'pi-a')!.enabled = false;
   assert.match((chooseSession(model, { role: 'approver', host: config.hostId }, at + 4) as { reason: string }).reason, /pi-b is held from approver/);
   assert.equal(chooseSession(model, { role: 'approver', host: config.hostId }, at + unjudgedHoldMs + 4).account?.name, 'pi-b', 'the hold lapses after its hour');
+  // Runs overlap when a role's concurrency is above one: runs started before the hold that end
+  // unjudged during it leave the hold standing for its whole hour instead of resetting the count.
+  const hold = structuredClone(model.accounts.find(entry => entry.name === 'pi-b')!.unjudged!.approver);
+  assert.equal(recordRunOutcome(model, session, 'no-result', 'the run ended without a graphyard_decide call', iso(10)), false, 'a run ending during the hold changes nothing');
+  recordRunOutcome(model, session, 'no-result', 'the run ended without a graphyard_decide call', iso(11));
+  assert.deepEqual(model.accounts.find(entry => entry.name === 'pi-b')!.unjudged!.approver, hold, 'the hold stands after overlapping runs end');
+  assert.match((chooseSession(model, { role: 'approver', host: config.hostId }, at + 12) as { reason: string }).reason, /pi-b is held from approver/, 'the loop does not relaunch on the held account');
   model.roles.push({ name: 'producer', accounts: ['pi-b'], concurrency: 1 });
   assert.equal(chooseSession(model, { role: 'producer', host: config.hostId }, at + 4).account?.name, 'pi-b', 'a hold from the approver role does not keep the account from producing');
   // A run the loop cancelled is not the account's failure, and a session ended first still takes its outcome once.
