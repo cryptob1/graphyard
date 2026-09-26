@@ -1,4 +1,4 @@
-import { baseRefreshConflict, ciPendingReason, conversationProtectionRefusal, latestCheck, tipValidation } from '../merge-queue.js';
+import { baseRefreshConflict, ciPendingReason, conversationProtectionRefusal, latestCheck, restoringAfterEjection, tipValidation } from '../merge-queue.js';
 import type { QueueEjection, QueueEntry, QueueHistoryEntry } from '../merge-queue.js';
 import type { Gate, Stage, Work } from './work.js';
 import { escalationRefusals } from './escalation.js';
@@ -37,14 +37,18 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[],
   // reaches review: the refusal names every file and is re-derived from each new observation.
   // A base the control plane cannot merge in cleanly is the other thing only the worker can fix:
   // the conflict is named here, the attempt returns to build, and nothing carries across it.
-  const conflict = baseRefreshConflict(work);
+  // A speculative tip built behind an entry that left the queue unlanded holds that entry's work
+  // (GY-568): nothing its tree shows is this item's, so no tree-dependent refusal is read from it —
+  // it waits for the control plane's restore and an observation of the restored head instead.
+  const restoring = restoringAfterEjection(work, all);
+  const conflict = restoring ? null : baseRefreshConflict(work);
   // Mechanical verification precedes review (GY-115): a unit or integration proof that failed on
   // this head returns it to its worker here, naming the criterion, so no review request stands for
   // it and no reviewer session is spent on what a test already answered.
-  const mechanical = current && work.submission && !work.reworkRequested
+  const mechanical = current && work.submission && !work.reworkRequested && !restoring
     ? mechanicalVerdicts(work, all, now).filter(verdict => verdict.outcome === 'failed').map(verdict => mechanicalFailure(verdict, candidate!.sha)) : [];
   add('build', [...(!work.submission || work.reworkRequested ? ['Worker has not submitted implementation for this attempt'] : []), ...(!candidate ? ['Pull request has not been independently observed'] : []), ...(!work.workspaces.length ? ['No workspace registered'] : []),
-    ...(conflict ? [conflict] : []), ...(current ? regressionRefusals(work, obs!, all) : []), ...mechanical]);
+    ...(restoring ? [restoring] : []), ...(conflict ? [conflict] : []), ...(current && !restoring ? regressionRefusals(work, obs!, all) : []), ...mechanical]);
   const reviews = current ? obs!.reviews : [];
   const changesRequested = reviews.some(r => r.state === 'CHANGES_REQUESTED');
   const agentReview = current ? obs!.agentReview : undefined;
