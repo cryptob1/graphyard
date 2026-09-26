@@ -167,7 +167,7 @@ test('unit:pi-destructive-guard the tool-call guard refuses rm on a statically u
     await rm(other, { recursive: true, force: true });
     // GY-391: only the mktemp invocation's own line counts. A command that merely mentions mktemp
     // and prints other existing directories beside it widens nothing.
-    const listed = await mkdtemp(join(tmpdir(), 'graphyard-pi-guard-listed-'));
+    const listed = await temporaryDirectory('pi-guard-listed');
     try {
       for (const command of [`mktemp -d && ls -d ${listed}`, `mktemp -d; echo ${listed}`, `echo mktemp; ls -d ${listed}`, `ls -d ${listed} # mktemp`, `D=$(mktemp -d) && echo ${listed}`, 'mktemp', 'mktemp -u'])
         await emit('tool_result', { toolName: 'bash', input: { command }, content: [{ type: 'text', text: `${session}\n${listed}\n` }] }, worktree);
