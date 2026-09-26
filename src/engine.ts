@@ -190,6 +190,25 @@ export async function readAttestations(db: { query: (text: string, values: unkno
  * the item exactly as an operator widening would be; a refusal becomes the item's blocker, so the
  * ready gate holds it until somebody decides the scope the item does not already carry.
  */
+/**
+ * A scope request belongs to the attempt that filed it (GY-597). Once that attempt has ended —
+ * submitted, released, lapsed, reworked or revised away — nobody is left to act on its answer,
+ * and a refusal it earned would hold every later attempt at the ready gate. Closing it lifts the
+ * refusal it wrote as the item's blocker, so the next attempt is dispatched and asks afresh if it
+ * still needs the files. Returns what the history records of the closed request, or null when
+ * there was none to close or its attempt still holds the lease.
+ */
+export const scopeRequestEndedReason = 'attempt ended';
+export function closeEndedScopeRequest(work: Work, now: Date, by: string) {
+  const request = work.scopeRequest;
+  if (!request || work.lease?.epoch === request.epoch) return null;
+  work.scopeRequest = null;
+  if (work.blocker?.startsWith(scopeRefusalBlocker)) work.blocker = null;
+  return { epoch: request.epoch, paths: request.paths, requestedBy: request.requestedBy, requestedAt: request.at, decision: request.decision?.state ?? null,
+    refusal: request.decision?.state === 'refused' ? request.decision.reason : null, reason: scopeRequestEndedReason, by, at: now.toISOString() };
+}
+/** The commands that end an attempt, or clear what an ended one left behind, and so close its scope request. */
+const attemptEndingCommands = new Set<string>(['submit', 'release', 'rework', 'requirements', 'unblock']);
 function applyScopeDecision(work: Work, request: NonNullable<Work['scopeRequest']>, now: Date): ScopeDecision {
   const verdict = decideScopeRequest(work, request);
   const decision: ScopeDecision = { state: verdict.state, reason: verdict.reason, at: now.toISOString(), decidedBy: 'graphyard',
@@ -970,6 +989,12 @@ export class Engine {
       }
       // A widening that covers an open scope ask is the answer to it: the deterministic rule the
       // request named has been applied, so the request closes rather than waiting on nobody.
+      // A scope request belongs to the attempt that filed it (GY-597): a command that ended that
+      // attempt, or an operator unblocking the item after it ended, closes it with the reason, so
+      // its refusal no longer holds the next attempt at the ready gate. The worker's own typed
+      // request is the exception: its release is the hand-off that puts the refusal to a decider.
+      const closedScope = attemptEndingCommands.has(command) ? closeEndedScopeRequest(work, now, command) : null;
+      if (closedScope) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'scope.closed', JSON.stringify({ details: closedScope })]);
       if (command === 'requirements') resolveSatisfiedScopeRequests(work, path => (work!.plannedFiles ?? []).some(planned => pathScopeContains(planned, path)), now);
       retainQuarantineFence(work);
       // Delivery is an immutable snapshot. A late containment cleanup or a post-deployment fact may
@@ -981,7 +1006,8 @@ export class Engine {
       await this.recordDispatch(db, work, now);
       await save(db, work, actor.id, command, now, command === 'settle' ? { epoch: data.epoch }
         : command === 'autoscope' ? { ...data, decision, before: { plannedFiles: before?.plannedFiles ?? [], blocker: before?.blocker ?? null } }
-        : actor.role === 'operator-agent' ? { before, intent: data, reason: data.reason ?? null, ...(command === 'requirements' ? { liveScopeWidening: widening } : {}) } : data);
+        : actor.role === 'operator-agent' ? { before, intent: data, reason: data.reason ?? null, ...(command === 'requirements' ? { liveScopeWidening: widening } : {}), ...(closedScope ? { closedScopeRequest: closedScope } : {}) }
+        : closedScope ? { ...data, closedScopeRequest: closedScope } : data);
       if (work.submission && !postDeployment && !deliveredSessionClosure && !['heartbeat', 'release', 'claim', 'workspace'].includes(command)) await wakeJob(db, work.id);
       // A renewal's replay needs only the lease, not a whole document per renewal.
       await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(command === 'heartbeat' ? compactHeartbeatReceipt(work) : work)]);
@@ -1677,6 +1703,9 @@ export class Engine {
       else raiseEscalation(work, { trigger: 'lease-loss', reason: leaseLossReason(lost), at: now.toISOString(), actor: 'graphyard' });
       endLapsedAttempt(work, lost, now);
     }
+    // The lapse ended the attempt that filed any open scope request: close it, rather than let it refuse the next one (GY-597).
+    const closedScope = leaseLost ? closeEndedScopeRequest(work, now, 'lease.expired') : null;
+    if (closedScope) ledger.push({ kind: 'scope.closed', details: closedScope });
     // A standing lease-loss for an epoch whose candidate was already bound predates that
     // rule, and one the control plane raised for an epoch whose blocked report or stopped-worker
     // attestation is in the ledger never needed a human either. Settle both here, on deploy and
