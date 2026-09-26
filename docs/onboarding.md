@@ -17,13 +17,13 @@ Commit `AGENTS.md`, `.gitignore`, `graphyard.json`; never `.graphyard/`. Without
 
 ### Documentation policy
 
-`init --scan --apply` writes the documentation paths found (`docs/`, `site/`, `README*`, package READMEs, `CHANGELOG*`) to `graphyard.json` (`{"documentation":{"paths":["site/"],"changelog":"CHANGELOG.md"}}`). Deploy the printed `GRAPHYARD_DOCUMENTATION` (default `docs/`, `README.md`, `AGENTS.md`). Features and bugs carry *Documentation reflects this change*, met by a diff there or `complete --no-docs "WHY"`, judged by the reviewer.
+`init --scan --apply` writes the documentation paths found (`docs/`, `site/`, `README*`, package READMEs, `CHANGELOG*`) to `graphyard.json` (`{"documentation":{"paths":["site/"],"changelog":"CHANGELOG.md"}}`). Deploy the printed `GRAPHYARD_DOCUMENTATION` (default `docs/`, `README.md`, `AGENTS.md`); `doctor` reports `documentation.drift` when it differs from the committed file. Features and bugs carry *Documentation reflects this change*, met by a diff there or `complete --no-docs "WHY"`, judged by the reviewer.
 
 ### What the generated instructions authorize
 
 The managed `AGENTS.md` section states that **every session Graphyard launches receives its instruction as the session's own first request, on the runtime's command line, never as pasted text**; the only later paste (the loop's single re-prompt, or the reviewer's reminder) comes from the same launcher and is acted on without confirmation.
 
-Agents treat Herdr's bracketed paste as untrusted data (prompt injection), so with the request on the command line sessions start without anybody sending `go`; Claude Code gets the statement through `--append-system-prompt-file`. The role files under `.graphyard/harness/` hold permissions, not instructions.
+Agents treat Herdr's bracketed paste as untrusted (prompt injection), so with the request on the command line sessions start without anybody sending `go`; Claude Code gets the statement through `--append-system-prompt-file`. The role files under `.graphyard/harness/` hold permissions, not instructions.
 
 ### Agent environments
 
@@ -35,7 +35,7 @@ CLAUDE_CONFIG_DIR=~/.coding_agents/claude-a claude                       # /logi
 node "$GRAPHYARD_CLI" master environments --apply                        # report quota, write profiles
 ```
 
-Profiles default to `"approvals": "auto"` so sessions never block on a permission prompt (trade-off: unattended sessions); `"prompt"` is refused at launch ([approval modes](master-agent-sessions.md#approval-modes)).
+Profiles default to `"approvals": "auto"` so sessions never block on a prompt (unattended by design); `"prompt"` is refused at launch ([approval modes](master-agent-sessions.md#approval-modes)).
 
 ### Configure the fleet
 
@@ -58,17 +58,17 @@ node "$GRAPHYARD_CLI" master registry runtime set aider --kind aider --arg=--yes
 
 ### Add an account
 
-One login per account, by reference:
+One login, held by reference:
 
 ```sh
-node "$GRAPHYARD_CLI" master registry model set opus --id claude-opus-5 \
-  --input-cost 15 --output-cost 75 --tier frontier --reason "Price"
+node "$GRAPHYARD_CLI" master registry model set opus --provider Anthropic --id claude-opus-5 \
+  --input-cost 15 --output-cost 75 --tier frontier --context 1000000 --reason "Price"
 node "$GRAPHYARD_CLI" master registry account set claude-b --runtime claude --model opus \
   --home ~/.coding_agents/claude-b --max-sessions 2 --reason "Second login"
 node "$GRAPHYARD_CLI" master registry account quota opencode-a exhausted --resets-at 2026-09-22T00:00:00Z --reason "Cut off"
 ```
 
-`--key-file zai.key --key-variable ZAI_API_KEY` names an API key by reference: a 0600 home file read into that variable per headless run. Pi accounts are smoke-tested first and when changed; failing (Pi's error), or two unjudged runs of a role (an hour), makes one ineligible.
+`--key-file zai.key --key-variable ZAI_API_KEY` names a 0600 home key file by reference, read into that variable per headless run. New or changed Pi accounts are smoke-tested: failing (Pi's error) bars one, two unjudged runs of a role bar it an hour.
 
 ### Add a role
 
@@ -87,7 +87,7 @@ Each candidate needs one review and one producer session per proof group; a prof
 "reviewers":[{"name":"claude-reviewer","agentName":"review-claude","kind":"claude","accounts":["claude-a","claude-b"],"concurrency":3}]
 ```
 
-Adding workers? For worker count `W` and `G` proof groups: `⌈W / 2⌉` review slots and `G × ⌈W / 2⌉` producer slots over two or more producer principals. Watch `longestWaitMs`.
+For worker count `W` and `G` proof groups: `⌈W/2⌉` review slots and `G×⌈W/2⌉` producer slots over two or more producer principals. Watch `longestWaitMs`.
 
 ## 3. Start the master
 
@@ -98,7 +98,7 @@ node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST   # now installs th
 node "$GRAPHYARD_CLI" master start codex     # or: master start claude
 ```
 
-Run it under an OS identity whose GitHub credentials workers cannot read. `--browser-profile` (Chrome, signed in as GitHub administrator) serves [`master browser`](master-agent-reference.md#github-administration-through-the-browser). Add the reviewer with `master reviewer setup` and `master reviewer add PROFILE` ([Claude](../examples/master/claude-reviewer.json) template); its manifest flow is the only App confirmation.
+Run it under an OS identity whose GitHub credentials workers cannot read. `--browser-profile` is the Chrome profile signed in to GitHub as admin, for `master browser` flows; *Confirm access* in GitHub Mobile stays human-only. Add the reviewer with `master reviewer setup` and `master reviewer add PROFILE` ([Claude](../examples/master/claude-reviewer.json) template); its manifest flow is the only App confirmation.
 
 ### The loop must be supervised
 
@@ -108,8 +108,8 @@ Run it under an OS identity whose GitHub credentials workers cannot read. `--bro
 
 `graphyard doctor --profile through-merge` names every missing piece. Create a small item: `master run` dispatches it; the loop merges once branch protection requires `Graphyard / merge`. `"systemDriven": false` allows [hand actions](master-agent.md#system-driven-items).
 
-CI workflows should cancel superseded pull-request runs: group each by `${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}` with `cancel-in-progress: ${{ github.event_name == 'pull_request' }}`; runs on main are never cancelled. `graphyard master protection` lists each required check whose workflow lacks cancel-in-progress under `advisories`.
+Cancel superseded pull-request CI runs: group each by `${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}` with `cancel-in-progress: ${{ github.event_name == 'pull_request' }}`; main runs are never cancelled. `graphyard master protection` lists required checks whose workflow lacks cancel-in-progress under `advisories`.
 
 ## What stays manual
 
-Logins (provider, GitHub, agent environments, browser profile), the App confirmation, plan approval, *Confirm access* on GitHub Mobile, producer grants, and the [human-only decisions](glossary.md#who-decides).
+Logins (provider, GitHub, agent environments, browser profile), the App confirmation, plan approval, *Confirm access*, producer grants, and the [human-only decisions](glossary.md#who-decides).

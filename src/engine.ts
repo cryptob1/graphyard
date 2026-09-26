@@ -319,7 +319,6 @@ export class Engine {
   // by the transaction that persists it. Keyed by the object, so a probe clone records nothing.
   private dispatchTransitions = new WeakMap<Work, DispatchTransition[]>();
   private conflictTransitions = new WeakMap<Work, ReviewConflictTransition[]>();
-  // The launch fence is a deployment-independent safety default; only tests shorten it.
   /** This repository's documentation policy (GY-215): the deployed GRAPHYARD_DOCUMENTATION, or the default. */
   documentation: DocumentationPolicy = configuredDocumentation();
   /**
@@ -334,6 +333,7 @@ export class Engine {
     this.mergeBatchSize = Number.isSafeInteger(row?.size) && row.size >= 1 ? row.size : defaultMergeBatchSize;
     return this.mergeBatchSize;
   }
+  // The launch fence is a deployment-independent safety default; only tests shorten it.
   constructor(public store: Store, public ciAppIds: number[] = [15368], public leaseSeconds = 120, public repository = process.env.GITHUB_REPOSITORY ?? '', public launchFence = launchFenceMs) {}
   private async observeSubmission(actor: Principal, id: string | null, data: { epoch: number; pr: number }, key: string): Promise<Observation | null> {
     if (this.submissionObserver === undefined) { const github = await githubFromEnv(); this.submissionObserver = github ? (probe, peers) => github.observe(probe, peers) : null; }
@@ -1557,6 +1557,14 @@ export class Engine {
    * or a request wrote while it yielded is overwritten, and resumes after the last item it
    * finished. Between batches the lock is released and the event loop runs, so a renewal waits
    * at most one batch however long the whole pass takes. One item always completes per batch.
+   *
+   * A pass therefore reads every document once per batch, O(batches x items) (GY-392), and that
+   * is kept deliberately: every item is evaluated against `all`, the whole fleet as it stands
+   * (dependencies, the merge queue, fleet capacity), so each batch needs the full snapshot, not
+   * just the rows it reconciles. A keyset read of the batch's own rows saves nothing while `all`
+   * must still be read, and a snapshot carried across batches would evaluate items against state
+   * that the heartbeats and requests admitted between batches have already changed. The number
+   * of batches is bounded by the pass's duration over reconcileBatchMs, not by the backlog.
    */
   async reconcile() {
     let cursor = 0, first = true;
@@ -1794,6 +1802,12 @@ export class Engine {
       // all GitHub's `mergeable: false` withheld from an open, non-draft pull request — so nothing
       // refreshes, holds or reworks it for that reading again.
       work.observation = observation.conflicting && disprovedConflict(work, observation) ? { ...observation, conflicting: false, mergeable: true } : observation;
+      // A submission recorded without an observation has no files (GY-293): the first observation
+      // of that pull request records what its diff changes inside the documentation paths, so a
+      // docs diff reads as satisfied rather than waiting for the reviewer to judge it.
+      const recorded = work.documentation?.submission;
+      if (recorded && recorded.files === null && work.submission?.pr === recorded.pr && observation.candidate.pr === recorded.pr && Array.isArray(observation.files))
+        work.documentation = { ...work.documentation!, submission: recordDocumentationSubmission(work.documentation!, recorded, observation.files, recorded.statement, new Date(recorded.at)) };
       // Snapshot all provider review identities after the revision. Approvals in this
       // first observation never count, regardless of clock skew or future reevaluation.
       if (work.formalReviewResetRequired && reviewProviderOf(work.policy) === 'github' && !work.formalReviewBaseline && observation.reviewIds
