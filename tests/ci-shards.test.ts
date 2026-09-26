@@ -45,9 +45,10 @@ test('unit:ci-sharded — the required test check aggregates a matrix of four du
   assert.deepEqual(shards.flatMap(entry => entry.files).sort(), tests, 'every test file runs on exactly one shard');
   assert.ok(shardImbalance(shards) <= 0.2, `shards finish within 20% of each other: ${shards.map(entry => Math.round(entry.durationMs / 1000)).join('s, ')}s`);
 
-  // Longest first onto the lightest shard; an unrecorded file weighs the median.
+  // Longest first onto the lightest shard; an unrecorded file weighs the median. Each shard lists its
+  // files longest first, the order node:test starts them in, so no long file starts last.
   const split = shardFiles(['a', 'b', 'c', 'd', 'e', 'new'], { a: 50, b: 40, c: 30, d: 20, e: 10 }, 2);
-  assert.deepEqual(split.map(entry => entry.files), [['a', 'e', 'new'], ['b', 'c', 'd']]);
+  assert.deepEqual(split.map(entry => entry.files), [['a', 'new', 'e'], ['b', 'c', 'd']]);
   assert.deepEqual(split.map(entry => entry.durationMs), [90, 90]);
 
   // The runner runs one shard of the selection, and nothing at all for an empty one.

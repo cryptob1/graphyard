@@ -45,7 +45,9 @@ const median = values => { const sorted = [...values].sort((a, b) => a - b); ret
  * Splits `files` into `count` shards whose recorded durations are as even as the files allow:
  * longest first, each onto the shard with the least time so far. A file with no recorded duration
  * (one added since the baseline was recorded) counts as the median file. Deterministic, so every
- * shard job computes the same split independently.
+ * shard job computes the same split independently. Each shard keeps its files longest first:
+ * node:test starts files in the order it is given them, a few at a time, so a long file placed
+ * last would start late and hold its shard open long after the others finish.
  */
 export function shardFiles(files, durations, count = defaultShardCount) {
   if (!Number.isInteger(count) || count < 1) throw new Error(`Shard count must be a positive integer: ${count}`);
@@ -56,7 +58,6 @@ export function shardFiles(files, durations, count = defaultShardCount) {
     const lightest = shards.reduce((best, shard) => shard.durationMs < best.durationMs ? shard : best);
     lightest.files.push(file); lightest.durationMs += weight(file);
   }
-  for (const shard of shards) shard.files.sort();
   return shards;
 }
 
