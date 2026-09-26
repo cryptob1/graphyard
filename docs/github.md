@@ -25,7 +25,7 @@ A reviewer App is never granted Contents: write, Checks, or Administration; work
 | Metadata | Read | read the managed repository (repository access) |
 | Pull requests | Read and write | post the verdict comment (review dispatch) |
 
-Grants are rechecked every five minutes and after a 403; a shortfall (`appPermissions`) holds its jobs, **not retried** (`integration-held`), until `master browser app-permissions` or `master browser installation-accept` fixes it.
+Grants are rechecked every five minutes and after 403s; a shortfall (`appPermissions`) holds jobs, **not retried** (`integration-held`), until `master browser app-permissions` or `master browser installation-accept` fixes it.
 
 ## The reviewer App
 
@@ -43,11 +43,11 @@ A candidate enters once its gates pass. Its speculative tip (predicted base merg
 
 ### Bindings and carry
 
-Reviews and proofs bind one head, base and policy revision. The queue head's tip merges moved bases: all carry if the clean merge kept the patch-id, else the approval if no reviewed file changed, disjoint-`scopeFiles` proofs. Carried steps name their ground; CI reruns. GitHub conflicts are test-merged; clean ones log `base.stale-mergeability`. Line-only conflicts merge by word (Markdown: base trims win) into a tip carrying nothing; colliding words need `sync`.
+Reviews and proofs bind one head, base and policy revision. The queue head's tip merges moved bases: all carry if the clean merge kept the patch-id, else the approval if no reviewed file changed, disjoint-`scopeFiles` proofs. Carried steps name their ground; CI reruns. GitHub conflicts are test-merged: clean ones log `base.stale-mergeability`, line-only ones merge by word, carrying nothing.
 
 ### Batches
 
-`mergeQueue.batchSize` (master config, default 4; 1 disables; published via `POST /api/merge-queue`) tests entries together: a pass merges members in order, a failure is halved until the culprit is ejected, naming its check (`mergeStep`); batches behind an unpassed one eject nothing.
+`mergeQueue.batchSize` (master config, default 4; 1 disables; published via `POST /api/merge-queue`) tests entries together: a pass merges members in order, a failure halves until the culprit is ejected, naming its check (`mergeStep`); batches behind an unpassed one eject nothing.
 
 ### Direct merges
 
@@ -55,7 +55,7 @@ Without a queue, mergeable `CLEAN`, `UNSTABLE` (optional checks failing) and `HA
 
 ### Proofs in CI
 
-A protected `pull_request_target` workflow (the default branch's, with its secrets) runs on every `graphyard/*` PR push: **plan** finds the item's `unit:*` and `integration:*` proofs, **exercise** runs one secret-free job each against the candidate merged with its base, **publish** submits reports via the [CI producer](deployment.md#ci-producer) bound by `ciRun`. Queue tips too; dependencies are cached. Manual proofs stay producer sessions.
+A protected `pull_request_target` workflow (the default branch's, with secrets) runs on every `graphyard/*` PR push: **plan** finds the item's `unit:*` and `integration:*` proofs, **exercise** runs one secret-free job each against the candidate merged with base, **publish** submits reports via the [CI producer](deployment.md#ci-producer) bound by `ciRun`. Queue tips too; dependencies are cached. Manual proofs stay producer sessions.
 
 ## Post-deployment smoke proof
 
@@ -63,7 +63,7 @@ With `"deploySmoke": true`, the master dispatches `master init --smoke-workflow 
 
 ## Enforcement boundary
 
-GitHub merges only heads whose required check passed; Graphyard has no merge route. Restrict other merge identities; a worker losing its lease can still push.
+GitHub merges only heads whose required check passed; Graphyard has no merge route. Restrict other merge identities; a lease-less worker can still push.
 
 ## Identity-bound agent review
 
