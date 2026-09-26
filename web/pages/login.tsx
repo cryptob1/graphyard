@@ -71,6 +71,7 @@ export function LoginView({ state, error, draftToken, setDraftToken, submit, ret
       {error && <p role="alert" className="notice danger">{error}</p>}
       <label>Access token<input type="password" required autoFocus value={draftToken} onChange={e => setDraftToken(e.target.value)} autoComplete="off" placeholder="Your Graphyard token"/></label>
       <button type="submit">Open control plane ↗</button>
+      <p className="login-help">{SIGN_IN_LINK_TEXT}</p>
     </form>}
     {state.kind === 'verifying' && <div className="login-status">
       <p role="status" aria-busy="true" aria-live="polite" className="login-progress"><span className="spinner" aria-hidden="true"/>Verifying connection…</p>
@@ -80,7 +81,6 @@ export function LoginView({ state, error, draftToken, setDraftToken, submit, ret
       <p role="alert" className="notice danger">Can't reach the control plane at {state.host}</p>
       <div className="login-actions"><button type="button" onClick={retry}>Retry</button>{escape}</div>
     </div>}
-    {state.kind === 'form' && <p className="login-help">{SIGN_IN_LINK_TEXT}</p>}
     <p className="login-help">{HELPER_TEXT}</p>
   </main>;
 }

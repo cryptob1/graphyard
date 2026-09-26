@@ -1,6 +1,7 @@
 import { demand } from '../../model.js';
 import { DirectMerges } from '../../direct-merge.js';
 import { defineRoutes, parseJson, type Services } from '../routes.js';
+import { humanSignIn } from '../auth.js';
 
 const directMerges = (services: Services) => new DirectMerges(services.engine.store, () => services.engine.directMergeEnvironment);
 
@@ -32,4 +33,6 @@ export const operatorAgentRoutes = defineRoutes('operator-agents', [
   // Direct-merge mode (direct-merge.ts): read by the master and dashboard, set and cleared with an admin credential only.
   { method: 'GET', path: '/api/direct-merges', handle: ({ actor, services }) => directMerges(services).status(actor) },
   { method: 'POST', path: /^\/api\/direct-merges\/(on|off)$/, handle: async (context, [action]) => directMerges(context.services).change(context.actor, action as 'on' | 'off', await parseJson(context), context.idempotencyKey()) },
+  // The operator's own sign-in link (GY-738): only their configured admin credential asks for one.
+  { method: 'POST', path: '/api/sign-in-links', handle: async ({ actor, services }) => humanSignIn(services).issue(actor, services.principals.some(entry => entry.actor.id === actor.id && entry.actor.role === 'admin')) },
 ]);

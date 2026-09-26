@@ -10,7 +10,7 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
-import { HumanSignIn, signInLinkTtlMs, signInSessionTtlMs } from '../src/server/routes/sign-in.js';
+import { HumanSignIn, signInLinkTtlMs, signInSessionTtlMs } from '../src/server/auth.js';
 import { hostSealKey, loginCommand, parkArgs, parkCommand, unsealOnHost } from '../src/cli/session-commands.js';
 import { defaultChoices, requestChoices, resolveHumanAnswer, type HumanRequestRow } from '../src/model/human-request.js';
 import type { Principal, Work } from '../src/model.js';
