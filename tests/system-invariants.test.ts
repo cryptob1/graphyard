@@ -222,8 +222,8 @@ test('unit:reviewer-repeat-question — the review of a change to the loop, mast
   const start = guide.indexOf('### System invariants');
   assert.ok(start >= 0, 'docs/master-agent.md has the section');
   const section = guide.slice(start, guide.indexOf('\n## ', start)).replace(/\s+/g, ' ');
-  for (const phrase of ['at most one open follow-up per parent', 'no session open 30 min past delivery or settled decision', 'at most 3 base refreshes without an own head change', 'no merge-stage item mergeable 10 min unrefused',
-    'cycle p90 under 30 s over an hour', 'no machine-filed backlog untriaged 24 h', 'no lease lost to a deploy', 'daemon.invariants.lines', '`invariants` in `.graphyard/master.json`', 'tests/soak.test.ts'])
+  for (const phrase of [...systemInvariants.map(invariant => `\`${invariant}\``), '`follow-ups-per-parent` (1 open)', '`lingering-sessions` (30 min)', '`refresh-churn` (3 per own head)', '`merge-stall` (10 min)', '`cycle-p90` (30 s)', '`untriaged-backlog` (24 h)', '`deploy-lease-loss` (0)',
+    'daemon.invariants.lines', '`invariants` in `.graphyard/master.json`', 'tests/soak.test.ts'])
     assert.ok(section.includes(phrase), `docs/master-agent.md lists: ${phrase}`);
   assert.ok(guide.split(/\s+/).filter(Boolean).length <= 1_200, 'the page stays within its word budget (tests/docs-budget.test.ts holds the whole set)');
 });

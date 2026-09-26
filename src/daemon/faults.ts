@@ -13,7 +13,7 @@ import { loopAttention } from './liveness.js';
 import { daemonSummary } from './run.js';
 import type { Cycle } from './cycle.js';
 import { candidateKey } from './reconcile.js';
-import { checkInvariants, herdrInvariantKinds, invariantFaults } from '../model/invariants.js';
+import { checkInvariants, invariantFaultKind, invariantFaults } from '../model/invariants.js';
 
 /** The attention `master status` adds after buildMasterStatus, and its final attribution over the whole list. */
 export interface ReportedAttention { items: AttentionItem[]; attribute?: (status: { work: any[]; attentionItems: AttentionItem[] }) => AttentionItem[] }
@@ -188,6 +188,6 @@ export async function faultStep(cycle: Cycle, assessments: Record<string, Contai
     agents: herdrRead.available ? seen : null, build: controlPlane?.build?.commit ?? null,
     refusedMerges: new Set(snapshot.work.filter(item => item.candidate && state.actions[candidateKey('merge', item)]?.state === 'failed').map(item => item.id)) });
   trackFaults(state.faults, [...cycleFaults(state, snapshot.work, clock, { config, agents: seen, credentials, containment: assessments, status: controlPlane, jobs: snapshot.jobs, reported: reported?.items, attribute: reported?.attribute, loop, herdrUnavailable: !herdrRead.available }), ...invariantFaults(invariants)],
-    new Date(clock).toISOString(), partial || (herdrRead.available ? false : new Set<string>([...herdrFaultKinds, ...herdrInvariantKinds])));
+    new Date(clock).toISOString(), partial || (herdrRead.available ? false : new Set<string>([...herdrFaultKinds, invariantFaultKind('lingering-sessions')])));
   await fileRecurringFaultClasses(state, effects, snapshot.work, clock, now, performed);
 }

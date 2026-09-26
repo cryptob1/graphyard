@@ -87,7 +87,7 @@ export interface InvariantInput {
   metrics?: readonly { at: string; durationMs: number }[];
   /** The decisions the loop put to approvers: which session judged each and when it settled. */
   approvals?: Readonly<Record<string, { work: string; agentName: string | null; pane: string | null; settledAt: string | null }>>;
-  /** Herdr's listing this cycle; null when Herdr could not be read. */
+  /** The session runtime's listing this cycle; null when it could not be read. */
   agents?: readonly { name?: string; pane_id?: string }[] | null;
   /** The build the control plane reports it runs; null when it could not be read. */
   build?: string | null;
@@ -160,7 +160,7 @@ export function checkInvariants(record: InvariantRecord, input: InvariantInput):
     }
     judge('lingering-sessions', `no session open ${limits.sessionAfterSettleMinutes} min after its item is delivered or its decision settled`,
       lingering.length ? `${lingering.length} session(s) still open, e.g. ${lingering[0].detail}` : 'no session outlived its item or decision', !lingering.length, lingering.map(entry => entry.subject));
-  } else judge('lingering-sessions', `no session open ${limits.sessionAfterSettleMinutes} min after its item is delivered or its decision settled`, 'Herdr could not be read this cycle', true, [], false);
+  } else judge('lingering-sessions', `no session open ${limits.sessionAfterSettleMinutes} min after its item is delivered or its decision settled`, 'the session runtime could not be read this cycle', true, [], false);
 
   // 3. No candidate base-refreshed past its bound without a head change of its own (GY-375). A base
   //    refresh the control plane recorded, or a queue tip it merged the base into, is one refresh;
@@ -256,5 +256,3 @@ export function invariantFaults(checks: readonly InvariantCheck[]): FaultObserva
     text: `System invariant ${check.invariant} is violated (threshold: ${check.threshold}) by ${check.subjects.length} subject(s)${check.subjects.length ? `, first ${check.subjects[0]}` : ''}`.slice(0, 500),
   }));
 }
-/** The invariant kinds a cycle that could not read Herdr leaves unobserved. */
-export const herdrInvariantKinds: readonly string[] = [invariantFaultKind('lingering-sessions')];
