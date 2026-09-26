@@ -3,7 +3,7 @@
 
 ## 1. Install the control plane
 
-Follow [install](install.md): `install --provider PROVIDER --repo OWNER/REPO --apply`.
+Follow [install](install.md): `node "$GRAPHYARD_CLI" install --provider railway --repo OWNER/REPO --workers 1 --apply` after reviewing `--plan`.
 
 ## 2. Add machines
 

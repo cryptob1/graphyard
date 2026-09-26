@@ -9,7 +9,7 @@
 
 ## Incident decision tree
 
-- **Item not moving**: fix the cause. Never weaken requirements.
+- **Item not moving**: fix the refusal's cause. Never weaken requirements.
   - Escalation: a declared human session runs `graphyard resolve GY-N TRIGGER "reason"`. No AI principal can alone, except an `admin` settling an explained `lease-loss` with `--attestation`.
   - Lease expired unsubmitted: [lost worker](operations-reference.md#lost-worker-before-submission). Another attempt: [rework](operations-reference.md#submitted-implementation-needs-rework). Fenced: [quarantine](operations-reference.md#supervisor-died-leaving-a-containment-quarantine).
 - **Merge refused**: wait or repair the cause; never bypass.
