@@ -37,6 +37,11 @@ import { observeDeployment } from './deployment.js';
 import { serverCallName, timedCall, timedFetch, timedRun } from '../master/timings.js';
 import type { RunRecord, Runner } from '../runner/types.js';
 import type { ResearchEvent } from '../research.js';
+import { doctorRole, doctorSettings, type DoctorEffects } from './doctor.js';
+
+import { piRunner } from '../runner/pi.js';
+import { registryHeadlessLaunch, registryRunner } from '../runner/roles.js';
+import { selectFleetSession } from '../fleet.js';
 import type { TriageJudgement } from '../model/machine-backlog.js';
 
 /** A reviewer or producer session a launch ledger holds as pending, as the failover step reads it. */
@@ -126,7 +131,7 @@ export interface DaemonEffects {
    * A loop configured without these three keeps cycling: each routine decision is then recorded as
    * an escalation naming the command a master session runs, exactly as before.
    */
-  decide?: (work: Work, action: RoutineDecisionAction, reason: string, input?: Record<string, unknown>) => Promise<{ id: string }>;
+  decide?: (work: Work, action: RoutineDecisionAction | 'unblock', reason: string, input?: Record<string, unknown>) => Promise<{ id: string }>;
   /**
    * Launches the independent approver session for one requested decision, under the name
    * `approverSessionName` gives it, and reports the session so later cycles can supervise it.
@@ -153,7 +158,7 @@ export interface DaemonEffects {
    * One item's decision history: the approved merge decision automatic merging asks for, and what
    * became of every decision this loop requested.
    */
-  decisions?: (work: Work) => Promise<{ decisions: { id: string; action: string; state: string; input: any; pin?: { escalations?: { trigger: string; at: string }[] } | null; reason?: string; precedent?: string[]; situation?: DecisionSituation | null; approvedBy: string | null; approvedAt?: string | null; approvalReason?: string | null; outcome?: string | null; refusal?: { approver: string; reason: string; at?: string } | null }[] }>;
+  decisions?: (work: Work) => Promise<{ decisions: { id: string; action: string; state: string; input: any; requestedBy?: string; requestedAt?: string; pin?: { escalations?: { trigger: string; at: string }[] } | null; reason?: string; precedent?: string[]; situation?: DecisionSituation | null; approvedBy: string | null; approvedAt?: string | null; approvalReason?: string | null; outcome?: string | null; refusal?: { approver: string; reason: string; at?: string } | null }[] }>;
   /**
    * Takes back one of the loop's own requests, as its requester. Only for a request the item has
    * moved past — a merge decision bound to an earlier candidate, a round the item no longer needs —
@@ -265,6 +270,13 @@ export interface DaemonEffects {
    * while no such identity is provisioned: the classes are still recorded and reported.
    */
   fileFaultClass?: (input: ReturnType<typeof faultClassItem>, key: string) => Promise<Work>;
+  /**
+   * The pipeline doctor (GY-711): its settings, the runners of its primary and fallback runs, and
+   * filing and run recording as the master's operator-agent identity. Absent while
+   * `run.doctor.enabled` is false or the operator-agent identity is missing: the loop then runs
+   * only the deterministic remedies, and stuck work waits for the master, as before.
+   */
+  doctor?: DoctorEffects;
   /** The recurrence rule; the environment's (GRAPHYARD_FAULT_CLASS_*) or the shipped default when absent. */
   faultClassPolicy?: FaultClassPolicy;
   /**
@@ -480,6 +492,30 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   const withdraw: DaemonEffects['withdraw'] = (work, decision, reason) => asOperatorAgent('POST', `work/${work.id}/decide`, { action: 'withdraw', decision, reason });
   const decisions: DaemonEffects['decisions'] = work => asOperatorAgent('GET', `work/${encodeURIComponent(work.id)}/decisions`);
   let publishedEnvironment: string | null = null, publishedBatchSize: number | null = null;
+  /**
+   * The doctor's effects under the live configuration (GY-711). Its primary run takes the
+   * registry's doctor role when an operator defines one, else Pi on `run.doctor.model`; the
+   * fallback run is Pi on the stronger `fallbackModel`. The session holds the control plane URL
+   * and the operator-agent credential by path — never the token itself — and its shipped command
+   * allowlist (integrations/pi) holds it to the sanctioned master commands.
+   */
+  const doctor = (config: MasterConfig): DoctorEffects => {
+    const settings = doctorSettings(config.run);
+    return {
+      settings, cwd: root,
+      env: { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: config.operatorAgent!.credentialFile, GRAPHYARD_HOST_ID: config.hostId },
+      runner: async attempt => {
+        if (attempt === 'primary') {
+          const fleet = await selectFleetSession(config, doctorRole, { name: doctorRole, principal: config.operatorAgent!.id }, {});
+          if (fleet) { const launch = registryHeadlessLaunch(fleet.account); return { runner: registryRunner(fleet.account), runtime: launch.command, model: launch.model, release: fleet.release }; }
+        }
+        const model = attempt === 'primary' ? settings.model : settings.fallbackModel;
+        return { runner: piRunner({ command: settings.command, model }), runtime: 'pi', model };
+      },
+      file: (input, key) => asOperatorAgent('POST', 'work', input, key) as Promise<Work>,
+      recordRun: run => asOperatorAgent('POST', 'doctor', run),
+    };
+  };
   return {
     agents: () => listHerdrAgents(run).catch(() => []),
     // A reviewer or producer session ends with its ledger record (GY-205): its Herdr name is not one the registry session determines.
@@ -657,6 +693,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       return { ...reported, items: [...reported.items, ...await timingFaultAttention(work, current().repository, annotations)] };
     },
     get fileFaultClass() { return current().operatorAgent ? (input: ReturnType<typeof faultClassItem>, key: string) => asOperatorAgent('POST', 'work', input, key) as Promise<Work> : undefined; },
+    // The doctor acts only through the operator-agent identity, and only its sanctioned commands (GY-711).
+    get doctor() { const config = current(); return config.operatorAgent && doctorSettings(config.run).enabled ? doctor(config) : undefined; },
     containment: (work, observed) => assessContainment(work, { hostId: current().hostId, observedAt: observed.now, clockOffset: observed.clockOffset, probe: async target => annotatePaneShell(await probeSupervisorAbsence(target, { run }),
       work.find(item => item.key === target.key && item.containmentQuarantine?.epoch === target.epoch), pane => herdrJson(['pane', 'process-info', '--pane', pane], run), undefined, () => herdrJson(['pane', 'list'], run),
       () => herdrJson(['status', 'server', '--json'], run)) }),

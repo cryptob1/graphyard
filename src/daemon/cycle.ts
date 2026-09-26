@@ -15,6 +15,7 @@ import { dispatchStep } from './cycle-dispatch.js';
 import { decisionStep } from './cycle-decisions.js';
 import { deploymentStep, mergeStep, shepherdStep } from './cycle-delivery.js';
 import { faultStep } from './faults.js';
+import { doctorStep } from './doctor.js';
 import { triageBacklogStep } from './cycle-triage.js';
 import { Timings, withTimings, withoutTimings } from '../master/timings.js';
 
@@ -206,6 +207,9 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   // 7c. The machine-filed backlog (GY-402): the one-time follow-up migration, then a triage run
   //     for each machine-filed item no triage has judged; its closures go to the approver in 4c.
   await timings.step('triage', () => triageBacklogStep(cycle));
+  // 7d. The pipeline doctor (GY-711): the deterministic remedies every cycle, and one doctor run
+  //     every `run.doctor.intervalMinutes`. It shares the deployment step's clock too.
+  await timings.step('doctor', () => doctorStep(cycle));
   spent('deployment');
 
   await settleLaunches();

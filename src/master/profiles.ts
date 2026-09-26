@@ -169,6 +169,23 @@ export const reviewerIdentitySchema = z.object({
 }).strict();
 export type ReviewerIdentity = z.infer<typeof reviewerIdentitySchema>;
 
+/**
+ * `run.doctor` in .graphyard/master.json (GY-711): the pipeline doctor runs every
+ * `intervalMinutes` (10 by default), headless on Pi with `model`, and a run that ends without a
+ * valid report runs once more on the stronger `fallbackModel`. The registry's doctor role, when an
+ * operator defines one, chooses the primary run's account and model instead. `timeoutMinutes`
+ * bounds one run. An installation turns the doctor off with `enabled: false`.
+ */
+export const doctorSettingsSchema = z.object({
+  enabled: z.boolean().default(true),
+  command: z.string().trim().min(1).max(500).optional(),
+  intervalMinutes: z.number().int().min(5).max(1440).default(10),
+  model: z.string().trim().min(1).max(200).default('zai/glm-5.3-flash'),
+  fallbackModel: z.string().trim().min(1).max(200).default('zai/glm-5.3'),
+  timeoutMinutes: z.number().int().min(1).max(60).default(20),
+}).strict();
+export type DoctorSettings = z.infer<typeof doctorSettingsSchema> & { command: string };
+
 // Durable-loop settings. The daemon adds no credential of its own: a proof or smoke workflow is
 // requested from the provider, which holds the trusted producer secret, and a deployment probe only reads.
 export const masterRunSchema = z.object({
@@ -239,6 +256,10 @@ export const masterRunSchema = z.object({
   // Research before build (GY-259): the cheap Pi session that briefs a feature before its worker
   // starts — its model (the Z.AI GLM flash model by default), time limit and token budget.
   research: researchSettingsSchema.optional(),
+  // The pipeline doctor (GY-711): the headless Pi session the loop launches every
+  // `intervalMinutes` (10 by default) to find stuck and overdue work and fix it through its
+  // sanctioned commands — its model, stronger fallback model, and time limit.
+  doctor: doctorSettingsSchema.optional(),
 }).strict();
 export type MasterRun = z.infer<typeof masterRunSchema>;
 

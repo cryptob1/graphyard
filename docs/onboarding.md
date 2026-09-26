@@ -104,6 +104,10 @@ Run it as an OS identity whose GitHub credentials workers cannot read. `--browse
 
 `master init` from the coordinator checkout writes `~/.config/systemd/user/graphyard-master.service`, runs `systemctl --user enable --now` and `loginctl enable-linger`, restarting on crash, reboot and hang; never a side effect: worker checkouts and temp directories are refused. Move it with `master init --token-stdin --replace-supervisor` from the new checkout; `master status` reports `setup.supervisor` and the merger.
 
+### The pipeline doctor (on by default)
+
+The loop launches a **doctor** every 10 minutes by default (`run.doctor.intervalMinutes`; headless Pi, or the registry's `doctor` role) that fixes stuck work through the master's [sanctioned commands](master-agent.md#the-pipeline-doctor) — never merges, dispatch, evidence or leases. Runs show in `master status` and the dashboard. Off: `"run": {"doctor": {"enabled": false}}`.
+
 ## 4. Prove the first PR
 
 `graphyard doctor --profile through-merge` names every missing piece. `master run` dispatches a small item; the loop merges once branch protection requires `Graphyard / merge`. `"systemDriven": false` allows [hand actions](master-agent.md#system-driven-items).

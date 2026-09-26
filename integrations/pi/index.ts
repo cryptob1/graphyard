@@ -11,7 +11,7 @@ import { autonomyContract } from '../../src/autonomy';
  * never run blindly. Nothing here asks a person anything: there is no UI call anywhere in this
  * file, and a refused call returns its reason to the agent so it retries safely.
  *
- * `GRAPHYARD_PI_ROLE` (approver | producer | research | triage) selects the role's tool; unset, the approver's
+ * `GRAPHYARD_PI_ROLE` (approver | producer | research | doctor | triage) selects the role's tool; unset, the approver's
  * and the producer's are registered.
  * The tools submit nothing to the control plane themselves: the runner hands the validated payload
  * to the loop, which applies it through the same routes a terminal session uses, and the gates
@@ -70,6 +70,34 @@ export const researchParameters: JsonSchema = {
     approach: text(6000, 'The approach you recommend the worker take'),
     questions: { type: 'array', maxItems: 10, description: 'Product-experience questions only the operator may answer; the build proceeds on each recommendation until answered',
       items: { type: 'object', additionalProperties: false, required: ['question', 'why', 'recommendation'], properties: { question: text(1000, 'The question'), why: text(1000, 'Why the answer matters'), recommendation: text(1000, 'The answer you recommend') } } },
+  },
+};
+
+/** The pipeline doctor's report (GY-711, src/runner/payloads.ts doctorReportPayloadSchema): what was stuck, what it did, what it filed. */
+export const doctorReportParameters: JsonSchema = {
+  type: 'object', additionalProperties: false, required: ['findings', 'actions', 'filed'],
+  properties: {
+    findings: { type: 'array', maxItems: 200, description: 'One entry per finding: the work item key or status-level subject, the check whose bound it passed, and what was stuck',
+      items: { type: 'object', additionalProperties: false, required: ['subject', 'check', 'detail'],
+        properties: {
+          subject: text(200, 'The work item key the finding is on, such as GY-711, or a status-level subject such as installation'),
+          check: { type: 'string', enum: ['blocked', 'worker', 'ci', 'review-request', 'launch', 'proofs', 'mergeable', 'decision', 'containment', 'refusal', 'overdue'], description: 'The check whose fault bound the finding passed' },
+          detail: text(2000, 'What was stuck, since when, and why'),
+          unactionable: { type: 'boolean', description: 'true when you could not act on it: a human-only decision, or a fault class with no item to act through' },
+        } } },
+    actions: { type: 'array', maxItems: 200, description: 'One entry per sanctioned command you ran: what it was and what became of it',
+      items: { type: 'object', additionalProperties: false, required: ['subject', 'command', 'outcome', 'detail'],
+        properties: { subject: text(200, 'The work item key the command acted on'), command: text(500, 'The command, as you ran it'), outcome: { type: 'string', enum: ['applied', 'refused'], description: 'applied when the control plane accepted it' }, detail: text(1000, 'What it changed, or the refusal the control plane gave') } } },
+    filed: { type: 'array', maxItems: 20, description: 'One entry per fault item to file for a finding no open item covers (the loop files it and deduplicates it against open items)',
+      items: { type: 'object', additionalProperties: false, required: ['faultClass', 'title', 'description', 'priority', 'criteria', 'plannedFiles'],
+        properties: {
+          faultClass: { type: 'string', enum: ['session-liveness', 'review-convergence', 'decision', 'scope', 'overlap-hold', 'observation', 'deployment', 'configuration', 'containment', 'merge', 'proof', 'capacity', 'resources', 'loop', 'human-decision', 'stalled-gate', 'unclassified'], description: 'The fault class the finding belongs to' },
+          title: text(200, 'The fault item title'), description: text(20000, 'What is wrong, the evidence, and what should change'),
+          priority: { type: 'integer', minimum: 0, description: '0 (P0) or 1 (P1): a fault the doctor files is urgent, never lower' },
+          criteria: { type: 'array', minItems: 1, maxItems: 20, items: { type: 'object', additionalProperties: false, required: ['id', 'text', 'proofs'],
+            properties: { id: { type: 'string', pattern: '^[A-Z]+-\\d+$', description: 'AC-1, AC-2, ...' }, text: text(4000, 'A testable criterion'), proofs: { type: 'array', minItems: 1, maxItems: 10, items: text(200, 'A proof such as unit:name') } } } },
+          plannedFiles: { type: 'array', minItems: 1, maxItems: 100, items: text(500, 'A file or directory the fix changes') },
+        } } },
   },
 };
 
@@ -135,12 +163,66 @@ export function graphyardTools(role: string | undefined = process.env.GRAPHYARD_
   };
   const decide = tool('graphyard_decide', 'Graphyard decide', 'Record your verdict on the Graphyard decision you were asked to judge: approve true or false, with your reason. Call it exactly once; it is your answer.', decideParameters, params => `decision ${params.decision}`, true);
   const evidence = tool('graphyard_submit_evidence', 'Graphyard evidence', 'Submit one proof\'s result on the exact head, base and policy revision you were given, with the exercise run against the tree with the criterion\'s behaviour removed. Call it once per proof, pass or fail.', evidenceParameters, params => `proof ${params.proof}`, false);
-  // The research session's brief (GY-259) is registered for its own role only.
+  // The research session's brief (GY-259), the diagnostician's diagnosis, and the doctor's report are registered for their own roles only.
+  if (role === 'doctor') return [tool('graphyard_doctor_report', 'Graphyard doctor report', 'Record the report of your doctor run: one entry per finding (what was stuck, under which check bound, and whether you could act), one per sanctioned command you ran and what it changed, and one per fault item to file for a finding no open item covers. Call it exactly once; it is your result.', doctorReportParameters, () => 'the doctor report', true)];
   if (role === 'research') return [tool('graphyard_research_brief', 'Graphyard research brief', 'Record the research brief for the item you were asked to research: existing code to reuse, patterns and prior art with sources, risks, the approach you recommend, and the operator\'s product questions with your recommended answers. Call it exactly once; it is your result.', researchParameters, () => 'the brief', true)];
   // The triage session's judgement of a machine-filed backlog item (GY-402), likewise for its own role only.
   if (role === 'triage') return [tool('graphyard_triage_decision', 'Graphyard triage decision', 'Record your judgement of the machine-filed backlog item you were asked to triage: release it with a priority, close it with a reason (naming the delivered item that already fixed it, if any), or merge it into another open item. Call it exactly once; it is your result.', triageParameters, () => 'the judgement', true)];
   return role === 'approver' ? [decide] : role === 'producer' ? [evidence] : [decide, evidence];
 }
+
+// ---- The doctor's command allowlist (GY-711) ----------------------------------------------------
+/**
+ * The master subcommands the doctor's operator-agent identity may run: the sanctioned intents and
+ * two-party requests, never `merge`, `dispatch`, an evidence submission or a lease command. A
+ * command the allowlist refuses is recorded in the doctor's report, never run.
+ */
+export const doctorSanctionedCommands = ['scope', 'requirements', 'unblock', 'decide', 'approver', 'settle-containment', 'close', 'create', 'release'] as const;
+/** The master subcommands and root commands that only read. */
+export const doctorReadOnlyCommands = ['status', 'decisions', 'context', 'guide', 'board'] as const;
+/** Other read-only programs a doctor may consult, with the read-only subcommands of `git` and `gh`. */
+const doctorReadPrograms = new Set(['cat', 'ls', 'head', 'tail', 'grep', 'rg', 'wc', 'jq', 'sort', 'uniq', 'diff', 'stat']);
+const doctorReadSubcommands = new Map<string, ReadonlySet<string>>([
+  ['git', new Set(['log', 'show', 'diff', 'status', 'branch', 'rev-parse', 'blame', 'describe', 'shortlog', 'ls-files', 'worktree'])],
+  ['gh', new Set(['view', 'list', 'checks', 'diff'])],
+]);
+/** The CLI programs a Graphyard command may be invoked through; the words after it are the CLI's own. */
+const doctorCliPrograms = new Set(['graphyard']);
+
+/**
+ * Whether one shell segment is within the doctor role's allowlist. `graphyard` and `node <cli>`
+ * invocations are judged by their command word: the sanctioned subcommands, the read-only ones,
+ * and nothing else — `master merge`, `master dispatch`, an evidence submission and a lease
+ * command are refused by name in the reason. Everything that is not a read is refused.
+ */
+export function doctorSegmentAllowed(words: ShellWord[]): GuardVerdict {
+  const { index } = commandIndex(words);
+  const program = words[index]?.value.split('/').pop() ?? '';
+  const rest = words.slice(index + 1);
+  if (doctorCliPrograms.has(program)) return doctorCommandWords(rest.map(word => word.value));
+  if (program === 'node') {
+    // `node <cli> status GY-N`: the script may be an expansion ($GRAPHYARD_CLI); the first word
+    // after it that is not a node option is the CLI's command word.
+    const after = rest.findIndex(word => !word.value.startsWith('-'));
+    return doctorCommandWords(rest.slice(after + 1).map(word => word.value));
+  }
+  if (doctorReadPrograms.has(program)) return { allow: true };
+  const reads = doctorReadSubcommands.get(program);
+  // `gh pr view 12`: the provider's read subcommands sit one word down under `pr`.
+  if (reads && (reads.has(rest[0]?.value ?? '') || (rest[0]?.value === 'pr' && reads.has(rest[1]?.value ?? '')))) return { allow: true };
+  return { allow: false, reason: doctorRefusal(program) };
+}
+function doctorCommandWords(words: string[]): GuardVerdict {
+  const command = words.find(word => !word.startsWith('-') && word !== 'master');
+  const isMaster = words[0] === 'master';
+  const name = isMaster ? words[1] : command;
+  if (isMaster && doctorSanctionedCommands.includes(name as never)) return { allow: true };
+  if (command === 'evidence') return { allow: false, reason: doctorRefusal('graphyard evidence') };
+  if (doctorReadOnlyCommands.includes(name as never)) return { allow: true };
+  return { allow: false, reason: doctorRefusal(name ? `graphyard ${isMaster ? 'master ' : ''}${name}` : 'that command') };
+}
+/** The refusal a command outside the doctor's allowlist gets: recorded, never run. */
+const doctorRefusal = (what: string) => `Graphyard refused this command for the doctor role: ${what} is outside the doctor's command allowlist, so it was not run. The doctor's sanctioned commands are master ${doctorSanctionedCommands.join(', master ')}; everything else it may do is read-only. Record the refused command in your graphyard_doctor_report instead of retrying it.`;
 
 // ---- The destructive-command guard -------------------------------------------------------------
 export interface GuardContext { cwd: string; home?: string; sessionDirectories?: Iterable<string> }
@@ -329,7 +411,17 @@ export default function graphyard(pi: ExtensionApi) {
   });
   pi.on('tool_call', (event, ctx) => {
     if (event?.toolName !== 'bash') return undefined;
-    const verdict = guardCommand(String(event.input?.command ?? ''), { cwd: ctx?.cwd ?? process.cwd(), sessionDirectories });
+    const command = String(event.input?.command ?? '');
+    const context = { cwd: ctx?.cwd ?? process.cwd(), sessionDirectories };
+    // The doctor role is judged by its command allowlist (GY-711) before the destructive-command
+    // guard: a command outside it is blocked with the reason to record, never run.
+    if (process.env.GRAPHYARD_PI_ROLE === 'doctor') {
+      for (const words of shellWords(command)) {
+        const verdict = doctorSegmentAllowed(words);
+        if (!verdict.allow) return { block: true, reason: verdict.reason };
+      }
+    }
+    const verdict = guardCommand(command, context);
     return verdict.allow ? undefined : { block: true, reason: verdict.reason };
   });
   pi.on('tool_result', event => {

@@ -197,6 +197,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     setup, administration, daemon, dispatch,
     // Each session ledger's bound, retention and the room left for live sessions (GY-131).
     ledgers: { reviews: sessionLedgerHeadroom(reviewRecords, reviewLedgerSpec), producers: sessionLedgerHeadroom(producerRecords, producerLedgerSpec) },
+    doctor: coordinator?.doctor ?? null, // GY-711 doctor runs
     // The inverted loop: what the control plane says each item needs, who is running it, and
     // every session it can be watched through.
     actions: needsHumanActions(actionReport(snapshot), owed.rows),

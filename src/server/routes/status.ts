@@ -19,6 +19,10 @@ import { eventStats } from '../../store/snapshot-delta.js';
 import { productionEnvironmentEvent, productionEnvironmentName, resolvedProductionEnvironment } from '../../flow-analytics.js';
 import { boardFromStatus } from '../../model/board.js';
 import { boundedSnapshot, workDocument } from '../../store/bounded-snapshot.js';
+import { doctorRunRecordSchema } from '../../daemon/state.js';
+
+/** The ledger kinds the pipeline doctor's runs are recorded under (GY-711): one per run, one per item a run found. */
+export const doctorRunEvent = 'doctor-run', doctorFindingEvent = 'doctor-finding';
 
 /** Control-plane status and the work reads every client polls. */
 export const statusRoutes = defineRoutes('status', [
@@ -74,6 +78,9 @@ export const statusRoutes = defineRoutes('status', [
         // placement for the executor asking. It names hosts and login homes, so identities that
         // only implement or produce do not read it.
         fleet: ['admin', 'coordinator', 'reader', 'slice-lead'].includes(actor.role) ? await services.agentRegistry.snapshot(executorHost(url, req)) : null,
+        // The pipeline doctor's last runs (GY-711): what each found, did and filed. The loop
+        // posts one summary per run, so the dashboard's Doctor panel reads them from here.
+        doctor: actor.role === 'operator-agent' ? null : (await engine.store.pool.query('SELECT payload FROM events WHERE kind=$1 ORDER BY seq DESC LIMIT 20', [doctorRunEvent])).rows.map((row: any) => row.payload),
         // Direct-merge mode (direct-merge.ts): the open windows and the one line master status shows while any is.
         directMerge: await directMergeStatus(engine.store.pool, engine.directMergeEnvironment, observedAt),
         // Heartbeat latency and the renewals refused or failed server-side, this process, last 10 minutes (GY-558).
@@ -130,6 +137,28 @@ export const statusRoutes = defineRoutes('status', [
       // the recorded size and the master unpublished, so its next cycle retries.
       engine.mergeBatchSize = batchSize;
       return { mergeQueue: { batchSize }, recorded: true };
+    },
+  },
+  {
+    // The pipeline doctor's run summaries (GY-711). The loop posts one per doctor run, as the
+    // master's operator-agent identity, and the route expands the findings into one event per
+    // item, so a run is one summary in the ledger with an event per item it found. The last runs
+    // are served on /api/status for `master status` and the dashboard's Doctor panel.
+    method: 'POST', path: '/api/doctor',
+    async handle(context) {
+      const { actor, services: { engine } } = context;
+      demand(['coordinator', 'admin', 'operator-agent'].includes(actor.role), 'Coordinator permission required', 403);
+      const run = doctorRunRecordSchema.parse(await parseJson(context, 65_536));
+      await engine.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, doctorRunEvent, JSON.stringify(run)]);
+      const keys = [...new Set(run.findings.map(finding => finding.subject).filter(subject => /^GY-\d+$/.test(subject)))];
+      if (keys.length) {
+        const items = (await engine.store.pool.query(`SELECT id, document->>'key' AS key FROM work_items WHERE document->>'key' = ANY($1)`, [keys])).rows as { id: string; key: string }[];
+        for (const finding of run.findings) {
+          const item = items.find(entry => entry.key === finding.subject);
+          if (item) await engine.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [item.id, actor.id, doctorFindingEvent, JSON.stringify(finding)]);
+        }
+      }
+      return { recorded: true, runs: 1 };
     },
   },
   {
