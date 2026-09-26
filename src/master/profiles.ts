@@ -246,6 +246,13 @@ export const masterBrowserSchema = z.object({
 export type MasterBrowser = z.infer<typeof masterBrowserSchema>;
 
 export const agentIdentitySchema = z.object({ id: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$/), credentialFile: z.string().min(1).max(1000) }).strict();
+/**
+ * GY-516: the product default for `mergeQueue.rerunFailedChecks`, so every installation reruns a
+ * failed required check once on the same sha before the failure ejects the entry; 0 disables it.
+ */
+export const defaultRerunFailedChecks = 1;
+/** The most reruns per sha and check master config and the control plane accept. */
+export const maxRerunFailedChecks = 3;
 export const masterConfigSchema = z.object({
   version: z.literal(1),
   url: z.string(),
@@ -268,7 +275,9 @@ export const masterConfigSchema = z.object({
   run: masterRunSchema.prefault({}),
   // The merge queue (GY-330): how many consecutive entries one combined tip validates (default 4;
   // 1 validates every entry on its own tip). The loop publishes it to the control plane every change.
-  mergeQueue: z.object({ batchSize: z.number().int().min(1).max(maxMergeBatchSize).optional() }).strict().optional(),
+  // GY-516: how many times a required check that failed on a tip or candidate head is rerun (GitHub
+  // "rerun failed jobs") on that sha before the failure ejects it or returns it to test; default 1, 0 disables.
+  mergeQueue: z.object({ batchSize: z.number().int().min(1).max(maxMergeBatchSize).optional(), rerunFailedChecks: z.number().int().min(0).max(maxRerunFailedChecks).optional() }).strict().optional(),
   // The operator's own authenticated browser profile, used only by master browser flows.
   browser: masterBrowserSchema.optional(),
   // The master's own operator-agent identity, and the separate approver identity whose session
@@ -283,6 +292,11 @@ export type MasterConfig = z.infer<typeof masterConfigSchema>;
 /** The merge queue's batch size under this master config: `mergeQueue.batchSize`, or the default of 4. */
 export function mergeBatchSize(config: Pick<MasterConfig, 'mergeQueue'> | null | undefined): number {
   return config?.mergeQueue?.batchSize ?? defaultMergeBatchSize;
+}
+
+/** Reruns of a failed required check per sha under this master config: `mergeQueue.rerunFailedChecks`, or the product default of 1. */
+export function rerunFailedChecks(config: Pick<MasterConfig, 'mergeQueue'> | null | undefined): number {
+  return config?.mergeQueue?.rerunFailedChecks ?? defaultRerunFailedChecks;
 }
 
 export function assertMasterBinding(config: MasterConfig, status: any) {

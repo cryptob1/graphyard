@@ -808,6 +808,8 @@ export function predictQueue(all: Work[], now: number): QueuePlacement[] {
       ? unancestored ? `Speculative tip on predicted base ${predictedBase.slice(0, 12)} has not been published onto that exact commit: ${missingAncestryReason(unancestored)}`
       : `Speculative tip on predicted base ${predictedBase.slice(0, 12)} has not been published and validated for this candidate`
       : `Waiting for ${ahead[position - 1]?.key ?? 'the queue head'} to publish its speculative tip`);
+    // A failed check awaiting its one rerun (GY-516) holds this position; master status says so.
+    if (current) reasons.push(...pendingCheckReruns(work).map(line => `${tipValidationPrefix}${line}`));
     placements.push({
       id: work.id, key: work.key, position, size, sequence: entry.sequence, enqueuedAt: entry.enqueuedAt,
       waitMs: Math.max(0, now - Date.parse(entry.enqueuedAt)), predecessors: ahead.map(item => item.key), skipped, ...(passedOver ? { passedOver } : {}),
@@ -897,11 +899,9 @@ export function ejectionReason(work: Work, ciAppIds: number[], all: Work[] = [],
   if (regressions.length) return `Landing speculative tip ${tip} on ${regressions[0].base.slice(0, 12)} would revert work outside its planned files: ${regressions.map(entry => entry.text).join('; ')}`;
   // Observations retain every run, including superseded ones; only the newest trusted run
   // for a required check decides, exactly as the test gate does, so a successful retry
-  // never leaves an entry ejected by the failure it replaced.
-  const check = work.policy.checks.find(name => {
-    const run = latestCheck(observation.checks.filter(entry => entry.name === name && ciAppIds.includes(entry.appId)));
-    return !!run && failedConclusions.has(run.result);
-  });
+  // never leaves an entry ejected by the failure it replaced. A failure the control plane owes
+  // or awaits one rerun of (GY-516) holds the entry in place until that rerun concludes.
+  const check = failedRequiredCheck(work, observation, ciAppIds);
   // A batch member's tip holds every member ahead of it, so a failure there is not yet its own
   // (GY-330): it is ejected only when the batch plan isolates it — its tip fails on a prefix known
   // to pass, or on the base — and otherwise stays queued while the bisection runs. A head that is
@@ -909,7 +909,7 @@ export function ejectionReason(work: Work, ciAppIds: number[], all: Work[] = [],
   const speculation = work.queue.speculation;
   const planned = !!batch && speculation?.tip === candidate.sha && speculation.base === candidate.baseSha;
   const isolated = !planned || batch!.step.kind === 'eject' && batch!.step.member === work.key;
-  if (check && isolated) return `Required CI check ${check} did not pass on speculative tip ${tip}${planned && batch!.size > 1 ? `, isolated by bisecting batch ${batch.batch} (${batch.members.join(', ')})` : ''}`;
+  if (check && isolated) return `Required CI check ${check} did not pass on speculative tip ${tip}${rerunOutcome(work, candidate.sha, check)}${planned && batch!.size > 1 ? `, isolated by bisecting batch ${batch.batch} (${batch.members.join(', ')})` : ''}`;
   if (observation.reviews.some(review => review.sha === candidate.sha && review.state === 'CHANGES_REQUESTED')) return `Review requested changes on speculative tip ${tip}`;
   // Unresolved threads are the reviewer's inputs, not a reason to eject; only a branch that still
   // requires conversation resolution (protection drift) makes a merge GitHub cannot land.
@@ -1273,8 +1273,10 @@ export function tipVerdict(work: Work, ciAppIds: readonly number[] | null = null
   const speculation = work.queue?.speculation, candidate = work.candidate, observation = work.observation;
   if (!speculation || !candidate || speculation.tip !== candidate.sha || !observation || observation.candidate.sha !== candidate.sha) return undefined;
   const runs = (work.policy?.checks ?? []).map(name => ({ name, run: latestCheck((observation.checks ?? []).filter(entry => entry.name === name && (!ciAppIds || ciAppIds.includes(entry.appId)))) }));
-  const failed = runs.find(entry => !!entry.run && failedConclusions.has(entry.run.result));
-  if (failed) return { result: 'fail', check: failed.name };
+  // A failure awaiting its one rerun (GY-516) is not yet a verdict: the batch waits, as for a pending run.
+  const failed = failedRequiredCheck(work, observation, ciAppIds);
+  if (failed) return { result: 'fail', check: failed };
+  if (runs.some(entry => !!entry.run && failedConclusions.has(entry.run.result))) return undefined;
   return runs.every(entry => entry.run?.result === 'success') ? { result: 'pass' } : undefined;
 }
 /** One batch as master status and the dashboard show it: a substate of the Merge step, never a return to Test. */
@@ -1336,4 +1338,134 @@ export function queueBatch(work: Pick<Work, 'key'>, all: Work[], now: number, ba
  */
 export function nextQueueEntries<W extends { id: string; stage: string; queue?: { sequence: number } | null }>(all: readonly W[], exclude: string, depth: number): W[] {
   return all.filter(other => other.id !== exclude && other.stage !== 'done' && other.queue).sort((a, b) => a.queue!.sequence - b.queue!.sequence).slice(0, depth);
+}
+
+/**
+ * GY-516. One rerun of a failed required check before it counts. A single infrastructure flake on
+ * a validated tip (a database torn down under a test, a runner lost) otherwise ejects the entry and
+ * costs the whole queue a review, proof and CI round for a failure that is not the change's. The
+ * control plane asks GitHub to rerun the failed jobs of that workflow run once, per candidate sha
+ * and check, and while the rerun is owed or running the failure holds: the entry keeps its queue
+ * position and every binding on the unchanged sha. The rerun's own conclusion then decides as any
+ * run does; a second failure on the same sha ejects, or returns the head to its worker, as before.
+ */
+declare module './model/work.js' {
+  interface Work {
+    /** GY-516: the reruns of failed required checks, per candidate sha and check (see `reconcileCheckReruns`). */
+    checkReruns?: CheckRerun[];
+  }
+}
+export interface CheckRerun {
+  /** The candidate sha (a published tip or a head) and the required check that failed on it. */
+  sha: string; check: string;
+  /** The failed check run the rerun answers; its workflow run is the one GitHub reruns. */
+  failedRunId: number;
+  /**
+   * `owed` until the control plane asks GitHub, `requested` once GitHub accepted, `refused` when it
+   * did not (the failure then stands), and the rerun's conclusion once observed: `passed` or
+   * `failed`. `expired` is a request whose rerun never appeared within `checkRerunVisibilityMs`.
+   */
+  state: 'owed' | 'requested' | 'refused' | 'passed' | 'failed' | 'expired';
+  at: string;
+  /** The workflow run GitHub reruns, once asked. */
+  runId?: number;
+  /** The check run of the rerun, once observed. */
+  rerunId?: number;
+  detail?: string;
+  resolvedAt?: string;
+}
+/** The installation-ledger event recording the rerun count the master published (POST /api/merge-queue). */
+export const rerunFailedChecksEvent = 'merge-queue.rerun-failed-checks';
+/** A rerun GitHub accepted but that no new check run shows after this long no longer holds the failure. */
+export const checkRerunVisibilityMs = 15 * 60_000;
+/** Rerun records kept on an item; older ones remain on the ledger. */
+export const checkRerunLimit = 20;
+const holdingRerun = new Set<CheckRerun['state']>(['owed', 'requested']);
+
+export function checkReruns(work: Pick<Work, 'checkReruns'>): CheckRerun[] {
+  return work.checkReruns ?? [];
+}
+/** The rerun holding `run`, the failed latest run of `check` on `sha`: owed or requested for exactly that run. */
+export function holdingCheckRerun(work: Pick<Work, 'checkReruns'>, sha: string, check: string, run: Observation['checks'][number] | undefined): CheckRerun | null {
+  if (!run || run.id === undefined || !failedConclusions.has(run.result)) return null;
+  return checkReruns(work).find(entry => entry.sha === sha && entry.check === check && entry.failedRunId === run.id && holdingRerun.has(entry.state)) ?? null;
+}
+/**
+ * Whether `check`'s newest run on the observed current candidate failed and is held by its one
+ * owed or requested rerun: the loop's decisions and the test gate's next action then wait for the
+ * rerun instead of returning the head to its worker, which would cost the bindings the rerun keeps.
+ */
+export function checkRerunHeld(work: Pick<Work, 'checkReruns' | 'candidate' | 'observation'>, check: string): boolean {
+  const observation = work.observation, sha = work.candidate?.sha;
+  if (!observation || !sha || observation.candidate.sha !== sha) return false;
+  return !!holdingCheckRerun(work, sha, check, latestCheck((observation.checks ?? []).filter(run => run.name === check)));
+}
+/** The required check whose newest trusted run failed on the observed candidate and is not held by a rerun. */
+function failedRequiredCheck(work: Work, observation: Observation, ciAppIds: readonly number[] | null): string | undefined {
+  return (work.policy?.checks ?? []).find(name => {
+    const run = latestCheck((observation.checks ?? []).filter(entry => entry.name === name && (!ciAppIds || ciAppIds.includes(entry.appId))));
+    return !!run && failedConclusions.has(run.result) && !holdingCheckRerun(work, observation.candidate.sha, name, run);
+  });
+}
+/** A transition of a rerun record, as the engine writes it to the item's ledger. */
+export interface CheckRerunTransition { kind: 'check.rerun.owed' | 'check.rerun.passed' | 'check.rerun.failed' | 'check.rerun.expired' | 'check.rerun.requested'; rerun: CheckRerun }
+/**
+ * Brings the rerun records up to the observation just taken, before the gates read it: a rerun
+ * whose own run concluded is resolved with that conclusion, one that never appeared expires, and
+ * each required check whose newest run failed on the current candidate is owed one rerun while
+ * fewer than `limit` were made for that sha and check (0 disables). Pure: the engine records the
+ * transitions, and the GitHub request is made outside the transaction (`owedCheckReruns`).
+ */
+export function reconcileCheckReruns(work: Work, ciAppIds: readonly number[], limit: number, now: Date): { reruns: CheckRerun[]; transitions: CheckRerunTransition[] } {
+  const observation = work.observation, candidate = work.candidate, at = now.toISOString();
+  const transitions: CheckRerunTransition[] = [];
+  let reruns = checkReruns(work);
+  if (!observation || !candidate || observation.candidate.sha !== candidate.sha || observation.merged) return { reruns, transitions };
+  const latestOf = (name: string) => latestCheck((observation.checks ?? []).filter(entry => entry.name === name && ciAppIds.includes(entry.appId)));
+  reruns = reruns.map(entry => {
+    if (entry.sha !== candidate.sha || !holdingRerun.has(entry.state)) return entry;
+    const run = latestOf(entry.check);
+    if (run && run.id !== undefined && run.id !== entry.failedRunId) {
+      // GitHub's rerun is a new check run on the same sha: its conclusion is the rerun's outcome.
+      if (run.result === 'success') { const resolved = { ...entry, state: 'passed' as const, rerunId: run.id, resolvedAt: at }; transitions.push({ kind: 'check.rerun.passed', rerun: resolved }); return resolved; }
+      if (failedConclusions.has(run.result)) { const resolved = { ...entry, state: 'failed' as const, rerunId: run.id, resolvedAt: at }; transitions.push({ kind: 'check.rerun.failed', rerun: resolved }); return resolved; }
+      if (entry.state === 'owed') { const started = { ...entry, state: 'requested' as const, rerunId: run.id }; transitions.push({ kind: 'check.rerun.requested', rerun: started }); return started; }
+      return entry.rerunId === run.id ? entry : { ...entry, rerunId: run.id };
+    }
+    if (entry.state === 'requested' && now.getTime() - Date.parse(entry.at) >= checkRerunVisibilityMs) {
+      const expired = { ...entry, state: 'expired' as const, detail: `GitHub accepted the rerun but no new ${entry.check} run appeared within ${checkRerunVisibilityMs / 60_000} minutes`, resolvedAt: at };
+      transitions.push({ kind: 'check.rerun.expired', rerun: expired }); return expired;
+    }
+    return entry;
+  });
+  for (const name of work.policy?.checks ?? []) {
+    const run = latestOf(name);
+    if (!run || run.id === undefined || !failedConclusions.has(run.result)) continue;
+    const made = reruns.filter(entry => entry.sha === candidate.sha && entry.check === name);
+    if (made.some(entry => entry.failedRunId === run.id) || made.length >= limit) continue;
+    const owed: CheckRerun = { sha: candidate.sha, check: name, failedRunId: run.id, state: 'owed', at };
+    reruns = [...reruns, owed];
+    transitions.push({ kind: 'check.rerun.owed', rerun: owed });
+  }
+  return { reruns: reruns.slice(-checkRerunLimit), transitions };
+}
+/** The reruns the control plane still has to ask GitHub for: owed, on the current candidate, whose failed run is still the newest. */
+export function owedCheckReruns(work: Work, ciAppIds: readonly number[]): CheckRerun[] {
+  const observation = work.observation, candidate = work.candidate;
+  if (!observation || !candidate || observation.candidate.sha !== candidate.sha || observation.merged) return [];
+  return checkReruns(work).filter(entry => entry.sha === candidate.sha && entry.state === 'owed'
+    && latestCheck((observation.checks ?? []).filter(run => run.name === entry.check && ciAppIds.includes(run.appId)))?.id === entry.failedRunId);
+}
+/** What the last rerun of `check` on `sha` came to, as a clause for the failure it did not clear. */
+function rerunOutcome(work: Work, sha: string, check: string): string {
+  const last = checkReruns(work).filter(entry => entry.sha === sha && entry.check === check).at(-1);
+  return !last ? '' : last.state === 'failed' ? ', again after one rerun of its failed jobs'
+    : last.state === 'refused' ? `; its rerun was refused: ${last.detail ?? 'no reason given'}`
+    : last.state === 'expired' ? `; ${last.detail}` : '';
+}
+/** The reruns on the current candidate that still hold a failure, as `<sha>: <what is awaited>` lines. */
+export function pendingCheckReruns(work: Work): string[] {
+  const sha = work.candidate?.sha;
+  return checkReruns(work).filter(entry => entry.sha === sha && holdingRerun.has(entry.state))
+    .map(entry => `${entry.sha.slice(0, 12)}: required CI check ${entry.check} failed and ${entry.state === 'owed' ? 'one rerun of its failed jobs is owed' : `its failed jobs are rerunning${entry.runId ? ` (workflow run ${entry.runId})` : ''}`}; the entry keeps its position and bindings until the rerun concludes`);
 }
