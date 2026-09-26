@@ -67,6 +67,7 @@ export class Store {
     const max = Math.max(2, Math.floor(options.max ?? 12));
     this.pool = new pg.Pool({ connectionString: url, max, connectionTimeoutMillis: storeConnectionTimeoutMs, statement_timeout: storeStatementTimeoutMs });
     this.leasePool = new pg.Pool({ connectionString: url, max: leaseLaneConnections, connectionTimeoutMillis: storeConnectionTimeoutMs, statement_timeout: storeStatementTimeoutMs });
+    for (const pool of [this.pool, this.leasePool]) { pool.on('connect', client => this.open.add(client)); pool.on('remove', client => { this.open.delete(client); if (!this.open.size) this.drained?.(); }); }
     this.background = new BackgroundLane(Math.max(1, Math.floor(max / 2)));
   }
   /**
@@ -176,7 +177,18 @@ export class Store {
     return { version: Number(rows[0].version), digest: rows[0].digest };
   }
   async schema() { return Number((await this.pool.query('SELECT COALESCE(MAX(version),0) AS version FROM graphyard_schema')).rows[0].version); }
-  async close() { await Promise.all([this.pool.end(), this.leasePool.end()]); }
+  /** Every connection the pools opened that has not finished closing, and who waits for none to be left. */
+  private readonly open = new Set<pg.PoolClient>(); private drained?: () => void;
+  /**
+   * End both pools and wait until every connection has closed. pg-pool's end() resolves once it
+   * has asked its clients to end, not once they have: a database stopped right after would
+   * terminate a connection still open, and that notice would escape as an unhandled pool error.
+   */
+  async close() {
+    const drained = new Promise<void>(resolve => { this.drained = resolve; });
+    await Promise.all([this.pool.end(), this.leasePool.end()]);
+    if (this.open.size) await drained;
+  }
   async transaction<T>(fn: (db: pg.PoolClient, now: Date) => Promise<T>, { lane = 'request' }: { lane?: StoreLane } = {}): Promise<T> {
     const permit = lane === 'background' ? await this.background.acquire() : null;
     const db = await (lane === 'lease' ? this.leasePool : this.pool).connect().catch(error => { permit?.(); throw error; });
