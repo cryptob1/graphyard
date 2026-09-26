@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
-import { reconcileItemLockSql } from '../src/store/coordination-sql.js';
+import { reconcileItemLockSql, reconcileVersionsSql } from '../src/store/coordination-sql.js';
 import type { Principal, Work } from '../src/model.js';
 
 // GY-727: the reconciliation tick re-read every work item's full document in every batch, so a
@@ -21,7 +21,7 @@ let database: EmbeddedPostgres, store: Store, engine: Engine;
 // What the passes read and lock, seen on every connection the pool opens. `hold` makes the
 // batch's row lock of one item slow by `ms` after the lock is taken, so a test knows the batch
 // is holding its transaction.
-const counts = { documents: 0, locks: 0, locked: [] as string[] };
+const counts = { documents: 0, locks: 0, locked: [] as string[], versioned: 0 };
 const hold: { id: string | null; ms: number; fired: boolean } = { id: null, ms: 0, fired: false };
 
 let openItems: Work[] = [], heldDone: Work[] = [];
@@ -56,6 +56,7 @@ before(async () => {
         const done = args[last];
         args[last] = (error: unknown, result: { rowCount?: number }) => {
           if (!error && documents) counts.documents += Number(result?.rowCount ?? 0);
+          if (!error && text === reconcileVersionsSql) counts.versioned = Math.max(counts.versioned, Number(result?.rowCount ?? 0));
           return done(error, result);
         };
         return query(...args);
@@ -63,6 +64,7 @@ before(async () => {
       return (async () => {
         const result = await query(...args);
         if (documents) counts.documents += Number((result as { rowCount?: number }).rowCount ?? 0);
+        if (text === reconcileVersionsSql) counts.versioned = Math.max(counts.versioned, Number((result as { rowCount?: number }).rowCount ?? 0));
         if (text === reconcileItemLockSql && hold.id && values?.[0] === hold.id && !hold.fired) {
           hold.fired = true;
           await new Promise(resolve => setTimeout(resolve, hold.ms));
@@ -94,10 +96,11 @@ test('unit:reconcile-reads-open-items-once — a pass reads each candidate once,
   assert.equal(expected, openItems.length + heldDone.length, 'the done items still holding a lease, a queue entry or a row are candidates too');
   // One item per batch: over 150 transactions. The old pass re-read all 700 documents in each.
   engine.reconcileBatchMs = 0;
-  counts.documents = 0; counts.locks = 0;
+  counts.documents = 0; counts.locks = 0; counts.versioned = 0;
   try { await engine.reconcile(); } finally { engine.reconcileBatchMs = 250; }
   assert.equal(counts.documents, expected, `a pass reads each candidate's document exactly once (read ${counts.documents})`);
   assert.equal(counts.locks, expected, `each candidate is locked row by row, once, and no settled delivery is (locked ${counts.locks})`);
+  assert.ok(counts.versioned > 0 && counts.versioned <= expected, `each batch versions only the pass's candidates, never the settled history (${counts.versioned} rows at most)`);
   assert.ok(await candidateCount() < expected, 'the pass settled the done item that still held a queue entry');
 });
 
@@ -169,4 +172,26 @@ test('unit:reconcile-reads-open-items-once — a batch that wrote on a view anot
   assert.equal(reloadedPeer.title, 'Moved under the batch', 'the write that bumped no revision was not overwritten');
   assert.equal(reloaded.lease, null, 'the lapsed lease was reconciled on the run that committed');
   assert.equal(reloaded.ready, true, 'the request that waited on the row lock landed');
+});
+
+test('unit:reconcile-reads-open-items-once — a batch that wrote, then finds a later item moved under it at its row lock, rolls back and runs again', { timeout: 60_000 }, async () => {
+  // Adjacent candidates in one batch: the batch writes `written` (its lease lapsed), and while it
+  // holds that row a raw write moves `peer`, which the batch reaches next. Rereading `peer` there
+  // would refresh the view the commit check compares against, hiding that `written` was evaluated
+  // against the old `peer`; the batch must roll back instead.
+  const [, , , , written, peer] = openItems;
+  const expired = { owner: 'worker', epoch: 1, expiresAt: new Date(Date.now() - 60_000).toISOString() };
+  await store.pool.query(`UPDATE work_items SET document = jsonb_set(document, '{lease}', $2::jsonb) WHERE id = $1`, [written.id, JSON.stringify(expired)]);
+  engine.reconcileBatchMs = 60_000;
+  hold.id = written.id; hold.ms = 500; hold.fired = false;
+  counts.locked = [];
+  const pass = engine.reconcile();
+  for (let waited = 0; !hold.fired && waited < 10_000; waited += 10) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.ok(hold.fired, 'the pass reached the item it writes and took its row lock');
+  await store.pool.query(`UPDATE work_items SET document = jsonb_set(document, '{title}', '"Moved before its row lock"') WHERE id = $1`, [peer.id]);
+  try { await pass; } finally { engine.reconcileBatchMs = 250; hold.id = null; }
+  assert.ok(counts.locked.filter(id => id === written.id).length >= 2, 'the batch rolled back rather than commit a write evaluated against the old peer, and ran again');
+  const after = await store.list();
+  assert.equal(after.find(item => item.id === peer.id)!.title, 'Moved before its row lock', 'the raw write on the peer stands');
+  assert.equal(after.find(item => item.id === written.id)!.lease, null, 'the lapsed lease was reconciled on the run that committed');
 });

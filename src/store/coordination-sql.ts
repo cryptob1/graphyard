@@ -116,11 +116,15 @@ export const reconcileSettledSql = 'SELECT i.id, i.number, i.summary FROM work_i
 /** Items a pass already read that moved since, read again: the only documents a pass reads twice. */
 export const reconcileRereadSql = 'SELECT w.id, w.number, w.xmin::text AS version, w.document FROM work_items w WHERE w.id = ANY($1::uuid[])';
 /**
- * Every row's version, never its document: `xmin` changes with every write to the row, including
- * the writes that bump no revision (a claim renewal), so a pass that compares it with what it read
- * knows exactly which items moved since.
+ * The versions of the rows a pass can be affected by, never their documents: the pass's own
+ * candidates (`$1`) and every row not settled now, which takes in an item created or reopened
+ * since. `xmin` changes with every write to the row, including the writes that bump no revision
+ * (a claim renewal), so a pass that compares it with what it read knows exactly which items moved
+ * since. A settled delivery that stays settled is never visited, so a batch's check grows with
+ * the live items, not with the history (GY-727).
  */
-export const reconcileVersionsSql = 'SELECT id, xmin::text AS version FROM work_items';
+export const reconcileVersionsSql = `SELECT w.id, w.xmin::text AS version FROM work_items w
+  JOIN (SELECT unnest($1::uuid[]) AS id UNION SELECT i.id FROM work_index i WHERE NOT i.settled) live ON live.id = w.id`;
 /**
  * One batch item's row lock, taken as the batch reaches it (GY-727), with the version of the row
  * it locked: after waiting for a writer, the version is the one that writer committed, never the

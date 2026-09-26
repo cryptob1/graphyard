@@ -1852,7 +1852,8 @@ export class Engine {
     const fleet = new Map<string, { number: number; work: Work; version: string }>();
     let all: Work[] = [], candidates: string[] = [], next = 0, contended = 0;
     const view = () => { all = [...fleet.values()].sort((a, b) => a.number - b.number).map(entry => entry.work); };
-    const versionsOf = async (db: PoolClient) => new Map<string, string>((await db.query(reconcileVersionsSql)).rows.map(row => [row.id, row.version]));
+    // Only the pass's candidates and the rows not settled now are versioned: a settled delivery that stays settled is never visited.
+    const versionsOf = async (db: PoolClient) => new Map<string, string>((await db.query(reconcileVersionsSql, [candidates])).rows.map(row => [row.id, row.version]));
     const moved = (versions: Map<string, string>, except = new Set<string>()) => [...versions].filter(([id, version]) => !except.has(id) && fleet.get(id)?.version !== version).map(([id]) => id);
     const reread = async (db: PoolClient, ids: string[]) => {
       if (!ids.length) return;
@@ -1886,8 +1887,13 @@ export class Engine {
             const id = candidates[next++];
             const locked = (await db.query(reconcileItemLockSql, [id])).rows[0] as { version: string } | undefined;
             if (!locked) continue;
-            // Moved between the batch's read and its lock: read it again, now that nothing else can move it.
-            if (locked.version !== fleet.get(id)?.version) await reread(db, [id]);
+            // Moved between the batch's read and its lock: read it again, now that nothing else can move it. An item the
+            // batch already wrote was evaluated against the old version, which the reread would hide from the commit check,
+            // so after any write the batch rolls back and runs again instead.
+            if (locked.version !== fleet.get(id)?.version) {
+              if (written.size) throw new ReconcileContended();
+              await reread(db, [id]);
+            }
             if (await this.reconcileItem(db, fleet.get(id)!.work, all, now)) written.add(id);
           }
           if (!written.size) return done;
