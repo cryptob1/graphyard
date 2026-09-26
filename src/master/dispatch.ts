@@ -14,9 +14,9 @@ import { type ConsentAnswer, type ConsentHold, consentHoldAttention, consentHold
 import type { MasterConfig, WorkerProfile } from './profiles.js';
 import { loadMasterConfig, readCredentialFile, readWorkerCredential } from './config.js';
 import { accountLaunch, agentLaunchPlan, type EnvironmentProbe, onSelectedSession, selectAccount, sharedGitDirectory } from './environments.js';
-import { type PromptDelivery, PromptNotAcceptedError, type RequestDelivery, startAgentSession, type StartBounds } from './launch.js';
-import { createdHerdrTab, type HerdrAgent, herdrJson, stopCreatedHerdrTab } from './herdr.js';
-import { containmentHold } from './containment.js';
+import { closeFailedLaunch, launchStartMs, type PromptDelivery, PromptNotAcceptedError, type RequestDelivery, SessionStartError, startAgentSession, type StartBounds, withLaunchClose } from './launch.js';
+import { createdHerdrTab, type HerdrAgent, herdrJson } from './herdr.js';
+import { containmentHold, stopLaunchSupervisor } from './containment.js';
 import { dependencyDirectories, failureText, type SharedDependencies, shareDependencies } from './worktrees.js';
 import { humanOnlyDecisions, installWorkerHarness, prepareSessionHarness } from './harness.js';
 import { currentAgents, dispatchedFile, DispatchReservedError, profileLaunchedFile, reserveDispatch, watchSupervisorRunning } from './dispatch-reservation.js';
@@ -40,6 +40,11 @@ export interface DispatchOptions {
    * fails once one may be is never closed under it. A test's stub answers for its fake panes.
    */
   supervisor?: (target: { key: string; epoch: number; pane: string | undefined }) => boolean | Promise<boolean>;
+  /**
+   * Stops the watch supervisor of a launch whose runtime never started (GY-413), answering whether
+   * it is gone: its own shutdown settles its quarantine, and only then is its pane closed.
+   */
+  stopSupervisor?: (target: { key: string; epoch: number; pane: string | undefined }) => boolean | Promise<boolean>;
   /** Herdr's agents read afresh, under the profile's reservation (GY-273); the loop passes `listHerdrAgents`. */
   agents?: () => HerdrAgent[] | Promise<HerdrAgent[]>;
 }
@@ -66,7 +71,7 @@ export function assertDispatchable(work: Work, allWork: Work[], observedAt: stri
   // round integrate whichever of two overlapping items lands second.
 }
 
-export async function dispatchWork(root: string, work: Work, profile: WorkerProfile, agents: HerdrAgent[], run?: ChildRun, allWork: Work[] = [work], prepare: WorkerPreparer = prepareWorkerLaunch, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void> = releaseWorkerLaunch, agentTimeoutMs = 30_000, observedAt = new Date().toISOString(), options: DispatchOptions = {}) {
+export async function dispatchWork(root: string, work: Work, profile: WorkerProfile, agents: HerdrAgent[], run?: ChildRun, allWork: Work[] = [work], prepare: WorkerPreparer = prepareWorkerLaunch, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void> = releaseWorkerLaunch, agentTimeoutMs?: number, observedAt = new Date().toISOString(), options: DispatchOptions = {}) {
   assertDispatchable(work, allWork, observedAt);
   const config = await loadMasterConfig(root);
   let target = agents.find(agent => agent.name === profile.agentName);
@@ -103,7 +108,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
         try {
           assertClaimDeadline(work.key, options.claimBy);
           let epoch: number;
-          ({ target, harness, dependencies, delivery, sandbox, started, consent, epoch } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt, options.start, options.sandbox ?? (prepare === prepareWorkerLaunch ? 'host' : null), options.claimBy, options.supervisor));
+          ({ target, harness, dependencies, delivery, sandbox, started, consent, epoch } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt, options.start, options.sandbox ?? (prepare === prepareWorkerLaunch ? 'host' : null), options.claimBy, options.supervisor, options.stopSupervisor));
           // The epoch this launch claimed outlives the reservation, so a dispatcher still holding the older snapshot is refused cleanly.
           const at = new Date().toISOString();
           await writeFile(dispatchedFile(root, work.key), JSON.stringify({ epoch, at }), { mode: 0o600 }).catch(() => {});
@@ -134,7 +139,7 @@ export function consentHold(config: Pick<MasterConfig, 'herdrWorkspace'>, key: s
   return { key, epoch, agentName, pane, attach: herdrAttach(pane, config.herdrWorkspace), prompt: awaiting.prompt, kind: awaiting.kind, since: new Date(now).toISOString(), releaseAt: new Date(now + consentHoldMs).toISOString(), ...(awaiting.request ? { request: awaiting.request } : {}), ...(awaiting.named === false ? { named: false } : {}) };
 }
 
-async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, run: ChildRun | undefined, prepare: WorkerPreparer, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void>, agentTimeoutMs: number, delivery?: PromptDelivery, start?: StartBounds, sandboxProbe: SandboxExec | 'host' | null = null, claimBy?: number, supervisor: NonNullable<DispatchOptions['supervisor']> = watchSupervisorRunning) {
+async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, run: ChildRun | undefined, prepare: WorkerPreparer, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void>, agentTimeoutMs: number | undefined, delivery?: PromptDelivery, start?: StartBounds, sandboxProbe: SandboxExec | 'host' | null = null, claimBy?: number, supervisor: NonNullable<DispatchOptions['supervisor']> = watchSupervisorRunning, stopSupervisor: NonNullable<DispatchOptions['stopSupervisor']> = stopLaunchSupervisor) {
   const prepared = await prepare(root, work.key, profile.name, undefined, claimBy);
   // The worker writes its worktree, the worktree's own Git admin directory and the shared one;
   // each is granted to the runtime's sandbox, and the grant is proved below before anything starts.
@@ -158,7 +163,7 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
     // the supervisor, read from the request file in the worktree (GY-121); only a runtime without
     // that contract is prompted after.
     const started = await startAgentSession(profile.agentName, launch.kind!, pane, [...args, ...sessionHarness.args], prompt, run,
-      { ...delivery, ...start, timeoutMs: start?.timeoutMs ?? agentTimeoutMs, directory: prepared.path, role: sessionHarness.role, prefix: [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--'], holdConsent: true, contract: launch.contract, environment: launch.environment, onRun: () => { ran = true; } });
+      { ...delivery, ...start, timeoutMs: start?.timeoutMs ?? agentTimeoutMs ?? launchStartMs(config), directory: prepared.path, role: sessionHarness.role, prefix: [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--'], holdConsent: true, contract: launch.contract, environment: launch.environment, onRun: () => { ran = true; } });
     // A worker stopped on a prompt the launcher does not answer is held for a human rather than
     // closed: its record beside the launch files is what master status raises and what the watch
     // supervisor bounds, releasing the slot once `consentHoldMs` passes with the prompt unanswered.
@@ -173,10 +178,22 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
     // runtime under it. Closing that pane kills both by SIGHUP and leaves an unverified containment
     // fence (GY-273), so it is left alone: the claim is released below, and the supervisor stops
     // its own worker on the lost lease and settles the containment itself.
-    const supervised = ran && await Promise.resolve(supervisor({ key: work.key, epoch: prepared.epoch, pane })).catch(() => true);
+    const target = { key: work.key, epoch: prepared.epoch, pane };
+    let supervised = ran && await Promise.resolve(supervisor(target)).catch(() => true);
+    // A runtime that never started (GY-413) leaves nothing under its supervisor worth keeping, and
+    // the pane it leaves idles in the worktree holding the containment fence. Its supervisor is
+    // stopped first — its own shutdown settles its quarantine — and only once it is gone is the
+    // pane closed, before the claim is released. A supervisor that will not stop keeps its pane.
+    let stop = '';
+    if (supervised && error instanceof SessionStartError) {
+      supervised = !await Promise.resolve(stopSupervisor(target)).catch(() => false);
+      stop = supervised ? '' : `its watch supervisor for epoch ${prepared.epoch} was stopped and `;
+    }
     if (!supervised && (pane || tabId || malformedTab)) {
-      try { await stopCreatedHerdrTab(pane, tabId ?? malformedTab, run); }
+      let note: string;
+      try { note = await closeFailedLaunch(pane, tabId ?? malformedTab, run); }
       catch { throw new Error(`${failed}; Herdr could not confirm pane shutdown, so Graphyard retained epoch ${prepared.epoch}`); }
+      withLaunchClose(error, `${stop}${note} before epoch ${prepared.epoch} was released`);
     }
     try { await release(root, work.key, prepared.epoch, profile.name); }
     catch { throw new Error(supervised ? `${failed}; pane ${pane} was left to its running supervisor, but Graphyard could not release epoch ${prepared.epoch}` : `${failed}; the pane was stopped but Graphyard could not release epoch ${prepared.epoch}`); }
