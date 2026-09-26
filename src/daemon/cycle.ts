@@ -15,6 +15,7 @@ import { dispatchStep } from './cycle-dispatch.js';
 import { decisionStep } from './cycle-decisions.js';
 import { deploymentStep, mergeStep, shepherdStep } from './cycle-delivery.js';
 import { faultStep } from './faults.js';
+import { triageBacklogStep } from './cycle-triage.js';
 import { Timings, withTimings, withoutTimings } from '../master/timings.js';
 
 /** How many session launches the launcher runs at once when master.json sets no `run.launchConcurrency` (GY-616). */
@@ -202,6 +203,9 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   // 7b. Classify what is wrong and file one item per recurring class (GY-173). It shares the
   //     deployment step's clock: it reads the same snapshot and makes at most one call per class.
   await timings.step('faults', () => faultStep(cycle, assessments));
+  // 7c. The machine-filed backlog (GY-402): the one-time follow-up migration, then a triage run
+  //     for each machine-filed item no triage has judged; its closures go to the approver in 4c.
+  await timings.step('triage', () => triageBacklogStep(cycle));
   spent('deployment');
 
   await settleLaunches();

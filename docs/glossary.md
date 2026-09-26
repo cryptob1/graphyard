@@ -65,7 +65,7 @@ The supervisor that launches sessions and reports their liveness.
 
 ## Who decides
 
-The master applies non-weakening intent (create, release, unblock, add requirements) directly. Rewriting requirements, resolving escalations, rework, recovery, `manual:` attestation, proof grants, repair-lane merges and merges with automatic merging off are requested with `graphyard master decide GY-N ACTION REASON` and applied by a separate approver with `graphyard master approve GY-N DECISION REASON`; the server refuses an approver that requested the decision, held an assignment on the item, produced its evidence, or would receive the grant. Reviewers, producers and the merge gate decide the rest. A human-only decision [parks](master-agent-reference.md#items-scope-and-human-waits) the item until the human answers.
+The master applies non-weakening intent (create, release, unblock, add requirements) directly. Rewriting requirements, resolving escalations, rework, recovery, `manual:` attestation, proof grants, repair-lane merges, triage closures and merges with automatic merging off are requested with `graphyard master decide GY-N ACTION REASON` and applied by a separate approver with `graphyard master approve GY-N DECISION REASON`; the server refuses an approver that requested the decision, held an assignment on the item, produced its evidence, or would receive the grant. Reviewers, producers and the merge gate decide the rest. A human-only decision [parks](master-agent-reference.md#items-scope-and-human-waits) the item until the human answers.
 
 ## Diagram legend
 
