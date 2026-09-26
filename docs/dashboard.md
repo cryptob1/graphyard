@@ -3,7 +3,7 @@
 
 ## Navigation
 
-One sidebar: **Work**, **Workers**, **Shipped**, **Tests** (planned, GY-162), **Insights**, **Settings**.
+One sidebar: **Work**, **Workers**, **Shipped**, **Tests** (planned), **Insights**, **Settings**.
 
 ## Work: one classification
 

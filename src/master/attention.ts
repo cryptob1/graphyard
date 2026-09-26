@@ -14,6 +14,8 @@ import { humanOnlyDecisions } from './harness.js';
 export interface ControlPlaneStatus {
   appPermissions?: { app?: string; installationUrl?: string; verifiedAt?: string | null; error?: string | null; suspended?: boolean; missing?: { permission: string; required: string; features: string[] }[]; attention?: string[] } | null;
   heldJobs?: number;
+  /** Observation jobs that saved no observation three or more times in a row (GY-506); a server before it reports none. */
+  starvedJobs?: { key: string; unobserved: number; error?: string | null; deferred_reason?: string | null }[];
   /** Capacity variables against the configured roster; a server before GY-59 reports none. */
   delegationLimits?: { limits?: Record<string, number>; deployed?: Record<string, string | null>; drift?: { variable: string; deployed: string | null; required: string; reason: string }[]; attention?: string[] } | null;
   /** The build the server runs and the merge protocol it speaks. */
@@ -132,12 +134,19 @@ export function controlPlaneAttention(status: ControlPlaneStatus | undefined) {
   for (const text of report?.attention ?? []) raise('app-permissions', text);
   if (status?.heldJobs) raise('held-jobs', `${status.heldJobs} integration job${status.heldJobs === 1 ? ' is' : 's are'} held on that permission shortfall rather than retried; they resume on their own once the installation reports the permission`);
   for (const text of status?.delegationLimits?.attention ?? []) raise('delegation-limits', text);
+  // A job that keeps finishing without an observation holds the merge queue behind its item (GY-506).
+  for (const job of status?.starvedJobs ?? []) { const text = starvedJobText(job); items.push({ subject: job.key, text, ...agentOwner('master', `graphyard diagnose ${job.key}: the recorded reason names what keeps the observation from being saved; the next saved observation clears this`), ...classified('integration-job') }); }
   const production = status?.production ? productionSummary(status.production) : null;
   for (const text of production?.attention ?? []) raise('production', text);
   const attention = items.map(item => item.text);
   return { attention, attentionItems: items, appPermissions: report ? { app: report.app ?? null, installationUrl: report.installationUrl ?? null, verifiedAt: report.verifiedAt ?? null, error: report.error ?? null, suspended: report.suspended ?? false, missing: (report.missing ?? []).map(shortfall => ({ permission: shortfall.permission, required: shortfall.required, features: shortfall.features })) } : null, heldJobs: status?.heldJobs ?? 0,
     delegationLimits: status?.delegationLimits ? { limits: status.delegationLimits.limits ?? null, deployed: status.delegationLimits.deployed ?? null, drift: (status.delegationLimits.drift ?? []).map(entry => ({ variable: entry.variable, deployed: entry.deployed, required: entry.required, reason: entry.reason })) } : null,
     build: status?.build ? { commit: status.build.commit ?? null, protocol: status.build.protocol ?? null } : null, production };
+}
+/** The attention line for an observation job starved of observations: the item and the path its last run took. */
+export function starvedJobText(job: NonNullable<ControlPlaneStatus['starvedJobs']>[number]) {
+  const path = job.error ? `last refusal: ${job.error}` : job.deferred_reason ? `last reschedule: ${job.deferred_reason}` : 'no reason recorded, so the job loop fails before the observation';
+  return `${job.key}'s observation job has finished ${job.unobserved} times in a row without saving an observation; ${path}`;
 }
 /**
  * The fleet as `master status` reports it, straight from the control plane's agent registry:
@@ -150,7 +159,8 @@ export function fleetStatus(fleet: FleetView | null | undefined) {
   if (!fleet) return { fleet: null, attentionItems: [] as AttentionItem[] };
   const accounts = fleet.accounts.map(account => ({ account: account.name, runtime: account.runtime, model: account.model, modelId: account.modelId, cost: account.cost, capability: account.capability?.tier ?? null, host: account.host,
     roles: account.roles.map(entry => `${entry.role} (${entry.preference} of ${entry.of})`), liveSessions: account.liveSessions.map(session => ({ role: session.role, work: session.work, since: session.since })),
-    loggedIn: account.loggedIn, quota: account.quota, usage: account.usage, resetsAt: account.resetsAt, observedAt: account.observedAt, eligible: account.eligible, ineligible: account.ineligible }));
+    loggedIn: account.loggedIn, quota: account.quota, usage: account.usage, resetsAt: account.resetsAt, observedAt: account.observedAt, eligible: account.eligible, ineligible: account.ineligible,
+    smoke: account.smoke ? { result: account.smoke.result, at: account.smoke.at, reason: account.smoke.reason } : null, heldFrom: account.held ?? [] }));
   const attentionItems: AttentionItem[] = fleet.configured ? fleet.attention.map(text => ({ subject: 'fleet', text,
     ...agentOwner('master', /is not configured/.test(text) ? 'graphyard master registry role set ROLE ACCOUNT[,ACCOUNT…] --concurrency N --reason REASON' : /serves no role/.test(text) ? 'graphyard master registry role set ROLE ACCOUNT[,ACCOUNT…] --reason REASON, or graphyard master registry account remove NAME --reason REASON'
       : 'graphyard master registry (each account\'s ineligible reason names what to fix: log it in, wait for its reset, or add an account and name it in the role)'), ...classified('fleet') })) : [];
