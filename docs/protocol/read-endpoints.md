@@ -8,6 +8,7 @@
 - `GET /api/interventions?window=7|30|90`: the window's ledger rows only (`ledger.since`).
 - `GET /api/events?work=UUID`: one item's events, newest first; `graphyard events GY-N --all` walks them.
 - `GET /api/analytics/flow`, `/api/analytics/attribution`: bounded. Flow days: UTC midnights to today, the first holding earlier time. `window.covered`/`window.kinds`: scan and per-kind reach; `throughput[].covered: false`: unread, not zero. Merged is Deploy; `stepDwell[].sparse` (n<5): marked, unsplit.
+- `/api/interventions`, `/api/analytics/flow`, `/api/shipping-pulse`: own 3-connection pool, 20s statement timeout.
 - `GET /api/deployments`: `POST /api/deployments` observations (`producer`/`admin`; `state` `succeeded`, `failed` or `rolled_back`; never moves a gate).
 - `GET /api/delegation`, `/api/proof-grants`, `/api/delivery`: slices, live proof authority, release state.
 
