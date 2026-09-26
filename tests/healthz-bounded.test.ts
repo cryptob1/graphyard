@@ -93,11 +93,3 @@ test('unit:healthz-select-bounded — while a probe is still queued behind the s
   for (const body of [...bodies, later]) assert.deepEqual(body.causes, [`database probe did not finish within ${healthCheckWaitMs} ms; the pool is busy`]);
   assert.equal(connects, 1, 'one acquisition waits in the pool queue, however many requests asked');
 });
-
-test('unit:settle-clock-bound-fast-read — GET /time answers the plane\'s clock without touching the database', async () => {
-  const route = healthRoutes.routes.find(entry => entry.path === '/time')!;
-  const before = Date.now();
-  const answer = await route.handle({ services: { engine: { store: { pool: { connect: () => { throw new Error('the clock read must not touch the pool'); } } } } } } as any, []) as { now: string };
-  assert.ok(Date.parse(answer.now) >= before && Date.parse(answer.now) <= Date.now());
-  assert.equal(route.method, 'GET');
-});

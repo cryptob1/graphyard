@@ -2,7 +2,7 @@
 import { randomUUID } from 'node:crypto';
 import { parseArgs } from 'node:util';
 import { resourceConflicts } from '../../coordination.js';
-import { approvedMerges, continueMergeBatch, currentMergeCandidates, dispatchWork, listHerdrAgents, mergeExecutor, readWorkerCredential, snapshotWithClock, containmentClock, readControlPlaneClock, verifyContainmentDeath } from '../../master.js';
+import { approvedMerges, continueMergeBatch, currentMergeCandidates, dispatchWork, listHerdrAgents, mergeExecutor, readWorkerCredential, snapshotWithClock, verifyContainmentDeath } from '../../master.js';
 import { readDaemonState } from '../../master-daemon.js';
 import { verificationEffects, verifyDeployment } from '../../master-verification.js';
 import { cycleBudget, masterStatusReport } from '../master-status.js';
@@ -23,8 +23,7 @@ export async function operationsCommand(session: MasterSession): Promise<unknown
     const work = snapshot.work.find((item: any) => item.id === args[0] || item.key === args[0]);
     if (!work) throw new Error(`Unknown work item ${args[0]}`);
     if (!work.containmentQuarantine) throw new Error(`${work.key} has no containment quarantine to settle`);
-    const clock = await containmentClock(clockOffset, () => readControlPlaneClock(master.url));
-    const assessment = await verifyContainmentDeath(work, { hostId: master.hostId, observedAt: snapshot.now, clockOffset: clock.clockOffset, clockRoundTripMs: clock.roundTripMs, clockSource: clock.source });
+    const assessment = await verifyContainmentDeath(work, { hostId: master.hostId, observedAt: snapshot.now, clockOffset });
     if (!assessment.settleable) {
       // Every process still holding the fence is printed with its command line and working
       // directory: the master verifies whose it is before stopping anything.

@@ -67,22 +67,22 @@ export interface ControlPlaneClock { clockOffset: { min: number; max: number }; 
 /** How long the timed clock read may take before the loop falls back to the snapshot's bounds. */
 export const controlPlaneClockTimeoutMs = 10_000;
 /**
- * Bound the local clock against the control plane with a light timed read (GY-795): `GET /time`
- * answers the plane's clock and touches nothing else, so its round trip, which is the width of the
- * bound, stays short on a plane whose work snapshot takes seconds to build. A plane that predates
- * the endpoint still stamps its answer with a `Date` header, which is truncated to the second, so
- * that bound is a second wider.
+ * Bound the local clock against the control plane with a light timed read (GY-795): a `HEAD /`
+ * is answered by the plane's static route from a file, touching neither the database nor the
+ * store, and stamped with the plane's `Date` header. Its round trip, plus the second the header is
+ * truncated to, is the width of the bound, which stays short on a plane whose work snapshot takes
+ * seconds to build.
  */
 export async function readControlPlaneClock(url: string, deps: { fetcher?: typeof fetch; clock?: () => number; timeoutMs?: number } = {}): Promise<ControlPlaneClock> {
   const fetcher = deps.fetcher ?? fetch, clock = deps.clock ?? Date.now;
   const before = clock();
-  const response = await fetcher(`${url.replace(/\/+$/, '')}/time`, { signal: AbortSignal.timeout(deps.timeoutMs ?? controlPlaneClockTimeoutMs) });
-  const body = response.ok ? await response.json().catch(() => null) : (await response.body?.cancel().catch(() => undefined), null);
+  const response = await fetcher(`${url.replace(/\/+$/, '')}/`, { method: 'HEAD', signal: AbortSignal.timeout(deps.timeoutMs ?? controlPlaneClockTimeoutMs) });
   const after = clock();
-  const answered = Date.parse(body?.now ?? ''), dated = Date.parse(response.headers.get('date') ?? '');
-  const [earliest, latest] = Number.isFinite(answered) ? [answered, answered] : Number.isFinite(dated) ? [dated, dated + 999] : [NaN, NaN];
-  if (!Number.isFinite(earliest)) throw new Error(`The control plane answered GET /time (${response.status}) with neither its time nor a Date header`);
-  return { clockOffset: { min: Math.round(before - latest), max: Math.round(after - earliest) }, roundTripMs: Math.max(0, Math.round(after - before)), source: 'timed read' };
+  await response.body?.cancel().catch(() => undefined);
+  const dated = Date.parse(response.headers.get('date') ?? '');
+  if (!Number.isFinite(dated)) throw new Error(`The control plane answered HEAD / (${response.status}) without a readable Date header`);
+  // The header names the second the plane answered in: its clock read somewhere in [dated, dated + 999].
+  return { clockOffset: { min: Math.round(before - (dated + 999)), max: Math.round(after - dated) }, roundTripMs: Math.max(0, Math.round(after - before)), source: 'timed read' };
 }
 /**
  * The bounds a containment assessment is judged with: the timed read's, or, when that read fails,

@@ -3,11 +3,12 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { assertDispatchable, assessContainment, buildMasterStatus, containmentClock, readControlPlaneClock, containmentHold, masterConfigSchema, type ContainmentAssessment, type MasterConfig, type WorkerProfile } from '../src/master.js';
+import { assertDispatchable, assessContainment, buildMasterStatus, containmentHold, masterConfigSchema, type ContainmentAssessment, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { emptyDaemonState, reconcilePendingActions, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { probeSupervisorAbsence } from '../src/containment-probe.js';
 import { annotatePaneShell, containmentSettlementRefusals, countHeldChildren, isInteractiveShell, paneShellReport, type ContainmentVerification } from '../src/quarantine.js';
 import type { Work } from '../src/model.js';
+import { containmentClock, readControlPlaneClock } from '../src/master/containment.js';
 
 const observedAt = '2030-01-01T12:00:00.000Z';
 const at = (offsetMs: number) => new Date(Date.parse(observedAt) + offsetMs).toISOString();
@@ -329,10 +330,10 @@ function slowPlane(options: { snapshotMs: number; timedReadMs: number | null }) 
   // The host clock runs exactly with the plane's; the snapshot is stamped halfway through its read.
   let local = Date.parse(observedAt) - options.snapshotMs / 2;
   const fetched: string[] = [];
-  const fetcher = (async (url: string) => {
-    fetched.push(url);
+  const fetcher = (async (url: string, init: RequestInit) => {
+    fetched.push(`${init.method} ${url}`);
     local += options.timedReadMs!;
-    return new Response(JSON.stringify({ now: new Date(local - options.timedReadMs! / 2).toISOString() }), { headers: { 'content-type': 'application/json' } });
+    return new Response(null, { headers: { date: new Date(local - options.timedReadMs! / 2).toUTCString() } });
   }) as unknown as typeof fetch;
   const overrides: Partial<DaemonEffects> = {
     snapshot: async () => { local += options.snapshotMs; return { work: [lapsedQuarantine], now: observedAt }; },
@@ -347,11 +348,11 @@ const lapsedQuarantine = launched(null, at(-600_000));
 test('unit:settle-clock-bound-fast-read a 12-second snapshot read and a 200 ms timed read: the loop bounds its clock with the timed read and settles a lapsed, verified-dead quarantine', async () => {
   const plane = slowPlane({ snapshotMs: 12_000, timedReadMs: 200 });
   const { settled, state } = await loop(lapsedQuarantine, plane.overrides, undefined, plane.clock);
-  assert.deepEqual(plane.fetched, ['https://graphyard.example/time'], 'the light read is the plane\'s time endpoint, read once before assessing');
+  assert.deepEqual(plane.fetched, ['HEAD https://graphyard.example/'], 'the light read is one HEAD of the plane, read once before assessing');
   assert.equal(settled.length, 1, 'the quarantine settles automatically');
   assert.deepEqual(settled[0].refusals, []);
   const bound = settled[0].verification!.clockOffset;
-  assert.ok(bound.max - bound.min <= 200, `the timed read bounds the offset to its round trip, not the snapshot's 12 s (${JSON.stringify(bound)})`);
+  assert.ok(bound.max - bound.min <= 200 + 999, `the timed read bounds the offset to its round trip and the Date header's second, not the snapshot's 12 s (${JSON.stringify(bound)})`);
   assert.equal(state.actions[`settle:${lapsedQuarantine.id}:1`]?.state, 'done');
 
   // Without the timed read the snapshot's 12 s bound is all there is, and it cannot settle.
@@ -359,14 +360,14 @@ test('unit:settle-clock-bound-fast-read a 12-second snapshot read and a 200 ms t
   assert.deepEqual((await loop(lapsedQuarantine, unmeasured.overrides, undefined, unmeasured.clock)).settled, []);
 });
 
-test('unit:settle-clock-bound-fast-read the timed read falls back to the Date header of a plane without the time endpoint, and the snapshot bounds stand when it fails', async () => {
+test('unit:settle-clock-bound-fast-read the timed read bounds the offset by the Date header of a HEAD, and the snapshot bounds stand when it fails', async () => {
   let local = Date.parse(observedAt);
-  const dated = (async () => { local += 150; return new Response('<html></html>', { headers: { date: new Date(Date.parse(observedAt)).toUTCString() } }); }) as unknown as typeof fetch;
+  const dated = (async () => { local += 150; return new Response(null, { headers: { date: new Date(Date.parse(observedAt)).toUTCString() } }); }) as unknown as typeof fetch;
   const clock = await readControlPlaneClock('https://graphyard.example/', { fetcher: dated, clock: () => local });
-  assert.deepEqual(clock, { clockOffset: { min: -999, max: 150 }, roundTripMs: 150, source: 'timed read' }, 'the header is truncated to the second, so the bound is a second wider');
-  const refused = (async () => new Response('nope', { status: 502 })) as unknown as typeof fetch;
-  await assert.rejects(readControlPlaneClock('https://graphyard.example', { fetcher: refused }), /neither its time nor a Date header/);
-  assert.deepEqual(await containmentClock({ min: -6_000, max: 6_000 }, () => readControlPlaneClock('https://graphyard.example', { fetcher: refused })),
+  assert.deepEqual(clock, { clockOffset: { min: -999, max: 150 }, roundTripMs: 150, source: 'timed read' }, 'the header is truncated to the second, so the bound is a second wider than the round trip');
+  const undated = (async () => { const response = new Response(null, { status: 502 }); response.headers.delete('date'); return response; }) as unknown as typeof fetch;
+  await assert.rejects(readControlPlaneClock('https://graphyard.example', { fetcher: undated }), /without a readable Date header/);
+  assert.deepEqual(await containmentClock({ min: -6_000, max: 6_000 }, () => readControlPlaneClock('https://graphyard.example', { fetcher: undated })),
     { clockOffset: { min: -6_000, max: 6_000 }, roundTripMs: 12_000, source: 'snapshot read' });
 });
 

@@ -94,8 +94,4 @@ export const healthRoutes = defineRoutes('health', [
       ...releaseInfo(), schema: schemaVersion, commit: services.build.commit, protocol: services.build.protocol };
     return verdict.healthy || !url.searchParams.has('strict') ? body : send(503, body);
   } },
-  // The control plane's clock alone, touching nothing else, so a host can bound its clock offset
-  // with a round trip as short as the network allows (GY-795): the work snapshot takes seconds on
-  // a loaded plane, and a bound that wide refused every automatic containment settlement.
-  { method: 'GET', path: '/time', handle: async () => ({ now: new Date().toISOString() }) },
 ]);

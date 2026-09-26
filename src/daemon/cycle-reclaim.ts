@@ -1,6 +1,7 @@
 // Concern: cycle step 3 — reclaim disk, bounded resources and dead sessions' quarantines.
 import { describeReclaim } from '../master-resources.js';
-import { diskThresholdBytes, containmentPhase, containmentClock } from '../master.js';
+import { diskThresholdBytes, containmentPhase } from '../master.js';
+import { containmentClock } from '../master/containment.js';
 import { worktreeRootMinFreeBytes } from '../install/worktree-root.js';
 import { gigabytes, message, reclaimIntervalMs, reclaimSummarySchema } from './state.js';
 import { readyToRetry } from './sessions.js';
