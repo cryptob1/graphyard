@@ -152,7 +152,7 @@ test('unit:pi-account-key-by-reference — a Pi account names its key file and v
   assert.deepEqual(registry.current().accounts[0].credential.key, zaiKey, 'the registry stores the reference');
   const pi = await fakePi();
   try {
-    const launched = await launchApprover(root, item('GY-901'), decisionId(1), undefined, { agents: [], available: true }, noHerdr, { registry: registry.client, quota: false, cacheMs: 0 }, undefined, { fetcher: accepted });
+    const launched = await launchApprover(root, item('GY-901'), decisionId(1), undefined, { agents: [], available: true }, noHerdr, { registry: registry.client, quota: false, cacheMs: 0 }, undefined, { fetcher: accepted, filesystem: durable });
     assert.equal(launched.runtime, 'pi'); assert.equal(launched.account?.environment, 'pi-a');
     const run = (await launched.settled)!;
     assert.equal(run.result?.ok, true, `the approver judged its decision: ${JSON.stringify(run.result)}`);
@@ -204,7 +204,7 @@ test('unit:account-smoke-gate — an account is smoke-tested before it is first 
   piFleet(registry, config.hostId, [{ name: 'pi-a', home: keyless }]);
   const pi = await fakePi();
   try {
-    await assert.rejects(launchApprover(root, item('GY-902'), decisionId(2), undefined, { agents: [], available: true }, noHerdr, { registry: registry.client, quota: false, cacheMs: 0 }, undefined, { fetcher: accepted }),
+    await assert.rejects(launchApprover(root, item('GY-902'), decisionId(2), undefined, { agents: [], available: true }, noHerdr, { registry: registry.client, quota: false, cacheMs: 0 }, undefined, { fetcher: accepted, filesystem: durable }),
       /No healthy agent account for approver.*pi-a failed its smoke test: No API key found for zai\./s);
     assert.deepEqual((await pi.runs()).map(entry => entry.smoke), [true], 'the smoke test ran, and no approver session launched');
     const account = registry.current().accounts[0];
@@ -213,18 +213,18 @@ test('unit:account-smoke-gate — an account is smoke-tested before it is first 
     assert.match(fleetView(registry.current(), Date.now()).accounts[0].ineligible!, /failed its smoke test: No API key found for zai/);
 
     // A failed account is not tested again on every launch: it stays out until it is changed.
-    await assert.rejects(launchApprover(root, item('GY-902'), decisionId(2), undefined, { agents: [], available: true }, noHerdr, { registry: registry.client, quota: false, cacheMs: 0 }, undefined, { fetcher: accepted }), /failed its smoke test/);
+    await assert.rejects(launchApprover(root, item('GY-902'), decisionId(2), undefined, { agents: [], available: true }, noHerdr, { registry: registry.client, quota: false, cacheMs: 0 }, undefined, { fetcher: accepted, filesystem: durable }), /failed its smoke test/);
     assert.equal((await pi.runs()).length, 1);
 
     // The fix is a registry change — naming the key — and the change is tested before any session.
     registry.mutate('account.set', { account: { name: 'pi-a', runtime: 'pi', model: 'glm-flash', credential: { host: config.hostId, home: keyless, key: zaiKey } }, reason: 'Name the z.ai key' });
     assert.equal(registry.current().accounts[0].smoke, undefined, 'the change clears the old result');
-    const launched = await launchApprover(root, item('GY-902'), decisionId(2), undefined, { agents: [], available: true }, noHerdr, { registry: registry.client, quota: false, cacheMs: 0 }, undefined, { fetcher: accepted });
+    const launched = await launchApprover(root, item('GY-902'), decisionId(2), undefined, { agents: [], available: true }, noHerdr, { registry: registry.client, quota: false, cacheMs: 0 }, undefined, { fetcher: accepted, filesystem: durable });
     assert.equal((await launched.settled)!.result?.ok, true);
     assert.deepEqual((await pi.runs()).map(entry => entry.smoke), [true, true, false]);
     assert.equal(registry.current().accounts[0].smoke?.result, 'pass');
     // A passed account is not tested again until it changes.
-    await (await launchApprover(root, item('GY-903'), decisionId(3), undefined, { agents: [], available: true }, noHerdr, { registry: registry.client, quota: false, cacheMs: 0 }, undefined, { fetcher: accepted })).settled;
+    await (await launchApprover(root, item('GY-903'), decisionId(3), undefined, { agents: [], available: true }, noHerdr, { registry: registry.client, quota: false, cacheMs: 0 }, undefined, { fetcher: accepted, filesystem: durable })).settled;
     assert.deepEqual((await pi.runs()).map(entry => entry.smoke), [true, true, false, false]);
     // A change to the runtime or model an account runs is a change to it too.
     registry.mutate('model.set', { model: { name: 'glm-flash', id: 'zai/glm-5.3-flash-2' }, reason: 'New model version' });
@@ -246,7 +246,7 @@ test('unit:account-smoke-gate — two consecutive approver runs on one account t
   piFleet(registry, config.hostId, [{ name: 'pi-a', home: silent, key: zaiKey }, { name: 'pi-b', home: judging, key: zaiKey }]);
   const pi = await fakePi();
   const launch = async (n: number) => {
-    const launched = await launchApprover(root, item(`GY-91${n}`), decisionId(10 + n), undefined, { agents: [], available: true }, noHerdr, { registry: registry.client, quota: false, cacheMs: 0 }, undefined, { fetcher: accepted });
+    const launched = await launchApprover(root, item(`GY-91${n}`), decisionId(10 + n), undefined, { agents: [], available: true }, noHerdr, { registry: registry.client, quota: false, cacheMs: 0 }, undefined, { fetcher: accepted, filesystem: durable });
     return { account: launched.account?.environment, run: (await launched.settled)! };
   };
   try {

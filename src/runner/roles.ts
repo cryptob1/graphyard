@@ -84,12 +84,12 @@ const failure = (error: unknown) => error instanceof Error ? error.message : Str
  * sees it, and apply its submission when it ends. `settled` resolves to the record the session
  * keeps: the run's last events, its result, and what became of each submission.
  */
-export function startNarrowRun<T>(input: { runner: Runner; name: string; role: 'approver' | 'producer'; work: string; subject: string; prompt: string; options: RunOptions<T>;
+export function startNarrowRun<T>(input: { runner: Runner; name: string; role: 'approver' | 'producer'; work: string; subject: string; prompt: string; options: RunOptions<T>; checkout?: string;
   apply: (result: RunResult<T>) => Promise<Applied[]> }) {
   const live = liveRun(input.name);
   if (live) throw new Error(`A ${live.role} run named ${input.name} is already running for ${live.work}`);
   const run = input.runner.start(input.prompt, input.options), startedAt = new Date().toISOString();
-  registerRun({ name: input.name, role: input.role, work: input.work, subject: input.subject, run: run as Run<unknown> });
+  registerRun({ name: input.name, role: input.role, work: input.work, subject: input.subject, run: run as Run<unknown>, ...(input.checkout ? { checkout: input.checkout } : {}) });
   const settled = run.result().then(async result => {
     let applied: Applied[];
     try { applied = await input.apply(result); }
@@ -149,9 +149,10 @@ export const producerRunOptions = (cwd: string, binding: { sha: string; baseSha:
   },
 });
 
-export function piApproverPrompt(config: { repository: string; cliPath: string }, key: string, decision: string, identity: string) {
+export function piApproverPrompt(config: { repository: string; cliPath: string }, key: string, decision: string, identity: string, repository?: string) {
   const cli = `node ${config.cliPath}`;
   return `You are the independent Graphyard approver for ${config.repository}, acting as ${identity}. Judge decision ${decision} on ${key}: run ${cli} master decisions ${key}, read the item with ${cli} status ${key}, its pull request and history, and weigh the requester's reason against the item's criteria and the operator's goals. `
+    + (repository ? `Your working directory is a scratch directory of your own; the repository is at ${repository} and is read-only to you: read it with git -C ${repository}, never write, move or remove anything in it. ` : '')
     + `Then call the graphyard_decide tool exactly once with decision "${decision}", approve true if the decision is justified or false if it is not, and your reason; a decline is a call with approve false, never an exit without one. Graphyard applies your verdict as ${identity}, so do not run master approve or master refuse yourself. `
     + 'Never approve a decision you requested, implemented, or produced evidence for; never edit, push, merge, review, or submit evidence. Stop after the call.';
 }
