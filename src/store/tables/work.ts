@@ -56,7 +56,12 @@ ALTER TABLE jobs ADD COLUMN IF NOT EXISTS claimed_generation bigint NOT NULL DEF
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS held_until timestamptz;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS held_reason text;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS refusals int NOT NULL DEFAULT 0;
-ALTER TABLE jobs ADD COLUMN IF NOT EXISTS held_on text;`,
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS held_on text;
+-- Consecutive finishes that saved no observation (GY-506): the starvation count an attention
+-- item is raised at, reset by the next observation that is saved.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS unobserved int NOT NULL DEFAULT 0;
+-- Why an observation job was deferred rather than spent, recorded beside the deferral itself (GY-506).
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS deferred_reason text;`,
 });
 export const webhookReceipts = defineTable({
   name: 'webhook_receipts', orderBy: 'id',
