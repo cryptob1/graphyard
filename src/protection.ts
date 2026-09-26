@@ -157,22 +157,26 @@ const repositoryMerge = Symbol.for('graphyard.repositoryMerge');
 // answers the queue ruleset with HTTP 422. There GitHub merges through auto-merge instead, which
 // Graphyard enables per pull request once every gate passes, so the repository must allow it.
 export type MergeMode = 'queue' | 'auto-merge';
-/** The repository settings the merge mode depends on; `queueRefused` records a 422 on the queue ruleset. */
-export interface RepositoryMergeSettings { ownerType: string; allowAutoMerge: boolean; queueRefused?: boolean }
+/** The repository settings the merge mode depends on, as GitHub's repository document reports them. */
+export interface RepositoryMergeSettings { ownerType: string; allowAutoMerge: boolean }
 /** The merge settings of a repository document, or null when it does not say who owns the repository. */
 export function repositoryMergeSettings(repository: unknown): RepositoryMergeSettings | null {
   const owner = (repository as any)?.owner?.type;
   return typeof owner === 'string' ? { ownerType: owner, allowAutoMerge: (repository as any).allow_auto_merge === true } : null;
 }
 /**
- * How GitHub merges on this repository: through a merge queue when the base branch already has one,
- * or the repository is organization-owned and GitHub did not refuse the queue ruleset; through
- * auto-merge otherwise. Unread settings keep the queue, the mode every earlier protection planned.
+ * How GitHub merges on this repository: through a merge queue when the base branch already has one;
+ * through auto-merge when the repository is user-owned, or organization-owned with auto-merge
+ * already allowed — `allow_auto_merge` is the persistent record of a queue ruleset GitHub refused
+ * with HTTP 422 (GY-350), which every 422 fallback writes, so a later plan, apply or install reads
+ * the settled mode back from GitHub instead of retrying the refused ruleset; through the queue
+ * otherwise. Unread settings keep the queue, the mode every earlier protection planned.
  */
 export function mergeMode(settings: RepositoryMergeSettings | null, rules: unknown): MergeMode {
   if (Array.isArray(rules) && rules.some((rule: any) => rule?.type === 'merge_queue')) return 'queue';
   if (!settings) return 'queue';
-  return settings.ownerType === 'Organization' && !settings.queueRefused ? 'queue' : 'auto-merge';
+  if (settings.ownerType !== 'Organization') return 'auto-merge';
+  return settings.allowAutoMerge ? 'auto-merge' : 'queue';
 }
 /** Whether a failed queue ruleset write is GitHub refusing merge queues on this repository (HTTP 422). */
 export function queueRulesetRefused(detail: string) { return /\bHTTP 422\b|\(422\)|\b422 Unprocessable/i.test(detail); }
@@ -308,7 +312,9 @@ export async function applyProtection(config: { repository: string; baseBranch: 
   let queueRefused = false;
   if (plan.mergeQueue && (!plan.mergeQueue.queue || !plan.mergeQueue.requiredCheck || plan.repairBypass?.configured === false)) {
     try { applyMergeQueue(config, run); } catch (error: any) {
-      // GitHub refused the queue ruleset (HTTP 422): this repository cannot have a merge queue, so it merges through auto-merge.
+      // GitHub refused the queue ruleset (HTTP 422): this repository cannot have a merge queue, so it
+      // merges through auto-merge. Switching auto-merge on records the settled mode in the repository
+      // itself (GY-350): the verify below re-plans from it, and no later plan or apply retries the write.
       if (!queueRulesetRefused(`${error?.message ?? ''}\n${error?.stderr ?? ''}`)) throw error;
       queueRefused = true;
     }
@@ -325,8 +331,7 @@ export async function applyProtection(config: { repository: string; baseBranch: 
     run('gh', ['api', '--method', 'PATCH', `repos/${config.repository}/branches/${encodeURIComponent(config.baseBranch)}/protection/required_pull_request_reviews`, '--input', '-'],
       JSON.stringify({ required_approving_review_count: plan.desired.requiredApprovals, require_last_push_approval: plan.desired.requireLastPushApproval, dismiss_stale_reviews: plan.desired.dismissStaleReviews }));
   }
-  const reread = readProtection(config, run), settings: RepositoryMergeSettings | null = reread?.[repositoryMerge] ?? null;
-  if (queueRefused && reread && typeof reread === 'object') withMergeSettings(reread, { ownerType: settings?.ownerType ?? 'Organization', allowAutoMerge: settings?.allowAutoMerge === true, queueRefused });
+  const reread = readProtection(config, run);
   const verified = protectionPlan(reread, config, work);
   if (!verified.consistent) throw new Error(`GitHub did not report the reconciled protection; branch protection remains inconsistent with the open review policies: ${[...verified.changes, ...verified.blockers].join('; ')}`);
   return { ...verified, applied: true, result: `branch protection now matches the ${plan.mode} review policy of every open item${verified.mergeQueue ? `, and ${plan.branch} merges through GitHub's merge queue requiring ${CHECK_NAME}; the queue's only bypass actor is App ${config.githubAppId} in pull-request mode, for the audited repair lane` : verified.autoMerge ? `, and ${plan.branch} merges through auto-merge requiring ${CHECK_NAME} (the repository cannot have a merge queue)` : ''}` };

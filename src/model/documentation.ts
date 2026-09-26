@@ -66,6 +66,22 @@ export function configuredDocumentation(env: NodeJS.ProcessEnv = typeof process 
   return documentationPolicySchema.parse(value);
 }
 
+/**
+ * The committed `graphyard.json` policy against the one the control plane serves (GY-293). The
+ * control plane reads only GRAPHYARD_DOCUMENTATION, so a committed edit that was never redeployed
+ * stamps new items with stale paths; doctor reports the difference and the assignment that fixes
+ * it. Null when they agree, or when the checkout commits no policy (the deployed one is then the
+ * only one there is).
+ */
+export function documentationDrift(committed: DocumentationPolicy | null, deployed: DocumentationPolicy) {
+  if (!committed) return null;
+  const same = (a: readonly string[], b: readonly string[]) => a.length === b.length && a.every(path => b.includes(path));
+  if (same(committed.paths, deployed.paths) && committed.changelog === deployed.changelog) return null;
+  const assignment = documentationAssignment(committed);
+  return { committed, deployed, variable: assignment.variable,
+    attention: `${repositoryConfigFile} declares documentation ${JSON.stringify(committed)} but the control plane serves ${JSON.stringify(deployed)}: set ${assignment.line} on the deployment` };
+}
+
 /** The standard criterion's short name, as the control plane stamps it on every feature and bug. */
 export const documentationCriterionTitle = 'Documentation reflects this change';
 export const documentationCriterionId = 'DOCS';

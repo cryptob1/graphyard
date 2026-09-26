@@ -249,8 +249,10 @@ const ReplayIcon = () => <svg viewBox="0 0 24 24" width="30" height="30" aria-hi
  * The replay, played like a video (GY-204): it waits at its first frame under a large play button
  * and runs once, over `replaySeconds`, only when that button is pressed. While it plays the button
  * gives way to a small pause control; at the end it holds the last frame under a replay button.
- * Under prefers-reduced-motion there is no button: the replay shows its last frame and the
- * slider steps through it. `initial` sets where it stands on first render.
+ * The position slider below it follows playback and can be dragged to scrub, which pauses the
+ * replay at that point; pressing play then resumes from there. Under prefers-reduced-motion there
+ * is no button: the replay shows its last frame and the slider steps through it. `initial` sets
+ * where it stands on first render.
  */
 export function ReplaySection({ frames, truncated, initial, clock = browserClock }: { frames: ReplayFrame[]; truncated: boolean; initial?: { t: number; playing: boolean }; clock?: FrameClock }) {
   const [t, setT] = useState(initial?.t ?? (reducedMotion() ? 1 : 0));
@@ -267,8 +269,8 @@ export function ReplaySection({ frames, truncated, initial, clock = browserClock
     </div>
     <div className="replay-controls">
       <span>24 h ago</span>
-      {reducedMotion() ? <input type="range" min={0} max={1000} value={Math.round(t * 1000)} aria-label="Replay position" onChange={e => setT(Number(e.target.value) / 1000)}/>
-        : <span className="replay-progress" role="progressbar" aria-label="Replay position" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(t * 100)}><span style={{ width: `${t * 100}%` }}/></span>}
+      {/* The slider tracks playback and scrubs it: dragging pauses the replay at the chosen point (GY-288). */}
+      <input type="range" min={0} max={1000} value={Math.round(t * 1000)} aria-label="Replay position" onChange={e => { setPlaying(false); setT(Number(e.target.value) / 1000); }}/>
       <span>now</span>
       {playing && <button type="button" className="text-button replay-pause" aria-label="Pause the replay" onClick={() => setPlaying(false)}>Pause</button>}
       {truncated && <small>Only the first rows of the recorded history were returned.</small>}
