@@ -49,9 +49,9 @@ export const flowAnalyticsRoutes = defineRoutes('flow-analytics', [
       // The watch's report as this request reads it, so the flow holds merges at Deploy exactly
       // where the board (grouped by the same report on /api/status) does.
       // The environment is the one the master verifies deployments under (as /api/status reads it).
-      const query = { ...flowQuery(url, await resolvedProductionEnvironment(engine.store.pool)), production: production?.status() ?? null };
-      // The report pool answers for up to a minute per window and filter set; its bounded catch-up
-      // runs on every read, so a new step event recomputes at once (GY-705).
+      const query = { ...flowQuery(url, await resolvedProductionEnvironment(engine.store.reportPool)), production: production?.status() ?? null };
+      // The report cache answers for up to a minute per window and filter set; the bounded catch-up
+      // runs on the report pool on every read (GY-491), so a new step event recomputes at once (GY-705).
       const { dataset, report } = await pooledFlowReport(engine.store, query);
       if (!part) return report;
       const drilldown = flowDrilldown(dataset, report, { metric: query.metric ?? 'bottleneck', key: query.key ?? null, authorized: auditRoles.includes(actor.role) });
