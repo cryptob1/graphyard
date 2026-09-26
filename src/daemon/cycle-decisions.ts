@@ -5,7 +5,7 @@ import { type ContainmentAssessment, type HerdrAgent, type RoleCapacity, approve
 import { type ApprovalWatch, approvalWatchSchema, carriedSession, type DaemonActionKind, latencySampleSchema, message, scopeMeasurementSchema } from './state.js';
 import { decisionKey, scopeAnsweredAt, scopeKey, scopeOutcomeAnswered } from './reconcile.js';
 import { readyToRetry } from './sessions.js';
-import { approvalStep, boundDetail, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, maxApproverCloses, maxRefusalAnswers, maxApproverLaunches, maxDecisionRequests, namePaths, neededDecision, observedFrom, resolveCovers, reworkDecisionReason, refusalNamedIn, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, standingVerdict, withheldDecision } from './decisions.js';
+import { approvalStep, boundDetail, observationWakeDue, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, maxApproverCloses, maxRefusalAnswers, maxApproverLaunches, maxDecisionRequests, namePaths, neededDecision, observedFrom, resolveCovers, reworkDecisionReason, refusalNamedIn, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, standingVerdict, withheldDecision } from './decisions.js';
 import { type DaemonEffects, failoverKey, record, stoppedStates } from './effects.js';
 import { detectExhaustion } from '../model/capacity.js';
 import { capacityRefusal } from '../fleet.js';
@@ -417,6 +417,13 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     if (wait) {
       const waitKey = `wait:rework:${item.id}`;
       if (detailChanged(state.actions[waitKey], wait)) await note(waitKey, item, 'decision', 'done', wait);
+      // The refusal wakes the item's observation job at once (GY-710), and the rework is decided
+      // on the first cycle after that observation lands, not whenever the cadence reaches it.
+      const wakeKey = `wake:observation:${item.id}`;
+      if (effects.wakeObservation && observationWakeDue(item, state.actions[wakeKey]?.at, clock, pause)) {
+        try { await effects.wakeObservation(item); await note(wakeKey, item, 'refresh', 'done', `Woke the observation job of ${item.key}: its rework waits for an observation newer than ${item.observation?.at ?? 'none'}`); }
+        catch (error) { await note(wakeKey, item, 'refresh', 'failed', `Could not wake the observation job of ${item.key}: ${message(error)}`); }
+      }
       return;
     }
     // A settled watch is supervised no more, but a registry session its close could not end still

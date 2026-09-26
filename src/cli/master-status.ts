@@ -10,7 +10,7 @@ import { installationMerger } from '../executor.js';
 import { daemonSummary, loopAttention, readDaemonState } from '../master-daemon.js';
 import { readReviewLedger, reconcileReviews, reviewLedgerSpec, sessionLedgerHeadroom, summarizeReviews } from '../reviewer.js';
 import { producerLedgerSpec, readProducerLedger, reconcileProducers, sessionRetries, summarizeProducers } from '../producer.js';
-import { defaultAwaitReviewers, dispatchFailureAttention, dispatchSummary, readDispatchCursor } from '../auto-dispatch.js';
+import { defaultAwaitReviewers, dispatchFailureAttention, dispatchSummary, launchWaitAttention, launchWaits, readDispatchCursor } from '../auto-dispatch.js';
 import { actionlessItems, stallBoundMs } from '../model/action-account.js';
 import { approverLaunchAttention, directMergeLine, nameOrphanSupervisors } from './status-attention.js';
 import { nameUnobtainableReviews, type SettledReviewSession } from '../model/dispatch.js';
@@ -91,9 +91,11 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   // is what logs and persists that repair, so status reports the cursor rather than announcing it.
   const dispatchCursor = await readDispatchCursor(root, master, () => {}).catch(error => ({ error: error instanceof Error ? error.message : 'Master dispatch cursor is unreadable' }));
   const stuck = stuckRequestReport({ reviews: reviewRecords, producers: producerRecords }, Date.now());
-  const dispatch = 'error' in dispatchCursor ? { running: false, failures: [] as { requestId: string; kind: string; attempts: number; reason: string; at: string; nextAt: string }[], error: dispatchCursor.error } : withStuckRequests(dispatchSummary(dispatchCursor, Date.now(), master.run.dispatchIntervalSeconds * 1000, master.run.awaitReviewers ?? defaultAwaitReviewers.logins), stuck.stuck);
+  // Every launch still waiting, how long since its request and why (GY-710); a review waiting past fifteen minutes is attention.
+  const waiting = 'error' in dispatchCursor ? [] : launchWaits(snapshot.work, dispatchCursor, Date.now());
+  const dispatch = 'error' in dispatchCursor ? { running: false, failures: [] as { requestId: string; kind: string; attempts: number; reason: string; at: string; nextAt: string }[], waiting, error: dispatchCursor.error } : { ...withStuckRequests(dispatchSummary(dispatchCursor, Date.now(), master.run.dispatchIntervalSeconds * 1000, master.run.awaitReviewers ?? defaultAwaitReviewers.logins), stuck.stuck), waiting };
   // A dispatcher that keeps failing its tick launches nothing for any item; it is named before the requests it is not launching.
-  const dispatchItems = dispatchFailureAttention(dispatch);
+  const dispatchItems = [...dispatchFailureAttention(dispatch), ...launchWaitAttention(waiting)];
   const containment = await timedStep('containment', () => assessContainment(snapshot.work, { hostId: master.hostId, observedAt: snapshot.now, clockOffset }));
   // Disk is reported from the host, not from the cursor: the loop may be stopped, and the volume
   // filling is exactly the condition that stops it. The plan is the one `master reclaim` computes,
