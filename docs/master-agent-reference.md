@@ -41,7 +41,7 @@ Protection reconciles through `master protection --apply`; where GitHub offers o
 | `installation-accept` | Accepts the pending permission request |
 | `protection` | Reconciles branch protection |
 
-Each flow records `record.json` under `.graphyard/master-actions/`, appends to `ledger.json`. Approving its *Confirm access* GitHub Mobile code on the device is human-only. The master never stores the profile's cookies, never uses a merge bypass, pushes no code and reads no worker credential.
+Each flow records `record.json` under `.graphyard/master-actions/`, appends `ledger.json`. Approving its *Confirm access* GitHub Mobile code on the device is human-only. The master never stores the profile's cookies, never uses a merge bypass, pushes no code and reads no worker credential.
 
 ## Harness permissions
 
