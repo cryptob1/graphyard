@@ -173,13 +173,11 @@ export interface Work extends Create {
    * ended that attempt's lease and parked the item; the answer clears it, and answered requests
    * are kept in `humanRequests` (see model/human-request.ts).
    */
-  humanRequest?: HumanRequest | null;
-  humanRequests?: HumanRequest[];
+  humanRequest?: HumanRequest | null; humanRequests?: HumanRequest[];
   /** What the research step found before build, and the product questions it asked (src/research.ts). */
   researchBrief?: ResearchRecord | null;
   /** Set when the item was closed without delivery (model/closure.ts); a closed item is `done` but never delivered. */
-  closure?: Closure | null;
-  triage?: TriageRecord | null; // a machine-filed item's triage judgement (GY-402, model/machine-backlog.ts)
+  closure?: Closure | null; triage?: TriageRecord | null; // triage is a machine-filed item's judgement (GY-402, model/machine-backlog.ts)
   /** Sessions of this item that ran out of provider quota, and any role with no account left (model/capacity.ts). */
   capacity?: CapacityState | null;
   queue?: QueueEntry | null; queueSequence?: number; queueEjection?: QueueEjection | null; queueHistory?: QueueHistoryEntry[];

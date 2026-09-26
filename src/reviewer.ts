@@ -1222,8 +1222,10 @@ async function fileApprovedFollowUp(record: ReviewRecord, verdict: NonNullable<R
   if (previous && previous.attempts >= threadResolutionAttempts && (previous.item || now.getTime() - Date.parse(previous.at) < followUpExhaustedRetryMs)) return;
   let keyReuse = previous?.keyReuse;
   const resolving: CreateFollowUpItem = (payload, key) => createResolvingKeyReuse(payload, key, create, () => existingFollowUpItem(work, item, verdict.reviewId), resolved => { keyReuse = resolved; });
-  // One follow-up item per parent (GY-402): the parent's open one, which this approval appends to.
-  const existing = filed.get(record.key) ?? openFollowUpItem(work, record.key)?.key;
+  // One follow-up item per parent (GY-402): the parent's open one, which this approval appends to —
+  // unless it is this approval's own earlier item, which a retried create links instead (GY-598).
+  const existing = existingFollowUpItem(work, item, verdict.reviewId) ? undefined
+    : filed.get(record.key) ?? openFollowUpItem(work, record.key)?.key;
   const filedNow = await fileFollowUpThreads({ repository, key: record.key, workId: item.id, pr: record.pr, sha: record.sha, reviewId: verdict.reviewId, reviewer, previous, store,
     ...(existing && append ? { existing, append } : {}),
     ...(record.threadReadFailure ? {} : record.threadsListed ? { listed: record.threadsListed } : {}) }, run, resolving, now);
