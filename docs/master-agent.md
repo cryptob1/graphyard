@@ -24,32 +24,30 @@ Ordinary review findings, rework, idle workers, and proof setup are not stopping
 
 ### System-driven items
 
-The loop drives every item. Unless created `"systemDriven": false`, one refuses hand `dispatch`, `merge`, `review` and `decide attest|merge`, naming the loop step, except stopped-loop recovery, unproduced `manual:` attestations, and `decide merge` of unauthorized merges or with no operator agent. Hand `dispatch` waits out live or just-released ones.
+Unless created `"systemDriven": false`, an item refuses hand `dispatch`, `merge`, `review` and `decide attest|merge`, naming the loop step, except stopped-loop recovery, unproduced `manual:` attestations, and `decide merge` of unauthorized merges or with no operator agent. Hand `dispatch` waits out live or just-released ones.
 
 ### Session liveness is reconciled, not trusted
 
-**The control plane reconciles session liveness; closing finished sessions is not the master's
-manual duty.** A sweep runs on every automatic-dispatch tick (`run.dispatchIntervalSeconds`, default 10, 30 at most). A handle closes at the second consecutive sweep
-that misses it; an unobserved one is left alone for its first 3 minutes. A handle another host launched is left to
-that host's loop. `master status` lists stale handles as `sessions.unseen`. `dispatch.sessionReconcile` reports each closure:
+**The control plane reconciles session liveness, not the master.** A sweep runs every automatic-dispatch tick (`run.dispatchIntervalSeconds`, default 10, at most 30). A handle closes at the second consecutive sweep
+that misses it; an unobserved one is left 3 minutes, another host's to that host's loop. `master status` lists stale handles as `sessions.unseen`. `dispatch.sessionReconcile` reports each closure:
 
 - **Vanished**: missing from two consecutive listings.
-- **Ended**: agentless pane, or terminal state. `idle`, `done` and
-  `blocked` are deliberately not terminal.
-- **Superseded**: a review or proof session for a head the item moved past; a delivered item is closed the same
-  way as any other. Implementation sessions are left to the lease.
+- **Ended**: agentless pane, or terminal state (`idle`, `done` and `blocked` are not).
+- **Superseded**: a review or proof session for a head the item moved past; implementation sessions are left to the lease.
 - **Duplicate**: the older of two sessions for one role and head.
 
-A closure decides no gate, ends no lease, and stops no process. A profile's concurrency is counted against live
-sessions only, and a name is busy only while a live session has it. A session past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) raises attention and is never closed.
+A closure decides no gate, ends no lease, and stops no process. Concurrency counts live sessions only, and a name is busy only while a live session has it. A session past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) raises attention and is never closed.
 
-**So what an operator or a master does instead of closing sessions by hand:** nothing, for a session
-that finished or died (with the loop stopped, `graphyard master run --once` sweeps); for an overlong one, attach to it with the command on the handle. Never mark
+Close nothing by hand (a stopped loop sweeps with `graphyard master run --once`); attach to an overlong session with its handle's command. Never mark
 another session's handle finished to free a slot.
+
+### System invariants
+
+Checked every cycle; each violation is one fault of its class (`daemon.invariants.lines` in `master status`; thresholds: `invariants` in `.graphyard/master.json`): at most one open follow-up per parent; no session open 30 min past delivery or settled decision; at most 3 base refreshes without an own head change; no merge-stage item mergeable 10 min unrefused; cycle p90 under 30 s over an hour; no machine-filed backlog untriaged 24 h; no lease lost to a deploy. `tests/soak.test.ts` holds them all in CI.
 
 ## Research before build
 
-With `run.research` set (`model`, `timeoutMinutes` 15, `tokenBudget`), a feature (or `"research": true`) gets one read-only Pi session per requirements revision, briefing worker and reviewer: reusable code, prior art, risks, approach. Product questions go under Needs you with recommendation and deadline; build proceeds on it, a differing answer requests rework, failure never blocks.
+With `run.research` set (`model`, `timeoutMinutes` 15, `tokenBudget`), a feature (or `"research": true`) gets one read-only Pi briefing per requirements revision. Product questions go under Needs you; build proceeds on the recommendation, a differing answer requests rework, failure never blocks.
 
 ## Automatic dispatch at submit
 
@@ -57,9 +55,9 @@ When a candidate passes the build gate, `autoDispatch` records one producer requ
 
 **Concurrency is per role.** A profile's `concurrency` (1–20, default 1) is how many sessions it runs at once, each with a name unique to its request above one. Changes apply without a restart; lowering it drains sessions first; status reports `longestWaitMs`; a role starved ten minutes counts in `counts.concurrencyStarved`.
 
-**Requests always settle.** A gone pane (`pane_not_found`) counts as closed. No request outlives its own token: expired and unreported by Herdr, it settles `expired`; one still pending counts in `dispatch.sessionReconcile.stuck`. Unanswered sessions relaunch on another profile (12 per request, then `dispatch.abandoned`); an unposted reviewer is reminded, then relaunched.
+**Requests always settle.** A gone pane (`pane_not_found`) counts as closed. No request outlives its own token: expired and unreported by Herdr, it settles `expired`; one still pending counts in `dispatch.sessionReconcile.stuck`. Unanswered sessions relaunch on another profile (12 per request, then `dispatch.abandoned`); an unposted reviewer is reminded first.
 
-**Every role, approvers too, fails over on spent quota**, skipping the account until reset, or waits as one `capacity` line.
+**Every role fails over on spent quota**, skipping the account until reset, or waits as one `capacity` line.
 
 The master never launches reviews or producers by hand, except `master review GY-N [PROFILE]` once the loop stops relaunching that review.
 
@@ -71,10 +69,10 @@ With a pass, the producer records `"exercise"`: the same proof run with the crit
 "exercise":{"criterion":"AC-1","behaviour":"the lease expiry check in claim()","result":"fail","executed":4}
 ```
 
-A pass is trusted only when that stripped run failed with a case executed; otherwise it is recorded as not exercising its criterion rather than as passing (`unexercised`, `evidence.exercise.refused`). The loop requests rework quoting it, like failed proofs/CI.
+A pass is trusted only when that stripped run failed with a case executed; otherwise it is recorded as not exercising its criterion rather than as passing (`unexercised`, `evidence.exercise.refused`), and the loop requests rework.
 
 ## Guarded merges
 
-`master merge GY-N|--all` (skipping system-driven items) asks [GitHub to merge](github.md#merge-queue) only under a current authorization for the exact head, base and policy, never an administrative bypass. Protocol skew refuses: `server runs <sha>, CLI expects <sha>: deploy main first`.
+`master merge GY-N|--all` (skipping system-driven items) asks [GitHub to merge](github.md#merge-queue) only under a current authorization for the exact head, base and policy. Protocol skew refuses: `server runs <sha>, CLI expects <sha>: deploy main first`.
 
 Unresolved review threads are the reviewer's inputs, not merge blockers (`reviewThreads`); its approval names each on `Resolved threads:`, `Follow-up threads:` or `Overridden threads:` ([rules](coordination.md#review-gate-verdicts-not-threads)).
