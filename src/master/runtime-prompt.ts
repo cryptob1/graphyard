@@ -20,8 +20,24 @@ export interface RuntimePrompt {
 export const runtimePromptTextLimit = 400;
 const menuOption = /^\s*(?:[❯>›▶→]\s*)?(\d)[.)]\s+(.+?)\s*$/;
 const affirmative = /^(?:yes|proceed|continue|allow|run|approve)\b/i, negative = /^(?:no|cancel|deny|decline|reject|abort)\b/i;
-/** Words that make a prompt's "yes" destructive: a deletion, move or overwrite the runtime would not run unasked. */
-export const destructivePrompt = /\b(?:dangerous|destructive|rm|rmdir|unlink|delete|deletion|remove|mv|overwrite|force|irreversible|wipe|truncate)\b/i;
+/** The runtime's own words for a prompt whose "yes" cannot be taken back. */
+const runtimeWarning = /\b(?:dangerous|destructive|irreversible|cannot be undone|permanently (?:delete|remove))/i;
+/**
+ * A command the prompt shows, classified by its verb at a command position (the start of a line,
+ * after `(`, `;`, `&&`, `|`, a backtick, `$(`, `sudo` or `xargs`): a deletion, move or overwrite,
+ * or a git command that discards work (GY-223). A word such as "remove" or "force" in the prompt's
+ * prose does not make it destructive; the command it would run does.
+ */
+const destructiveCommand = /(?:^|[;&|(`]|\$\(|\bsudo\s+|\bxargs\s+(?:-\S+\s+)*)\s*(?:(?:rm|rmdir|unlink|shred|mv|truncate|dd)\s|git\s+(?:clean\b|reset\s+--hard\b|push\b.*(?:--force\b|\s-f\b)|branch\s+-D\b|checkout\s+--\s))/i;
+/** A command's own confirmation, such as `rm: remove regular file 'x'?` or `mv: overwrite 'y'?`. */
+const commandConfirmation = /^(?:rm|rmdir|unlink|shred|mv|cp):\s/i;
+/** Box borders, bullets and a shell's `$` before a command on a runtime's screen. */
+const screenFrame = /^[\s│┃║╎┆>$●⎿•]+/;
+/** Whether a prompt's "yes" is destructive: the runtime says so, or a command it shows is one. */
+export function destructivePrompt(lines: string[]) {
+  if (runtimeWarning.test(lines.join(' '))) return true;
+  return lines.some(entry => { const line = entry.replace(screenFrame, ''); return destructiveCommand.test(line) || commandConfirmation.test(line); });
+}
 const collapse = (lines: string[]) => {
   const text = lines.map(entry => entry.replace(/\s+/g, ' ').trim()).filter(Boolean).join(' / ');
   return text.length > runtimePromptTextLimit ? `${text.slice(0, runtimePromptTextLimit - 1)}…` : text;
@@ -46,12 +62,12 @@ export function classifyRuntimePrompt(screen: string | null | undefined): Runtim
     const question = filled.slice(Math.max(0, start - 8), start).map(({ entry }) => entry);
     const text = collapse([...question, ...options.map(option => `${option.number}. ${option.label}`)]);
     const yes = options.find(option => affirmative.test(option.label)), no = options.find(option => negative.test(option.label));
-    if (yes && no && destructivePrompt.test(question.join(' '))) return { kind: 'destructive-command', text, keys: [no.number], answer: `${no.number}. ${no.label}` };
+    if (yes && no && destructivePrompt(question)) return { kind: 'destructive-command', text, keys: [no.number], answer: `${no.number}. ${no.label}` };
     return { kind: 'unknown', text, keys: null, answer: null };
   }
   const tail = filled.slice(-4).map(({ entry }) => entry);
   // An inline yes/no question, such as `Proceed? [y/N]`, is declined with `n`.
-  if (/[[(]\s*y(?:es)?\s*\/\s*n(?:o)?\s*[\])]/i.test(tail.at(-1) ?? '') && destructivePrompt.test(tail.join(' '))) return { kind: 'destructive-command', text: collapse(tail), keys: ['n', 'Enter'], answer: 'n' };
+  if (/[[(]\s*y(?:es)?\s*\/\s*n(?:o)?\s*[\])]/i.test(tail.at(-1) ?? '') && destructivePrompt(tail)) return { kind: 'destructive-command', text: collapse(tail), keys: ['n', 'Enter'], answer: 'n' };
   return { kind: 'unknown', text: collapse(tail), keys: null, answer: null };
 }
 /** The one instruction a session gets after the loop declined its destructive-command prompt: carry on with a safe alternative. */
