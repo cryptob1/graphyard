@@ -17,7 +17,7 @@ Commit `AGENTS.md`, `.gitignore`, `graphyard.json`; never `.graphyard/`. Without
 
 ### Documentation policy
 
-`init --scan --apply` writes the documentation paths found (`docs/`, `site/`, `README*`, package READMEs, `CHANGELOG*`) to `graphyard.json` (`{"documentation":{"paths":["site/"],"changelog":"CHANGELOG.md"}}`). Deploy the printed `GRAPHYARD_DOCUMENTATION` (default `docs/`, `README.md`, `AGENTS.md`). Features and bugs carry *Documentation reflects this change*, met by a diff there or `complete --no-docs "WHY"`, judged by the reviewer.
+`init --scan --apply` writes the documentation paths found (`docs/`, `site/`, `README*`, package READMEs, `CHANGELOG*`) to `graphyard.json` (`{"documentation":{"paths":["site/"],"changelog":"CHANGELOG.md"}}`). Deploy the printed `GRAPHYARD_DOCUMENTATION` (default `docs/`, `README.md`, `AGENTS.md`); `doctor` reports `documentation.drift` when it differs from the committed file. Features and bugs carry *Documentation reflects this change*, met by a diff there or `complete --no-docs "WHY"`, judged by the reviewer.
 
 ### What the generated instructions authorize
 
@@ -35,7 +35,7 @@ CLAUDE_CONFIG_DIR=~/.coding_agents/claude-a claude                       # /logi
 node "$GRAPHYARD_CLI" master environments --apply                        # report quota, write profiles
 ```
 
-Profiles default to `"approvals": "auto"` so sessions never block on a permission prompt (trade-off: unattended sessions); `"prompt"` is refused at launch ([approval modes](master-agent-sessions.md#approval-modes)).
+Profiles default to `"approvals": "auto"` so sessions never block on a prompt (trade-off: unattended sessions); `"prompt"` is refused at launch ([approval modes](master-agent-sessions.md#approval-modes)).
 
 ### Configure the fleet
 
@@ -58,7 +58,7 @@ node "$GRAPHYARD_CLI" master registry runtime set aider --kind aider --arg=--yes
 
 ### Add an account
 
-An account is one login, held by reference:
+One login, held by reference:
 
 ```sh
 node "$GRAPHYARD_CLI" master registry model set opus --provider Anthropic --id claude-opus-5 \
@@ -96,7 +96,7 @@ node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST   # now installs th
 node "$GRAPHYARD_CLI" master start codex     # or: master start claude
 ```
 
-Run it under an OS identity whose GitHub credentials workers cannot read. `--browser-profile` is the Chrome profile signed in to GitHub as administrator, for `master browser` flows; *Confirm access* in GitHub Mobile stays human-only. Add the reviewer with `master reviewer setup` and `master reviewer add PROFILE` ([Claude](../examples/master/claude-reviewer.json) template); its manifest flow is the only App confirmation.
+Run it under an OS identity whose GitHub credentials workers cannot read. `--browser-profile` is the Chrome profile signed in to GitHub as admin, for `master browser` flows; *Confirm access* in GitHub Mobile stays human-only. Add the reviewer with `master reviewer setup` and `master reviewer add PROFILE` ([Claude](../examples/master/claude-reviewer.json) template); its manifest flow is the only App confirmation.
 
 ### The loop must be supervised
 
