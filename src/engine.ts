@@ -443,7 +443,31 @@ export class Engine {
     const work = all.find(w => w.id === id || w.key === id);
     if (!work || work.stage === 'done' || !work.workspaces.some(w => w.epoch === data.epoch)) return null;
     // Every item goes with it: the landing check reads other items' unlanded candidates (GY-97).
-    return this.submissionObserver({ ...work, submission: { epoch: data.epoch, pr: data.pr } }, all);
+    const observation = await this.submissionObserver({ ...work, submission: { epoch: data.epoch, pr: data.pr } }, all);
+    await this.reconcileLanded(observation, all);
+    return observation;
+  }
+  /**
+   * GY-744. Reconcile at once the merge of every peer an observation's landing check found already
+   * on the base branch tip while its item still records it unlanded: the peer's pull request is
+   * observed and that observation saved, so the ordinary delivery path records it merged, with its
+   * merge commit, now rather than whenever its own observation comes round — and the stale state
+   * that named it unlanded does not recur. A failure is logged and left to that later observation.
+   */
+  async reconcileLanded(observation: Observation | null, all: Work[], observer = this.submissionObserver) {
+    const reconciled: Work[] = [];
+    if (!observer) return reconciled;
+    for (const entry of observation?.landing?.landed ?? []) {
+      const peer = all.find(item => item.key === entry.key && item.stage !== 'done' && item.submission?.pr === entry.pr);
+      if (!peer) continue;
+      try {
+        const seen = await observer(peer, all);
+        if (seen.merged) reconciled.push(await this.observe(peer.id, peer.revision, seen));
+      } catch (error) {
+        console.error(`[landing] reconciling ${entry.key}'s landed pull request #${entry.pr} failed: ${(error as Error).message}`);
+      }
+    }
+    return reconciled;
   }
   /**
    * Bootstrap deferral is an operator act. It requires the explicit policy:bootstrap capability,
@@ -1706,8 +1730,11 @@ export class Engine {
     }
     return restored;
   }
-  /** Removes an entry whose speculative validation cannot succeed, with the reason on the record. */
-  async ejectFromQueue(id: string, expectedRevision: number, reason: string, jobToken: string) {
+  /**
+   * Removes an entry whose speculative validation cannot succeed, with the reason on the record.
+   * `conflict` says the speculative merge conflicted; the record carries it as a typed flag (GY-252).
+   */
+  async ejectFromQueue(id: string, expectedRevision: number, reason: string, jobToken: string, conflict = false) {
     return this.store.transaction(async (db, now) => {
       const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
       requireCurrent(job, 'Integration job lease expired or superseded');
@@ -1717,13 +1744,13 @@ export class Engine {
       requireCurrent(work.queue, 'Queue entry already left the merge queue');
       const sequence = work.queue!.sequence;
       // A speculative conflict records the predecessors its prediction held (GY-321, model/queue.ts).
-      const ejected = queueEjectionRecord(work, all, reason, now);
+      const ejected = queueEjectionRecord(work, all, reason, now, conflict);
       work.queueEjection = ejected.ejection;
       work.queueHistory = ejected.history;
       work.queue = null;
       this.evaluate(work, all, now);
       await this.recordDispatch(db, work, now);
-      await save(db, work, 'graphyard', 'queue.ejected', now, { sequence, reason });
+      await save(db, work, 'graphyard', 'queue.ejected', now, { sequence, reason, conflict: ejected.ejection.conflict ?? null });
       for (const behind of all) if (behind.queue && behind.id !== work.id) await wakeJob(db, behind.id);
       return work;
     });
