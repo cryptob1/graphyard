@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { defaultPiModel, piRunner, type PiRunnerOptions } from './pi.js';
+import { lstatSync, readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { defaultPiModel, piRunner, piSmoke, type PiRunnerOptions, type SmokeResult } from './pi.js';
 import type { FleetLaunchAccount } from '../fleet.js';
 import { registryToolsArgs } from '../master/environments.js';
 import { endRun, liveRun, registerRun } from './registry.js';
@@ -36,10 +38,46 @@ export function registryHeadlessLaunch(account: FleetLaunchAccount) {
   const environment: Record<string, string> = { ...contract.environment, ...(contract.homeVariable && account.home ? { [contract.homeVariable]: account.home } : {}) };
   return { command: contract.kind, model: modelId ?? defaultPiModel, args, environment };
 }
+/**
+ * The provider key an account's registry entry names by reference (GY-446), read from its file in
+ * the account's login home at the moment a run starts, as the one variable the runtime reads. The
+ * file must be a regular file of mode 0600; its content appears in no error, record or log.
+ */
+export function accountKeyEnvironment(account: Pick<FleetLaunchAccount, 'name' | 'home' | 'key'>): Record<string, string> {
+  if (!account.key) return {};
+  if (!account.home) throw new Error(`${account.name} names key file ${account.key.file} but no login home to read it from`);
+  const file = resolve(account.home, account.key.file);
+  let value: string;
+  try {
+    const info = lstatSync(file);
+    if (!info.isFile() || info.mode & 0o077) throw new Error(`${file} must be a regular file with mode 0600 (chmod 600 ${file})`);
+    value = readFileSync(file, 'utf8').trim();
+  } catch (error) { throw new Error(`${account.name}'s key file cannot be read: ${error instanceof Error ? error.message.replace(/^ENOENT: /, '') : 'unreadable'}`); }
+  if (!value || /[\u0000-\u001f\u007f]/.test(value)) throw new Error(`${account.name}'s key file ${file} must hold the key alone, on one line`);
+  return { [account.key.variable]: value };
+}
+/** A registry account's headless runner: every run reads the account's key afresh, into its own environment only. */
 export function registryRunner(account: FleetLaunchAccount, where: RunSurface = {}): Runner {
   const launch = registryHeadlessLaunch(account);
-  return piRunner({ command: launch.command, model: launch.model, args: launch.args, environment: launch.environment, ...where });
+  return { name: 'pi', start: (prompt, options) => piRunner({ command: launch.command, model: launch.model, args: launch.args, environment: { ...launch.environment, ...accountKeyEnvironment(account) }, ...where }).start(prompt, options) };
 }
+/**
+ * The one-prompt smoke test of a registry account (GY-446): its runtime, login home, key and model,
+ * none of a role's policy. A key file that cannot be read fails the test with that reason.
+ */
+export async function smokeRegistryAccount(account: FleetLaunchAccount, options: { cwd?: string; timeoutMs?: number; command?: string; commandArgs?: string[] } = {}): Promise<SmokeResult> {
+  const launch = registryHeadlessLaunch({ ...account, fleet: { ...account.fleet, policy: undefined } });
+  let key: Record<string, string>;
+  try { key = accountKeyEnvironment(account); } catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) }; }
+  return piSmoke({ command: options.command ?? launch.command, commandArgs: options.commandArgs, model: launch.model, args: launch.args, environment: { ...launch.environment, ...key } },
+    { cwd: options.cwd ?? account.home ?? undefined, timeoutMs: options.timeoutMs, redact: Object.values(key) });
+}
+/**
+ * How a headless run ended, as the registry counts it (GY-446): with a result, without one, or —
+ * for a run the loop itself cancelled — not the account's doing, so not counted.
+ */
+export const runOutcome = (record: RunRecord): 'result' | 'no-result' | undefined =>
+  record.result?.ok ? 'result' : record.result?.reason === 'cancelled' ? undefined : 'no-result';
 
 export type Applied = RunRecord['applied'][number];
 const failure = (error: unknown) => error instanceof Error ? error.message : String(error);
