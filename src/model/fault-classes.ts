@@ -64,7 +64,7 @@ export const faultCatalogue = {
   'proof': ['proof-gap', 'timing-failure', 'escalation:evidence-policy-conflict', 'action:proof'],
   'capacity': ['reviewer-exhausted', 'role-capacity', 'concurrency-starved', 'action:failover', 'action:capacity'],
   'resources': ['disk-pressure', 'resource-bound', 'ledger-refusal', 'action:reclaim'],
-  'loop': ['loop-liveness', 'loop-cost', 'loop-failures', 'loop-silence', 'delivery-budget', 'loop-cursor', 'dispatch-failures', 'action:fault', 'action:doctor'],
+  'loop': ['loop-liveness', 'loop-cost', 'loop-failures', 'loop-silence', 'delivery-budget', 'loop-cursor', 'dispatch-failures', 'action:fault'],
   'human-decision': ['human-request', 'sudo', 'action:human'],
   'stalled-gate': ['gate', 'blocker', 'stalled-item', 'stalled-action', 'actorless'],
   'unclassified': ['unclassified'],

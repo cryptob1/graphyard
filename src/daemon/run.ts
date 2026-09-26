@@ -4,7 +4,6 @@ import type { ConfigReload, MasterConfig } from '../master.js';
 import { acquireDaemonLock, type DaemonAction, type DaemonState, message, storeAction } from './state.js';
 import { faultClassPolicyFromEnv, type FaultClassPolicy } from '../model/fault-classes.js';
 import { faultRecurrenceReport } from './faults.js';
-import { doctorReport } from './doctor.js';
 import { latencyBudget, silenceReport } from './metrics.js';
 import { boundedPersist, cycleCost, cycleTimes, cycleDelay, cycleFailureCeiling, describeFailingCall, loopLiveness, namedEffects, noteCycleFailure, noteCycleSuccess, noteUnhandled, watchdogPlan } from './liveness.js';
 import type { DaemonEffects } from './effects.js';
@@ -48,8 +47,6 @@ export function daemonSummary(state: DaemonState, now: number, intervalMs: numbe
     reclaim: state.reclaim,
     // Every decision the loop has put to an approver and not yet seen applied and retired.
     approvals: Object.entries(state.approvals).map(([key, watch]) => ({ key, ...watch })),
-    // The pipeline doctor's last runs (GY-711): what each found, did and filed.
-    doctor: doctorReport(state),
     // Fault instances by class in the recurrence window, and the item each recurring class filed (GY-173).
     faults: faultRecurrenceReport(state, faultPolicy, now),
     // The system invariants as the last observation judged them (GY-404): one line per invariant, with its threshold and reading.

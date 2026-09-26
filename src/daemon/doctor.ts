@@ -8,7 +8,7 @@ import { openFaultClassItem } from '../model/fault-classes.js';
 import { scopeRefusalBlocker, unplannedPaths } from '../model/scope.js';
 import { approverSessionName, guardBroadScope } from '../master/autonomy.js';
 import { containmentPhase } from '../master.js';
-import { doctorReportPayloadSchema, doctorRunRecordSchema, doctorSettings, graphyardTools, type DoctorAction, type DoctorFile, type DoctorFinding, type DoctorRunRecord, type DoctorSettings } from '../runner/payloads.js';
+import { doctorReportPayloadSchema, doctorRunRecordSchema, doctorSettings, doctorTool, type DoctorAction, type DoctorFile, type DoctorFinding, type DoctorRunRecord, type DoctorSettings } from '../runner/roles.js';
 import type { Runner } from '../runner/types.js';
 import { readyToRetry } from './sessions.js';
 import { stoppedStates, record } from './effects.js';
@@ -94,7 +94,7 @@ export function doctorPrompt(config: { repository: string; cliPath: string }, in
   return `You are the Graphyard pipeline doctor for ${config.repository}. Find stuck and overdue work and fix it through your sanctioned commands, doing what the master would have done by hand. Read the evidence below and the control plane (${cli} status GY-N, ${cli} master status, ${cli} master decisions GY-N, gh pr view). `
     + `Act only where a check below has passed its fault bound; leave what is merely moving. Your sanctioned commands are ${doctorSanctionedCommands.map(name => `${cli} master ${name}`).join(', ')}, as the master's operator-agent identity; every other mutation is refused by your command allowlist — never merge, dispatch, submit evidence or touch a lease — and a refused command is recorded in your report, never retried. Never weaken a requirement; never approve a decision you requested yourself (request it, then ${cli} master approver GY-N DECISION for an independent approver). `
     + `A finding you cannot act on — a human-only decision (goals and priorities, money or accounts, credentials for people), or a fault class with no item to act through — mark unactionable; for the latter name the fault item to file, which the loop files at P0/P1 only if no open item already covers it. `
-    + `Then call the ${graphyardTools.doctor} tool exactly once: one finding per stuck or overdue item under its check, one action entry per sanctioned command you ran and what it changed, and one filed entry per fault item you are asking the loop to file. Stop after the call.\n\nThe checks and their bounds:\n${checklist}\n\nThe evidence, as JSON:\n${JSON.stringify(input).slice(0, 100_000)}`;
+    + `Then call the ${doctorTool} tool exactly once: one finding per stuck or overdue item under its check, one action entry per sanctioned command you ran and what it changed, and one filed entry per fault item you are asking the loop to file. Stop after the call.\n\nThe checks and their bounds:\n${checklist}\n\nThe evidence, as JSON:\n${JSON.stringify(input).slice(0, 100_000)}`;
 }
 
 /** Run the primary attempt, and the fallback once when the primary returns no valid report. */
@@ -104,7 +104,7 @@ async function runDoctor(effects: DoctorEffects, prompt: string) {
     let chosen: Awaited<ReturnType<DoctorEffects['runner']>>;
     try { chosen = await effects.runner(attempt); }
     catch (error) { runs.push({ runtime: 'none', model: attempt, result: 'spawn', detail: `No ${attempt} runner: ${message(error)}`.slice(0, 500) }); continue; }
-    const run = chosen.runner.start(prompt, { cwd: effects.cwd, env: { ...effects.env, GRAPHYARD_PI_ROLE: doctorRole }, tool: graphyardTools.doctor, timeoutMs,
+    const run = chosen.runner.start(prompt, { cwd: effects.cwd, env: { ...effects.env, GRAPHYARD_PI_ROLE: doctorRole }, tool: doctorTool, timeoutMs,
       validate: payload => doctorReportPayloadSchema.parse(payload) });
     const result = await run.result();
     await Promise.resolve(chosen.release?.(`the ${attempt} doctor run ended`)).catch(() => {});
@@ -156,7 +156,7 @@ export async function applyDoctorRun(cycle: Cycle, effects: DoctorEffects, run: 
   const key = keyOf([run.at, ...payload.findings.map(finding => finding.subject)]);
   const note = async (subject: string, detail: string, outcome: DaemonAction['state'] = 'done') => {
     const itemKey = subjectKey(snapshot.work, subject);
-    performed.push(await record(state, `${key}:${subject}:${performed.length}`, { kind: 'doctor', work: itemKey, principal: null, state: outcome, detail, attempts: 1, cycle: state.cycle }, now(), daemon.persist));
+    performed.push(await record(state, `${key}:${subject}:${performed.length}`, { kind: 'fault', work: itemKey, principal: null, state: outcome, detail, attempts: 1, cycle: state.cycle }, now(), daemon.persist));
   };
   for (const finding of payload.findings)
     await note(finding.subject, `${finding.check} bound passed${finding.unactionable ? ', unactionable' : ''}: ${finding.detail}`.slice(0, 2000));
@@ -174,7 +174,7 @@ export async function applyDoctorRun(cycle: Cycle, effects: DoctorEffects, run: 
   run.state = 'reported';
   run.detail = `${run.findings.length} finding(s), ${run.actions.length} action(s), ${run.filed.length} filed, ${deduped.filter(entry => entry.covered).length} deduplicated: ${run.detail}`.slice(0, 1000);
   // The run record is already on the cursor's list; only its state, summary and filings move here.
-  performed.push(await record(state, key, { kind: 'doctor', work: null, principal: null, state: 'done', detail: run.detail, attempts: 1, cycle: state.cycle }, now(), daemon.persist));
+  performed.push(await record(state, key, { kind: 'fault', work: null, principal: null, state: 'done', detail: run.detail, attempts: 1, cycle: state.cycle }, now(), daemon.persist));
   await effects.recordRun?.(run).catch(() => { /* the cursor's copy stands; the next run posts again */ });
 }
 
@@ -197,7 +197,7 @@ export async function doctorStep(cycle: Cycle) {
     if (live || clock - Date.parse(inFlight.at) < 2 * doctor.settings.timeoutMinutes * 60_000 + lostRunGraceMs) return;
     inFlight.state = 'failed';
     inFlight.detail = `The doctor run started ${inFlight.at} never ended in this process; it is recorded as lost`.slice(0, 1000);
-    await record(state, `doctor:${inFlight.at}`, { kind: 'doctor', work: null, principal: null, state: 'failed', detail: inFlight.detail, attempts: 1, cycle: state.cycle }, now(), effects.persist);
+    await record(state, `doctor:${inFlight.at}`, { kind: 'fault', work: null, principal: null, state: 'failed', detail: inFlight.detail, attempts: 1, cycle: state.cycle }, now(), effects.persist);
     await doctor.recordRun?.(inFlight).catch(() => {});
     return;
   }
@@ -220,7 +220,7 @@ export async function doctorStep(cycle: Cycle) {
       current.detail = outcome.report ? 'reported' : `no report: ${outcome.runs.map(entry => `${entry.model} ${entry.result}`).join('; ')}`.slice(0, 1000);
       if (!outcome.report) {
         current.state = 'failed';
-        await record(state, `doctor:${current.at}`, { kind: 'doctor', work: null, principal: null, state: 'failed', detail: `The doctor run returned no report: ${current.detail}`, attempts: 1, cycle: state.cycle }, now(), effects.persist);
+        await record(state, `doctor:${current.at}`, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `The doctor run returned no report: ${current.detail}`, attempts: 1, cycle: state.cycle }, now(), effects.persist);
         await doctor.recordRun?.(current).catch(() => {});
         return;
       }

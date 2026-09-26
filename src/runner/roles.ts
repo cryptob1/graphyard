@@ -1,10 +1,97 @@
 import { randomUUID } from 'node:crypto';
+import { z } from 'zod';
 import { defaultPiModel, piRunner } from './pi.js';
 import type { FleetLaunchAccount } from '../fleet.js';
 import { registryToolsArgs } from '../master/environments.js';
 import { endRun, liveRun, registerRun } from './registry.js';
 import { decidePayloadSchema, evidencePayloadSchema, graphyardTools, piRuntimeSchema, type DecidePayload, type EvidencePayload } from './payloads.js';
 import { runRecord, type Run, type RunOptions, type RunRecord, type RunResult, type Runner } from './types.js';
+import { faultClasses } from '../model/fault-classes.js';
+
+/**
+ * The pipeline doctor's contract (GY-711, src/daemon/doctor.ts): the structured report its headless
+ * run submits through `graphyard_doctor_report`, the `run.doctor` settings, and the run record the
+ * loop keeps. The loop re-validates every payload; the Pi extension holds the matching tool schema
+ * and the role's command allowlist (integrations/pi).
+ */
+
+/** The tool name the doctor's Pi session submits its report through. */
+export const doctorTool = 'graphyard_doctor_report';
+
+const line = (max: number) => z.string().trim().min(1).max(max);
+export const doctorFindingsSchema = z.object({
+  /** The work item key the finding is on, or a status-level subject such as `installation`. */
+  subject: line(200),
+  /** The check whose fault bound the finding passed: blocked, worker, ci, review-request, launch, proofs, mergeable, decision, containment, refusal, overdue. */
+  check: z.enum(['blocked', 'worker', 'ci', 'review-request', 'launch', 'proofs', 'mergeable', 'decision', 'containment', 'refusal', 'overdue']),
+  detail: line(2000),
+  /** Whether the doctor could not act on it: a human-only decision, or a fault class with no item. */
+  unactionable: z.boolean().default(false),
+}).strict();
+export type DoctorFinding = z.infer<typeof doctorFindingsSchema>;
+export const doctorActionSchema = z.object({
+  subject: line(200),
+  /** The sanctioned command the doctor ran, as it ran it. */
+  command: line(500),
+  outcome: z.enum(['applied', 'refused']),
+  detail: line(1000),
+}).strict();
+export type DoctorAction = z.infer<typeof doctorActionSchema>;
+export const doctorFileSchema = z.object({
+  /** The fault class the finding belongs to, deduplicated against the open items naming it. */
+  faultClass: z.enum(faultClasses),
+  title: line(200), description: line(20000),
+  /** A fault the doctor files is urgent: 0 (P0) or 1 (P1). */
+  priority: z.number().int().min(0).max(1),
+  criteria: z.array(z.object({ id: z.string().trim().regex(/^[A-Z]+-\d+$/), text: line(4000), proofs: z.array(line(200)).min(1).max(10) }).strict()).min(1).max(20),
+  plannedFiles: z.array(line(500)).min(1).max(100),
+}).strict();
+export type DoctorFile = z.infer<typeof doctorFileSchema>;
+export const doctorReportPayloadSchema = z.object({
+  findings: z.array(doctorFindingsSchema).max(200).default([]),
+  actions: z.array(doctorActionSchema).max(200).default([]),
+  filed: z.array(doctorFileSchema).max(20).default([]),
+}).strict();
+export type DoctorReportPayload = z.infer<typeof doctorReportPayloadSchema>;
+
+/**
+ * `run.doctor` in .graphyard/master.json (GY-711): the pipeline doctor runs every
+ * `intervalMinutes` (10 by default), headless on Pi with `model`, and a run that ends without a
+ * valid report runs once more on the stronger `fallbackModel`. The registry's doctor role, when an
+ * operator defines one, chooses the primary run's account and model instead. `timeoutMinutes`
+ * bounds one run. An installation turns the doctor off with `enabled: false`.
+ */
+export const doctorSettingsSchema = z.object({
+  enabled: z.boolean().default(true),
+  command: z.string().trim().min(1).max(500).optional(),
+  intervalMinutes: z.number().int().min(5).max(1440).default(10),
+  model: z.string().trim().min(1).max(200).default('zai/glm-5.3-flash'),
+  fallbackModel: z.string().trim().min(1).max(200).default('zai/glm-5.3'),
+  timeoutMinutes: z.number().int().min(1).max(60).default(20),
+}).strict();
+export type DoctorSettings = z.infer<typeof doctorSettingsSchema> & { command: string };
+/** The doctor settings in force: `run.doctor` over its defaults, Pi's command from `run.pi` when it names none. */
+export function doctorSettings(run: { doctor?: unknown; pi?: { command?: string } } | undefined): DoctorSettings {
+  const parsed = doctorSettingsSchema.parse(run?.doctor ?? {});
+  return { ...parsed, command: parsed.command ?? run?.pi?.command ?? 'pi' };
+}
+
+/**
+ * What the loop keeps of one doctor run (GY-711): when it ran, what it found, did and filed, and
+ * how it ended. Kept bounded on the cursor, posted to the control plane for the dashboard, and
+ * summarised by `master status`.
+ */
+export const doctorStates = ['running', 'reported', 'failed'] as const;
+export const doctorRunRecordSchema = z.object({
+  at: z.string().max(40), state: z.enum(doctorStates),
+  runs: z.array(z.object({ runtime: z.string().max(40), model: z.string().max(200), result: z.string().max(40), detail: z.string().max(500) }).strict()).max(4).default([]),
+  findings: z.array(doctorFindingsSchema).max(50).default([]),
+  actions: z.array(doctorActionSchema).max(50).default([]),
+  filed: z.array(z.object({ faultClass: z.enum(faultClasses), title: z.string().max(200), work: z.string().max(50).nullable().default(null), deduplicated: z.boolean().default(false) }).strict()).max(20).default([]),
+  detail: z.string().max(1000).default(''),
+}).strict();
+export type DoctorRunRecord = z.infer<typeof doctorRunRecordSchema>;
+export const retainedDoctorRuns = 20;
 
 /**
  * The narrow roles on the headless runner (GY-169): the approver and the unit proof producer. A

@@ -38,9 +38,9 @@ import { serverCallName, timedCall, timedFetch, timedRun } from '../master/timin
 import type { RunRecord, Runner } from '../runner/types.js';
 import type { ResearchEvent } from '../research.js';
 import { doctorRole, type DoctorEffects } from './doctor.js';
-import { doctorSettings } from '../runner/payloads.js';
+
 import { piRunner } from '../runner/pi.js';
-import { registryHeadlessLaunch, registryRunner } from '../runner/roles.js';
+import { doctorSettings, registryHeadlessLaunch, registryRunner } from '../runner/roles.js';
 import { selectFleetSession } from '../fleet.js';
 
 /** A reviewer or producer session a launch ledger holds as pending, as the failover step reads it. */

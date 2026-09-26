@@ -6,7 +6,8 @@ import { Launcher, type Cycle } from '../src/daemon/cycle.js';
 import { Timings } from '../src/master/timings.js';
 import { approverSessionName } from '../src/master/autonomy.js';
 import { clearDoctorRuns, clearCoveredBlockers, doctorBounds, doctorDue, doctorIntervalMs, doctorPrompt, doctorRunsSettled, doctorSanctionedCommands, doctorStep, relaunchUnansweredApprovers, settleSubmittedContainment, unansweredDecisionMs, type DoctorEffects } from '../src/daemon/doctor.js';
-import { doctorSettingsSchema, graphyardTools, type DoctorRunRecord } from '../src/runner/payloads.js';
+import { doctorSettingsSchema, type DoctorRunRecord } from '../src/runner/roles.js';
+import { doctorTool } from '../src/runner/roles.js';
 import { doctorSanctionedCommands as piSanctioned, doctorSegmentAllowed, graphyardTools as piTools } from '../integrations/pi/index.js';
 import type { Runner } from '../src/runner/types.js';
 import type { Work } from '../src/model.js';
@@ -93,7 +94,7 @@ test('unit:doctor-scheduled-and-scoped — the doctor runs every ten minutes by 
     assert.deepEqual(doctorSegmentAllowed(words(...segments)), { allow: true }, `${segments.join(' ')} is read-only`);
   }
   // The doctor session launched through the headless runner gets exactly the doctor tool.
-  assert.deepEqual(piTools('doctor').map(tool => tool.name), [graphyardTools.doctor]);
+  assert.deepEqual(piTools('doctor').map(tool => tool.name), [doctorTool]);
 
   // The shipped template names every check bound, the sanctioned commands and the unactionable rule.
   const prompt = doctorPrompt({ repository: master.repository, cliPath: `node ${master.cliPath}` }, { items: [], faults: [] });
@@ -141,7 +142,7 @@ test('unit:doctor-run-recorded — a doctor run records one event per item it fo
   assert.deepEqual([run.findings.length, run.actions.length], [2, 1]);
   assert.deepEqual(posted.length && [posted[0].at, posted[0].findings.length], [run.at, 2], 'the run summary was posted to the control plane');
   // One event per item the run found or acted on, plus one summary event.
-  const events = Object.values(first.state.actions).filter(action => action.kind === 'doctor');
+  const events = Object.values(first.state.actions).filter(action => action.kind === 'fault');
   assert.deepEqual(events.filter(action => action.work).map(action => action.work).sort(), ['GY-74', 'GY-75'], 'one event per item with a finding or an action');
   assert.ok(events.some(action => action.work === null && /2 finding\(s\), 1 action\(s\)/.test(action.detail)), 'one run summary event names what was stuck, what it did and what it filed');
   // Dedup: the covered class is not filed; the uncovered one is filed through master create's checks.
