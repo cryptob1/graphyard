@@ -297,8 +297,11 @@ export async function closeStep(cycle: Cycle) {
     // The session's own handle on the item — the one its launcher registered — carries the prompt
     // and the loop's answer, as a worker's does (GY-223). One the launcher never registered has
     // only the loop's ledger entry: the loop does not mint a handle under an id it would have to guess.
-    const registered = item.sessions?.find(entry => entry.state === 'running' && (entry.kind === 'review' || entry.kind === 'proof')
-      && (entry.agentName === session.agentName || (!!session.pane && entry.pane === session.pane)));
+    // The handle's id is the launch's request id, so that binding is exact and is tried first (GY-472);
+    // the agent name or pane is the fallback for a launch that carries no request id.
+    const running = item.sessions?.filter(entry => entry.state === 'running' && (entry.kind === 'review' || entry.kind === 'proof')) ?? [];
+    const registered = session.requestId ? running.find(entry => entry.id === session.requestId)
+      : running.find(entry => entry.agentName === session.agentName || (!!session.pane && entry.pane === session.pane));
     const handle = async (outcome: string, finished: boolean) => {
       if (!registered) return;
       await effects.recordSession?.(item, { id: registered.id, kind: registered.kind, runtime: registered.runtime, host: registered.host, subject: registered.subject,
