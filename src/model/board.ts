@@ -6,7 +6,7 @@ import { scopeRefusalBlocker } from './scope.js';
 import { shortShas } from './format.js';
 import { OVERDUE_MINUTES, statusDuration } from './duration.js';
 import { phaseOf, plainReason, plainStatus, statusSince } from './plain-status.js';
-import { prSteps, stepSince } from './pr-steps.js';
+import { prSteps, researchStepState, stepSince } from './pr-steps.js';
 import { leftFlowAt, noRelease, releaseView, servedFor, type ReleaseView } from './release.js';
 import { stalledCards } from './actionless.js';
 import { resourceConflicts } from '../coordination.js';
@@ -84,6 +84,9 @@ export function groupOf(work: Work, now: number, humanOnly: ReadonlySet<string> 
   if (humanOnly.has(work.id) || parkedOnHuman(work)) return 'needs-you';
   const phase = phaseOf(work, now);
   if (phase === 'not-started') return 'backlog';
+  // A research run live or awaited is somebody working on the item, before any builder starts
+  // (GY-434): the item is moving, at its Research step, and not waiting for a worker.
+  if (researchStepState(work, now) === 'current') return 'moving';
   if (stalled.has(work.id) || plainStatus(work, now).tone === 'stuck') return 'blocked';
   return phase === 'needs-worker' ? 'up-next' : 'moving';
 }
@@ -185,7 +188,7 @@ function heldMeaning(total: number, held: string[]): string {
 export const actorRoles = ['worker', 'reviewer', 'producer', 'approver', 'master', 'executor', 'human-only', 'held'] as const;
 export type ActorRole = typeof actorRoles[number];
 const roleOf: Record<string, ActorRole> = {
-  You: 'human-only', 'Master agent': 'master', 'Builder agent': 'worker', 'Reviewer agent': 'reviewer', 'Prover agent': 'producer',
+  You: 'human-only', 'Master agent': 'master', 'Builder agent': 'worker', 'Research agent': 'worker', 'Reviewer agent': 'reviewer', 'Prover agent': 'producer',
   // The control plane's own steps: the dispatcher, the CI run, the merge queue, the production watch.
   'Graphyard (automatic)': 'executor', 'Graphyard (assigns a builder)': 'executor', 'Automated checks': 'executor',
   'Nobody yet': 'held',

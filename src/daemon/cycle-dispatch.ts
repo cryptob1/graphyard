@@ -32,6 +32,10 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
   //     within its time limit. A run that fails or times out is recorded and the item is built
   //     without a brief; research never holds an item past its bound. It runs only once
   //     `run.research` names the research account: an unconfigured loop dispatches as before.
+  //     The loop publishes whether it researches, so the dashboard shows a released feature's
+  //     Research step as skipped where no run will start (GY-434); a failed publication is retried
+  //     next cycle and holds nothing back.
+  if (effects.publishResearch) await effects.publishResearch().catch(() => undefined);
   const held = new Set(offered.filter(item => researchHold(item, clock)).map(item => item.id));
   if (effects.recordResearch && effects.research && config.run?.research) await isolate('dispatch', null, 'research', async () => {
     const settings = researchSettings(config.run);

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Work } from '../../src/model';
 import { sessionStaleThresholdMs, workersView, type PrincipalSummary, type SessionRoleKind, type WorkerRow } from '../workers-view';
-import { prSteps } from '../../src/model/pr-steps';
+import { prSteps, researchStepState } from '../../src/model/pr-steps';
 import { releaseView, type ReleaseView } from '../../src/model/release';
 import type { Dashboard } from './dashboard';
 import DeliverySlices from '../components/delivery-slices';
@@ -65,6 +65,33 @@ export function useLiveNow(observedAt: number) {
 export const roleWords: Record<SessionRoleKind, string> = {
   worker: 'Builds code', reviewer: 'Reviews code', producer: 'Proves requirements', approver: 'Approves decisions', 'escalation handler': 'Handles escalations', master: 'Runs the loop',
 };
+/** The role a row shows: a research run is its own role — Researches — whatever kind backs it (GY-434). */
+export const roleLabel = (row: Pick<WorkerRow, 'roleKind' | 'role'>): string => row.role === 'research' ? 'Researches' : roleWords[row.roleKind];
+
+/**
+ * Every live research run as a session row (GY-434): one per item whose research step is current —
+ * a run recorded as running within its bound — with the role Researches, the model it runs on, its
+ * item and since when. A research run holds no lease and no runtime handle: the item's research
+ * record is what the loop and the dashboard both read, so the row is derived from that record and
+ * ends the moment the brief or the failure is recorded.
+ */
+export function researchRows(work: readonly Work[], now: number): WorkerRow[] {
+  return work.flatMap(item => {
+    if (researchStepState(item, now) !== 'current' || !item.researchBrief) return [];
+    const startedAt = item.researchBrief.startedAt;
+    const row: WorkerRow = {
+      id: `research:${item.id}:${item.researchBrief.revision}`, kind: 'coordination', principal: 'research', epoch: null,
+      runtime: item.researchBrief.runtime, host: 'the master loop', workspace: null, tab: null, pane: null, agentName: null,
+      role: 'research', head: null, attach: null, transcript: null,
+      subject: `Researching ${item.key} on ${item.researchBrief.model} before build`,
+      startedAt, updatedAt: startedAt, endedAt: null, state: 'running', outcome: null,
+      observed: 'working', seenAt: startedAt, live: true, unseenMs: null,
+      workId: item.id, key: item.key, roleKind: 'master', spentMs: Math.max(0, now - Date.parse(startedAt)),
+      local: null, remote: null, stale: null, reconciled: null, leftOn: null,
+    };
+    return [row];
+  });
+}
 
 /**
  * A session's health in plain words, from the one session state (GY-172): only a session whose
@@ -100,10 +127,11 @@ function Attach({ row }: { row: WorkerRow }) {
   return row.transcript ? <CopyButton text={row.transcript} label="Copy transcript path"/> : <span className="muted">no transcript recorded</span>;
 }
 
-/** What the session is doing now: a builder by its item's current step, anyone else by what it was launched for, an ended one by how it ended. */
+/** What the session is doing now: a builder by its item's current step, a research run by the brief it is writing, anyone else by what it was launched for, an ended one by how it ended. */
 function doing(row: WorkerRow, item: Work | undefined, now: number, release: ReleaseView) {
   if (row.leftOn) return shortShas(row.subject);
   if (row.state !== 'running') return shortShas(row.reconciled ? row.subject : row.outcome ?? row.subject);
+  if (row.role === 'research') return shortShas(row.subject);
   if (row.roleKind === 'worker' && item && !row.stale) return prSteps(item, now, release).label;
   return shortShas(row.subject);
 }
@@ -116,9 +144,10 @@ function since(row: WorkerRow, now: number) {
 }
 
 function Row({ row, item, now, release, setSelected }: { row: WorkerRow; item?: Work; now: number; release: ReleaseView; setSelected(id: string | null): void }) {
-  return <tr data-session={row.id} data-work={row.key} data-role={row.roleKind} className={row.stale && !row.leftOn ? 'stale' : undefined}>
+  const role = roleLabel(row);
+  return <tr data-session={row.id} data-work={row.key} data-role={row.role === 'research' ? 'researches' : row.roleKind} className={row.stale && !row.leftOn ? 'stale' : undefined}>
     <th scope="row" data-label="Agent"><span className="mono agent-name" title={`${row.principal} · ${row.runtime} on ${row.host}`}>{row.agentName ?? row.principal}</span><Attach row={row}/></th>
-    <td data-label="Role">{roleWords[row.roleKind]}</td>
+    <td data-label="Role">{role}</td>
     <td data-label="Working on"><button type="button" className="text-button" title={shortShas(row.subject)} onClick={() => setSelected(row.workId)}><span className="mono">{row.key}</span>{item ? <> {item.title}</> : null}</button></td>
     <td data-label="Doing now">{doing(row, item, now, release)}</td>
     <td data-label="Since" data-spent={row.spentMs}>{since(row, now)}</td>
@@ -153,18 +182,22 @@ function Accounts({ principals, setSelected }: { principals: PrincipalSummary[];
  * The Workers page (GY-161, design/dashboard/Workers.dc.html): one table of the agent sessions
  * open now — the agent, its role in plain words, the item it works on, what it is doing, since
  * when, and its health — with the sessions that ended and the per-account summary folded below.
+ * Live research runs are listed among the open sessions as their own role (Researches, GY-434),
+ * read from the same research record the loop holds.
  */
 export default function WorkersPage({ work, observedAt, setSelected, status }: Pick<Dashboard, 'work' | 'observedAt' | 'setSelected'> & { status?: Dashboard['status'] }) {
   const now = useLiveNow(observedAt);
   const release = releaseView(status);
   const view = workersView(work, new Date(now), undefined, release);
+  // Research runs are not runtime handles, so they are joined here, longest-running first like the rest.
+  const running = [...view.running, ...researchRows(work, now)].sort((a, b) => b.spentMs - a.spentMs || a.key.localeCompare(b.key));
   // A session the runtime no longer reports is not open: it is listed, marked, but never counted as working.
-  const stale = view.running.filter(row => row.stale).length;
-  const open = view.running.length - stale;
+  const stale = running.filter(row => row.stale).length;
+  const open = running.length - stale;
   return <>
     <div className="page-heading"><div><h1>Workers</h1><p className="summary">{open} agent {open === 1 ? 'session' : 'sessions'} open.{stale ? ` ${stale} not seen recently.` : ''} {view.finished.length} ended.</p></div></div>
-    {view.running.length ? <Table rows={view.running} label="Agent sessions" work={work} now={now} release={release} setSelected={setSelected}/> : <p className="muted">No agent session is open.</p>}
-    <p className="muted workers-note">Roles: builds code · reviews code · proves requirements · approves decisions. An agent never reviews or approves its own work. A session not seen for {Math.round(sessionStaleThresholdMs / 60_000)} minutes is marked, never shown as live.</p>
+    {running.length ? <Table rows={running} label="Agent sessions" work={work} now={now} release={release} setSelected={setSelected}/> : <p className="muted">No agent session is open.</p>}
+    <p className="muted workers-note">Roles: researches · builds code · reviews code · proves requirements · approves decisions. An agent never reviews or approves its own work. A session not seen for {Math.round(sessionStaleThresholdMs / 60_000)} minutes is marked, never shown as live.</p>
     <details className="finished-sessions"><summary>Ended <span className="count">{view.finished.length}</span></summary>
       {view.finished.length ? <Table rows={view.finished} label="Ended sessions" work={work} now={now} release={release} setSelected={setSelected}/> : <p className="muted">No session has ended yet.</p>}
     </details>

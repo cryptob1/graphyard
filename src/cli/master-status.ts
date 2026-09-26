@@ -22,6 +22,7 @@ import { ghCheckAnnotations, qualifyTimingFailures } from './timing-failures.js'
 import { setupHealth } from './master-setup.js';
 import { stuckRequestReport, withStuckRequests } from './stuck-requests.js';
 import { nameUnresolvedThreads } from '../merge-queue.js';
+import { researchReport } from '../research.js';
 import { observationThroughputStatus } from '../github.js';
 import type { LoopSupervisorHost } from '../supervisor.js';
 import { attributeAttention, derivedAttention, faulted, ledgerRefusalAttention, resourceStatus } from '../master-status.js';
@@ -144,8 +145,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     { reviews: reviewRecords, producers: producerRecords, runtime, commit: cli.commit, approvals: cycling?.approvals ?? [], loop: cycling?.liveness ?? null, rows: status.work, trees,
       // The intervention report is slow: status reads the loop's copy, or a bounded live read.
       reports: 'bounded', reportBoundMs: dependencies.reportReadBoundMs, sections });
-  // A merge pending on a head GitHub reports mergeable is named with the stalled items (GY-344).
-  // A repair-lane merge stays in front of the master until a normal merge proves the merge path healthy (GY-406).
+  // A merge pending on a mergeable head (GY-344) and a repair-lane merge (GY-406) join the stalled items.
   // Queue-head observation lag (GY-492) and slow renewals (GY-558) stall what waits.
   const observation = observationThroughputStatus(coordinator, snapshot), health = leaseHealthStatus(coordinator);
   const stalledItems = [...derivedStalls, ...mergeStallAttention(snapshot), ...observation.attention, ...repairLaneAttention(snapshot.work), ...health.attention];
@@ -200,6 +200,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     // The inverted loop: what the control plane says each item needs, who is running it, and
     // every session it can be watched through.
     actions: needsHumanActions(actionReport(snapshot), owed.rows),
+    research: researchReport(master.run, snapshot.work, Date.parse(snapshot.now)),
     // Presence and supervision (GY-105) and the release each registered executor runs (GY-126).
     executors: { ...executors, ...releases, attention: [...executors.attention, ...releases.attention] }, sessions: sessionReport(snapshot),
     // Branches the queue's own pushes contaminated and the approvals its pushes cost (GY-127).

@@ -22,14 +22,16 @@ Running rows offer:
 - **Copy local**, on the launching host: `herdr agent attach w1V:pJD`.
 - **Copy remote**: `herdr --help` documents `herdr --machine <label-or-id> <command>` and `herdr --remote <ssh-target>`, and interactive attachment is not forwarded by `--machine`, so the form focuses the pane then attaches remotely: `herdr --machine vishrog agent focus w1V:pJD && herdr --remote vishrog`.
 
+[Research runs](master-agent.md#research-before-build) are **Researches** rows.
+
 ## The status sentence
 
-Rows show **Build, Validate, Test, Review, Prove, Merge, Deploy** (`src/model/pr-steps.ts`). A merged item reads *Merged*, then *Live* once production serves it (counted this week). Moving and Blocked rows past thirty minutes read `1h 12m overdue`.
+Rows show **Research, Build, Validate, Test, Review, Prove, Merge, Deploy** (`src/model/pr-steps.ts`). Research: **current** while live, **done** with a brief, else **skipped** (failed, bug, `"research": false`, built briefless, no `run.research`). Merged items read *Merged*, then *Live* in production. Moving or Blocked over 30 minutes reads `1h 12m overdue`.
 
 ## An item page
 
-Below the summary: **What is left** (unmet requirements, who clears each), **Requirements** (✓ or ○ per criterion), **Pull request** and **Activity**. **Technical details** holds gates, sessions, evidence and overlaps (`Shares files with GY-166, GY-167 (tests/)`).
+Below the summary: **What is left** (unmet requirements, who clears each), **Requirements** (✓ or ○ per criterion), **Pull request** and **Activity**. **Research brief** (collapsed): model, duration, tokens. **Technical details** holds gates, sessions, evidence and overlaps (`Shares files with GY-166, GY-167 (tests/)`).
 
 ## Insights
 
-Headline numbers, **Flow** (Now columns show 12 dots, then **+N more**; medians survive a failed replay read), landed per day, time spent; **Show details** holds shipping pulse (PR-to-production from `POST /api/production-observations` or `master verify-deployment`) and flow analytics. **Shipped** holds **Interventions**, **Validation** and **Releases**; `GRAPHYARD_INTERVENTION_PATTERNS=1` files repeats as `bug` items. Missing values read `Unavailable`.
+Headline numbers, **Flow** (Now columns show 12 dots, then **+N more**; medians survive a failed replay read), landed per day, time use, research effect; **Show details** holds shipping pulse (PR-to-production from `POST /api/production-observations` or `master verify-deployment`) and flow analytics. **Shipped** holds **Interventions**, **Validation** and **Releases**; `GRAPHYARD_INTERVENTION_PATTERNS=1` files repeats as `bug` items. Missing values read `Unavailable`.

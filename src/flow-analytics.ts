@@ -56,6 +56,7 @@ export type FlowSource = 'graphyard' | 'github' | 'ci' | 'evidence' | 'deploymen
 export const flowKinds = ['work.created', 'work.released', 'dependencies.changed', 'blocker.set', 'blocker.cleared',
   'lease.claimed', 'lease.released', 'lease.lost', 'rework.requested', 'pr.submitted', 'candidate.observed',
   'review.requested', 'review.submitted', 'review.completed', 'check.observed', 'evidence.recorded',
+  'research.started', 'research.recorded', 'research.failed',
   'merge.authorized', 'merged', 'delivered', 'stage.changed', 'gates.changed'] as const;
 export type FlowKind = typeof flowKinds[number];
 
@@ -132,6 +133,20 @@ export function deriveFacts(event: LedgerEvent, state: ProjectionState): FlowFac
   if (event.kind === 'rework') push('rework.requested', recordedAt, 'graphyard', String(sourceEvent), { epoch: work.epoch });
 
   if (event.kind === 'submit' && work.submission) push('pr.submitted', recordedAt, 'graphyard', `${work.submission.pr}:${work.submission.epoch}`, { pr: work.submission.pr, epoch: work.submission.epoch });
+
+  // The research step (GY-434): the loop's own record of the run, read from the item the event
+  // carries. The run's instants are the recorded start and end, never the ledger write.
+  if (event.kind === 'research.started' && work.researchBrief)
+    push('research.started', work.researchBrief.startedAt, 'graphyard', work.researchBrief.revision,
+      { revision: work.researchBrief.revision, model: work.researchBrief.model, runtime: work.researchBrief.runtime, timeoutMs: work.researchBrief.timeoutMs, tokenBudget: work.researchBrief.tokenBudget });
+  if ((event.kind === 'research.recorded' || event.kind === 'research.failed') && work.researchBrief) {
+    const record = work.researchBrief;
+    const durationMs = time(record.endedAt) !== null && time(record.startedAt) !== null ? time(record.endedAt)! - time(record.startedAt)! : null;
+    push(event.kind, record.endedAt ?? recordedAt, 'graphyard', record.revision, {
+      revision: record.revision, model: record.model, durationMs: durationMs !== null && durationMs >= 0 ? durationMs : null,
+      tokens: record.tokens ?? null, failure: record.failure?.reason ?? null,
+    });
+  }
 
   const observation = work.observation;
   if (work.candidate && work.candidate.sha !== state.candidateSha) {
@@ -238,13 +253,19 @@ export function deriveFacts(event: LedgerEvent, state: ProjectionState): FlowFac
   // Whether the candidate has merged: a merged item is past every pre-merge step whatever its gates
   // still say (`gateFactStep`), so its merge is a new fact; like the rework it joins the identity only while set.
   const merged = !!observation?.merged;
-  const gateKey = JSON.stringify([work.stage, unmet, dependencyWaiting, !!work.candidate, blocker, !!work.ready, work.violations?.length ?? 0, queued, mergeBlockers > 0, firstUnmet?.name ?? null, reasons, ...(reworkRequested ? ['rework'] : []), ...(merged ? ['merged'] : [])]);
+  // Whether a research run is live or awaited as of this event (GY-434): a brief recorded as
+  // running, within its time limit as of the event's own instant. It puts a released item in the
+  // Researching wait category and joins the gate identity only while set.
+  const research = work.researchBrief;
+  const researchRunning = !!research && research.state === 'running'
+    && time(recordedAt) !== null && time(recordedAt)! < time(research.startedAt)! + research.timeoutMs;
+  const gateKey = JSON.stringify([work.stage, unmet, dependencyWaiting, !!work.candidate, blocker, !!work.ready, work.violations?.length ?? 0, queued, mergeBlockers > 0, firstUnmet?.name ?? null, reasons, ...(reworkRequested ? ['rework'] : []), ...(merged ? ['merged'] : []), ...(researchRunning ? ['research-running'] : [])]);
   if (gateKey !== state.gateKey)
     push('gates.changed', recordedAt, 'graphyard', String(sourceEvent), {
       stage: work.stage, unmet, firstUnmet: firstUnmet?.name ?? null, firstUnmetReason: firstUnmet?.reasons[0] ?? null,
       reasons, dependencyWaiting, hasCandidate: !!work.candidate,
       released: !!work.ready, blocker, violations: work.violations?.length ?? 0, pr: work.candidate?.pr ?? null,
-      queued, mergeBlockers, reworkRequested, merged,
+      queued, mergeBlockers, reworkRequested, merged, researchRunning,
     });
 
   state.created = true;
@@ -442,7 +463,7 @@ export function coveredUntil(dataset: { to?: string; covered?: CoveredWindow; ki
   return dataset.kindCovered?.[kind] ?? (dataset.covered?.truncated ? dataset.covered.toCovered : dataset.to);
 }
 
-const carryKinds: FlowKind[] = ['stage.changed', 'gates.changed', 'work.created', 'work.released', 'delivered', 'merged', 'candidate.observed', 'lease.claimed', 'lease.released', 'lease.lost', 'dependencies.changed'];
+const carryKinds: FlowKind[] = ['stage.changed', 'gates.changed', 'work.created', 'work.released', 'delivered', 'merged', 'candidate.observed', 'lease.claimed', 'lease.released', 'lease.lost', 'dependencies.changed', 'research.recorded'];
 
 /**
  * Facts grouped by work id, oldest first as read, built once per fact array and reused: the
@@ -610,11 +631,12 @@ export async function pooledFlowReport(store: Store, query: FlowQuery): Promise<
   return entry.read;
 }
 
-export type WaitCategory = 'delivered' | 'backlog' | 'blocked' | 'dependency' | 'implementation' | 'review' | 'evidence' | 'merge-blocked' | 'merge-ready';
+export type WaitCategory = 'delivered' | 'backlog' | 'blocked' | 'dependency' | 'research' | 'implementation' | 'review' | 'evidence' | 'merge-blocked' | 'merge-ready';
 export const waitCategories: { id: WaitCategory; label: string; definition: string }[] = [
   { id: 'backlog', label: 'Not released', definition: 'Recorded intent that an operator has not released for implementation.' },
   { id: 'blocked', label: 'Blocked', definition: 'An explicit blocker was recorded and has not been cleared.' },
   { id: 'dependency', label: 'Dependency-blocked', definition: 'The ready gate refuses because a prerequisite work item is not delivered.' },
+  { id: 'research', label: 'Researching', definition: 'Released, unblocked, and a research run for its current requirements is live or awaited: the brief is written before a builder starts.' },
   { id: 'implementation', label: 'In implementation', definition: 'Released, unblocked, and no pull-request candidate has been independently observed yet.' },
   { id: 'review', label: 'Waiting on review', definition: 'A candidate is observed and the review gate has not been satisfied for it.' },
   { id: 'evidence', label: 'Waiting on acceptance evidence', definition: 'Review is satisfied and at least one required proof still lacks trusted passing evidence for the candidate.' },
@@ -667,6 +689,8 @@ export function classifyWait(gate: Record<string, any> | undefined, delivered: b
   if (!gate.released) return 'backlog';
   if (gate.blocker) return 'blocked';
   if ((gate.dependencyWaiting ?? []).length) return 'dependency';
+  // A live or awaited research run is the item's own step before any builder starts (GY-434).
+  if (!gate.hasCandidate && gate.researchRunning) return 'research';
   if (!gate.hasCandidate) return 'implementation';
   if (unmet.includes('review')) return 'review';
   if (unmet.includes('acceptance')) return 'evidence';
@@ -697,16 +721,17 @@ export function countSummary(values: number[]) {
 }
 export const metricDefinitions: Record<string, { label: string; formula: string; sources: string[] }> = {
   stageDwell: { label: 'Stage dwell', formula: 'For each completed stage transition in the window, the interval between entering and leaving that stage. Open stages are excluded and counted separately as work in progress.', sources: ['flow_facts:stage.changed'] },
-  stepDwell: { label: 'Step dwell', formula: 'For each of the seven pull-request steps, the interval between an item entering the step and leaving it, from the step each recorded gate fact places it at and the recorded release serving it. Stays still open are excluded.', sources: ['flow_facts:gates.changed', 'work.delivery.deployment'] },
+  stepDwell: { label: 'Step dwell', formula: 'For each of the eight pull-request steps, the interval between an item entering the step and leaving it, from the step each recorded gate fact places it at, the recorded research run\u2019s start and end, and the recorded release serving it. Stays still open are excluded.', sources: ['flow_facts:gates.changed', 'flow_facts:research.started', 'flow_facts:research.recorded', 'flow_facts:research.failed', 'work.delivery.deployment'] },
   wip: { label: 'Work in progress and aging', formula: 'Items whose latest durable stage fact places them in a stage and that have no delivered fact. Age is the observation time minus the time that stage was entered.', sources: ['flow_facts:stage.changed', 'flow_facts:delivered'] },
   cumulativeFlow: { label: 'Cumulative flow', formula: 'At each daily boundary in the window, the number of created, not-yet-delivered items in each stage, reconstructed from stage facts.', sources: ['flow_facts:stage.changed', 'flow_facts:work.created'] },
-  throughput: { label: 'Throughput', formula: 'Count of delivered facts per daily bucket. A delivered fact is written only when an authorized merge is independently observed.', sources: ['flow_facts:delivered'] },
+  throughput: { label: 'Throughput', formula: 'Count of delivered facts per daily bucket, and of those the ones whose item was built from a recorded research brief. A delivered fact is written only when an authorized merge is independently observed.', sources: ['flow_facts:delivered', 'work.researchBrief'] },
   leadTime: { label: 'Lead time', formula: 'Delivered observation time minus the work-created time, per delivered item in the window.', sources: ['flow_facts:work.created', 'flow_facts:delivered'] },
   queueVsActive: { label: 'Queue versus active work time', formula: 'Active time is the union of lease intervals clipped to the window. Queue time is released, undelivered time in the window with no active lease.', sources: ['flow_facts:lease.claimed', 'flow_facts:lease.released', 'flow_facts:lease.lost'] },
   mergeReadyDwell: { label: 'Merge-ready dwell', formula: 'Interval from the gate fact where the candidate became merge ready (no gate refuses, or only merge-queue sequencing remains) to the next refusing gate fact, to the observed merge, or to the observation time for items still merge ready, clipped to the window. Gate facts observed after the merge never open an interval, and an interval that ended before the window is excluded rather than measured.', sources: ['flow_facts:gates.changed', 'flow_facts:merged'] },
   phases: { label: 'Phase durations', formula: 'Per candidate episode (one commit under review), the interval between consecutive milestones. A milestone uses the independently observed provider timestamp when the provider supplies one. The production milestone is the earliest successful deployment of the configured production environment (report.productionEnvironment) that contains the merge commit; a deployment to any other environment never ends the phase.', sources: ['flow_facts:candidate.observed', 'flow_facts:review.submitted', 'flow_facts:review.completed', 'flow_facts:gates.changed', 'flow_facts:merge.authorized', 'flow_facts:merged', 'deployment_observations'] },
   ci: { label: 'CI duration, failure and retry', formula: 'Per check name and commit, the interval between the first pending observation and the first terminal observation. Durations are bounded by Graphyard observation intervals, not by provider start timestamps.', sources: ['flow_facts:check.observed'] },
   evidence: { label: 'Evidence wait, expiry and staleness', formula: 'Wait is review completion to the gate fact where acceptance stops refusing. Expiry counts recorded evidence whose expiry precedes the observation time; staleness counts evidence bound to a superseded commit.', sources: ['flow_facts:evidence.recorded', 'flow_facts:gates.changed'] },
+  research: { label: 'Research runs and effect', formula: 'Per item, one research run per requirements revision: the run\u2019s recorded start to its recorded brief or failure is the research dwell, and the brief, failure and duration are the run\u2019s own facts. The effect compares features with a brief recorded by the window\u2019s end with features without one, over rework rounds and review findings per item in each cohort.', sources: ['flow_facts:research.started', 'flow_facts:research.recorded', 'flow_facts:research.failed', 'flow_facts:rework.requested', 'flow_facts:review.submitted'] },
   operations: { label: 'Operational analytics', formula: 'Counts of recorded blockers, gate refusal reasons, review rounds and findings, rework, lease lifecycle, and queue depth sampled at daily boundaries. Aggregates are never keyed by a person.', sources: ['flow_facts:blocker.set', 'flow_facts:gates.changed', 'flow_facts:review.submitted', 'flow_facts:rework.requested', 'flow_facts:lease.claimed'] },
   deployments: { label: 'Deployment frequency, latency, failure and rollback', formula: 'Deployment-provider observations of every environment join their independently observed contained merge SHAs to merged facts. Latency is deployment start minus the latest contained observed merge. Deployment observations are repository-wide, so slice, type and stage filters do not narrow them. Absent observations are reported as unavailable, never as zero.', sources: ['deployment_observations', 'deployment_merge_observations', 'flow_facts:merged'] },
   bottleneck: { label: 'Bottleneck summary', formula: 'Each undelivered item is classified by its latest durable gate fact into exactly one wait category.', sources: ['flow_facts:gates.changed', 'flow_facts:delivered'] },
@@ -788,7 +813,7 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
   });
 
   // Step dwell: the same step moves the replay plays, completed stays only (entered and left).
-  // Each item's moves are computed once and shared by the seven steps.
+  // Each item's moves are computed once and shared by the eight steps.
   const itemMoves = stageScope.map(item => stepMoves(dataset, item, productionEnvironment));
   const stepDwell = flowSteps.map(step => {
     const values: number[] = [];
@@ -834,8 +859,13 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
   const deliveredFacts = scopedFacts.filter(fact => fact.kind === 'delivered');
   // A day the read never reached is marked uncovered, so its count is never shown as a zero.
   const deliveredUntil = time(coveredUntil(dataset, 'delivered')) ?? to;
-  const throughput = starts.map(at => ({ bucket: new Date(at).toISOString(), delivered: deliveredFacts.filter(fact => inBucket(time(fact.observedAt)!, at)).length,
-    covered: Math.min(at + day, to) <= deliveredUntil }));
+  // Each day's deliveries split by whether the item was built from a recorded research brief (GY-434).
+  const researchedIds = new Set(dataset.work.filter(item => item.researchBrief?.state === 'recorded').map(item => item.id));
+  const throughput = starts.map(at => {
+    const landed = deliveredFacts.filter(fact => inBucket(time(fact.observedAt)!, at));
+    return { bucket: new Date(at).toISOString(), delivered: landed.length, researched: landed.filter(fact => researchedIds.has(fact.workId)).length,
+      covered: Math.min(at + day, to) <= deliveredUntil };
+  });
   const leadValues: { key: string; ms: number; at: string }[] = [];
   for (const fact of deliveredFacts) {
     const created = latest.get(`${fact.workId}:work.created`);
@@ -1071,6 +1101,40 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
   };
   if (!withCandidate.length) unavailable.push({ metric: 'review', reason: 'No candidate was observed for the selected work.' });
 
+  // Research runs and their effect (GY-434). Duration is recorded on the end fact itself — the
+  // run's start to its recorded brief or failure — so the aggregation reads one fact per stay.
+  // The effect compares researched features against unresearched ones, over the two counts that
+  // answer whether research pays: rework rounds and review findings per item. A feature is
+  // researched when a brief was ever recorded for it up to the window's end (`latest`), so one
+  // researched before the window opened never dilutes the unresearched cohort.
+  const researchStarts = scopedFacts.filter(fact => fact.kind === 'research.started');
+  const researchEndFacts = scopedFacts.filter(fact => fact.kind === 'research.recorded' || fact.kind === 'research.failed');
+  const researchDurations: number[] = [];
+  for (const end of researchEndFacts) {
+    const value = typeof end.details.durationMs === 'number' ? end.details.durationMs : null;
+    if (value !== null && value >= 0) researchDurations.push(value);
+    else exclude('research-duration-not-recorded', end.workKey);
+  }
+  const researchedKeys = new Set(stageScope.filter(item => latest.has(`${item.id}:research.recorded`)).map(item => item.key));
+  const roundsByWorkKey = new Map<string, number>();
+  for (const fact of scopedFacts.filter(fact => fact.kind === 'rework.requested')) roundsByWorkKey.set(fact.workKey, (roundsByWorkKey.get(fact.workKey) ?? 0) + 1);
+  const findingsByWorkKey = new Map<string, number>();
+  for (const fact of reviewFacts.filter(fact => fact.details.reviewState === 'CHANGES_REQUESTED')) findingsByWorkKey.set(fact.workKey, (findingsByWorkKey.get(fact.workKey) ?? 0) + 1);
+  const researchCohort = (researched: boolean) => stageScope.filter(item => item.type === 'feature' && researchedKeys.has(item.key) === researched).map(item => item.key);
+  const researchEffect = (keys: string[]) => ({
+    items: keys.length,
+    reworkRounds: countSummary(keys.map(key => roundsByWorkKey.get(key) ?? 0)),
+    reviewFindings: countSummary(keys.map(key => findingsByWorkKey.get(key) ?? 0)),
+  });
+  const research = {
+    runs: researchStarts.length,
+    briefs: researchEndFacts.filter(fact => fact.kind === 'research.recorded').length,
+    skipped: researchEndFacts.filter(fact => fact.kind === 'research.failed').length,
+    duration: distribution(researchDurations),
+    effect: { researched: researchEffect(researchCohort(true)), unresearched: researchEffect(researchCohort(false)) },
+  };
+  if (!researchStarts.length && !researchEndFacts.length) unavailable.push({ metric: 'research', reason: 'No research run was recorded in this window.' });
+
   const leases = {
     claims: scopedFacts.filter(fact => fact.kind === 'lease.claimed').length,
     reassignments: scopedFacts.filter(fact => fact.kind === 'lease.claimed' && fact.details.reassignment).length,
@@ -1187,7 +1251,7 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
       statement: 'Flow analytics describe observed work, queueing, and capacity. No metric is keyed by a person, and no principal, provider login, or producer identity is stored in a flow fact or returned by this API.',
     },
     coverage, exclusions, unavailable,
-    stageDwell, stepDwell, wip, cumulativeFlow, throughput, leadTime, queueVsActive, mergeReadyDwell, phases, ci, evidence, operations, bottleneck,
+    stageDwell, stepDwell, wip, cumulativeFlow, throughput, leadTime, queueVsActive, mergeReadyDwell, phases, ci, evidence, research, operations, bottleneck,
   };
 }
 export type FlowReport = ReturnType<typeof computeFlow>;
@@ -1195,8 +1259,8 @@ export type FlowReport = ReturnType<typeof computeFlow>;
 export interface DrilldownRequest { metric: string; key?: string | null; authorized?: boolean }
 const drilldownMetrics = ['bottleneck', 'wip', 'stage-dwell', 'lead-time', 'throughput', 'phase', 'evidence', 'merge-ready', 'deployments', 'review', 'blockers', 'steps'] as const;
 
-/** The seven pull-request steps the dashboard draws (src/model/pr-steps.ts), in the order a pull request travels. */
-export const flowSteps = ['build', 'validate', 'test', 'review', 'prove', 'merge', 'deploy'] as const;
+/** The eight pull-request steps the dashboard draws (src/model/pr-steps.ts), in the order a pull request travels. */
+export const flowSteps = ['research', 'build', 'validate', 'test', 'review', 'prove', 'merge', 'deploy'] as const;
 export type FlowStep = typeof flowSteps[number];
 const gateStep: [string, FlowStep][] = [['build', 'validate'], ['test', 'test'], ['review', 'review'], ['acceptance', 'prove'], ['merge', 'merge']];
 /**
@@ -1318,10 +1382,12 @@ export function flowExitAt(work: Work, productionEnvironment = defaultProduction
 
 export interface StepMove { at: string; from: FlowStep | null; to: FlowStep | null; pr: number | null; carried: boolean }
 /**
- * One item's moves between the seven steps, oldest first: the gate fact carried in from before the
+ * One item's moves between the eight steps, oldest first: the gate fact carried in from before the
  * window says where it started (`carried`, not a move inside the window), each recorded gate fact
  * that puts it at a different step is a move, its observed merge moves it to Deploy (gate facts after
- * it never put it back at a pre-merge step), and its exit (`flowExitAt`) takes it from Deploy
+ * it never put it back at a pre-merge step), the research step's own facts move it into Research at
+ * the run's start and out of it at its end — back to the step the gates then say, usually outside
+ * the flow, before any builder (GY-434) — and its exit (`flowExitAt`) takes it from Deploy
  * out of the flow — never while the production watch (`dataset.production`) holds it at Deploy. The carried move starts when the item entered that step (`dataset.stepEntries`). Nothing after the report's cutoff is a move —
  * `dataset.to`, or where the read of gate facts stopped (`coveredUntil`) — and work that
  * left the flow before the window opened (`dataset.from`) has no moves in it at all: its finished
@@ -1339,15 +1405,25 @@ export function stepMoves(dataset: Pick<FlowDataset, 'facts' | 'carryIn'> & { fr
   const merge = carriedMerge ?? own.find(fact => fact.kind === 'merged');
   const mergedAt = merge ? time(merge.observedAt) : null;
   let at: FlowStep | null = carried ? mergedStep(gateFactStep(carried.details), !!carriedMerge) : null;
+  // The gate-based step, kept apart from `at`: leaving Research returns to the step the gates then
+  // name — outside the flow before any builder — never to Research itself.
+  let gateAt: FlowStep | null = at;
   const entered = dataset.stepEntries?.[item.id];
   if (carried && at) moves.push({ at: entered && time(entered) !== null ? entered : carried.observedAt, from: null, to: at, pr: carried.details.pr ?? null, carried: true });
   const mergeCutoff = Math.min(cutoff, time(coveredUntil(dataset, 'merged') ?? '') ?? Infinity);
   const timeline = own.filter(fact => (fact.kind === 'gates.changed' ? time(fact.observedAt)! <= cutoff : fact === merge && !carriedMerge && time(fact.observedAt)! <= mergeCutoff))
-    .sort((a, b) => time(a.observedAt)! - time(b.observedAt)!);
-  for (const fact of timeline) {
-    const step = fact.kind === 'merged' ? 'deploy' : stepAfterMerge(fact, mergedAt);
+    .map(fact => ({ fact, at: time(fact.observedAt)!, research: false as const }));
+  // The research run's own two moves: into Research at its start, out of it at its recorded end
+  // (a brief or a failure alike — both end the step, GY-434), each cut off with the gates.
+  const research = own.filter(fact => (fact.kind === 'research.started' || fact.kind === 'research.recorded' || fact.kind === 'research.failed') && time(fact.observedAt)! <= cutoff)
+    .map(fact => ({ fact, at: time(fact.observedAt)!, research: fact.kind === 'research.started' ? 'start' as const : 'end' as const }));
+  const entries = [...timeline, ...research].sort((a, b) => a.at - b.at || (a.research === false ? 0 : 1) - (b.research === false ? 0 : 1));
+  for (const entry of entries) {
+    const step = entry.research === false ? (entry.fact.kind === 'merged' ? 'deploy' as const : stepAfterMerge(entry.fact, mergedAt))
+      : entry.research === 'start' ? 'research' as const : gateAt;
+    if (entry.research === false) gateAt = step;
     if (step === at) continue;
-    moves.push({ at: fact.observedAt, from: at, to: step, pr: fact.details.pr ?? null, carried: false });
+    moves.push({ at: entry.fact.observedAt, from: at, to: step, pr: entry.fact.details.pr ?? null, carried: false });
     at = step;
   }
   // Recorded as delivered before the gate fact that said so (a merge-time `deliveredAt`), it
@@ -1475,7 +1551,7 @@ export function flowDrilldown(dataset: FlowDataset, report: FlowReport, request:
     for (const fact of dataset.facts.filter(fact => fact.kind === 'review.submitted' && scopedIds.has(fact.workId) && (!key || fact.details.reviewState === key)))
       row(fact.workKey, String(fact.details.reviewState), fact.observedAt, null, null, fact.details.sha ?? null, `independent=${fact.details.independent}; timestamp=${fact.details.timestampSource}`);
   } else if (metric === 'steps') {
-    // Each item's moves between the seven pull-request steps (`stepMoves`), led by the carried
+    // Each item's moves between the eight pull-request steps (`stepMoves`), led by the carried
     // entry into the step it held when the window opened ("outside to <step>" at that entry), so a
     // step entered before the window still says when it began. `key`, when given, is
     // an instant (moves before it are left out) and/or a page cursor (see `next` below):

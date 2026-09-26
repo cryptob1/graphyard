@@ -327,20 +327,21 @@ test('unit:ui-pr-steps — every moving item shows the seven steps from its gate
   for (const [name, item, current, label, who] of cases) {
     const steps = prSteps(item, NOW, trusted);
     assert.deepEqual(steps.steps.map(step => step.id), [...stepIds], name);
-    assert.deepEqual(steps.steps.map(step => step.label), ['Build', 'Validate', 'Test', 'Review', 'Prove', 'Merge', 'Deploy']);
+    assert.deepEqual(steps.steps.map(step => step.label), ['Research', 'Build', 'Validate', 'Test', 'Review', 'Prove', 'Merge', 'Deploy']);
     assert.equal(steps.current, current, name); assert.equal(steps.label, label, name); assert.equal(steps.who, who, name);
     const at = stepIds.indexOf(current as any);
     assert.equal(steps.steps.filter(step => step.state === 'current').length, 1, `${name}: one current step`);
-    for (const step of steps.steps.slice(0, at)) assert.equal(step.state, 'done', `${name}: ${step.id} before the current step is done`);
+    // Research before the current step is done or, with no brief recorded, skipped (GY-434).
+    for (const step of steps.steps.slice(0, at)) assert.ok(step.state === 'done' || step.id === 'research' && step.state === 'skipped', `${name}: ${step.id} before the current step is done`);
     assert.equal(steps.steps[stepIds.length - 1].state, current === 'deploy' ? 'current' : 'pending', `${name}: deploy`);
   }
   // A shipped item the live release serves has every step done.
-  assert.ok(prSteps(find('GY-18', work), NOW).steps.every(step => step.state === 'done'));
+  assert.ok(prSteps(find('GY-18', work), NOW).steps.every(step => step.state === 'done' || step.id === 'research' && step.state === 'skipped'));
   // The Work page row, the phone card (the same element, laid out as a card) and the item page draw the same steps.
   for (const key of ['GY-14', 'GY-15', 'GY-16', 'GY-21', 'GY-22']) {
     const steps = prSteps(find(key, work), NOW);
     const row = markup(createElement(WorkCard, { item: find(key, work), now: NOW, onOpen: noop }));
-    assert.equal((row.match(/data-step="/g) ?? []).length, 7, `${key} row shows seven steps`);
+    assert.equal((row.match(/data-step="/g) ?? []).length, stepIds.length, `${key} row shows every step, Research first`);
     assert.match(row, new RegExp(`data-step="${steps.current}" data-state="current"`));
     assert.ok(row.includes(steps.label), `${key} row labels the current step`);
     const detail = firstScreen(itemPage(key));
@@ -426,10 +427,10 @@ test('unit:ui-insights-flow — Insights shows a Now view at each item\'s true s
   assert.equal(replayPlaces.length, 30); assert.equal(new Set(replayPlaces).size, 30, 'no two replay dots overlap');
   const laneHeight = Number(lane.match(/height:(\d+)px/)![1]);
   assert.ok(Math.max(...replayPlaces.map(place => Number(place.split('|')[1]))) < laneHeight, 'the replay lane grows to hold every row');
-  // On a phone the step heads keep the seven columns the lanes below are drawn in.
+  // On a phone the step heads keep the eight columns (Research to Deploy) the lanes below are drawn in.
   const cssFlow = await read('web/style.css');
-  assert.deepEqual([...cssFlow.matchAll(/\.flow-columns-head\{[^}]*grid-template-columns:repeat\((\d+)/g)].map(match => match[1]), ['7']);
-  assert.match(cssFlow, /\.flow-lane\{[^}]*calc\(100%\/7 - 1px\)/);
+  assert.deepEqual([...cssFlow.matchAll(/\.flow-columns-head\{[^}]*grid-template-columns:repeat\((\d+)/g)].map(match => match[1]), ['8']);
+  assert.match(cssFlow, /\.flow-lane\{[^}]*calc\(100%\/8 - 1px\)/);
   // Time per step honours the report's stage filter, like every other item-scoped figure.
   const dwellItem = (id: string, stage: string) => ({ id, key: id, stage, type: 'feature', createdAt: new Date(NOW - 10 * hour).toISOString(), stageEnteredAt: new Date(NOW - hour).toISOString(), policy: {}, gates: [], criteria: [] }) as unknown as Work;
   const fact = (workId: string, kind: string, ago: number, details: Record<string, unknown>) => ({ workId, workKey: workId, kind, observedAt: new Date(NOW - ago * hour).toISOString(), recordedAt: new Date(NOW - ago * hour).toISOString(), source: 'graphyard', details, dedupe: `${kind}:${workId}:${ago}` });
@@ -609,7 +610,7 @@ test('unit:ui-delivered-without-deployment-record — a merged item is Shipped w
     assert.equal(groupOf(item, NOW), 'shipped', `${item.key} is Shipped`);
     const steps = prSteps(item, NOW);
     assert.equal(steps.current, null, `${item.key} is at no step`);
-    assert.ok(steps.steps.every(step => step.state === 'done'), `${item.key} has every step done`);
+    assert.ok(steps.steps.every(step => step.state === 'done' || step.id === 'research' && step.state === 'skipped'), `${item.key} has every step done`);
     // No production observation covers it, so it reads "Merged", not "Live": it left the flow at its
     // merge (`deliveredAt`), but nothing says the release serves it yet (`servedAt` is null).
     assert.equal(steps.label, 'Merged');
@@ -944,7 +945,7 @@ test('GY-161 review: a refusing ready gate keeps handed-in work at Build, in the
   assert.notEqual(prSteps(handedIn, NOW).current, 'build', 'handed in, it has moved past Build');
   const refuse = (reasons: string[]) => ({ ...handedIn, stage: 'build', gates: handedIn.gates.map(gate => gate.name === 'ready' ? { ...gate, passed: false, reasons } : gate) }) as Work;
   const blocked = prSteps(refuse(['Staging credentials expired']), NOW);
-  assert.equal(blocked.current, 'build'); assert.ok(blocked.steps.slice(1).every(step => step.state === 'pending'));
+  assert.equal(blocked.current, 'build'); assert.ok(blocked.steps.slice(stepIds.indexOf('build') + 1).every(step => step.state === 'pending'));
   assert.equal(blocked.label, 'Building · blocked: Staging credentials expired'); assert.equal(blocked.who, 'Master agent');
   const waiting = prSteps(refuse(['Dependency GY-7 is unfinished']), NOW);
   assert.equal(waiting.current, 'build'); assert.equal(waiting.label, 'Building · waiting for GY-7 to ship first'); assert.equal(waiting.who, 'Graphyard (automatic)');
