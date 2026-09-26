@@ -27,7 +27,7 @@ const credentials = [operator, engineer, rival].map(principal => ({ ...principal
 let database: EmbeddedPostgres, connection: string;
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 558;
+  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 196;
   database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-lease-pool-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('lease_pool');
   connection = `postgres://graphyard:testing-only@127.0.0.1:${port}/lease_pool`;
