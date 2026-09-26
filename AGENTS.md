@@ -8,7 +8,7 @@ Autonomy is the default: agents act without asking and agents approve agents. Th
 
 Domain mutations must be transactional, append history, and enforce principal identity and lease epochs. Never add a client-controlled arbitrary lifecycle-state endpoint. Do not grant implementation workers trusted evidence-producer credentials. Never weaken a task's requirements to make its implementation pass.
 
-Run `npm run build` and `npm test` for domain/API changes. Tests run a temporary real Postgres database; do not substitute production data. Update the relevant guide under `docs/` when behavior changes. Keep external I/O outside coordination transactions.
+Run `npm run build` and `npm test` for domain/API changes. Tests run a temporary real Postgres database; do not substitute production data. A test that stops its embedded Postgres awaits `store.close()` first (never `store.pool.end()`, which returns before its connections close); `tests/db-test-shutdown-order.test.ts` enforces this. Update the relevant guide under `docs/` when behavior changes. Keep external I/O outside coordination transactions.
 
 No secrets belong in Git. `.graphyard/credentials.json` and `.env` are local-only. Installation credentials belong under `~/.config/graphyard/<install>/` with mode 0600, never in a repository. Installation and deployment changes go through `src/install/`, the Dockerfile, `compose.yaml` and `deploy/helm/graphyard`; `.railway/railway.ts` describes this project's own personal Railway deployment and is not part of the generic path. Preview infrastructure changes with `graphyard install --plan` before applying, and keep the release contract (`scripts/verify-image-release.mjs`) and the chart exercise passing.
 
