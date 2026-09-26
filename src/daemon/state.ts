@@ -245,6 +245,8 @@ export const approvalWatchSchema = z.object({
   run: runRecordSchema.nullable().default(null),
   /** The decision and launch whose spent-account hold and capacity `exhausted` report the loop already wrote (GY-316): a retried failover writes neither again. */
   reportedExhaustion: z.string().max(200).nullable().default(null),
+  /** The decision and launch whose spent-account hold alone is written (GY-489): a capacity report that failed after it is retried without writing the hold again. */
+  heldExhaustion: z.string().max(200).nullable().default(null),
 }).strict();
 export type ApprovalWatch = z.infer<typeof approvalWatchSchema>;
 /**
