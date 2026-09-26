@@ -27,7 +27,10 @@ import { reviewProviderOf } from './review.js';
  * answered no request, pass through to the gates exactly as GitHub reports them.
  *
  * A dismissed review is withdrawn, not given, so it is never one of the two: the relaunch that
- * follows a dismissal answers the same request afresh. A new head, base or policy revision starts
+ * follows a dismissal answers the same request afresh, and so does the approval the merge broker
+ * re-posts through the reviewer App after GitHub dismissed the original. The dismissal is read from
+ * every review GitHub reports dismissed, not only from the identity's latest review, which the
+ * re-post replaces (GY-486). A new head, base or policy revision starts
  * a new binding and supersedes a conflict on the old one.
  */
 
@@ -107,6 +110,13 @@ export function reconcileReviewConflict(work: Work, now: Date): ReviewConflictTr
   const record: ReviewVerdicts = work.reviewVerdicts && binds(work.reviewVerdicts, work) ? work.reviewVerdicts
     : { sha: candidate!.sha, baseSha: candidate!.baseSha, policyRevision: work.policyRevision, verdicts: [] };
   const requestId = answeredRequest(work);
+  // GitHub reports one review per identity, its latest, so a recorded approval that GitHub
+  // dismissed and the same identity then re-posted (the restored or carried approval the merge
+  // broker posts through the reviewer App) is never seen as DISMISSED in `reviews`: the re-post
+  // hides it. The observation lists every dismissed review, so the withdrawal is still read and
+  // the re-post is not taken for a second verdict on the request (GY-486).
+  const dismissed = new Set(observation!.dismissedReviewIds ?? []);
+  for (const verdict of record.verdicts) if (dismissed.has(verdict.id)) verdict.dismissed = true;
   for (const review of observation!.reviews) {
     if (review.sha !== candidate!.sha || !Number.isSafeInteger(review.id)) continue;
     const known = record.verdicts.find(verdict => verdict.id === review.id);
