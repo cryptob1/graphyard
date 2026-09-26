@@ -1,5 +1,5 @@
 import { demand, type Principal } from '../../model.js';
-import type { Command } from '../../engine.js';
+import { flagPathRefusal, type Command } from '../../engine.js';
 import { producerIndependenceRefusal, recordEvidenceRefusal, recordLeadViolation } from '../../delegation.js';
 import { ciRunBindingSchema, isCiProducer, observeCiCheckRun, type CiRunObservation } from '../../model/ci-proofs.js';
 import { defineRoutes, parseJson, type RouteContext } from '../routes.js';
@@ -32,6 +32,11 @@ export const workRoutes = defineRoutes('work', [
     async handle(context, [id, action]) {
       await refuseLead(context, id, action);
       const data = await parseJson(context), key = context.idempotencyKey(), target = decodeURIComponent(id);
+      // A flag is never a planned path (GY-522): refused when the revision is asked, not only when
+      // its approval applies it through the engine.
+      const request = data as { action?: string; input?: { plannedFiles?: unknown } } | null;
+      const planned = action === 'decide' && request?.action === 'requirements' && Array.isArray(request.input?.plannedFiles) ? request.input.plannedFiles.filter((path): path is string => typeof path === 'string') : undefined;
+      const flag = flagPathRefusal(planned, 'plannedFiles'); demand(!flag, flag!, 422);
       return action === 'decide' ? requestDecision(context.services, context.actor, target, data, key) : approveDecision(context.services, context.actor, target, data, key);
     },
   },
