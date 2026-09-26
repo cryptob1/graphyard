@@ -4,7 +4,7 @@ import { readFile, writeFile, rename, chmod } from 'node:fs/promises';
 import { resolve, dirname, basename } from 'node:path';
 import { z } from 'zod';
 import { runRecordSchema } from '../runner/types.js';
-import { doctorRunRecordSchema, retainedDoctorRuns } from '../runner/roles.js';
+
 import { type MasterConfig, assertOutsideWorktrees, writeFailure, diskExhaustionMessage, reclaimAdvice } from '../master.js';
 import { boundDetail } from './decisions.js';
 import { classified, faultClasses, faultInstanceSchema, noteActionOutcome, type FaultKind } from '../model/fault-classes.js';
@@ -284,6 +284,37 @@ export const cycleFailureSchema = z.object({
   lastUnhandled: z.object({ at: z.string(), origin: z.enum(['unhandledRejection', 'uncaughtException']), reason: z.string().max(1000), cycle: z.number().int().min(0) }).strict().nullable().default(null),
 }).strict();
 export type CycleFailures = z.infer<typeof cycleFailureSchema>;
+
+// ---- The pipeline doctor's run record (GY-711, src/daemon/doctor.ts) ---------------------------
+const doctorLine = (max: number) => z.string().trim().min(1).max(max);
+/** One finding of a doctor run: what was stuck, under which check bound, and whether it could act. */
+export const doctorFindingsSchema = z.object({
+  subject: doctorLine(200),
+  check: z.enum(['blocked', 'worker', 'ci', 'review-request', 'launch', 'proofs', 'mergeable', 'decision', 'containment', 'refusal', 'overdue']),
+  detail: doctorLine(2000),
+  unactionable: z.boolean().default(false),
+}).strict();
+/** One sanctioned command the doctor ran, with what became of it. */
+export const doctorActionSchema = z.object({
+  subject: doctorLine(200), command: doctorLine(500), outcome: z.enum(['applied', 'refused']), detail: doctorLine(1000),
+}).strict();
+/** The fault item a doctor run asks the loop to file, deduplicated against open items. */
+export const doctorFileEntrySchema = z.object({
+  faultClass: z.enum(faultClasses), title: z.string().max(200), work: z.string().max(50).nullable().default(null), deduplicated: z.boolean().default(false),
+}).strict();
+export const doctorStates = ['running', 'reported', 'failed'] as const;
+export const doctorRunRecordSchema = z.object({
+  at: z.string().max(40), state: z.enum(doctorStates),
+  runs: z.array(z.object({ runtime: z.string().max(40), model: z.string().max(200), result: z.string().max(40), detail: z.string().max(500) }).strict()).max(4).default([]),
+  findings: z.array(doctorFindingsSchema).max(50).default([]),
+  actions: z.array(doctorActionSchema).max(50).default([]),
+  filed: z.array(doctorFileEntrySchema).max(20).default([]),
+  detail: z.string().max(1000).default(''),
+}).strict();
+export const retainedDoctorRuns = 20;
+export type DoctorRunRecord = z.infer<typeof doctorRunRecordSchema>;
+export type DoctorFinding = z.infer<typeof doctorFindingsSchema>;
+export type DoctorAction = z.infer<typeof doctorActionSchema>;
 
 export const daemonStateSchema = z.object({
   version: z.literal(1), url: z.string(), repository: z.string(),

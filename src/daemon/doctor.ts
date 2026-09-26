@@ -4,11 +4,13 @@ import { createHash } from 'node:crypto';
 import type { Work } from '../model.js';
 import { createSchema } from '../model.js';
 import { isClosed } from '../model/closure.js';
-import { openFaultClassItem } from '../model/fault-classes.js';
+import { faultClasses, openFaultClassItem } from '../model/fault-classes.js';
 import { scopeRefusalBlocker, unplannedPaths } from '../model/scope.js';
 import { approverSessionName, guardBroadScope } from '../master/autonomy.js';
 import { containmentPhase } from '../master.js';
-import { doctorReportPayloadSchema, doctorRunRecordSchema, doctorSettings, doctorTool, type DoctorAction, type DoctorFile, type DoctorFinding, type DoctorRunRecord, type DoctorSettings } from '../runner/roles.js';
+import { doctorActionSchema, doctorFindingsSchema, doctorRunRecordSchema, type DoctorAction, type DoctorFinding, type DoctorRunRecord } from './state.js';
+import { doctorSettingsSchema, type DoctorSettings } from '../master/profiles.js';
+import { z } from 'zod';
 import type { Runner } from '../runner/types.js';
 import { readyToRetry } from './sessions.js';
 import { stoppedStates, record } from './effects.js';
@@ -29,6 +31,33 @@ import type { Cycle } from './cycle.js';
 // ---------------------------------------------------------------------------
 
 export const doctorRole = 'doctor';
+
+/** The tool name the doctor's Pi session submits its report through. */
+export const doctorTool = 'graphyard_doctor_report';
+
+const line = (max: number) => z.string().trim().min(1).max(max);
+/** The fault item a doctor run asks the loop to file: P0/P1, criteria and planned files. */
+export const doctorFiledSchema = z.object({
+  faultClass: z.enum(faultClasses),
+  title: line(200), description: line(20000),
+  priority: z.number().int().min(0).max(1),
+  criteria: z.array(z.object({ id: z.string().trim().regex(/^[A-Z]+-\d+$/), text: line(4000), proofs: z.array(line(200)).min(1).max(10) }).strict()).min(1).max(20),
+  plannedFiles: z.array(line(500)).min(1).max(100),
+}).strict();
+export type DoctorFile = z.infer<typeof doctorFiledSchema>;
+/** `graphyard_doctor_report`: the doctor's structured report, re-validated here (GY-711). */
+export const doctorReportPayloadSchema = z.object({
+  findings: z.array(doctorFindingsSchema).max(200).default([]),
+  actions: z.array(doctorActionSchema).max(200).default([]),
+  filed: z.array(doctorFiledSchema).max(20).default([]),
+}).strict();
+export type DoctorReportPayload = z.infer<typeof doctorReportPayloadSchema>;
+
+/** The doctor settings in force: `run.doctor` over its defaults, Pi's command from `run.pi` when it names none. */
+export function doctorSettings(run: { doctor?: unknown; pi?: { command?: string } } | undefined): DoctorSettings {
+  const parsed = doctorSettingsSchema.parse(run?.doctor ?? {});
+  return { ...parsed, command: parsed.command ?? run?.pi?.command ?? 'pi' };
+}
 
 /** The fault bounds of the doctor's checks, in minutes, as the shipped template states them. */
 export const doctorBounds = {

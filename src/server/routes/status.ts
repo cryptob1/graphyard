@@ -19,7 +19,7 @@ import { eventStats } from '../../store/snapshot-delta.js';
 import { productionEnvironmentEvent, productionEnvironmentName, resolvedProductionEnvironment } from '../../flow-analytics.js';
 import { boardFromStatus } from '../../model/board.js';
 import { boundedSnapshot, workDocument } from '../../store/bounded-snapshot.js';
-import { doctorRunRecordSchema } from '../../runner/roles.js';
+import { doctorRunRecordSchema } from '../../daemon/state.js';
 
 /** The ledger kinds the pipeline doctor's runs are recorded under (GY-711): one per run, one per item a run found. */
 export const doctorRunEvent = 'doctor-run', doctorFindingEvent = 'doctor-finding';
