@@ -37,7 +37,7 @@ before(async () => {
   port = Number(process.env.GRAPHYARD_STORE_LOCKS_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 203);
   postgres = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-store-locks-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await postgres.initialise(); await postgres.start();
-  for (const name of ['locks', 'restored', 'contended', 'lifecycle', 'board']) await postgres.createDatabase(name);
+  for (const name of ['locks', 'restored', 'contended', 'deadlocked', 'lifecycle', 'board']) await postgres.createDatabase(name);
 });
 after(async () => {
   for (const store of stores) await store.close().catch(() => {});
@@ -139,6 +139,33 @@ test('GY-257 — a restore excludes a write in flight on the target: it waits fo
     await writer.db.query('COMMIT'); committed = true; await writer.db.end();
     const refused = await within(5_000, restoring, 'the restore');
     assert.ok(refused, 'the restore does not interleave with the write');
+    assert.match(refused.message, /Restore requires an empty database: work_items already holds 1 row/);
+    assert.deepEqual((await target.pool.query('SELECT id FROM work_items')).rows.map(row => row.id), [id]);
+  } finally { if (!committed) await writer.release().catch(() => {}); }
+});
+
+test('GY-443 — a restore that deadlocks with a writer holding a later ledger table runs again, then refuses the ledger that writer left', async () => {
+  const live = await open('locks');
+  const backup = await createBackup(live.pool);
+  const target = await open('deadlocked'), id = randomUUID();
+  // The writer holds events, which the restore locks after work_items, and then asks for work_items,
+  // which the restore already holds. The writer waits out a longer deadlock timeout, so the restore is
+  // the transaction Postgres aborts.
+  const writer = await session('deadlocked', async db => { await db.query("SET LOCAL deadlock_timeout = '30s'"); await db.query('LOCK TABLE events IN ROW EXCLUSIVE MODE'); });
+  let committed = false;
+  try {
+    const restoring = restoreBackup(target.pool, backup).then(() => null, (error: Error & { code?: string }) => error);
+    let waiting = false;
+    for (let attempt = 0; attempt < 100 && !waiting; attempt++) {
+      waiting = Number((await target.pool.query("SELECT count(*) AS n FROM pg_locks WHERE locktype='relation' AND mode='ExclusiveLock' AND NOT granted AND relation='events'::regclass")).rows[0].n) === 1;
+      if (!waiting) await delay(20);
+    }
+    assert.ok(waiting, 'the restore holds work_items and waits for events');
+    await within(10_000, writer.db.query("INSERT INTO work_items(id, document) VALUES($1, jsonb_build_object('id', $2::text, 'key', 'GY-9', 'stage', 'build'))", [id, id]), 'the writer');
+    await writer.db.query('COMMIT'); committed = true; await writer.db.end();
+    const refused = await within(10_000, restoring, 'the restore');
+    assert.ok(refused, 'the restore does not interleave with the write');
+    assert.notEqual(refused.code, '40P01', 'the deadlock is not what the operator sees');
     assert.match(refused.message, /Restore requires an empty database: work_items already holds 1 row/);
     assert.deepEqual((await target.pool.query('SELECT id FROM work_items')).rows.map(row => row.id), [id]);
   } finally { if (!committed) await writer.release().catch(() => {}); }
