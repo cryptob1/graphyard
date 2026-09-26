@@ -170,9 +170,8 @@ export class Store {
     const db = await (lane === 'lease' ? this.leasePool : this.pool).connect().catch(error => { permit?.(); throw error; });
     try {
       await db.query('BEGIN');
-      // Serializes short coordination decisions across replicas, including dependency edits
-      // and cross-task workspace reservations. Never hold this lock during external I/O.
-      // The reconciliation batches opt out (GY-727): they lock their own items' rows instead, so a mutation on any other item never waits for a batch.
+      // Serializes short coordination decisions across replicas, including dependency edits and cross-task workspace
+      // reservations; never held during external I/O. Reconciliation batches lock their own rows instead (GY-727).
       if (takeCoordinationLock) await db.query('SELECT pg_advisory_xact_lock($1)', [coordinationLock]);
       const { rows } = await db.query('SELECT clock_timestamp() AS now');
       const result = await fn(db, rows[0].now);

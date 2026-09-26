@@ -111,13 +111,20 @@ export const coordinationTrimSql = (kept: string, keep: number) => `jsonb_build_
  */
 export const reconcileCandidatesSql = `SELECT w.id, w.number, w.document FROM work_items w
   WHERE NOT EXISTS (SELECT 1 FROM work_index i WHERE i.id = w.id AND i.settled) ORDER BY w.number`;
-/** The settled deliveries' summaries, in number order: the rest of the `all` a batch evaluates against. */
-export const reconcileSettledSql = 'SELECT i.number, i.summary AS document FROM work_index i WHERE i.settled ORDER BY i.number';
+/** The settled deliveries' summaries: the rest of the fleet a batch evaluates its items against. */
+export const reconcileSettledSql = 'SELECT i.id, i.number, i.summary FROM work_index i WHERE i.settled ORDER BY i.number';
+/** Items a pass already read that moved since, read again: the only documents a pass reads twice. */
+export const reconcileRereadSql = 'SELECT w.id, w.number, w.xmin::text AS version, w.document FROM work_items w WHERE w.id = ANY($1::uuid[])';
 /**
- * One batch item's row lock, taken as the batch reaches it (GY-727), with the revision the item
- * stands at now, read from the work index beside it — a small row, never the document. A revision
- * the pass's read did not see means the item moved after the read: the batch leaves it for the
- * next pass instead of overwriting what it cannot see. Locked row by row, a batch holds only its
- * own items, so a mutation on any other item commits while the batch holds its transaction.
+ * Every row's version, never its document: `xmin` changes with every write to the row, including
+ * the writes that bump no revision (a claim renewal), so a pass that compares it with what it read
+ * knows exactly which items moved since.
  */
-export const reconcileItemLockSql = 'SELECT w.id, i.revision FROM work_items w JOIN work_index i ON i.id = w.id WHERE w.id = $1 FOR UPDATE OF w';
+export const reconcileVersionsSql = 'SELECT id, xmin::text AS version FROM work_items';
+/**
+ * One batch item's row lock, taken as the batch reaches it (GY-727), with the version of the row
+ * it locked: after waiting for a writer, the version is the one that writer committed, never the
+ * statement's older snapshot. Locked row by row, a batch holds only its own items, so a mutation
+ * on any other item commits while the batch holds its transaction.
+ */
+export const reconcileItemLockSql = 'SELECT xmin::text AS version FROM work_items WHERE id = $1 FOR UPDATE';
