@@ -165,8 +165,14 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       // failover — a session that could not be closed, a replacement that failed to launch —
       // writes neither again, so one spent session leaves one exhaustion record.
       if (watch.reportedExhaustion !== session) {
-        // An approver on no named account spent its runtime's own login, which an escalation handler launches on too.
-        for (const name of account ? [account] : ownLoginAccounts({ name: approverProfile, kind: watch.runtime ?? undefined })) await effects.holdAccount?.(name, { at: new Date(clock).toISOString(), resetsAt: signal.resetsAt, reason: signal.reason, role: 'approver', profile: approverProfile, work: item.key });
+        // Each write is marked as it lands (GY-489): a report that fails after the hold is retried
+        // without holding the account again.
+        if (watch.heldExhaustion !== session) {
+          // An approver on no named account spent its runtime's own login, which an escalation handler launches on too.
+          for (const name of account ? [account] : ownLoginAccounts({ name: approverProfile, kind: watch.runtime ?? undefined })) await effects.holdAccount?.(name, { at: new Date(clock).toISOString(), resetsAt: signal.resetsAt, reason: signal.reason, role: 'approver', profile: approverProfile, work: item.key });
+          watch.heldExhaustion = session;
+          await effects.persist(state);
+        }
         await effects.reportCapacity(item, { event: 'exhausted', role: 'approver', requestId: watch.decision.slice(0, 64), profile: approverProfile, account, runtime: watch.runtime, reason: signal.reason, resetsAt: signal.resetsAt,
           partialWork: { state: 'not-applicable', detail: 'an approver session edits nothing: it judges a decision and leaves no work to keep' } });
         watch.reportedExhaustion = session;
@@ -598,7 +604,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
           if (!agent?.pane_id) continue;
           const fresh = records.findLast(entry => entry.agentName === watch.agentName);
           if (fresh ? !(Date.parse(fresh.launchedAt) > Date.parse(watch.exhaustedAt)) : watch.closeAttempts >= maxApproverCloses) continue;
-          Object.assign(watch, { exhaustedAt: null, launches: 1, closeAttempts: 0, pane: agent.pane_id, launchedAt: fresh?.launchedAt ?? stamp, account: fresh?.account ?? null, runtime: fresh?.runtime ?? null, session: fresh?.session ?? watch.session, capacity: null, reportedExhaustion: null });
+          Object.assign(watch, { exhaustedAt: null, launches: 1, closeAttempts: 0, pane: agent.pane_id, launchedAt: fresh?.launchedAt ?? stamp, account: fresh?.account ?? null, runtime: fresh?.runtime ?? null, session: fresh?.session ?? watch.session, capacity: null, reportedExhaustion: null, heldExhaustion: null });
           await note(`approver:${watch.decision}:rewatched:${watch.launchedAt}`, item, 'decision', 'done', `Watching approver session ${agent.name}, put to ${item.key} decision ${watch.decision} again after its earlier sessions were spent`);
         }
         if ((!judged || judged.state === 'requested') && await approverExhausted(item, watch)) continue;
