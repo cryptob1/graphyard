@@ -673,7 +673,9 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       restartSelf: async () => {
         const unit = detectLoopSupervisorUnit();
         if (!unit) throw new Error('this loop runs under no graphyard-master supervisor unit, so it cannot re-execute itself; run it under the packaged unit (examples/master/graphyard-master.service), or restart it by hand with systemctl --user restart graphyard-master');
-        await run('systemctl', ['--user', 'restart', unit]);
+        // --no-block queues the restart and returns: the hand-off is systemd's stop signal, which
+        // the loop takes during its wait, not a call this process must survive.
+        await run('systemctl', ['--user', '--no-block', 'restart', unit]);
       },
       persist: persistLoop,
     }),

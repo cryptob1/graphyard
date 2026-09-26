@@ -7,11 +7,11 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import type { Work } from '../src/model.js';
-import { deploymentObservationSchema, emptyDaemonState, runDaemon, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
+import { daemonSummary, deploymentObservationSchema, emptyDaemonState, readDaemonState, runDaemon, writeDaemonState, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { describeSelfUpgrade, performSelfUpgrade } from '../src/daemon/upgrade.js';
 import { releaseLag, readBaseTip, releaseLagGraceMs, upgradeRefusalAttention } from '../src/master/release-lag.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
-import { writeExecutorRegistration, type ExecutorRegistration } from '../src/executor-fleet.js';
+import { readRelease, writeExecutorRegistration, type ExecutorRegistration } from '../src/executor-fleet.js';
 
 /**
  * GY-437: the loop and the executors upgrade themselves to the merged release. After every merge
@@ -127,7 +127,7 @@ test('unit:loop-self-upgrade — between cycles the loop checks out the verified
     assert.deepEqual(code.calls.executors, [tip], 'the executors were restarted against exactly the checked-out tip, after it');
     assert.equal(code.calls.self, 1, 'and the loop re-executed itself last');
     assert.deepEqual(src.upgrade, { alignedRelease: tip, pending: null, last: { at: iso(0), from: loaded, to: tip, code: true, executors: 'restarted', self: true }, refused: null });
-    assert.deepEqual(src.release, { commit: git(checkout, 'rev-parse', 'HEAD'), dirty: false }, 'the loaded release was read from this checkout the first time the loop looked at it');
+    assert.equal(src.release, null, 'the alignment never records a release: only a starting process records the one it loaded');
     const done = Object.values(src.actions).find(action => action.kind === 'config' && action.state === 'done');
     assert.match(done!.detail, /loaded code moved, the executors were restarted/);
     assert.ok(code.calls.persisted >= 3, 'the cursor was written as the upgrade progressed');
@@ -236,10 +236,20 @@ test('unit:loop-self-upgrade — between cycles the loop checks out the verified
     assert.match([...Object.values(alone.actions)].at(-1)!.detail, /keeps running [0-9a-f]{12} until its supervisor restarts it/);
 
     // The wiring: runDaemon performs the upgrade between the cycle and its wait, never mid-cycle —
-    // through the shipped performSelfUpgrade here, which records the loaded release on the cursor.
+    // through the shipped performSelfUpgrade here. The process before it loaded the first commit
+    // and persisted it on the cursor; the checkout then moved (the upgrade this feature performs)
+    // and a new process starts from that persisted cursor. It reports the release it loaded, never
+    // the one the cursor carried over.
     const repo = await repository();
     try {
-      const state = emptyDaemonState(master);
+      const previous = git(repo, 'rev-parse', 'HEAD');
+      const persisted = emptyDaemonState(master);
+      persisted.release = { commit: previous, dirty: false };
+      await writeDaemonState(master, persisted);
+      git(repo, 'commit', '-q', '--allow-empty', '-m', 'the delivery the loop upgraded to');
+      const moved = git(repo, 'rev-parse', 'HEAD');
+      const state = await readDaemonState(repo, master);
+      assert.deepEqual(state.release, { commit: previous, dirty: false }, 'the cursor carries the previous process\'s release');
       let upgradedBetweenCycles = 0;
       const effects = {
         snapshot: async () => ({ work: [], now: iso(0) }),
@@ -248,15 +258,22 @@ test('unit:loop-self-upgrade — between cycles the loop checks out the verified
         observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'none', deployed: [], pending: [] }),
         requestSmoke: async () => {}, merge: async () => {}, recordDeployment: async () => {}, requestProof: async () => {},
         dispatch: async () => {}, recordSession: async () => {}, closeSession: () => {},
-        persist: async () => {},
+        persist: (written: DaemonState) => writeDaemonState(master, written),
         selfUpgrade: async () => {
           upgradedBetweenCycles += 1;
           return performSelfUpgrade(master, state, { root: repo, run: async (command, args) => execFileSync(command, args, { encoding: 'utf8' }), now: () => clock });
         },
       } as unknown as DaemonEffects;
-      await runDaemon(master, state, effects, { once: true, intervalMs: 20_000, identity: { pid: process.pid, host: master.hostId } });
+      await runDaemon(master, state, effects, { once: true, intervalMs: 20_000, identity: { pid: process.pid, host: master.hostId }, release: readRelease(repo) });
       assert.equal(upgradedBetweenCycles, 1, 'the upgrade ran once, after the cycle completed');
-      assert.deepEqual(state.release, { commit: git(repo, 'rev-parse', 'HEAD'), dirty: false }, 'the loaded release was recorded from this checkout');
+      assert.deepEqual(state.release, { commit: moved, dirty: false }, 'the new process recorded the release it loaded from the moved checkout');
+      assert.deepEqual(daemonSummary(state, clock, 20_000).release, { commit: moved, dirty: false }, 'and the summary master status reads reports it');
+      assert.deepEqual((await readDaemonState(repo, master)).release, { commit: moved, dirty: false }, 'the persisted cursor now carries it too');
+      // A loop started without its release reports none rather than inheriting a stale one.
+      const unrecorded = await readDaemonState(repo, master);
+      unrecorded.release = { commit: previous, dirty: false };
+      await runDaemon(master, unrecorded, { ...effects, selfUpgrade: undefined } as DaemonEffects, { once: true, intervalMs: 20_000, identity: { pid: process.pid, host: master.hostId } });
+      assert.equal(unrecorded.release, null);
     } finally { await rm(repo, { recursive: true, force: true }); }
   } finally { await dispose(); await rm(checkout, { recursive: true, force: true }); }
 });

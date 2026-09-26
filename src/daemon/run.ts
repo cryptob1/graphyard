@@ -1,7 +1,7 @@
 // Concern: the long-running loop — cycle scheduling, config reload, the watchdog and its summary.
 import { setTimeout as delay } from 'node:timers/promises';
 import type { ConfigReload, MasterConfig } from '../master.js';
-import { acquireDaemonLock, type DaemonAction, type DaemonState, message, storeAction } from './state.js';
+import { acquireDaemonLock, type DaemonAction, type DaemonState, type LoopRelease, message, storeAction } from './state.js';
 import { faultClassPolicyFromEnv } from '../model/fault-classes.js';
 import { faultRecurrenceReport } from './faults.js';
 import { latencyBudget, silenceReport } from './metrics.js';
@@ -98,12 +98,17 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
   /** Re-reads .graphyard/master.json before each cycle, so profiles, workspace, run settings and autoMerge apply without a restart. */
   reload?: () => Promise<ConfigReload>;
   /** The process whose unhandled rejections and uncaught exceptions the loop catches; defaults to this one. */
-  process?: Pick<NodeJS.Process, 'on' | 'off'> } ) {
+  process?: Pick<NodeJS.Process, 'on' | 'off'>;
+  /** The release this process loaded, read from its checkout at startup (GY-437); a loop started without it reports none. */
+  release?: LoopRelease | null } ) {
   // Progress goes to stderr so stdout stays the machine-readable result the CLI prints.
   const now = options.now ?? Date.now, log = options.log ?? (line => console.error(line));
   const interval = () => typeof options.intervalMs === 'function' ? options.intervalMs() : options.intervalMs;
   const effects = boundedPersist(namedEffects(raw)), host = options.process ?? process;
   acquireDaemonLock(state, options.identity, now(), interval());
+  // GY-437: the release is this process's, never the cursor's: a loop re-executed onto a moved
+  // checkout must not report the release the process before it loaded.
+  state.release = options.release ?? null;
   await effects.persist(state);
   // Under a supervisor that watches for keep-alives, a hung cycle is a restart rather than a
   // silent pipeline; a window that would restart a healthy loop is recorded and left to the

@@ -5,11 +5,11 @@ The master (`coordinator`) routes work, merges, verifies deployments and adminis
 
 ## Autonomy: agents approve agents
 
-Only three decisions are human-only: goals and priorities, spending money or opening third-party accounts, and issuing credentials to people. Everything else it applies alone or through an approver agent ([who decides](glossary.md#who-decides)); never ask a human to run a command an agent identity may run.
+Only three decisions are human-only: goals and priorities, spending money or opening third-party accounts, and issuing credentials to people. Everything else it decides alone or through an approver agent ([who decides](glossary.md#who-decides)); never ask a human to run a command an agent identity may run.
 
 ## Operate
 
-Keep cycling: status, dispatch, review, merge, deployment verification. Stop only when every in-scope item is Done or has a genuinely external blocker recorded in Graphyard, and every merged change is verified against the exact deployed release or has a recorded deployment blocker.
+Keep cycling: status, dispatch, review, merge, deployment verification. Stop only when every in-scope item is Done or an external blocker recorded in Graphyard, and every merged change is verified against the exact deployed release or has a recorded deployment blocker.
 
 1. `master status`.
 2. `master run` dispatches ready work in `schedule.order`.
@@ -18,7 +18,7 @@ Keep cycling: status, dispatch, review, merge, deployment verification. Stop onl
 5. `master verify-deployment GY-N` after delivery ([refusals](operations-reference.md#perpetual-master-loop)). Railway: `master config productionEnvironment='graphyard / production'`.
 6. Close finished agent sessions.
 
-Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions. `controlPlane.production` flags main ahead of production.
+Review findings, rework, idle workers and proof setup are not stopping conditions. `controlPlane.production` flags main ahead of production.
 
 `master run` runs this loop under the `graphyard-master.service` unit ([supervision](onboarding.md#the-loop-must-be-supervised)); restart it (`systemctl --user restart graphyard-master`) when `daemon.liveness` is `stalled` or `absent`.
 
@@ -28,24 +28,19 @@ The loop drives every item. Unless created `"systemDriven": false`, one refuses 
 
 ### Session liveness is reconciled, not trusted
 
-**The control plane reconciles session liveness; closing finished sessions is not the master's
-manual duty.** A sweep runs on every automatic-dispatch tick (`run.dispatchIntervalSeconds`, default 10, 30 at most). A handle closes at the second consecutive sweep
-that misses it; an unobserved one is left alone for its first 3 minutes. A handle another host launched is left to
-that host's loop. `sessions.unseen` lists stale handles. `dispatch.sessionReconcile` reports each closure:
+**The control plane reconciles session liveness, not the master.** A sweep runs every automatic-dispatch tick (`run.dispatchIntervalSeconds`, default 10, 30 at most). A handle closes at the second consecutive sweep
+missing it; an unobserved one gets 3 minutes' grace; another host's handles are left to its loop. `sessions.unseen` lists stale handles. `dispatch.sessionReconcile` reports each closure:
 
 - **Vanished**: missing from two consecutive listings.
 - **Ended**: agentless pane or terminal state. `idle`, `done` and
   `blocked` are deliberately not terminal.
-- **Superseded**: a review or proof session for a head the item moved past; a delivered item is closed the same
-  way as any other. Implementation sessions are left to the lease.
+- **Superseded**: a review or proof session for a head the item moved past (delivered items too); implementation sessions are left to the lease.
 - **Duplicate**: the older of two sessions for one role and head.
 
-A closure decides no gate, ends no lease, and stops no process. A profile's concurrency is counted against live
-sessions only, and a name is busy only while a live session has it. A session past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) raises attention and is never closed.
+A closure decides no gate, ends no lease, and stops no process. Concurrency and busy names count live sessions only. A session past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) raises attention and is never closed.
 
-**So what an operator or a master does instead of closing sessions by hand:** nothing, for a session
-that finished or died (with the loop stopped, `graphyard master run --once` sweeps); for an overlong one, attach to it with the command on the handle. Never mark
-another session's handle finished to free a slot.
+**By hand:** leave finished or dead sessions (with the loop stopped, `graphyard master run --once` sweeps); attach to an overlong one via its handle's command; never mark
+another's handle finished to free a slot.
 
 ## Research before build
 
@@ -61,17 +56,17 @@ A candidate passing the build gate gets, in `autoDispatch`, one producer request
 
 **Every role, approvers too, fails over on spent quota** or waits as one `capacity` line.
 
-The master never launches reviews or producers by hand, except `master review GY-N [PROFILE]` once the loop stops relaunching that review.
+The master launches no review or producer by hand, except `master review GY-N [PROFILE]` once the loop stops relaunching that review.
 
 ### Proofs must exercise their criterion
 
-With a pass, the producer records `"exercise"`: the same proof run with the criterion's behaviour removed.
+With a pass, the producer records `"exercise"`: the proof rerun without the criterion's behaviour.
 
 ```json
 "exercise":{"criterion":"AC-1","behaviour":"the lease expiry check in claim()","result":"fail","executed":4}
 ```
 
-A pass is trusted only when that stripped run failed with a case executed; otherwise it is recorded as not exercising its criterion rather than as passing (`unexercised`, `evidence.exercise.refused`); the loop requests rework quoting it.
+A pass is trusted only when that stripped run failed with a case executed; otherwise it is recorded `unexercised` (`evidence.exercise.refused`), not passing; the loop requests rework quoting it.
 
 ## Guarded merges
 

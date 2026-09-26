@@ -23,7 +23,7 @@ Commit `AGENTS.md`, `.gitignore`, `graphyard.json`; never `.graphyard/`. Without
 
 The managed `AGENTS.md` section states that **every session Graphyard launches receives its instruction as the session's own first request, on the runtime's command line, never as pasted text**; the only later paste (the loop's single re-prompt, or the reviewer's reminder) comes from the same launcher and is acted on without confirmation.
 
-Agents treat Herdr's bracketed paste as untrusted data (prompt injection), so with the request on the command line sessions start without anybody sending `go`; Claude Code gets the statement through `--append-system-prompt-file`. The role files under `.graphyard/harness/` hold permissions, not instructions.
+Agents treat Herdr's bracketed paste as untrusted (prompt injection), so command-line requests start sessions without anyone sending `go`; Claude Code gets the statement through `--append-system-prompt-file`. The role files under `.graphyard/harness/` hold permissions, not instructions.
 
 ### Agent environments
 
@@ -79,13 +79,13 @@ node "$GRAPHYARD_CLI" master registry role set reviewer codex-a,claude-c --concu
 
 ### Size review and proof capacity
 
-Each candidate needs one review and one producer session per proof group; a profile's `"concurrency"` caps its sessions, changed without a restart:
+Each candidate needs one review and one producer session per proof group; a profile's `"concurrency"` caps its sessions, live-reloaded:
 
 ```json
 "reviewers":[{"name":"claude-reviewer","agentName":"review-claude","kind":"claude","accounts":["claude-a","claude-b"],"concurrency":3}]
 ```
 
-Adding workers? For worker count `W` and `G` proof groups: `⌈W / 2⌉` review slots and `G × ⌈W / 2⌉` producer slots over two or more producer principals. Watch `longestWaitMs`.
+For `W` workers and `G` proof groups: `⌈W / 2⌉` review slots and `G × ⌈W / 2⌉` producer slots over two or more producer principals. Watch `longestWaitMs`.
 
 ## 3. Start the master
 
@@ -106,7 +106,7 @@ Run it under an OS identity whose GitHub credentials workers cannot read. `--bro
 
 `graphyard doctor --profile through-merge` names every missing piece. Create a small item: `master run` dispatches it; the loop merges once branch protection requires `Graphyard / merge`. `"systemDriven": false` allows [hand actions](master-agent.md#system-driven-items).
 
-CI workflows should cancel superseded pull-request runs: group each by `${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}` with `cancel-in-progress: ${{ github.event_name == 'pull_request' }}`; runs on main are never cancelled. `graphyard master protection` lists each required check whose workflow lacks cancel-in-progress under `advisories`.
+CI should cancel superseded pull-request runs: group each by `${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}` with `cancel-in-progress: ${{ github.event_name == 'pull_request' }}`; runs on main are never cancelled. `graphyard master protection` lists each required check whose workflow lacks cancel-in-progress under `advisories`.
 
 ## What stays manual
 

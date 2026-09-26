@@ -282,8 +282,9 @@ export const cycleFailureSchema = z.object({
 export type CycleFailures = z.infer<typeof cycleFailureSchema>;
 
 /**
- * The release this loop's own process loaded, read once at startup exactly as an executor reads
- * its (GY-437): what every action this process takes runs, until its supervisor replaces it.
+ * The release this loop's own process loaded, read once at its startup exactly as an executor reads
+ * its (GY-437) and overwritten by every new process: what every action it takes runs, until its
+ * supervisor replaces it.
  */
 export const loopReleaseSchema = z.object({ commit: z.string().regex(/^[0-9a-f]{40}$/).nullable(), dirty: z.boolean().nullable() }).strict();
 export type LoopRelease = z.infer<typeof loopReleaseSchema>;
@@ -314,7 +315,7 @@ export const daemonStateSchema = z.object({
   profiles: z.record(z.string(), z.object({ failures: z.number().int().min(0), reason: z.string().max(500).nullable(), cooldownUntil: z.string().nullable() }).strict()).default({}),
   metrics: z.array(cycleMetricsSchema).default([]),
   deployment: deploymentObservationSchema.nullable().default(null),
-  /** The release this loop's process loaded, recorded once at startup (GY-437). */
+  /** The release the running loop process loaded, recorded by each process at its startup (GY-437). */
   release: loopReleaseSchema.nullable().default(null),
   /** The between-cycles self-upgrade's progress (GY-437). */
   upgrade: upgradeStateSchema,

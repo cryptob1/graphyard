@@ -11,7 +11,7 @@
 // on the cursor, and `master status` names it until it clears.
 import { readFileSync } from 'node:fs';
 import type { ChildRun } from '../child-runner.js';
-import { readRelease, shortCommit, type ExecutorRestartResult } from '../executor-fleet.js';
+import { shortCommit, type ExecutorRestartResult } from '../executor-fleet.js';
 import type { MasterConfig } from '../master.js';
 import { storeAction, message, type DaemonState } from './state.js';
 import { detailChanged } from './decisions.js';
@@ -94,10 +94,6 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
   const now = deps.now ?? Date.now, at = () => new Date(now()).toISOString();
   const git = (...args: string[]) => deps.run('git', ['-C', deps.root, ...args]);
   const persist = async () => { if (deps.persist) await deps.persist(state); };
-  // The release this process loaded, recorded like an executor's the first time the loop looks at
-  // its checkout (GY-437): the checkout cannot have moved under this process yet, because this
-  // loop is the only thing that moves it.
-  state.release ??= readRelease(deps.root);
   const key = `upgrade:${state.deployment?.sha ?? 'none'}`;
   const note = async (detail: string, failure: boolean) => {
     storeAction(state, key, { kind: 'config', work: null, principal: null, state: failure ? 'failed' : 'done', detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, epoch: null, cycle: state.cycle, at: at() });
@@ -149,8 +145,7 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
       await note(`${reason}; it keeps running ${shortCommit(state.release?.commit ?? null)} until its supervisor restarts it`, true);
       return { outcome: 'failed', reason };
     }
-    // In production the supervisor kills this process during the restart call; this line is for
-    // a fake supervisor.
+    // The supervisor has queued the restart; its stop signal ends this process during the wait.
     return { outcome: 'upgraded', from: pending.from, to: pending.to, code: true, executors, self: true };
   };
 
