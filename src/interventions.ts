@@ -6,6 +6,7 @@ import { scopeRefusalBlocker } from './model/scope.js';
 import { interventionKindLabel, interventionKinds, interventionWindows, judgementVerdictLabel, type Intervention, type InterventionKind, type InterventionPattern, type InterventionPolicy, type InterventionReport, type InterventionRecordInput, type InterventionWindow, type Judgement, type JudgementInput } from './model/interventions.js';
 import type { Store } from './store.js';
 import { boundedSnapshot } from './store/bounded-snapshot.js';
+import { applyWorkDelta, type DeltaOp } from './store/snapshot-delta.js';
 
 /**
  * Interventions read from the ledger (GY-98; see model/interventions.ts for the concept).
@@ -47,40 +48,123 @@ export interface InterventionLedgerRow {
 type Db = { query: pg.Pool['query'] };
 /** A provider or ledger instant in the one form the report compares: ISO with milliseconds. */
 const instant = (value: unknown, fallback: string) => { const parsed = typeof value === 'string' ? Date.parse(value) : Number.NaN; return Number.isFinite(parsed) ? new Date(parsed).toISOString() : fallback; };
-// A row stored as a delta (store/snapshot-delta.ts) is read as the document it stands for: `doc`.
-const ledgerColumns = `seq, work_id, actor, kind, created_at, doc->>'updatedAt' AS updated_at, payload->'details' AS details,
-  CASE WHEN kind LIKE 'decision.%' OR kind IN ('intervention.recorded','judgement.recorded') THEN payload ELSE NULL END AS top,
-  CASE WHEN doc IS NOT NULL THEN jsonb_build_object('key', doc->'key', 'stage', doc->'stage', 'title', doc->'title', 'epoch', doc->'epoch', 'blocker', doc->'blocker',
-    'plannedFiles', doc->'plannedFiles', 'quarantine', doc->'containmentQuarantine', 'escalations', doc->'escalations', 'candidate', doc->'candidate', 'submission', doc->'submission') ELSE NULL END AS work,
-  CASE WHEN work_id IS NULL THEN NULL ELSE (SELECT graphyard_event_work(earlier.work_id, earlier.payload)->>'stage' FROM events earlier WHERE earlier.work_id=ledger.work_id AND earlier.seq<ledger.seq AND (earlier.payload ? 'work' OR earlier.payload ? 'delta') ORDER BY earlier.seq DESC LIMIT 1) END AS stage_before`;
+/** The document fields the fold reads (`InterventionLedgerRow['work']`), with the document field each comes from. */
+const workFields = [['key', 'key'], ['stage', 'stage'], ['title', 'title'], ['epoch', 'epoch'], ['blocker', 'blocker'], ['plannedFiles', 'plannedFiles'],
+  ['quarantine', 'containmentQuarantine'], ['escalations', 'escalations'], ['candidate', 'candidate'], ['submission', 'submission']] as const;
+/** Those fields and `updatedAt`, projected from a stored document in SQL, so a whole document never leaves the database. */
+const projectedWork = (document: string) => `CASE WHEN jsonb_typeof(${document})='object' THEN jsonb_build_object(${[...workFields.map(([, field]) => field), 'updatedAt'].map(field => `'${field}', ${document}->'${field}'`).join(', ')}) END`;
+const projectedFields = new Set<unknown>([...workFields.map(([, field]) => field), 'updatedAt']);
+const isObject = (value: unknown): value is Record<string, any> => !!value && typeof value === 'object' && !Array.isArray(value);
+/** The row's `work` as the fold reads it, from the projected document (null fields where the document has none). */
+const workOf = (document: Record<string, any> | null): InterventionLedgerRow['work'] =>
+  Object.fromEntries(workFields.map(([name, field]) => [name, document?.[field] ?? null])) as InterventionLedgerRow['work'];
+
 /**
- * The exact statement `readInterventionLedger` sends, with its parameters: the kinds the fold
- * reads, one row past the limit (so the caller can say it truncated), the item to narrow to, and
- * the instant a window opens. The window's rows must come from the (kind, created_at) index, and
- * the test holds this statement — not a lookalike — to that index (GY-432).
+ * The exact window statement `readInterventionLedger` sends, with its parameters: the kinds the
+ * fold reads, one row past the limit (so the caller can say it truncated), the item to narrow to,
+ * and the instant a window opens. The window's rows must come from the (kind, created_at) index,
+ * and the test holds this statement — not a lookalike — to that index (GY-432). It projects a
+ * whole row's document to the fields the fold reads and carries a delta row's delta as stored;
+ * no document is rebuilt in SQL (GY-491) — the rows read below reconstruct each document once.
  */
 export const interventionLedgerQuery = (limit: number, workId: string | null = null, since: string | null = null): { text: string; values: unknown[] } => ({
-  text: `SELECT ${ledgerColumns} FROM (SELECT *, graphyard_event_work(work_id, payload) AS doc FROM (SELECT * FROM events WHERE kind = ANY($1) AND ($3::uuid IS NULL OR work_id=$3) AND ($4::timestamptz IS NULL OR created_at >= $4::timestamptz) ORDER BY seq DESC LIMIT $2) newest) ledger ORDER BY seq DESC`,
+  text: `SELECT seq, work_id, actor, kind, created_at, payload->'details' AS details,
+      CASE WHEN kind LIKE 'decision.%' OR kind IN ('intervention.recorded','judgement.recorded') THEN payload ELSE NULL END AS top,
+      payload ? 'work' AS whole, ${projectedWork("payload->'work'")} AS work, CASE WHEN payload ? 'work' THEN NULL ELSE payload->'delta' END AS delta
+    FROM events WHERE kind = ANY($1) AND ($3::uuid IS NULL OR work_id=$3) AND ($4::timestamptz IS NULL OR created_at >= $4::timestamptz) ORDER BY seq DESC LIMIT $2`,
   values: [[...interventionLedgerKinds], limit + 1, workId, since],
 });
-/** One ledger row as the fold reads it, mapped once for both reads. */
-const ledgerRow = (row: any): InterventionLedgerRow => ({ seq: Number(row.seq), workId: row.work_id, actor: row.actor, kind: row.kind, at: instant(row.updated_at, new Date(row.created_at).toISOString()), details: row.details, payload: row.top ?? undefined, work: row.work ?? null, stageBefore: row.stage_before ?? null });
 
 /**
  * The newest `limit` rows of the kinds the fold reads, in ledger order; with `since`, only those
  * written from that instant on (GY-422). A report reads its window this way — the rows come from
- * the (kind, created_at) index, so a ledger of any age costs what the window holds — and every
- * per-row lookup below (the embedded document, the stage before) runs for those rows alone.
+ * the (kind, created_at) index, so a ledger of any age costs what the window holds — and the
+ * window's exact statement is `interventionLedgerQuery`, which the test explains against that
+ * index (GY-432).
+ *
+ * Nothing is rebuilt per row (GY-491). Three set reads, then one pass in ledger order:
+ * - the window's rows, with a whole row's document projected to the fields the fold reads and a
+ *   delta row's delta as stored;
+ * - the full snapshots those deltas extend, each read once however many rows share it, projected
+ *   the same way; each delta's edits are applied to its snapshot's projection
+ *   (`applyWorkDelta`, the twin of the SQL `graphyard_event_work`);
+ * - each item's stage timeline across its span of the window: the stage of every row that carries
+ *   a whole document, and of the last one before the span.
+ *
+ * The stage before a row is the stage of the item's newest earlier row that carries a document,
+ * whole or as a delta. A delta is only ever written on the item's newest whole row and only when
+ * the stage is unchanged (`appendSave`, under the coordination lock every ledger write takes), so
+ * that stage is the stage of the item's newest earlier whole row — read from the timeline.
  */
 export async function readInterventionLedger(db: Db, options: { limit?: number; workId?: string | null; since?: string | null } = {}): Promise<{ rows: InterventionLedgerRow[]; truncated: boolean }> {
   const limit = options.limit ?? interventionLedgerLimit;
   const query = interventionLedgerQuery(limit, options.workId ?? null, options.since ?? null);
   const result = await db.query(query.text, query.values);
   const truncated = result.rows.length > limit;
-  // A row written with the document carries the transaction instant the document's own
-  // timestamps use (`updatedAt`); a raw row has only its insertion instant.
-  const rows = result.rows.slice(0, limit).reverse().map(ledgerRow);
-  return { rows, truncated };
+  return { rows: await readLedgerDocuments(db, result.rows.slice(0, limit).reverse()), truncated };
+}
+
+/**
+ * The documents behind a read's rows (GY-491): each delta row's edits applied to its snapshot's
+ * projection (`applyWorkDelta`, the twin of the SQL `graphyard_event_work`), each item's stage
+ * timeline across its span of the rows, then one pass in ledger order — three set reads whatever
+ * the rows hold, no document rebuilt per row. Shared by the window read and the straddle read
+ * (GY-432), which hand in their rows oldest-first and are mapped identically. The stage before a
+ * row is the stage of the item's newest earlier row that carries a document, whole or as a delta.
+ * A delta is only ever written on the item's newest whole row and only when the stage is
+ * unchanged (`appendSave`, under the coordination lock every ledger write takes), so that stage
+ * is the stage of the item's newest earlier whole row — read from the timeline.
+ */
+async function readLedgerDocuments(db: Db, window: any[]): Promise<InterventionLedgerRow[]> {
+  // The full snapshots the window's deltas extend, once each.
+  const bases = new Map<number, { workId: string | null; work: Record<string, any> | null }>();
+  const baseSeqs = [...new Set(window.flatMap(row => row.work_id && isObject(row.delta) && Number.isSafeInteger(Number(row.delta.base)) ? [Number(row.delta.base)] : []))];
+  if (baseSeqs.length) for (const row of (await db.query(`SELECT seq, work_id, ${projectedWork("payload->'work'")} AS work FROM events WHERE seq = ANY($1::bigint[])`, [baseSeqs])).rows)
+    bases.set(Number(row.seq), { workId: row.work_id, work: row.work });
+
+  // Each item's stage timeline over its span of the window, and the whole row before that span.
+  const spans = new Map<string, { from: number; to: number }>();
+  for (const row of window) if (row.work_id) { const seq = Number(row.seq), span = spans.get(row.work_id); if (!span) spans.set(row.work_id, { from: seq, to: seq }); else span.to = seq; }
+  const timelines = new Map<string, { seq: number; stage: string | null }[]>();
+  if (spans.size) {
+    const ids = [...spans.keys()], from = ids.map(id => spans.get(id)!.from), to = ids.map(id => spans.get(id)!.to);
+    const stages = await db.query(`SELECT s.id AS work_id, e.seq, e.payload->'work'->>'stage' AS stage
+        FROM unnest($1::uuid[], $2::bigint[], $3::bigint[]) AS s(id, from_seq, to_seq)
+        JOIN events e ON e.work_id = s.id AND e.seq >= s.from_seq AND e.seq < s.to_seq AND e.payload ? 'work'
+      UNION ALL
+      SELECT s.id, before.seq, before.stage FROM unnest($1::uuid[], $2::bigint[]) AS s(id, from_seq)
+        CROSS JOIN LATERAL (SELECT e.seq, e.payload->'work'->>'stage' AS stage FROM events e WHERE e.work_id = s.id AND e.seq < s.from_seq AND e.payload ? 'work' ORDER BY e.seq DESC LIMIT 1) before`, [ids, from, to]);
+    for (const row of stages.rows) { const list = timelines.get(row.work_id) ?? []; list.push({ seq: Number(row.seq), stage: row.stage ?? null }); timelines.set(row.work_id, list); }
+    for (const list of timelines.values()) list.sort((a, b) => a.seq - b.seq);
+  }
+
+  // One pass in ledger order: each item's timeline is walked forward alongside its rows.
+  const cursors = new Map<string, number>();
+  return window.map((row): InterventionLedgerRow => {
+    const seq = Number(row.seq);
+    let document: Record<string, any> | null = null;
+    if (row.whole) document = row.work ?? null;
+    else if (row.work_id && isObject(row.delta)) {
+      const base = bases.get(Number(row.delta.base));
+      if (base && base.workId === row.work_id && isObject(base.work)) {
+        const delta = Array.isArray(row.delta.ops) ? { ...row.delta, ops: row.delta.ops.filter((op: DeltaOp) => projectedFields.has(op[0]?.[0])) } : row.delta;
+        document = applyWorkDelta(base.work as Work, delta) as unknown as Record<string, any>;
+      }
+    }
+    let stageBefore: string | null = null;
+    if (row.work_id) {
+      const timeline = timelines.get(row.work_id) ?? [];
+      let cursor = cursors.get(row.work_id) ?? -1;
+      while (cursor + 1 < timeline.length && timeline[cursor + 1].seq < seq) cursor++;
+      cursors.set(row.work_id, cursor);
+      stageBefore = cursor >= 0 ? timeline[cursor].stage : null;
+    }
+    // A row written with the document carries the transaction instant the document's own
+    // timestamps use (`updatedAt`); a raw row has only its insertion instant.
+    const updatedAt = document?.updatedAt == null ? null : typeof document.updatedAt === 'string' ? document.updatedAt : JSON.stringify(document.updatedAt);
+    return { seq, workId: row.work_id, actor: row.actor, kind: row.kind, at: instant(updatedAt, new Date(row.created_at).toISOString()), details: row.details, payload: row.top ?? undefined,
+      work: row.whole || document ? workOf(document) : null, stageBefore };
+  });
 }
 
 /** How far the straddle read reaches for one report: the newest rows before the window, bounded. */
@@ -95,13 +179,21 @@ export const interventionLedgerSeedQuery = (limit: number, until: string): { tex
   text: `SELECT b.seq, b.created_at FROM unnest($1::text[]) AS k(kind) CROSS JOIN LATERAL (SELECT e.seq, e.created_at FROM events e WHERE e.kind = k.kind AND e.created_at < $2::timestamptz ORDER BY e.created_at DESC LIMIT $3) b ORDER BY b.created_at DESC LIMIT $3`,
   values: [[...interventionLedgerKinds], until, limit + 1],
 });
-/** The straddle read's wide statement: exactly the candidate rows, one index lookup each — never a walk of the ledger. */
-export const interventionLedgerSeedRowsQuery = `SELECT ${ledgerColumns} FROM (SELECT *, graphyard_event_work(work_id, payload) AS doc FROM events WHERE seq = ANY($1::bigint[])) ledger`;
+/**
+ * The straddle read's wide statement: exactly the candidate rows, one index lookup each — never a
+ * walk of the ledger. The columns are the window read's (`interventionLedgerQuery`), so both
+ * reads' rows reach `readLedgerDocuments` in one shape.
+ */
+export const interventionLedgerSeedRowsQuery = `SELECT seq, work_id, actor, kind, created_at, payload->'details' AS details,
+    CASE WHEN kind LIKE 'decision.%' OR kind IN ('intervention.recorded','judgement.recorded') THEN payload ELSE NULL END AS top,
+    payload ? 'work' AS whole, ${projectedWork("payload->'work'")} AS work, CASE WHEN payload ? 'work' THEN NULL ELSE payload->'delta' END AS delta
+  FROM events WHERE seq = ANY($1::bigint[])`;
 /**
  * The straddle (GY-432): needs recorded before a window opened, whose pairing lands inside it, are
  * folded silently ahead of the window's rows so their wait is measured from the moment the product
  * needed someone. The rows come back newest-first; the caller sorts them with the window's rows by
- * seq before folding.
+ * seq before folding. Their documents come back the way the window's do (GY-491): set reads and
+ * one pass, never a per-row rebuild in SQL.
  */
 export async function readInterventionSeed(db: Db, options: { limit?: number; until: string }): Promise<{ rows: InterventionLedgerRow[]; truncated: boolean }> {
   const limit = options.limit ?? interventionLedgerSeedLimit;
@@ -112,8 +204,8 @@ export async function readInterventionSeed(db: Db, options: { limit?: number; un
   if (!seqs.length) return { rows: [], truncated };
   const wide = await db.query(interventionLedgerSeedRowsQuery, [seqs]);
   const bySeq = new Map(wide.rows.map(row => [String(row.seq), row]));
-  const rows = seqs.flatMap(seq => { const row = bySeq.get(seq); return row ? [{ ...ledgerRow(row), seed: true as const }] : []; });
-  return { rows, truncated };
+  const rows = await readLedgerDocuments(db, seqs.flatMap(seq => { const row = bySeq.get(seq); return row ? [row] : []; }).reverse());
+  return { rows: rows.map(row => ({ ...row, seed: true as const })), truncated };
 }
 
 interface Ask { seq: number; at: string; stage: Stage | null; kind: 'scope-request' | 'blocked-report'; blocked: string; paths: string[]; trigger?: string; sources: { seq: number; kind: string }[] }
@@ -415,10 +507,10 @@ const minutes = (value: number) => `${Math.round(value / 60_000)} min`;
  * never count towards a second one.
  */
 export async function openPatternItems(engine: Engine, policy: InterventionPolicy, options: { now?: string; actor?: Principal; limit?: number } = {}) {
-  const snapshot = await boundedSnapshot(engine.store.pool);
+  const snapshot = await boundedSnapshot(engine.store.reportPool);
   const now = options.now ?? snapshot.now;
   // Detection reads the policy window of the ledger and nothing older (GY-422).
-  const { rows, truncated } = await readInterventionLedger(engine.store.pool, { limit: options.limit, since: windowStart(now, policy.windowDays) });
+  const { rows, truncated } = await readInterventionLedger(engine.store.reportPool, { limit: options.limit, since: windowStart(now, policy.windowDays) });
   const folded = foldInterventions(rows, snapshot.work, now, { since: windowStart(now, policy.windowDays) });
   const opened: Work[] = [];
   for (const pattern of detectPatterns(folded.interventions, snapshot.work, policy, now)) {
@@ -530,11 +622,11 @@ const windowStart = (now: string, days: number) => new Date(Date.parse(now) - da
  */
 export async function readInterventionReport(store: Store, policy: InterventionPolicy, options: { days?: InterventionWindow; kind?: InterventionKind | null; stage?: Stage | null; work?: string | null; limit?: number } = {}) {
   const days = options.days ?? 30;
-  const snapshot = await boundedSnapshot(store.pool);
+  const snapshot = await boundedSnapshot(store.reportPool);
   const since = windowStart(snapshot.now, Math.max(days, policy.windowDays));
   const [window, seed] = await Promise.all([
-    readInterventionLedger(store.pool, { limit: options.limit, since }),
-    readInterventionSeed(store.pool, { limit: interventionLedgerSeedLimit, until: since }),
+    readInterventionLedger(store.reportPool, { limit: options.limit, since }),
+    readInterventionSeed(store.reportPool, { limit: interventionLedgerSeedLimit, until: since }),
   ]);
   const folded = foldInterventions([...seed.rows, ...window.rows].sort((a, b) => a.seq - b.seq), snapshot.work, snapshot.now, { since: windowStart(snapshot.now, days) });
   const report = computeInterventionReport(folded, snapshot.work, policy, { days, now: snapshot.now, kind: options.kind, stage: options.stage, work: options.work });

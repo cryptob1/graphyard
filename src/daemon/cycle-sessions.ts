@@ -16,18 +16,33 @@ import type { Cycle } from './cycle.js';
 /** Steps 1–1d: close finished sessions, fail over exhausted ones, and settle what dead workers and orphaned supervisors left. */
 export async function closeStep(cycle: Cycle) {
   const { config, state, effects, now, snapshot, clock, performed, isolate, agents, open, owns, heldBy } = cycle;
+  // Whether a live lease of `principal` is worked in the worktree `cwd` names (…/worktrees/GY-N-EPOCH).
+  const workedHere = (principal: string, cwd: string | undefined) => open.some(item => !!item.lease && item.lease.owner === principal
+    && Date.parse(item.lease.expiresAt) > clock && !!cwd && cwd.replace(/ \(deleted\)$/, '').endsWith(`/${item.key}-${item.lease.epoch}`));
   // 1. Close finished worker sessions. Authority stops at the lease, so a launched agent with no
   //    active assignment has nothing left to do and its pane must not linger holding a provider seat.
   for (const profile of config.workers.filter(worker => worker.mode === 'launch')) await isolate('close', null, profile.name, async () => {
     const agent = agents.find(candidate => candidate.name === profile.agentName);
-    if (!agent?.pane_id || owns(profile.principal)) return;
-    if (!['idle', 'done', 'blocked'].includes(agent.agent_status ?? '')) return;
+    if (!agent?.pane_id) return;
+    // A runtime that left its pane (Herdr detects no agent in it: a bare shell, status unknown) never
+    // reports idle, yet its agent name keeps the profile from every dispatch (2026-09-26: six of ten
+    // profiles held for hours). Such a pane is closed unless a live lease of its principal is worked
+    // in the worktree it stands in, and only once it has stood so for launchAppearanceMs, so a launch
+    // whose runtime has not yet started is never taken for one that exited.
+    const exited = !agent.agent && agent.agent_status === 'unknown';
+    if (exited && agent.cwd ? workedHere(profile.principal, agent.cwd) : owns(profile.principal)) return;
+    if (!exited && !['idle', 'done', 'blocked'].includes(agent.agent_status ?? '')) return;
     const key = closeKey(profile, agent.pane_id);
     if (state.actions[key]?.state === 'done') return;
+    if (exited) {
+      const seenKey = `exited:${profile.name}:${agent.pane_id}`, seen = state.actions[seenKey];
+      if (!seen) { await record(state, seenKey, { kind: 'close', work: null, principal: profile.principal, state: 'started', detail: `${profile.agentName}'s runtime has left pane ${agent.pane_id}, which holds no live assignment; it is closed if that still stands in ${launchAppearanceMs / 1000}s`, attempts: 1, cycle: state.cycle }, now(), effects.persist); return; }
+      if (now() - Date.parse(seen.at) < launchAppearanceMs) return;
+    }
     await record(state, key, { kind: 'close', work: null, principal: profile.principal, state: 'started', detail: `Closing ${profile.agentName}: no active Graphyard assignment`, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist);
     try {
       await effects.closeSession(agent.pane_id);
-      performed.push(await record(state, key, { kind: 'close', work: null, principal: profile.principal, state: 'done', detail: `Closed finished session ${profile.agentName} (${agent.agent_status ?? 'unknown'}) with no active assignment`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+      performed.push(await record(state, key, { kind: 'close', work: null, principal: profile.principal, state: 'done', detail: `Closed finished session ${profile.agentName} (${exited ? 'its runtime exited' : agent.agent_status ?? 'unknown'}) with no active assignment`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
     } catch (error) {
       performed.push(await record(state, key, { kind: 'close', work: null, principal: profile.principal, state: 'failed', detail: `Could not close ${profile.agentName}: ${message(error)}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
     }
@@ -279,9 +294,21 @@ export async function closeStep(cycle: Cycle) {
   for (const session of await effects.launchedSessions?.().catch(() => [] as LaunchedSession[]) ?? []) await isolate('session', open.find(candidate => candidate.key === session.work) ?? null, session.agentName, async () => {
     const agent = agents.find(candidate => candidate.name === session.agentName), item = open.find(candidate => candidate.key === session.work);
     if (!agent?.pane_id || !item || agent.agent_status !== 'blocked' || state.actions[failoverKey(session.role, item, session.record)]?.state === 'done') return;
-    await unblock(`${session.role} session ${session.agentName}`, `${session.role}:${session.record}`, agent, item, null, null, null, async () => {}, async reason => {
-      if (!effects.endSession) { await effects.closeSession(agent.pane_id!); return 'its pane was closed and its request launches again on the next dispatch tick'; }
+    // The session's own handle on the item — the one its launcher registered — carries the prompt
+    // and the loop's answer, as a worker's does (GY-223). One the launcher never registered has
+    // only the loop's ledger entry: the loop does not mint a handle under an id it would have to guess.
+    const registered = item.sessions?.find(entry => entry.state === 'running' && (entry.kind === 'review' || entry.kind === 'proof')
+      && (entry.agentName === session.agentName || (!!session.pane && entry.pane === session.pane)));
+    const handle = async (outcome: string, finished: boolean) => {
+      if (!registered) return;
+      await effects.recordSession?.(item, { id: registered.id, kind: registered.kind, runtime: registered.runtime, host: registered.host, subject: registered.subject,
+        state: finished ? 'finished' : 'running', outcome: outcome.slice(0, 500) }).catch(() => {});
+    };
+    await unblock(`${session.role} session ${session.agentName}`, `${session.role}:${session.record}`, agent, item, null, null, null, handle, async reason => {
+      // The handle ends before any relaunch: a relaunch reopens the same handle for its new session.
+      if (!effects.endSession) { await effects.closeSession(agent.pane_id!); await handle(`closed as failed: ${reason}`, true); return 'its pane was closed and its request launches again on the next dispatch tick'; }
       await effects.endSession(session, `closed as failed: ${reason}`.slice(0, 500));
+      await handle(`closed as failed: ${reason}`, true);
       if (!session.requestId || !effects.relaunch) return 'its request launches again on the next dispatch tick';
       // Launched again on the launcher beside the cycle (GY-616); the profile it lands on is reported when it settles.
       const key = `relaunch:${session.role}:${session.record}`;
