@@ -3,6 +3,7 @@ import { stableJson } from './model/stable-json.js';
 import { z } from 'zod';
 import type { PoolClient } from 'pg';
 import { Store, save, wakeJob, documentBefore, eventWorkSql } from './store.js';
+import { reconcileCandidatesSql, reconcileItemLockSql, reconcileSettledSql } from './store/coordination-sql.js';
 import { leaseCommands } from './store/pools.js';
 import { compactHeartbeatReceipt } from './store/receipts.js';
 import { authorizedForProof, unauthorizedProofs } from './proof-grants.js';
@@ -1806,48 +1807,75 @@ export class Engine {
     for (const transition of conflicts) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', transition.event, JSON.stringify({ details: { ...transition.conflict, at: now.toISOString() } })]);
   }
   /**
-   * How long one reconciliation batch may hold the coordination lock before it yields (GY-274).
+   * How long one reconciliation batch may hold its items' row locks before it yields (GY-274).
    * The first tick after a deploy re-evaluated every item under one lock for 65 s, and every
    * heartbeat queued behind it until the workers' supervisors gave up.
    */
   reconcileBatchMs = 250;
   /**
-   * Reconcile every item, in batches. Each batch is its own short coordination transaction on the
-   * background lane (a bounded share of the pool): it re-reads the items, so nothing a heartbeat
-   * or a request wrote while it yielded is overwritten, and resumes after the last item it
-   * finished. Between batches the lock is released and the event loop runs, so a renewal waits
-   * at most one batch however long the whole pass takes. One item always completes per batch.
+   * A reconciliation tick slower than this logs a warning with its item count and duration
+   * (GY-727): a tick over the bound is the symptom that preceded GY-727's 30 s passes. The
+   * production bound; only tests shorten it, as they shorten `reconcileBatchMs`.
+   */
+  reconcileSlowWarnMs = 5_000;
+  /**
+   * Reconcile every item that can still change, in batches. A pass reads its candidates once
+   * (GY-727): the opening transaction — a short coordination transaction, like every mutation's —
+   * sweeps direct merges and then reads each non-settled item's document one time, with a settled
+   * delivery's summary served from the work index (GY-203) instead of its document. Nothing reads
+   * a document again for the rest of the pass: where the old pass re-read every document in every
+   * batch, O(batches x items), this one is O(items) however many batches it takes.
    *
-   * A pass therefore reads every document once per batch, O(batches x items) (GY-392), and that
-   * is kept deliberately: every item is evaluated against `all`, the whole fleet as it stands
-   * (dependencies, the merge queue, fleet capacity), so each batch needs the full snapshot, not
-   * just the rows it reconciles. A keyset read of the batch's own rows saves nothing while `all`
-   * must still be read, and a snapshot carried across batches would evaluate items against state
-   * that the heartbeats and requests admitted between batches have already changed. The number
-   * of batches is bounded by the pass's duration over reconcileBatchMs, not by the backlog.
+   * Each batch is its own short transaction on the background lane (a bounded share of the pool)
+   * that holds no coordination lock: it takes each item's row lock as it reaches it (`SELECT …
+   * FOR UPDATE`, GY-274's per-batch bound retained), so a heartbeat or a request on any other
+   * item commits while the batch holds its transaction. A write that landed between the pass's
+   * read and the item's lock moved the revision the work index carries beside the row; the batch
+   * leaves that item for the next pass rather than overwrite what it cannot see. Between batches
+   * the row locks are released and the event loop runs, so a renewal waits at most one batch
+   * however long the whole pass takes. One item always completes per batch.
    */
   async reconcile() {
-    let cursor = 0, first = true;
+    const tickStarted = performance.now();
+    let opened = false, candidates: { id: string; number: number }[] = [], all: Work[] = [], reconciled = 0;
+    const candidatesById = new Map<string, Work>();
     for (;;) {
+      const opening = !opened;
       const finished = await this.store.transaction(async (db, now) => {
-        const rows = (await db.query('SELECT number, document FROM work_items ORDER BY number')).rows;
-        const all: Work[] = rows.map(row => row.document);
-        // Items held for a merge inside a direct-merge window are delivered before anything else reads them.
-        if (first) { await sweepDirectMerges(db, all, await directMergeWindows(db, this.directMergeEnvironment), now); first = false; }
+        if (opening) {
+          // The pass's one read of documents: only the items that can change, then the settled
+          // deliveries' summaries, each in number order, as the coordination view reads them.
+          const live = (await db.query(reconcileCandidatesSql)).rows as { id: string; number: string; document: Work }[];
+          const settled = (await db.query(reconcileSettledSql)).rows as { number: string; document: Work }[];
+          all = [...live, ...settled].map(row => ({ number: Number(row.number), document: row.document }))
+            .sort((a, b) => a.number - b.number).map(row => row.document);
+          for (const row of live) { candidatesById.set(row.id, row.document); candidates.push({ id: row.id, number: Number(row.number) }); }
+          // Items held for a merge inside a direct-merge window are delivered before anything else reads them.
+          await sweepDirectMerges(db, all, await directMergeWindows(db, this.directMergeEnvironment), now);
+          opened = true;
+          return false;
+        }
         const started = performance.now();
-        let reconciled = 0;
-        for (const [index, row] of rows.entries()) {
-          const number = Number(row.number);
-          if (number <= cursor) continue;
-          if (reconciled && performance.now() - started >= this.reconcileBatchMs) return false;
-          await this.reconcileItem(db, all[index], all, now);
-          cursor = number; reconciled++;
+        let reconciledInBatch = 0;
+        while (candidates.length) {
+          if (reconciledInBatch && performance.now() - started >= this.reconcileBatchMs) return false;
+          const candidate = candidates.shift()!;
+          // Row by row: lock this item and read the revision it stands at now, from the index
+          // that tracks the row. A revision the pass's read never saw means the item moved after
+          // the read; the batch skips it, and the next pass reads it afresh.
+          const locked = (await db.query(reconcileItemLockSql, [candidate.id])).rows[0] as { id: string; revision: string } | undefined;
+          const work = candidatesById.get(candidate.id);
+          if (!locked || !work || Number(locked.revision) !== work.revision) continue;
+          await this.reconcileItem(db, work, all, now);
+          reconciledInBatch++; reconciled++;
         }
         return true;
-      }, { lane: 'background' });
-      if (finished) return;
+      }, { lane: 'background', coordinationLock: opening });
+      if (finished) break;
       await new Promise(resolve => setImmediate(resolve));
     }
+    const elapsedMs = performance.now() - tickStarted;
+    if (elapsedMs >= this.reconcileSlowWarnMs) console.warn(`reconciliation tick took ${Math.round(elapsedMs)} ms for ${reconciled} item(s), over the ${this.reconcileSlowWarnMs} ms bound; find what held its batches in the server logs`);
   }
   /** One item's reconciliation inside a batch's coordination transaction. */
   private async reconcileItem(db: PoolClient, work: Work, all: Work[], now: Date) {

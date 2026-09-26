@@ -102,3 +102,22 @@ export const coordinationTrimSql = (kept: string, keep: number) => `jsonb_build_
   'queueHistory', GREATEST(0, ${length("d.document->'queueHistory'")} - ${keep}),
   'actionHistory', GREATEST(0, ${length("d.document->'actionQueue'->'history'")} - ${keep}),
   'sessions', ${length("d.document->'sessions'")} - ${length(`${kept}->'sessions'`)})`;
+
+/**
+ * The items a reconciliation pass can change (GY-727): everything that is not a settled delivery.
+ * `settled` is the work index's own flag, kept current beside every write by the same trigger, so
+ * the filter is an index lookup that never reads a document: the pass reads only these documents,
+ * once, and takes a settled delivery's summary from the index instead of its document.
+ */
+export const reconcileCandidatesSql = `SELECT w.id, w.number, w.document FROM work_items w
+  WHERE NOT EXISTS (SELECT 1 FROM work_index i WHERE i.id = w.id AND i.settled) ORDER BY w.number`;
+/** The settled deliveries' summaries, in number order: the rest of the `all` a batch evaluates against. */
+export const reconcileSettledSql = 'SELECT i.number, i.summary AS document FROM work_index i WHERE i.settled ORDER BY i.number';
+/**
+ * One batch item's row lock, taken as the batch reaches it (GY-727), with the revision the item
+ * stands at now, read from the work index beside it — a small row, never the document. A revision
+ * the pass's read did not see means the item moved after the read: the batch leaves it for the
+ * next pass instead of overwriting what it cannot see. Locked row by row, a batch holds only its
+ * own items, so a mutation on any other item commits while the batch holds its transaction.
+ */
+export const reconcileItemLockSql = 'SELECT w.id, i.revision FROM work_items w JOIN work_index i ON i.id = w.id WHERE w.id = $1 FOR UPDATE OF w';

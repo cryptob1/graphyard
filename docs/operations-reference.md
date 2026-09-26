@@ -106,6 +106,8 @@ Only an `admin` grants, only to `producer` principals. Patterns: an exact name, 
 
 `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (default 4, ≤ half the pool) share one pace per token: budget above reserve, less others' projected spend, spread to reset. Claims: head band, in-flight merges, never-observed submissions, jobs due over five minutes, review/rework waits, running sessions (before waits when tight), `available_at`; tight, idle items await webhooks. `observationThroughput` reports budget, pace, head lag, oldest unobserved submission; `master status` raises `github` past two minutes. Heartbeat, claim, `complete` and `blocked` own the lease pool; `leaseHealth` (`GET /api/status`) reports heartbeat p50/p95 and failures, raised above 5 s p95.
 
+The reconciliation tick reads only the items that can change — everything except settled deliveries, selected from the work index — and reads each one once per pass, however many batches it takes, so pass cost grows with the live items, not with items × batches. Each batch locks only its own items' rows (`SELECT … FOR UPDATE`) and holds no coordination lock, so a heartbeat or a request on any other item commits while a batch holds its transaction; a write that landed between the pass's read and an item's lock is left for the next pass, never overwritten. A tick slower than 5 s logs a warning naming its item count and duration: find what held its batches in the server logs.
+
 ### Concurrent reconciliation
 
 A stale observation snapshot retries after two seconds.
