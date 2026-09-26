@@ -12,7 +12,7 @@ import { agentStartCeilingMs, agentStartTimeoutMs, awaitRuntimeStart, buildMaste
 import { launchAuthorization } from '../src/repository-setup.js';
 import { summarizeReviews } from '../src/reviewer.js';
 import { launchProducer, producerPrompt, readProducerLedger, summarizeProducers } from '../src/producer.js';
-import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
+import { bounded, dispatchFailureReasonLimit, emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { readMasterGuide } from './helpers/master-guide.js';
 import { autonomyContract } from '../src/autonomy.js';
 
@@ -114,7 +114,8 @@ class FakePane {
     if (args[0] === 'pane' && args[1] === 'list') return json({ panes: [] });
     return json({});
   };
-  bounds() { return { clock: () => this.now, wait: this.wait }; }
+  // These cases read the pane against a 30 s bound; the default is run.launchStartSeconds (GY-413).
+  bounds() { return { clock: () => this.now, wait: this.wait, timeoutMs: 30_000 }; }
 }
 const readyAtOnce = () => ({ agent: { agent: 'claude', agent_status: 'idle' }, screen: ' ▐▛███▛█   Claude Code v2.1.278\n❯ \n' });
 const echoLine = 'vish@host ~/code/project ❯ GY=/home/vish/code/project/.graphyard/launch/produce-a; claude --permission-mode bypassPermissions --setting-sources user --settings /home/vish/co';
@@ -209,7 +210,7 @@ test('unit:launch-command-bounded — the typed launch command line is short and
 test('unit:start-bound-reads-the-pane — before a start is declared failed the launcher reads the pane: a runtime starting at the bound is given until the ceiling and reported started at 45 s, one that never starts is refused with the pane\'s last line', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'graphyard-launch-start-'));
   try {
-    assert.equal(agentStartTimeoutMs, 30_000); assert.equal(agentStartCeilingMs, 120_000);
+    assert.equal(agentStartTimeoutMs, 60_000); assert.equal(agentStartCeilingMs, 120_000);
     // Ready at 45 s: the process exists under the pane from 2 s (Herdr reports the kind, state unknown) with nothing of it drawn yet, interactive at 45 s.
     const slow = new FakePane(elapsed => elapsed < 2_000 ? { screen: `${echoLine}\n` } : elapsed < 45_000 ? { agent: { agent: 'claude', agent_status: 'unknown' }, screen: `${echoLine}\n` } : readyAtOnce());
     const started = await startAgentSession('produce-a', 'claude', 'w1V:pR6', producerArgs, 'Produce evidence', slow.run, { directory, ...slow.bounds() });
@@ -285,7 +286,8 @@ test('integration:launch-refusal-names-the-screen — a producer launch refused 
     const refused = tick.refused.filter(entry => entry.kind === 'producer');
     assert.ok(refused.length >= 1, 'the producer launch was refused');
     for (const failure of refused) {
-      assert.equal(failure.reason, `the claude runtime never started within 30 s in pane w1V:pR6 (command still echoing); the pane last showed: "${echoLine}"`);
+      // The launch failure records that its pane was closed (GY-413); the stored reason is bounded.
+      assert.equal(failure.reason, bounded(`the claude runtime never started within 30 s in pane w1V:pR6 (command still echoing); the pane last showed: "${echoLine}"; its Herdr pane w1V:pR6 was closed`, dispatchFailureReasonLimit));
       assert.equal(failure.reason.includes('not found'), false, 'Herdr\'s agent_not_found never reaches the record');
       assert.deepEqual(cursor.failures[failure.requestId].reason, failure.reason, 'the dispatcher\'s failure record carries the same reason');
     }
@@ -307,7 +309,7 @@ test('integration:launch-refusal-names-the-screen — a producer launch refused 
 test('manual:launch-delivery-docs-review — docs/master-agent.md states how a request reaches its runtime, the start bound and its extension, and what a start refusal means', async () => {
   const guide = await readMasterGuide();
   for (const fragment of ['#### How the request reaches the runtime', '.graphyard/launch/NAME.request', 'mode 0600', 'removed with the checkout', '--append-system-prompt-file "$GY.role"', '"$(cat "$GY.request")"', 'bounded at **512 bytes** whatever the request is',
-    '#### The start bound reads the pane', '**30 seconds**', '**120 seconds**', 'started.extended', 'the claude runtime is on screen while Herdr reports it unknown', 'is blocked before it is ready', 'command still echoing', 'pane\'s last non-empty line', 'never Herdr\'s own `agent_not_found`', 'the claude runtime never started within 30 s', 'was still starting after 120 s', 'Automatic producer launch for GY-N refused']) {
+    '#### The start bound reads the pane', '**60 seconds**', 'run.launchStartSeconds', '**120 seconds**', 'started.extended', 'the claude runtime is on screen while Herdr reports it unknown', 'is blocked before it is ready', 'command still echoing', 'pane\'s last non-empty line', 'never Herdr\'s own `agent_not_found`', 'the claude runtime never started within 60 s', 'was still starting after 120 s', 'Automatic producer launch for GY-N refused']) {
     assert.ok(guide.includes(fragment), `docs/master-agent.md states ${fragment}`);
   }
 });

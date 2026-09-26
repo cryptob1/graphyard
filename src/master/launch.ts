@@ -10,7 +10,7 @@ import { withAutonomyContract } from '../autonomy.js';
 import type { PartialWork } from '../model/capacity.js';
 import { type ConsentPrompt, detectConsentPrompt, settingsWarning, type ConsentAnswer, sameConsentPrompt } from '../consent-prompt.js';
 import type { MasterRun } from './profiles.js';
-import { type HerdrAgent, herdrJson, herdrRun } from './herdr.js';
+import { type HerdrAgent, herdrJson, herdrRun, stopCreatedHerdrTab } from './herdr.js';
 
 /**
  * Keep what an interrupted attempt had not committed. The work is committed on the attempt's own
@@ -142,7 +142,14 @@ export function launchCommand(kind: string, args: string[], files: LaunchFiles, 
  * `command still echoing`, the dialog, or the runtime's own words rather than Herdr's
  * `agent_not_found`.
  */
-export const agentStartTimeoutMs = 30_000, agentStartCeilingMs = 120_000, startPollMs = 500, paneLineLimit = 200;
+export const agentStartTimeoutMs = 60_000, agentStartCeilingMs = 120_000, startPollMs = 500, paneLineLimit = 200;
+/**
+ * The start bound scales with the host (GY-413): `run.launchStartSeconds` (10–600, default 60).
+ * Under load the launch command was still echoing at 30 s — a slow start, not a failure — and the
+ * launcher closed a session that would have come up. Every launch logs how long its start took.
+ */
+export const defaultLaunchStartSeconds = agentStartTimeoutMs / 1000;
+export const launchStartMs = (config: { run: Pick<MasterRun, 'launchStartSeconds'> }) => (config.run.launchStartSeconds ?? defaultLaunchStartSeconds) * 1000;
 export const startedStates = ['idle', 'done', 'working'], promptableStates = ['idle', 'done'];
 /**
  * The runtime's own screen, per kind: its banner, its status line, or its spinner at the start of a
@@ -157,7 +164,8 @@ export const runtimeScreens: Record<string, RegExp> = {
 export type StartState = 'ready' | 'starting' | 'absent' | 'blocked' | 'consent';
 export interface StartObservation { state: StartState; agent: HerdrAgent | null; detail: string; line: string; prompt?: ConsentPrompt }
 export interface StartBounds { timeoutMs?: number; ceilingMs?: number; pollMs?: number; clock?: () => number; /** The pause between polls; a test's advances a virtual clock, the process's awaits a timer. */ wait?: (ms: number) => void | Promise<void>; /** The states that count as ready; `startedStates` unless the runtime is still to be prompted. */ readyStates?: string[];
-  /** Whether a session stopped on a consent prompt the launcher does not answer is held for a human (a worker, whose supervisor bounds the hold) rather than refused. */ holdConsent?: boolean }
+  /** Whether a session stopped on a consent prompt the launcher does not answer is held for a human (a worker, whose supervisor bounds the hold) rather than refused. */ holdConsent?: boolean;
+  /** Where the start's duration is logged (GY-413); standard error unless a caller collects it. */ log?: (line: string) => void }
 export class SessionStartError extends Error {
   constructor(readonly startCase: 'never started' | 'still starting' | 'blocked' | 'awaiting consent', readonly pane: string, readonly screen: string, readonly waitedMs: number, message: string) { super(message); }
 }
@@ -282,7 +290,14 @@ export async function startAgentSession(name: string, kind: string, pane: string
   const command = launchCommand(kind, args, files, options.prefix);
   await herdrRun(['pane', 'run', pane, command], run);
   options.onRun?.();
-  const started = await awaitRuntimeStart(pane, kind, command, run, { ...options, readyStates: startedStates });
+  const log = options.log ?? (line => process.stderr.write(`${line}\n`));
+  let started: Awaited<ReturnType<typeof awaitRuntimeStart>>;
+  try { started = await awaitRuntimeStart(pane, kind, command, run, { ...options, readyStates: startedStates }); }
+  catch (error) {
+    if (error instanceof SessionStartError) log(`graphyard: ${name} (${kind}) in pane ${pane}: start failed after ${(error.waitedMs / 1000).toFixed(1)} s (${error.startCase}; bound ${Math.round((options.timeoutMs ?? agentStartTimeoutMs) / 1000)} s)`);
+    throw error;
+  }
+  log(`graphyard: ${name} (${kind}) in pane ${pane}: runtime ${started.awaiting ? 'awaiting consent' : 'started'} after ${(started.waitedMs / 1000).toFixed(1)} s (bound ${Math.round((options.timeoutMs ?? agentStartTimeoutMs) / 1000)} s)`);
   let named = true;
   try { await herdrJson(['agent', 'rename', pane, name], run); }
   catch (error) {
@@ -299,6 +314,22 @@ export async function startAgentSession(name: string, kind: string, pane: string
   // session held on a consent dialog reads it once the dialog is answered.
   return { delivery, command, files, trust: trust ?? null, consent: started.consent, awaiting: started.awaiting ? { ...started.awaiting, request: null as string | null, named } : undefined,
     started: { state: started.awaiting ? 'awaiting consent' as const : 'started' as const, detail: started.detail, waitedMs: started.waitedMs, extended: started.extended } };
+}
+
+/**
+ * A launch that failed before its runtime started closes what it created (GY-413): its pane
+ * through closeHerdrPane, the path the loop closes finished sessions by, or its tab when Herdr
+ * named no pane. The returned note is what the launch failure records, so the record says the
+ * pane is gone rather than leaving an idle shell in the checkout to hold a containment fence.
+ */
+export async function closeFailedLaunch(pane: string | undefined, tab: string | undefined, run?: ChildRun) {
+  await stopCreatedHerdrTab(pane, tab, run);
+  return pane ? `its Herdr pane ${pane} was closed` : `its Herdr tab ${tab} was closed`;
+}
+/** The launch failure with what became of its pane appended; the error keeps its class. */
+export function withLaunchClose(error: unknown, note: string): Error {
+  if (error instanceof Error) { error.message = `${error.message}; ${note}`; return error; }
+  return new Error(`${String(error)}; ${note}`);
 }
 
 /**
