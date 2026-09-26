@@ -2,7 +2,7 @@
 // and the main guard while main is red after an optimistic merge.
 import type { Work } from '../model/work.js';
 import { agentOwner, type AttentionItem } from './attention.js';
-import { optimisticMergeEnabled, type MasterConfig } from './profiles.js';
+import { mergeBatchSize, optimisticMergeEnabled, type MasterConfig } from './profiles.js';
 import { describeGuard, mainGuard, optimisticMetrics } from '../optimistic-merge.js';
 
 /**
@@ -10,7 +10,7 @@ import { describeGuard, mainGuard, optimisticMetrics } from '../optimistic-merge
  * `optimisticMerge`: how many entries landed past the queue, how many the guard reverted, where
  * main stands, and time-to-merge for optimistic versus queued entries.
  */
-export function optimisticStatus(master: Pick<MasterConfig, 'mergeQueue'>, work: Work[], batchSize: number) {
+export function optimisticStatus(master: Pick<MasterConfig, 'mergeQueue'>, work: Work[], batchSize = mergeBatchSize(master)) {
   const optimistic = optimisticMergeEnabled(master);
   return { mergeQueue: { batchSize, optimistic }, optimisticMerge: optimisticMetrics(work, optimistic) };
 }
