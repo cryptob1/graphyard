@@ -415,9 +415,18 @@ export interface BaseRefresh {
    * refresh. `head` is then the unchanged candidate, and whatever the record carried onto it stays.
    */
   stale?: StaleMergeability | null;
+  /** The coordinator's request this refresh answered (GY-528), when it was one; see `BaseRefreshRequest`. */
+  requested?: { by: string; at: string; reason: string } | null;
 }
-/** Why a branch was written by the control plane rather than by its worker (GY-375). */
-export type RefreshTrigger = 'conflict confirmed' | 'ejection restore' | 'repair';
+/**
+ * The coordinator's request that a base tip be merged into this head although GitHub reports no
+ * conflict (GY-528): the head carries a base failure the base has since repaired, and a CI rerun
+ * reuses the merge commit the failure was built on. Kept beside `baseRefresh`, not in it, so an
+ * approval an earlier refresh carried onto the head still binds until this one runs.
+ */
+export interface BaseRefreshRequest { head: string; base: string; policyRevision: number; by: string; at: string; reason: string }
+/** Why a branch was written by the control plane rather than by its worker (GY-375, GY-528). */
+export type RefreshTrigger = 'conflict confirmed' | 'ejection restore' | 'repair' | 'base failure repaired';
 /**
  * A GitHub `mergeable: false` the control plane's own test merge showed to be clean (GY-375).
  * GitHub recomputes mergeability lazily after the base moves and can report a clean head
@@ -519,6 +528,23 @@ export function baseRefreshNeeded(work: Work): { head: string; boundBase: string
   const restore = currentRestore(work)?.restore;
   if (restore && restore.contaminated === candidate.sha && (restore.performedAt === null || restore.outcome === 'unrepairable')) return null;
   return { head: candidate.sha, boundBase: candidate.baseSha, baseTip };
+}
+
+/**
+ * The base refresh the coordinator requested for exactly the current head, not yet run (GY-528),
+ * or null. It runs whether or not GitHub reports a conflict: the head carries
+ * a base failure the base has since repaired, and only the repaired base merged in clears it.
+ */
+export function requestedBaseRefresh(work: Work): BaseRefreshRequest | null {
+  const request = work.baseRefreshRequest, refresh = work.baseRefresh, candidate = work.candidate, observation = work.observation;
+  if (!request || !candidate || !observation) return null;
+  if (!work.submission || work.reworkRequested || work.stage === 'done' || work.queue || observation.merged || observation.prState === 'closed' || observation.draft) return null;
+  if (observation.candidate.sha !== candidate.sha || request.head !== candidate.sha || request.policyRevision !== work.policyRevision) return null;
+  // Answered already: a refresh of this head since the request is recorded, merged or conflicting.
+  if (refresh && refresh.from.sha === candidate.sha && refresh.policyRevision === work.policyRevision && Date.parse(refresh.at) >= Date.parse(request.at)) return null;
+  // The base tip observed now is the one merged in: a base that moved on again since the request
+  // still holds the repair, and merging an older tip would leave the head behind it anyway.
+  return observation.baseTip && observation.baseTipContained === false ? request : null;
 }
 
 /** The unresolved conflict a base refresh reported for exactly this candidate and branch head, or null. */

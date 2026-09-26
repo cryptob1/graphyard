@@ -15,7 +15,7 @@ A lease expires 120 seconds after the last heartbeat; the next claim, a higher e
 
 ## Supervisor died leaving a containment quarantine
 
-On the worker's machine `graphyard master settle-containment GY-N "reason"` verifies no process survives (`containment.held` lists them); only the loop excuses an idle pane shell (childless, parent `herdr server`), closing its pane. If refused, confirm the stop, then `graphyard rework GY-N --previous-worker-stopped "reason"`, or `graphyard recover-containment GY-N --previous-worker-stopped "reason"` once delivered.
+On the worker's machine `graphyard master settle-containment GY-N "reason"` verifies no process survives (`containment.held` lists them); only the loop excuses an idle pane shell (childless, parent `herdr server`), closing its pane. If refused, confirm the stop, then [rework](#submitted-implementation-needs-rework) it, or [recover](operations.md#recovery-recipes) it once delivered.
 
 ## Submitted implementation needs rework
 

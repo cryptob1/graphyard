@@ -7,6 +7,7 @@ import { unexercisedFindings } from '../auto-dispatch.js';
 import { decisionBindingMax } from '../model/approval.js';
 import { guardBroadScope, type MasterConfig, type ContainmentAssessment, containmentPhase, type HerdrAgent } from '../master.js';
 import { researchRework } from '../research.js';
+import { failedRequiredChecks } from '../model/base-failure.js';
 import { actionDetailMax, type ApprovalWatch, message } from './state.js';
 
 // ---- Routine decisions ---------------------------------------------------------------------
@@ -143,8 +144,8 @@ export function scopeRoutineDecision(work: Work, now: number, judged: boolean): 
  * Recovery releases a delivered item whose supervisor is still quarantined. A merge decision is
  * needed only where automatic merging is off, and then for the exact candidate that is mergeable.
  */
-export function routineDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>, now: number, assessment?: ContainmentAssessment | null): RoutineDecision | null {
-  const needed = neededDecision(work, config);
+export function routineDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>, now: number, assessment?: ContainmentAssessment | null, baseFailed?: ReadonlySet<string>): RoutineDecision | null {
+  const needed = neededDecision(work, config, baseFailed);
   if (!needed) return null;
   if (needed.action === 'merge') return needed;
   // A lease-loss a newer attempt superseded rests on the record, not on this host: see supersededLeaseLoss.
@@ -156,8 +157,12 @@ export function routineDecision(work: Work, config: Pick<MasterConfig, 'autoMerg
   // the same head, base and grounds (GY-407) — not of every request the item ever carried.
   return stopped.stopped ? { ...needed, input: situatedInput(needed), reason: `${needed.reason} The previous worker is stopped: ${stopped.grounds}.` } : null;
 }
-/** What the item calls for, before asking whether the loop may attest that its worker is stopped. */
-export function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>): RoutineDecision | null {
+/**
+ * What the item calls for, before asking whether the loop may attest that its worker is stopped.
+ * `baseFailed` names the required checks the base-failure step set aside for this item (GY-528):
+ * they fail on the base head too, so no rework is requested for them.
+ */
+export function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>, baseFailed?: ReadonlySet<string>): RoutineDecision | null {
   if (work.stage === 'done') {
     return work.containmentQuarantine
       ? { action: 'recover', reason: `${work.key} is delivered and still fenced by its epoch ${work.containmentQuarantine.epoch} containment quarantine; recovery releases it without touching the delivery.`, binding: String(work.containmentQuarantine.epoch) } : null;
@@ -184,7 +189,7 @@ export function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge
   // which waits for one — must not hold this rework.
   const proofs = proofRework(work);
   if (proofs) return { action: 'rework', ...proofs };
-  const ci = failedCheckRework(work);
+  const ci = failedCheckRework(work, baseFailed);
   if (ci) return { action: 'rework', ...ci };
   // The operator answered a product question the head was built on provisionally, and the answer
   // differs from that recommendation (GY-259): the head no longer builds what was asked.
@@ -218,15 +223,11 @@ export function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge
  * next step named for no one. The latest attempt of each check decides, so a rerun that is still
  * going or passed asks for nothing; the binding names the head and the failed checks.
  */
-export function failedCheckRework(work: Work): { reason: string; binding: string } | null {
-  const candidate = work.candidate, observation = work.observation;
-  if (!work.submission || work.reworkRequested || !candidate || !observation || work.stage === 'done') return null;
-  if (observation.candidate.sha !== candidate.sha || observation.merged || observation.prState === 'closed') return null;
-  const failed = work.policy.checks.filter(name => {
-    const runs = observation.checks.filter(check => check.name === name);
-    const latest = runs.length ? runs.reduce((newest, check) => (check.attempt ?? 0) >= (newest.attempt ?? 0) ? check : newest) : null;
-    return !!latest && ['failure', 'timed_out', 'action_required', 'cancelled'].includes(latest.result);
-  }).sort();
+export function failedCheckRework(work: Work, baseFailed?: ReadonlySet<string>): { reason: string; binding: string } | null {
+  const candidate = work.candidate!;
+  // A check that fails on the base head too is no worker's to fix (GY-528): the loop raises it against
+  // the base once, and the approvers are not asked, one blocked item at a time, to refuse the round.
+  const failed = failedRequiredChecks(work).map(entry => entry.name).filter(name => !baseFailed?.has(name));
   if (!failed.length) return null;
   return { reason: `${work.key}: required CI check${failed.length === 1 ? '' : 's'} ${failed.join(', ')} failed on candidate ${candidate.sha.slice(0, 12)}. No gate passes a head whose required checks failed, so the item returns to a worker to fix what CI found.`,
     binding: `${candidate.sha}:ci:${failed.join(',')}` };

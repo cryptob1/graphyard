@@ -13,6 +13,7 @@ import { scopeStep, successorStep } from './cycle-scope.js';
 import { reclaimStep } from './cycle-reclaim.js';
 import { dispatchStep } from './cycle-dispatch.js';
 import { decisionStep } from './cycle-decisions.js';
+import { baseFailureStep } from './cycle-base-failures.js';
 import { deploymentStep, mergeStep, shepherdStep } from './cycle-delivery.js';
 import { faultStep } from './faults.js';
 import { Timings, withTimings } from '../master/timings.js';
@@ -83,7 +84,7 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   /** The item a worker profile holds a live lease on, which a failure while handling that profile is recorded against. */
   const heldBy = (profile: WorkerProfile) => open.find(item => !!item.lease && item.lease.owner === profile.principal && Date.parse(item.lease.expiresAt) > clock) ?? null;
 
-  const cycle: Cycle = { config, state, effects, now, snapshot, clock, clockOffset, performed, isolate, agents, credentials, open, owns, heldBy, timings };
+  const cycle: Cycle = { config, state, effects, now, snapshot, clock, clockOffset, performed, isolate, agents, credentials, open, owns, heldBy, timings, baseFailed: new Map() };
   await timings.step('close', () => closeStep(cycle));
 
   // A pane this cycle just closed frees its profile, so health is read after the closures.
@@ -98,6 +99,11 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
 
   const assessments = await timings.step('reclaim', () => reclaimStep(cycle));
   spent('close');
+
+  // 3a. A required check that fails on the base head too is set aside before anything decides on
+  //     the item (GY-528): the decisions and the approver capacity dispatch counts read it.
+  cycle.baseFailed = await timings.step('base failures', () => baseFailureStep(cycle));
+  spent('decisions');
 
   const capacity = await timings.step('dispatch', () => dispatchStep(cycle, health, assessments));
   spent('dispatch');
@@ -127,7 +133,7 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
     const sample = observeItemClock(state, item, clock);
     if (sample) state.latency.push(sample);
   }
-  const actionable = actionableSubjects(config, snapshot.work, clock, { assessments, approvals: state.approvals });
+  const actionable = actionableSubjects(config, snapshot.work, clock, { assessments, approvals: state.approvals, baseFailed: cycle.baseFailed });
   const silence = trackSilence(state, actionable, performed, clock);
   const { stages, lead, production, postDeploy, postDeployFailures } = stageMetrics(snapshot.work, clock);
   // The cycle's duration, and of it the time at least one child was in flight: the difference is
@@ -168,4 +174,6 @@ export interface Cycle {
   owns: (principal: string) => boolean; heldBy: (profile: WorkerProfile) => Work | null;
   /** This cycle's step and call timings (GY-377); a step may time a phase of its own inside it. */
   timings: Timings;
+  /** Per item id, the required checks that fail on the base head too (GY-528): no rework is requested for them. */
+  baseFailed: Map<string, Set<string>>;
 }

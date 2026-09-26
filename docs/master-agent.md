@@ -26,6 +26,8 @@ Ordinary review findings, rework, idle workers, and proof setup are not stopping
 
 The loop drives every item. Unless created `"systemDriven": false`, one refuses hand `dispatch`, `merge`, `review` and `decide attest|merge`, naming the loop step, except stopped-loop recovery, unproduced `manual:` attestations, and `decide merge` of unauthorized merges or with no operator agent. Hand `dispatch` waits out live or just-released ones.
 
+Required-check failures the base head's latest completed run shares request no rework or approver: one attention and P0 item per test and base head; once the base passes, blocked candidates rerun and get it merged (`refresh`).
+
 ### Session liveness is reconciled, not trusted
 
 **The control plane reconciles session liveness; closing finished sessions is not the master's

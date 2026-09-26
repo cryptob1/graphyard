@@ -43,6 +43,8 @@ export function daemonSummary(state: DaemonState, now: number, intervalMs: numbe
     approvals: Object.entries(state.approvals).map(([key, watch]) => ({ key, ...watch })),
     // Fault instances by class in the recurrence window, and the item each recurring class filed (GY-173).
     faults: faultRecurrenceReport(state, faultClassPolicyFromEnv(process.env), now),
+    // Required checks failing on the base head as well as on the candidates they hold (GY-528).
+    baseFailures: Object.values(state.baseFailures),
   };
 }
 

@@ -281,6 +281,14 @@ export const cycleFailureSchema = z.object({
 }).strict();
 export type CycleFailures = z.infer<typeof cycleFailureSchema>;
 
+/** A base failure the loop raised (GY-528): one per failing test and base head; see model/base-failure.ts. */
+const blockedCandidateSchema = z.object({ key: z.string().max(40), id: z.string().max(100), sha: z.string().max(64), jobId: z.number().int().nullable(), url: z.string().max(500).nullable() }).strict();
+export const baseFailureSchema = z.object({
+  test: z.string().max(500), check: z.string().max(200), baseSha: z.string().max(64), jobId: z.number().int().nullable(), url: z.string().max(500).nullable(), raisedAt: z.string(),
+  blocks: z.array(blockedCandidateSchema).max(200), item: z.string().max(40).nullable(),
+  cleared: z.object({ at: z.string(), baseSha: z.string().max(64), jobId: z.number().int().nullable() }).strict().nullable(),
+}).strict();
+
 export const daemonStateSchema = z.object({
   version: z.literal(1), url: z.string(), repository: z.string(),
   lock: z.object({ id: z.string(), pid: z.number().int().positive(), host: z.string(), startedAt: z.string(), heartbeatAt: z.string() }).strict().nullable().default(null),
@@ -317,11 +325,17 @@ export const daemonStateSchema = z.object({
    */
   faults: z.object({ instances: z.array(faultInstanceSchema).default([]), open: z.record(z.string(), z.string()).default({}), failing: z.record(z.string(), z.string()).default({}) }).strict()
     .default(() => ({ instances: [], open: {}, failing: {} })),
+  /**
+   * Per failing test and base head (`baseFailureKey`), a required check that fails on the base
+   * branch head as well as on the candidates it blocks (GY-528): no rework is requested for it, one
+   * P0 item is filed, and once the base passes again the blocked candidates are rerun and refreshed.
+   */
+  baseFailures: z.record(z.string(), baseFailureSchema).default(() => ({})),
 }).strict();
 export type DaemonState = z.infer<typeof daemonStateSchema>;
 
 export const retainedActions = 500, retainedMetrics = 100, profileCooldownMs = 600_000, maxProofAttempts = 3, retainedScopeDecisions = 200;
-export const retainedSamples = 200, retainedClocks = 500;
+export const retainedSamples = 200, retainedClocks = 500, retainedBaseFailures = 200;
 /** Reclamation scans the worktree directory, so it runs on its own bounded interval, not every cycle. */
 export const reclaimIntervalMs = 600_000;
 export const gigabytes = (bytes: number | null) => bytes === null ? 'an unknown amount of space' : `${(bytes / 1e9).toFixed(1)} GB`;
@@ -377,6 +391,9 @@ export function pruneDaemonState(state: DaemonState) {
   // A watch is retired when its item moves on; this bound only catches items the loop stopped seeing.
   const watches = Object.entries(state.approvals).sort((a, b) => Date.parse(a[1].requestedAt) - Date.parse(b[1].requestedAt));
   if (watches.length > retainedClocks) for (const [key] of watches.slice(0, watches.length - retainedClocks)) delete state.approvals[key];
+  // A cleared base failure is retired by its step once its candidates were rerun and refreshed; this bound drops the oldest, cleared first.
+  const failures = Object.entries(state.baseFailures).sort((a, b) => Number(!a[1].cleared) - Number(!b[1].cleared) || Date.parse(a[1].raisedAt) - Date.parse(b[1].raisedAt));
+  if (failures.length > retainedBaseFailures) for (const [key] of failures.slice(0, failures.length - retainedBaseFailures)) delete state.baseFailures[key];
   return state;
 }
 
