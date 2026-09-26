@@ -3,7 +3,7 @@ import type pg from 'pg';
 import { z } from 'zod';
 import { demand, type Principal } from './model.js';
 import type { Store } from './store.js';
-import { RegistryError, applyRegistryMutation, chooseSession, emptyRegistry, fleetView, foldObservation, liveSessions, refusalHistoryLimit, registryMutationSchemas, selectionRequestSchema, settleSessions, supersededByRequest,
+import { RegistryError, applyRegistryMutation, chooseSession, emptyRegistry, fleetView, foldObservations, liveSessions, endRegistrySession, runOutcomes, refusalHistoryLimit, registryMutationSchemas, selectionRequestSchema, settleSessions, supersededByRequest,
   type AgentRegistry as RegistryDocument, type FleetSession, type RegistryMutation } from './model/registry.js';
 
 /**
@@ -112,12 +112,8 @@ export class AgentRegistry {
       for (const superseded of supersededByRequest(registry, request)) {
         superseded.endedAt = at; superseded.endReason = `superseded by the ${request.role} session requested for ${request.work}`; changed = true;
       }
-      for (const observed of request.observations) {
-        const account = registry.accounts.find(entry => entry.name === observed.account);
-        // An executor only vouches for the logins on its own host.
-        if (!account || account.credential.host !== request.host) continue;
-        if (foldObservation(account, observed.quota, { actor: actor.id, at })) changed = true;
-      }
+      // Its quotas and the smoke tests it ran (GY-446), for the logins on its own host only.
+      if (foldObservations(registry, request, { actor: actor.id, at })) changed = true;
       const choice = chooseSession(registry, request, now.getTime());
       let result: { selected: boolean; reason: string; skipped: typeof choice.skipped; session: FleetSession | null; account: unknown; runtime: unknown; model: unknown; policy?: unknown; revision: number };
       if (choice.account) {
@@ -142,14 +138,15 @@ export class AgentRegistry {
   async endSession(actor: Principal, id: string, input: unknown, key: string) {
     demand((configurators as readonly string[]).includes(actor.role), 'Sessions are ended by the executor\'s coordinator identity (or an admin)', 403);
     demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
-    const data = z.object({ reason: z.string().trim().min(1).max(500) }).strict().parse(input);
+    // A headless run's end says whether it produced a result (GY-446): runs of one role that end
+    // without one, twice in a row, hold the account from that role.
+    const data = z.object({ reason: z.string().trim().min(1).max(500), outcome: z.enum(runOutcomes).optional() }).strict().parse(input);
     return this.store.transaction(async (db, now) => {
       const registry = await readRegistry(db), session = registry.sessions.find(entry => entry.id === id);
       demand(session, 'Unknown session', 404);
-      if (session.endedAt) return { session };
-      session.endedAt = now.toISOString(); session.endReason = data.reason;
-      registry.revision++; registry.updatedAt = session.endedAt;
-      await this.append(db, actor, 'session-ended', registry, { session: session.id, account: session.account, reason: data.reason });
+      if (!endRegistrySession(registry, session, data.reason, data.outcome, now.toISOString())) return { session };
+      registry.revision++; registry.updatedAt = now.toISOString();
+      await this.append(db, actor, 'session-ended', registry, { session: session.id, account: session.account, reason: data.reason, ...(data.outcome ? { outcome: data.outcome } : {}) });
       return { session };
     });
   }
