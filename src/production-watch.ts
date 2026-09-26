@@ -38,9 +38,14 @@ const railwayStatus: Record<string, ProviderDeploymentStatus> = {
 const railwayQuery = `query graphyardDeployments($input: DeploymentListInput!, $first: Int) {
   deployments(input: $input, first: $first) { edges { node { id status createdAt updatedAt url meta } } }
 }`;
-/** Deploys the newest commit of the service's configured branch — the call `railway redeploy` makes. */
+/**
+ * Deploys the newest commit of the service's configured branch. `latestCommit: true` is what makes
+ * it so: without it Railway redeploys the commit the service already holds (as `railway redeploy`
+ * and `serviceInstanceRedeploy` do), which in a stalled auto-deploy is the stale commit and leaves
+ * the drift standing. The mutation answers a Boolean, not a deployment id.
+ */
 const railwayDeployMutation = `mutation graphyardRedeploy($serviceId: String!, $environmentId: String!) {
-  serviceInstanceDeploy(serviceId: $serviceId, environmentId: $environmentId)
+  serviceInstanceDeploy(serviceId: $serviceId, environmentId: $environmentId, latestCommit: true)
 }`;
 /**
  * Railway's public GraphQL API for the service this control plane runs as. Railway injects
@@ -82,7 +87,8 @@ export function railwayProvider(env: Record<string, string | undefined> = proces
       if (!response.ok) throw new Error(`Railway API answered ${response.status}`);
       const body: any = await response.json();
       if (Array.isArray(body?.errors) && body.errors.length) throw new Error(`Railway API refused the redeploy: ${body.errors[0]?.message ?? 'unknown error'}`);
-      return { id: typeof body?.data?.serviceInstanceDeploy === 'string' ? body.data.serviceInstanceDeploy : null };
+      if (body?.data?.serviceInstanceDeploy !== true) throw new Error('Railway API did not accept the deploy of the latest commit');
+      return { id: null };
     },
   };
 }

@@ -155,16 +155,18 @@ test('unit:production-drift-holds-when-not-behind — the watch triggers nothing
   }
 });
 
-test('unit:railway-redeploy — the provider asks Railway to deploy the service instance and reports refusals as errors, never as success', async () => {
+test('unit:railway-redeploy — the provider asks Railway to deploy the branch\'s latest commit, not the stale one it holds, and reports refusals as errors, never as success', async () => {
   const calls: { url: string; body: any; headers: Record<string, string> }[] = [];
   const fetcher = (async (url: any, init: any) => {
     calls.push({ url: String(url), body: JSON.parse(init.body), headers: init.headers });
-    return { ok: true, json: async () => ({ data: { serviceInstanceDeploy: 'deployment-9' } }) };
+    return { ok: true, json: async () => ({ data: { serviceInstanceDeploy: true } }) };
   }) as unknown as typeof fetch;
   const provider = railwayProvider({ RAILWAY_API_TOKEN: 'account-token', RAILWAY_SERVICE_ID: 'svc-1', RAILWAY_ENVIRONMENT_ID: 'env-1' }, fetcher)!;
-  assert.deepEqual(await provider.redeploy!(), { id: 'deployment-9' });
+  assert.deepEqual(await provider.redeploy!(), { id: null }, 'the mutation answers a Boolean, never a deployment id');
   assert.equal(calls.length, 1);
-  assert.match(calls[0].body.query, /serviceInstanceDeploy\(serviceId: \$serviceId, environmentId: \$environmentId\)/);
+  // Without latestCommit Railway redeploys the commit the service already holds — the stale one in a
+  // stalled auto-deploy — so the drift would stand; the mutation must ask for the branch's newest commit.
+  assert.match(calls[0].body.query, /serviceInstanceDeploy\(serviceId: \$serviceId, environmentId: \$environmentId, latestCommit: true\)/);
   assert.deepEqual(calls[0].body.variables, { serviceId: 'svc-1', environmentId: 'env-1' });
   assert.equal(calls[0].headers.Authorization, 'Bearer account-token', 'an account token authenticates the mutation');
 
@@ -176,6 +178,8 @@ test('unit:railway-redeploy — the provider asks Railway to deploy the service 
   await assert.rejects(refused.redeploy!(), /Railway API refused the redeploy: permission denied/);
   const failing = railwayProvider({ RAILWAY_API_TOKEN: 't', RAILWAY_SERVICE_ID: 's', RAILWAY_ENVIRONMENT_ID: 'e' }, (async () => ({ ok: false, status: 503, json: async () => ({}) })) as unknown as typeof fetch)!;
   await assert.rejects(failing.redeploy!(), /Railway API answered 5/);
+  const unaccepted = railwayProvider({ RAILWAY_API_TOKEN: 't', RAILWAY_SERVICE_ID: 's', RAILWAY_ENVIRONMENT_ID: 'e' }, (async () => ({ ok: true, json: async () => ({ data: { serviceInstanceDeploy: false } }) })) as unknown as typeof fetch)!;
+  await assert.rejects(unaccepted.redeploy!(), /did not accept the deploy of the latest commit/);
   assert.equal(railwayProvider({ RAILWAY_SERVICE_ID: 's', RAILWAY_ENVIRONMENT_ID: 'e' }), null, 'without a token the provider stays observe-only');
 });
 

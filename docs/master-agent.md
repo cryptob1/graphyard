@@ -1,4 +1,4 @@
-<!-- page: Operate Graphyard | 5 | the loop, dispatch and merges. -->
+<!-- page: Operate Graphyard | 5 | loop, dispatch, merges. -->
 # Master-agent operating mode
 
 The master (`coordinator`) routes work, merges, verifies deployments and administers GitHub; it never implements, reviews or proves.

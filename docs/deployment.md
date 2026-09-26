@@ -5,11 +5,11 @@ Graphyard is one stateless container plus Postgres.
 
 ## The one command
 
-`node "$GRAPHYARD_CLI" install --provider railway --repo OWNER/REPO --apply` ([install](install.md)) is the supported path; this page references it.
+`node "$GRAPHYARD_CLI" install --provider railway --repo OWNER/REPO --apply` ([install](install.md)) is the supported path; this is its reference.
 
 ## Versioned images
 
-Tag `vX.Y.Z` publishes `ghcr.io/cryptob1/graphyard:X.Y.Z`. `/healthz` reports version and `commit`; alert on `/healthz?strict` (503 unhealthy).
+Tag `vX.Y.Z` publishes `ghcr.io/cryptob1/graphyard:X.Y.Z`. `/healthz` reports version and `commit`; alert on `/healthz?strict` (503 when unhealthy).
 
 ## Variables
 
@@ -27,11 +27,11 @@ Tag `vX.Y.Z` publishes `ghcr.io/cryptob1/graphyard:X.Y.Z`. `/healthz` reports ve
 | `GRAPHYARD_MIN_REVIEWERS` | Reviewers once a lead exists (default 1) |
 | `GRAPHYARD_MAX_REVIEWERS` | At least the number of `producer` principals (default 2) |
 | `GRAPHYARD_GENERATED_FILES` | What `node scripts/check-docs.mjs --list` prints |
-| `GRAPHYARD_BUILD_SHA` | Commit the image was built from (Railway supplies `RAILWAY_GIT_COMMIT_SHA`) |
+| `GRAPHYARD_BUILD_SHA` | The image's source commit (Railway supplies `RAILWAY_GIT_COMMIT_SHA`) |
 | `GRAPHYARD_ARTIFACT_BACKEND` | `postgres` or `s3` ([artifacts](recovery.md#artifact-backends-capacity-and-migration)) |
 | `RAILWAY_API_TOKEN` | Optional; incident records and stalled-deploy re-triggering |
 
-Installers derive the four capacity limits from the deployed principals; an unset one derives at start-up (`delegationLimits` drift).
+Installers derive the four capacity limits from the deployed principals; an unset one is derived at start-up as `delegationLimits` drift.
 
 ### CI producer
 
@@ -41,26 +41,26 @@ Installers derive the four capacity limits from the deployed principals; an unse
 {"id":"ci-proofs","role":"producer","runtime":"github-actions","proofs":["unit:*","integration:*"],"token":"…"}
 ```
 
-Store its token as `GRAPHYARD_CI_PRODUCER_TOKEN` on the `graphyard-reporting` environment (default branch only) with `GRAPHYARD_URL`. `scripts/configure-integrations.mjs --apply` merges `.graphyard/credentials.json` into the live roster (`--remove ID` drops a principal, `--rotate ID` rotates a producer, `--deploy` sets the GitHub secret).
+Store its token as `GRAPHYARD_CI_PRODUCER_TOKEN` on the `graphyard-reporting` environment (default branch only) with `GRAPHYARD_URL`. `scripts/configure-integrations.mjs --apply` merges `.graphyard/credentials.json` into the live roster; `--remove ID` drops a principal, `--rotate ID` rotates a producer, `--deploy` sets the GitHub secret.
 
 ### Production deployment observation
 
-When the serving commit (`GRAPHYARD_BUILD_SHA`) changes, undeployed merges are compared once, recording answers (`delivery.deployment-contained`, `production.deployment-pending`); a same-commit restart compares nothing. One unserved after five minutes is a `delivery.deployment-incident`; `master status` shows `main is N commits ahead of production`. Probe: `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`.
+When the serving commit (`GRAPHYARD_BUILD_SHA`) changes, undeployed merges are compared once and recorded (`delivery.deployment-contained`, `production.deployment-pending`); a same-commit restart compares nothing. One unserved after five minutes is a `delivery.deployment-incident`; `master status` shows `main is N commits ahead of production`. Probe: `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`.
 
-With main ahead and no deploy in flight, the watch re-deploys its tip hourly; the loop records throughput per release in `.graphyard/measurements/throughput`, without a master session.
+With main ahead and no deploy in flight, the watch re-deploys the base-branch tip it compared against, at most hourly; the loop records throughput per release in `.graphyard/measurements/throughput`, without a master session.
 
 ## Backup, upgrade, rollback
 
 ```sh
-node bin/graphyard.mjs db backup ./graphyard.json
+node bin/graphyard.mjs db backup ./graphyard.json   # with DATABASE_URL set
 node bin/graphyard.mjs db verify FILE
 ```
 
-**Upgrade:** back up, deploy, confirm `/healthz` names the new commit, then any [App-permission migration](install.md#upgrading-an-existing-installation). **Rollback** only within a schema generation. **Restore:** `graphyard db migrate` an empty database, then `graphyard db restore FILE`.
+**Upgrade:** back up, deploy, confirm `/healthz` names the new commit, then run any [App-permission migration](install.md#upgrading-an-existing-installation). **Rollback** only to a same-schema-generation image. **Restore:** `graphyard db migrate` an empty database, then `graphyard db restore FILE`.
 
 ## Manual fallback
 
-For an unsupported platform or existing deployment: set the variables table by hand, run `node "$GRAPHYARD_CLI" github-setup https://YOUR-DOMAIN`, verify with `doctor`.
+For an unsupported platform or existing deployment only: set the variables table above by hand, run `node "$GRAPHYARD_CLI" github-setup https://YOUR-DOMAIN`, and verify with `doctor`.
 
 - Compose: `cp .env.example .env`, replace every secret, `docker compose --profile full up -d`; front 4310 with TLS, never expose Postgres.
 - Kubernetes: `helm install graphyard deploy/helm/graphyard --set secrets.existingSecret=graphyard-credentials …`.
