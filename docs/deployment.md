@@ -5,7 +5,7 @@ Graphyard is one stateless container plus Postgres.
 
 ## The one command
 
-`node "$GRAPHYARD_CLI" install --provider railway --repo OWNER/REPO --apply` ([install](install.md)) is the supported path; this page is its reference.
+[`install --provider`](install.md) is the supported path.
 
 ## Versioned images
 

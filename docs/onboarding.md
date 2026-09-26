@@ -3,7 +3,7 @@
 
 ## 1. Install the control plane
 
-Follow [install](install.md): `node "$GRAPHYARD_CLI" install --provider railway --repo OWNER/REPO --workers 1 --apply` after reviewing `--plan`.
+Follow [install](install.md): `install --provider PROVIDER --repo OWNER/REPO --apply`.
 
 ## 2. Add machines
 
@@ -58,7 +58,7 @@ node "$GRAPHYARD_CLI" master registry runtime set aider --kind aider --arg=--yes
 
 ### Add an account
 
-An account is one login, held by reference:
+One account per login:
 
 ```sh
 node "$GRAPHYARD_CLI" master registry model set opus --provider Anthropic --id claude-opus-5 \

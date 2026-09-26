@@ -5,7 +5,7 @@
 
 ### 1. Human operator (human authority)
 
-The person holding an `admin` credential declaring `sessionKind: "human"`, who alone decides goals and priorities, spending money or opening accounts, and credentials for people.
+The person holding an `admin` credential declaring `sessionKind: "human"`, who alone makes the [human-only decisions](master-agent.md#autonomy-agents-approve-agents).
 
 **Canonical usage:** *human operator*; bare *operator* means this person.
 
@@ -72,7 +72,7 @@ The master applies non-weakening intent (create, release, unblock, add requireme
 | Shape and colour | Term |
 | --- | --- |
 | Amber rounded box | Human operator |
-| Green rounded box | Agent session with one role and credential |
+| Green rounded box | Agent session |
 | Blue square box | Graphyard control plane |
 | Violet box or container | Herdr runtime |
 | Grey square box | GitHub and other external facts |
