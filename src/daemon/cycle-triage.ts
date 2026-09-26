@@ -6,10 +6,16 @@ import { record } from './effects.js';
 import { message } from './state.js';
 import type { Cycle } from './cycle.js';
 
-/** Whether this process has had the control plane run the one-time follow-up migration; the server makes a repeat a no-op either way. */
+/**
+ * Whether this process has had the control plane run the one-time follow-up migration with nothing
+ * left deferred; the server makes a repeat a no-op either way. While items stay deferred because they
+ * were leased (GY-431), the migration is asked again at most every `followUpMigrationRetryMs`.
+ */
 let migrated = false;
+let deferredUntil: number | null = null;
+export const followUpMigrationRetryMs = 15 * 60_000;
 /** Test seam: forget that the migration ran. */
-export function resetFollowUpMigration() { migrated = false; }
+export function resetFollowUpMigration() { migrated = false; deferredUntil = null; }
 
 /**
  * Step 7c. Once per loop process, ask the control plane for the one-time migration that folds each
@@ -23,11 +29,16 @@ export async function triageBacklogStep(cycle: Cycle) {
     if (!detailChanged(state.actions[key], detail)) return;
     performed.push(await record(state, key, { kind: 'decision', work, principal: null, epoch: null, state: outcome, detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
   };
-  if (!migrated && effects.migrateFollowUps) await isolate('decision', null, 'follow-up migration', async () => {
+  if (!migrated && effects.migrateFollowUps && (deferredUntil === null || clock >= deferredUntil)) await isolate('decision', null, 'follow-up migration', async () => {
     try {
-      const result = await effects.migrateFollowUps!();
-      migrated = true;
-      await note('followups:migration', null, 'done', result.already ? `The one-time follow-up migration already ran (${result.merged} duplicate follow-up items merged into their parent's oldest open one)` : `Merged ${result.merged} duplicate follow-up items into their parent's oldest open follow-up item and closed them as superseded by it`);
+      // A later pass carries its own key, so the first run's receipt does not answer it.
+      const result = await effects.migrateFollowUps!(deferredUntil === null ? undefined : `resume:${clock}`);
+      const pending = result.deferred;
+      // A first run's receipt from before `deferred` existed is resumed once, to learn what is left.
+      migrated = Array.isArray(pending) && !pending.length;
+      deferredUntil = migrated ? null : pending ? clock + followUpMigrationRetryMs : clock;
+      const left = pending?.length ? `; ${pending.length} leased follow-up items (${pending.join(', ')}) are folded once their lease ends, asked again in ${followUpMigrationRetryMs / 60_000} minutes` : '';
+      await note('followups:migration', null, 'done', (result.already ? `The one-time follow-up migration already ran (${result.merged} duplicate follow-up items merged into their parent's oldest open one)` : `Merged ${result.merged} duplicate follow-up items into their parent's oldest open follow-up item and closed them as superseded by it`) + left);
     } catch (error) { await note('followups:migration', null, 'failed', `The one-time follow-up migration could not run, and is asked again next cycle: ${message(error)}`); }
   });
   if (!effects.recordTriage || !effects.research || !config.run?.research) return;

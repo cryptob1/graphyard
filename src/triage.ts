@@ -53,7 +53,12 @@ export function triagePrompt(config: { repository: string }, work: Work, all: re
 export interface TriageStepAction { work: string; state: 'started' | 'done' | 'failed'; detail: string }
 interface LiveTriage { run: Run<TriageJudgement>; settled: Promise<void> }
 const live = new Map<string, LiveTriage>();
-const failedAt = new Map<string, number>();
+/**
+ * When each item's last triage run failed, on the loop's clock. A run settles between cycles, so a
+ * failure is noted as `null` and stamped with the clock of the next step that sees it: the back-off is
+ * measured on `input.clock` alone, never mixed with the wall clock (GY-431).
+ */
+const failedAt = new Map<string, number | null>();
 /** Test seam: stop and forget every triage run. */
 export function clearTriageRuns() { for (const entry of live.values()) entry.run.cancel('the triage runs were cleared'); live.clear(); failedAt.clear(); }
 /** Every run this process has in flight, settled. */
@@ -83,10 +88,11 @@ export function triageStep(input: TriageStepInput): TriageStepAction[] {
   for (const work of waiting) {
     if (live.size >= triageConcurrency) break;
     const failed = failedAt.get(work.id);
+    if (failed === null) { failedAt.set(work.id, input.clock); continue; }
     if (failed !== undefined && input.clock - failed < triageRetryMs) continue;
     const run = input.runner.start(triagePrompt(input.config, work, input.work), {
       cwd: input.cwd, env: { GRAPHYARD_PI_ROLE: triageRole }, tool: triageTool, timeoutMs: triageTimeoutMs(input.settings), validate: payload => triageJudgementSchema.parse(payload) });
-    const settled = run.result().then(result => settleTriage(input, work, result)).catch(() => { failedAt.set(work.id, Date.now()); }).finally(() => { if (live.get(work.id)?.run === run) live.delete(work.id); });
+    const settled = run.result().then(result => settleTriage(input, work, result)).catch(() => { failedAt.set(work.id, null); }).finally(() => { if (live.get(work.id)?.run === run) live.delete(work.id); });
     live.set(work.id, { run, settled });
     actions.push({ work: work.key, state: 'started', detail: `Triaging machine-filed ${work.key} on ${input.settings.model}: release with a priority, close with a reason, or merge into another item` });
   }
@@ -94,7 +100,7 @@ export function triageStep(input: TriageStepInput): TriageStepAction[] {
 }
 
 async function settleTriage(input: TriageStepInput, work: Work, result: RunResult<TriageJudgement>) {
-  if (!result.ok) { failedAt.set(work.id, Date.now()); return; }
+  if (!result.ok) { failedAt.set(work.id, null); return; }
   await input.record(work, { judgement: result.payload, runtime: input.runner.name });
   failedAt.delete(work.id);
 }

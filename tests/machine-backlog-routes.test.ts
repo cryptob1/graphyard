@@ -81,8 +81,16 @@ test('unit:followup-migration-merges — the one-time migration merges each pare
   const oldest = await followUp(parent, 21, ['src/b.ts — first finding'], false);
   const middle = await followUp(parent, 22, ['src/b.ts — first finding', 'src/c.ts — second finding'], false);
   const newest = await followUp(parent, 23, ['src/d.ts — third finding'], false);
+  // GY-431: another parent's older follow-up item is leased while the migration runs.
+  const other = await ok(operator, 'work', { title: 'Parent G', plannedFiles: ['src/g.ts'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:g'] }] }) as Work;
+  const leased = await followUp(other, 24, ['src/g.ts — leased finding'], false);
+  const later = await followUp(other, 25, ['src/h.ts — later finding'], false);
+  const lease = async (lease: object | null) => store.pool.query('UPDATE work_items SET document=$2 WHERE id=$1', [leased.id, JSON.stringify({ ...(await reload(leased.key)), lease })]);
+  await lease({ owner: 'backlog-worker', epoch: 1, expiresAt: new Date(Date.now() + 3_600_000).toISOString() });
   const result = await ok(coordinator, 'followups/migrate', {});
   assert.equal(result.merged, 2);
+  assert.deepEqual(result.deferred, [leased.key], 'the leased item is named, neither closed nor merged into');
+  assert.equal((await reload(later.key)).stage, 'backlog');
   assert.deepEqual(result.survivors.find((entry: any) => entry.key === oldest.key), { key: oldest.key, absorbed: [middle.key, newest.key], added: 2 });
   const survivor = await reload(oldest.key);
   assert.equal(survivor.stage, 'backlog');
@@ -97,11 +105,22 @@ test('unit:followup-migration-merges — the one-time migration merges each pare
   const recorded = (await store.pool.query("SELECT payload FROM events WHERE kind='followups.migrated'")).rows;
   assert.equal(recorded.length, 1);
   assert.equal(recorded[0].payload.merged, result.merged);
-  // One-time: a second run changes nothing and says it already ran.
-  const repeat = await ok(coordinator, 'followups/migrate', {});
+  // While the item stays leased, a second run changes nothing and still names it.
+  const waiting = await ok(coordinator, 'followups/migrate', {}, 'migrate-waiting');
+  assert.deepEqual({ already: waiting.already, merged: waiting.merged, deferred: waiting.deferred }, { already: true, merged: 0, deferred: [leased.key] });
+  assert.equal((await store.pool.query("SELECT 1 FROM events WHERE kind='followups.migration.resumed'")).rowCount, 0, 'an unchanged pass records nothing');
+  // Once its lease has ended, a later pass folds that parent's items into its oldest open one.
+  await lease(null);
+  const resumed = await ok(coordinator, 'followups/migrate', {}, 'migrate-resumed');
+  assert.deepEqual({ merged: resumed.merged, deferred: resumed.deferred, survivors: resumed.survivors }, { merged: 1, deferred: [], survivors: [{ key: leased.key, absorbed: [later.key], added: 1 }] });
+  assert.equal((await reload(later.key)).closure?.ref, leased.key);
+  assert.deepEqual(followUpEntries(await reload(leased.key)).map(entry => entry.text), ['src/g.ts — leased finding', 'src/h.ts — later finding']);
+  // One-time: with nothing deferred, a further run changes nothing and says it already ran.
+  const repeat = await ok(coordinator, 'followups/migrate', {}, 'migrate-repeat');
   assert.equal(repeat.already, true);
   assert.equal(repeat.merged, result.merged);
-  assert.equal((await store.list()).length, 6, 'nothing was deleted');
+  assert.equal((await store.pool.query("SELECT 1 FROM events WHERE kind='followups.migration.resumed'")).rowCount, 1);
+  assert.equal((await store.list()).length, 9, 'nothing was deleted');
 });
 
 test('unit:machine-backlog-triaged — a triage release applies at once with its priority; a triage closure waits for an independent approver and a refusal returns the item to triage', async () => {
@@ -142,4 +161,23 @@ test('unit:machine-backlog-triaged — a triage release applies at once with its
   assert.equal(closed.closure?.ref, shipped.key);
   assert.equal(closed.triage?.state, 'applied');
   assert.equal(closed.triage?.decision, decision.id);
+});
+
+test('unit:machine-backlog-triaged — an approved triage merge applies atomically: a closure refused after the append leaves the target without the merged findings (GY-431)', async () => {
+  const parent = await ok(operator, 'work', { title: 'Parent H', plannedFiles: ['src/m.ts'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:h'] }] }) as Work;
+  const target = await followUp(parent, 41, ['src/m.ts — kept finding']);
+  const source = await ok(operator, 'work', { title: 'Recurring action:dispatch faults: 3 in 24 hours', type: 'bug', plannedFiles: ['src/n.ts'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:h'] }] }) as Work;
+  const proposed = await ok(coordinator, `work/${source.key}/triage`, { judgement: { outcome: 'merge', into: target.key, reason: 'the same fault' } }) as Work;
+  const input = { kind: 'duplicate', ref: target.key, reason: `Merged into ${target.key} by triage: the same fault`, triageAt: proposed.triage!.at };
+  const decision = await ok(operator, `work/${source.key}/decide`, { action: 'close', input, reason: 'triage merged it' });
+  // A worker takes the source before the approval: its closure is refused after the append was made.
+  await store.pool.query('UPDATE work_items SET document=$2 WHERE id=$1', [source.id, JSON.stringify({ ...(await reload(source.key)), lease: { owner: 'backlog-worker', epoch: 1, expiresAt: new Date(Date.now() + 3_600_000).toISOString() } })]);
+  const failed = await ok(approver, `work/${source.key}/approve`, { decision: decision.id, reason: 'The same fault' });
+  assert.equal(failed.state, 'failed', JSON.stringify(failed));
+  const untouched = await reload(target.key);
+  assert.deepEqual(followUpEntries(untouched).map(entry => entry.text), ['src/m.ts — kept finding'], 'the append rolled back with the refused closure');
+  assert.ok(!(await events(untouched)).some(event => event.kind === 'followups.appended'));
+  const open = await reload(source.key);
+  assert.equal(open.stage, 'backlog');
+  assert.equal(open.triage?.state, 'proposed');
 });

@@ -192,8 +192,11 @@ export interface DaemonEffects {
   research?: { cwd: string; runner?: Runner };
   /** Records a triage judgement on a machine-filed item as the coordinator (GY-402, POST work/ID/triage). */
   recordTriage?: (work: Work, body: { judgement: TriageJudgement; runtime?: string }) => Promise<unknown>;
-  /** Asks the control plane for the one-time follow-up migration (GY-402, POST followups/migrate) as the operator agent. */
-  migrateFollowUps?: () => Promise<{ merged: number; already?: boolean }>;
+  /**
+   * Asks the control plane for the one-time follow-up migration (GY-402, POST followups/migrate) as the
+   * operator agent; `pass` names a later pass for the items it deferred while leased (GY-431).
+   */
+  migrateFollowUps?: (pass?: string) => Promise<{ merged: number; already?: boolean; deferred?: string[] }>;
   /** The reviewer and producer sessions the launch ledgers hold as pending. */
   launchedSessions?: () => Promise<LaunchedSession[]>;
   /** The account the profile's current session was launched on, as its launcher recorded it. */
@@ -500,7 +503,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     recordResearch: (work, event) => mutate(`work/${work.id}/research`, event),
     research: { cwd: root },
     recordTriage: (work, body) => mutate(`work/${work.id}/triage`, body),
-    migrateFollowUps: () => asOperatorAgent('POST', 'followups/migrate', {}, 'graphyard-followups-migration'),
+    migrateFollowUps: pass => asOperatorAgent('POST', 'followups/migrate', {}, pass ? `graphyard-followups-migration:${pass}` : 'graphyard-followups-migration'),
     launchedSessions: async () => [
       ...(await readReviewLedger(root)).reviews.filter(entry => entry.state === 'pending' && !entry.launching).map(entry => ({ role: 'reviewer' as const, record: entry.id, profile: entry.profile, agentName: entry.agentName, pane: entry.pane, work: entry.key, requestId: entry.requestId ?? null })),
       ...(await readProducerLedger(root)).producers.filter(entry => entry.state === 'pending').map(entry => ({ role: 'producer' as const, record: entry.id, profile: entry.profile, agentName: entry.agentName, pane: entry.pane, work: entry.key, requestId: entry.requestId })),

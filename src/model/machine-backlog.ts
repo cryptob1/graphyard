@@ -65,15 +65,23 @@ export function followUpEntryKey(finding: FollowUpEntry) {
   if (path && text.replace(/^`/, '').startsWith(path)) text = text.replace(/^`?[^\s`]+`?(?::\d+)?\s*(?:[—–:-]+\s*)?/, '');
   return `${path.toLowerCase()}\u0000${normalized(text)}`;
 }
-/** `existing` with each of `incoming` it does not already hold, in order; `added` names the new ones. */
+/**
+ * `existing` with each of `incoming` it does not already hold, in order, up to `followUpEntriesMax`;
+ * `added` names only the new ones the result holds, and `dropped` counts the new ones past the bound
+ * (GY-431: the description and the reported count never name a finding the item does not hold).
+ */
 export function mergeFollowUpEntries(existing: readonly FollowUpEntry[], incoming: readonly FollowUpEntry[]) {
   const seen = new Set(existing.map(followUpEntryKey)), added: FollowUpEntry[] = [];
+  const room = Math.max(0, followUpEntriesMax - existing.length);
+  let dropped = 0;
   for (const finding of incoming) {
     const key = followUpEntryKey(finding);
     if (seen.has(key)) continue;
-    seen.add(key); added.push({ path: finding.path, text: finding.text, ...(finding.ref ? { ref: finding.ref } : {}) });
+    seen.add(key);
+    if (added.length >= room) { dropped++; continue; }
+    added.push({ path: finding.path, text: finding.text, ...(finding.ref ? { ref: finding.ref } : {}) });
   }
-  return { findings: [...existing, ...added].slice(0, followUpEntriesMax), added };
+  return { findings: [...existing, ...added].slice(0, followUpEntriesMax), added, dropped };
 }
 
 /**
@@ -123,23 +131,30 @@ export function openFollowUpItem<T extends Pick<Work, 'title' | 'stage' | 'creat
  * one, which takes the union of their findings, and the others are closed as superseded by it,
  * naming it. Nothing is deleted. Items are changed in place; the result names each survivor with
  * the findings it gained and each item closed, for the caller to save and record.
+ *
+ * A leased item is being worked, so it is neither closed nor merged into: `deferred` names each
+ * leased follow-up item that still has an open sibling, and a later pass restricted to their
+ * `parents` folds them once their lease has ended (GY-431).
  */
-export function mergeDuplicateFollowUps(all: Work[], actor: string, now: Date) {
-  const groups = new Map<string, Work[]>();
+export function mergeDuplicateFollowUps(all: Work[], actor: string, now: Date, parents?: ReadonlySet<string>) {
+  const groups = new Map<string, Work[]>(), leased = new Map<string, Work[]>();
   for (const item of all) {
     const parent = open(item) ? followUpParent(item) : null;
-    if (parent && !item.lease) groups.set(parent, [...groups.get(parent) ?? [], item]);
+    if (!parent || (parents && !parents.has(parent))) continue;
+    const into = item.lease ? leased : groups;
+    into.set(parent, [...into.get(parent) ?? [], item]);
   }
-  const survivors: { work: Work; added: number; absorbed: string[] }[] = [], closed: Work[] = [];
+  const survivors: { work: Work; added: number; absorbed: string[]; dropped: number }[] = [], closed: Work[] = [];
   for (const [parent, items] of groups) {
     if (items.length < 2) continue;
     const [survivor, ...duplicates] = items.sort(oldestFirst);
     let findings = followUpEntries(survivor!);
     const before = findings.length;
     const addedAll: FollowUpEntry[] = [];
+    let dropped = 0;
     for (const duplicate of duplicates) {
       const merged = mergeFollowUpEntries(findings, followUpEntries(duplicate));
-      findings = merged.findings; addedAll.push(...merged.added);
+      findings = merged.findings; addedAll.push(...merged.added); dropped += merged.dropped;
       const closure: Closure = { kind: 'duplicate', ref: survivor!.key, by: actor, at: now.toISOString(), from: duplicate.stage,
         reason: `Superseded by ${survivor!.key}, ${parent}'s one follow-up item, which now holds every finding of this one (GY-402 follow-up migration)` };
       Object.assign(duplicate, { closure, stage: 'done', stageEnteredAt: now.toISOString(), ready: false, queue: null, mergeAuthorization: null, reviewRequest: null, scopeRequest: null, blocker: null });
@@ -147,9 +162,13 @@ export function mergeDuplicateFollowUps(all: Work[], actor: string, now: Date) {
     }
     survivor!.origin = { ...survivor!.origin, reviewFollowUps: { parent, findings } };
     survivor!.description = appendedDescription(survivor!.description ?? '', addedAll, `Merged from ${duplicates.map(item => item.key).join(', ')} (the same parent's later follow-up items):`);
-    survivors.push({ work: survivor!, added: findings.length - before, absorbed: duplicates.map(item => item.key) });
+    survivors.push({ work: survivor!, added: findings.length - before, absorbed: duplicates.map(item => item.key), dropped });
   }
-  return { merged: closed.length, survivors, closed };
+  const deferred: string[] = [];
+  for (const [parent, items] of leased) {
+    if (items.length + (groups.get(parent)?.length ? 1 : 0) > 1) deferred.push(...items.sort(oldestFirst).map(item => item.key));
+  }
+  return { merged: closed.length, survivors, closed, deferred };
 }
 
 // ---- Triage --------------------------------------------------------------------------------------
