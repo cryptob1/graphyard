@@ -1,7 +1,7 @@
 <!-- page: Operate Graphyard | 11 | slice leads and escalations. -->
 # Slice-lead delegation
 
-Delivery can be split into optional slices (`product`, `infrastructure`, `docs-experience`), each led by an AI session with its own `slice-lead` principal.
+Optional slices (`product`, `infrastructure`, `docs-experience`) are each led by an AI session holding a `slice-lead` principal.
 
 ## Authority boundaries
 
@@ -18,7 +18,7 @@ A producer that ever held an assignment on the item or belongs to its slice is r
 | `security-concern` | A lead files an `escalate` ruling naming it. |
 | `requirement-weakening` | A revision retires a criterion or narrows its proofs. |
 
-Each unresolved trigger drops merge authorization and refuses the merge gate; raising one dequeues the head. A lapse the ledger explains is instead a `lease.expired` entry with its cause: `submitted`, `blocked-awaiting-operator` (a `blocked` report for that epoch), `stopped-by-attestation` (an admin `--previous-worker-stopped` for that epoch) or `exhausted-capacity`. Reconciliation auto-settles a `lease-loss` whose epoch is later explained, recording `escalation.auto-settled` with a note such as `auto-settled: blocked report for epoch N explains the lapse` or `auto-settled: stopped-worker attestation for epoch N explains the lapse`. A replacement worker may claim meanwhile; delivery waits.
+An unresolved trigger drops merge authorization, refuses the merge gate and dequeues the head. A lapse the ledger explains is instead a `lease.expired` entry with its cause: `submitted`, `blocked-awaiting-operator` (a `blocked` report for that epoch), `stopped-by-attestation` (an admin `--previous-worker-stopped` for that epoch) or `exhausted-capacity`. Reconciliation auto-settles a `lease-loss` whose epoch is later explained, recording `escalation.auto-settled` with a note such as `auto-settled: blocked report for epoch N explains the lapse` or `auto-settled: stopped-worker attestation for epoch N explains the lapse`. A replacement worker may claim meanwhile; delivery waits.
 
 ### Who may settle what
 
@@ -30,4 +30,4 @@ Each resolution records `escalation.resolved`: resolver, session kind, reason, a
 | Control-plane `lease-loss` of a superseded or stopped epoch | The loop's two-party decision, stale if the superseding lease lapses |
 | `security-concern`, `requirement-weakening`, `evidence-policy-conflict`, and any `lease-loss` a lead raised | A two-party decision the master requests, or a declared human session |
 
-A declared human session (`admin`, `sessionKind: "human"`) settles any. A two-party `master decide GY-N resolve` applies once an independent approver approves; nobody else resolves alone.
+A declared human session (`admin`, `sessionKind: "human"`) settles any; nobody else resolves alone.
