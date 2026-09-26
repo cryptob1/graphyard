@@ -55,6 +55,10 @@ With `run.research` set (`model`, `timeoutMinutes` 15, `tokenBudget`), a feature
 
 `Recurring <class> faults` items and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician` `model`/`fallbackModel`/`serverLogCommand`, or registry role) that cycle. Approved decisions release its fix or `close` the item as duplicate; recurrences after the fix delivers re-file.
 
+## Machine-filed backlog
+
+One follow-up item per parent; approvals append their findings. With `run.research`, Pi triages machine-filed items (release, close, merge; closure needs approval). Untriaged past 24h raises attention; status counts `machineUntriaged`/`operatorBacklog`.
+
 ## Automatic dispatch at submit
 
 A candidate passing the build gate gets, in `autoDispatch`, one producer request per proof group (`unit`, `integration`, `manual` for `producerProofs`), then a review request once its unit and integration proofs pass (`proofs-pending` until then; failure means rework). `*-postmerge` proofs are refused. **The loop launches each request within 30 seconds**: every `dispatchIntervalSeconds` it starts the reviewer profile (`run.reviewerProfile`) and one producer session per proof group on a `master producer add FILE` profile ([template](../examples/master/claude-producer.json)), (`.graphyard/reviews.json`, `.graphyard/producers.json`). A reviewer launch awaits the head's bot reviews (`run.awaitReviewers`) for `awaitReviewersMinutes` (default 8, 0 disables), skipping one that last posted a usage-limit notice until it next reviews (`skipped: <bot> exhausted since <time>`; `dispatch.botReviewers`).

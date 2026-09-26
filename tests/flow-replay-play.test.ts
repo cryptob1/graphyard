@@ -64,10 +64,12 @@ test('unit:replay-no-autoplay — after the flow data loads the replay stands st
   assert.equal(p.pending.size, 0);
   assert.deepEqual(p.state, { t: 0, playing: false });
   assert.match(p.render(), /data-playing="false" data-position="0"/);
-  // Loading the page never sets playing: the load callback only stores what was read.
+  // Loading the page never sets playing: the load callbacks (the report and the replay rows, read
+  // apart since GY-705) only store what was read.
   const source = await read('web/pages/insights-flow.tsx');
-  const load = /readFlow\(api, now\)\.then\(flow => \{([\s\S]*?)\}\)\.catch/.exec(source)![1];
-  assert.doesNotMatch(load, /setPlaying|setT\(/);
+  const load = /readFlowReport\(api\)\.then\(([\s\S]*?)\);\n[\s\S]*?readReplay\(api, now\)\.then\(([\s\S]*?)\);\n/.exec(source)!;
+  for (const callback of [load[1], load[2]]) assert.doesNotMatch(callback, /setPlaying|setT\(/);
+  assert.match(load[2], /setFrames\(replay\.frames\)/);
   assert.equal([...source.matchAll(/setPlaying\(true\)/g)].length, 1, 'playing is set true in one place only');
   assert.match(source, /onClick=\{\(\) => \{ if \(t >= 1\) setT\(0\); setPlaying\(true\); \}\}/, 'and that place is the play button');
   assert.match(source, /useState\(initial\?\.playing \?\? false\)/);
