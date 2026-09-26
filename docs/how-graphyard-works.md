@@ -10,7 +10,7 @@ Graphyard decides whether work may advance; runtimes such as Herdr run the sessi
 3. **Review**: an independent reviewer approves the exact commit.
 4. **Test**: Graphyard observes CI itself.
 5. **Acceptance**: granted producers report evidence for that commit.
-6. **Done**: Graphyard rechecks every gate, merges, and observes the merge.
+6. **Done**: Graphyard rechecks every gate, merges, and observes it.
 
 A card stops at its first refusing gate, naming what is missing; nothing sets a stage directly.
 
@@ -22,7 +22,7 @@ Text equivalent: in bootstrap the human operator supervises one worker while gat
 
 ![Who holds which authority: the operator, Graphyard, Herdr-hosted sessions, reviewer and producer.](diagrams/roles-and-authority.svg)
 
-Text equivalent: the human operator sends human-only decisions to Graphyard; Herdr hosts the master (`coordinator`), slice lead and worker (epoch, worktree); the reviewer is a GitHub identity and the producer holds a grant. Each session commands Graphyard under its own credential; merges go only through the guarded path. Colours follow the [legend](glossary.md#diagram-legend).
+Text equivalent: the operator sends human-only decisions to Graphyard; Herdr hosts the master (`coordinator`), slice lead and worker (epoch, worktree); the reviewer is a GitHub identity and the producer holds a grant. Each session commands Graphyard under its own credential; merges go only through the guarded path. Colours follow the [legend](glossary.md#diagram-legend).
 
 ## Correctness rules
 

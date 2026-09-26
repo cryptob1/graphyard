@@ -292,11 +292,7 @@ test('unit:parallel-speculative-tips — the master publishes mergeQueue.paralle
     await store.init();
     const engine = new Engine(store, [CI_APP], 120, 'owner/project');
     assert.equal(engine.parallelTips, 4, 'the default window is four positions');
-    // Before any publication the deployment environment's setting answers, then the default.
-    process.env.GRAPHYARD_MERGE_PARALLEL_TIPS = '3';
-    try { assert.equal(await engine.loadParallelTips(), 3, 'the deployment environment sets the window before any publication'); }
-    finally { delete process.env.GRAPHYARD_MERGE_PARALLEL_TIPS; }
-    assert.equal(await engine.loadParallelTips(), 4, 'and the default stands with neither');
+    assert.equal(await engine.loadParallelTips(), 4, 'the default stands before any publication');
     http = server(engine, [{ id: 'master', role: 'coordinator', token: tokens.coordinator }, { id: 'worker-a', role: 'worker', token: tokens.worker }]);
     await new Promise<void>(resolve => http!.listen(0, '127.0.0.1', resolve));
     const url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;

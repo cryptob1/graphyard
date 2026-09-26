@@ -40,11 +40,11 @@ Once gated, a candidate's speculative tip (predicted base merged in), pushed ont
 
 ### Bindings and carry
 
-Reviews and proofs bind one head, base and policy revision. The queue head's tip merges moved bases: all carry if the clean merge kept the patch-id, else the approval if no reviewed file changed, disjoint-`scopeFiles` proofs. A republication reads the PR's reviews before force-pushing: an approval of the replaced tip carries onto a Graphyard-authored tip over the same author head and patch (GY-519), and the App's own dismissal (patch unchanged) restores when observed — never a person's dismissal, moved author head or changed patch. Carried steps name their ground, carries and restores the review id and both tips; CI reruns. GitHub conflicts are test-merged; clean ones log `base.stale-mergeability`.
+Reviews and proofs bind one head, base and policy revision. The queue head's tip merges moved bases: all carry if the clean merge kept the patch-id, else the approval if no reviewed file changed, disjoint-`scopeFiles` proofs. A republication reads the PR's reviews before force-pushing: an approval of the replaced tip carries onto a Graphyard-authored tip over the same author head and patch, and the App's own dismissal (patch unchanged) restores when observed — never a person's dismissal, moved author head or changed patch. Carried steps name their ground, carries and restores the review id and both tips; CI reruns. GitHub conflicts are test-merged; clean ones log `base.stale-mergeability`.
 
 ### Parallel tips
 
-`mergeQueue.parallelTips` (master config, default 4, published with `batchSize` via `POST /api/merge-queue`) tips run CI at once, each on the last; entries merge in order once theirs and all ahead passed. A failing tip ejects its entry once every tip ahead passed; until then it waits, and a failure ahead is inherited. Later tips rebuild. `batchSize` now only widens observation and wakes. `master status`, Merge step, [Insights](dashboard.md#insights) show tips, merges/hour, queue wait.
+`mergeQueue.parallelTips` (master config, default 4, published with `batchSize` via `POST /api/merge-queue`) tips run CI at once, each on the last; entries merge in order once theirs and all ahead passed. A failing tip ejects its entry once every tip ahead passed; until then it waits, and a failure ahead is inherited. Later tips rebuild. `batchSize` now only widens observation and wakes; batch bisection and stuck-batch dissolution (`queue.batch-dissolved`) belong to the batch plan the window replaces. `master status`, Merge step, [Insights](dashboard.md#insights) show tips, merges/hour, queue wait.
 
 ### Direct merges
 
