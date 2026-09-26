@@ -120,7 +120,7 @@ export function decisionInput(action: string, work: Work, input: Record<string, 
 export function attestationExercise(work: Pick<Work, 'criteria' | 'candidate'>, proof: unknown) {
   const criterion = work.criteria.find(entry => typeof proof === 'string' && entry.proofs.includes(proof));
   if (!criterion || !work.candidate) return {};
-  return { exercise: { criterion: criterion.id, behaviour: `the diff of candidate ${work.candidate.sha.slice(0, 12)} against its base ${work.candidate.baseSha.slice(0, 12)}; the proof fails on that base, as the approver confirms by running it and records in its approval reason`, result: 'fail' as const, executed: 1 } };
+  return { exercise: { criterion: criterion.id, behaviour: `the diff of candidate ${work.candidate.sha.slice(0, 12)} against the candidate base ${work.candidate.baseSha.slice(0, 12)}; the proof fails on that base, as the approver confirms by running it and records in its approval reason`, result: 'fail' as const, executed: 1 } };
 }
 /**
  * GY-523. What an approver confirms before approving an attestation: the exercise record it carries

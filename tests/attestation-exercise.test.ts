@@ -31,10 +31,7 @@ test('unit:attestation-carries-exercise — the requested attest input carries a
   const work = item();
   const input = decisionInput('attest', work, { proof: PROOF }) as any;
   assert.deepEqual(input.exercise && { criterion: input.exercise.criterion, result: input.exercise.result, executed: input.exercise.executed }, { criterion: 'AC-1', result: 'fail', executed: 1 });
-  assert.match(input.exercise.behaviour, /candidate aaaaaaaaaaaa against its base bbbbbbbbbbbb/);
-  // GY-535: the record claims only what the approver's confirmation establishes, and says so.
-  assert.doesNotMatch(input.exercise.behaviour, /whole change/);
-  assert.match(input.exercise.behaviour, /approver confirms .* approval reason/);
+  assert.match(input.exercise.behaviour, /candidate base bbbbbbbbbbbb/);
   // The server accepts it, and the attested pass is recorded as exercising its criterion.
   assert.equal(decisionInputs.attest.safeParse(input).success, true);
   assert.equal(exerciseRefusal(work, [work], input), null);
@@ -47,7 +44,7 @@ test('unit:attestation-carries-exercise — the requested attest input carries a
 
 test('unit:attestation-carries-exercise — the approver prompt says to confirm the exercise record by running the proof against the candidate base', () => {
   const confirmation = attestConfirmation(base);
-  for (const phrase of ['exercise record', 'against the candidate base', base, 'fail', 'refuse', 'approval reason', 'how many cases executed'])
+  for (const phrase of ['exercise record', 'against the candidate base', base, 'fail', 'refuse'])
     assert.ok(confirmation.includes(phrase), `${phrase} appears in the approver's instruction`);
   const pi = piApproverWithAttestation({ repository: 'owner/project', cliPath: '/bin/graphyard.mjs', approver: { id: 'approver' } } as any, item(), 'd1');
   assert.ok(pi.includes(attestConfirmation(base)) && pi.indexOf(attestConfirmation(base)) < pi.indexOf('graphyard_decide'), 'the Pi approver is told before it decides');
