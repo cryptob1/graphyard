@@ -69,11 +69,13 @@ The master applies non-weakening intent (create, release, unblock, add requireme
 
 ## Diagram legend
 
-- Amber rounded box: Human operator.
-- Green rounded box: Agent session with one role and credential.
-- Blue square box: Graphyard control plane.
-- Violet box or container: Herdr runtime.
-- Grey square box: GitHub and other external facts.
-- Dashed chip: Credential, lease epoch, or worktree.
-- Solid arrow: Authenticated command.
-- Dashed arrow: Observation, never authority.
+| Shape and colour | Term |
+| --- | --- |
+| Amber rounded box | Human operator |
+| Green rounded box | Agent session with one role and credential |
+| Blue square box | Graphyard control plane |
+| Violet box or container | Herdr runtime |
+| Grey square box | GitHub and other external facts |
+| Dashed chip | Credential, lease epoch, or worktree |
+| Solid arrow | Authenticated command |
+| Dashed arrow | Observation, never authority |
