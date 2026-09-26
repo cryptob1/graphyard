@@ -9,7 +9,7 @@ import { humanNeededActions } from '../model/next-action.js';
 import { assertDispatchable, dispatchReserved, type ContainmentAssessment, type EscalationSession, type RoleCapacity, roleCapacity } from '../master.js';
 import { standingEscalations } from '../model/escalation.js';
 import { registeredLaunch } from '../model/session-state.js';
-import { message } from './state.js';
+import { type DaemonAction, message } from './state.js';
 import { decisionKey, dispatchKey } from './reconcile.js';
 import { clearProfileFailure, profileHealth, recordProfileFailure } from './sessions.js';
 import { detailChanged, routineDecision } from './decisions.js';
@@ -136,14 +136,15 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
   if (unrecordable && detailChanged(state.actions['escalation:dispatch:plane'], `Dispatch held: ${unrecordable}`))
     performed.push(await record(state, 'escalation:dispatch:plane', { kind: 'escalation', work: null, principal: null, state: 'done', detail: `Dispatch held: ${unrecordable}`, attempts: (state.actions['escalation:dispatch:plane']?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
   // Each item's profile is chosen in dispatch order, one after another, and taken before the next
-  // item chooses; the launches themselves do not depend on each other and run at once (GY-377),
-  // so a cycle that dispatches to every free profile costs one launch, not the sum of them. The
-  // concurrency is bounded by capacity: a launch holds a distinct healthy profile for its duration.
-  const taken = new Set<string>();
-  const launches: Promise<unknown>[] = [];
-  for (const item of workersSpent || unrecordable ? [] : claimable) if (await isolate('dispatch', item, item.key, async () => {
+  // item chooses; the launches themselves do not depend on each other and are handed to the
+  // launcher beside the cycle (GY-616), which runs them a few at a time while the cycle goes on to
+  // its decisions, merges and closes. Each launch holds a distinct healthy profile from hand-off
+  // until it settles, across cycles: a profile an earlier cycle's launch still holds is taken.
+  const taken = cycle.launcher.held();
+  // The `launches` step is the hand-off: choosing each item's profile and handing its launch over.
+  await cycle.timings.step('launches', async () => { for (const item of workersSpent || unrecordable ? [] : claimable) if (await isolate('dispatch', item, item.key, async () => {
     const key = dispatchKey(item);
-    if (state.actions[key] && state.actions[key].state !== 'failed') return;
+    if (cycle.launcher.busy(key) || (state.actions[key] && state.actions[key].state !== 'failed')) return;
     const free = await effects.agents();
     const pick = () => health.find(entry => entry.healthy && !taken.has(entry.profile.name) && !free.some(agent => agent.name === entry.profile.agentName));
     let choice = pick();
@@ -159,17 +160,22 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
       return 'stop';
     }
     taken.add(choice.profile.name);
-    launches.push(isolate('dispatch', item, item.key, () => launch(item, key, choice!, free, pick)));
-  }) === 'stop') break;
-  await cycle.timings.step('launches', () => Promise.all(launches));
+    const holds = [choice.profile.name];
+    cycle.launch('dispatch', item, key, holds, sink => launch(item, key, choice!, free, pick, holds, sink));
+  }) === 'stop') break; });
 
-  /** One item's launch on the profile chosen for it, passing a profile another dispatcher holds over for the next free one. */
-  async function launch(item: Work, key: string, chosen: NonNullable<ReturnType<typeof health.find>>, free: Awaited<ReturnType<typeof effects.agents>>, pick: () => ReturnType<typeof health.find>) {
+  /**
+   * One item's launch on the profile chosen for it, passing a profile another dispatcher holds over
+   * for the next free one. It runs on the launcher, after the cycle that chose it may have ended, so
+   * what it records goes to `performed` — the launcher's sink the next cycle reports.
+   */
+  async function launch(item: Work, key: string, chosen: NonNullable<ReturnType<typeof health.find>>, free: Awaited<ReturnType<typeof effects.agents>>, pick: () => ReturnType<typeof health.find>, holds: string[], performed: DaemonAction[]) {
     let choice = chosen;
     const previous = state.actions[key];
     for (;;) {
       const current = choice;
       taken.add(current.profile.name);
+      if (!holds.includes(current.profile.name)) holds.push(current.profile.name);
       await record(state, key, { kind: 'dispatch', work: item.key, principal: current.profile.principal, epoch: item.epoch, state: 'started', detail: `Dispatching ${item.key} to ${current.profile.name}`, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist);
       try {
         // The session is registered before its runtime starts (GY-172), where every Graphyard reader
