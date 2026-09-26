@@ -18,7 +18,7 @@ before(async () => {
   const scratch = await mkdtemp(join(tmpdir(), 'graphyard-store-init-'));
   postgres = new EmbeddedPostgres({ databaseDir: join(scratch, 'data'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await postgres.initialise(); await postgres.start();
-  for (const name of ['migrated', 'changed', 'pending', 'tables', 'deadline', 'statements', 'watchdog', 'work']) await postgres.createDatabase(name);
+  for (const name of ['migrated', 'changed', 'pending', 'tables', 'deadline', 'statements', 'watchdog', 'work', 'deadlock']) await postgres.createDatabase(name);
 });
 after(async () => { if (postgres) await postgres.stop(); });
 
@@ -207,6 +207,36 @@ test('integration:migration-lock-bounded the budget bounds lock waits only: a mi
     assert.ok(boot.ms > 1, `the migration took only ${boot.ms} ms`);
     assert.equal(await store.schema(), schemaVersion);
   } finally { await store.close(); }
+});
+
+test('integration:migration-deadlock-retried a live writer queued behind the migration\'s index build does not fail the deploy with a deadlock', async () => {
+  // Production, 2026-09-26: building a new index held a share lock on events; a live transaction that had
+  // read events queued its insert behind it; the migration then asked for events exclusively (its
+  // append-only trigger) and Postgres refused it as a deadlock. Every deploy under live traffic failed.
+  const deployed = new Store(url('deadlock'));
+  await deployed.init();
+  await deployed.pool.query('DROP INDEX events_work_whole');
+  await deployed.pool.query('COMMENT ON TABLE graphyard_schema IS NULL');
+  const definition = (await deployed.pool.query("SELECT pg_get_functiondef('graphyard_event_work'::regproc) AS sql")).rows[0].sql;
+  const [blocker, live] = [new pg.Client({ connectionString: url('deadlock') }), new pg.Client({ connectionString: url('deadlock') })];
+  await blocker.connect(); await live.connect();
+  const next = new Store(url('deadlock'));
+  const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+  try {
+    // Holds the migration between its index build and its exclusive lock on events.
+    await blocker.query('BEGIN'); await blocker.query(definition);
+    await live.query('BEGIN'); await live.query('SELECT count(*) FROM events');
+    const boot = timed(() => next.init({ lockTimeoutMs: 10_000 }));
+    await pause(300);
+    const insert = live.query("INSERT INTO events(actor, kind, payload) VALUES('live', 'probe', '{}'::jsonb)").catch(() => {});
+    await pause(200);
+    await blocker.query('ROLLBACK');
+    await insert;
+    await live.query('ROLLBACK');
+    const result = await boot;
+    assert.equal(result.error, null, `init failed: ${result.error?.message}`);
+    assert.equal(await next.schema(), schemaVersion);
+  } finally { await blocker.end(); await live.end(); await next.close(); await deployed.close(); }
 });
 
 test('unit:startup-lock-documented operations.md states how startup takes coordination locks', async () => {
