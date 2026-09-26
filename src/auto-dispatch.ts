@@ -14,6 +14,7 @@ import { actionRenewIntervalMs, type ActionRow } from './model/actions.js';
 import { nextActionKinds, type NextActionKind } from './model/next-action.js';
 import { agentOwner, assertOutsideWorktrees, inspectProducerCredentials, listHerdrAgents, profileAccount, profileSessions, readCredentialFile, readEnvironmentLog, recordObservedExhaustion, herdrErrorCode, selectionKey, sessionAgentName, SessionStartError, sessionWords, type StartBounds, type AttentionItem, type ConfigReload, type EnvironmentLog, type HerdrAgent, type MasterConfig, type ObservedExhaustion, type ProducerProfile, type ReviewerProfile } from './master.js';
 import { detectExhaustion, type ExhaustionSignal } from './model/capacity.js';
+import { capacityRefusal } from './fleet.js';
 import { launchReview, reconcileReviews, reviewVerdictReminderMs, unpostedVerdict, type ReviewRecord } from './reviewer.js';
 import { independentProducerProfiles, launchProducer, reconcileProducers, requestAttemptLimit, sessionRetry, type ProducerRecord } from './producer.js';
 import { currentEvidence } from './model/evidence.js';
@@ -592,6 +593,9 @@ async function launchWithFailover<P extends { name: string }>(profiles: P[], lau
   // unconfigured environment also fails over, but it is a fault a master can fix now, so it must
   // not turn the role's launches into a wait for a provider reset (GY-89).
   let capacity = true;
+  // The registry's refusal when a profile was passed over because its role is at its concurrency
+  // limit (GY-205), and whether every other pass-over was a wait too (spent quota, no free slot).
+  let full: string | null = null, waiting = true;
   for (const profile of profiles) {
     let dropped = false, exits = 0;
     for (;;) {
@@ -599,14 +603,20 @@ async function launchWithFailover<P extends { name: string }>(profiles: P[], lau
       catch (error: any) {
         if (error?.promptDropped && !dropped) { dropped = true; continue; }
         if (error?.instantExit?.notice && exhaustedAtLaunch && exits < instantExitRelaunchLimit) { exits++; failover.push(await exhaustedAtLaunch(profile, error.instantExit)); continue; }
-        if (error?.accountsExhausted) { failover.push(`${profile.name}: ${message(error)}`); capacity &&= !!error.capacityExhausted; break; }
+        if (error?.accountsExhausted) {
+          failover.push(`${profile.name}: ${message(error)}`); capacity &&= !!error.capacityExhausted;
+          const refusal = capacityRefusal(error);
+          if (refusal) full ??= refusal; else waiting &&= !!error.capacityExhausted;
+          break;
+        }
         throw error;
       }
     }
   }
   // `accountsExhausted` still means only that every profile was passed over; `capacityExhausted`
-  // means the role has no quota left, which is the one case that waits rather than refuses.
-  throw Object.assign(new Error(failover.join('; ') || 'no profile could launch'), { accountsExhausted: failover.length > 0, capacityExhausted: failover.length > 0 && capacity });
+  // means the role has no quota left, which is the one case that waits rather than refuses; and
+  // `roleAtCapacity` means the registry had no free slot for the role, which waits for one to free.
+  throw Object.assign(new Error(failover.join('; ') || 'no profile could launch'), { accountsExhausted: failover.length > 0, capacityExhausted: failover.length > 0 && capacity, ...(full && waiting ? { roleAtCapacity: full } : {}) });
 }
 
 /**
@@ -716,6 +726,11 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
   const spent = (kind: 'review' | 'producer') => { const hold = cursor.capacity[kind]; return hold && Date.parse(hold.recheckAt) > now() ? hold : null; };
   const capacityWait = (kind: 'review' | 'producer') => `${kind === 'review' ? 'reviewer' : 'producer'} capacity is exhausted (${cursor.capacity[kind]!.reason}); launches are paused and its accounts are read again at ${cursor.capacity[kind]!.recheckAt}`;
   const outOfCapacity = (kind: 'review' | 'producer', item: Work, request: DispatchRequest, error: unknown) => {
+    // A role at its registry concurrency limit waits for a slot (GY-205), as an approver does: the
+    // refusal is not counted against the request and arms no quota hold, so the launch is made again
+    // on the first tick after the registry ends a session of the role.
+    const full = capacityRefusal(error);
+    if (full) { delete cursor.failures[request.id]; wait(kind, item, request, `waits for a ${kind === 'review' ? 'reviewer' : 'producer'} slot, launched on the first tick one frees: ${full}`); return true; }
     if (!(error as { capacityExhausted?: boolean })?.capacityExhausted) return false;
     cursor.capacity[kind] = { at: cursor.capacity[kind]?.at ?? new Date(now()).toISOString(), recheckAt: new Date(now() + capacityRecheckMs).toISOString(), reason: bounded(message(error), capacityReasonLimit) };
     delete cursor.failures[request.id];
