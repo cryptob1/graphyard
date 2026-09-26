@@ -12,7 +12,7 @@ import { workRoutes } from '../src/server/routes/work.js';
 import { matchRoute } from '../src/server/routes.js';
 import { masterRunSchema } from '../src/master/profiles.js';
 import { researchSettings } from '../src/research.js';
-import { roleSurface } from '../src/runner/payloads.js';
+import { roleSurface } from '../src/runner/role-surface.js';
 import { headlessSurface } from '../src/runner/surface.js';
 import { herdrSurface, surfacePane } from '../src/runner/herdr-surface.js';
 import { piRunner } from '../src/runner/pi.js';

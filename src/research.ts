@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { demand, operatorScopeIncludes, type Principal, type Work } from './model.js';
 import { humanOnlyRefusal, parkRule } from './model/human-request.js';
 import { defaultPiModel, piRunner } from './runner/pi.js';
-import { roleSurfaces } from './runner/payloads.js';
+import { roleSurfaces } from './runner/role-surface.js';
 import { herdrSurface, surfacePane } from './runner/herdr-surface.js';
 import { agentRuntimeRun } from './master/herdr.js';
 import { runLogFile, type LaunchedRun } from './session-tail.js';
