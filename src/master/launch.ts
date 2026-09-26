@@ -157,14 +157,14 @@ export const startedStates = ['idle', 'done', 'working'], promptableStates = ['i
  * echoed launch command — lowercase runtime names, no spaces inside `bypassPermissions` — or a
  * shell prompt, whose `❯` some shells draw at the start of a line too.
  *
- * OpenCode's own TUI never prints the capitalized word (GY-417): 1.18's start screen draws its
- * logo in block characters (`█▀▄`), shows the `Ask anything…` input prompt, and carries a hint
- * bar — `tab agents`, `ctrl+p commands`. Those are what the check matches; the echoed launch
- * command holds the lowercase word alone and none of the TUI's own elements, so it never counts.
+ * OpenCode's own TUI never prints the capitalized word (GY-417): 1.18's start screen shows the
+ * `Ask anything…` input prompt and a hint bar opening with `tab agents`. Those two are what the
+ * check matches — not its block-character logo or a bare `ctrl+` hint, which a shell theme or a
+ * MOTD can draw too; the echoed launch command holds the lowercase word alone, so it never counts.
  */
 export const runtimeScreens: Record<string, RegExp> = {
   claude: /Claude Code|Welcome to Claude|esc to interrupt|bypass permissions on|shift\+tab to cycle|for shortcuts|^\s*[∙✻✶✳✢]/m,
-  codex: /\bCodex\b|esc to interrupt/, cursor: /\bCursor\b/, opencode: /\bOpenCode\b|tab agents|ctrl\+\S|[█▀▄]{2,}/, gemini: /\bGemini\b/,
+  codex: /\bCodex\b|esc to interrupt/, cursor: /\bCursor\b/, opencode: /\bOpenCode\b|\btab agents\b|Ask anything…/, gemini: /\bGemini\b/,
 };
 export type StartState = 'ready' | 'starting' | 'absent' | 'blocked' | 'consent';
 export interface StartObservation { state: StartState; agent: HerdrAgent | null; detail: string; line: string; prompt?: ConsentPrompt }

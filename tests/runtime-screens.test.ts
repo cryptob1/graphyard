@@ -7,6 +7,8 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { accountStartFailureAttention, accountStartFailurePath, clearAccountStartFailures, readAccountStartFailures, readProfileLaunchRecords, workerLaunchRows } from '../src/master/dispatch.js';
 import { atomicPrivateWrite, awaitRuntimeStart, dispatchWork, loadMasterConfig, observeStart, runtimeScreens, SessionStartError, setupMaster, type HerdrAgent, type WorkerProfile } from '../src/master.js';
+import { applyRegistryMutation, chooseSession, emptyRegistry, proposedRuntimes, type AgentRegistry, type FleetSession } from '../src/model/registry.js';
+import type { FleetClient, FleetProbe } from '../src/fleet.js';
 import { expandTypedCommand } from './helpers/launch-shell.js';
 
 // GY-417: a runtime's start is judged from the runtime's own screen, and a launch whose preferred
@@ -42,7 +44,7 @@ class ScreenPane {
   };
 }
 
-test('unit:opencode-start-recognized — the start check matches OpenCode 1.18\'s own start screen (its block-character logo, input prompt and tab agents / ctrl+ hint bar), never the echoed launch command, which also holds the lowercase word', async () => {
+test('unit:opencode-start-recognized — the start check matches OpenCode 1.18\'s own start screen (its input prompt and tab agents hint bar), never the echoed launch command, which also holds the lowercase word', async () => {
   // The recorded screen: captured from OpenCode 1.18.32 in a pseudo-terminal, exactly as
   // `herdr pane read` returns it. It holds no capitalized "OpenCode" anywhere.
   const screen = await readFile(fileURLToPath(new URL('fixtures/opencode-1.18-start-screen.txt', import.meta.url)), 'utf8');
@@ -50,6 +52,7 @@ test('unit:opencode-start-recognized — the start check matches OpenCode 1.18\'
   assert.equal(runtimeScreens.opencode.test(screen), true, 'the start check recognizes the recorded screen');
   assert.equal(runtimeScreens.opencode.test(echoLine), false, 'the echoed launch command is not a start screen');
   assert.equal(runtimeScreens.opencode.test('❯ '), false, 'a bare shell prompt is not a start screen');
+  assert.equal(runtimeScreens.opencode.test('▄▄▀▀ welcome ▀▀▄▄\nctrl+r to search history\n❯ '), false, 'a MOTD drawn in block characters or a shell\'s ctrl+ hint is not a start screen');
 
   // The case every OpenCode launch died in: Herdr sees the runtime's process but has not classified
   // it, and the TUI is on screen — the session is adopted as started at once.
@@ -210,4 +213,46 @@ test('unit:start-failure-fallback-visible — a launch whose preferred account\'
         && error.message.endsWith('; launched on no named account; no further account of profile opencode-only to fall back to'));
   } finally { await cleanup(); }
   assert.ok(accountStartFailurePath(master).endsWith('.start-failures.json'), 'the start-failure ledger is kept beside the coordinator\'s other private launch state');
+});
+
+test('unit:start-failure-fallback-visible — a worker role the agent registry decides never relaunches the account whose runtime just failed to start: the dispatch ends once, naming it, and gives both registry sessions back', async () => {
+  const { root, master, profile, cleanup } = await installed();
+  try {
+    await clearAccountStartFailures(master, 'opencode-a');
+    // The registry's worker role prefers opencode-a, then claude-b, and ignores the profile's own
+    // `accounts`, which this profile does not list at all (docs/onboarding.md: `master registry role set worker …`).
+    const host = master.hostId ?? 'unknown-host', context = { actor: 'operator', at };
+    let registry: AgentRegistry = applyRegistryMutation(emptyRegistry(), 'apply', { runtimes: proposedRuntimes.filter(runtime => ['opencode', 'claude'].includes(runtime.name)),
+      models: [{ name: 'glm', id: 'zai-coding-plan/glm-5' }, { name: 'opus', id: 'claude-opus-5' }],
+      accounts: [{ name: 'opencode-a', runtime: 'opencode', model: 'glm', credential: { host, home: null } }, { name: 'claude-b', runtime: 'claude', model: 'opus', credential: { host, home: null } }],
+      roles: [{ name: 'worker', accounts: ['opencode-a', 'claude-b'], concurrency: 4 }], reason: 'fixture' }, context).registry;
+    const chosen: string[] = [], ended: [string, string][] = [];
+    const client: FleetClient = {
+      document: async () => structuredClone(registry),
+      select: async request => {
+        const choice = chooseSession(registry, request, clock);
+        if (!choice.account) return { selected: false, reason: choice.reason, skipped: choice.skipped, session: null, account: null, runtime: null, model: null, revision: registry.revision };
+        const session: FleetSession = { id: `session-${chosen.length + 1}`, role: request.role, account: choice.account.name, runtime: choice.runtime.name, model: choice.model.name, host: request.host, work: request.work, principal: request.principal, group: request.group,
+          selectedAt: at, selectedBy: 'master', reason: choice.reason, skipped: choice.skipped, endedAt: null, endReason: null };
+        registry = { ...registry, sessions: [...registry.sessions, session] };
+        chosen.push(choice.account.name);
+        return { selected: true, reason: choice.reason, skipped: choice.skipped, session, account: choice.account, runtime: choice.runtime, model: choice.model, policy: choice.policy, revision: registry.revision };
+      },
+      end: async (id, reason) => { ended.push([id, reason]); registry = { ...registry, sessions: registry.sessions.map(session => session.id === id ? { ...session, endedAt: at, endReason: reason } : session) }; },
+    };
+    const managed: WorkerProfile = { ...profile, name: 'registry-worker', accounts: undefined }, probe: FleetProbe = { registry: client };
+    let claims = 0;
+    const prepare = async () => ({ epoch: ++claims, path: join(root, `assigned-${claims}`), base: 'c'.repeat(40) });
+    const pane = new FallbackPane(new Set(['claude']));
+    await assert.rejects(dispatchWork(root, item, managed, [], pane.run, [item], prepare, async () => {}, 5_000, new Date().toISOString(), { start: pane.bounds(), probe }),
+      (error: unknown) => error instanceof Error && error.message.startsWith('opencode-a failed to start: the opencode runtime never started within 5 s')
+        && error.message.endsWith('; the agent registry chose opencode-a again, so no further account of the worker role to fall back to'));
+    assert.deepEqual(pane.kinds, ['opencode'], 'the runtime that never started is launched once, not again and again');
+    assert.equal(claims, 1, 'nothing is claimed for the repeated choice');
+    assert.deepEqual(chosen, ['opencode-a', 'opencode-a']);
+    assert.deepEqual(ended.map(([id]) => id), ['session-1', 'session-2'], 'both registry sessions are given back at once');
+    assert.ok(ended[1][1].includes('opencode-a already failed to start under this dispatch'), ended[1][1]);
+    // The failure is counted like any other, so three dispatches in a row raise the attention item.
+    assert.equal((await readAccountStartFailures(master))['opencode-a'].failures, 1);
+  } finally { await cleanup(); }
 });

@@ -112,6 +112,15 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
           if (!startFailures.length || !(error instanceof NoHealthyAccountError)) throw error;
           throw new Error(`${describeStartFailures(startFailures, null)}; no further account of profile ${profile.name} could be launched: ${failureText(error).slice(0, 300)}`, { cause: error });
         }
+        // The agent registry chooses from its own role order and never reads the profile's
+        // `accounts`, so it can hand back the account whose runtime just failed. That session is
+        // given back and the dispatch ends once, naming both, rather than relaunching the same
+        // runtime again (GY-417); the loop's retry and backoff take it from there.
+        const again = selected.account && startFailures.find(failure => failure.account === selected!.account!.name);
+        if (again) {
+          await selected.release?.(`worker launch for ${work.key}: ${again.account} already failed to start under this dispatch`);
+          throw new Error(`${describeStartFailures(startFailures, null)}; the agent registry chose ${again.account} again, so no further account of the worker role to fall back to`, { cause: startError });
+        }
         // The Git directories the worker writes are granted once its worktree exists (launchWorker).
         // A launch refused for its effective arguments gives the chosen session back at once (GY-184).
         const chosen = selected;

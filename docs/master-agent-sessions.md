@@ -21,7 +21,7 @@ Sessions run in no-approval mode (`"approvals": "auto"`): `--permission-mode byp
 
 A profile's `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`) in order unless the [agent registry](onboarding.md#configure-the-fleet) defines the role. A launch takes the first logged-in account under `run.quotaCeilingPercent`, else **fails over** (`dispatch.accounts`).
 
-A runtime that never starts fails over, both named (`opencode-a failed to start: …; launched on claude-b`); **three** raise attention.
+A runtime that never starts fails over, both named (`opencode-a failed to start: …; launched on claude-b`); **three** in a row raise attention. If the registry picks that account again, the dispatch ends once, naming it.
 
 On a mid-session limit notice the loop commits worker changes as unpushed `WIP:`, records `capacity.exhausted` (not `lease-loss`) and relaunches on the next account or waits for the first reset.
 
@@ -62,6 +62,6 @@ When a live attempt's blocker or scope request resolves, its inactive session is
 - **The dispatcher bounds its own state where it composes it**, each cut marked with an ellipsis.
 - **A cursor that fails its schema is repaired, not fatal**; the repair is logged once with the
   path that failed.
-- **A tick failure is attributed and surfaced.** `dispatch.lastFailure` names it. Three consecutive failures raise one attention item saying no reviewer or producer session is being launched for any item.
+- **A tick failure is attributed and surfaced.** `dispatch.lastFailure` names it. Three consecutive failures raise one attention item saying no reviewer or producer session is being launched for any item. `graphyard master restart` repairs the cursor.
 
 **A session that exits at launch is classified from its pane.** `herdr agent get` answers only `agent_not_found` for a runtime that exits **at launch**, so the dispatcher uses `herdr pane read`: a **provider limit notice** fails over exactly as a mid-session exhaustion does; any other cause is refused with the pane's last words and retried.
