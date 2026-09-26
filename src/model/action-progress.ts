@@ -227,7 +227,8 @@ export function queueSnapshot(all: Work[], now: Date): QueueSnapshot {
     claimed: rows.filter(({ row }) => claimLive(row, now)).length,
     settling: rows.filter(({ row }) => settling(row, now)).length,
     backingOff: backoff.length,
-    completed: all.reduce((total, work) => total + (work.actionQueue?.history ?? []).filter(row => row.result === 'done').length, 0)
+    // A settled delivery's summary carries the count of its completed rows in place of the rows (GY-422).
+    completed: all.reduce((total, work) => total + (work.actionQueue?.history ?? []).filter(row => row.result === 'done').length + ((work as { completedActions?: number }).completedActions ?? 0), 0)
       + rows.filter(({ row }) => row.state === 'done').length,
     byKind, waiting, backoff, stalled, oldestPendingMs: waiting.length ? waiting[0].waitedMs : null,
     executors: [...executors.values()].sort((a, b) => a.executor.localeCompare(b.executor)),
