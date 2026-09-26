@@ -6,7 +6,8 @@ import { z } from 'zod';
 import { consentAnswerSchema } from './consent-prompt.js';
 import { defaultChildRun, type ChildRun } from './child-runner.js';
 import { closeFailedLaunch, launchStartMs, withLaunchClose, accountLaunch, acknowledgeLaunch, agentToken, acknowledgementMs, agentLaunchPlan, allocateManagedCheckout, assertOutsideWorktrees, atomicPrivateWrite, autonomousSession, createdHerdrTab, deliverPrompt, herdrJson, loadMasterConfig, markReprompted, neverStarted, onSelectedSession, prepareSessionHarness, privateFile, profileAtLimit, profileConcurrency, registrySessionOf, profileSessions, readSessionScreen, reviewerIdentitySchema, reviewerProfileSchema, closeHerdrPane, selectAccount, sessionActivity, sessionAgentName, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, writeFailure, type HerdrAgent, type PromptDelivery, type StartBounds, type MasterConfig, type RequestDelivery, type ReviewerIdentity, type ReviewerProfile } from './master.js';
-import { criteriaRuleSection, fileFollowUpThreads, followUpCreateKey, plannedScope, followUpFindingLimit, followUpFindingMax, listedThreadLimit, readUnresolvedThreads, resolveNamedThreads, threadReadFailureSection, threadSection, unaccountedThreads, type CreateFollowUpItem, type FollowUpCreateStore, type FollowUpFiling, type LaunchThread, type PendingFollowUpCreate, type ThreadResolution } from './review-threads.js';
+import { clientErrorStatus, nextClientErrorRun, retryStopAttention, retryStopped } from './retry-stop.js';
+import { criteriaRuleSection, fileFollowUpThreads, followUpCreateKey, plannedScope, followUpFindingLimit, followUpFindingMax, listedThreadLimit, readUnresolvedThreads, resolveNamedThreads, threadReadFailureSection, threadSection, unaccountedThreads, type CreateFollowUpItem, type FollowUpCreateStore, type FollowUpFiling, type FollowUpItem, type LaunchThread, type PendingFollowUpCreate, type ThreadResolution } from './review-threads.js';
 import type { FleetProbe } from './fleet.js';
 import { carriedApproval, type Work } from './model.js';
 import { removeSessionCheckout, type FilesystemProbe, type SessionCheckout } from './install/worktree-root.js';
@@ -97,7 +98,11 @@ export const reviewRecordSchema = z.object({
     /** The approval's body was read and classified: `named` is its Follow-up line. Until then every listed thread stays set aside (followUpThreadIds). */
     classified: z.boolean().optional(),
     /** When the loop saw the approval of a failed filing stop standing: the record is pinned until then (pinnedSessionRecords). */
-    releasedAt: z.string().min(1).max(40).optional() }).optional(),
+    releasedAt: z.string().min(1).max(40).optional(),
+    /** How a create refused as a key reuse was resolved (GY-598): linked to the approval's existing item, or filed under its body key. */
+    keyReuse: z.enum(['linked', 'rekeyed']).optional(),
+    /** The unchanged 4xx error the filing's consecutive attempts failed with, and when that run stopped its retries (retry-stop.ts). */
+    clientError: z.object({ error: z.string().min(1).max(500), count: z.number().int().min(1) }).strict().optional(), stoppedAt: z.string().min(1).max(40).optional() }).optional(),
   /** The launch prompt carried the criteria-only rule (GY-166): an approval must classify the listed threads, so one naming neither line vouches for none. */
   criteriaOnly: z.literal(true).optional(),
   /** The review history the launch prompt was built from (GY-167, reviewHistory): the head last reviewed, and the changes-requested rounds before this one. */
@@ -1135,6 +1140,41 @@ async function fileApprovedFollowUps(root: string, records: ReviewRecord[], revi
   return { events, changed };
 }
 
+/** The control plane's refusal of a key sent again with a different body (`idempotencyMismatch`, src/engine.ts). */
+const keyReuseRefusal = 'Idempotency key reused with different input';
+/**
+ * The key a follow-up create is sent under once its approval's key was refused as reused with a
+ * different body: the approval's key and the hash of the body sent, so a retry of this very body
+ * returns the item it made, and no two bodies share a key (GY-598).
+ */
+export const followUpBodyKey = (createKey: string, item: FollowUpItem) =>
+  `${createKey.slice(0, 183)}:${createHash('sha256').update(JSON.stringify(item)).digest('hex').slice(0, 16)}`;
+/**
+ * The follow-up item an approval already filed, found by its parent and the approval's id: it
+ * depends on the parent, and its title and description name the parent and the review, as
+ * `followUpItem` writes them. Undefined when no such item exists.
+ */
+export function existingFollowUpItem(work: readonly Pick<Work, 'key' | 'title' | 'description' | 'dependencies'>[], parent: Pick<Work, 'id' | 'key'>, reviewId: number): string | undefined {
+  return work.find(entry => !!entry.dependencies?.includes(parent.id) && entry.title.startsWith(`Follow-ups from the approved review of ${parent.key} (`)
+    && !!entry.description?.includes(`(review ${reviewId})`))?.key;
+}
+/**
+ * A follow-up create whose key was used before with a different body (GY-598) — the body moved on
+ * since the first attempt — is refused on every retry, so it is resolved rather than retried: the
+ * item that key made is this approval's follow-up, and is linked; with none, the body is filed under
+ * a key of its own, which a retry of the same body repeats.
+ */
+async function createResolvingKeyReuse(payload: FollowUpItem, key: string, create: CreateFollowUpItem, existing: () => string | undefined, resolved: (how: 'linked' | 'rekeyed') => void) {
+  try { return await create(payload, key); }
+  catch (error) {
+    if (!(error instanceof Error ? error.message : String(error)).includes(keyReuseRefusal)) throw error;
+    const linked = existing();
+    if (linked) { resolved('linked'); return { key: linked }; }
+    try { const made = await create(payload, followUpBodyKey(key, payload)); resolved('rekeyed'); return made; }
+    catch (retry) { throw new Error(`under its body key after its approval key was refused as reused: ${retry instanceof Error ? retry.message : String(retry)}`); }
+  }
+}
+
 /** One approval's follow-up filing, or its reopen check once filed; the outcome is left on `record.followUps`. */
 async function fileApprovedFollowUp(record: ReviewRecord, verdict: NonNullable<ReviewRecord['verdict']>, reviewer: string, repository: string, work: Work[], run: ChildRun, create: CreateFollowUpItem, store: ReturnType<typeof followUpCreateStore>, now: Date, events: string[]) {
   const previous = record.followUps?.reviewId === verdict.reviewId ? record.followUps : undefined;
@@ -1152,12 +1192,20 @@ async function fileApprovedFollowUp(record: ReviewRecord, verdict: NonNullable<R
   // open on GitHub and returns to rework. One that created no item keeps retrying, at a slower pace,
   // for as long as the approval stands: a finding with no thread has nothing else holding the
   // merge, and would otherwise be lost while the approved candidate lands.
+  // A filing whose attempts kept failing with one unchanged 4xx error is stopped, and named once in attention (GY-598).
+  if (previous?.stoppedAt) return;
   if (previous && previous.attempts >= threadResolutionAttempts && (previous.item || now.getTime() - Date.parse(previous.at) < followUpExhaustedRetryMs)) return;
-  const outcome = await fileFollowUpThreads({ repository, key: record.key, workId: item.id, pr: record.pr, sha: record.sha, reviewId: verdict.reviewId, reviewer, previous, store,
-    ...(record.threadReadFailure ? {} : record.threadsListed ? { listed: record.threadsListed } : {}) }, run, create, now);
+  let keyReuse = previous?.keyReuse;
+  const resolving: CreateFollowUpItem = (payload, key) => createResolvingKeyReuse(payload, key, create, () => existingFollowUpItem(work, item, verdict.reviewId), resolved => { keyReuse = resolved; });
+  const filed = await fileFollowUpThreads({ repository, key: record.key, workId: item.id, pr: record.pr, sha: record.sha, reviewId: verdict.reviewId, reviewer, previous, store,
+    ...(record.threadReadFailure ? {} : record.threadsListed ? { listed: record.threadsListed } : {}) }, run, resolving, now);
+  const outcome = { ...filed, ...(keyReuse && filed.item ? { keyReuse } : {}) };
+  const failure = outcome.failure?.slice(0, 500), clientError = nextClientErrorRun(previous?.clientError, failure);
   // The observation the loop held when it resolved: a later one showing a resolved thread open is checked on GitHub.
-  record.followUps = { ...outcome, threads: outcome.threads.map(ledgerThread), ...(outcome.findings ? { findings: outcome.findings.slice(0, followUpFindingLimit).map(finding => ({ ...finding, path: finding.path && ledgerPath(finding.path), text: finding.text.slice(0, followUpFindingMax) })) } : {}), refused: outcome.refused.slice(0, 100), ...(outcome.failure ? { failure: outcome.failure.slice(0, 500) } : {}), ...(observedAt ? { observedAt } : {}) };
-  if (outcome.item && !previous?.item) events.push(`filed ${outcome.threads.length} follow-up review thread(s) on ${record.key} PR #${record.pr} as ${outcome.item}, named by approval ${verdict.reviewId} of ${record.sha.slice(0, 12)}`);
+  record.followUps = { ...outcome, threads: outcome.threads.map(ledgerThread), ...(outcome.findings ? { findings: outcome.findings.slice(0, followUpFindingLimit).map(finding => ({ ...finding, path: finding.path && ledgerPath(finding.path), text: finding.text.slice(0, followUpFindingMax) })) } : {}), refused: outcome.refused.slice(0, 100), ...(failure ? { failure } : {}), ...(observedAt ? { observedAt } : {}),
+    ...(clientError ? { clientError } : {}), ...(retryStopped(clientError) ? { stoppedAt: now.toISOString() } : {}) };
+  if (outcome.item && !previous?.item) events.push(`filed ${outcome.threads.length} follow-up review thread(s) on ${record.key} PR #${record.pr} as ${outcome.item}, named by approval ${verdict.reviewId} of ${record.sha.slice(0, 12)}${outcome.keyReuse === 'linked' ? ' (the item its refused reused key already made)' : outcome.keyReuse === 'rekeyed' ? ' (under its body key, its approval key having been refused as reused)' : ''}`);
+  if (record.followUps.stoppedAt) events.push(`follow-up filing for ${record.key} approval ${verdict.reviewId} stopped retrying after ${clientError!.count} consecutive attempts failed with the same client error: ${failure}`);
   for (const id of outcome.resolved.filter(id => !previous?.resolved.includes(id))) events.push(`resolved follow-up review thread ${id} on ${record.key} PR #${record.pr} with a reply naming ${outcome.item}`);
   if (outcome.failure) events.push(`follow-up filing for ${record.key} approval ${verdict.reviewId} failed (attempt ${outcome.attempts}): ${outcome.failure}`);
 }
@@ -1264,6 +1312,15 @@ async function resolveApprovedThreads(records: ReviewRecord[], reviewer: string,
     if (outcome.failure) events.push(`thread resolution for ${record.key} approval ${verdict.reviewId} failed (attempt ${outcome.attempts}): ${outcome.failure}`);
   }
   return { events, changed };
+}
+
+/**
+ * One attention item per follow-up filing the loop stopped retrying (retry-stop.ts): the step, the
+ * unchanged client error and the item. Raised while the stopped filing's approval is on the ledger.
+ */
+export function stoppedFollowUpAttention(records: ReviewRecord[]) {
+  return records.filter(record => !!record.followUps?.stoppedAt && !record.followUps.releasedAt && clientErrorStatus(record.followUps.clientError?.error) !== null)
+    .map(record => retryStopAttention({ step: `follow-up filing for approval ${record.followUps!.reviewId} (PR #${record.pr})`, item: record.key, error: record.followUps!.clientError!.error, count: record.followUps!.clientError!.count, at: record.followUps!.stoppedAt! }));
 }
 
 export function summarizeReviews(records: ReviewRecord[]) {
