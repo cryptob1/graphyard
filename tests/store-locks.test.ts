@@ -37,7 +37,7 @@ before(async () => {
   port = Number(process.env.GRAPHYARD_STORE_LOCKS_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 203);
   postgres = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-store-locks-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await postgres.initialise(); await postgres.start();
-  for (const name of ['locks', 'restored', 'lifecycle', 'board']) await postgres.createDatabase(name);
+  for (const name of ['locks', 'restored', 'contended', 'lifecycle', 'board']) await postgres.createDatabase(name);
 });
 after(async () => {
   for (const store of stores) await store.close().catch(() => {});
@@ -116,6 +116,32 @@ test('integration:migration-backup-locks-separate — a migration and a backup p
     await within(10_000, waiting, 'the queued migration');
     assert.equal(await blocked.schema(), schemaVersion);
   } finally { await migrating.release().catch(() => {}); }
+});
+
+test('GY-257 — a restore excludes a write in flight on the target: it waits for it, then refuses a ledger that is no longer empty', async () => {
+  const live = await open('locks');
+  const backup = await createBackup(live.pool);
+  const target = await open('contended'), id = randomUUID();
+  // A writer that took no coordination lock opens its write before the restore starts and commits
+  // only once the restore is waiting: without the table locks the restore saw an empty ledger,
+  // wrote beside it, and both committed.
+  const writer = await session('contended', async db => { await db.query('LOCK TABLE work_items IN ROW EXCLUSIVE MODE'); });
+  let committed = false;
+  try {
+    const restoring = restoreBackup(target.pool, backup).then(() => null, (error: Error) => error);
+    let waiting = false;
+    for (let attempt = 0; attempt < 100 && !waiting; attempt++) {
+      waiting = Number((await target.pool.query("SELECT count(*) AS n FROM pg_locks WHERE locktype='relation' AND mode='ExclusiveLock' AND NOT granted AND relation='work_items'::regclass")).rows[0].n) === 1;
+      if (!waiting) await delay(20);
+    }
+    assert.ok(waiting, 'the restore waits for the write in flight');
+    await writer.db.query("INSERT INTO work_items(id, document) VALUES($1, jsonb_build_object('id', $2::text, 'key', 'GY-9', 'stage', 'build'))", [id, id]);
+    await writer.db.query('COMMIT'); committed = true; await writer.db.end();
+    const refused = await within(5_000, restoring, 'the restore');
+    assert.ok(refused, 'the restore does not interleave with the write');
+    assert.match(refused.message, /Restore requires an empty database: work_items already holds 1 row/);
+    assert.deepEqual((await target.pool.query('SELECT id FROM work_items')).rows.map(row => row.id), [id]);
+  } finally { if (!committed) await writer.release().catch(() => {}); }
 });
 
 // ---- AC-2: the index ------------------------------------------------------------------------
