@@ -26,8 +26,8 @@ Start with the numbered path; the other pages are references to open when a task
 ## Build integrations
 
 - [Agent protocol and HTTP API](protocol.md) — the HTTP API, one topic per page.
-- [Validation: E2E test cases and the runner protocol](validation.md) — E2E test cases and the runner protocol.
-- [The packaged Playwright runner and collector](runner-setup.md) — the packaged runner and collector.
+- [Validation: E2E test cases and the runner protocol](validation.md) — the specification.
+- [The packaged Playwright runner and collector](runner-setup.md) — install and run.
 - [Releases and observed production delivery](delivery.md) — releases and observed delivery.
 - [Runner capacity, artifacts and rollback](recovery.md) — runner capacity, artifacts, rollback.
 - [Evidence reuse and replay](evidence-reuse.md) — reuse and replay of E2E passes.

@@ -1,4 +1,4 @@
-<!-- page: Build integrations | 2 | E2E test cases and the runner protocol. -->
+<!-- page: Build integrations | 2 | the specification. -->
 # Validation: E2E test cases and the runner protocol
 
 An `e2e:` proof passes only from a pinned candidate and bundle, published by a separately trusted collector ([runner setup](runner-setup.md)).

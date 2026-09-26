@@ -35,6 +35,9 @@ import type { daemonSummary } from './run.js';
 import { observeDeployment } from './deployment.js';
 import { serverCallName, timedCall, timedFetch, timedRun } from '../master/timings.js';
 import type { RunRecord, Runner } from '../runner/types.js';
+import { adoptRuns, type AdoptedRun } from '../runner/registry.js';
+import { approverRunAdopter } from '../runner/roles.js';
+import { producerRunAdopter } from '../producer.js';
 import type { ResearchEvent } from '../research.js';
 
 /** A reviewer or producer session a launch ledger holds as pending, as the failover step reads it. */
@@ -186,6 +189,12 @@ export interface DaemonEffects {
    */
   recordResearch?: (work: Work, event: ResearchEvent) => Promise<unknown>;
   research?: { cwd: string; runner?: Runner };
+  /**
+   * Adopt the headless runs a restart left running (GY-453): each approver and producer run in the
+   * run registry on disk that no process applied yet is watched again, and its result applied once
+   * when it ends. Called once when the loop starts; a loop wired without it adopts nothing.
+   */
+  adoptRuns?: () => Promise<AdoptedRun[]>;
   /** The reviewer and producer sessions the launch ledgers hold as pending. */
   launchedSessions?: () => Promise<LaunchedSession[]>;
   /** The account the profile's current session was launched on, as its launcher recorded it. */
@@ -483,6 +492,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     reportCapacity: (work, event) => mutate(`work/${work.id}/capacity`, event),
     recordResearch: (work, event) => mutate(`work/${work.id}/research`, event),
     research: { cwd: root },
+    adoptRuns: () => adoptRuns(root, { approver: approverRunAdopter(() => agentToken(root, current(), 'approver'), deps.fetcher), producer: producerRunAdopter(root, deps.fetcher) }),
     launchedSessions: async () => [
       ...(await readReviewLedger(root)).reviews.filter(entry => entry.state === 'pending' && !entry.launching).map(entry => ({ role: 'reviewer' as const, record: entry.id, profile: entry.profile, agentName: entry.agentName, pane: entry.pane, work: entry.key, requestId: entry.requestId ?? null })),
       ...(await readProducerLedger(root)).producers.filter(entry => entry.state === 'pending').map(entry => ({ role: 'producer' as const, record: entry.id, profile: entry.profile, agentName: entry.agentName, pane: entry.pane, work: entry.key, requestId: entry.requestId })),

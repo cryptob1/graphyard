@@ -9,6 +9,7 @@ import { boundedPersist, cycleCost, cycleDelay, cycleFailureCeiling, describeFai
 import type { DaemonEffects } from './effects.js';
 import { runCycle } from './cycle.js';
 import { describeTimings } from '../master/timings.js';
+import { detachRuns } from '../runner/registry.js';
 
 /** The compact daemon view `master status` joins onto Graphyard truth. */
 export function daemonSummary(state: DaemonState, now: number, intervalMs: number, hostId?: string) {
@@ -77,6 +78,26 @@ export async function noteWatchdog(state: DaemonState, plan: ReturnType<typeof w
 }
 
 /**
+ * Take back the headless runs a restart left running (GY-453). An approver's run reports its
+ * record on the watch of the decision it judges when it ends, as a run this loop launched would.
+ */
+export async function adoptHeadlessRuns(state: DaemonState, effects: DaemonEffects, log: (line: string) => void) {
+  if (!effects.adoptRuns) return [];
+  try {
+    const adopted = await effects.adoptRuns();
+    if (adopted.length) log(`[graphyard-master] adopted ${adopted.length} headless run(s) left running by a restart: ${adopted.map(run => `${run.name} (${run.role} for ${run.work}${run.live ? '' : ', ended while unwatched'})`).join(', ')}`);
+    for (const run of adopted) {
+      if (run.role !== 'approver') continue;
+      run.settled.then(async record => {
+        const watch = Object.values(state.approvals).find(entry => entry.agentName === run.name && entry.decision === run.subject);
+        if (watch) { watch.run = record; await effects.persist(state); }
+      }).catch(() => { /* the next cycle judges the decision from the control plane */ });
+    }
+    return adopted;
+  } catch (error) { log(`[graphyard-master] could not adopt the headless runs a restart left: ${message(error)}`); return []; }
+}
+
+/**
  * Supervised entry point. The process owns no lease and no credential beyond the coordinator token,
  * so a restart is always safe: it reconciles the cursor against Graphyard and keeps cycling.
  *
@@ -107,6 +128,7 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
   const watchdog = watchdogPlan(options.environment ?? process.env, interval());
   for (const action of await noteWatchdog(state, watchdog, new Date(now()).toISOString(), effects.persist)) log(`[graphyard-master] ${action.kind} ${action.state}: ${action.detail}`);
   if (watchdog.supervised) { try { await effects.notify?.('ready'); } catch (error) { log(`[graphyard-master] supervisor notification failed: ${message(error)}`); } }
+  await adoptHeadlessRuns(state, effects, log);
   let stopping = false;
   // A supervisor's SIGTERM must land during the wait, not one whole interval later.
   const waking = new AbortController();
@@ -161,6 +183,10 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
   } finally {
     for (const signal of signals) host.off(signal, stop);
     host.off('unhandledRejection', onRejection); host.off('uncaughtException', onException);
+    // Headless runs are detached (GY-453): the loop stops watching them and sends none of them a
+    // signal, so a planned restart takes no run's attempt; the next loop adopts them.
+    const left = detachRuns();
+    log(`[graphyard-master] stopping: left ${left} headless run(s) running, detached, for the next loop to adopt`);
     state.lock = null;
     await effects.persist(state).catch(() => {});
   }

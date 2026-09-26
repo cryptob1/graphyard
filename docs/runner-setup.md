@@ -1,4 +1,4 @@
-<!-- page: Build integrations | 3 | the packaged runner and collector. -->
+<!-- page: Build integrations | 3 | install and run. -->
 # The packaged Playwright runner and collector
 
 An approved oracle bundle runs in an isolated container supervised by a host attestor; a separately trusted collector verifies it before publishing.

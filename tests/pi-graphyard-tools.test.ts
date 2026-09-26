@@ -110,10 +110,13 @@ test('unit:pi-session-autonomous the extension puts the autonomy contract in the
   for (const flag of ['--continue', '-c', '--resume', '-r', '--mode=rpc']) assert.equal(args.slice(0, args.indexOf('--')).includes(flag), false, `${flag} is not a launch option`);
   assert.deepEqual(args.slice(-2), ['--', '--resume the review'], 'the prompt is a message, never an option');
   assert.equal(args[args.indexOf('--mode') + 1], 'json');
-  let stdio: unknown;
-  piRunner({ spawn: ((_command: string, _args: string[], options: { stdio: unknown }) => { stdio = options.stdio; throw new Error('not started'); }) as any })
+  let stdio: unknown, detached: unknown, script = '';
+  piRunner({ containment: 'setsid', spawn: ((_command: string, args: string[], options: { stdio: unknown; detached: unknown }) => { stdio = options.stdio; detached = options.detached; script = args[1]; throw new Error('not started'); }) as any })
     .start('p', { cwd: process.cwd(), tool: 'graphyard_decide', validate: value => value, timeoutMs: 1_000 }).cancel();
-  assert.deepEqual(stdio, ['ignore', 'pipe', 'pipe'], 'stdin is closed: nothing can wait on a person');
+  // GY-453: the run is detached, with its output in its run directory rather than a pipe to the launcher.
+  assert.deepEqual(stdio, ['ignore', 'ignore', 'ignore'], 'stdin is closed: nothing can wait on a person');
+  assert.equal(detached, true);
+  assert.match(script, /<\/dev\/null/, 'Pi itself reads no stdin');
 });
 
 test('unit:pi-destructive-guard the tool-call guard refuses rm on a statically unresolvable target with a reason, allows rm inside the session mktemp directory, and never prompts', async () => {

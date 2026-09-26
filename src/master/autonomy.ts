@@ -24,7 +24,7 @@ import type { SessionHandleInput } from '../model/sessions.js';
 import { registeredLaunch } from '../model/session-state.js';
 import { liveReviewRequest } from '../model/dispatch.js';
 import { narrowRoleRuntime, piRuntimeSchema } from '../runner/payloads.js';
-import { applyDecision, approverRunOptions, narrowRunner, piApproverPrompt, registryRunner, startNarrowRun } from '../runner/roles.js';
+import { applyDecision, approverRunContext, approverRunOptions, narrowRunner, piApproverPrompt, registryRunner, startNarrowRun } from '../runner/roles.js';
 import type { Runner, RunRecord } from '../runner/types.js';
 import { autonomyPlan, autonomyReason, humanOnlyDecisions, masterHarness } from './harness.js';
 
@@ -282,7 +282,8 @@ export async function launchApprover(root: string, work: Work, decision: string,
   if (registry && registry.account.kind === 'pi') {
     let started: ReturnType<typeof startNarrowRun>;
     try {
-      started = startNarrowRun({ runner: headless.runner ?? registryRunner(registry.account), name, role: 'approver', work: work.key, subject: decision,
+      started = startNarrowRun({ runner: headless.runner ?? registryRunner(registry.account), name, role: 'approver', work: work.key, subject: decision, root,
+        context: approverRunContext(config.url, work.id, decision, piRuntimeSchema.parse(config.run.pi ?? {}).approverTimeoutMinutes * 60_000),
         prompt: piApproverPrompt(config, work.key, decision, config.approver!.id),
         options: approverRunOptions(root, decision, { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: config.approver!.credentialFile, GRAPHYARD_HOST_ID: config.hostId }, piRuntimeSchema.parse(config.run.pi ?? {}).approverTimeoutMinutes * 60_000),
         apply: async result => result.ok ? [await applyDecision(config.url, token, work, result.payload, headless.fetcher)] : [] });
@@ -296,7 +297,8 @@ export async function launchApprover(root: string, work: Work, decision: string,
   }
   if (!registry && !explicitKind && narrowRoleRuntime(config.run, 'approver') === 'pi') {
     const pi = piRuntimeSchema.parse(config.run.pi ?? {});
-    const started = startNarrowRun({ runner: headless.runner ?? narrowRunner(pi), name, role: 'approver', work: work.key, subject: decision,
+    const started = startNarrowRun({ runner: headless.runner ?? narrowRunner(pi), name, role: 'approver', work: work.key, subject: decision, root,
+      context: approverRunContext(config.url, work.id, decision, pi.approverTimeoutMinutes * 60_000),
       prompt: piApproverPrompt(config, work.key, decision, config.approver!.id),
       options: approverRunOptions(root, decision, { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: config.approver!.credentialFile, GRAPHYARD_HOST_ID: config.hostId }, pi.approverTimeoutMinutes * 60_000),
       apply: async result => result.ok ? [await applyDecision(config.url, token, work, result.payload, headless.fetcher)] : [] });

@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { defaultPiModel, piRunner } from './pi.js';
 import type { FleetLaunchAccount } from '../fleet.js';
-import { endRun, liveRun, registerRun } from './registry.js';
+import { z } from 'zod';
+import { liveRun, runsDirectory, superviseRun, writeRunOwner, type Applied, type RunAdopter } from './registry.js';
 import { decidePayloadSchema, evidencePayloadSchema, graphyardTools, piRuntimeSchema, type DecidePayload, type EvidencePayload } from './payloads.js';
-import { runRecord, type Run, type RunOptions, type RunRecord, type RunResult, type Runner } from './types.js';
+import { runRecord, type RunOptions, type RunResult, type Runner } from './types.js';
 
 /**
  * The narrow roles on the headless runner (GY-169): the approver and the unit proof producer. A
@@ -36,28 +37,29 @@ export function registryRunner(account: FleetLaunchAccount): Runner {
   return piRunner({ command: launch.command, model: launch.model, args: launch.args, environment: launch.environment });
 }
 
-export type Applied = RunRecord['applied'][number];
+export type { Applied } from './registry.js';
 const failure = (error: unknown) => error instanceof Error ? error.message : String(error);
 
 /**
  * Start a run for one role session, registered under its session name so the loop's supervision
  * sees it, and apply its submission when it ends. `settled` resolves to the record the session
  * keeps: the run's last events, its result, and what became of each submission.
+ *
+ * With the loop's `root` (GY-453) the run is recorded in the run registry on disk with its owner
+ * and the `context` its role needs to apply the result, so a restart that leaves the run going
+ * (it is detached) is followed by an adoption that applies it — once, whichever process sees it end.
  */
 export function startNarrowRun<T>(input: { runner: Runner; name: string; role: 'approver' | 'producer'; work: string; subject: string; prompt: string; options: RunOptions<T>;
-  apply: (result: RunResult<T>) => Promise<Applied[]> }) {
+  apply: (result: RunResult<T>) => Promise<Applied[]>; root?: string; context?: Record<string, unknown> }) {
   const live = liveRun(input.name);
   if (live) throw new Error(`A ${live.role} run named ${input.name} is already running for ${live.work}`);
-  const run = input.runner.start(input.prompt, input.options), startedAt = new Date().toISOString();
-  registerRun({ name: input.name, role: input.role, work: input.work, subject: input.subject, run: run as Run<unknown> });
-  const settled = run.result().then(async result => {
-    let applied: Applied[];
-    try { applied = await input.apply(result); }
-    catch (error) { applied = [{ subject: input.subject, outcome: 'refused', detail: failure(error) }]; }
-    const record = runRecord(input.runner.name, run, result, startedAt, new Date().toISOString(), applied);
-    endRun(input.name, record);
-    return record;
-  });
+  const startedAt = new Date().toISOString();
+  const run = input.runner.start(input.prompt, input.root ? { ...input.options, runs: runsDirectory(input.root) } : input.options);
+  if (run.directory) {
+    try { writeRunOwner(run.directory, { name: input.name, role: input.role, work: input.work, subject: input.subject, context: input.context ?? {}, startedAt }); }
+    catch { /* the run is still watched here; only its adoption after a restart is lost */ }
+  }
+  const settled = superviseRun({ runner: input.runner, run, name: input.name, role: input.role, work: input.work, subject: input.subject, startedAt, apply: input.apply });
   return { run, settled, record: runRecord(input.runner.name, run, null, startedAt, null) };
 }
 
@@ -96,6 +98,22 @@ export const approverRunOptions = (cwd: string, decision: string, env: Record<st
     return parsed;
   },
 });
+
+/** What an approver run's adoption after a restart needs (GY-453): never the token, which the adopter reads itself. */
+export const approverRunContext = (url: string, workId: string, decision: string, timeoutMs: number) => ({ url, workId, decision, timeoutMs });
+const approverRunContextSchema = z.object({ url: z.string(), workId: z.string(), decision: z.string(), timeoutMs: z.number().int().positive() }).passthrough();
+/**
+ * How a restarted loop takes back a headless approver run (GY-453, registry.ts adoptRuns): its
+ * verdict is validated against the decision it was launched for and applied as the approver
+ * identity, exactly as the launch would have applied it.
+ */
+export function approverRunAdopter(token: () => Promise<string>, fetcher?: typeof fetch): RunAdopter {
+  return async owner => {
+    const context = approverRunContextSchema.parse(owner.context);
+    return { options: approverRunOptions('', context.decision, {}, context.timeoutMs),
+      apply: async result => result.ok ? [await applyDecision(context.url, await token(), { id: context.workId }, result.payload as DecidePayload, fetcher)] : [] };
+  };
+}
 
 /** The producer's run options: each submission must be one of its proofs on its exact binding. */
 export const producerRunOptions = (cwd: string, binding: { sha: string; baseSha: string; policyRevision: number; proofs: string[] }, env: Record<string, string>, timeoutMs: number): RunOptions<EvidencePayload> => ({

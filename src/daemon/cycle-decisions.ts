@@ -86,6 +86,12 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     // at a role concurrency of 1 the live slot would refuse it, and the id is the only way to end it.
     if (watch.session && !listed && !await endApproverSession(item, watch, `approver for ${watch.work} decision ${watch.decision} replaced`))
       throw new Error(`registry session ${watch.session} of the replaced approver could not be ended, so no replacement is launched while it holds the role's slot; ending it is tried again next cycle`);
+    // A headless approver run that was lost (GY-453: killed from outside, recording no exit) judged
+    // nothing, so its launch is given back: the replacement spends no launch of the decision's bound.
+    if (!listed && watch.run?.result?.ok === false && watch.run.result.reason === 'lost') {
+      watch.ended = [...watch.ended, `approver run ${watch.agentName ?? name} was lost: ${watch.run.result.detail}`.slice(0, 300)].slice(-10);
+      Object.assign(watch, { launches: Math.max(0, watch.launches - 1), run: null });
+    }
     Object.assign(watch, { launches: watch.launches + 1, agentName: name, pane: listed?.pane_id ?? null, launchedAt: stamp, account: adopted?.account ?? null, runtime: adopted?.runtime ?? null, session: adopted?.session ?? null });
     await effects.persist(state);
     if (listed) return `adopted approver session ${name}${adopted?.account ? ` on ${adopted.account}` : ''}, already judging it`;
