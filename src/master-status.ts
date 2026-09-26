@@ -203,7 +203,7 @@ export async function derivedAttention(root: string, master: MasterConfig, maste
   const host: AttentionItem[] = [];
   if (observed.standalone) {
     const cursor = await readDispatchCursor(root, master, () => {}).catch(error => ({ error: error instanceof Error ? error.message : 'Master dispatch cursor is unreadable' }));
-    const dispatch = 'error' in cursor ? cursor : dispatchSummary(cursor, now, master.run.dispatchIntervalSeconds * 1000, [], snapshot.work);
+    const dispatch = 'error' in cursor ? cursor : dispatchSummary(cursor, now, master.run.dispatchIntervalSeconds * 1000, [], snapshot.work, Date.parse(snapshot.now) || now);
     host.push(...dispatchFailureAttention(dispatch), ...(await setupHealth(root, master)).attention);
     // A starved reviewer or producer role (GY-107), which the report's own buildMasterStatus raises from the role profiles.
     const sessions = { producers: summarizeProducers(observed.producers), failures: 'error' in dispatch ? [] : dispatch.failures, retries: [...sessionRetries(observed.reviews, now), ...sessionRetries(observed.producers, now)] };

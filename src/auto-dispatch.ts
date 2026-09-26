@@ -1199,7 +1199,7 @@ export function dispatchEffects(root: string, config: MasterConfig | (() => Mast
 }
 
 /** The compact dispatcher view `master status` joins onto the per-candidate requests. */
-export function dispatchSummary(cursor: DispatchCursor, now: number, intervalMs: number, awaited: readonly string[] = [], work: Work[] = []) {
+export function dispatchSummary(cursor: DispatchCursor, now: number, intervalMs: number, awaited: readonly string[] = [], work: Work[] = [], requestNow = now) {
   const lastTickAt = cursor.lastTickAt ? Date.parse(cursor.lastTickAt) : Number.NaN;
   const lagMs = Number.isFinite(lastTickAt) ? now - lastTickAt : null;
   return { running: lagMs !== null && lagMs < Math.max(3 * intervalMs, 60_000), ticks: cursor.ticks, lastTickAt: cursor.lastTickAt, lagMs, intervalMs,
@@ -1209,8 +1209,8 @@ export function dispatchSummary(cursor: DispatchCursor, now: number, intervalMs:
       missing: Object.keys(cursor.sessionMisses).length, failures: cursor.lastTick?.closeFailures ?? [] },
     lastSuccessAt: cursor.lastSuccessAt, consecutiveFailures: cursor.consecutiveFailures, lastFailure: cursor.lastFailure, lastTick: cursor.lastTick ?? null,
     failures: Object.entries(cursor.failures).map(([requestId, failure]) => ({ requestId, ...failure })),
-    // Every launch still waiting, how long since its request and why (GY-710).
-    waiting: launchWaits(work, cursor, now),
+    // Every launch still waiting, how long since its request and why (GY-710), aged on the control plane's clock.
+    waiting: launchWaits(work, cursor, requestNow),
     // Requests the loop has stopped attempting because every session it launched ended unanswered.
     abandoned: Object.entries(cursor.abandoned).map(([requestId, entry]) => ({ requestId, ...entry })),
     // A role with no account left, as one entry per role rather than a failure per request.
