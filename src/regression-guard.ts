@@ -64,20 +64,50 @@ export function describeRefusal(finding: ScopeFinding, all: Work[]) {
 }
 
 /**
+ * GY-568. The unlanded items whose commits this head carries outside the queue's intent: the
+ * entries a speculative tip equal to the candidate was published behind that have since left the
+ * queue without landing (one still queued ahead is the queue's construction, reported as ahead of
+ * it), and the open candidates the landing check found in the head's history. A file such an item covers (its planned scope or its observed diff) and no
+ * delivery claims came from that item, not from this change, so it is attributed to it by name
+ * and never read as the candidate reverting it: the control plane restores such a branch.
+ */
+export type CarriedSubject = { id?: string; candidate?: Work['candidate']; queueHistory?: Work['queueHistory'] };
+export function carriedItems(work: CarriedSubject, observation: Pick<Observation, 'landing'>, all: Work[]): Work[] {
+  const candidate = work.candidate;
+  const predicted = candidate ? [...(work.queueHistory ?? [])].reverse().find(entry => entry.event === 'predicted' && entry.tip === candidate.sha) : undefined;
+  const departed = (predicted?.predecessors ?? []).filter(key => {
+    const item = all.find(entry => entry.key === key);
+    return !item?.queue || item.queue.sequence > predicted!.sequence;
+  });
+  const keys = new Set([...departed, ...(observation.landing?.foreign ?? []).map(entry => entry.key)]);
+  return all.filter(item => keys.has(item.key) && item.id !== work.id && item.stage !== 'done' && !item.observation?.merged);
+}
+/** How many carried files a refusal names; the count covers every one. */
+const carriedNamed = 10;
+const carriedBy = (path: string, carried: Work[], all: Work[]) => !carried.length || shippedBy(path, all).length ? []
+  : carried.filter(item => inPlannedScope(item.plannedFiles ?? [], path) || (item.observation?.files ?? []).includes(path)).map(item => item.key);
+
+/**
  * The landing re-check (GY-97; see merge-queue.ts LandingCheck): what the candidate would revert
  * on the commit it would actually land on, as opposed to the base it is bound to. One entry per
  * file, naming the item that owns it. `adverse` is false for a file the observation could not
  * compare: that refuses the build gate like any uncompared file, and ejects nothing.
  */
-export interface LandingRegression { base: string; path: string; owners: string[]; adverse: boolean; text: string }
-export function landingRegressions(work: Pick<Work, 'id' | 'plannedFiles'>, observation: Pick<Observation, 'scopeFiles' | 'landing'>, all: Work[], generated: readonly string[] = generatedFiles): LandingRegression[] {
+export interface LandingRegression { base: string; path: string; owners: string[]; adverse: boolean; text: string; carried?: string[] }
+export function landingRegressions(work: Pick<Work, 'id' | 'plannedFiles'> & CarriedSubject, observation: Pick<Observation, 'scopeFiles' | 'landing'>, all: Work[], generated: readonly string[] = generatedFiles): LandingRegression[] {
   const landing = observation.landing;
   if (!landing) return [];
-  const planned = work.plannedFiles ?? [], found: LandingRegression[] = [];
+  const planned = work.plannedFiles ?? [], found: LandingRegression[] = [], carried = carriedItems(work, observation, all);
   // A file the bound-base comparison already refuses is reported there, once.
   const reported = new Set(classifyScope(planned, observation.scopeFiles ?? [], generated).filter(finding => finding.refused).map(finding => finding.path));
   for (const finding of classifyScope(planned, landing.files ?? [], generated)) {
     if (!finding.refused || reported.has(finding.path)) continue;
+    const from = carriedBy(finding.path, carried, all);
+    if (from.length) {
+      found.push({ base: landing.base, path: finding.path, owners: from, adverse: finding.kind !== 'unverified', carried: from,
+        text: `${finding.path}: ${finding.detail.replaceAll('the base branch tip', 'that commit').replaceAll('the base branch', 'that commit')} (carried from ${from.join(', ')}, whose unlanded commits this head holds)` });
+      continue;
+    }
     // A predicted base holds entries that have not landed: the file belongs to the unlanded
     // candidate whose planned scope or observed diff covers it, when no delivery does.
     const shipped = shippedBy(finding.path, all);
@@ -111,13 +141,22 @@ export function queuedRegressions(work: Pick<Work, 'id' | 'plannedFiles'>, obser
  * Build-gate reasons for the observed candidate. An observation that never compared the diff
  * against the base branch tip proves nothing about scope and is refused until a fresh one does.
  */
-export function regressionRefusals(work: Pick<Work, 'key' | 'plannedFiles'> & { id?: string }, observation: Pick<Observation, 'scopeFiles' | 'landing'>, all: Work[], generated: readonly string[] = generatedFiles): string[] {
+export function regressionRefusals(work: Pick<Work, 'key' | 'plannedFiles'> & CarriedSubject, observation: Pick<Observation, 'scopeFiles' | 'landing'>, all: Work[], generated: readonly string[] = generatedFiles): string[] {
   if (!observation.scopeFiles) return ['Candidate diff has not been compared against the base branch tip; a fresh GitHub observation is required'];
-  const refused = classifyScope(work.plannedFiles ?? [], observation.scopeFiles, generated).filter(finding => finding.refused);
+  const carried = carriedItems(work, observation, all);
+  const findings = classifyScope(work.plannedFiles ?? [], observation.scopeFiles, generated).filter(finding => finding.refused);
+  const refused = findings.filter(finding => !carriedBy(finding.path, carried, all).length);
   // The same judgement where the candidate would land: the base it is bound to is held while its
   // head is unchanged, so what the base gained since is only visible against the landing commit.
-  const landing = landingRegressions({ id: work.id ?? '', plannedFiles: work.plannedFiles }, observation, all, generated);
-  return [...(refused.length ? [`Candidate changes ${refused.length} file${refused.length === 1 ? '' : 's'} outside its planned files that must match the base branch byte-for-byte; run graphyard sync ${work.key}, restore each file from origin/<base>, and push again`,
+  const landings = landingRegressions({ id: work.id ?? '', plannedFiles: work.plannedFiles, candidate: work.candidate, queueHistory: work.queueHistory }, observation, all, generated);
+  const landing = landings.filter(entry => !entry.carried?.length);
+  // Files another item's unlanded commits put on this head (GY-568) are named with that item and
+  // sent to no worker: one refusal, which waits for the control plane's restore of the branch.
+  const foreign = [...findings.filter(finding => carriedBy(finding.path, carried, all).length).map(finding => ({ owners: carriedBy(finding.path, carried, all), text: `${finding.path}: ${finding.detail} (carried from ${carriedBy(finding.path, carried, all).join(', ')})` })),
+    ...landings.filter(entry => entry.carried?.length).map(entry => ({ owners: entry.carried!, text: entry.text }))];
+  const owners = [...new Set(foreign.flatMap(entry => entry.owners))];
+  return [...(foreign.length ? [`Carried from another item's tip: ${foreign.length} file${foreign.length === 1 ? '' : 's'} the candidate would change belong${foreign.length === 1 ? 's' : ''} to ${owners.join(', ')}, whose unlanded commits this head carries (${foreign.slice(0, carriedNamed).map(entry => entry.text).join('; ')}${foreign.length > carriedNamed ? `; and ${foreign.length - carriedNamed} more` : ''}); they are not this change's, so no worker is asked to revert them: the control plane restores the branch to the item's own reviewed head`] : []),
+  ...(refused.length ? [`Candidate changes ${refused.length} file${refused.length === 1 ? '' : 's'} outside its planned files that must match the base branch byte-for-byte; run graphyard sync ${work.key}, restore each file from origin/<base>, and push again`,
     ...refused.map(finding => `Out-of-scope regression: ${describeRefusal(finding, all)}`)] : []),
   ...(landing.length ? [`Landing the candidate on ${landing[0].base.slice(0, 12)}, the commit it would merge onto, would revert ${landing.length} file${landing.length === 1 ? '' : 's'} outside its planned files; run graphyard sync ${work.key}, restore each file as its owner shipped it, and push again`,
     ...landing.map(entry => `Landing regression: ${entry.text}`)] : [])];
