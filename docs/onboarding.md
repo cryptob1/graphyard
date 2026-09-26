@@ -3,7 +3,7 @@
 
 ## 1. Install the control plane
 
-Follow [install](install.md): `node "$GRAPHYARD_CLI" install --provider railway --repo OWNER/REPO --workers 1 --apply` after `--plan`.
+Follow [install](install.md): `node "$GRAPHYARD_CLI" install --provider railway --repo OWNER/REPO --workers 1 --apply` after reviewing `--plan`.
 
 ## 2. Add machines
 
@@ -30,8 +30,8 @@ Agents treat bracketed paste as untrusted data (prompt injection), so sessions s
 Each account's login home under `~/.coding_agents` is selected by `CLAUDE_CONFIG_DIR` (Claude Code), `CODEX_HOME` (Codex), `XDG_DATA_HOME` (OpenCode) or `CURSOR_CONFIG_DIR` (Cursor). Tokens go in `~/.config/graphyard/workers/` and `producers/` (mode 0600). Then:
 
 ```sh
-node "$GRAPHYARD_CLI" master environments --create claude,codex --apply
-CLAUDE_CONFIG_DIR=~/.coding_agents/claude-a claude
+node "$GRAPHYARD_CLI" master environments --create claude,codex --apply  # new login homes
+CLAUDE_CONFIG_DIR=~/.coding_agents/claude-a claude                       # /login once
 node "$GRAPHYARD_CLI" master environments --apply                        # report quota, write profiles
 ```
 
@@ -39,9 +39,10 @@ Profiles default to [`"approvals": "auto"`](master-agent-sessions.md#approval-mo
 
 ### Configure the fleet
 
-The **agent registry** (Settings › **Agents**) records runtimes, accounts, roles and policies:
+The **agent registry** (Settings › **Agents**) records runtimes, accounts, roles and policies, proposed from `~/.coding_agents`:
 
 ```sh
+node "$GRAPHYARD_CLI" master registry propose
 node "$GRAPHYARD_CLI" master registry propose --apply
 ```
 
@@ -58,6 +59,7 @@ node "$GRAPHYARD_CLI" master registry runtime set aider --kind aider --arg=--yes
 ### Add an account
 
 One login each:
+
 ```sh
 node "$GRAPHYARD_CLI" master registry model set opus --provider Anthropic --id claude-opus-5 \
   --input-cost 15 --output-cost 75 --tier frontier --context 1000000 --reason "Model pricing"
@@ -70,6 +72,8 @@ node "$GRAPHYARD_CLI" master registry account quota opencode-a exhausted --reset
 
 ### Add a role
 
+Preferred account first; applies next launch:
+
 ```sh
 node "$GRAPHYARD_CLI" master registry role set worker claude-b,claude-c,codex-a --concurrency 4 --reason "Codex overflow"
 node "$GRAPHYARD_CLI" master registry role set reviewer codex-a,claude-c --concurrency 2 --tool Read --model opus --reason "Read-only"
@@ -77,7 +81,11 @@ node "$GRAPHYARD_CLI" master registry role set reviewer codex-a,claude-c --concu
 
 ### Size review and proof capacity
 
-Each candidate needs one review and one producer session per proof group; `"concurrency"` caps a profile's sessions without a restart:
+Each candidate needs one review and one producer session per proof group; `"concurrency"` caps a profile's sessions, changed without a restart:
+
+```json
+"reviewers":[{"name":"claude-reviewer","agentName":"review-claude","kind":"claude","accounts":["claude-a","claude-b"],"concurrency":3}]
+```
 
 Adding workers? For worker count `W` and `G` proof groups: `⌈W / 2⌉` review slots and `G × ⌈W / 2⌉` producer slots over ≥ 2 producer principals. Watch `longestWaitMs`.
 
@@ -108,4 +116,4 @@ CI workflows should cancel superseded pull-request runs: group each by `${{ gith
 
 ## What stays manual
 
-Logins, the App confirmation, plan approval, *Confirm access*, producer grants and the [human-only decisions](glossary.md#who-decides).
+Logins (provider, GitHub, agent environments, browser profile), the App confirmation, plan approval, *Confirm access*, producer grants and the [human-only decisions](glossary.md#who-decides).
