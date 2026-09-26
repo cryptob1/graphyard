@@ -8,7 +8,7 @@ import { compactHeartbeatReceipt } from './store/receipts.js';
 import { authorizedForProof, unauthorizedProofs } from './proof-grants.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
 import { activeLease, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, submittedEpoch, type Attestation, requireCurrent, createSchema, criterionSchema, bindingApproval, carriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type ApprovalIdentity, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type Lease, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
-import { Refusal } from './model/refusal.js';
+import { Refusal, demandWork } from './model/refusal.js';
 import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
 import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
@@ -630,7 +630,7 @@ export class Engine {
         all.push(work!);
         this.refuseRenewedDeferral(work!, all);
       }
-      demand(work, 'Work item not found', 404);
+      demandWork(work);
       // A lease past its expiry that a recorded server-side renewal fault still covers stays live (GY-558).
       await this.renewalGrace(db, work, now);
       if (actor.role === 'operator-agent') {
@@ -1730,8 +1730,11 @@ export class Engine {
     }
     return restored;
   }
-  /** Removes an entry whose speculative validation cannot succeed, with the reason on the record. */
-  async ejectFromQueue(id: string, expectedRevision: number, reason: string, jobToken: string) {
+  /**
+   * Removes an entry whose speculative validation cannot succeed, with the reason on the record.
+   * `conflict` says the speculative merge conflicted; the record carries it as a typed flag (GY-252).
+   */
+  async ejectFromQueue(id: string, expectedRevision: number, reason: string, jobToken: string, conflict = false) {
     return this.store.transaction(async (db, now) => {
       const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
       requireCurrent(job, 'Integration job lease expired or superseded');
@@ -1741,13 +1744,13 @@ export class Engine {
       requireCurrent(work.queue, 'Queue entry already left the merge queue');
       const sequence = work.queue!.sequence;
       // A speculative conflict records the predecessors its prediction held (GY-321, model/queue.ts).
-      const ejected = queueEjectionRecord(work, all, reason, now);
+      const ejected = queueEjectionRecord(work, all, reason, now, conflict);
       work.queueEjection = ejected.ejection;
       work.queueHistory = ejected.history;
       work.queue = null;
       this.evaluate(work, all, now);
       await this.recordDispatch(db, work, now);
-      await save(db, work, 'graphyard', 'queue.ejected', now, { sequence, reason });
+      await save(db, work, 'graphyard', 'queue.ejected', now, { sequence, reason, conflict: ejected.ejection.conflict ?? null });
       for (const behind of all) if (behind.queue && behind.id !== work.id) await wakeJob(db, behind.id);
       return work;
     });
