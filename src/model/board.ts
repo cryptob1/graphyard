@@ -184,7 +184,8 @@ function heldMeaning(total: number, held: string[]): string {
  */
 export const actorRoles = ['worker', 'reviewer', 'producer', 'approver', 'master', 'executor', 'human-only', 'held'] as const;
 export type ActorRole = typeof actorRoles[number];
-const roleOf: Record<string, ActorRole> = {
+/** Every `who` label `nextActor` (and `prSteps`) writes, with the role it names. */
+export const roleOf: Readonly<Record<string, ActorRole>> = {
   You: 'human-only', 'Master agent': 'master', 'Builder agent': 'worker', 'Reviewer agent': 'reviewer', 'Prover agent': 'producer',
   // The control plane's own steps: the dispatcher, the CI run, the merge queue, the production watch.
   'Graphyard (automatic)': 'executor', 'Graphyard (assigns a builder)': 'executor', 'Automated checks': 'executor',
@@ -194,13 +195,15 @@ const roleOf: Record<string, ActorRole> = {
 /**
  * The role acting next. A worker's open scope request that the widening rule has not refused is
  * the approver's to judge, whatever step the item shows; everything else is the role `nextActor`
- * names on the card.
+ * names on the card, and `held` for a label `roleOf` does not list.
  */
 export function actorRole(work: Work, group: Group | null, who: string): ActorRole {
   if (group === 'needs-you') return 'human-only';
   const request = work.scopeRequest;
   if (group === 'moving' && request && request.decision?.state !== 'refused' && work.lease?.epoch === request.epoch) return 'approver';
-  return roleOf[who] ?? 'executor';
+  // A label this table does not know is no evidence the control plane acts: report it as held
+  // rather than claim a pending step for anyone (the misreport GY-371 fixed for 'Nobody yet').
+  return Object.hasOwn(roleOf, who) ? roleOf[who]! : 'held';
 }
 
 const escalation = /^Unresolved \S+ escalation requires operator resolution/;

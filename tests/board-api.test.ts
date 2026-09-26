@@ -10,7 +10,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import type { Work } from '../src/model.js';
 import { openHumanOnly } from '../src/model/human-request.js';
 import { scopeRefusalBlocker } from '../src/model/scope.js';
-import { groups, type Board, type OpenGroup } from '../src/model/board.js';
+import { actorRole, groups, roleOf, type Board, type OpenGroup } from '../src/model/board.js';
 import { statusRoutes } from '../src/server/routes/status.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
@@ -211,11 +211,33 @@ test('unit:dashboard-uses-board-api — the Work page renders the groups GET /ap
 
 test('unit:server-does-not-import-web — the layering runs web → src only: no module under src imports from web/, so the runtime image needs no web tree (GY-371)', async () => {
   const sources = execFileSync('git', ['ls-files', 'src'], { cwd: fileURLToPath(new URL('..', import.meta.url)), encoding: 'utf8' }).split('\n').filter(path => /\.tsx?$/.test(path));
+  // Every way a module reaches another: `import … from`, `export … from`, a side-effect `import`,
+  // a dynamic `import(` and a `require(` — to web/ itself or anything under it (GY-469).
+  const reachesWeb = /(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*)['"`](?:\.\.\/)+web(?:\/|['"`])/;
+  for (const form of [`import { x } from '../web/x.js';`, `export * from "../../web/x.js";`, `import '../../web/x.css';`, `await import('../web/x.js')`, `require('../web/x')`, `import x from '../../web';`])
+    assert.match(form, reachesWeb, `the guard catches ${form}`);
+  for (const form of [`import { x } from './web/x.js';`, `import x from '../webhooks/x.js';`, `const web = 'web/';`])
+    assert.doesNotMatch(form, reachesWeb, `the guard ignores ${form}`);
   const offenders: string[] = [];
   for (const path of sources) {
     const source = await readFile(new URL(`../${path}`, import.meta.url), 'utf8');
-    if (/(?:from\s+|import\(\s*)['"](?:\.\.\/)+web\//.test(source)) offenders.push(path);
+    if (reachesWeb.test(source)) offenders.push(path);
   }
   assert.deepEqual(offenders, [], 'src imports nothing from web/');
   assert.doesNotMatch(await readFile(new URL('../Dockerfile', import.meta.url), 'utf8'), /COPY web /, 'the runtime image does not copy web/');
+});
+
+test('unit:actor-role-covers-every-label — every `who` label the board writes names a role, and an unknown label reads as held, never the control plane (GY-469)', async () => {
+  const labels = new Set<string>();
+  for (const path of ['src/model/board.ts', 'src/model/pr-steps.ts']) {
+    const source = await readFile(new URL(`../${path}`, import.meta.url), 'utf8');
+    for (const match of source.matchAll(/\bwho: '([^']+)'/g)) labels.add(match[1]!);
+  }
+  assert.ok(labels.size >= 5, `found the labels: ${[...labels].join(', ')}`);
+  assert.deepEqual([...labels].filter(label => !Object.hasOwn(roleOf, label)), [], 'roleOf lists every label nextActor and prSteps write');
+  const work = { scopeRequest: null, lease: null } as unknown as Work;
+  assert.equal(actorRole(work, 'moving', 'Nobody yet'), 'held');
+  assert.equal(actorRole(work, 'moving', 'Automated checks'), 'executor');
+  assert.equal(actorRole(work, 'moving', 'Some future label'), 'held', 'an unknown label is not reported as the executor');
+  assert.equal(actorRole(work, 'moving', 'toString'), 'held', 'an inherited property is no label');
 });
