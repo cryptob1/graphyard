@@ -7,7 +7,6 @@ import { dispatchEffects, dispatchReadTimeoutMs, readDispatchCursor, runAutoDisp
 import { coordinationViewHeader } from '../../server/work-view.js';
 import { unhandled, type MasterSession } from './session.js';
 import { timedApi } from '../../master/timings.js';
-import { readRelease } from '../../executor-fleet.js';
 
 /** The durable coordination loop and the dispatcher beside it, until stopped. */
 export async function loopCommand(session: MasterSession): Promise<unknown> {
@@ -21,8 +20,6 @@ export async function loopCommand(session: MasterSession): Promise<unknown> {
     if (coordinator.actor.proofs?.length) throw new Error('The durable master loop refuses a credential that is also allowed to produce evidence');
     assertProtocol(coordinator);
     const state = await readDaemonState(root, master);
-    // The release this process loaded, read before anything can move the checkout (GY-437).
-    const release = readRelease(root);
     // The cycle and the dispatcher poll the bounded coordination view (by header, so an older
     // server answers with whole documents); the guarded merge re-reads the full documents.
     const live = liveMasterConfig(root, master), current = () => live.current, reload = () => live.reload();
@@ -38,7 +35,7 @@ export async function loopCommand(session: MasterSession): Promise<unknown> {
     // Automatic dispatch runs beside the cycle on a shorter cadence; it stops with the daemon.
     const dispatchCursor = await readDispatchCursor(root, master);
     const stopping = new AbortController();
-    const daemonRun = runDaemon(master, state, effects, { once: values.once, intervalMs: values.interval ? intervalSeconds * 1000 : () => current().run.intervalSeconds * 1000, identity: { pid: process.pid, host: master.hostId }, reload, release }).finally(() => stopping.abort());
+    const daemonRun = runDaemon(master, state, effects, { once: values.once, intervalMs: values.interval ? intervalSeconds * 1000 : () => current().run.intervalSeconds * 1000, identity: { pid: process.pid, host: master.hostId }, reload }).finally(() => stopping.abort());
     const dispatchRun = runAutoDispatch(master, dispatchCursor, dispatchEffects(root, current, { snapshot: () => coordinationSnapshot(dispatchReadTimeoutMs) }), { once: values.once, intervalMs: () => current().run.dispatchIntervalSeconds * 1000, signal: stopping.signal, reload });
     const [result, dispatched] = await Promise.all([daemonRun, dispatchRun]);
     // A cycle that threw was recorded and retried in-process (GY-119); it is reported here, never as an exit.

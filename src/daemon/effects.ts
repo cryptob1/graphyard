@@ -23,7 +23,7 @@ import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type C
 import { annotatePaneShell } from '../quarantine.js';
 import { probeSupervisorAbsence } from '../containment-probe.js';
 import { httpFleetClient, reconcileFleetSessions } from '../fleet.js';
-import { type ContainmentRetention, type DaemonAction, type DaemonState, storeAction, type DeploymentObservation, message, writeDaemonState } from './state.js';
+import { type ContainmentRetention, type DaemonAction, type DaemonState, type LoopRelease, storeAction, type DeploymentObservation, message, writeDaemonState } from './state.js';
 import { answeringWidening } from './reconcile.js';
 import { type OrphanSupervisor, readyToRetry, stopWatchSupervisor } from './sessions.js';
 import { neededDecision, type RoutineDecisionAction } from './decisions.js';
@@ -34,7 +34,7 @@ import { onceAnnotations, timingFaultAttention, type ReportedAttention } from '.
 import type { daemonSummary } from './run.js';
 import { observeDeployment } from './deployment.js';
 import { detectLoopSupervisorUnit, performSelfUpgrade, type SelfUpgradeOutcome } from './upgrade.js';
-import { restartExecutors } from '../executor-fleet.js';
+import { readRelease, restartExecutors } from '../executor-fleet.js';
 import { serverCallName, timedCall, timedFetch, timedRun } from '../master/timings.js';
 import type { RunRecord, Runner } from '../runner/types.js';
 import type { ResearchEvent } from '../research.js';
@@ -114,6 +114,12 @@ export interface DaemonEffects {
    * the release it loaded.
    */
   selfUpgrade?: (state: DaemonState) => Promise<SelfUpgradeOutcome>;
+  /**
+   * GY-437: the release this process loaded, read from its checkout when the effects are built at
+   * startup, before anything can move the checkout. The loop records it on the cursor over whatever
+   * a previous process left there; a loop wired without it reports none.
+   */
+  loadedRelease?: LoopRelease | null;
   /**
    * Removes the dependency directories of finished assignment worktrees. A loop configured
    * without it keeps cycling; it simply never reclaims. It touches no checkout, no branch, and
@@ -667,6 +673,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // fence) leaves the owed restarts on the cursor for the next cycle — and the loop
     // re-executes itself only through the supervisor unit it actually runs under, detected from
     // its own cgroup like an executor's.
+    loadedRelease: readRelease(root),
     selfUpgrade: state => performSelfUpgrade(current(), state, {
       root, run,
       restartExecutors: to => restartExecutors(current(), { actions: () => asCoordinator('actions'), coordinatorCommit: to }),

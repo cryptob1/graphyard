@@ -259,20 +259,21 @@ test('unit:loop-self-upgrade — between cycles the loop checks out the verified
         requestSmoke: async () => {}, merge: async () => {}, recordDeployment: async () => {}, requestProof: async () => {},
         dispatch: async () => {}, recordSession: async () => {}, closeSession: () => {},
         persist: (written: DaemonState) => writeDaemonState(master, written),
+        loadedRelease: readRelease(repo),
         selfUpgrade: async () => {
           upgradedBetweenCycles += 1;
           return performSelfUpgrade(master, state, { root: repo, run: async (command, args) => execFileSync(command, args, { encoding: 'utf8' }), now: () => clock });
         },
       } as unknown as DaemonEffects;
-      await runDaemon(master, state, effects, { once: true, intervalMs: 20_000, identity: { pid: process.pid, host: master.hostId }, release: readRelease(repo) });
+      await runDaemon(master, state, effects, { once: true, intervalMs: 20_000, identity: { pid: process.pid, host: master.hostId } });
       assert.equal(upgradedBetweenCycles, 1, 'the upgrade ran once, after the cycle completed');
       assert.deepEqual(state.release, { commit: moved, dirty: false }, 'the new process recorded the release it loaded from the moved checkout');
       assert.deepEqual(daemonSummary(state, clock, 20_000).release, { commit: moved, dirty: false }, 'and the summary master status reads reports it');
       assert.deepEqual((await readDaemonState(repo, master)).release, { commit: moved, dirty: false }, 'the persisted cursor now carries it too');
-      // A loop started without its release reports none rather than inheriting a stale one.
+      // A loop wired without its loaded release reports none rather than inheriting a stale one.
       const unrecorded = await readDaemonState(repo, master);
       unrecorded.release = { commit: previous, dirty: false };
-      await runDaemon(master, unrecorded, { ...effects, selfUpgrade: undefined } as DaemonEffects, { once: true, intervalMs: 20_000, identity: { pid: process.pid, host: master.hostId } });
+      await runDaemon(master, unrecorded, { ...effects, selfUpgrade: undefined, loadedRelease: undefined } as DaemonEffects, { once: true, intervalMs: 20_000, identity: { pid: process.pid, host: master.hostId } });
       assert.equal(unrecorded.release, null);
     } finally { await rm(repo, { recursive: true, force: true }); }
   } finally { await dispose(); await rm(checkout, { recursive: true, force: true }); }
