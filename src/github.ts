@@ -13,7 +13,7 @@ import { nextAction } from './model/next-action.js';
 import { foldDecisions } from './model/approval.js';
 import { normalMergeState, repairAudit, repairAuditEvent, repairLaneVerdict, type RepairAudit, type RepairLaneVerdict } from './master/repair-lane.js';
 export { CHECK_NAME };
-import { alreadyMergeableRefusal, baseRefreshNeeded, dismissedVerdict, enqueueRequestCurrent, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, pendingRestore, queuePlacement, queueRef, mergeCheckBranch, treeIdenticalPrediction, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread } from './merge-queue.js';
+import { alreadyMergeableRefusal, baseRefreshNeeded, dismissedVerdict, enqueueRequestCurrent, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, owedCheckReruns, pendingRestore, queuePlacement, queueRef, mergeCheckBranch, treeIdenticalPrediction, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread } from './merge-queue.js';
 import { blockedFeatures, controlPlanePermissions, describeShortfall, permissionShortfalls, requiredPermissions, type PermissionFeature, type PermissionLevel, type PermissionShortfall } from './github-permissions.js';
 
 /** Out-of-scope paths compared against the base tip per observation; the rest are refused as uncompared. */
@@ -1454,6 +1454,17 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     }
   }
   /**
+   * GitHub's "rerun failed jobs" for the workflow run that produced check run `checkRunId` (GY-516).
+   * An Actions check run's id is its job's id, which names the run; only the failed jobs rerun, on
+   * the same sha, so the rerun's check run is the one the gates read next.
+   */
+  async rerunFailedJobs(checkRunId: number): Promise<{ runId: number }> {
+    const job = await this.request(`/actions/jobs/${checkRunId}`);
+    demand(Number.isSafeInteger(job?.run_id), `Check run ${checkRunId} is not a GitHub Actions job; it cannot be rerun`);
+    await this.request(`/actions/runs/${job.run_id}/rerun-failed-jobs`, 'POST', {});
+    return { runId: job.run_id };
+  }
+  /**
    * The pull request's place in GitHub's merge queue (GY-258): whether the base branch has a queue,
    * whether the pull request is queued or set to auto-merge, and the merge group commit GitHub builds
    * for its entry. One GraphQL read.
@@ -1739,6 +1750,16 @@ export async function processJob(engine: Engine, github: GitHub) {
       const observation = await github.observe(work, all);
       work = await engine.observe(work.id, work.revision, observation, job.token);
       schedule.cadence = observationCadence(work, all.map(item => item.id === work!.id ? work! : item), now, previous, github.steadyStateMs?.(now.getTime()));
+      // A required check that failed on this candidate is rerun once before it counts (GY-516): the
+      // observation recorded the rerun as owed, holding the entry's position; GitHub is asked here,
+      // outside any transaction, and its answer recorded. A refusal lets the failure stand at once.
+      for (const owed of owedCheckReruns(work, engine.ciAppIds)) {
+        let outcome: { state: 'requested' | 'refused'; runId?: number; detail?: string };
+        if (typeof github.rerunFailedJobs !== 'function') outcome = { state: 'refused', detail: 'This GitHub adapter cannot rerun failed jobs' };
+        else try { outcome = { state: 'requested', runId: (await github.rerunFailedJobs(owed.failedRunId)).runId }; }
+        catch (error) { outcome = { state: 'refused', detail: error instanceof Error ? error.message.slice(0, 300) : 'GitHub refused the rerun' }; }
+        work = await engine.recordCheckRerun(work.id, job.token, owed, outcome);
+      }
       // A branch carrying another item's unlanded commits is restored by the control plane (GY-127):
       // on its own for a tip the queue ejected, on the coordinator's request otherwise. The restored
       // head is a new candidate, so the job requeues onto it before anything else is dispatched.

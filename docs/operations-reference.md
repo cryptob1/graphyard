@@ -3,27 +3,31 @@
 
 ## Master coordination loop
 
-Restart `graphyard master run` freely; it never dispatches twice. `master status` → `daemon` gives health; `journalctl --user -u graphyard-master`, the log. `daemon.metrics.timings` and status `timings` time steps and calls over 1s; status reads a cached intervention report. Failed server requests log their route and SQL statement.
+Restart `graphyard master run` freely; it never dispatches twice. Health: `master status` → `daemon`; log: `journalctl --user -u graphyard-master`. `daemon.metrics.timings` and status `timings` time steps and calls over 1s; status reads cached interventions; failed server requests log route and SQL.
 
 ### Perpetual master loop
 
-`master verify-deployment GY-N` refuses a release *unobserved* (set `--deployment-url`), *stale* (rerun), not serving the merge (keep cycling), or *already recording deployment* (use a follow-up item).
+`master verify-deployment GY-N` refuses a release *unobserved* (set `--deployment-url`), *stale* (rerun), not serving the merge (keep cycling), or *already recording deployment* (follow up).
 
 ## Lost worker before submission
 
-A lease expires 120 seconds after the last heartbeat; the next claim, a higher epoch, keeps the worktree. An unexplained lapse raises `lease-loss` ([classification](protocol/leases.md#how-a-lease-ends)), blocking merge until settled ([settling](delegation.md#who-may-settle-what)).
+Leases expire 120 seconds after the last heartbeat; the next claim (higher epoch) keeps the worktree. Unexplained lapses raise `lease-loss` ([classification](protocol/leases.md#how-a-lease-ends)), blocking merge until settled ([settling](delegation.md#who-may-settle-what)).
 
 ## Supervisor died leaving a containment quarantine
 
-On the worker's machine `graphyard master settle-containment GY-N "reason"` verifies no process survives (`containment.held` lists them); only the loop excuses an idle pane shell (childless, parent `herdr server`), closing its pane. If refused, confirm the stop, then `graphyard rework GY-N --previous-worker-stopped "reason"`, or `graphyard recover-containment GY-N --previous-worker-stopped "reason"` once delivered.
+On the worker's machine `graphyard master settle-containment GY-N "reason"` verifies no process survives (`containment.held` lists them); only the loop excuses an idle pane shell (childless, parent `herdr server`), closing it. If refused, confirm the stop, then `graphyard rework GY-N --previous-worker-stopped "reason"`, or `graphyard recover-containment GY-N --previous-worker-stopped "reason"` once delivered.
 
 ## Submitted implementation needs rework
 
-Stop the worker, then `graphyard rework GY-N --previous-worker-stopped "reason"`; the next worker resubmits the PR.
+Stop the worker, then `graphyard rework GY-N --previous-worker-stopped "reason"`; the next worker resubmits.
+
+## Flaky CI check
+
+A required check failing on a tip or head reruns once per sha (*rerun failed jobs*, Actions: write), holding position, approval and proofs; a second failure or refused rerun ejects (`check.rerun.*` events). `mergeQueue.rerunFailedChecks`: default 1, 0 disables; not yet loop-published.
 
 ## Accepted evidence turns out to be wrong
 
-`graphyard revoke GY-N revoke.json` ([body](protocol/evidence.md#revocation)): the gate closes and the queue ejects the entry.
+`graphyard revoke GY-N revoke.json` ([body](protocol/evidence.md#revocation)): the gate closes and the queue ejects it.
 
 ## GitHub request budget
 
@@ -46,7 +50,7 @@ Unchanged non-merge candidates spend **at most 40%** (`steadyStateShare`) of the
 
 ### The merge-path reserve
 
-Below **500 requests** by default, `GRAPHYARD_GITHUB_RESERVE`, non-merge observations wait for the reset (`githubBudget.deferrals`).
+Below **500 requests** by default, `GRAPHYARD_GITHUB_RESERVE`, non-merge observations await the reset (`githubBudget.deferrals`).
 
 ### What an observation costs
 
@@ -54,15 +58,15 @@ About ten requests uncached; unchanged, none.
 
 ### What a pause means for gates
 
-A rate-limit `403`/`429` pauses requests; gates read stale until it lifts: nothing merges on an observation over two minutes old.
+A rate-limit `403`/`429` pauses requests; gates read stale until it lifts; nothing merges on observations over two minutes old.
 
 ### Reading the budget
 
-`graphyard status` (or `GET /api/status`) → `githubBudget`; `master status` attention items with subject `github`.
+`graphyard status` (or `GET /api/status`) → `githubBudget`; `master status` attention subject `github`.
 
 ### Webhook liveness
 
-After an hour without deliveries `master status` points to `https://github.com/settings/apps/APP-SLUG`.
+Deliveries silent an hour: `master status` points to `https://github.com/settings/apps/APP-SLUG`.
 
 ## Control-plane resources
 
@@ -70,42 +74,42 @@ Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROF
 
 ## Bootstrap mode for a self-proving change
 
-For a change shipping its own proof harness, a `policy:bootstrap` holder adds `"bootstrap": {"reason": "…", "contractPaths": ["src/herdr/recovery.ts"]}` to that criterion. Other gates apply; `e2e:` proofs cannot be deferred; the next item touching those paths owes it (`graphyard obligations`).
+For a change shipping its own proof harness a `policy:bootstrap` holder adds `"bootstrap": {"reason": "…", "contractPaths": ["src/herdr/recovery.ts"]}` to that criterion. Other gates apply; `e2e:` proofs are never deferred; the next item touching those paths owes it (`graphyard obligations`).
 
 ## Delivered with a failed smoke proof
 
-It stays Done, marked **delivered with failure**. Revert through a new item; never backfill evidence.
+Stays Done, **delivered with failure**; revert through a new item, never backfill evidence.
 
 ## Merged but not deployed
 
-A merge production never served is a `delivery.deployment-incident` ([observation](deployment.md#production-deployment-observation)). Fix the deployment; it recovers once served.
+An unserved merge is a `delivery.deployment-incident` ([observation](deployment.md#production-deployment-observation)). It recovers once served.
 
 ## Merge bypass
 
-An ungated merge is a permanent violation: repair access, open a follow-up item, never backfill evidence. An admin opens a direct-merge window with `graphyard operator direct-merges on --since ISO REASON`.
+An ungated merge is a permanent violation: repair access, open a follow-up, never backfill evidence. Admins open direct-merge windows: `graphyard operator direct-merges on --since ISO REASON`.
 
 ## Credentials
 
-Rotate `GRAPHYARD_PRINCIPALS` and redeploy. Operator agents hold only listed capabilities: `graphyard operator-agent setup|list|rotate|revoke`.
+Rotate `GRAPHYARD_PRINCIPALS`, redeploy. Operator agents hold listed capabilities only: `graphyard operator-agent setup|list|rotate|revoke`.
 
 ## Proof authority grants
 
 ```sh
-graphyard grants                                   # live authority
-graphyard grants grant ci "integration:*,unit:*" "CI proves integration and unit"
+graphyard grants
+graphyard grants grant ci "integration:*,unit:*" "CI proves both"
 graphyard grants revoke ci "integration:claim-safety" "Runner decommissioned"
 ```
 
-Only an `admin` grants, only to `producer` principals. Patterns: an exact name, `kind:*`, or a prefix like `manual:gy-43/*`.
+Admins grant, to `producer` principals only. Patterns: exact name, `kind:*`, or prefix like `manual:gy-43/*`.
 
 ## Setup proposals and drift
 
-`graphyard init --scan` writes `.graphyard/setup-proposal.json`; `--apply` applies it. Later scans and `doctor --profile through-merge|preview-validation|production-verification` report drift without repairing it.
+`graphyard init --scan` writes `.graphyard/setup-proposal.json`; `--apply` applies it. Later scans and `doctor --profile through-merge|preview-validation|production-verification` report drift, repairing nothing.
 
 ## Scale limits
 
-Four provider jobs per tick per replica; watch lock wait, job lag, budget.
+Four provider jobs per replica tick; watch lock wait, job lag, budget.
 
 ### Concurrent reconciliation
 
-A stale observation snapshot retries after two seconds.
+Stale observation snapshots retry after two seconds.
