@@ -167,6 +167,19 @@ test('unit:repair-lane-audited — a repair-lane merge appends its audit entry b
   assert.deepEqual(events.map(event => event.kind), ['repair.merged', 'repair.failed'], 'no second repair.merged for the same head');
   assert.equal(merges.length, 1); assert.deepEqual(merges[0].audit, events[0].payload.details, 'the merge is attributed to the first audit entry');
 
+  // GY-455: a retry after the normal merge's refusal changed keeps the first entry's attribution and
+  // time, but appends it once more with `bypassed` refreshed, so delivery reads the current refusal.
+  merges.length = 0;
+  const moved = repairItem({ gates: [{ name: 'test', passed: true, reasons: [] }, { name: 'merge', passed: false, reasons: ['GitHub reports the pull request BLOCKED'] }] });
+  await repairLaneStep(engine, github, moved, new Date(stalled + 120_000));
+  assert.deepEqual(events.map(event => event.kind), ['repair.merged', 'repair.failed', 'repair.merged'], 'the corrected entry is appended');
+  const corrected = events[2].payload.details as RepairAudit;
+  assert.deepEqual(corrected, { ...(events[0].payload.details as RepairAudit), bypassed: { state: 'refused', since, detail: 'GitHub reports the pull request BLOCKED' } }, 'only bypassed is refreshed');
+  assert.equal(merges.length, 1); assert.deepEqual(merges[0].audit, corrected, 'the merge carries the refreshed refusal');
+  merges.length = 0;
+  await repairLaneStep(engine, github, moved, new Date(stalled + 180_000));
+  assert.equal(events.length, 3, 'an unchanged refusal appends nothing more'); assert.deepEqual(merges[0].audit, corrected);
+
   // GY-428: the bypass merge runs behind the job's fencing guard; a fenced-out job writes nothing.
   events.length = 0; merges.length = 0;
   await assert.rejects(repairLaneStep(engine, github, repairItem(), new Date(stalled), async () => { throw new Error('Work or job ownership changed before publication; retry'); }), /ownership changed/);

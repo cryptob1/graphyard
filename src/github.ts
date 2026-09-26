@@ -5,6 +5,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { observeCodex } from './codex-review.js';
 import { observeAgentReview } from './agent-review.js';
 import { readFile } from 'node:fs/promises';
+import { isDeepStrictEqual } from 'node:util';
 import type { Engine } from './engine.js';
 import { behindBaseHold, mechanicalHold } from './model/dispatch.js';
 import { CHECK_NAME, carriedApproval, demand, nativeReviewRequired, parseReviewerApps, reviewerProfileFor, reviewProviderOf, type Observation, type ReviewerApp, type ReviewerProfile, type ScopeFile, type TipMerge, type Work, type ReviewRequest } from './model.js';
@@ -1907,7 +1908,9 @@ export async function gateMerge(github: MergeGateClient, work: Work, request: Me
  * `repair.refused`, naming the missing condition, once per head and condition.
  * The bypass merge runs behind the job's fencing guard, as gateMerge and publish do (GY-428): a job
  * that lost its lock or whose item moved writes nothing. A retry after a failed GitHub merge reuses
- * the audit entry already appended for the same head and decision instead of appending a second.
+ * the audit entry already appended for the same head and decision instead of appending a second,
+ * unless the bypassed normal merge has changed since: then the entry is appended once more with its
+ * `bypassed` refreshed, so the delivered record names the refusal the merge actually bypassed.
  */
 export async function repairLaneStep(engine: Pick<Engine, 'store' | 'enqueueRequest'>, github: Pick<GitHub, 'repairMerge'>, work: Work, now = new Date(), beforeWrite: () => Promise<void> = async () => {}): Promise<RepairLaneVerdict> {
   const rows = (await engine.store.pool.query("SELECT actor, kind, payload, created_at FROM events WHERE work_id=$1 AND kind LIKE 'decision.%' ORDER BY seq", [work.id])).rows;
@@ -1923,8 +1926,10 @@ export async function repairLaneStep(engine: Pick<Engine, 'store' | 'enqueueRequ
   const recorded = (await engine.store.pool.query(`SELECT payload->'details' AS audit FROM events WHERE work_id=$1 AND kind=$2 AND payload->'details'->>'head'=$3 AND payload->'details'->>'decision'=$4 ORDER BY seq DESC LIMIT 1`,
     [work.id, repairAuditEvent, verdict.sha, verdict.decision.id])).rows[0]?.audit as RepairAudit | undefined;
   await beforeWrite();
-  const audit = recorded ?? repairAudit(work, verdict, now.toISOString());
-  if (!recorded) await record(repairAuditEvent, audit);
+  // A retry keeps the first entry's attribution and time, but the normal merge it bypasses may have
+  // moved since (GY-455): the refreshed refusal is appended as a corrected entry, which delivery reads.
+  const audit = recorded ? { ...recorded, bypassed: verdict.bypassed } : repairAudit(work, verdict, now.toISOString());
+  if (!recorded || !isDeepStrictEqual(recorded.bypassed, audit.bypassed)) await record(repairAuditEvent, audit);
   try { await github.repairMerge(work, audit); }
   catch (error) { await record('repair.failed', { ...audit, error: error instanceof Error ? error.message : String(error) }); throw error; }
   return verdict;
