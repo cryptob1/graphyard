@@ -57,7 +57,7 @@ Three failures with an unchanged reason mark a row stalled rather than retrying 
 
 ### Loop failure recovery
 
-A failed snapshot read retries once after 0.5–1.5 s; a failed cycle waits min(interval, 30 s), doubling to the ceiling. One item's throw fails only its `isolated:KIND:ITEM-ID` action, as does a launch's on the launcher beside the cycle ([launches](operations-reference.md#master-coordination-loop)).
+A failed snapshot read retries once after 0.5–1.5 s; a failed cycle waits min(interval, 30 s), doubling to the ceiling. One item's throw fails only its `isolated:KIND:ITEM-ID` action.
 
 ## Resources and disk
 
