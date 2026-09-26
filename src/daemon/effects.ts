@@ -59,6 +59,12 @@ export interface DaemonEffects {
    */
   decideScope?: (work: Work) => Promise<Work>;
   /**
+   * Wakes the item's durable observation job now (GY-710): the control plane's `resync`, which
+   * makes the job due at once, ahead of every job still waiting for its cadence. A step refused
+   * for want of a fresh observation asks for one this way instead of waiting for the cadence.
+   */
+  wakeObservation?: (work: Work) => Promise<unknown>;
+  /**
    * The review findings standing against the item's head — its unresolved threads and its
    * reviewer's latest change request (review-scope.ts) — read outside every transaction.
    */
@@ -562,6 +568,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     dispatch: (work, profile, agents, snapshot) => dispatchWork(root, work, profile, agents, run, snapshot.work, undefined, undefined, undefined, snapshot.now, { agents: () => listHerdrAgents(run) }),
     recordSession: (work, handle) => mutate(`work/${work.id}/session`, handle),
     decideScope: work => mutate(`work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch }),
+    wakeObservation: work => mutate(`work/${work.id}/resync`, {}),
     // No pull request yet means no review finding: the first attempt's scope is the criteria's alone.
     // Only the configured reviewer's and the awaited bot reviewers' words are findings the loop acts on.
     reviewFindings: async work => work.candidate?.pr ? readReviewFindings({ repository: current().repository, pr: work.candidate.pr, sha: work.candidate.sha, reviewer: current().reviewer ? `${current().reviewer!.slug}[bot]` : null,

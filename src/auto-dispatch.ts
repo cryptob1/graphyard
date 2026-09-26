@@ -57,6 +57,7 @@ import { currentEvidence } from './model/evidence.js';
  * sentence is bounded again before it becomes a tick reason — so a reason at its cap still
  * yields a valid tick. `bounded` marks every cut with an ellipsis rather than hiding it.
  */
+export const launchWaitLimit = 50;
 export const cursorTextLimit = 500, capacityReasonLimit = 1000, dispatchFailureReasonLimit = 300, closureFailureReasonLimit = 300;
 export const ellipsis = '…';
 export const bounded = (text: string, limit: number) => text.length > limit ? `${text.slice(0, Math.max(0, limit - ellipsis.length))}${ellipsis}` : text;
@@ -112,6 +113,9 @@ export const dispatchCursorSchema = z.object({
     /** Session records this tick closed against the runtime, and the closures it could not write back. */
     closed: z.number().int().min(0).default(0), closeFailures: z.array(z.string().max(cursorTextLimit)).max(20).default([]),
     reasons: z.array(z.string().max(cursorTextLimit)).max(20).default([]),
+    /** Each request the tick left waiting, by request id, with why (GY-710): what `master status` ages against the request's own time. */
+    waits: z.array(z.object({ kind: z.enum(['review', 'producer']), work: z.string().min(1).max(40), requestId: z.string().min(1).max(64), sha: z.string().min(1).max(40),
+      reason: z.string().max(cursorTextLimit), group: z.string().max(40).optional() }).strict()).max(launchWaitLimit).default([]),
     /** Where the tick's time went (GY-377): its steps and its slowest external calls. Absent on older ticks. */
     timings: timingsSchema.optional() }).strict().nullable().default(null),
   /**
@@ -1002,7 +1006,8 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
   cursor.lastTick = { at: tick.at, launched: tick.launched.length, refused: tick.refused.length, waiting: tick.waiting.length, settled: tick.skipped,
     closed: tick.closed.length, closeFailures: closeFailureReasons(tick.closeFailures),
     // A launch that skipped an exhausted bot's wait says so beside the waits (GY-349).
-    reasons: [...composed().map(([reason]) => reason), ...tick.launched.filter(launch => launch.reason).map(launch => bounded(`${launch.kind} for ${launch.work} ${launch.sha.slice(0, 12)}: launched; ${launch.reason}`, cursorTextLimit))].slice(0, 20), timings: timings.report() };
+    reasons: [...composed().map(([reason]) => reason), ...tick.launched.filter(launch => launch.reason).map(launch => bounded(`${launch.kind} for ${launch.work} ${launch.sha.slice(0, 12)}: launched; ${launch.reason}`, cursorTextLimit))].slice(0, 20),
+    waits: tickWaits(tick.waiting), timings: timings.report() };
   await persist();
   return tick;
 }
@@ -1125,7 +1130,7 @@ export function dispatchEffects(root: string, config: MasterConfig | (() => Mast
     reconcileProducers: (work, agents) => reconcileProducers(root, current(), work, agents, { run }),
     // Each launch's reads of its own pane are watched: a runtime that exited on its provider's
     // limit notice is failed over below rather than counted as a refusal.
-    launchReview: (work, request, profile, agents, observedAt) => { const watch = watchInstantExit(run, deps.now); return launchReview(root, work, profile.name, agents, observedAt, { run: watch.run, start: watch.start, requestId: request.id }).catch(error => { throw watch.classify(error); }); },
+    launchReview: (work, request, profile, agents, observedAt) => { const watch = watchInstantExit(run, deps.now); return launchReview(root, work, profile.name, agents, observedAt, { run: watch.run, start: watch.start, requestId: request.id, request: { sha: request.sha, baseSha: request.baseSha, policyRevision: request.policyRevision } }).catch(error => { throw watch.classify(error); }); },
     launchProducer: (work, request, profile, agents, observedAt) => { const watch = watchInstantExit(run, deps.now); return launchProducer(root, work, request, profile, agents, observedAt, { run: watch.run, start: watch.start }).catch(error => { throw watch.classify(error); }); },
     // Who has reviewed the head: one read per head at most every 30 seconds, however often the
     // dispatcher ticks, since it is asked on every tick while a launch waits on a bot reviewer.
@@ -1217,6 +1222,46 @@ export function dispatchSummary(cursor: DispatchCursor, now: number, intervalMs:
       environments: Object.values(cursor.accounts.environments).map((health: any) => ({ environment: health.name, kind: health.kind, loggedIn: health.loggedIn, quota: health.quota, healthy: health.healthy, reason: health.reason, usage: health.usage, login: health.login, checkedAt: health.checkedAt })),
       skipped: cursor.accounts.skipped.slice(-20),
     } : { environments: [], skipped: [] } };
+}
+
+/** The waits a tick keeps (GY-710): one per request, its last reason, reviews first, bounded for the cursor. */
+export function tickWaits(waiting: DispatchWait[]) {
+  const byRequest = new Map<string, DispatchWait>();
+  for (const entry of waiting) byRequest.set(entry.requestId, entry);
+  return [...byRequest.values()].sort((a, b) => (a.kind === 'review' ? 0 : 1) - (b.kind === 'review' ? 0 : 1)).slice(0, launchWaitLimit)
+    .map(({ kind, work, requestId, sha, reason, group }) => ({ kind, work: work.slice(0, 40), requestId: requestId.slice(0, 64), sha: sha.slice(0, 40), reason: bounded(reason, cursorTextLimit), ...(group ? { group: group.slice(0, 40) } : {}) }));
+}
+/** A review request waiting longer than this without a launch raises attention (GY-710). */
+export const reviewLaunchWaitAttentionMs = 15 * 60_000;
+export interface LaunchWait { kind: 'review' | 'producer'; work: string; requestId: string; sha: string; group: string | null; requestedAt: string; waitedMs: number; reason: string }
+/**
+ * Every launch still waiting (GY-710), as `master status` reports it: each request the control
+ * plane still holds open that the last tick left waiting or a refusal still stands against, how
+ * long since the request was made, and why it has not launched. A request the snapshot no longer
+ * holds, or one already answered by a session, waits for nothing and is not listed.
+ */
+export function launchWaits(work: Work[], cursor: Pick<DispatchCursor, 'lastTick' | 'failures'>, now: number): LaunchWait[] {
+  const waits = new Map((cursor.lastTick?.waits ?? []).map(entry => [entry.requestId, entry]));
+  const rows: LaunchWait[] = [];
+  for (const item of work.filter(entry => entry.stage !== 'done' && entry.autoDispatch)) {
+    const requests = [item.autoDispatch!.review, ...item.autoDispatch!.producers].filter((request): request is DispatchRequest => request?.state === 'requested');
+    for (const request of requests) {
+      const wait = waits.get(request.id), failure = cursor.failures[request.id];
+      if (!wait && !failure) continue;
+      const requested = Date.parse(request.requestedAt);
+      rows.push({ kind: request.kind === 'review' ? 'review' : 'producer', work: item.key, requestId: request.id, sha: request.sha, group: request.group ?? null, requestedAt: request.requestedAt,
+        waitedMs: Number.isFinite(requested) ? Math.max(0, now - requested) : 0,
+        reason: wait?.reason ?? `launch refused ${failure!.attempts} time(s): ${failure!.reason}; next attempt at ${failure!.nextAt}` });
+    }
+  }
+  return rows.sort((a, b) => b.waitedMs - a.waitedMs);
+}
+const waitedFor = (ms: number) => ms >= 3_600_000 ? `${Math.floor(ms / 3_600_000)} h ${Math.floor(ms % 3_600_000 / 60_000)} min` : `${Math.floor(ms / 60_000)} min`;
+/** One attention item per review request that has waited past the bound without a launch (GY-710), naming how long and why. */
+export function launchWaitAttention(waits: LaunchWait[]): AttentionItem[] {
+  return waits.filter(wait => wait.kind === 'review' && wait.waitedMs > reviewLaunchWaitAttentionMs).map(wait => ({ subject: wait.work,
+    text: bounded(`${wait.work}'s review request ${wait.requestId} on ${wait.sha.slice(0, 12)} has waited ${waitedFor(wait.waitedMs)} (since ${wait.requestedAt}) without a reviewer launch: ${wait.reason}`, 2000),
+    ...agentOwner('master', `Fix what the wait names, or launch it with graphyard master review ${wait.work}`) }));
 }
 
 /**
