@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { consentAnswerSchema } from './consent-prompt.js';
 import { LaunchRefusedError } from './harness.js';
 import { defaultChildRun, type ChildRun } from './child-runner.js';
-import { closeFailedLaunch, launchStartMs, withLaunchClose, accountLaunch, acknowledgeLaunch, acknowledgementMs, allocateManagedCheckout, atomicPrivateWrite, autonomousSession, closeHerdrPane, createdHerdrTab, deliverPrompt, destructivePromptGuidance, herdrJson, loadMasterConfig, markReprompted, neverStarted, onSelectedSession, prepareSessionHarness, privateFile, profileAtLimit, profileSessions, readProducerCredential, readSessionScreen, repromptText, selectAccount, selectRegistryAccount, sessionActivity, sessionAgentName, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, writeFailure, type PromptDelivery, type StartBounds, type HerdrAgent, type MasterConfig, type ProducerProfile, type RequestDelivery, type SessionRetryReport } from './master.js';
+import { closeFailedLaunch, launchStartMs, withLaunchClose, accountLaunch, acknowledgeLaunch, acknowledgementMs, allocateManagedCheckout, atomicPrivateWrite, autonomousSession, closeHerdrPane, createdHerdrTab, deliverPrompt, destructivePromptGuidance, herdrJson, loadMasterConfig, markReprompted, neverStarted, onSelectedSession, prepareSessionHarness, privateFile, profileAtLimit, profileSessions, registrySessionOf, readProducerCredential, readSessionScreen, repromptText, selectAccount, selectRegistryAccount, sessionActivity, sessionAgentName, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, writeFailure, type PromptDelivery, type StartBounds, type HerdrAgent, type MasterConfig, type ProducerProfile, type RequestDelivery, type SessionRetryReport } from './master.js';
 import type { FleetProbe, selectFleetSession } from './fleet.js';
 import { implementerIdentities, type Work } from './model.js';
 import type { DispatchRequest } from './model/dispatch.js';
@@ -44,6 +44,8 @@ export const producerRecordSchema = z.object({
   attempt: z.number().int().min(1).max(50).default(1),
   /** When the loop saw the control plane no longer request `requestId`; until then the record is pinned (reviewer.ts boundSessionLedger). */
   requestClosedAt: z.string().min(1).max(40).optional(),
+  /** The agent registry session the launch was chosen under (GY-205): ended once this record settles, so the role's slot frees with it. */
+  session: z.string().min(1).max(200).optional(),
   key: z.string().min(1).max(40), pr: z.number().int().positive(),
   sha: sha40, baseSha: sha40, policyRevision: z.number().int().nonnegative(),
   group: z.string().min(1).max(40), proofs: z.array(z.string().min(1).max(200)).min(1).max(50),
@@ -315,7 +317,8 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
     const requestedAt = now();
     const record: ProducerRecord = producerRecordSchema.parse({ id, requestId: request.id, attempt: prior.length + 1, key: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision,
       group: binding.group, proofs: binding.proofs, profile: profile.name, principal: profile.principal, agentName, pane: pane ?? null,
-      requestedAt: requestedAt.toISOString(), expiresAt: new Date(requestedAt.getTime() + config.run.producerTimeoutMinutes * 60_000).toISOString(), state: 'pending', outcome: Object.fromEntries(binding.proofs.map(proof => [proof, 'missing'])), delivery, ...(consent.length ? { consent } : {}), checkout: checkout.directory });
+      requestedAt: requestedAt.toISOString(), expiresAt: new Date(requestedAt.getTime() + config.run.producerTimeoutMinutes * 60_000).toISOString(), state: 'pending', outcome: Object.fromEntries(binding.proofs.map(proof => [proof, 'missing'])), delivery, ...(consent.length ? { consent } : {}), checkout: checkout.directory,
+      ...(registrySessionOf(selected) ? { session: registrySessionOf(selected) } : {}) });
     // A record that cannot be written leaves no session behind.
     try { await saveProducerLedger(root, { ...ledger, producers: [...ledger.producers, record] }); }
     catch (error) {
@@ -356,7 +359,7 @@ async function launchHeadlessProducer(root: string, config: MasterConfig, work: 
     group: binding.group, proofs: binding.proofs, profile: profile.name, principal: profile.principal, agentName: session.agentName, pane: null,
     // A run holds its request on its command line from its first instant: there is nothing to re-prompt.
     requestedAt: requestedAt.toISOString(), expiresAt: new Date(requestedAt.getTime() + timeoutMs).toISOString(), state: 'pending', outcome: Object.fromEntries(binding.proofs.map(proof => [proof, 'missing'])),
-    delivery: 'request', acknowledgedAt: requestedAt.toISOString(), checkout: checkout.directory, runtime: 'pi' });
+    delivery: 'request', acknowledgedAt: requestedAt.toISOString(), checkout: checkout.directory, runtime: 'pi', ...(registry ? { session: registry.account.fleet.session } : {}) });
   const ledger = await readProducerLedger(root);
   try { await saveProducerLedger(root, { ...ledger, producers: [...ledger.producers, record] }); }
   catch (error) { await removeSessionCheckout(root, dirname(checkout.directory), checkout.directory).catch(() => {}); await registry?.release('the producer record could not be written'); throw error; }
