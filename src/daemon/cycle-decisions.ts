@@ -534,8 +534,9 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     }
     // A `master approver` session that ended before any cycle listed it is known by its launch
     // record alone (GY-551): while its decision still waits for a judgement it is watched as gone,
-    // so supervision relaunches it like one seen to end.
-    for (const record of records) {
+    // so supervision relaunches it like one seen to end. Without the approver effect nothing could
+    // relaunch it, and the watch would only be closed and found again every cycle.
+    if (effects.approver) for (const record of records) {
       if (!record.work || !record.decision || seen.agents.some(agent => agent.name === record.agentName) || watched.some(watch => watch.decision === record.decision || watch.agentName === record.agentName)) continue;
       const item = snapshot.work.find(candidate => candidate.key === record.work);
       if (!item || item.stage === 'done' || !effects.decisions) continue;
