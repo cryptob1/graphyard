@@ -33,7 +33,7 @@ Grants are rechecked every five minutes and after 403s; a shortfall (`appPermiss
 
 On the base branch require `Graphyard / merge` bound to this App, `strict` **off**, enforce for administrators, forbid force pushes and deletion, workers get no bypass (the [repair lane](master-agent.md#repair-lane)). `master browser protection` reconciles it; `master protection --apply`, `install --apply` and `init --scan --apply` give organization repositories a merge queue requiring it (CI on `merge_group`), user-owned ones or a 422 `allow_auto_merge`.
 
-The gate also requires `GITHUB_CI_APP_IDS` CI, current-head approval, trusted evidence (executed > 0, skipped 0) and a non-draft PR with the queue head.
+The gate also requires CI checks from `GITHUB_CI_APP_IDS` Apps, current-head approval, trusted evidence (executed > 0, skipped 0), a mergeable non-draft PR, and the queue head. Unknown mergeability (`null`) is re-read 3 times in 10 s, then refused as computing; queued tips decide.
 
 ## Merge queue
 

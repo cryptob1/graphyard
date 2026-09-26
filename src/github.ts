@@ -1,6 +1,7 @@
 import { ReconciliationRetry, Refusal, SpeculativeConflict, requireCurrent } from './model.js';
 import { createHash, createSign, randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { setTimeout as delay } from 'node:timers/promises';
 import { observeCodex } from './codex-review.js';
 import { observeAgentReview } from './agent-review.js';
 import { readFile } from 'node:fs/promises';
@@ -13,8 +14,10 @@ import { nextAction } from './model/next-action.js';
 import { foldDecisions } from './model/approval.js';
 import { normalMergeState, repairAudit, repairAuditEvent, repairLaneVerdict, type RepairAudit, type RepairLaneVerdict } from './master/repair-lane.js';
 export { CHECK_NAME };
-import { alreadyMergeableRefusal, baseRefreshNeeded, dismissedVerdict, enqueueRequestCurrent, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, pendingRestore, queuePlacement, queueRef, mergeCheckBranch, treeIdenticalPrediction, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread } from './merge-queue.js';
+import { alreadyMergeableRefusal, baseRefreshNeeded, dismissedVerdict, enqueueRequestCurrent, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, pendingRestore, predictQueue, queuePlacement, queueRef, mergeCheckBranch, treeIdenticalPrediction, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread } from './merge-queue.js';
 import { blockedFeatures, controlPlanePermissions, describeShortfall, permissionShortfalls, requiredPermissions, type PermissionFeature, type PermissionLevel, type PermissionShortfall } from './github-permissions.js';
+import { agentOwner, type AttentionItem } from './master/attention.js';
+import type { IntegrationJob } from './coordination.js';
 
 /** Out-of-scope paths compared against the base tip per observation; the rest are refused as uncompared. */
 export const scopeLookupBudget = 200;
@@ -23,6 +26,8 @@ export const scopeLookupBudget = 200;
  * so a list this long may be truncated: it is treated as incomplete and nothing is carried.
  */
 export const compareFileCap = 300;
+/** Re-requests of a pull request GitHub answered with `mergeable: null`, `mergeabilityRetryMs` apart: at most 10 seconds (GY-548). */
+export const mergeabilityRetries = 3, mergeabilityRetryIntervalMs = 3_000;
 /** One file of a GitHub compare, as far as a patch-id reads it. */
 export interface CompareFile { filename?: unknown; previous_filename?: unknown; status?: unknown; patch?: unknown; changes?: unknown }
 /**
@@ -126,6 +131,19 @@ export function steadyStateInterval(openCandidates: number, meanRequests: number
   return Math.min(3600_000, Math.max(observationCadenceMs.steady, affordable));
 }
 /**
+ * The observation throughput one process has been achieving (GY-492), read from the durations of
+ * the jobs it completed in `windowMs`: how many it finished a minute, and how long the typical
+ * and the slowest tenth took. This is the number a stalled queue argues with: workers at twice
+ * the fleet's arrival rate keep the head fresh, and `master status` reports the lag past it.
+ */
+export function observationThroughput(durations: { at: number; ms: number }[], now: number, windowMs = budgetWindowMs) {
+  const recent = durations.filter(entry => now - entry.at <= windowMs);
+  const sorted = recent.map(entry => entry.ms).sort((a, b) => a - b);
+  const quantile = (fraction: number) => sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor(fraction * sorted.length))] : null;
+  return { windowMs, count: recent.length, jobsPerMinute: Math.round(recent.length / (windowMs / 60_000) * 100) / 100,
+    medianDurationMs: quantile(0.5), p90DurationMs: quantile(0.9) };
+}
+/**
  * The observation schedule, by what an observation of an item in that state can change.
  *
  * - `merge` — at the merge gate with every other gate passing. The merge executor refuses an
@@ -191,6 +209,8 @@ export interface GitHubBudget {
   lastHour: { requests: number; byKind: { kind: string; requests: number }[] };
   /** The schedule in force, and what each observation cost the job that made it. */
   cadence: Record<CadenceBand, number>;
+  /** The throughput the observation workers have been achieving (GY-492), from the job durations of the last window. */
+  throughput: ReturnType<typeof observationThroughput>;
   observations: { count: number; meanRequests: number | null; meanUncached: number | null;
     jobs: { work: string; at: string; requests: number; uncached: number; band: CadenceBand; cadenceMs: number }[] };
   /** Observations the reserve is holding back, until when and why. */
@@ -206,7 +226,7 @@ export function observationFingerprint(observation: Observation | null | undefin
   if (!observation) return null;
   return JSON.stringify({
     sha: observation.candidate.sha, baseSha: observation.candidate.baseSha, baseTip: observation.baseTip,
-    prState: observation.prState, draft: observation.draft, merged: observation.merged, mergeable: observation.mergeable, conflicting: observation.conflicting || undefined,
+    prState: observation.prState, draft: observation.draft, merged: observation.merged, mergeable: observation.mergeable, conflicting: observation.conflicting || undefined, mergeabilityUnknown: observation.mergeabilityUnknown || undefined,
     checks: observation.checks.map(check => [check.name, check.result, check.appId, check.id ?? null, check.attempt ?? null]),
     reviews: observation.reviews.map(review => [review.id, review.reviewer, review.sha, review.state]),
     agentReview: observation.agentReview ? [observation.agentReview.sha, observation.agentReview.approved, observation.agentReview.reason ?? null] : null,
@@ -338,6 +358,8 @@ const disableAutoMergeMutation = `mutation($id: ID!) { disablePullRequestAutoMer
 const autoMergeMethod = () => (['MERGE', 'SQUASH', 'REBASE'] as const).find(method => method === process.env.GITHUB_MERGE_METHOD?.toUpperCase()) ?? 'MERGE';
 export const installationSettingsUrl = (installationId: number) => `https://github.com/settings/installations/${installationId}`;
 export class GitHub {
+  /** The wait between re-requests of a pull request whose mergeability GitHub has not computed yet. */
+  mergeabilityRetryMs: number = mergeabilityRetryIntervalMs;
   private token = '';
   private expires = 0;
   private permissions: Record<string, string> = {};
@@ -398,6 +420,8 @@ export class GitHub {
   private samples: { at: number; requests: number; uncached: number }[] = [];
   /** Observations the reserve is holding back, until when and why. */
   private deferred = new Map<string, { until: string; reason: string }>();
+  /** How long each completed observation job took, for the throughput report (GY-492). */
+  private jobDurations: { at: number; ms: number }[] = [];
   private pausedSince = 0;
   private pauseReason = '';
   /** The open candidates the last reconciliation pass counted, which sizes the steady-state bound. */
@@ -457,6 +481,11 @@ export class GitHub {
   }
   /** Record an observation the reserve held back, so the deferral is readable as a decision. */
   recordDeferral(work: string, deferral: { until: string; reason: string }) { this.deferred.set(work, deferral); }
+  /** Record how long one claimed observation job took, however it ended (GY-492). */
+  recordJobDuration(ms: number, now = Date.now()) {
+    this.jobDurations = [...this.jobDurations, { at: now, ms: Math.max(0, Math.floor(ms)) }].filter(entry => now - entry.at <= budgetLedgerMs);
+    if (this.jobDurations.length > 512) this.jobDurations = this.jobDurations.slice(this.jobDurations.length - 512);
+  }
   /** The open candidates the steady-state bound is sized for, as the last pass counted them. */
   noteFleet(openCandidates: number) { this.fleet = Math.max(0, Math.floor(openCandidates)); }
   /** The steady-state poll interval the fleet can afford right now (see `steadyStateInterval`). */
@@ -505,6 +534,7 @@ export class GitHub {
         reason: this.pauseReason || 'GitHub refused a request for rate limiting' } : null,
       lastHour: { requests: this.charges.length, byKind: [...counts].map(([kind, requests]) => ({ kind, requests })).sort((a, b) => b.requests - a.requests || a.kind.localeCompare(b.kind)) },
       cadence: { ...observationCadenceMs },
+      throughput: observationThroughput(this.jobDurations, now),
       observations: { count: samples.length, meanRequests: mean(samples.map(sample => sample.requests)), meanUncached: mean(samples.map(sample => sample.uncached)),
         jobs: [...this.costs].map(([work, cost]) => ({ work, at: new Date(cost.at).toISOString(), requests: cost.requests, uncached: cost.uncached, band: cost.band, cadenceMs: cost.cadenceMs })) },
       deferrals: [...this.deferred].flatMap(([work, entry]) => Date.parse(entry.until) > now ? [{ work, until: entry.until, reason: entry.reason }] : []),
@@ -805,6 +835,21 @@ export class GitHub {
     if (pinned) { this.histories.set(key, result); this.persisted?.put('history', key, result); if (this.histories.size > historyEntries) this.histories.delete(this.histories.keys().next().value!); }
     return result;
   }
+  /**
+   * The pull request once GitHub has computed its mergeability (GY-548). GitHub answers `null`
+   * right after the base branch moves and computes it lazily on request, so an open pull request
+   * read as `null` is re-requested up to `mergeabilityRetries` times, `mergeabilityRetryMs` apart
+   * (at most 10 seconds in all). Observation runs outside any coordination transaction, so the wait
+   * holds no lock. A value still unknown after that is kept as unknown, never as not mergeable, and
+   * is read again on the next observation.
+   */
+  private async computedMergeability(pr: any): Promise<any> {
+    for (let attempt = 0; attempt < mergeabilityRetries && pr.mergeable === null && pr.state === 'open' && !pr.merged; attempt++) {
+      await delay(this.mergeabilityRetryMs);
+      pr = await this.request(`/pulls/${pr.number}`);
+    }
+    return pr;
+  }
   /** The base a published speculative tip was built on, when the head is that tip; otherwise null. */
   private speculativeBase(work: Work, headSha: string): string | null {
     const speculation = work.queue?.speculation;
@@ -835,7 +880,7 @@ export class GitHub {
    */
   async observe(work: Work, peers?: Work[]): Promise<Observation> {
     const startedAt = new Date().toISOString();
-    const pr = await this.request(`/pulls/${work.submission!.pr}`);
+    const pr = await this.computedMergeability(await this.request(`/pulls/${work.submission!.pr}`));
     demand(pr.base.repo.full_name.toLowerCase() === this.config.repository.toLowerCase() && pr.head.repo?.full_name.toLowerCase() === this.config.repository.toLowerCase(), 'MVP requires same-repository pull requests');
     demand(pr.base.ref === this.config.base, 'Pull request targets an unmanaged branch');
     const [checks, reviews, protection, files, branch] = await Promise.all([
@@ -900,6 +945,7 @@ export class GitHub {
       reviews: [...latest.values()].map(r => ({ id: r.id, reviewer: r.user.login, sha: r.commit_id, state: r.state, submittedAt: r.submitted_at,
         ...(r.state === 'DISMISSED' && dismissalOf(r.id) ? { dismissal: dismissalOf(r.id)! } : {}) })),
       prState: pr.state, draft: pr.draft, prCreatedAt: pr.created_at, merged: pr.merged, mergeSha: pr.merge_commit_sha, mergedAt: pr.merged_at, mergeable: pr.mergeable === true && !pr.draft && pr.state === 'open', conflicting: pr.mergeable === false && pr.state === 'open',
+      ...(pr.mergeable === null && pr.state === 'open' && !pr.merged ? { mergeabilityUnknown: true } : {}),
       protected: protection.protected, conversations, files: files.map(f => f.filename), at: startedAt,
       baseTip: branch.tip, baseTree: branch.tree, baseTipContained, baseTipAncestor: contained, scopeFiles,
       ...(landing ? { landing } : {}), ...(revertedDelivery ? { revertedDelivery } : {}),
@@ -1074,7 +1120,7 @@ export class GitHub {
   async verify(work: Work, peers?: Work[]): Promise<Observation> {
     const first = await this.observe(work, peers);
     const second = await this.observe(work, peers);
-    const gates = (o: Observation) => JSON.stringify({ candidate: o.candidate, checks: o.checks, reviews: o.reviews, agentReview: o.agentReview, protected: o.protected, conversations: o.conversations, merged: o.merged, mergeable: o.mergeable, conflicting: o.conflicting || undefined, prState: o.prState, draft: o.draft, scopeFiles: o.scopeFiles, landing: o.landing });
+    const gates = (o: Observation) => JSON.stringify({ candidate: o.candidate, checks: o.checks, reviews: o.reviews, agentReview: o.agentReview, protected: o.protected, conversations: o.conversations, merged: o.merged, mergeable: o.mergeable, conflicting: o.conflicting || undefined, mergeabilityUnknown: o.mergeabilityUnknown || undefined, prState: o.prState, draft: o.draft, scopeFiles: o.scopeFiles, landing: o.landing });
     demand(gates(first) === gates(second), 'GitHub gates changed during final verification; retry');
     return second;
   }
@@ -1679,12 +1725,81 @@ async function boundedMap<T, R>(items: T[], limit: number, run: (item: T) => Pro
  */
 export const headObservationSeconds = 20;
 export const idleObservationSeconds = 300;
+/**
+ * How old an observation may be and still serve the merge gate: the freshness the publication
+ * guard demands of the record it publishes, and the lag past which `master status` names the
+ * queue head as unobserved (GY-492).
+ */
+export const observationFreshnessMs = 120_000;
 /** Consecutive permission refusals a job may retry at the normal cadence before it is held. */
 export const permissionRefusalLimit = 3;
 /** How often the job loop re-reads the batch size the master published (GY-330). */
 export const mergeBatchSizeRefreshMs = 30_000;
 const batchSizeRead = new WeakMap<Engine, number>();
-export async function processJob(engine: Engine, github: GitHub) {
+/**
+ * How far the claim priority reaches into the merge queue (GY-492): the head and the next
+ * `max(2, batch size) - 1` entries. The head needs a fresh observation to merge at all; the
+ * entries its batch is validated with move only when it does.
+ */
+export const headClaimBand = (batchSize: number) => Math.max(2, Math.max(1, Math.floor(batchSize)));
+/**
+ * Whether this item's next action waits on an observation (GY-492): the loop requests a rework
+ * round and dispatches a review only from a fresh reading of the pull request, so a job for such
+ * an item is claimed ahead of the idle backlog that would otherwise hold it minutes.
+ */
+export function waitsOnObservation(work: Work, all: Work[], now = new Date()): boolean {
+  const kind = nextAction(work, all, now)?.kind;
+  return kind === 'request-rework' || kind === 'request-review';
+}
+/**
+ * The order observation jobs are claimed in (GY-492): merge-queue entries within the head band
+ * first, in queue position, then items whose next action waits on an observation, then the rest
+ * by available_at — the order `Store.takeJob` falls back to for a job this list does not name.
+ * `available_at` still gates every claim: priority reorders due jobs, never makes one due.
+ */
+export function observationClaimOrder(all: Work[], batchSize: number, now = Date.now()): string[] {
+  const band = headClaimBand(batchSize);
+  const ranked: string[] = [];
+  for (const placement of predictQueue(all, now)) {
+    if (placement.position < band) ranked.push(placement.id);
+  }
+  const rankedSet = new Set(ranked);
+  return [...ranked, ...all.filter(work => !rankedSet.has(work.id) && waitsOnObservation(work, all, new Date(now))).map(work => work.id)];
+}
+
+/** How long a lag is, in the unit a reader reads: a minute and change, or seconds. */
+const observationLag = (ms: number) => ms >= 60_000 ? `${Math.floor(ms / 60_000)}m${Math.round(ms % 60_000 / 1000)}s` : `${Math.round(ms / 1000)}s`;
+
+/**
+ * Observation throughput and the queue head's observation lag (GY-492), read from what master
+ * status already holds: the job durations `/api/status` carries under `githubBudget.throughput`,
+ * the jobs in the work snapshot, and the merge queue predicted from it. The head is what merges,
+ * and it merges only on an observation under two minutes old, so a head whose observation is
+ * missing or older than that is raised as attention naming the head, its lag, and what the
+ * workers have actually been achieving.
+ */
+export function observationThroughputStatus(coordinator: { githubBudget?: { throughput?: { jobsPerMinute?: number; medianDurationMs?: number | null; p90DurationMs?: number | null } | null } | null } | null | undefined,
+  snapshot: { work: Work[]; now: string; jobs?: IntegrationJob[] }, now = Date.parse(snapshot.now)) {
+  const throughput = coordinator?.githubBudget?.throughput ?? null;
+  const oldestDueJobMs = (snapshot.jobs ?? []).reduce<number | null>((oldest, job) => {
+    const locked = job.locked_until !== null && Date.parse(job.locked_until) > now, held = job.held_until != null && Date.parse(job.held_until) > now;
+    if (locked || held) return oldest;
+    const available = Date.parse(job.available_at);
+    return oldest === null ? Math.max(0, now - available) : Math.min(oldest, Math.max(0, now - available));
+  }, null);
+  const head = predictQueue(snapshot.work, now).find(placement => placement.position === 0) ?? null;
+  const headObservation = head ? snapshot.work.find(work => work.id === head.id)?.observation ?? null : null;
+  const headObservationAgeMs = head ? headObservation?.at ? Math.max(0, now - Date.parse(headObservation.at)) : null : null;
+  const report = { jobsPerMinute: throughput?.jobsPerMinute ?? null, medianDurationMs: throughput?.medianDurationMs ?? null,
+    p90DurationMs: throughput?.p90DurationMs ?? null, oldestDueJobMs, head: head?.key ?? null, headObservationAgeMs };
+  const attention: AttentionItem[] = head && (headObservationAgeMs === null || headObservationAgeMs > observationFreshnessMs)
+    ? [{ subject: 'github',
+        text: `The merge-queue head ${head.key} has ${headObservationAgeMs === null ? 'no observation at all' : `gone ${observationLag(headObservationAgeMs)} without an observation`} while the merge gate refuses anything older than two minutes${oldestDueJobMs !== null ? `; the oldest due job has waited ${observationLag(oldestDueJobMs)}` : ''}${report.jobsPerMinute !== null ? `, and the server has been observing ${report.jobsPerMinute} job(s)/min (median ${report.medianDurationMs ?? '?'} ms, p90 ${report.p90DurationMs ?? '?'} ms)`: ''}: the queue stalls until its head is observed`,
+        ...agentOwner('control plane', 'Nothing to run: the observation workers claim the head ahead of the backlog on their own; if the lag keeps growing, graphyard status (githubBudget.throughput) shows what the workers achieve and the budget allows') }]
+    : [];
+  return { ...report, attention };
+}
+export async function processJob(engine: Engine, github: GitHub): Promise<boolean> {
   // The batch size is the master's configuration, published to the installation ledger; a
   // restarted server reads it back here before the next evaluation it runs.
   const readAt = batchSizeRead.get(engine);
@@ -1692,15 +1807,20 @@ export async function processJob(engine: Engine, github: GitHub) {
     batchSizeRead.set(engine, Date.now());
     await engine.loadMergeBatchSize().catch(() => batchSizeRead.delete(engine));
   }
-  const job = await engine.store.takeJob();
-  if (!job) return;
+  // The fleet is read before the claim, so the claim order can name it (GY-492): with a backlog
+  // due, the merge-queue head's job is claimed first however recently it became due, instead of
+  // waiting behind every older entry for a worker to reach it.
+  const all = await engine.store.list();
+  const job = await engine.store.takeJob(observationClaimOrder(all, engine.mergeBatchSize));
+  if (!job) return false;
+  const startedAt = Date.now();
   let work: Work | undefined;
   const guard = (snapshot: Work, success: boolean) => async () => {
     const result = await engine.store.pool.query(`SELECT w.document,clock_timestamp() AS now FROM work_items w JOIN jobs j ON j.work_id=w.id
       WHERE w.id=$1 AND j.token=$2 AND j.locked_until>clock_timestamp()`, [job.work_id, job.token]);
     const row = result.rows[0];
     requireCurrent(row && row.document.revision === snapshot.revision, 'Work or job ownership changed before publication; retry');
-    if (success) requireCurrent(snapshot.observation && row.now.getTime() - Date.parse(snapshot.observation.at) < 120_000, 'Observation expired before publication; retry');
+    if (success) requireCurrent(snapshot.observation && row.now.getTime() - Date.parse(snapshot.observation.at) < observationFreshnessMs, 'Observation expired before publication; retry');
   };
   // A feature whose permission the last preflight found missing is not attempted: the job is
   // held with the operator-facing reason instead of retrying into a 403. Adapters without a
@@ -1722,7 +1842,6 @@ export async function processJob(engine: Engine, github: GitHub) {
   const schedule: { cadence: { band: CadenceBand; ms: number; reason: string } | null } = { cadence: null };
   const metered = <T>(fn: () => Promise<T>) => github.measured ? github.measured(fn) : fn().then(value => ({ value, requests: 0, uncached: 0 }));
   try {
-    const all = await engine.store.list();
     work = all.find(w => w.id === job.work_id);
     // `settled` is true when the job already scheduled itself: held, deferred, or requeued onto a
     // freshly published head. The measured cost is recorded either way.
@@ -1829,7 +1948,7 @@ export async function processJob(engine: Engine, github: GitHub) {
     const cadence = schedule.cadence && (head ? { ...schedule.cadence, band: 'merge' as const, ms: headObservationSeconds * 1000 }
       : { ...schedule.cadence, band: schedule.cadence.band === 'merge' ? 'active' as const : schedule.cadence.band, ms: Math.max(idleObservationSeconds * 1000, schedule.cadence.ms) });
     if (cadence && work) github.recordObservation?.(work.id, { requests, uncached, band: cadence.band, cadenceMs: cadence.ms });
-    if (settled) return;
+    if (settled) return true;
     if (work?.stage === 'done') await engine.store.pool.query('DELETE FROM jobs WHERE work_id=$1 AND token=$2', [job.work_id, job.token]);
     if (held) await engine.store.holdJob(job.work_id, job.token, held, permissionHoldMs, heldOn());
     else await engine.store.finishJob(job.work_id, job.token, undefined, false, cadence?.ms ?? (head ? headObservationSeconds : idleObservationSeconds) * 1000, observed);
@@ -1838,7 +1957,7 @@ export async function processJob(engine: Engine, github: GitHub) {
     // A rate-limit pause is one incident, not a retry every 45 seconds into the same refusal:
     // the job keeps the error and comes back when the pause lifts (a webhook still wakes it).
     const paused = github.budget?.().paused;
-    if (paused && error instanceof Refusal && /requests paused/.test(message)) { await engine.store.finishJob(job.work_id, job.token, message, false, Math.max(2000, Date.parse(paused.until) - Date.now() + 1000), observed); return; }
+    if (paused && error instanceof Refusal && /requests paused/.test(message)) { await engine.store.finishJob(job.work_id, job.token, message, false, Math.max(2000, Date.parse(paused.until) - Date.now() + 1000), observed); return true; }
     const current = (await engine.store.pool.query('SELECT document,clock_timestamp() AS now FROM work_items WHERE id=$1', [job.work_id])).rows[0];
     const latest = current?.document as Work | undefined;
     if (latest?.candidate && latest.stage !== 'done' && !hold('check')) try { await github.publish(latest, 'Reconciliation failed; fresh verification required', guard(latest, false)); } catch { /* Durable retry follows. */ }
@@ -1852,11 +1971,16 @@ export async function processJob(engine: Engine, github: GitHub) {
     // releases it once the installation changed. A refusal the declaration does not explain
     // (the preflight already passes) therefore stays held for the bounded hold, one attempt
     // per hold, instead of being released into the same 403 by every passing preflight.
-    if (error instanceof GitHubPermissionRefusal) { await engine.store.refuseJob(job.work_id, job.token, message, permissionRefusalLimit, permissionHoldMs, heldOn()); return; }
+    if (error instanceof GitHubPermissionRefusal) { await engine.store.refuseJob(job.work_id, job.token, message, permissionRefusalLimit, permissionHoldMs, heldOn()); return true; }
     const retry = error instanceof ReconciliationRetry;
     // A concurrency retry comes back within seconds and is not an operator error, but a run that
     // saved no observation never ends silent: the reason stands on the job record (GY-506).
-    if (retry && !observed) { await engine.store.retryJob(job.work_id, job.token, message, observed); return; }
+    if (retry && !observed) { await engine.store.retryJob(job.work_id, job.token, message, observed); return true; }
     await engine.store.finishJob(job.work_id, job.token, retry ? undefined : message, retry, undefined, observed);
+  } finally {
+    // The throughput ledger (GY-492): how long the claimed job took, however it ended, so master
+    // status can report what the workers actually achieve and name the lag a queue head suffers.
+    github.recordJobDuration?.(Date.now() - startedAt);
   }
+  return true;
 }

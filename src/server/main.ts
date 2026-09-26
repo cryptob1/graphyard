@@ -1,7 +1,7 @@
 import { Store } from '../store.js';
 import { Engine } from '../engine.js';
 import { demand, parseReviewerApps } from '../model.js';
-import { githubFromEnv, installationFingerprint, processJob, type AppPermissionReport } from '../github.js';
+import { githubFromEnv, installationFingerprint, processJob, type AppPermissionReport, type GitHub } from '../github.js';
 import { Validation } from '../validation.js';
 import { Delivery } from '../delivery.js';
 import { ProofGrants } from '../proof-grants.js';
@@ -81,6 +81,10 @@ export async function main() {
   // A recurring intervention becomes work on its own (GY-98): the detection reads the ledger, so
   // it runs once a minute rather than every tick.
   let patternsAt = 0, receiptsPrunedAt = 0;
+  // The observation workers run beside the tick, never in it: a queue of due jobs is drained at
+  // the concurrency the installation sets, whatever the rest of the tick is doing (GY-492).
+  const observing = github ? startObservationWorkers(engine, github) : null;
+  console.log(`Observation workers: ${observing?.concurrency ?? 0}`);
   const reconciliation = startReconciliation(async step => {
     // The delivery sweep is bounded per tick and resumes from its persisted cursor, so a
     // backlog of observations drains across ticks without ever skipping one.
@@ -98,15 +102,56 @@ export async function main() {
     if (github) {
       const preflight = await step('github.preflight', () => github.preflightIfDue());
       if (preflight) await announcePreflight(preflight);
-      await step('processJob', () => Promise.all(Array.from({ length: 4 }, () => processJob(engine, github))));
     }
   }, 2000);
   http.listen(Number(process.env.PORT ?? 4310), process.env.HOST ?? '127.0.0.1', () => console.log(`Graphyard listening on port ${process.env.PORT ?? 4310}; GitHub ${github ? 'connected' : 'not configured'}`));
-  const shutdown = () => { reconciliation.stop(); watching.stop(); http.close(() => { void Promise.resolve(githubCache?.close()).then(() => store.close()).then(() => process.exit(0)); }); setTimeout(() => process.exit(1), 10_000).unref(); };
+  const shutdown = () => { reconciliation.stop(); watching.stop(); observing?.stop(); http.close(() => { void Promise.resolve(githubCache?.close()).then(() => store.close()).then(() => process.exit(0)); }); setTimeout(() => process.exit(1), 10_000).unref(); };
   process.on('SIGTERM', shutdown); process.on('SIGINT', shutdown);
 }
 
 export type ReconciliationStep = <T>(name: string, run: () => Promise<T>) => Promise<T>;
+
+/**
+ * The observation concurrency (GY-492): `GRAPHYARD_OBSERVATION_CONCURRENCY`, four jobs at once
+ * by default, bounded by the database pool's background share — a worker beyond it only queues on
+ * a connection the API and the tick need. The GitHub budget reserve is enforced inside every job,
+ * so extra workers spend nothing the budget has not allowed.
+ */
+export const observationConcurrency = (poolMax = 12) => {
+  const bound = Math.max(1, Math.floor(poolMax / 2));
+  const configured = Number(process.env.GRAPHYARD_OBSERVATION_CONCURRENCY);
+  return Number.isFinite(configured) && configured >= 1 ? Math.min(Math.floor(configured), bound) : Math.min(4, bound);
+};
+
+/**
+ * The observation workers (GY-492): `concurrency` long-lived loops beside the reconciliation tick,
+ * as the production watch is. Each claims one due job at a time — SKIP LOCKED in `takeJob` means
+ * two workers never hold the same job — processes it, and looks for the next at once, waiting
+ * `idleMs` only when nothing is due. The tick's four-jobs-per-tick batch used to serialise behind
+ * its slowest job, so a queue thirty entries deep left the merge-queue head minutes without an
+ * observation; workers that keep claiming while jobs are due are what drains a backlog and keeps
+ * the head observed at its twenty-second cadence.
+ */
+export async function observationWorkers(engine: Engine, github: GitHub, concurrency: number, stopped: () => boolean = () => false, idleMs = 1000): Promise<void> {
+  const worker = async () => {
+    while (!stopped()) {
+      let claimed = false;
+      try { claimed = await processJob(engine, github); }
+      catch (error) { console.error('observation worker job failed', error instanceof Error ? error.message : 'unknown'); }
+      if (!claimed) await new Promise(resolve => setTimeout(resolve, idleMs));
+    }
+  };
+  await Promise.all(Array.from({ length: Math.max(1, Math.floor(concurrency)) }, worker));
+}
+
+/** Start the observation workers for the process's lifetime; `stop` resolves once each has finished its current job. */
+export function startObservationWorkers(engine: Engine, github: GitHub, concurrency = observationConcurrency(engine.store.pool.options.max)) {
+  let stopped = false;
+  const done = observationWorkers(engine, github, concurrency, () => stopped)
+    .catch(error => console.error('observation workers stopped', error instanceof Error ? error.message : 'unknown'));
+  return { concurrency, stop: () => { stopped = true; return done; } };
+}
+
 /**
  * The serial reconciliation tick: one run at a time every `intervalMs`, each named step timed, and a
  * tick that never finishes reported with the step it is stuck in. Anything that may wait on a slow
