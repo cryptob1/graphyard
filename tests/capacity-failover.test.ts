@@ -110,7 +110,7 @@ async function guardedMerge(work: Work) {
   const committed = await engine.requestEnqueue(coordinator, current.id, { enqueue: true, expectedRevision: current.revision, ...candidate, policyRevision: current.policyRevision }, randomUUID());
   await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
   await engine.observe(current.id, committed.revision, seen(current, candidate, { merged: true, mergeSha: sha40(`merge:${work.id}`), mergedAt }));
-  return { result: 'merged' };
+  return { result: 'merged', merged: true };
 }
 
 // Two agent accounts on two runtimes, both logged in. Neither exposes quota to this test (the
