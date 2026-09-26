@@ -140,7 +140,7 @@ test('real HTTP coordination refusal envelope is classified as definitive', asyn
   });
   const envelope = await response.json();
   assert.equal(response.status, 404);
-  assert.deepEqual(envelope, { error: 'Work item not found' });
+  assert.deepEqual(envelope, { error: 'Work item not found', code: 'work-not-found' });
   assert.equal(isConfirmedCoordinationRefusal(response.status, envelope), true);
 });
 test('expired lease is recoverable and all stale-owner commands are fenced', async () => {
