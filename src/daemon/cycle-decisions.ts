@@ -129,15 +129,23 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     if (!agent || !stoppedStates.includes(agent.agent_status ?? '')) return false;
     const signal = await Promise.resolve(effects.sessionOutput(agent)).then(output => output ? detectExhaustion(output, clock) : null, () => null);
     if (!signal) return false;
-    const key = failoverKey('approver', item, `${watch.decision}:${watch.launchedAt ?? watch.launches}`), previous = state.actions[key];
+    const session = `${watch.decision}:${watch.launchedAt ?? watch.launches}`;
+    const key = failoverKey('approver', item, session), previous = state.actions[key];
     if (previous?.state === 'done' || !readyToRetry(previous, state.cycle)) return true;
     const attempts = (previous?.attempts ?? 0) + 1, resets = signal.resetsAt ? `resets ${signal.resetsAt}` : 'reset time unknown';
     const account = watch.account, spentOn = account ?? 'its runtime\'s own account';
     try {
-      // An approver on no named account spent its runtime's own login, which an escalation handler launches on too.
-      for (const name of account ? [account] : ownLoginAccounts({ name: approverProfile, kind: watch.runtime ?? undefined })) await effects.holdAccount?.(name, { at: new Date(clock).toISOString(), resetsAt: signal.resetsAt, reason: signal.reason, role: 'approver', profile: approverProfile, work: item.key });
-      await effects.reportCapacity(item, { event: 'exhausted', role: 'approver', requestId: watch.decision.slice(0, 64), profile: approverProfile, account, runtime: watch.runtime, reason: signal.reason, resetsAt: signal.resetsAt,
-        partialWork: { state: 'not-applicable', detail: 'an approver session edits nothing: it judges a decision and leaves no work to keep' } });
+      // The hold and the capacity record are written once per spent session (GY-316): a retried
+      // failover — a session that could not be closed, a replacement that failed to launch —
+      // writes neither again, so one spent session leaves one exhaustion record.
+      if (watch.reportedExhaustion !== session) {
+        // An approver on no named account spent its runtime's own login, which an escalation handler launches on too.
+        for (const name of account ? [account] : ownLoginAccounts({ name: approverProfile, kind: watch.runtime ?? undefined })) await effects.holdAccount?.(name, { at: new Date(clock).toISOString(), resetsAt: signal.resetsAt, reason: signal.reason, role: 'approver', profile: approverProfile, work: item.key });
+        await effects.reportCapacity(item, { event: 'exhausted', role: 'approver', requestId: watch.decision.slice(0, 64), profile: approverProfile, account, runtime: watch.runtime, reason: signal.reason, resetsAt: signal.resetsAt,
+          partialWork: { state: 'not-applicable', detail: 'an approver session edits nothing: it judges a decision and leaves no work to keep' } });
+        watch.reportedExhaustion = session;
+        await effects.persist(state);
+      }
       const ended = `approver session ${watch.agentName} exhausted ${spentOn} mid-session (${signal.reason}; ${resets})`;
       // The registry slot goes first (closeApprover ends it): at a role concurrency of 1 the replacement is refused while it is held.
       if (!await closeApprover(item, watch, ended)) throw new Error(`the session could not be closed, so its name or registry slot still refuses a replacement`);
