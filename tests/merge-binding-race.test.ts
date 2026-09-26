@@ -154,7 +154,7 @@ function mergeable(overrides: Partial<Work> = {}): Work {
 }
 function effects(overrides: Partial<DaemonEffects>): DaemonEffects {
   return { agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [], now: iso() }), closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
-    merge: async () => ({ result: 'merge requested' }),
+    merge: async () => ({ result: 'merged', merged: true }),
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {}, ...overrides };
 }
@@ -170,7 +170,7 @@ test('unit:merge-race-retried-immediately — two races then a success merge in 
   let calls = 0;
   const state = emptyDaemonState(config);
   const performed = await runCycle(config, state, effects({ snapshot: async () => ({ work: [item], now: iso() }),
-    merge: async target => { calls++; if (calls <= 2) throw race(target.key); return { result: 'merge requested' }; } }), () => clock);
+    merge: async target => { calls++; if (calls <= 2) throw race(target.key); return { result: 'merged', merged: true }; } }), () => clock);
   assert.equal(calls, 3, 'the third call, in the same cycle, merged');
   const action = state.actions[candidateKey('merge', item)];
   assert.equal(action.state, 'done', action.detail);
@@ -207,7 +207,7 @@ test('unit:queue-position-not-attempted — of two queued candidates only the on
   assert.equal(waitingInMergeQueue(mergeable({ gates: [{ name: 'merge', passed: false, reasons: ['Merge queue position 2 of 2: GY-1 is ahead', 'Pull request is not mergeable against the current base'] }] })), false, 'a real refusal beside the position is still attempted and recorded');
   const attempted: string[] = [];
   const state = emptyDaemonState(config);
-  const deps = effects({ snapshot: async () => ({ work: [first, second], now: iso() }), merge: async target => { attempted.push(target.key); return { result: 'merge requested' }; } });
+  const deps = effects({ snapshot: async () => ({ work: [first, second], now: iso() }), merge: async target => { attempted.push(target.key); return { result: 'merged', merged: true }; } });
   for (let cycle = 0; cycle < 3; cycle++) await runCycle(config, state, deps, () => clock + cycle * 20_000);
   assert.deepEqual(attempted, ['GY-1'], 'only the candidate at position 1 was attempted');
   assert.equal(state.actions[candidateKey('merge', second)], undefined, 'the candidate behind has no failed merge action and no backoff');
@@ -222,9 +222,35 @@ test('unit:merge-uses-fresh-read — a write after the cycle snapshot and before
   const state = emptyDaemonState(config);
   await runCycle(config, state, effects({ snapshot: async () => ({ work: [reads++ ? written : snapshotItem], now: iso() }),
     // The guarded merge refuses a read older than the record, as it does for any read it cannot trust.
-    merge: async target => { merged.push(target); if (target.revision !== 5) throw new Error(`${target.key} was invoked on a stale snapshot`); return { result: 'merge requested' }; } }), () => clock);
+    merge: async target => { merged.push(target); if (target.revision !== 5) throw new Error(`${target.key} was invoked on a stale snapshot`); return { result: 'merged', merged: true }; } }), () => clock);
   assert.ok(reads >= 2, 'the merge step read the item again');
   assert.equal(merged.length, 1, 'one guarded merge, in this cycle');
   assert.equal(merged[0].revision, 5, 'the guarded merge ran on the item as it stood, not the cycle-start snapshot');
   assert.equal(state.actions[candidateKey('merge', written)].state, 'done');
+});
+
+test('unit:merge-done-only-when-merged — an outcome that reports neither a pending request nor a merge GitHub performed is not recorded done, and is asked again (GY-246)', async () => {
+  const item = mergeable();
+  const outcomes: unknown[] = [{ result: 'merge requested' }, undefined, { result: 'merge requested', pending: true }, { result: 'merged', merged: true }];
+  let calls = 0;
+  const state = emptyDaemonState(config);
+  const deps = effects({ snapshot: async () => ({ work: [item], now: iso() }), merge: async () => outcomes[calls++] });
+  const seen: string[] = [];
+  for (let cycle = 0; cycle < outcomes.length; cycle++) {
+    await runCycle(config, state, deps, () => clock + cycle * 20_000);
+    seen.push(state.actions[candidateKey('merge', item)].state);
+  }
+  assert.equal(calls, outcomes.length, 'every outcome short of a merge was asked again the next cycle');
+  assert.deepEqual(seen, ['waiting', 'waiting', 'waiting', 'done']);
+});
+
+test('unit:interrupted-merge-retried — a merge left started by a daemon that died mid-merge is resolved at the next cycle start and asked again (GY-246)', async () => {
+  const item = mergeable();
+  let calls = 0;
+  const state = emptyDaemonState(config);
+  const key = candidateKey('merge', item);
+  state.actions[key] = { kind: 'merge', work: item.key, principal: null, state: 'started', detail: `Invoking the guarded merge for ${item.key}`, attempts: 1, epoch: null, cycle: 0, at: iso() };
+  await runCycle(config, state, effects({ snapshot: async () => ({ work: [item], now: iso() }), merge: async () => { calls++; return { result: 'merge requested', pending: true }; } }), () => clock + 20_000);
+  assert.equal(calls, 1, 'the interrupted merge was asked again, not stranded at started');
+  assert.equal(state.actions[key].state, 'waiting');
 });

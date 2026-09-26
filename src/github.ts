@@ -10,6 +10,8 @@ import { CHECK_NAME, carriedApproval, demand, nativeReviewRequired, parseReviewe
 import { inPlannedScope } from './regression-guard.js';
 import type { GitHubCacheStore } from './github-cache.js';
 import { nextAction } from './model/next-action.js';
+import { foldDecisions } from './model/approval.js';
+import { normalMergeState, repairAudit, repairAuditEvent, repairLaneVerdict, type RepairAudit, type RepairLaneVerdict } from './master/repair-lane.js';
 export { CHECK_NAME };
 import { alreadyMergeableRefusal, baseRefreshNeeded, dismissedVerdict, enqueueRequestCurrent, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, pendingRestore, queuePlacement, queueRef, mergeCheckBranch, treeIdenticalPrediction, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread } from './merge-queue.js';
 import { MERGE_METHOD } from './protection.js';
@@ -1493,6 +1495,22 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     else if (state.mode === 'auto-merge') await this.graphql(disableAutoMergeMutation, { id: state.pullRequestId });
   }
   /**
+   * The repair lane's merge (GY-406), made only once repairLaneVerdict allowed it: the App merges
+   * exactly `sha`, head-bound (expectedHeadOid), with the bypass its ruleset grants it in
+   * pull-request mode. Classic protection still binds the App, so the head first carries a
+   * `Graphyard / merge` verdict that names the repair-lane decision instead of the gates.
+   */
+  async repairMerge(work: Work, audit: RepairAudit) {
+    const state = await this.mergeQueueState(audit.pr);
+    requireCurrent(state.head === audit.head, `Pull request #${audit.pr} head moved from ${audit.head.slice(0, 12)} to ${state.head.slice(0, 12)}; the repair lane merges only the approved head`);
+    if (state.mode !== 'none') await this.dequeuePullRequest(state);
+    const existing = (await this.pages(`/commits/${audit.head}/check-runs?check_name=${encodeURIComponent(CHECK_NAME)}&filter=latest`, 'check_runs')).find(c => c.app.id === this.config.appId);
+    const body = { name: CHECK_NAME, head_sha: audit.head, status: 'completed', conclusion: 'success', external_id: work.id,
+      output: { title: 'Repair lane: merge-path repair', summary: `Repair-lane merge of ${work.key} at ${audit.head}, decision ${audit.decision} (requested by ${audit.requestedBy}, approved by ${audit.approver}) for the fault in ${audit.fault}; bypassing a normal guarded merge ${audit.bypassed.state} since ${audit.bypassed.since}` } };
+    await this.request(existing ? `/check-runs/${existing.id}` : '/check-runs', existing ? 'PATCH' : 'POST', body);
+    await this.graphql(headBoundMergeMutation, { id: state.pullRequestId, head: audit.head, method: MERGE_METHOD });
+  }
+  /**
    * GitHub's merge queue requires every required check on the merge group commit it builds, not only
    * on the pull request head. The authorized head's verdict is carried to that commit, and only
    * while the head stays authorized: a withdrawn head is dequeued, which discards the group. It is
@@ -1570,6 +1588,30 @@ export async function gateMerge(github: MergeGateClient, work: Work, request: Me
     }
   } catch (error) { return { action: { kind: 'hold', reason: `GitHub refused to ${action.kind} ${work.key}: ${error instanceof Error ? error.message : String(error)}` }, state }; }
   return { action, state };
+}
+/**
+ * The repair lane (GY-406), run for a merge-path repair item after its normal gate step: every
+ * condition is judged from the ledger (repairLaneVerdict), and only an allowed head is merged. The
+ * audit entry is appended before GitHub is asked, so the delivery it produces is attributed to it;
+ * a refused GitHub call is appended as `repair.failed`. A refusal of the lane itself is appended as
+ * `repair.refused`, naming the missing condition, once per head and condition.
+ */
+export async function repairLaneStep(engine: Pick<Engine, 'store' | 'enqueueRequest'>, github: Pick<GitHub, 'repairMerge'>, work: Work, now = new Date()): Promise<RepairLaneVerdict> {
+  const rows = (await engine.store.pool.query("SELECT actor, kind, payload, created_at FROM events WHERE work_id=$1 AND kind LIKE 'decision.%' ORDER BY seq", [work.id])).rows;
+  const decisions = foldDecisions(work.id, rows.map(row => ({ kind: row.kind, actor: row.actor, at: new Date(row.created_at).toISOString(), payload: row.payload })));
+  const verdict = repairLaneVerdict(work, decisions, normalMergeState(work, await engine.enqueueRequest(work.id)), now.getTime());
+  const record = (kind: string, details: object) => engine.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', kind, JSON.stringify({ details })]);
+  if (!verdict.allowed) {
+    // The condition that holds the lane back is on the ledger once per head and condition, so the item says why it waits.
+    const last = (await engine.store.pool.query("SELECT payload->'details' AS details FROM events WHERE work_id=$1 AND kind='repair.refused' ORDER BY seq DESC LIMIT 1", [work.id])).rows[0]?.details;
+    if (last?.head !== work.candidate?.sha || last?.condition !== verdict.condition) await record('repair.refused', { head: work.candidate?.sha ?? null, condition: verdict.condition, refusal: verdict.refusal, at: now.toISOString() });
+    return verdict;
+  }
+  const audit = repairAudit(work, verdict, now.toISOString());
+  await record(repairAuditEvent, audit);
+  try { await github.repairMerge(work, audit); }
+  catch (error) { await record('repair.failed', { ...audit, error: error instanceof Error ? error.message : String(error) }); throw error; }
+  return verdict;
 }
 export async function githubFromEnv() {
   if (!process.env.GITHUB_APP_ID || !process.env.GITHUB_REPOSITORY) return null;
@@ -1781,6 +1823,8 @@ export async function processJob(engine: Engine, github: GitHub) {
           if (gated.state) work = await engine.recordGitHubQueue(work.id, gated.state, gated.action);
         }
         else await github.publish(work, undefined, guard(work, work.gates.every(g => g.passed) && !work.violations.length));
+        // A merge-path repair whose normal merge is stalled may take the audited repair lane (GY-406).
+        if (work.repair === 'merge-path' && !unpublishable && typeof github.repairMerge === 'function') await repairLaneStep(engine, github, work);
       }
       return false;
     });
