@@ -11,7 +11,7 @@ import { reconcileAutoDispatch } from '../src/model/dispatch.js';
 import { loadMasterConfig, saveProducerProfile, setupMaster } from '../src/master.js';
 import { launchProducer, readProducerLedger } from '../src/producer.js';
 import { controlPlaneHandlers, type ControlPlaneEffects } from '../src/executor.js';
-import type { ExecutorIdentity } from '../src/auto-dispatch.js';
+import { emptyDispatchCursor, runDispatchTick, type DispatchEffects, type ExecutorIdentity } from '../src/auto-dispatch.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 
 // GY-415 names this test for its proof: manual:fault-class-unclassified. Three items' dispatch rows
@@ -76,6 +76,18 @@ test('manual:fault-class-unclassified — a proof dispatch row whose head alread
       assert.match(String(await handlers.dispatch!(action, executor)), /are left to producer session/);
       assert.equal((await readProducerLedger(root)).producers.filter(record => record.key === work.key).length, 1, 'no second session was launched');
     });
+    // The race's other side: the loop's tick asking for a head an executor's session already answers
+    // records a wait on that session, not a refusal it would repeat every tick until the session ends.
+    const tickEffects: DispatchEffects = {
+      snapshot: effects.snapshot, agents: () => [], credentials: effects.producerCredentials,
+      reconcileReviews: async () => ({ reviews: [] }), reconcileProducers: async () => ({ producers: [] }), launchReview: async () => ({}),
+      launchProducer: effects.launchProducer, persist: async () => {},
+    };
+    const tick = await runDispatchTick(config, emptyDispatchCursor(config), tickEffects);
+    assert.deepEqual(tick.refused, [], 'the tick refuses no request an executor\'s session is answering');
+    assert.deepEqual(tick.launched, [], 'the tick launches no second session');
+    for (const work of items) assert.ok(tick.waiting.some(entry => entry.kind === 'producer' && entry.work === work.key && /producer session produce-a\S* is already pending on/.test(entry.reason)),
+      `the tick waits on ${work.key}'s pending session: ${JSON.stringify(tick.waiting)}`);
     // A session pending on another head is not this request's answer: the launch is still refused.
     const ledger = await readProducerLedger(root);
     ledger.producers = ledger.producers.map(record => record.key === 'GY-274' ? { ...record, sha: base } : record);
@@ -84,5 +96,7 @@ test('manual:fault-class-unclassified — a proof dispatch row whose head alread
     await assert.rejects(async () => handlers.dispatch!({ id: 'row-stale', key: stale.key, work: stale.id, kind: 'dispatch', state: 'claimed', attempts: 1, history: [],
       inputs: { kind: 'dispatch', target: 'proof', group: 'unit', proofs: request.proofs, requestId: request.id, pr: request.pr, sha: request.sha, baseSha: request.baseSha, policyRevision: request.policyRevision } } as unknown as ActionRow, executor),
     /already pending on 2f76b9b; reconcile it with master status/);
+    const staleTick = await runDispatchTick(config, emptyDispatchCursor(config), tickEffects);
+    assert.ok(staleTick.refused.some(entry => entry.work === stale.key && /already pending on 2f76b9b/.test(entry.reason)), `the tick still refuses ${stale.key}: ${JSON.stringify(staleTick.refused)}`);
   } finally { await rm(root, { recursive: true, force: true }); await rm(credentials, { recursive: true, force: true }); }
 });
