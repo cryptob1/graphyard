@@ -48,12 +48,11 @@ export class BackgroundLane {
 
 export class Store {
   pool: pg.Pool;
-  /** Lease renewals only; `background` bounds the tick to half the main pool. */
+  /** Lease renewals only, its failed statements named like the main pool's (GY-447); `background` bounds the tick to half the main pool. */
   leasePool: pg.Pool; readonly background: BackgroundLane;
   constructor(url: string, options: { max?: number } = {}) {
     const max = Math.max(2, Math.floor(options.max ?? 12));
     this.pool = trackedPool(namedStatements(new pg.Pool({ connectionString: url, max, connectionTimeoutMillis: storeConnectionTimeoutMs, statement_timeout: storeStatementTimeoutMs })));
-    // The lease lane names its failed statements too (GY-447), so every statement timeout is logged with its SQL.
     this.leasePool = trackedPool(namedStatements(new pg.Pool({ connectionString: url, max: leaseLaneConnections, connectionTimeoutMillis: storeConnectionTimeoutMs, statement_timeout: storeStatementTimeoutMs })));
     this.background = new BackgroundLane(Math.max(1, Math.floor(max / 2)));
   }
