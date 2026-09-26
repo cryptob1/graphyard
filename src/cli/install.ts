@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { availableRuntimes, discover } from '../onboarding.js';
 import { startGithubSetup, updateAppPermissions } from '../github-setup.js';
-import { applyProposal, loadAppliedSetup, loadProposal, readSetupStatus, repositoryScanDifference, saveProposal, scanProposal, setupDrift, setupRepository } from '../repository-setup.js';
+import { applyProposal, loadAppliedSetup, loadProposal, readDocumentationConfig, readSetupStatus, repositoryScanDifference, saveProposal, scanProposal, setupDrift, setupRepository } from '../repository-setup.js';
 import { protectionRun } from '../protection.js';
 import { applyInstall, buildPlan, prepareInstall, providers, type InstallInputs } from '../install/index.js';
 import { runManifestFlow } from '../install/manifest.js';
@@ -12,6 +12,7 @@ import { ciProducerProvisioningSteps, readRoster, registerCiProducer } from '../
 import { completionProfiles, readinessChecklist, summarizeDefinitions, type CompletionProfile } from '../readiness.js';
 import { defineCommands } from './registry.js';
 import { readSecretFromStdin } from './context.js';
+import { documentationDrift } from '../model/documentation.js';
 
 
 const interactiveGithubSetup = (root: string) => async (repository: string, deployment: string) => {
@@ -170,6 +171,11 @@ export const installCommands = defineCommands([
       const setup = await readSetupStatus(root).catch((error: any) => ({ error: error.message }));
       const stored = await loadProposal(root).catch(() => null);
       const appPermissions = live?.appPermissions ?? null;
+      // The committed documentation policy against the deployed one (GY-293): the control plane
+      // reads only GRAPHYARD_DOCUMENTATION, so an unredeployed graphyard.json edit is drift.
+      const committedDocumentation = await readDocumentationConfig(root).catch((error: any) => ({ error: error.message as string }));
+      const documentation = committedDocumentation && 'error' in committedDocumentation ? { committed: null, deployed: live?.documentation ?? null, drift: null, error: committedDocumentation.error }
+        : { committed: committedDocumentation, deployed: live?.documentation ?? null, drift: live?.documentation ? documentationDrift(committedDocumentation, live.documentation)?.attention ?? null : null };
       // Capacity drift and production lag are the two installation facts a deploy can break
       // silently; the server reports both and doctor repeats them beside the App preflight.
       const delegationLimits = live?.delegationLimits ?? null, production = live?.production ?? null;
@@ -188,6 +194,7 @@ export const installCommands = defineCommands([
       // an undeployed merge are the next actions; until then the checklist's own gap comes first.
       const next = !readiness.ready ? readiness.next
         : delegationLimits?.drift?.length ? `Set ${delegationLimits.drift.map((entry: any) => `${entry.variable}=${entry.required}`).join(' ')} on the deployment: ${delegationLimits.drift[0].reason}`
+        : documentation.drift ? documentation.drift
         : production?.incidents?.length ? `Production has not deployed ${production.incidents.map((incident: any) => incident.key).join(', ')}: ${production.incidents[0].reason}`
         : readiness.next;
       return context.print({ discovered, server: base, cliPath: await context.activeCliPath(), hostId: context.individualHostId(), connected: !!live, githubConfigured: !!live?.github, role: live?.actor?.role, release: live?.release ?? null, failure,
@@ -197,6 +204,7 @@ export const installCommands = defineCommands([
         build: live?.build ?? null,
         delegationLimits: delegationLimits ? { limits: delegationLimits.limits, deployed: delegationLimits.deployed, drift: delegationLimits.drift, attention: delegationLimits.attention } : null,
         production: production ? { provider: production.provider, serving: production.serving, running: production.running, aheadBy: production.ahead?.by ?? null, incidents: production.incidents, attention: production.attention, error: production.error } : null,
+        documentation,
         readiness,
         next,
         limits: ['CI discovery is a proposal, not executed-test inventory', 'Herdr two-host recovery and GitHub refusal-to-acceptance must be demonstrated', 'A ready checklist is configuration, never evidence: the first real PR must visibly pass every gate'] });
