@@ -8,6 +8,7 @@ import { appendSave, resolvedPayloadSql } from './snapshot-delta.js';
 import { advisoryLocks } from './locks.js';
 import { coordinationDocumentSql, coordinationRelevance, coordinationTail, coordinationTrimSql, detoasted, type CoordinationTrim } from './coordination-sql.js';
 import { namedPool, reportPool, type ReportPoolOptions } from './report-pool.js';
+import { closePool, reserve, trackedPool } from './pools.js';
 
 export * from './snapshot-delta.js';
 export type { CoordinationTrim } from './coordination-sql.js';
@@ -27,20 +28,6 @@ export const migrationLockTimeoutMs = 30_000;
 const migrationPrelude = migration.slice(0, migration.indexOf(tables[0].ddl));
 const literal = (text: string) => `'${text.replace(/'/g, "''")}'`;
 const newerSchema = (current: number) => new Error(`Database schema generation ${current} is newer than this release supports (${schemaVersion}); deploy the release that migrated it, or restore a backup taken at generation ${schemaVersion} or earlier`);
-
-/** How long a migrating release waits for its watchdog's connection; a database at its limit refuses at once. */
-const watchdogConnectMs = 5_000;
-/** A pool connection, or an error after `watchdogConnectMs` without one (sooner than the pool's own `storeConnectionTimeoutMs`). */
-async function reserve(pool: pg.Pool) {
-  let timer: NodeJS.Timeout | undefined;
-  const connecting = pool.connect();
-  try {
-    return await Promise.race([connecting, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`no connection within ${watchdogConnectMs} ms`)), watchdogConnectMs); })]);
-  } catch (error) {
-    connecting.then(late => late.release(), () => {});
-    throw error;
-  } finally { clearTimeout(timer); }
-}
 
 /**
  * Which connections a transaction may use (GY-274). Lease renewals run on a reserved pool, so a
@@ -66,7 +53,7 @@ export class Store {
   constructor(url: string, options: { max?: number } & ReportPoolOptions = {}) {
     const max = Math.max(2, Math.floor(options.max ?? 12));
     this.pool = namedPool(url, max, storeConnectionTimeoutMs, storeStatementTimeoutMs);
-    this.leasePool = new pg.Pool({ connectionString: url, max: leaseLaneConnections, connectionTimeoutMillis: storeConnectionTimeoutMs, statement_timeout: storeStatementTimeoutMs });
+    this.leasePool = trackedPool(new pg.Pool({ connectionString: url, max: leaseLaneConnections, connectionTimeoutMillis: storeConnectionTimeoutMs, statement_timeout: storeStatementTimeoutMs }));
     this.background = new BackgroundLane(Math.max(1, Math.floor(max / 2))); this.reportPool = reportPool(url, options, storeConnectionTimeoutMs, storeStatementTimeoutMs);
   }
   /**
@@ -176,7 +163,8 @@ export class Store {
     return { version: Number(rows[0].version), digest: rows[0].digest };
   }
   async schema() { return Number((await this.pool.query('SELECT COALESCE(MAX(version),0) AS version FROM graphyard_schema')).rows[0].version); }
-  async close() { await Promise.all([this.pool.end(), this.leasePool.end(), this.reportPool.end()]); }
+  /** Resolves once every connection of all three pools has closed (GY-483), so the database may be stopped right after. */
+  async close() { await Promise.all([closePool(this.pool, 'main'), closePool(this.leasePool, 'lease'), closePool(this.reportPool, 'report')]); }
   async transaction<T>(fn: (db: pg.PoolClient, now: Date) => Promise<T>, { lane = 'request' }: { lane?: StoreLane } = {}): Promise<T> {
     const permit = lane === 'background' ? await this.background.acquire() : null;
     const db = await (lane === 'lease' ? this.leasePool : this.pool).connect().catch(error => { permit?.(); throw error; });
