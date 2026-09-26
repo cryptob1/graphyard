@@ -113,8 +113,6 @@ export interface Observation {
   // `mergeable` being false while GitHub is still computing it. A conflicting head is the one a
   // behind-base candidate is withheld and sent back for (GY-191).
   conflicting?: boolean;
-  // GitHub's raw reading, kept while a test merge disproves its conflict (GY-375, GY-390).
-  disproved?: { mergeable: boolean; conflicting: boolean; reading: string };
   // The real base-branch head and its tree, read from refs/heads/<base> (never from the pull
   // request's cached base) and recorded separately from the candidate's bound base so a
   // speculative binding never hides where the managed branch actually points.
