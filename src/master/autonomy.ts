@@ -1,5 +1,6 @@
 // Concern: agent identities and autonomy — approver and escalation launches, and the autonomy commands.
 import { randomUUID, randomBytes } from 'node:crypto';
+import { wholeDocument } from '../model/work-summary.js';
 import { readFile, mkdir, lstat } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { z } from 'zod';
@@ -95,12 +96,35 @@ export async function agentToken(root: string, config: MasterConfig, which: 'ope
 export function decisionInput(action: string, work: Work, input: Record<string, unknown>) {
   if (['release', 'unblock', 'resolve'].includes(action)) return { expectedRevision: work.revision, ...input };
   if (action === 'requirements') return { expectedPolicyRevision: work.policyRevision, criteria: work.criteria, dependencies: work.dependencies, plannedFiles: work.plannedFiles, exclusiveResources: work.exclusiveResources ?? [], producerProofs: work.producerProofs ?? [], ...input };
-  if ((action === 'merge' || action === 'attest') && work.candidate) return { sha: work.candidate.sha, baseSha: work.candidate.baseSha, policyRevision: work.policyRevision, ...(action === 'attest' ? { result: 'pass', executed: 1, skipped: 0 } : {}), ...input };
+  if ((action === 'merge' || action === 'attest') && work.candidate) return { sha: work.candidate.sha, baseSha: work.candidate.baseSha, policyRevision: work.policyRevision, ...(action === 'attest' ? { result: 'pass', executed: 1, skipped: 0, ...attestationExercise(work, input.proof) } : {}), ...input };
   if (action === 'rework' || action === 'recover') return { previousWorkerStopped: true, ...input };
   // The repair lane (GY-406) binds the exact head it may merge.
   if (action === 'repair-merge' && work.candidate) return { sha: work.candidate.sha, ...input };
   return input;
 }
+/**
+ * GY-523. The exercise record an attestation carries: the proof run against the candidate base —
+ * the tree with the change, and so the criterion's behaviour, removed — failed. The approver
+ * confirms it by running the proof there before approving; without it the control plane records
+ * the attested pass as not exercising its criterion (GY-135), and no remedy but a second,
+ * hand-built attestation would move the item.
+ */
+export function attestationExercise(work: Pick<Work, 'criteria' | 'candidate'>, proof: unknown) {
+  const criterion = work.criteria.find(entry => typeof proof === 'string' && entry.proofs.includes(proof));
+  if (!criterion || !work.candidate) return {};
+  return { exercise: { criterion: criterion.id, behaviour: `the whole change: ${proof} run against the candidate base ${work.candidate.baseSha.slice(0, 12)}, the tree without it`, result: 'fail' as const, executed: 1 } };
+}
+/**
+ * GY-523. What an approver confirms before approving an attestation: the exercise record it carries
+ * says the proof fails against the candidate base, so the approver runs it there, and against the
+ * candidate, and approves only on both outcomes. An approved attestation is then recorded as
+ * exercising its criterion rather than as an unexercised pass.
+ */
+export const attestConfirmation = (baseSha?: string) =>
+  `An attest decision carries an exercise record (criterion, behaviour removed, executed, result fail) that is yours to confirm: before approving it, run its proof against the candidate base${baseSha ? ` ${baseSha}` : ''} — the tree without the change — and see it fail, and against the candidate and see it pass; refuse it otherwise. `;
+/** The Pi approver's prompt, with the attestation confirmation before its call to decide. */
+export const piApproverWithAttestation = (config: MasterConfig, work: Work, decision: string) =>
+  piApproverPrompt(config, work.key, decision, config.approver!.id).replace("the operator's goals. Then call", `the operator's goals. ${attestConfirmation(work.candidate?.baseSha)}Then call`);
 /** With automatic merging off, the guarded merge runs only for a candidate an approver agent approved. */
 export function approvedMerge<T extends { action: string; state: string; input: any; approvedBy: string | null }>(work: Work, decisions: T[]): T | null {
   return decisions.find(decision => decision.action === 'merge' && decision.state === 'applied' && !!work.candidate
@@ -264,9 +288,15 @@ async function abandonLaunch(error: unknown, pane: string | undefined, tabId: st
  */
 export const approverSessionId = (decision: string) => `approver:${decision}`;
 export type SessionRegistrar = (handle: SessionHandleInput) => Promise<unknown>;
-export async function launchApprover(root: string, work: Work, decision: string, explicitKind: NonNullable<WorkerProfile['kind']> | undefined, agents: HerdrAgent[], run?: ChildRun, probe: FleetProbe = {}, register?: SessionRegistrar,
+/**
+ * `herdr` is this host's Herdr inventory and whether it could be read at all (GY-205): the role's
+ * registry sessions are judged live or gone against it, and an inventory that could not be read
+ * judges none gone — an empty list read as available would end every approver session on the host.
+ */
+export async function launchApprover(root: string, work: Work, decision: string, explicitKind: NonNullable<WorkerProfile['kind']> | undefined, herdr: { agents: HerdrAgent[]; available: boolean }, run?: ChildRun, probe: FleetProbe = {}, register?: SessionRegistrar,
   headless: { runner?: Runner; fetcher?: typeof fetch } = {}) {
   const config = await loadMasterConfig(root);
+  const { agents } = herdr;
   const token = await agentToken(root, config, 'approver');
   const retry = `graphyard master approver ${work.key} ${decision} [AGENT_KIND]`;
   const name = nameForLaunch(retry, () => approverSessionName(work, decision));
@@ -278,13 +308,13 @@ export async function launchApprover(root: string, work: Work, decision: string,
   // GY-170: when the registry defines the approver role, its choice decides the runtime too — an
   // account of a `pi` runtime runs headless with that account's home, model and the role's policy,
   // and `run.runtimes`/`run.pi` configure only an approver the registry does not define.
-  const registry = explicitKind ? null : await selectFleetSession(config, 'approver', { name: approverProfile, principal: config.approver!.id }, await heldAwareProbe(config, { runtime: { agents, available: true }, ...probe, work: work.key }));
+  const registry = explicitKind ? null : await selectFleetSession(config, 'approver', { name: approverProfile, principal: config.approver!.id }, await heldAwareProbe(config, { runtime: herdr, ...probe, work: work.key }));
   if (registry && registry.account.kind === 'pi') {
     let started: ReturnType<typeof startNarrowRun>;
     try {
       started = startNarrowRun({ runner: headless.runner ?? registryRunner(registry.account), name, role: 'approver', work: work.key, subject: decision, root,
         context: approverRunContext(config.url, work.id, decision, piRuntimeSchema.parse(config.run.pi ?? {}).approverTimeoutMinutes * 60_000),
-        prompt: piApproverPrompt(config, work.key, decision, config.approver!.id),
+        prompt: piApproverWithAttestation(config, work, decision),
         options: approverRunOptions(root, decision, { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: config.approver!.credentialFile, GRAPHYARD_HOST_ID: config.hostId }, piRuntimeSchema.parse(config.run.pi ?? {}).approverTimeoutMinutes * 60_000),
         apply: async result => result.ok ? [await applyDecision(config.url, token, work, result.payload, headless.fetcher)] : [] });
     } catch (error) { await registry.release(`approver run for ${work.key} failed to start: ${failureText(error).slice(0, 300)}`); throw error; }
@@ -299,7 +329,7 @@ export async function launchApprover(root: string, work: Work, decision: string,
     const pi = piRuntimeSchema.parse(config.run.pi ?? {});
     const started = startNarrowRun({ runner: headless.runner ?? narrowRunner(pi), name, role: 'approver', work: work.key, subject: decision, root,
       context: approverRunContext(config.url, work.id, decision, pi.approverTimeoutMinutes * 60_000),
-      prompt: piApproverPrompt(config, work.key, decision, config.approver!.id),
+      prompt: piApproverWithAttestation(config, work, decision),
       options: approverRunOptions(root, decision, { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: config.approver!.credentialFile, GRAPHYARD_HOST_ID: config.hostId }, pi.approverTimeoutMinutes * 60_000),
       apply: async result => result.ok ? [await applyDecision(config.url, token, work, result.payload, headless.fetcher)] : [] });
     return { agentName: name, work: work.key, decision, identity: config.approver!.id, pane: null as string | null, runtime: 'pi' as const, delivery: 'request' as RequestDelivery, focusChanged: false, session: null, account: null,
@@ -314,7 +344,7 @@ export async function launchApprover(root: string, work: Work, decision: string,
   // judged its decision and exited no longer holds a slot the next one needs.
   const chosen = explicitKind ? await heldRuntimeLogin(config, 'approver', approverProfile, work.key, probe, explicitKind)
     : registry ? { fleet: registry, account: registry.account, profile: approverProfile, skipped: registry.skipped } satisfies ApproverSelection
-    : await selectApproverAccount(config, work.key, config.approver!.id, { runtime: { agents, available: true }, ...probe });
+    : await selectApproverAccount(config, work.key, config.approver!.id, { runtime: herdr, ...probe });
   const selected = chosen?.fleet ?? null;
   // Nothing here names a runtime: the role's account decides, then the operator's own argument,
   // then a runtime this installation already configured for another session.
@@ -322,6 +352,8 @@ export async function launchApprover(root: string, work: Work, decision: string,
   // A launch refused for its runtime gives the chosen session back at once (GY-184).
   const plan = () => {
     if (!kind) throw new Error('No runtime is configured for the approver: name accounts for the approver role with graphyard master registry role set approver ACCOUNT[,ACCOUNT…] --reason REASON, or pass AGENT_KIND');
+    // Without an inventory nothing shows whether this decision's session already runs.
+    if (!herdr.available) throw new Error(`Herdr's session inventory could not be read, so no approver session for ${work.key} is launched into it; the launch is made again once Herdr answers`);
     return accountLaunch({ kind, approvals: 'auto', agentArgs: [], environment: {} }, chosen?.account ?? null);
   };
   let launch: ReturnType<typeof accountLaunch>;
@@ -329,7 +361,7 @@ export async function launchApprover(root: string, work: Work, decision: string,
   catch (error) { await selected?.release(`approver launch for ${work.key} failed: ${failureText(error).slice(0, 300)}`); throw error; }
   const cli = `node ${config.cliPath}`;
   let delivery: RequestDelivery | undefined;
-  const prompt = `You are the independent Graphyard approver for ${config.repository}, acting as ${config.approver!.id}. Judge decision ${decision} on ${work.key}: run ${cli} master decisions ${work.key}, read the item with ${cli} status ${work.key}, its pull request and history, and weigh the requester's reason against the item's criteria and the operator's goals. If it is justified, run ${cli} master approve ${work.key} ${decision} "YOUR REASON". If not, record the refusal: run ${cli} master refuse ${work.key} ${decision} "YOUR REASON" — a decline is recorded, never expressed by exiting. Never approve a decision you requested, implemented, or produced evidence for; never edit, push, merge, review, or submit evidence. Stop when the decision is judged.`;
+  const prompt = `You are the independent Graphyard approver for ${config.repository}, acting as ${config.approver!.id}. Judge decision ${decision} on ${work.key}: run ${cli} master decisions ${work.key}, read the item with ${cli} status ${work.key}, its pull request and history, and weigh the requester's reason against the item's criteria and the operator's goals. ${attestConfirmation(work.candidate?.baseSha)}If it is justified, run ${cli} master approve ${work.key} ${decision} "YOUR REASON". If not, record the refusal: run ${cli} master refuse ${work.key} ${decision} "YOUR REASON" — a decline is recorded, never expressed by exiting. Never approve a decision you requested, implemented, or produced evidence for; never edit, push, merge, review, or submit evidence. Stop when the decision is judged.`;
   let pane: string | undefined, tabId: string | undefined;
   try {
     const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root, '--label', `Approver · ${work.key}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', `GRAPHYARD_TOKEN_FILE=${config.approver!.credentialFile}`, '--env', 'GRAPHYARD_APPROVER=1', '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, ...Object.entries(launch.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'], run));
@@ -602,7 +634,8 @@ export async function runAutonomyCommand(root: string, config: MasterConfig, id:
   const snapshotItem = async (key: string | undefined) => {
     if (!key) throw new Error(`Use master ${id} GY-N …`);
     const snapshot = await deps.coordinator('work-snapshot'), found = snapshot.work.find((work: Work) => work.id === key || work.key === key);
-    if (!found) throw new Error(`Unknown work item ${key}`); return { work: found as Work, now: Date.parse(snapshot.now) };
+    // A settled delivery is a summary in the snapshot (GY-422); a decision reads its whole document.
+    if (!found) throw new Error(`Unknown work item ${key}`); return { work: await wholeDocument(found, deps.coordinator), now: Date.parse(snapshot.now) };
   };
   const item = async (key: string | undefined) => (await snapshotItem(key)).work;
   const reason = (rest: string[]) => { const text = words(rest); if (!text) throw new Error(`master ${id} needs a REASON; every agent decision is attributable`); return text; };
@@ -687,7 +720,8 @@ export async function runAutonomyCommand(root: string, config: MasterConfig, id:
   }
   if (id === 'approver') {
     const work = await item(args[0]); if (!args[1]) throw new Error('Use master approver GY-N DECISION [AGENT_KIND]');
-    const launched = await launchApprover(root, work, args[1], args[2] ? agentKindSchema.parse(args[2]) : undefined, await deps.agents(), deps.runtime, {}, registrar(work.id));
+    // `deps.agents` throws when Herdr cannot be read, so a listing it returns was read.
+    const launched = await launchApprover(root, work, args[1], args[2] ? agentKindSchema.parse(args[2]) : undefined, { agents: await deps.agents(), available: true }, deps.runtime, {}, registrar(work.id));
     // A headless approver runs in this process, so the command waits for its verdict and reports the run.
     const { settled, ...report } = launched;
     return settled ? { ...report, run: await settled } : report;
