@@ -63,11 +63,11 @@ test('unit:launch-marker-ignores-clock-skew — a profile launch marker re-reads
     const snapshot: HerdrAgent[] = [];
     const live: HerdrAgent[] = [{ name: profile.agentName, pane_id: 'pane-1', agent_status: 'working' } as HerdrAgent];
     const run = async (_command: string, args: string[]) => args[0] === 'agent' && args[1] === 'list' ? JSON.stringify({ result: { agents: live } }) : JSON.stringify({ result: {} });
-    assert.deepEqual(await currentAgents(root, profile, snapshot, run as never, undefined), snapshot, 'without a marker the snapshot stands');
+    assert.deepEqual(await currentAgents(root, profile, snapshot, new Date().toISOString(), run as never, undefined), snapshot, 'without a marker the snapshot stands');
     // This host's clock is an hour behind the server's: the marker's time precedes the snapshot's.
     const behind = new Date(Date.now() - hour).toISOString();
     await writeFile(profileLaunchedFile(root, profile.name), JSON.stringify({ key: 'GY-1', epoch: 1, agentName: profile.agentName, at: behind }));
-    assert.deepEqual((await currentAgents(root, profile, snapshot, run as never, undefined)).map(agent => agent.name), [profile.agentName], 'a marker re-reads Herdr regardless of its time');
+    assert.deepEqual((await currentAgents(root, profile, snapshot, new Date().toISOString(), run as never, undefined)).map(agent => agent.name), [profile.agentName], 'a marker re-reads Herdr regardless of its time');
     // The item's own marker stays a hint read against the snapshot's time: skew can pass it over, and
     // what that costs is the claim the control plane then refuses, not a second launch.
     await writeFile(dispatchedFile(root, 'GY-1'), JSON.stringify({ epoch: 1, at: new Date().toISOString() }));

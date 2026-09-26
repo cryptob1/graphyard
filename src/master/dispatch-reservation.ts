@@ -106,7 +106,7 @@ const launchMarker = (file: string) => readFile(file, 'utf8').then(text => JSON.
  * the snapshot's time (GY-356): that time is the control plane's clock and the marker's this host's,
  * so a skewed server would make a launch after the snapshot look older than it.
  */
-export async function currentAgents(root: string, profile: WorkerProfile, snapshot: HerdrAgent[], run: ChildRun | undefined, fresh: (() => HerdrAgent[] | Promise<HerdrAgent[]>) | undefined) {
+export async function currentAgents(root: string, profile: WorkerProfile, snapshot: HerdrAgent[], _observedAt: string, run: ChildRun | undefined, fresh: (() => HerdrAgent[] | Promise<HerdrAgent[]>) | undefined) {
   if (fresh) return fresh();
   return await launchMarker(profileLaunchedFile(root, profile.name)) ? listHerdrAgents(run) : snapshot;
 }
