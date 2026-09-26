@@ -53,7 +53,7 @@ Each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `linge
 
 With `run.research` set (`model`, `timeoutMinutes` 15, `tokenBudget`), a feature (or `"research": true`) gets one read-only Pi briefing per revision. Product questions: Needs you; build proceeds on the recommendation, a differing answer requests rework, failure never blocks.
 
-Each `Recurring <class> faults` item, or `invariant:` fault (above) past `invariantBoundMinutes`, gets a read-only diagnostician (`run.diagnostician` `model`/`fallbackModel`/`serverLogCommand`, or registry role). Approved decisions release its fix or `close` it as duplicate; recurrences re-file post-delivery. `tests/soak.test.ts` holds this over a simulated day: with the diagnostician and fault-class filing wired as fakes, the loop files each recurring class once, diagnoses it in the filing cycle, closes it on the approved decision, and keeps every invariant and its approver sessions bounded.
+`Recurring <class> faults` items and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician` `model`/`fallbackModel`/`serverLogCommand`, or registry role) in their filing cycle. Approved decisions release its fix or `close` it as duplicate; recurrences re-file post-delivery. Soak-tested (`tests/soak.test.ts`).
 
 ## Automatic dispatch at submit
 
@@ -79,10 +79,10 @@ A pass is trusted only when that stripped run failed with a case executed; other
 
 ## Guarded merges
 
-`master merge GY-N|--all` asks [GitHub to merge](github.md#merge-queue) only under a current authorization for the exact head, base and policy. Protocol skew refuses (`server runs <sha>, CLI expects <sha>: deploy main first`).
+`master merge GY-N|--all` asks [GitHub to merge](github.md#merge-queue) only under a current authorization for the exact head, base and policy. Protocol skew refuses (`… deploy main first`).
 
 ### Repair lane
 
-The sole no-admin-bypass exception: once a `"repair": "merge-path"` item (`mergePath` files only) stalls 15 minutes with checks passed and an approver agent's `master decide GY-N repair-merge REASON` naming the fault, the App's ruleset bypass merges its head, audited (`repair.merged`) and flagged until a normal merge.
+Sole bypass: once a `"repair": "merge-path"` item (`mergePath` files only) stalls 15 minutes with checks passed and an approver's `master decide GY-N repair-merge REASON` naming the fault, the App's ruleset bypass merges its head, audited (`repair.merged`) and flagged until a normal merge.
 
 Unresolved review threads are the reviewer's inputs, not merge blockers (`reviewThreads`); its approval names each on `Resolved threads:`, `Follow-up threads:` or `Overridden threads:` ([rules](coordination.md#review-gate-verdicts-not-threads)).
