@@ -98,10 +98,18 @@ export function ciConcurrencyAdvisories(checks: string[], workflows: WorkflowFil
 // no merge-queue setting, so the queue is a repository ruleset on the base branch that Graphyard
 // writes by name and reads back through the branch's active rules.
 export const mergeQueueRulesetName = 'Graphyard merge queue';
-/** The ruleset Graphyard writes: a queue that builds and merges one entry at a time, and the App-bound required check. */
+/**
+ * The repair lane's bypass (GY-406): the control-plane App, and nobody else, may merge a pull
+ * request past this ruleset's queue — in pull-request mode only, so it never pushes to the base
+ * branch. Classic protection (required checks, reviews, enforce_admins) is untouched and still
+ * binds the App; the lane decides when the App may use the bypass (src/master/repair-lane.ts).
+ */
+export const repairBypassActor = (githubAppId: number) => ({ actor_id: githubAppId, actor_type: 'Integration' as const, bypass_mode: 'pull_request' as const });
+/** The ruleset Graphyard writes: a queue that builds and merges one entry at a time, the App-bound required check, and the repair lane's one bypass actor. */
 export function mergeQueueRuleset(config: { baseBranch: string; githubAppId: number }) {
   return {
     name: mergeQueueRulesetName, target: 'branch', enforcement: 'active',
+    bypass_actors: [repairBypassActor(config.githubAppId)],
     conditions: { ref_name: { include: [`refs/heads/${config.baseBranch}`], exclude: [] } },
     rules: [
       // One entry at a time: each merge group is exactly one authorized head on the base it lands on.
@@ -121,6 +129,23 @@ export function mergeQueueState(rules: unknown, githubAppId: number): { queue: b
     requiredCheck: rules.some((rule: any) => rule?.type === 'required_status_checks' && Array.isArray(rule.parameters?.required_status_checks)
       && rule.parameters.required_status_checks.some((check: any) => check?.context === CHECK_NAME && check?.integration_id === githubAppId)),
   };
+}
+/**
+ * Whether a ruleset document (GET repos/OWNER/REPO/rulesets/ID) carries exactly the repair lane's
+ * bypass: one actor, the App, as an Integration, in pull_request mode. Null when it was not read.
+ */
+export function repairBypassState(ruleset: unknown, githubAppId: number): { actors: unknown[]; exact: boolean } | null {
+  const actors = (ruleset as any)?.bypass_actors;
+  if (!Array.isArray(actors)) return null;
+  const wanted = repairBypassActor(githubAppId);
+  return { actors, exact: actors.length === 1 && Number(actors[0]?.actor_id) === wanted.actor_id && actors[0]?.actor_type === wanted.actor_type && actors[0]?.bypass_mode === wanted.bypass_mode };
+}
+/** Where readProtection attaches Graphyard's merge-queue ruleset document, as GitHub returns it. */
+const queueRulesetDocument = Symbol.for('graphyard.queueRuleset');
+/** Attach Graphyard's merge-queue ruleset document to a protection document, as readProtection does. */
+export function withQueueRuleset<T extends object>(protection: T, ruleset: unknown): T {
+  Object.defineProperty(protection, queueRulesetDocument, { value: ruleset, enumerable: false, configurable: true });
+  return protection;
 }
 /** Where readProtection attaches the branch's active rules beside GitHub's protection document. */
 const branchRules = Symbol.for('graphyard.branchRules');
@@ -183,6 +208,10 @@ export function protectionPlan(current: any, config: { repository: string; baseB
   // Auto-merge mode plans no queue ruleset: GitHub would refuse it, and the plan would never settle.
   const queue = mode === 'queue' ? mergeQueueState(rules, config.githubAppId) : null;
   const autoMerge = mode === 'auto-merge' ? { enabled: repository?.allowAutoMerge === true } : null;
+  // The repair lane's bypass lives on the queue ruleset; an unread ruleset leaves it unknown. In
+  // auto-merge mode no ruleset holds the App back, so the lane needs no bypass there.
+  const bypass = queue ? repairBypassState(current?.[queueRulesetDocument], config.githubAppId) : null;
+  const repairBypass = queue ? { ruleset: mergeQueueRulesetName, actor: repairBypassActor(config.githubAppId), configured: bypass ? bypass.exact : null, observed: bypass?.actors ?? null } : null;
   const changes = [
     ...(conversationResolution ? ['required_conversation_resolution true to false'] : []),
     ...(observed.requiredApprovals === protection.requiredApprovals ? [] : [`required_approving_review_count ${observed.requiredApprovals} to ${protection.requiredApprovals}`]),
@@ -190,6 +219,7 @@ export function protectionPlan(current: any, config: { repository: string; baseB
     ...(observed.dismissStaleReviews === protection.dismissStaleReviews ? [] : [`dismiss_stale_reviews ${observed.dismissStaleReviews} to ${protection.dismissStaleReviews}`]),
     ...(queue && !queue.queue ? [`merge queue on ${config.baseBranch}: none to ruleset "${mergeQueueRulesetName}"`] : []),
     ...(queue && !queue.requiredCheck ? [`merge queue required check ${CHECK_NAME}: missing to required from App ${config.githubAppId}`] : []),
+    ...(repairBypass?.configured === false ? [`repair lane bypass on "${mergeQueueRulesetName}": ${JSON.stringify(repairBypass.observed)} to only App ${config.githubAppId} (Integration, pull_request)`] : []),
     ...(autoMerge && !autoMerge.enabled ? [`allow_auto_merge false to true (${config.repository} cannot have a merge queue, so GitHub merges through auto-merge)`] : []),
   ];
   const advisories = ciConcurrencyAdvisories(work.filter(item => item.stage !== 'done').flatMap(item => item.policy.checks), workflows);
@@ -198,6 +228,8 @@ export function protectionPlan(current: any, config: { repository: string; baseB
     mergeQueue: queue ? { ...queue, ruleset: mergeQueueRuleset(config) } : null,
     // Or through auto-merge where the repository cannot have a queue (GY-310); mergeQueue is then null.
     mergeMode: mode, autoMerge,
+    // The one sanctioned merge bypass (GY-406): the App, pull-request mode, on the queue ruleset only.
+    repairBypass,
     consistent: !changes.length && !blockers.length,
     refusal: blockers.length ? `Branch protection is missing settings Graphyard cannot reconcile for you: ${blockers.join('; ')}` : null };
 }
@@ -210,9 +242,16 @@ export function readProtection(config: { repository: string; baseBranch: string 
   // Who owns the repository decides whether it can have a merge queue at all.
   let settings: RepositoryMergeSettings | null = null;
   try { settings = repositoryMergeSettings(JSON.parse(run('gh', ['api', `repos/${config.repository}`]))); } catch { settings = null; }
+  // The queue ruleset's bypass actors are only on the ruleset's own document.
+  let queueRuleset: unknown = null;
+  try {
+    const listed = (JSON.parse(run('gh', ['api', `repos/${config.repository}/rulesets?includes_parents=false`])) as any[]).find(ruleset => ruleset?.name === mergeQueueRulesetName);
+    if (listed?.id) queueRuleset = JSON.parse(run('gh', ['api', `repos/${config.repository}/rulesets/${listed.id}`]));
+  } catch { queueRuleset = null; }
   if (protection && typeof protection === 'object') {
     Object.defineProperty(protection, branchRules, { value: rules, enumerable: false });
     withMergeSettings(protection, settings);
+    withQueueRuleset(protection, queueRuleset);
   }
   return protection;
 }
@@ -267,7 +306,7 @@ export async function applyProtection(config: { repository: string; baseBranch: 
   if (plan.blockers.length) throw new Error(plan.refusal!);
   if (!plan.changes.length) return { ...plan, applied: false, result: 'branch protection already matches every open review policy' };
   let queueRefused = false;
-  if (plan.mergeQueue && (!plan.mergeQueue.queue || !plan.mergeQueue.requiredCheck)) {
+  if (plan.mergeQueue && (!plan.mergeQueue.queue || !plan.mergeQueue.requiredCheck || plan.repairBypass?.configured === false)) {
     try { applyMergeQueue(config, run); } catch (error: any) {
       // GitHub refused the queue ruleset (HTTP 422): this repository cannot have a merge queue, so it merges through auto-merge.
       if (!queueRulesetRefused(`${error?.message ?? ''}\n${error?.stderr ?? ''}`)) throw error;
@@ -290,5 +329,5 @@ export async function applyProtection(config: { repository: string; baseBranch: 
   if (queueRefused && reread && typeof reread === 'object') withMergeSettings(reread, { ownerType: settings?.ownerType ?? 'Organization', allowAutoMerge: settings?.allowAutoMerge === true, queueRefused });
   const verified = protectionPlan(reread, config, work);
   if (!verified.consistent) throw new Error(`GitHub did not report the reconciled protection; branch protection remains inconsistent with the open review policies: ${[...verified.changes, ...verified.blockers].join('; ')}`);
-  return { ...verified, applied: true, result: `branch protection now matches the ${plan.mode} review policy of every open item${verified.mergeQueue ? `, and ${plan.branch} merges through GitHub's merge queue requiring ${CHECK_NAME}` : verified.autoMerge ? `, and ${plan.branch} merges through auto-merge requiring ${CHECK_NAME} (the repository cannot have a merge queue)` : ''}` };
+  return { ...verified, applied: true, result: `branch protection now matches the ${plan.mode} review policy of every open item${verified.mergeQueue ? `, and ${plan.branch} merges through GitHub's merge queue requiring ${CHECK_NAME}; the queue's only bypass actor is App ${config.githubAppId} in pull-request mode, for the audited repair lane` : verified.autoMerge ? `, and ${plan.branch} merges through auto-merge requiring ${CHECK_NAME} (the repository cannot have a merge queue)` : ''}` };
 }

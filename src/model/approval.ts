@@ -17,11 +17,13 @@ import { createSchema, escalationTriggers, operatorCapability, type OperatorCapa
  */
 // `close` is a triage closure (GY-402): a machine-filed item the triage agent judged already fixed,
 // not worth doing, or to be merged into another, which is applied only once an approver agrees.
-export const decisionActions = ['release', 'unblock', 'requirements', 'resolve', 'attest', 'merge', 'rework', 'recover', 'grant', 'close'] as const;
+export const decisionActions = ['release', 'unblock', 'requirements', 'resolve', 'attest', 'merge', 'rework', 'recover', 'grant', 'repair-merge', 'close'] as const;
 export type DecisionAction = typeof decisionActions[number];
 export const decisionCapabilities: Record<DecisionAction, OperatorCapability> = {
   release: 'intent:ready', unblock: 'intent:unblock', requirements: 'policy:requirements', resolve: 'decision:resolve',
   attest: 'decision:attest', merge: 'decision:merge', rework: 'decision:rework', recover: 'decision:rework', grant: 'decision:grant', close: 'intent:create',
+  // The repair lane (GY-406): the App merges a merge-path fix past the stalled merge path.
+  'repair-merge': 'decision:merge',
 };
 export const approveCapability: OperatorCapability = 'decision:approve';
 
@@ -57,6 +59,8 @@ export const decisionInputs = {
   grant: z.object({ principal: principalId, patterns: z.array(z.string().min(1).max(200)).min(1).max(50), expectedRevision: z.number().int().min(0).optional() }).strict(),
   // Bound to the triage judgement it applies (its `at`): a later judgement is a new decision.
   close: z.object({ kind: z.enum(['superseded', 'obsolete', 'duplicate']), ref: z.string().regex(/^[A-Z][A-Z0-9]*-\d+$/).nullable(), reason: z.string().trim().min(1).max(2000), triageAt: z.iso.datetime() }).strict(),
+  // Head-bound: the repair lane merges exactly this head (expectedHeadOid) and nothing else.
+  'repair-merge': z.object({ sha }).strict(),
 } satisfies Record<DecisionAction, z.ZodType>;
 const reason = z.string().trim().min(1).max(2000);
 /**
@@ -165,8 +169,8 @@ export function approvalConflict(decision: Pick<Decision, 'id' | 'action' | 'inp
     return `Self-approval refused: ${approver.id} requested decision ${decision.id}; a second, independent agent identity must approve it`;
   if (implementerIdentities(work).includes(approver.id))
     return `Conflicted approval refused: ${approver.id} has held an assignment on ${work.key}, so it cannot approve decisions about it`;
-  if (decision.action === 'attest' || decision.action === 'merge') {
-    const own = work.evidence.filter(item => item.producer === approver.id && (decision.action === 'merge' || item.proof === decision.input.proof));
+  if (decision.action === 'attest' || decision.action === 'merge' || decision.action === 'repair-merge') {
+    const own = work.evidence.filter(item => item.producer === approver.id && (decision.action !== 'attest' || item.proof === decision.input.proof));
     if (own.length) return `Conflicted approval refused: ${approver.id} produced evidence ${[...new Set(own.map(item => item.proof))].join(', ')} on ${work.key} and may not approve its own evidence`;
   }
   if (decision.action === 'grant' && decision.input.principal === approver.id)
@@ -244,6 +248,10 @@ export function decisionPrecondition(action: DecisionAction, input: any, work: W
   }
   if (action === 'rework' && !work.submission) return 'Rework applies to submitted work';
   if (action === 'close' && (work.triage?.state !== 'proposed' || work.triage.at !== input.triageAt)) return `${work.key} has no proposed triage closure from ${input.triageAt}; its triage is ${work.triage ? `${work.triage.state} from ${work.triage.at}` : 'not recorded'}`;
+  if (action === 'repair-merge') {
+    if (work.repair !== 'merge-path') return `${work.key} does not carry "repair": "merge-path"; only a merge-path repair item may use the repair lane`;
+    if (!work.candidate || work.candidate.sha !== input.sha) return `The decision names ${String(input.sha).slice(0, 12)} but the current candidate is ${work.candidate?.sha.slice(0, 12) ?? 'none'}`;
+  }
   return null;
 }
 

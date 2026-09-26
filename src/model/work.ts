@@ -14,6 +14,7 @@ import { namedPaths, pathScope, pathScopeContains, type ScopeDecision, type Scop
 import type { CapacityState } from './capacity.js';
 import type { HumanRequest } from './human-request.js';
 import type { ResearchRecord } from '../research.js';
+import type { RepairAudit } from '../master/repair-lane.js';
 import type { Closure } from './closure.js';
 import type { TriageRecord } from './machine-backlog.js';
 import { proofSchema } from './proof.js';
@@ -59,6 +60,9 @@ export const createSchema = z.object({
   // Research before build (GY-259): a feature item is researched unless this is false, and any
   // other item only when it is true. See src/research.ts.
   research: z.boolean().optional(),
+  // A repair to Graphyard's own merge path (GY-406): allowed only when every plannedFiles entry is
+  // inside the merge path, and it opens the audited repair lane (src/master/repair-lane.ts).
+  repair: z.literal('merge-path').optional(),
 }).strict();
 export type Create = z.infer<typeof createSchema>;
 // The `decision:*` capabilities request a two-party decision (see model/approval.ts); an agent
@@ -173,8 +177,7 @@ export interface Work extends Create {
   researchBrief?: ResearchRecord | null;
   /** Set when the item was closed without delivery (model/closure.ts); a closed item is `done` but never delivered. */
   closure?: Closure | null;
-  /** The triage judgement of a machine-filed item (GY-402, model/machine-backlog.ts): released, or a closure proposed to or applied by the approver. */
-  triage?: TriageRecord | null;
+  triage?: TriageRecord | null; // a machine-filed item's triage judgement (GY-402, model/machine-backlog.ts)
   /** Sessions of this item that ran out of provider quota, and any role with no account left (model/capacity.ts). */
   capacity?: CapacityState | null;
   queue?: QueueEntry | null; queueSequence?: number; queueEjection?: QueueEjection | null; queueHistory?: QueueHistoryEntry[];
@@ -204,6 +207,8 @@ export interface Work extends Create {
   sessions?: SessionHandle[];
   mergeExecution?: { id: string; owner: string; sha: string; baseSha: string; policyRevision: number; authorizationRevision: number; issuedAt: string; expiresAt: string; verifiedAt?: string; committingAt?: string; clockOffset?: { min: number; max: number }; fenced?: { reason: string; at: string } | null } | null;
   delivery?: Delivery;
+  /** Set when the delivery was merged through the repair lane (GY-406): its audit entry. */
+  repairLane?: RepairAudit | null;
   /**
    * Independently observed production delivery, one record per environment: the first
    * release whose verified common interval covered the whole expected manifest while this
