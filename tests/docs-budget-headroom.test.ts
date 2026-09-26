@@ -3,8 +3,7 @@ import assert from 'node:assert/strict';
 import { batchStep, predictQueue, queueRef, runMergeBatches } from '../src/merge-queue.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { emptyDaemonState } from '../src/master-daemon.js';
-import { docsTrimActionKey, fileDocsTrim, type ReportedAttention } from '../src/daemon/faults.js';
-import { docsHeadroomStatus } from '../src/cli/master-status.js';
+import { docsHeadroomStatus, docsTrimActionKey, docsWordCountAt, fileDocsTrim, type ReportedAttention } from '../src/daemon/faults.js';
 import { attributeDocsOverflow, docsHeadroom, docsTrimTitle, docsWordBudget, type DocsWordCount } from '../src/model/documentation.js';
 import { evaluate, type Work } from '../src/model.js';
 
@@ -19,7 +18,7 @@ const config = (): MasterConfig => masterConfigSchema.parse({ version: 1, url: '
 
 test('unit:docs-headroom-kept — at 11,700 of 12,000 words master status raises attention and the loop files exactly one docs-trim item naming the largest pages', async () => {
   const main = { ...pages(11_000), 'docs/master-agent.md': 700 };
-  const status = docsHeadroomStatus('/repository', 'main', (_, ref) => ref === 'origin/main' ? main : null);
+  const status = await docsHeadroomStatus('/repository', 'main', (_, ref) => ref === 'origin/main' ? main : null);
   assert.equal(status.docs!.headroom.total, 11_700);
   assert.equal(status.docs!.base, 'origin/main', 'the base branch as fetched is what is counted');
   assert.equal(status.attention.length, 1, 'within 3% of the budget raises one attention item');
@@ -49,7 +48,7 @@ test('unit:docs-headroom-kept — at 11,700 of 12,000 words master status raises
   assert.equal(filed.length, 1, 'the open item, not the loop cursor, is what keeps it to one');
 
   // A set with its headroom raises nothing and files nothing.
-  const roomy = docsHeadroomStatus('/repository', 'main', () => pages(11_400));
+  const roomy = await docsHeadroomStatus('/repository', 'main', () => pages(11_400));
   assert.deepEqual(roomy.attention, []);
   assert.equal(roomy.docs!.headroom.saturated, false);
   await fileDocsTrim(emptyDaemonState(config()), effects, [], roomy.docs, () => Date.now(), []);

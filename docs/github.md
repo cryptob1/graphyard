@@ -47,7 +47,7 @@ Reviews and proofs bind one head, base and policy revision. The queue head's tip
 
 ### Batches
 
-`mergeQueue.batchSize` (master config, default 4; 1 disables; published via `POST /api/merge-queue`) tests entries together: a pass merges members in order, a failure is halved until the culprit is ejected, naming its check (`mergeStep`); batches behind an unpassed one eject nothing. A docs-budget-only failure ejects the entry that crossed it, naming words over and pages grown.
+`mergeQueue.batchSize` (master config, default 4; 1 disables; published via `POST /api/merge-queue`) tests entries together: a pass merges members in order, a failure is halved until the culprit is ejected, naming its check (`mergeStep`); batches behind an unpassed one eject nothing. A docs-budget-only failure ejects the entry crossing it, naming words over and pages grown.
 
 ### Direct merges
 

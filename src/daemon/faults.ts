@@ -12,7 +12,9 @@ import { type DaemonEffects, record } from './effects.js';
 import { loopAttention } from './liveness.js';
 import { daemonSummary } from './run.js';
 import type { Cycle } from './cycle.js';
-import { docsTrimItem, openDocsTrimItem, type DocsHeadroom } from '../model/documentation.js';
+import { budgetedPage, docsHeadroom, docsHeadroomText, docsTrimItem, docsWords, openDocsTrimItem, type DocsHeadroom, type DocsWordCount } from '../model/documentation.js';
+import { agentOwner } from '../master/attention.js';
+import { defaultChildRun, type ChildRun } from '../child-runner.js';
 
 /** The attention `master status` adds after buildMasterStatus, and its final attribution over the whole list. */
 export interface ReportedAttention { items: AttentionItem[]; attribute?: (status: { work: any[]; attentionItems: AttentionItem[] }) => AttentionItem[];
@@ -151,6 +153,45 @@ export async function fileRecurringFaultClasses(state: DaemonState, effects: Dae
       performed.push(await record(state, key, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `Could not file the item for the recurring ${recurrence.faultClass} fault class: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist));
     }
   }
+}
+/** The last count per tree: the base branch moves far less often than the loop cycles. */
+const docsCounts = new Map<string, DocsWordCount>();
+/**
+ * Words per budgeted page (README.md and docs/**\/*.md) at `ref` in the checkout at `root`, read
+ * from Git so the count is the base branch's whatever the checkout has out; null when unreadable.
+ */
+export async function docsWordCountAt(root: string, ref: string, run: ChildRun = defaultChildRun): Promise<DocsWordCount | null> {
+  const git = async (...args: string[]) => await run('git', args, { cwd: root, timeoutMs: 30_000 });
+  try {
+    const tree = (await git('rev-parse', '--verify', '--quiet', `${ref}^{tree}`)).trim();
+    const known = docsCounts.get(tree);
+    if (known) return known;
+    // `<mode> blob <sha> <size>\t<path>` per page, then every blob in one `git show`, split by those sizes.
+    const pages = (await git('ls-tree', '-r', '-l', tree, '--', 'README.md', 'docs')).split('\n').map(line => line.match(/^\S+ blob \S+\s+(\d+)\t(.+)$/)).filter(match => !!match && budgetedPage(match[2])).map(match => ({ path: match![2], size: Number(match![1]) }));
+    if (!pages.length) return null;
+    const blobs = Buffer.from(await git('show', ...pages.map(page => `${tree}:${page.path}`)), 'utf8'), count: DocsWordCount = {};
+    let at = 0;
+    for (const page of pages) { count[page.path] = docsWords(blobs.subarray(at, at + page.size).toString('utf8')); at += page.size; }
+    if (at !== blobs.length) return null;
+    if (docsCounts.size >= 8) docsCounts.delete(docsCounts.keys().next().value!);
+    docsCounts.set(tree, count);
+    return count;
+  } catch { return null; }
+}
+/**
+ * The documentation word budget's headroom on the base branch (GY-574): its origin copy when the
+ * checkout has one, else the local branch. A set within 3% of the budget is an attention line for the
+ * master (`master status` and the loop read it through reportedAttention), and the loop files the one
+ * trim item for it (fileDocsTrim).
+ */
+export async function docsHeadroomStatus(root: string, baseBranch: string, count: (root: string, ref: string) => Promise<DocsWordCount | null> | DocsWordCount | null = docsWordCountAt): Promise<{ docs: { base: string; headroom: DocsHeadroom } | null; attention: AttentionItem[] }> {
+  for (const ref of [`origin/${baseBranch}`, baseBranch]) {
+    const pages = await count(root, ref);
+    if (!pages) continue;
+    const headroom = docsHeadroom(pages), text = docsHeadroomText(headroom, ref);
+    return { docs: { base: ref, headroom }, attention: text ? [{ subject: 'docs', text, kind: 'resource-bound', faultClass: 'resources', ...agentOwner('master', 'The loop files one trim item for it (a docs-trim bug naming the largest pages); dispatch it ahead of items that add documentation') }] : [] };
+  }
+  return { docs: null, attention: [] };
 }
 /** The loop's action key for the documentation trim item (GY-574). */
 export const docsTrimActionKey = 'fault:docs-headroom';

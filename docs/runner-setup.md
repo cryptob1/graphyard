@@ -1,17 +1,17 @@
 <!-- page: Build integrations | 3 | the packaged runner and collector. -->
 # The packaged Playwright runner and collector
 
-An approved oracle bundle runs in an isolated container supervised by a host attestor; a separately trusted collector verifies it before publishing.
+An approved oracle bundle runs in an isolated container supervised by a host attestor; a separately trusted collector verifies it, then publishes.
 
 ## Approve the bundle
 
 ```bash
 graphyard runner inspect [packages/web]                 # reads metadata only
 graphyard runner snapshot selected-files.json > oracle-source.json
-graphyard runner bundle-digest ./oracle                 # the digest the runner will execute
+graphyard runner bundle-digest ./oracle                 # the digest to execute
 ```
 
-The bundle holds the reviewed specs with every helper and lockfile, owned by the attestor and not group- or world-writable. Pin `digest` and `runnerImageDigest` with `validation define`. The image builds from `docker/runner/Dockerfile`; specs read the target from `GRAPHYARD_TARGET_URL`.
+The bundle holds the reviewed specs with every helper and lockfile, attestor-owned, not group- or world-writable. Pin `digest` and `runnerImageDigest` with `validation define`. The image builds from `docker/runner/Dockerfile`; specs read the target from `GRAPHYARD_TARGET_URL`.
 
 ## Run an attempt
 
