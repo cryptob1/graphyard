@@ -32,7 +32,7 @@ import { flowAnalyticsRoutes } from './routes/flow-analytics.js';
 import { attributionRoutes } from './routes/attribution.js';
 import { statusRoutes } from './routes/status.js';
 import { actionRoutes } from './routes/actions.js';
-import { workRoutes } from './routes/work.js';
+import { leaseCommandRequest, workRoutes } from './routes/work.js';
 import { interventionPolicyFromEnv, interventionRoutes } from './routes/interventions.js';
 import { staticRoutes } from './static.js';
 
@@ -133,7 +133,7 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
       };
       if (await dispatch(publicRoutes)) return;
       if (url.pathname.startsWith('/api/')) {
-        context.actor = await authenticate(services, req.headers.authorization, services.repository);
+        context.actor = await authenticate(services, req.headers.authorization, services.repository, { lease: leaseCommandRequest(req.method, url.pathname) });
         if (await dispatch(apiRoutes)) return;
         return send(404, { error: 'Route not found' });
       }

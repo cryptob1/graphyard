@@ -149,6 +149,8 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   // The queue head going without an observation stalls the whole queue behind it (GY-492), so its lag is raised with them.
   const observation = observationThroughputStatus(coordinator, snapshot);
   const stalledItems = [...derivedStalls, ...mergeStallAttention(snapshot), ...observation.attention, ...repairLaneAttention(snapshot.work)];
+  // Heartbeat latency and failed renewals (GY-558): a p95 over 5 s puts every live lease at risk.
+  const leaseHealth = leaseHealthStatus(coordinator);
   // Exactly one component merges (GY-245): the loop, where one is installed or running, else the executors.
   const merger = installationMerger({ loop: { configured: !!setup.supervisor.installed, running: !!cycling?.running, autoMerge: master.autoMerge },
     declaration: executors.supervision.declaration, served: executors.presence.served });
@@ -159,7 +161,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   attentionItems.unshift(...loopItems, ...dispatchItems, ...executors.attention, ...merger.attention);
   // Setup that stops every launch, or leaves the loop unsupervised, is the master's to repair.
   attentionItems.push(...setupItems);
-  attentionItems.push(...generatedFiles, ...overflow); attentionItems.push(...interventions.attentionItems, ...releases.attention, ...(throughput.attention ? [throughput.attention] : []));
+  attentionItems.push(...generatedFiles, ...overflow, ...leaseHealth.attention); attentionItems.push(...interventions.attentionItems, ...releases.attention, ...(throughput.attention ? [throughput.attention] : []));
   attentionItems.splice(loopItems.length + dispatchItems.length, 0, ...resources.attention);
   // Everything the control plane takes from the operator's own credential alone, from the
   // human-only rule table, answered on the dashboard's Needs you page (GY-102).
@@ -171,7 +173,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
       // Items with no action, split the way a reader has to read them: one waiting on another
       // item is the pipeline working, one with nothing moving it is the pipeline stopped.
       actionless: actionless.length, actorless: actorless.length, livenessViolations: liveness.violations, waitingOnAnother: actionless.filter(entry => entry.outcome === 'waiting-on').length, stalled: stalledItems.length,
-      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + conflicted.length + stuck.attentionItems.length + stalledItems.length + actorless.length + stalled.length + overlong.length + loopItems.length + dispatchItems.length + executors.attention.length + merger.attention.length + releases.attention.length + overflow.length + budget.length + (throughput.attention ? 1 : 0) + observation.attention.length + owed.counted + resources.attention.length } }, snapshot.work);
+      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + conflicted.length + stuck.attentionItems.length + stalledItems.length + actorless.length + stalled.length + overlong.length + loopItems.length + dispatchItems.length + executors.attention.length + merger.attention.length + releases.attention.length + overflow.length + budget.length + (throughput.attention ? 1 : 0) + observation.attention.length + owed.counted + resources.attention.length + leaseHealth.attention.length } }, snapshot.work);
   return { ...directMergeLine(coordinator), ...status, ...attributed, ...faulted(attributeAttention(attributed.attentionItems, resources.readings)), resources: resources.report,
     // The board (GY-200): what the master owes first, with commands, then the rest.
     board: await timedStep('board', () => masterBoard(masterApi, snapshot, coordinator, decisions.unanswered)),
@@ -188,6 +190,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     merger: { merger: merger.merger, detail: merger.detail }, autoMerge: master.autoMerge, mergeQueue: { batchSize: mergeBatchSize(master) }, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'each merge needs an approved merge decision: graphyard master decide GY-N merge REASON, approved by the approver agent',
     // What the observation workers achieve and how far the queue head has drifted (GY-492).
     observationThroughput: observation,
+    leaseHealth: leaseHealth.report,
     versionSkew: mergeProtocolSkew(coordinator, cli), cli,
     reviewer: master.reviewer ? { identity: `${master.reviewer.slug}[bot]`, appId: master.reviewer.appId, profiles: master.reviewers.map(profile => profile.name), automatic: master.run.reviewerProfile ?? (master.reviewers.length === 1 ? master.reviewers[0].name : null),
       concurrency: master.reviewers.map(profile => ({ name: profile.name, agentName: profile.agentName, concurrency: profileConcurrency(profile) })) } : null,
@@ -206,6 +209,19 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     // What the host has left, what a reclaim would give back, and the bound it was judged against.
     disk: { ...disk, worktreeRoot: managedRoot.health, idleMs: reclaimIdleMs(master), inventory: { at: inventory.at, cached: inventory.cached }, reclaimable: reclaimPlan.filter(entry => entry.disposable).map(entry => ({ path: entry.path, key: entry.key, epoch: entry.epoch, disposition: entry.disposition, detail: entry.detail })) },
     runtime: { herdr: { available: runtime.available, reason: runtime.reason }, reviews: reviewRuntime } };
+}
+
+/**
+ * The server's heartbeat health (`leaseHealth` in GET /api/status, GY-558): p50/p95 renewal latency
+ * over the last ten minutes and the renewals refused or failed server-side, with one attention item
+ * when p95 exceeds the server's threshold. Null from a server that predates it.
+ */
+export function leaseHealthStatus(coordinator: { leaseHealth?: { p50Ms: number | null; p95Ms: number | null; renewals: number; refused: number; failed: number; windowMs: number; attention: string | null } | null } | null | undefined) {
+  const report = coordinator?.leaseHealth ?? null;
+  const attention: AttentionItem[] = report?.attention
+    ? [{ subject: 'leases', text: report.attention, ...agentOwner('master', 'GET /api/status (leaseHealth) and the server logs name what holds the lease pool or the coordination lock; workers keep their leases through recorded server-side failures') }]
+    : [];
+  return { report: report && { p50Ms: report.p50Ms, p95Ms: report.p95Ms, renewals: report.renewals, refused: report.refused, failed: report.failed, windowMs: report.windowMs }, attention };
 }
 
 /** What the report adds after buildMasterStatus; the loop reads it too, to track every class (GY-173). */
