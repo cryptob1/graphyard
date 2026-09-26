@@ -1,7 +1,7 @@
 <!-- page: Start here | 1 | the lifecycle and who holds which authority. -->
 # How Graphyard works
 
-Graphyard decides whether work may move forward; runtimes such as Herdr run the sessions doing it ([glossary](glossary.md)).
+Graphyard decides whether work may move forward; runtimes such as Herdr run the sessions ([glossary](glossary.md)).
 
 ## One trip from setup to Done
 
@@ -16,7 +16,7 @@ A card stops at its first refusing gate, saying what is missing; nothing sets a 
 
 ![Bootstrap versus normal operation: one supervised worker, then a fleet with separate credentials.](diagrams/bootstrap-vs-normal.svg)
 
-Text equivalent: in bootstrap the operator supervises one worker while gates are activated; normally the master dispatches to many workers, each with its own credential and worktree, and reviewers and producers judge candidates under the same gates.
+Text equivalent: in bootstrap the human operator supervises one worker while the gates are activated; normally the master dispatches to many workers, each with its own credential and worktree, and reviewers and producers judge candidates under the same gates.
 
 ## Who holds which authority
 
