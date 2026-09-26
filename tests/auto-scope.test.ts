@@ -419,24 +419,26 @@ test('integration:scope-from-review-finding — a refused request for a file a r
   assert.ok(work.plannedFiles.includes('src/server/routes/work.ts'));
   assert.match(widened[1].reason, /PRRT_later02/);
 
-  // A path a prefix already in plannedFiles covers is not outstanding: after an operator plans
-  // src/queue/ for half of a refused request, a finding naming only the other half widens it.
+  // What a finding grounds is widened at once, and only that (GY-438): the rest of the request
+  // stays refused, for the approver. A path a prefix planned since covers is then not outstanding:
+  // an operator planning src/queue/ answers what is left of the request.
   let partial = await claimed('prefix covers part of the request');
   await request(partial, { paths: ['src/queue/entry.ts', 'src/cli/queue-status.ts'], reason: 'The reviewer finding names src/cli/queue-status.ts:12' });
   const partialFindings = [{ ground: 'review thread PRRT_partial03', text: 'src/cli/queue-status.ts:12 still prints the stale count' }];
   const partialEffects: Partial<DaemonEffects> = { ...overrides, reviewFindings: async () => partialFindings };
   await cycle(state, partialEffects);
   partial = await reload(partial.id);
-  assert.equal(partial.scopeRequest!.decision!.state, 'refused', 'no finding names src/queue/entry.ts yet');
+  assert.deepEqual(widened.at(-1)!.paths, ['src/cli/queue-status.ts'], 'only the path the finding names is widened');
+  assert.ok(partial.plannedFiles.includes('src/cli/queue-status.ts'), `widened: ${partial.plannedFiles}`);
+  assert.equal(partial.scopeRequest!.decision!.state, 'refused', 'no finding names src/queue/entry.ts, so the rest stays refused');
+  const partly = widened.length;
+  await cycle(state, partialEffects, findingRecheckMs + 1_000);
+  assert.equal(widened.length, partly, 'a path already widened is not outstanding, and the rest is still ungrounded');
+  partial = await reload(partial.id);
   await ok(master.token, 'POST', `work/${partial.id}/requirements`, { expectedPolicyRevision: partial.policyRevision, criteria: partial.criteria, dependencies: partial.dependencies,
     plannedFiles: [...partial.plannedFiles, 'src/queue/'], exclusiveResources: partial.exclusiveResources ?? [], producerProofs: partial.producerProofs ?? [], reason: 'The item owns the queue module' });
   partial = await reload(partial.id);
-  assert.ok(partial.scopeRequest, 'a partly covered request stays open');
-  await cycle(state, partialEffects);
-  partial = await reload(partial.id);
-  assert.deepEqual(widened.at(-1)!.paths, ['src/cli/queue-status.ts'], 'only the uncovered path is widened');
-  assert.ok(partial.plannedFiles.includes('src/cli/queue-status.ts'), `widened: ${partial.plannedFiles}`);
-  assert.equal(partial.scopeRequest, null);
+  assert.equal(partial.scopeRequest, null, 'the revision covering the rest answers the request');
 
   // A request at the bounds a scope request allows — 50 paths of 500 characters — that a finding names
   // in full is widened, and its record is bounded: the widening already happened, so recording it
