@@ -4,7 +4,7 @@ import { dirname, resolve } from 'node:path';
 import { z } from 'zod';
 import { consentAnswerSchema } from './consent-prompt.js';
 import { defaultChildRun, type ChildRun } from './child-runner.js';
-import { accountLaunch, acknowledgeLaunch, acknowledgementMs, allocateManagedCheckout, atomicPrivateWrite, autonomousSession, closeHerdrPane, createdHerdrTab, deliverPrompt, destructivePromptGuidance, herdrJson, loadMasterConfig, markReprompted, neverStarted, onSelectedSession, prepareSessionHarness, privateFile, profileAtLimit, profileSessions, readProducerCredential, readSessionScreen, repromptText, selectAccount, selectRegistryAccount, sessionActivity, sessionAgentName, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, writeFailure, type PromptDelivery, type StartBounds, type HerdrAgent, type MasterConfig, type ProducerProfile, type RequestDelivery, type SessionRetryReport } from './master.js';
+import { closeFailedLaunch, launchStartMs, withLaunchClose, accountLaunch, acknowledgeLaunch, acknowledgementMs, allocateManagedCheckout, atomicPrivateWrite, autonomousSession, closeHerdrPane, createdHerdrTab, deliverPrompt, destructivePromptGuidance, herdrJson, loadMasterConfig, markReprompted, neverStarted, onSelectedSession, prepareSessionHarness, privateFile, profileAtLimit, profileSessions, readProducerCredential, readSessionScreen, repromptText, selectAccount, selectRegistryAccount, sessionActivity, sessionAgentName, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, writeFailure, type PromptDelivery, type StartBounds, type HerdrAgent, type MasterConfig, type ProducerProfile, type RequestDelivery, type SessionRetryReport } from './master.js';
 import type { FleetProbe, selectFleetSession } from './fleet.js';
 import { implementerIdentities, type Work } from './model.js';
 import type { DispatchRequest } from './model/dispatch.js';
@@ -288,15 +288,20 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
       pane = created.pane; tabId = created.tab;
       // The request is the session's own first message, on the runtime's command line (GY-93), read
       // from the request file in the session's checkout so the typed line stays short (GY-121).
-      ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], producerPrompt(config, binding, profile, checkout), dependencies.run, { ...dependencies.prompt, ...dependencies.start, directory: checkout.directory, cwd: root, environment, role: harness.role, contract: launch.contract }));
+      ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], producerPrompt(config, binding, profile, checkout), dependencies.run, { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: root, environment, role: harness.role, contract: launch.contract }));
     } catch (error) {
       // A launch that never became a session leaves no checkout behind.
       await removeSessionCheckout(root, dirname(checkout.directory), checkout.directory).catch(() => {});
       const malformedTab = (error as any)?.herdrTab as string | undefined;
-      if (pane || tabId || malformedTab) try { await stopCreatedHerdrTab(pane, tabId ?? malformedTab, dependencies.run); }
+      // Closed through the loop's own close path, and recorded in the failure (GY-413).
+      let closed: string | null = null;
+      if (pane || tabId || malformedTab) try { closed = await closeFailedLaunch(pane, tabId ?? malformedTab, dependencies.run); }
         catch { throw new Error(`${error instanceof Error ? error.message : 'Producer launch failed'}; Herdr could not confirm cleanup of the created tab`); }
       // A launch that failed for want of room says so, with the path and the reclaim command.
-      throw writeFailure(error, `Launching the ${binding.key} producer session (${String((error as Error)?.message ?? error).split('\n')[0]})`, checkout.directory);
+      const failure = writeFailure(error, `Launching the ${binding.key} producer session (${String((error as Error)?.message ?? error).split('\n')[0]})`, checkout.directory);
+      // A disk-exhaustion report keeps its advice last; the close rides on it as `paneClosed` (GY-413).
+      if (closed) { if (failure === error) withLaunchClose(failure, closed); else Object.assign(failure, { paneClosed: closed }); }
+      throw failure;
     }
     const requestedAt = now();
     const record: ProducerRecord = producerRecordSchema.parse({ id, requestId: request.id, attempt: prior.length + 1, key: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision,

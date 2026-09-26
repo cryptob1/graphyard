@@ -2,6 +2,10 @@
 import type { Work } from '../model.js';
 import { type ContainmentVerification, containmentGraceMs, containmentAttestation, containmentVerificationSchema, containmentSettlementRefusals } from '../quarantine.js';
 import { type SupervisorProbe, probeSupervisorAbsence } from '../containment-probe.js';
+import { readdirSync, readFileSync } from 'node:fs';
+import { setTimeout as sleep } from 'node:timers/promises';
+import { watchAssignment } from '../supervisor.js';
+import { watchSupervisorRunning } from './dispatch-reservation.js';
 
 export interface ContainmentAssessment {
   key: string; id: string; epoch: number; owner: string; at: string;
@@ -101,4 +105,29 @@ export async function assessContainment(work: Work[], options: { hostId: string;
     }
   }
   return assessments;
+}
+
+/** How long a failed launch waits for its supervisor to shut down and settle its quarantine (GY-413). */
+export const launchSupervisorStopMs = 30_000;
+export interface SupervisorStopDeps { list?: () => string[]; readCommand?: (pid: number) => string; kill?: (pid: number, signal: NodeJS.Signals) => void; boundMs?: number; pollMs?: number }
+/**
+ * Stops the watch supervisor of `KEY EPOCH` on this host, found by its exact command line, and
+ * answers whether it is gone within the bound (GY-413). SIGTERM is the supervisor's own shutdown:
+ * it stops what it launched, verifies its scope empty and settles its quarantine before it exits,
+ * so the pane it leaves behind can be closed without leaving an unverifiable fence (GY-273).
+ */
+export async function stopLaunchSupervisor(target: { key: string; epoch: number }, deps: SupervisorStopDeps = {}) {
+  const list = deps.list ?? (() => readdirSync('/proc')), readCommand = deps.readCommand ?? ((pid: number) => readFileSync(`/proc/${pid}/cmdline`, 'utf8'));
+  const kill = deps.kill ?? ((pid: number, signal: NodeJS.Signals) => { process.kill(pid, signal); });
+  const matching = () => list().filter(name => /^\d+$/.test(name)).map(Number).filter(pid => {
+    try { const assignment = watchAssignment(readCommand(pid).split('\0').filter(Boolean)); return assignment?.key === target.key && assignment.epoch === String(target.epoch); }
+    catch { return false; }
+  });
+  for (const pid of matching()) { try { kill(pid, 'SIGTERM'); } catch { /* already gone */ } }
+  const deadline = Date.now() + (deps.boundMs ?? launchSupervisorStopMs);
+  for (;;) {
+    if (!watchSupervisorRunning(target, readCommand, list)) return true;
+    if (Date.now() >= deadline) return false;
+    await sleep(deps.pollMs ?? 250);
+  }
 }
