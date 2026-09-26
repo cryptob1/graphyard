@@ -88,6 +88,9 @@ function provider(work: Work, tip: string, merge: 'clean' | 'conflict') {
     }
     if (method !== 'GET') return { id: 12 };
     if (path === '/git/ref/heads/main') return { ref: 'refs/heads/main', object: { type: 'commit', sha: tip } };
+    // A refused merge reads the branch it would resolve onto (GY-444); these fakes model an unresolvable conflict.
+    if (path.startsWith('/git/ref/heads/')) return { ref: path.slice(5), object: { type: 'commit', sha: '0'.repeat(40) } };
+    if (path.startsWith('/compare/')) return { status: 'diverged', files: [] };
     if (/^\/commits\/[a-f0-9]{40}$/.test(path)) return { sha: path.slice(9), commit: { tree: { sha: treeOf(path.slice(9)) } }, parents: [] };
     if (path === `/pulls/${work.submission!.pr}`) return { number: work.submission!.pr, head: { sha: work.candidate!.sha, ref: work.workspaces[0].branch }, base: { ref: 'main' }, state: 'open', draft: false };
     throw new Error(`Unexpected request ${path}`);

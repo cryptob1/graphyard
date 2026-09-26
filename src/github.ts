@@ -9,6 +9,7 @@ import type { Engine } from './engine.js';
 import { behindBaseHold, mechanicalHold } from './model/dispatch.js';
 import { CHECK_NAME, carriedApproval, demand, nativeReviewRequired, parseReviewerApps, reviewerProfileFor, reviewProviderOf, type Observation, type ReviewerApp, type ReviewerProfile, type ScopeFile, type TipMerge, type Work, type ReviewRequest } from './model.js';
 import { inPlannedScope, type LandedCandidate } from './regression-guard.js';
+import { mergeText } from './text-merge.js';
 import type { GitHubCacheStore } from './github-cache.js';
 import { nextAction } from './model/next-action.js';
 import { foldDecisions } from './model/approval.js';
@@ -28,6 +29,9 @@ export const scopeLookupBudget = 200;
 export const compareFileCap = 300;
 /** Re-requests of a pull request GitHub answered with `mergeable: null`, `mergeabilityRetryMs` apart: at most 10 seconds (GY-548). */
 export const mergeabilityRetries = 3, mergeabilityRetryIntervalMs = 3_000;
+/** The line a Graphyard-written word-level merge commit carries, before the files it resolved (GY-444). */
+export const wordMergeMarker = 'Graphyard resolved at word granularity';
+const isSha = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{40}$/.test(value);
 /** One file of a GitHub compare, as far as a patch-id reads it. */
 export interface CompareFile { filename?: unknown; previous_filename?: unknown; status?: unknown; patch?: unknown; changes?: unknown; sha?: unknown }
 /**
@@ -1580,23 +1584,119 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     const author = typeof commit?.author?.login === 'string' ? commit.author.login : null;
     const email = typeof commit?.commit?.author?.email === 'string' ? commit.commit.author.email : '';
     const authoredByApp = appAuthored(commit, await this.controlPlaneLogin());
-    // The provider merge never resolves a conflict: a conflicting merge is refused with 409 and
-    // ejects the entry (see mergeBranch), so a tip that exists was produced without one.
-    // A diff neither side of which could be read is left off: the record is what it was before GY-330.
+    // The provider merge never resolves a conflict. A tip Graphyard built itself from a word-level
+    // resolution (GY-444, see mergeBranch) says so in its message, and is recorded as resolved, so
+    // no binding carries onto it. A diff neither side of which could be read is left off: the
+    // record is what it was before GY-330.
+    const conflicts = typeof commit?.commit?.message === 'string' && commit.commit.message.includes(wordMergeMarker);
     const diff = { reviewed: await this.diffPatchId(boundBase, from), tip: await this.diffPatchId(predictedBase, tip) };
-    return { from, parents, author: author ?? (email || null), authoredByApp, conflicts: false, baseChanges: await this.changedFiles(boundBase, predictedBase), ...(diff.reviewed || diff.tip ? { diff } : {}) };
+    return { from, parents, author: author ?? (email || null), authoredByApp, conflicts, baseChanges: await this.changedFiles(boundBase, predictedBase), ...(diff.reviewed || diff.tip ? { diff } : {}) };
   }
-  /** Returns the new head, or null when the branch already contains the merged commit. */
+  /**
+   * Returns the new head, or null when the branch already contains the merged commit.
+   *
+   * GitHub's merge is line-granular: two independent edits on one line, or on adjacent lines,
+   * conflict. Where it refuses, the files both sides changed are merged again word by word
+   * (text-merge.ts, GY-444) and, when every one resolves, Graphyard writes the merge commit itself;
+   * its message names the resolved files and carries `wordMergeMarker`, which describeMerge reads so
+   * no review or proof carries onto it. A file whose words collide stays a conflict, as before.
+   */
   async mergeBranch(branch: string, head: string, message: string): Promise<string | null> {
+    return (await this.mergeBranchResolving(branch, head, message)).sha;
+  }
+  /** mergeBranch, also naming the files the word-level merge resolved (empty for GitHub's own merge). */
+  private async mergeBranchResolving(branch: string, head: string, message: string): Promise<{ sha: string | null; resolved: string[] }> {
     let result: any;
     try { result = await this.request('/merges', 'POST', { base: branch, head, commit_message: message }); }
     catch (error) {
-      if (error instanceof Refusal && /\(409\)/.test(error.message)) throw new SpeculativeConflict(`Speculative merge of ${head.slice(0, 12)} into ${branch} conflicts and cannot be resolved by Graphyard`);
+      if (error instanceof Refusal && /\(409\)/.test(error.message)) return this.wordMerge(branch, head, message, `Speculative merge of ${head.slice(0, 12)} into ${branch} conflicts and cannot be resolved by Graphyard`);
       throw error;
     }
-    if (result === null) return null;
+    if (result === null) return { sha: null, resolved: [] };
     demand(typeof result?.sha === 'string' && /^[a-f0-9]{40}$/.test(result.sha), 'GitHub returned an invalid speculative merge commit', 502);
-    return result.sha;
+    return { sha: result.sha, resolved: [] };
+  }
+  /**
+   * The merge GitHub refused, rebuilt through the Git Data API with the files both sides changed
+   * merged word by word. Every file only the merged-in side changed takes that side's entry; the
+   * commit's parents are the branch tip and `head`, as GitHub's own merge would have them, and the
+   * branch moves only if it still points at the tip read here. Any file that cannot be merged —
+   * colliding words, binary content, a rename, deletion or addition on both sides, or a change list
+   * GitHub truncates — refuses with `refusal` and the reason, and nothing is written.
+   */
+  private async wordMerge(branch: string, head: string, message: string, refusal: string): Promise<{ sha: string; resolved: string[] }> {
+    // Any failure of the resolution itself — an unreadable side, a refused write, a branch that
+    // moved — leaves the merge the conflict GitHub reported, exactly as before GY-444.
+    try { return await this.wordMergeUnchecked(branch, head, message, refusal); }
+    catch (error) {
+      if (error instanceof SpeculativeConflict) throw error;
+      throw new SpeculativeConflict(`${refusal}: the word-level merge could not be completed (${error instanceof Error ? error.message : String(error)})`);
+    }
+  }
+  private async wordMergeUnchecked(branch: string, head: string, message: string, refusal: string): Promise<{ sha: string; resolved: string[] }> {
+    const refuse = (why: string): never => { throw new SpeculativeConflict(`${refusal}: ${why}`); };
+    const ours = (await this.request(`/git/ref/heads/${branch}`))?.object?.sha;
+    if (!isSha(ours)) refuse('the branch tip could not be read');
+    // Each three-dot compare lists one side's changes against the merge base of the two.
+    const theirs = await this.request(`/compare/${ours}...${head}`), mine = await this.request(`/compare/${head}...${ours}`);
+    const base = theirs?.merge_base_commit?.sha;
+    if (!isSha(base) || !Array.isArray(theirs?.files) || !Array.isArray(mine?.files)) refuse('GitHub did not list both sides of the merge');
+    if (theirs.files.length >= compareFileCap || mine.files.length >= compareFileCap) refuse(`one side changes ${compareFileCap} or more files, more than GitHub lists`);
+    const paths = (file: any) => [file.filename, file.previous_filename].filter((path: unknown): path is string => typeof path === 'string');
+    const changedHere = new Map<string, any>(mine.files.flatMap((file: any) => paths(file).map(path => [path, file] as const)));
+    const tree = await this.treeEntries(head);
+    if (!tree) refuse(`the tree of ${head.slice(0, 12)} is too large to read whole`);
+    const entries: { path: string; mode: string; type: string; sha: string | null }[] = [];
+    const resolved: string[] = [], notes: string[] = [];
+    for (const file of theirs.files) {
+      const path = file.filename;
+      if (typeof path !== 'string') refuse('GitHub listed a file without a name');
+      const other = paths(file).map(name => changedHere.get(name)).find(Boolean);
+      const entry = tree!.get(path);
+      if (!other) {
+        if (typeof file.previous_filename === 'string') entries.push({ path: file.previous_filename, mode: '100644', type: 'blob', sha: null });
+        if (file.status === 'removed') entries.push({ path, mode: '100644', type: 'blob', sha: null });
+        else if (entry) entries.push({ path, ...entry });
+        else refuse(`${path} is not in the tree of ${head.slice(0, 12)}`);
+        continue;
+      }
+      if (file.status !== 'modified' || other.status !== 'modified' || other.filename !== path || entry?.type !== 'blob') refuse(`${path} is ${file.status} on one side and ${other.status} on the other`);
+      const baseBlob = (await this.request(`/contents/${path.split('/').map(encodeURIComponent).join('/')}?ref=${base}`))?.sha;
+      if (!isSha(baseBlob) || !isSha(other.sha) || !isSha(file.sha)) refuse(`${path} could not be read on every side`);
+      const [original, here, there] = await Promise.all([baseBlob, other.sha, file.sha].map(sha => this.blobText(sha)));
+      if (original === null || here === null || there === null) return refuse(`${path} is not UTF-8 text`);
+      const merged = mergeText(original, here, there, { prose: /\.(md|markdown)$/i.test(path) });
+      if ('conflict' in merged) return refuse(`${path}: ${merged.conflict}`);
+      const blob = await this.request('/git/blobs', 'POST', { content: merged.merged, encoding: 'utf-8' });
+      if (!isSha(blob?.sha)) refuse(`GitHub did not store the merged ${path}`);
+      entries.push({ path, mode: entry!.mode, type: 'blob', sha: blob.sha });
+      resolved.push(path); notes.push(...merged.notes.map(note => `${path}: ${note}`));
+    }
+    const oursTree = (await this.request(`/git/commits/${ours}`))?.tree?.sha;
+    if (!isSha(oursTree)) refuse(`the tree of ${ours.slice(0, 12)} could not be read`);
+    const written = await this.request('/git/trees', 'POST', { base_tree: oursTree, tree: entries });
+    const body = [message, '', `${wordMergeMarker}: ${resolved.join(', ')}.`, ...notes.map(note => `- ${note}`)].join('\n');
+    const commit = await this.request('/git/commits', 'POST', { message: body, tree: written?.sha, parents: [ours, head] });
+    demand(isSha(commit?.sha), 'GitHub returned an invalid merge commit', 502);
+    // Not forced: a branch that moved since its tip was read is refused, and the caller retries.
+    await this.request(`/git/refs/heads/${branch}`, 'PATCH', { sha: commit.sha, force: false });
+    return { sha: commit.sha, resolved };
+  }
+  /** Every entry of a commit's tree by path, or null when GitHub truncates the recursive listing. */
+  private async treeEntries(commit: string): Promise<Map<string, { mode: string; type: string; sha: string }> | null> {
+    const treeSha = (await this.request(`/git/commits/${commit}`))?.tree?.sha;
+    if (!isSha(treeSha)) return null;
+    const listing = await this.request(`/git/trees/${treeSha}?recursive=1`);
+    if (!Array.isArray(listing?.tree) || listing.truncated) return null;
+    return new Map(listing.tree.filter((item: any) => typeof item?.path === 'string').map((item: any) => [item.path, { mode: item.mode, type: item.type, sha: item.sha }]));
+  }
+  /** A blob as text, or null when it is not valid UTF-8 and so cannot be merged as text. */
+  private async blobText(sha: string): Promise<string | null> {
+    const blob = await this.request(`/git/blobs/${sha}`);
+    demand(typeof blob?.content === 'string', `GitHub did not return blob ${sha.slice(0, 12)}`, 502);
+    const raw = blob.encoding === 'base64' ? Buffer.from(blob.content, 'base64') : Buffer.from(blob.content, 'utf8');
+    const text = raw.toString('utf8');
+    return Buffer.from(text, 'utf8').equals(raw) ? text : null;
   }
   async publishRef(ref: string, sha: string) {
     try { await this.request(`/git/${ref}`, 'PATCH', { sha, force: true }); }
@@ -1749,9 +1849,13 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     // the base moves and read clean candidates as conflicting, and every refresh they were given
     // dropped their review and proofs. The conflict is confirmed first by a test merge that never
     // touches the candidate's branch; only one that really conflicts goes back to the worker.
-    const conflict = await this.testMerge(work.key, candidate!.sha, branch.tip);
+    const { conflict, resolved } = await this.testMergeResolving(work.key, candidate!.sha, branch.tip);
+    // A conflict only a line-granular merge has (GY-444) is not the worker's either: the queue's
+    // tip resolves it word by word, and nothing carries onto that tip, so it is reviewed and proven afresh.
+    const clean = resolved.length ? `a test merge resolves it word by word in ${resolved.join(', ')}; the merge queue builds that tip, which takes a fresh review and fresh proofs, and nothing was refreshed`
+      : 'a test merge of the two is clean; the reading is stale and nothing was refreshed';
     if (!conflict) return record({ head: candidate!.sha, trigger: undefined, stale: { head: candidate!.sha, base: branch.tip, policyRevision: work.policyRevision, at: new Date().toISOString(),
-      reading: `GitHub reported ${candidate!.sha.slice(0, 12)} conflicting with base branch tip ${branch.tip.slice(0, 12)}, but a test merge of the two is clean; the reading is stale and nothing was refreshed` } });
+      reading: `GitHub reported ${candidate!.sha.slice(0, 12)} conflicting with base branch tip ${branch.tip.slice(0, 12)}, but ${clean}` } });
     // The confirmed conflict is the refresh's whole outcome: the provider merge onto the branch
     // would be refused the same way, and nothing is written to it.
     return record({ conflict: `Candidate ${candidate!.sha.slice(0, 12)} cannot be brought onto base branch tip ${branch.tip.slice(0, 12)} without resolving a conflict, which is content nobody reviewed or proved: ${conflict}. Run graphyard sync ${work.key}, resolve it and push; the approval and proofs bound to ${candidate!.sha.slice(0, 12)} do not survive the resolution.` });
@@ -1763,14 +1867,17 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
    * read-only merge check; `[skip ci]` keeps the scratch merge commit from starting a workflow.
    */
   async testMerge(key: string, head: string, base: string): Promise<string | null> {
+    return (await this.testMergeResolving(key, head, base)).conflict;
+  }
+  /** testMerge, also naming the files only the word-level merge resolved (GY-444). */
+  private async testMergeResolving(key: string, head: string, base: string): Promise<{ conflict: string | null; resolved: string[] }> {
     const branch = mergeCheckBranch(key);
     await this.publishRef(`refs/heads/${branch}`, head);
     try {
-      await this.mergeBranch(branch, base, `Graphyard merge check for ${key} [skip ci]`);
-      return null;
+      return { conflict: null, resolved: (await this.mergeBranchResolving(branch, base, `Graphyard merge check for ${key} [skip ci]`)).resolved };
     } catch (error) {
       if (!(error instanceof SpeculativeConflict)) throw error;
-      return error.message;
+      return { conflict: error.message, resolved: [] };
     } finally {
       // A scratch branch left behind by a failed delete is overwritten by the next check.
       await this.request(`/git/refs/heads/${branch}`, 'DELETE').catch(() => {});
