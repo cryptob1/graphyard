@@ -10,6 +10,7 @@
 - `GET /api/analytics/flow`, `/api/analytics/attribution`: bounded. Flow days: UTC midnights to today, the first holding earlier time. `window.covered`/`window.kinds`: scan and per-kind reach; `throughput[].covered: false`: unread, not zero. Merged is Deploy; `stepDwell[].sparse` (n<5): marked, unsplit.
 - Interventions, flow, `/api/shipping-pulse`: 3-connection, 20s-timeout report pool.
 - `GET /api/deployments`: `POST /api/deployments` observations (`producer`/`admin`; `state` `succeeded`, `failed` or `rolled_back`; never moves a gate).
+- `GET /api/tests`, `/api/tests/ID/runs`: case results, paged history.
 - `GET /api/delegation`, `/api/proof-grants`, `/api/delivery`: slices, live proof authority, release state.
 
 Events skip routine `github.observed`/`heartbeat` rows unless `routine=include`; page by `limit` (default 300) and `cursor` (last `seq`); filter by `kind`, `since`, `until`.
