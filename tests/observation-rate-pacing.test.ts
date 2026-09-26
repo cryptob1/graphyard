@@ -2,12 +2,13 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { GitHub, ObservationPacer, budgetTight, mergePathReserve, observationClaimOrder, observationPace, observationThroughputStatus, tightBudgetDecision, type GitHubBudget } from '../src/github.js';
+import { GitHub, ObservationPacer, budgetTight, firstObservationOwed, mergePathReserve, observationClaimOrder, observationPace, observationThroughputStatus, tightBudgetDecision, type GitHubBudget } from '../src/github.js';
 import { githubBudgetAttention } from '../src/cli/github-budget-attention.js';
 import { evaluate, type Work } from '../src/model.js';
 
 // GY-567. Each test is named for the proof it produces: unit:observation-rate-paced,
-// unit:observation-priority-under-budget, unit:budget-projection-reported.
+// unit:observation-priority-under-budget, unit:budget-projection-reported,
+// unit:first-observation-not-starved.
 
 const CI = 15368;
 const sha = (seed: string) => createHash('sha1').update(seed).digest('hex');
@@ -143,10 +144,11 @@ test('unit:observation-priority-under-budget — under a tight budget the queue 
   const flightWork = settle(item('GY-FLIGHT', 400, sha('flight'), base), settledQueue);
   const flight = { ...flightWork, stage: 'merge', gates: flightWork.gates.map(gate => ({ ...gate, passed: true, reasons: [] })), violations: [],
     mergeAuthorization: { sha: flightWork.candidate!.sha, baseSha: flightWork.candidate!.baseSha, policyRevision: 1, at: new Date().toISOString() } } as Work;
-  const running = item('GY-RUN', 401, sha('run'), base, { stage: 'build', candidate: null, observation: null,
+  // A worker still running has not submitted; an unsubmitted idle item is nothing to read.
+  const running = item('GY-RUN', 401, sha('run'), base, { stage: 'build', candidate: null, observation: null, submission: null,
     sessions: [{ id: 'worker:1', state: 'running', endedAt: null, kind: 'implementation' }] } as unknown as Partial<Work>);
   const waiting = settle(item('GY-WAIT', 402, sha('wait'), base, { criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['manual:budget'] }] }), settledQueue, false);
-  const idle = item('GY-IDLE', 403, sha('idle'), base, { stage: 'build', candidate: null, observation: null });
+  const idle = item('GY-IDLE', 403, sha('idle'), base, { stage: 'build', candidate: null, observation: null, submission: null });
   const all = [idle, waiting, running, flight, ...settledQueue];
   const keys = (order: string[]) => order.map(id => all.find(work => work.id === id)!.key);
 
@@ -201,4 +203,96 @@ test('unit:budget-projection-reported — master status reports remaining, reset
   const docs = readFileSync(new URL('../docs/operations-reference.md', import.meta.url), 'utf8');
   assert.match(docs, /GRAPHYARD_OBSERVATION_CONCURRENCY/);
   assert.match(docs, /pace/i, 'the pacing rule is documented');
+});
+
+/**
+ * A fleet's observation hour with the real claim order (GY-567 AC-4): `workers` paced workers
+ * claim the first due job the order names, else the oldest due one (what `Store.takeJob` does).
+ * The queue head comes due every 20 s, the rest of its band every 60 s, queued entries behind it
+ * every 5 minutes, and review-waiting items every 30 s — the load that, ranked ahead of them,
+ * kept one worker from ever reading a new submission. Submissions arrive at `arrivals` and are
+ * observed once; returns how long each waited for that first reading.
+ */
+function firstReadWaits(all: Work[], submissions: Work[], arrivals: number[], options: { workers: number; order: (works: Work[]) => string[] }) {
+  const hour = 3_600_000, step = 1000, duration = 4000, cost = 12, resetAt = hour;
+  let remaining = 5000;
+  const pacer = new ObservationPacer();
+  const works = new Map(all.map(work => [work.id, work]));
+  const queued = all.filter(work => (work as Work & { queue?: unknown }).queue);
+  const cadence = new Map<string, number>(all.map(work => [work.id, firstObservationOwed(work) ? Infinity : 30_000]));
+  queued.forEach((work, index) => cadence.set(work.id, index === 0 ? 20_000 : index === 1 ? 60_000 : 300_000));
+  const due = new Map<string, number>(all.map((work, index) => [work.id, index * 500]));
+  const arrival = new Map(submissions.map((work, index) => [work.id, arrivals[index]]));
+  const waits = new Map<string, number>();
+  const busy = new Set<string>();
+  const state = Array.from({ length: options.workers }, () => ({ sleepUntil: 0, job: null as null | { id: string; startedAt: number; settle: (charged?: number, at?: number) => void } }));
+  for (let now = 0; now < hour; now += step) {
+    for (const [id, at] of arrival) if (at === now) { works.set(id, submissions.find(work => work.id === id)!); due.set(id, now); }
+    for (const worker of state) {
+      if (worker.job && now - worker.job.startedAt >= duration) {
+        const { id, settle } = worker.job;
+        remaining -= cost; settle(cost, now); busy.delete(id); worker.job = null;
+        const work = works.get(id)!;
+        if (firstObservationOwed(work)) {
+          waits.set(id, now - arrival.get(id)!);
+          // Read once, it holds a candidate and is observed like any review-waiting item after.
+          works.set(id, { ...work, observation: { at: new Date().toISOString() }, candidate: { sha: sha(id), baseSha: sha('base'), pr: 1, branch: 'b', author: 'a' } } as unknown as Work);
+          cadence.set(id, 30_000);
+        }
+        due.set(id, now + cadence.get(id)!);
+      }
+      if (worker.job || worker.sleepUntil > now) continue;
+      const slot = pacer.start({ remaining, resetAt, reserve: mergePathReserve }, cost, now);
+      if (!slot.settle) { worker.sleepUntil = now + Math.min(slot.wait, 5000); continue; }
+      const dueNow = [...due].filter(([id, at]) => at <= now && !busy.has(id));
+      const named = options.order([...works.values()]).find(id => dueNow.some(([due]) => due === id));
+      const next = named ?? dueNow.sort((a, b) => a[1] - b[1])[0]?.[0];
+      if (!next) { slot.settle(0, now); worker.sleepUntil = now + 1000; continue; }
+      busy.add(next); due.set(next, Infinity);
+      worker.job = { id: next, startedAt: now, settle: slot.settle };
+    }
+  }
+  return submissions.map(work => waits.get(work.id) ?? Infinity);
+}
+
+test('unit:first-observation-not-starved — with 13 queued entries and review-waiting items due every cycle, 3 new submissions each get their first observation within 5 minutes, ranked behind only the queue head band and in-flight merges; master status reports the oldest unobserved submission', () => {
+  const base = sha('main-first-read');
+  const raw = Array.from({ length: 13 }, (_, index) => item(`GY-Q${String(index).padStart(2, '0')}`, 600 + index, sha(`fq${index}`), base,
+    { queue: { sequence: index + 1, enqueuedAt: new Date(Date.now() - 3_600_000).toISOString(), policyRevision: 1, speculation: null } } as Partial<Work>));
+  const queue = raw.map(work => settle(work, raw));
+  const waiting = Array.from({ length: 6 }, (_, index) => settle(item(`GY-W${index}`, 700 + index, sha(`fw${index}`), base, { criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['manual:budget'] }] }), queue, false));
+  const submissions = [0, 1, 2].map(index => item(`GY-NEW${index}`, 800 + index, sha(`fn${index}`), base, { stage: 'build', candidate: null, observation: null,
+    documentation: { submission: { epoch: 1, pr: 800 + index, at: new Date(Date.now() - (3 - index) * 60_000).toISOString(), files: null, statement: null, satisfiedBy: null } } } as unknown as Partial<Work>));
+  const fleet = [...queue, ...waiting];
+  assert.ok(submissions.every(firstObservationOwed) && !fleet.some(firstObservationOwed), 'only the new submissions owe a first reading');
+
+  // The claim order: the head band first, then every never-observed submission, then the
+  // review-waiting items — whether or not the budget is tight.
+  for (const tight of [false, true]) {
+    const all = [...fleet, ...submissions];
+    const order = observationClaimOrder(all, 1, Date.now(), tight).map(id => all.find(work => work.id === id)!.key);
+    assert.deepEqual(order.slice(0, 5), ['GY-Q00', 'GY-Q01', 'GY-NEW0', 'GY-NEW1', 'GY-NEW2'], `tight=${tight}: ${order.join(', ')}`);
+  }
+
+  // An hour of load: submissions arriving at 10, 25 and 40 minutes, four paced workers and one.
+  const arrivals = [600_000, 1_500_000, 2_400_000];
+  const claimOrder = (works: Work[]) => observationClaimOrder(works, 1, Date.now());
+  for (const workers of [1, 4]) {
+    const waits = firstReadWaits(fleet, submissions, arrivals, { workers, order: claimOrder });
+    assert.ok(waits.every(wait => wait <= 300_000), `${workers} worker(s): each submission is first observed within 5 minutes (waits ${waits.join(', ')} ms)`);
+  }
+  // Without the first-read ranking (the order before this fix), the review-waiting items that
+  // come due every cycle keep the submissions from ever being read.
+  const unranked = (works: Work[]) => claimOrder(works).filter(id => !submissions.some(work => work.id === id));
+  const starved = firstReadWaits(fleet, submissions, arrivals, { workers: 1, order: unranked });
+  assert.ok(starved.some(wait => wait > 300_000), `unranked, a submission waits past the bound (waits ${starved.join(', ')} ms)`);
+
+  // master status names the oldest submission still unread, with its age and how many there are.
+  const now = Date.now();
+  const report = observationThroughputStatus(null, { work: [...fleet, ...submissions], now: new Date(now).toISOString(), jobs: [] }, now);
+  assert.equal(report.oldestUnobservedSubmission?.key, 'GY-NEW0');
+  assert.equal(report.oldestUnobservedSubmission?.pr, 800);
+  assert.equal(report.oldestUnobservedSubmission?.count, 3);
+  assert.ok(Math.abs(report.oldestUnobservedSubmission!.ageMs - 180_000) < 5_000, `aged from its submission (${report.oldestUnobservedSubmission!.ageMs} ms)`);
+  assert.equal(observationThroughputStatus(null, { work: fleet, now: new Date(now).toISOString(), jobs: [] }, now).oldestUnobservedSubmission, null, 'none unread, none reported');
 });

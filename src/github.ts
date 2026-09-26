@@ -1853,12 +1853,17 @@ export function waitsOnObservation(work: Work, all: Work[], now = new Date()): b
 }
 /** Whether a session is running on the item now: a worker, reviewer or producer whose result an observation reads. */
 export const runningSession = (work: Work) => (work.sessions ?? []).some(session => session.state === 'running' && !session.endedAt);
+/** A submitted item the control plane has never read: its first observation is what every later gate waits on. */
+export const firstObservationOwed = (work: Work) => !!work.submission && !work.observation && !work.candidate && work.stage !== 'done';
+/** When the item's current submission was made: the documentation record's time for that PR, else when its stage was entered. */
+const submittedAt = (work: Work) => work.documentation?.submission?.pr === work.submission?.pr && work.documentation?.submission?.at ? work.documentation.submission.at : work.stageEnteredAt;
 /**
  * The order observation jobs are claimed in (GY-492): merge-queue entries within the head band
  * first, in queue position, and any merge in flight (an authorized head GitHub may merge now);
- * then items whose next action waits on an observation, then items with a running session, then
- * the rest by available_at — the order `Store.takeJob` falls back to for a job this list does not
- * name. Under a `tight` budget (GY-567) running sessions come straight after the merge path.
+ * then submissions never observed; then items whose next action waits on an observation, then
+ * items with a running session, then the rest by available_at — the order `Store.takeJob` falls
+ * back to for a job this list does not name. Under a `tight` budget (GY-567) running sessions come
+ * straight after the first reads, which stay behind only the merge path whatever the budget.
  * `available_at` still gates every claim: priority reorders due jobs, never makes one due.
  */
 export function observationClaimOrder(all: Work[], batchSize: number, now = Date.now(), tight = false): string[] {
@@ -1869,9 +1874,13 @@ export function observationClaimOrder(all: Work[], batchSize: number, now = Date
   }
   for (const work of all) if (mergeAuthorized(work) && !ranked.includes(work.id)) ranked.push(work.id);
   const open = all.filter(work => work.stage !== 'done' && !ranked.includes(work.id));
+  // A submission never observed has no candidate, so no gate, review or proof can start until it
+  // is read once. Behind the review-waiting items, which come due again every cycle, one worker
+  // never reached it (2026-09-26: eight submitted PRs unread for hours).
+  const firstReads = open.filter(firstObservationOwed).map(work => work.id);
   const waiting = open.filter(work => waitsOnObservation(work, all, new Date(now))).map(work => work.id);
   const running = open.filter(runningSession).map(work => work.id);
-  return [...new Set([...ranked, ...(tight ? [running, waiting] : [waiting, running]).flat()])];
+  return [...new Set([...ranked, ...firstReads, ...(tight ? [running, waiting] : [waiting, running]).flat()])];
 }
 
 /** How long a lag is, in the unit a reader reads: a minute and change, or seconds. */
@@ -1903,8 +1912,12 @@ export function observationThroughputStatus(coordinator: { githubBudget?: ({ thr
   const head = predictQueue(snapshot.work, now).find(placement => placement.position === 0) ?? null;
   const headObservation = head ? snapshot.work.find(work => work.id === head.id)?.observation ?? null : null;
   const headObservationAgeMs = head ? headObservation?.at ? Math.max(0, now - Date.parse(headObservation.at)) : null : null;
+  // The oldest submission never observed (GY-567): nothing can review or prove it until it is read once.
+  const unobserved = snapshot.work.filter(firstObservationOwed).map(work => ({ key: work.key, pr: work.submission!.pr, submittedAt: submittedAt(work) }))
+    .sort((a, b) => Date.parse(a.submittedAt) - Date.parse(b.submittedAt));
+  const oldestUnobservedSubmission = unobserved[0] ? { ...unobserved[0], ageMs: Math.max(0, now - Date.parse(unobserved[0].submittedAt)), count: unobserved.length } : null;
   const report = { budget, jobsPerMinute: throughput?.jobsPerMinute ?? null, medianDurationMs: throughput?.medianDurationMs ?? null,
-    p90DurationMs: throughput?.p90DurationMs ?? null, oldestDueJobMs, head: head?.key ?? null, headObservationAgeMs };
+    p90DurationMs: throughput?.p90DurationMs ?? null, oldestDueJobMs, head: head?.key ?? null, headObservationAgeMs, oldestUnobservedSubmission };
   const attention: AttentionItem[] = head && (headObservationAgeMs === null || headObservationAgeMs > observationFreshnessMs)
     ? [{ subject: 'github',
         text: `The merge-queue head ${head.key} has ${headObservationAgeMs === null ? 'no observation at all' : `gone ${observationLag(headObservationAgeMs)} without an observation`} while the merge gate refuses anything older than two minutes${oldestDueJobMs !== null ? `; the oldest due job has waited ${observationLag(oldestDueJobMs)}` : ''}${report.jobsPerMinute !== null ? `, and the server has been observing ${report.jobsPerMinute} job(s)/min (median ${report.medianDurationMs ?? '?'} ms, p90 ${report.p90DurationMs ?? '?'} ms)`: ''}: the queue stalls until its head is observed`,
