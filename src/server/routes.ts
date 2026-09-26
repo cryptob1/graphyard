@@ -79,3 +79,5 @@ export function matchRoute(route: Route, method: string | undefined, pathname: s
 
 /** Parse a JSON body; `fallback` stands in for an empty body where a route accepts one. */
 export const parseJson = async (context: RouteContext, limit?: number, fallback = '') => JSON.parse((await context.body(limit)).toString() || fallback);
+// The log line a route's unexpected failure is reported with (GY-422).
+export { requestFailure } from './request-log.js';
