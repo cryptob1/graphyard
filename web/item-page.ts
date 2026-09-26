@@ -93,6 +93,7 @@ export function activityLabel(kind: string): string {
     submit: 'Handed in', blocked: 'The builder reported it blocked', scope: 'The builder asked to change the planned files', autoscope: 'The planned files were changed',
     evidence: 'Proof recorded', deployment: 'Deployment recorded', revoke: 'A proof was withdrawn', session: 'A session was recorded', request: 'An agent asked for a decision',
     repair: 'Asked to repair the branch',
+    refresh: 'Asked to merge the repaired base in',
     // The control plane's own facts.
     'human.requested': 'Asked you for a decision', 'human.answered': 'You answered', 'review.requested': 'Review requested', 'review.failover': 'Handed to another reviewer',
     'queue.ejected': 'Taken out of the line to merge', 'queue.predicted': 'Lined up to merge', 'merge.execution.committed': 'Merged', 'delivery.verified': 'Live in production',

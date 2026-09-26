@@ -11,6 +11,7 @@ import { readyToRetry } from './sessions.js';
 import { type DaemonEffects, record } from './effects.js';
 import { loopAttention } from './liveness.js';
 import { daemonSummary } from './run.js';
+import { baseFailureAttention } from './cycle-base-failures.js';
 import type { Cycle } from './cycle.js';
 import { candidateKey } from './reconcile.js';
 import { checkInvariants, invariantFaultKind, invariantFaults } from '../model/invariants.js';
@@ -196,7 +197,7 @@ export async function faultStep(cycle: Cycle, assessments: Record<string, Contai
     .catch(error => { partial = true; return { items: [{ subject: 'loop', text: `The loop could not read the attention master status adds to classify it: ${message(error)}`, kind: 'loop-failures' } as AttentionItem] }; });
   // The loop's own health lines, as master status puts them first: its cost, silence and delivery budget. The loop reading
   // them is cycling, so its liveness is not in question here, and a failed cycle is noted once as it happens (noteCycleFailure).
-  const loop = loopAttention({ liveness: { ...summary.liveness, state: 'running' }, silence: summary.silence, budget: summary.budget, cost: summary.cost });
+  const loop = [...loopAttention({ liveness: { ...summary.liveness, state: 'running' }, silence: summary.silence, budget: summary.budget, cost: summary.cost }), ...baseFailureAttention(summary.baseFailures, config.baseBranch)];
   endFailingRuns(state, policy, clock);
   // The system invariants (GY-404): properties of the running pipeline no per-item gate can see,
   // judged on each observation over the same snapshot; each violation is one fault of its class below.

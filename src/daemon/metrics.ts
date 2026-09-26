@@ -101,7 +101,7 @@ export function missingProofs(work: Work, now: Date) {
 export const silenceBudgetMs = 1_200_000;
 export interface ActionableSubject { key: string; kind: DaemonActionKind; work: string | null; detail: string }
 export function actionableSubjects(config: Pick<MasterConfig, 'autoMerge' | 'run'>, work: Work[], now: number,
-  context: { assessments?: Record<string, ContainmentAssessment>; approvals?: DaemonState['approvals'] } = {}): ActionableSubject[] {
+  context: { assessments?: Record<string, ContainmentAssessment>; approvals?: DaemonState['approvals']; baseFailed?: Map<string, Set<string>> } = {}): ActionableSubject[] {
   const subjects: ActionableSubject[] = [];
   // The silence record keeps each detail to 500 characters; a refusal or proof list quoted here is cut to fit.
   const add = (kind: DaemonActionKind, item: Work | null, detail: string) => subjects.push({ key: `${kind}:${item?.key ?? 'pipeline'}`, kind, work: item?.key ?? null, detail: boundDetail(detail, 500) });
@@ -115,7 +115,7 @@ export function actionableSubjects(config: Pick<MasterConfig, 'autoMerge' | 'run
     // It stays a subject until it is applied. A decision sitting with an approver is the pipeline
     // waiting on its own agent, and counting that as nothing to act on is how a dead approver used
     // to make an item disappear from the one measure built to notice it.
-    const decision = routineDecision(item, config, now, context.assessments?.[item.id]);
+    const decision = routineDecision(item, config, now, context.assessments?.[item.id], context.baseFailed?.get(item.id));
     const watch = decision ? context.approvals?.[decisionKey(item, decision)] : undefined;
     // A decision waiting for an approver account to reset is the one capacity line, not a stall per item (GY-182).
     if (decision && !watch?.settledAt && !(watch && standingCapacity(item, 'approver').length)) add('decision', item, !watch ? `${item.key} needs a ${decision.action} decision requested and approved`

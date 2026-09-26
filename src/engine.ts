@@ -12,7 +12,7 @@ import { Refusal } from './model/refusal.js';
 import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
 import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
-import { branchContamination, nextQueueEntries, disprovedConflict, currentRestore, decideIdentityCarry, defaultMergeBatchSize, mergeBatchSizeEvent, dismissedApproval, keptTipCarry, onto, pendingRestore, reviewedFilesOf, queueHistoryLimit, queueSequencingReason, reconciliationRefusalPrefix, tipReplacesHead, type BaseRefresh, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type QueueSpeculation, type RestoredApproval } from './merge-queue.js';
+import { branchContamination, requestedBaseRefresh, nextQueueEntries, disprovedConflict, currentRestore, decideIdentityCarry, defaultMergeBatchSize, mergeBatchSizeEvent, dismissedApproval, keptTipCarry, onto, pendingRestore, reviewedFilesOf, queueHistoryLimit, queueSequencingReason, reconciliationRefusalPrefix, tipReplacesHead, type BaseRefresh, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type QueueSpeculation, type RestoredApproval } from './merge-queue.js';
 import { queueEjectionRecord } from './model/queue.js';
 import { githubFromEnv, mergeBandQueueDepth } from './github.js';
 import { regressionRefusals } from './regression-guard.js';
@@ -129,6 +129,10 @@ const commands = {
   // unlanded commits (GY-127). It carries no head: the restore is decided from the record and the
   // observation, run by the reconciliation job, and recorded on `baseRefresh.restore`.
   repair: z.object({ reason: z.string().trim().min(1).max(2000) }).strict(),
+  // The coordinator — the master loop's operator-agent identity — asking the control plane to merge
+  // the base tip it names into a candidate a repaired base failure held (GY-528). The reconciliation
+  // job runs it and records it on `baseRefresh`, where the binding carry decides what the head keeps.
+  refresh: z.object({ reason: z.string().trim().min(1).max(2000), base: sha }).strict(),
 } as const;
 const executorName = z.string().trim().min(1).max(200).regex(/^[^\u0000-\u001f\u007f]+$/);
 const actionClaimSchema = z.object({
@@ -158,7 +162,7 @@ export const mergeExecutionOwner = (actor: Pick<Principal, 'id'>, executor?: str
 /** The refusal a replay of one idempotency key with different input earns; read back by the pull. */
 export const idempotencyMismatch = 'Idempotency key reused with different input';
 export type Command = keyof typeof commands;
-const operatorCapabilitiesByCommand: Partial<Record<Command, OperatorCapability>> = { create: 'intent:create', ready: 'intent:ready', unblock: 'intent:unblock', requirements: 'policy:requirements', reviewpolicy: 'policy:review-provider' };
+const operatorCapabilitiesByCommand: Partial<Record<Command, OperatorCapability>> = { create: 'intent:create', ready: 'intent:ready', unblock: 'intent:unblock', refresh: 'intent:unblock', requirements: 'policy:requirements', reviewpolicy: 'policy:review-provider' };
 
 function authorizeOperatorCommand(actor: Principal, command: Command, data: any, work: Work | undefined, repository: string) {
   const capability = operatorCapabilitiesByCommand[command];
@@ -684,6 +688,21 @@ export class Engine {
           head: null, conflict: null, merge: null, carry: null,
           restore: { contaminated: candidate.sha, foreign: contamination!.foreign, own: contamination!.own, cause: 'repair', requested: { by: actor.id, at: now.toISOString(), reason: data.reason },
             reason: `head ${candidate.sha.slice(0, 12)} carries the unlanded commits of ${contamination!.foreign.join(', ')} (${contamination!.source.join(' and ')})`, performedAt: null, outcome: null } };
+      }
+      if (command === 'refresh') {
+        if (actor.role !== 'operator-agent') demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
+        demand(work.submission && !work.observation?.merged && work.stage !== 'done' && !work.reworkRequested, 'Open submitted work is required');
+        const candidate = work.candidate, observation = work.observation;
+        demand(candidate && observation?.candidate.sha === candidate.sha && observation.prState === 'open' && observation.draft === false, 'An open pull request observed at the current head is required');
+        demand(!work.queue, `${work.key} is a live merge-queue entry; its tip is rebuilt on the base branch when the queue changes`);
+        demand(observation!.baseTip === data.base, `The base branch tip last observed for ${work.key} is ${observation!.baseTip?.slice(0, 12) ?? 'unknown'}, not ${data.base.slice(0, 12)}; retry once it is observed`, 409);
+        demand(observation!.baseTipContained === false, `${work.key} head ${candidate!.sha.slice(0, 12)} already contains base branch tip ${data.base.slice(0, 12)}; there is nothing to merge in`);
+        const refresh = work.baseRefresh;
+        demand(!(refresh && refresh.from.sha === candidate!.sha && refresh.base === data.base && refresh.policyRevision === work.policyRevision),
+          `A refresh of ${work.key} head ${candidate!.sha.slice(0, 12)} onto ${data.base.slice(0, 12)} is already recorded`);
+        demand(!requestedBaseRefresh(work), `A refresh of ${work.key} head ${candidate!.sha.slice(0, 12)} is already requested; the reconciliation job runs it`);
+        // Beside `baseRefresh`, not in it: an approval an earlier refresh carried onto this head still binds until the merge runs.
+        work.baseRefreshRequest = { head: candidate!.sha, base: data.base, policyRevision: work.policyRevision, by: actor.id, at: now.toISOString(), reason: data.reason };
       }
       if (command === 'reviewpolicy') {
         if (actor.role !== 'operator-agent') admin(actor);
@@ -1627,6 +1646,8 @@ export class Engine {
       }
       const carry = refresh.head && refresh.head !== refresh.from.sha ? this.decideBaseRefreshCarry(work, all, refresh, now) : null;
       work.baseRefresh = { ...refresh, carry };
+      // A requested refresh (GY-528) is answered by the refresh of the head it named, merged or conflicting.
+      if (work.baseRefreshRequest?.head === refresh.from.sha) work.baseRefreshRequest = null;
       this.evaluate(work, all, now);
       if (carry) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'base.carry', JSON.stringify({ details: { ...carry, merge: refresh.merge ?? null } })]);
       await this.recordDispatch(db, work, now);

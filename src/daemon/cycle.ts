@@ -13,6 +13,7 @@ import { scopeStep, successorStep } from './cycle-scope.js';
 import { reclaimStep } from './cycle-reclaim.js';
 import { dispatchStep } from './cycle-dispatch.js';
 import { decisionStep } from './cycle-decisions.js';
+import { baseFailureStep } from './cycle-base-failures.js';
 import { deploymentStep, mergeStep, shepherdStep } from './cycle-delivery.js';
 import { faultStep } from './faults.js';
 import { triageBacklogStep } from './cycle-triage.js';
@@ -166,7 +167,7 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
       } catch { /* a cursor that cannot be written is the next cycle's failure */ }
     }
   });
-  const cycle: Cycle = { config, state, effects, now, snapshot, clock, clockOffset, performed, isolate, agents, credentials, open, owns, heldBy, timings, launcher, launch, detached: !settle };
+  const cycle: Cycle = { config, state, effects, now, snapshot, clock, clockOffset, performed, isolate, agents, credentials, open, owns, heldBy, timings, launcher, launch, detached: !settle, baseFailed: new Map() };
   /** A cycle that owns its launcher waits for what a step handed it; the loop's cycles never do. */
   const settleLaunches = async () => { if (settle && launcher.pending) { await timings.step('launches', () => launcher.idle()); performed.push(...launcher.drain()); } };
   await timings.step('close', () => closeStep(cycle));
@@ -184,6 +185,11 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
 
   const assessments = await timings.step('reclaim', () => reclaimStep(cycle));
   spent('close');
+
+  // 3a. A required check that fails on the base head too is set aside before anything decides on
+  //     the item (GY-528): the decisions and the approver capacity dispatch counts read it.
+  cycle.baseFailed = await timings.step('base failures', () => baseFailureStep(cycle));
+  spent('decisions');
 
   const capacity = await timings.step('dispatch', () => dispatchStep(cycle, health, assessments));
   await settleLaunches();
@@ -220,7 +226,7 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
     const sample = observeItemClock(state, item, clock);
     if (sample) state.latency.push(sample);
   }
-  const actionable = actionableSubjects(config, snapshot.work, clock, { assessments, approvals: state.approvals });
+  const actionable = actionableSubjects(config, snapshot.work, clock, { assessments, approvals: state.approvals, baseFailed: cycle.baseFailed });
   const silence = trackSilence(state, actionable, performed, clock);
   const { stages, lead, production, postDeploy, postDeployFailures } = stageMetrics(snapshot.work, clock);
   // The cycle's duration, and of it the time at least one child was in flight: the difference is
@@ -264,6 +270,8 @@ export interface Cycle {
   owns: (principal: string) => boolean; heldBy: (profile: WorkerProfile) => Work | null;
   /** This cycle's step and call timings (GY-377); a step may time a phase of its own inside it. */
   timings: Timings;
+  /** Per item id, the required checks that fail on the base head too (GY-528): no rework is requested for them. */
+  baseFailed: Map<string, Set<string>>;
   /** The launcher beside the cycle (GY-616): what is in flight, and what it holds. */
   launcher: Launcher;
   /** Hands a launch to the launcher without waiting on it; false when one under `key` is already in flight. */

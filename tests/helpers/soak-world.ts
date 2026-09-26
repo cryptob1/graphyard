@@ -3,8 +3,9 @@ import type { GitHub } from '../../src/github.js';
 import type { HerdrAgent } from '../../src/master.js';
 import type { Observation, Work } from '../../src/model.js';
 import type { AgentReview, ReviewRequest } from '../../src/model/review.js';
-import { mergeableNow, queueRef, type BaseRefresh, type GitHubMergeQueueState, type QueuePlacement, type QueueSpeculation } from '../../src/merge-queue.js';
+import { mergeableNow, queueRef, requestedBaseRefresh, type BaseRefresh, type GitHubMergeQueueState, type QueuePlacement, type QueueSpeculation } from '../../src/merge-queue.js';
 import type { Succession } from '../../src/model/successors.js';
+import type { BaseCheck } from '../../src/model/base-failure.js';
 
 // The outside world of the soak test (GY-404), simulated deterministically: one clock that both the
 // test process and the test Postgres read, a GitHub repository with pull requests, CI, a reviewer and
@@ -91,7 +92,19 @@ export class SimulatedGitHub {
   unstable = new Set<string>(); slowRecompute = new Set<string>();
   /** Successions (renames and splits) recorded on the base branch. */
   successions: Succession[] = [];
+  /**
+   * A required-check failure on the base branch (GY-528): a commit landed outside Graphyard that
+   * fails one `test` test in every tree containing it, until a later commit repairs it. A head is
+   * failing while it contains the breaking commit and not the repair, so a rerun of its job fails
+   * again and only the repaired base merged in clears it.
+   */
+  baseFailure = { test: 'soak:time-bomb — a fixed date held against the clock', broken: null as string | null, repaired: null as string | null };
+  /** Every CI job, by id: the head and check it ran for, its attempt, and when it started; it reports `ciMs` later. */
+  jobs = new Map<number, { head: string; name: string; attempt: number; at: number }>();
+  /** The jobs rerun, in order, by the id of the job rerun. */
+  reruns: number[] = [];
   private serial = 0;
+  private jobSerial = 900_000;
   constructor(readonly options: WorldOptions, files: string[]) {
     const root: Commit = { sha: sha('root'), tree: sha('tree', 'root'), parents: [], files, at: clock.now(), message: 'root' };
     this.commits.set(root.sha, root); this.tip = root.sha;
@@ -125,6 +138,45 @@ export class SimulatedGitHub {
     Object.assign(pr, { head, base: this.tip, files, autoMerge: false, mergeRequestedAt: null });
     pr.pushed.set(head, clock.now());
     return pr;
+  }
+  /** Whether `commit`'s tree carries the base failure: it contains the breaking commit and not the repair. */
+  failing(commit: string) {
+    const { broken, repaired } = this.baseFailure;
+    return !!broken && this.contains(commit, broken) && !(repaired && this.contains(commit, repaired));
+  }
+  /** The latest job of each required check on `head`, started when the head was pushed. */
+  private jobsOf(head: string, pushedAt: number) {
+    return ['test', 'typecheck'].map(name => {
+      const runs = [...this.jobs.entries()].filter(([, job]) => job.head === head && job.name === name);
+      if (runs.length) return runs.reduce((latest, run) => run[1].attempt > latest[1].attempt ? run : latest);
+      const job = { head, name, attempt: 1, at: pushedAt };
+      this.jobs.set(++this.jobSerial, job);
+      return [this.jobSerial, job] as const;
+    });
+  }
+  private result(job: { head: string; name: string; at: number }, now: number) {
+    if (now - job.at < this.options.ciMs) return 'in_progress';
+    return job.name === 'test' && this.failing(job.head) ? 'failure' : 'success';
+  }
+  /** The failing test names the log of job `id` reports. */
+  failedTests(id: number) {
+    const job = this.jobs.get(id);
+    if (!job) throw new Error(`No job ${id}`);
+    return this.result(job, clock.now()) === 'failure' ? [this.baseFailure.test] : [];
+  }
+  /** Rerun job `id`: a new job on the same head, and so the same merge commit, as GitHub's rerun is. */
+  rerun(id: number) {
+    const job = this.jobs.get(id);
+    if (!job) throw new Error(`No job ${id}`);
+    this.jobs.set(++this.jobSerial, { ...job, attempt: job.attempt + 1, at: clock.now() });
+    this.reruns.push(id);
+  }
+  /** The base branch head's latest run of `check`: pending until `ciMs` after the tip landed. */
+  baseCheck(check: string): BaseCheck {
+    const tip = this.tip, commit = this.commits.get(tip)!, jobId = Number.parseInt(tip.slice(0, 7), 16);
+    if (clock.now() - commit.at < this.options.ciMs) return { check, baseSha: tip, state: 'pending', jobId: null, url: null, tests: null };
+    const failed = check === 'test' && this.failing(tip);
+    return { check, baseSha: tip, state: failed ? 'failed' : 'passed', jobId, url: null, tests: failed ? [this.baseFailure.test] : [] };
   }
   pr(work: Pick<Work, 'submission' | 'candidate'>) { const number = work.candidate?.pr ?? work.submission?.pr; const pr = number ? this.prs.get(number) : undefined; if (!pr) throw new Error(`No pull request #${number}`); return pr; }
 
@@ -179,7 +231,7 @@ export class SimulatedGitHub {
         return {
           clockOffset: { min: 0, max: 0 }, prState: pr.open ? 'open' : 'closed', draft: false, prCreatedAt: new Date(pr.createdAt).toISOString(),
           candidate: { sha: pr.head, baseSha: pr.base, pr: pr.number, branch: pr.branch, author: pr.author, createdAt: new Date(pr.createdAt).toISOString() },
-          checks: ci ? ['test', 'typecheck'].map((name, index) => ({ name, result: 'success', appId: options.ciAppId, id: pr.number * 10 + index })) : [],
+          checks: ci ? world.jobsOf(pr.head, pr.pushed.get(pr.head)!).map(([id, job]) => ({ name: job.name, result: world.result(job, now), appId: options.ciAppId, id, attempt: job.attempt })) : [],
           // GitHub's latest verdict per reviewer, and the id of every review, as the real adapter reports them.
           reviews: [...new Map(pr.reviews.map(review => [review.reviewer, { ...review }])).values()], reviewIds: pr.reviews.map(review => review.id),
           // A reviewer App's verdict is read for the request the item is bound to, never for another.
@@ -202,8 +254,19 @@ export class SimulatedGitHub {
           merge: { from, parents: [from, predicted], author: 'graphyard[bot]', authoredByApp: true, conflicts: false, baseChanges: changed, diff: { reviewed: sha('patch', from), tip: sha('patch', from) } } };
       },
       async refreshCandidateBase(work: Work): Promise<BaseRefresh> {
-        // No candidate in this world conflicts: a GitHub reading that says so is stale, as GY-375 found.
         const pr = world.pr(work), at = new Date(clock.now()).toISOString();
+        // The coordinator asked for the repaired base to be merged in (GY-528): this App merges the tip into the branch.
+        const requested = requestedBaseRefresh(work);
+        if (requested) {
+          const from = pr.head, bound = pr.base, tip = world.tip, merged = sha('refresh', from, tip), onto = world.commits.get(tip)!;
+          const changed = onto.files.filter(file => !world.commits.get(bound)!.files.includes(file));
+          world.record({ sha: merged, tree: sha('tree', merged), parents: [from, tip], files: [...new Set([...world.commits.get(from)!.files, ...onto.files])], at: clock.now(), message: `Graphyard base refresh for ${work.key}` });
+          pr.head = merged; pr.base = tip; pr.pushed.set(merged, clock.now());
+          return { from: { sha: from, baseSha: bound }, base: tip, baseTree: onto.tree, policyRevision: work.policyRevision, at, head: merged, conflict: null, carry: null, trigger: 'base failure repaired',
+            requested: { by: requested.by, at: requested.at, reason: requested.reason },
+            merge: { from, parents: [from, tip], author: 'graphyard[bot]', authoredByApp: true, conflicts: false, baseChanges: changed, diff: { reviewed: sha('patch', from), tip: sha('patch', from) } } } as BaseRefresh;
+        }
+        // No candidate in this world conflicts: a GitHub reading that says so is stale, as GY-375 found.
         return { from: { sha: pr.head, baseSha: pr.base }, base: world.tip, baseTree: world.tree, policyRevision: work.policyRevision, at, head: pr.head, conflict: null, merge: null, carry: null,
           stale: { head: pr.head, base: world.tip, policyRevision: work.policyRevision, at, reading: `GitHub reported ${pr.head.slice(0, 12)} conflicting, but a test merge is clean` } } as BaseRefresh;
       },

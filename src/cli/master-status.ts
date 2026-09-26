@@ -7,7 +7,7 @@ import { impliedScopeRequests, type Work } from '../model/work.js';
 import { actionReport, agentRequestReport, sessionReport } from './loop-report.js';
 import { needsHumanActions, routedScopeStatus } from './owed-report.js';
 import { installationMerger } from '../executor.js';
-import { daemonSummary, loopAttention, readDaemonState } from '../master-daemon.js';
+import { baseFailureAttention, daemonSummary, loopAttention, readDaemonState } from '../master-daemon.js';
 import { slowCycleAttention } from '../daemon/liveness.js';
 import { readReviewLedger, reconcileReviews, reviewLedgerSpec, sessionLedgerHeadroom, summarizeReviews } from '../reviewer.js';
 import { producerLedgerSpec, readProducerLedger, reconcileProducers, sessionRetries, summarizeProducers } from '../producer.js';
@@ -38,8 +38,7 @@ import { slowReportReader } from '../master/report-cache.js';
 import { repairLaneAttention } from '../master/repair-lane.js';
 
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
-// The cycle-budget measure is a daemon metric (src/daemon/metrics.ts); it is read from here,
-// as it always was, by `master status` and its tests.
+// The cycle-budget measure is a daemon metric (src/daemon/metrics.ts), read from here as before.
 export { cycleBudget } from '../daemon/metrics.js';
 // `master scope` lives in its own module; it is read from here as it always was.
 export { approveScopeRequest } from './master-scope.js';
@@ -113,7 +112,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   // why nothing else on this list is moving, and no other attention item would say so; a cycle that
   // outgrew its interval names its costly step and whether it computed or waited.
   const loopItems: AttentionItem[] = cycling
-    ? [...loopAttention({ liveness: cycling.liveness, silence: cycling.silence, budget: cycling.budget, failures: cycling.failures, cost: cycling.cost }), ...slowCycleAttention(cycling), ...approverLaunchAttention(cycling)]
+    ? [...loopAttention({ liveness: cycling.liveness, silence: cycling.silence, budget: cycling.budget, failures: cycling.failures, cost: cycling.cost }), ...slowCycleAttention(cycling), ...approverLaunchAttention(cycling), ...baseFailureAttention(cycling.baseFailures, master.baseBranch)]
     : [{ subject: 'loop', text: `The master loop's cursor cannot be read, so whether it is cycling is unknown: ${(daemonState as { error: string }).error}`, ...agentOwner('master', 'graphyard master restart (a supervised deployment restarts it on its own: systemctl --user restart graphyard-master)') }];
   // Browser administration is reported beside the work it unblocks: a pending sudo code is
   // the one thing the operator must act on, and the recent ledger entries say who changed what.

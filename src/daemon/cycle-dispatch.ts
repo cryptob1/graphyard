@@ -62,7 +62,7 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
       .filter(session => session.waiting && open.some(item => item.key === session.work && standingEscalations(item).some(entry => entry.trigger === session.trigger))).map(session => session.work));
     // An item waits on the approver role while it needs a decision no approver session is judging.
     const unjudged = new Set(open.filter(item => {
-      const decision = effects.approver ? routineDecision(item, config, clock, assessments[item.id]) : null, watch = decision ? state.approvals[decisionKey(item, decision)] : undefined;
+      const decision = effects.approver ? routineDecision(item, config, clock, assessments[item.id], cycle.baseFailed.get(item.id)) : null, watch = decision ? state.approvals[decisionKey(item, decision)] : undefined;
       return !!decision && !watch?.settledAt && !watch?.exhaustedAt && !agents.some(agent => agent.name === watch?.agentName && !stoppedStates.includes(agent.agent_status ?? ''));
     }).map(item => item.key));
     const needs: Record<CapacityRole, Work[]> = {

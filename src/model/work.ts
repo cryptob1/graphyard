@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { BaseRefresh, LandingCheck, QueueEjection, QueueEntry, QueueHistoryEntry, RevertedDelivery } from '../merge-queue.js';
+import type { BaseRefresh, BaseRefreshRequest, LandingCheck, QueueEjection, QueueEntry, QueueHistoryEntry, RevertedDelivery } from '../merge-queue.js';
 import { criterionSchema, policySchema, resourcesSchema, type Criterion } from './policy.js';
 import type { Evidence } from './evidence.js';
 import type { AgentReview, ReviewFailover, ReviewRequest } from './review.js';
@@ -181,12 +181,10 @@ export interface Work extends Create {
   /** Sessions of this item that ran out of provider quota, and any role with no account left (model/capacity.ts). */
   capacity?: CapacityState | null;
   queue?: QueueEntry | null; queueSequence?: number; queueEjection?: QueueEjection | null; queueHistory?: QueueHistoryEntry[];
-  /**
-   * The last time the control plane brought this candidate onto a base branch that had moved
-   * under it, or refused to because the merge conflicts. Decided and written by Graphyard
-   * alone; see merge-queue.ts for the rule and model/carry.ts for what the refresh carries.
-   */
-  baseRefresh?: BaseRefresh | null;
+  /** `baseRefresh`: the last time Graphyard alone brought this candidate onto a moved base, or refused to on a conflict
+   * (rule in merge-queue.ts, what it carries in model/carry.ts). `baseRefreshRequest`: the coordinator's standing
+   * request to merge a repaired base into this head (GY-528), answered by the next `baseRefresh` of it. */
+  baseRefresh?: BaseRefresh | null; baseRefreshRequest?: BaseRefreshRequest | null;
   reworkRequested: boolean;
   scenarioRequirements: { proof: string; revision: number; environment: string; hash: string }[];
   reviewRequest?: ReviewRequest | null;
