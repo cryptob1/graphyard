@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { defaultPiModel, piRunner } from './pi.js';
 import type { FleetLaunchAccount } from '../fleet.js';
+import { registryToolsArgs } from '../master/environments.js';
 import { endRun, liveRun, registerRun } from './registry.js';
 import { decidePayloadSchema, evidencePayloadSchema, graphyardTools, piRuntimeSchema, type DecidePayload, type EvidencePayload } from './payloads.js';
 import { runRecord, type Run, type RunOptions, type RunRecord, type RunResult, type Runner } from './types.js';
@@ -24,10 +25,11 @@ export function narrowRunner(pi: unknown): Runner {
  * runtime's executable, the account's login home on the runtime's home variable, the model the
  * choice names, and the role policy's flags and tool allowlist — all from the registry revision the
  * choice was made in, never from `run.pi`, which configures only a role the registry does not define.
+ * A policy that limits tools on a runtime with no tools flag is refused, as the Herdr path refuses it.
  */
 export function registryHeadlessLaunch(account: FleetLaunchAccount) {
-  const { contract, policy, modelId } = account.fleet, tools = policy?.tools ?? [];
-  const args = [...contract.args, ...(policy?.args ?? []), ...(tools.length ? [contract.toolsFlag ?? '--tools', tools.join(',')] : [])];
+  const { contract, policy, modelId } = account.fleet;
+  const args = [...contract.args, ...(policy?.args ?? []), ...registryToolsArgs(account)];
   const environment: Record<string, string> = { ...contract.environment, ...(contract.homeVariable && account.home ? { [contract.homeVariable]: account.home } : {}) };
   return { command: contract.kind, model: modelId ?? defaultPiModel, args, environment };
 }
