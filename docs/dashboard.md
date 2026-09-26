@@ -32,4 +32,4 @@ Below the summary: **What is left** (unmet requirements, who clears each), **Req
 
 ## Insights
 
-Headline numbers, **Flow** replay, landed per day, time spent; **Show details** holds shipping pulse (PR-to-production from `POST /api/production-observations` or `master verify-deployment`) and flow analytics. **Shipped** holds **Interventions**, **Validation** and **Releases**; `GRAPHYARD_INTERVENTION_PATTERNS=1` files repeats as `bug` items. Missing values read `Unavailable`, never zero.
+Headline numbers, **Flow** (**Now** from the work snapshot at once: each step column wraps its dots and shows 12 before **+N more**, the panel capped at 320 px; step medians from the flow report, which a failed or slow replay read never blanks — each read shows its own notice), 24-hour replay, landed per day, time spent; **Show details** holds shipping pulse (PR-to-production from `POST /api/production-observations` or `master verify-deployment`) and flow analytics. **Shipped** holds **Interventions**, **Validation** and **Releases**; `GRAPHYARD_INTERVENTION_PATTERNS=1` files repeats as `bug` items. Missing values read `Unavailable`, never zero.
