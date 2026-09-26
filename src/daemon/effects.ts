@@ -34,6 +34,7 @@ import { readCredentialFile } from '../master.js';
 import { onceAnnotations, timingFaultAttention, type ReportedAttention } from './faults.js';
 import type { daemonSummary } from './run.js';
 import { observeDeployment } from './deployment.js';
+import { claimContainmentFrom, deployedRevision, recordThroughputMeasurement, throughputClaim, verifyThroughput } from '../throughput.js';
 import { serverCallName, timedCall, timedFetch, timedRun } from '../master/timings.js';
 import type { RunRecord, Runner } from '../runner/types.js';
 import type { ResearchEvent } from '../research.js';
@@ -96,6 +97,14 @@ export interface DaemonEffects {
   observeDeployment: (delivered: Work[], retained?: ContainmentRetention | null) => Promise<DeploymentObservation>;
   /** Records the coordinator's own deployment observation on the delivered item. */
   recordDeployment: (work: Work, observation: { sha: string; source: 'endpoint' | 'github-deployment'; observedAt: string }) => Promise<unknown>;
+  /**
+   * Takes the post-deploy throughput measurement the loop itself records (GY-393): reads the
+   * control plane's own release identity, judges the claim over the snapshot given, and appends
+   * the report under `.graphyard/measurements/throughput` in the measurement script's format.
+   * Refuses (throws) when the release the control plane names is not the one the cycle's
+   * deployment observation saw serving, so the cursor never binds a measurement to another release.
+   */
+  measureThroughput?: (input: { work: Work[]; now: string; sha: string }) => Promise<{ revision: string | null; verdict: 'verified' | 'unverified'; file: string; reason: string }>;
   /**
    * Publishes the production environment this loop verifies deployments under
    * (`config.run.productionEnvironment`, else GRAPHYARD_PRODUCTION_ENVIRONMENT, else `production`)
@@ -641,6 +650,23 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       publishedBatchSize = batchSize;
     },
     recordDeployment: (work, observation) => mutate(`work/${work.id}/deployment`, { sha: observation.sha, mergeSha: work.delivery!.mergeSha, source: observation.source, observedAt: observation.observedAt }),
+    // The loop's own post-deploy measurement (GY-393): the deployed release's identity comes from
+    // the control plane's status document, never from this checkout; the claim's containment is
+    // asked of this checkout's object store, the one `root` holds; and the report is recorded in
+    // the measurement script's directory and format, so a reader cannot tell them apart. A release
+    // that moved between the observation and this read refuses, and the cycle measures it again.
+    measureThroughput: async ({ work, now, sha }) => {
+      const config = current();
+      const status = await asCoordinator('status');
+      const { revision, source } = deployedRevision(status);
+      if (revision && revision.toLowerCase() !== sha.toLowerCase()) throw new Error(`the control plane now reports release ${revision.slice(0, 12)}, not the ${sha.slice(0, 12)} this cycle observed; measuring the observed one again next cycle`);
+      const containment = await claimContainmentFrom({ revision, mergeSha: work.find(item => item.key === throughputClaim.item)?.delivery?.mergeSha ?? null, claim: throughputClaim.item, repository: root }, run);
+      const report = verifyThroughput(work, Number.isFinite(Date.parse(now)) ? Date.parse(now) : Date.now(), { claimKey: throughputClaim.item,
+        deployed: { revision, revisionSource: source, version: status.release?.version ?? null, origin: new URL(config.url).origin,
+          observedAt: typeof status.now === 'string' ? status.now : now, containsClaim: containment.contains, reason: containment.reason } });
+      const file = await recordThroughputMeasurement(root, report);
+      return { revision, verdict: report.verdict, file, reason: report.reason };
+    },
     requestSmoke: async work => {
       const config = current();
       await run('gh', ['workflow', 'run', config.run.smokeWorkflow!, '--repo', config.repository, '--ref', config.baseBranch,
@@ -692,7 +718,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     get diagnostician() { const config = current(); return config.operatorAgent && config.approver && diagnosticianSettings(config.run).enabled ? diagnostician(config) : undefined; },
     get fileFaultClass() { return current().operatorAgent ? (input: ReturnType<typeof faultClassItem>, key: string) => asOperatorAgent('POST', 'work', input, key) as Promise<Work> : undefined; },
     containment: (work, observed) => assessContainment(work, { hostId: current().hostId, observedAt: observed.now, clockOffset: observed.clockOffset, probe: async target => annotatePaneShell(await probeSupervisorAbsence(target, { run }),
-      work.find(item => item.key === target.key && item.containmentQuarantine?.epoch === target.epoch), pane => herdrJson(['pane', 'process-info', '--pane', pane], run), undefined, () => herdrJson(['pane', 'list'], run)) }),
+      work.find(item => item.key === target.key && item.containmentQuarantine?.epoch === target.epoch), pane => herdrJson(['pane', 'process-info', '--pane', pane], run), undefined, () => herdrJson(['pane', 'list'], run),
+      () => herdrJson(['status', 'server', '--json'], run)) }),
     settleContainment: (work, assessment) => mutate(`work/${work.id}/autosettle`, { epoch: assessment.epoch, settlementHash: work.containmentQuarantine!.settlementHash,
       reason: `The master loop verified on ${assessment.host ?? current().hostId} that the supervisor of epoch ${assessment.epoch} is gone; the item is released for a fresh attempt`, verification: assessment.verification }),
     // systemd's own keep-alive channel. `systemd-notify` is part of systemd, so it is present
