@@ -33,7 +33,7 @@ A worker restores its own: `git reset --hard REVIEWED_HEAD`, `graphyard sync GY-
 
 ## GitHub administration through the browser
 
-Protection reconciles via `master protection --apply`; where GitHub offers only a page, `master browser FLOW` drives the `master init --browser-profile` profile.
+Protection reconciles via `master protection --apply`; where GitHub offers only a page, `master browser FLOW` drives the `master init --browser-profile` profile: `master browser app-permissions`, `master browser installation-accept` or `master browser protection`.
 
 | Flow | What it does |
 | --- | --- |
@@ -41,7 +41,7 @@ Protection reconciles via `master protection --apply`; where GitHub offers only 
 | `installation-accept` | Accepts the pending permission request |
 | `protection` | Reconciles branch protection |
 
-Each flow records `record.json` under `.graphyard/master-actions/`, appending to `ledger.json`. Approving its *Confirm access* GitHub Mobile code is human-only. The master never stores the profile's cookies, and must never use a merge bypass, push code or read a worker credential.
+Each flow records `record.json` under `.graphyard/master-actions/`, appending to `ledger.json`. Approving its *Confirm access* GitHub Mobile code on the device is human-only. The master never stores the profile's cookies, and must never use a merge bypass, push code or read a worker credential.
 
 ## Harness permissions
 
@@ -49,11 +49,11 @@ A harness classifier refuses routine administration; `master harness claude --ap
 
 ## Typed actions and executors
 
-Each item has one typed action (`nextAction`): `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment` or `escalate`. Executors claim rows under their own credential; `escalate` and `request-rework` are judgements (`actions.needsHuman`). `graphyard init` starts `graphyard-executor@N` user units; `master executors restart` moves them to the current release. An executor whose checkout moves exits 0 for systemd to restart; one killed mid-action names its action and item in `master status`.
+Each item has one typed action (`nextAction`): `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment` or `escalate`. Executors claim rows under their own credential; `escalate` and `request-rework` are judgements (`actions.needsHuman`). `graphyard init` starts `graphyard-executor@N` user units; `master executors restart` moves them to the current release. A moved checkout exits the executor 0 for systemd to restart; one killed mid-action is named, with its item, in `master status`.
 
-A `resync` completes only on a fresh observation. The executor calls `POST /api/work/:id/resync` with `{ since }`, its claim time; the server wakes the item's observation job, answering `observed`, `observedAt`, `job` and the job's `availableAt`, `lockedUntil`, `attempts`, `error`, `heldUntil` and `heldReason`. `wake: false` only reads. The claim never waits (GY-646): unobserved, it fails with `no observation newer than the claim was saved`, the job's condition, and backs off; a later claim completes on a newer observation. Three stall it, named with its condition in `master status`. Claiming, renewing or settling a row is only action bookkeeping; an observation read before it still saves, any other change since the read refuses it.
+A `resync` completes only on a fresh observation. The executor calls `POST /api/work/:id/resync` with `{ since }`, its claim time; the server wakes the item's observation job, answering `observed`, `observedAt` and its `job` (`availableAt`, `lockedUntil`, `attempts`, `error`, `heldUntil`, `heldReason`). `wake: false` only reads. The claim never waits: unobserved, it fails with `no observation newer than the claim was saved`, its job's condition, and backs off; a later claim completes once one exists. Three stall it (`master status`). Row bookkeeping (claim, renew, settle) never refuses an observation read before it; other changes do.
 
-Three failures with an unchanged reason mark a row stalled rather than retrying: once in no count and no list, it shows in `actions.stalled` and on the item's own card; backoff, doubling from one minute, never outlives it. Eight escalate it (half-hourly); ticks requeue ownerless items (`liveness.violations`).
+Three failures with an unchanged reason mark a row stalled rather than retrying (a fleet that looks idle): once in no count and no list, it shows in `actions.stalled` and on the item's own card; backoff, doubling from one minute, never outlives it. Eight escalate it (half-hourly); ticks requeue ownerless items (`liveness.violations`).
 
 ### Loop failure recovery
 
