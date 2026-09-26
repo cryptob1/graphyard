@@ -32,9 +32,9 @@ Node 24; a checkout of `OWNER/REPO`; `export GRAPHYARD_CLI=/abs/path/graphyard/b
 node "$GRAPHYARD_CLI" install --provider PROVIDER --repo OWNER/REPO --plan
 ```
 
-Common options: `--workers N`, `--producer-proof NAME`, `--required-check NAME`, `--domain`; `init --scan` [proposes](operations-reference.md#setup-proposals-and-drift) check and proof names.
+Options: `--workers N`, `--producer-proof NAME`, `--required-check NAME`, `--domain`; `init --scan` [proposes](operations-reference.md#setup-proposals-and-drift) check and proof names.
 
-**Verify:** `secretsRedacted` is `true` and every `preflight[].ok` is `true` (else run its `fix` and re-plan).
+**Verify:** `secretsRedacted` and every `preflight[].ok` are `true` (else run its `fix` and re-plan).
 
 ## Step 2: approve the plan
 
@@ -50,7 +50,7 @@ It writes credentials, sets [variables](deployment.md#variables), deploys, runs 
 
 ## Step 4: the GitHub App confirmation
 
-The installer prints `Open http://127.0.0.1:4311 ...`; the human registers and installs the App. **Verification:** the page reports *App registered and installation verified*.
+The installer prints `Open http://127.0.0.1:4311 ...`; the human registers and installs the App. **Verify:** the page reports *App registered and installation verified*.
 
 ## Step 5: read the summary
 
@@ -70,7 +70,7 @@ A release needing a new App permission holds the jobs using it. [Back up, deploy
 node "$GRAPHYARD_CLI" github-setup --update-permissions --wait 600
 ```
 
-Confirm `doctor` shows `appPermissions.missing` empty; `delegationLimits` drift such as `Set GRAPHYARD_MAX_REVIEWERS=N on the deployment` is fixed by a re-run.
+Confirm `doctor` shows `appPermissions.missing` empty; a re-run fixes `delegationLimits` drift such as `Set GRAPHYARD_MAX_REVIEWERS=N on the deployment`.
 
 ## Failure handling
 
@@ -87,7 +87,7 @@ Confirm `doctor` shows `appPermissions.missing` empty; `delegationLimits` drift 
 
 ## Agent execution contract
 
-Run the preconditions and `--plan`, await approval, `--apply`, report verification and `nextSteps`. Never read a token file or weaken a gate to finish.
+Follow steps 1–6, reporting verification and `nextSteps`; never read a token file or weaken a gate to finish.
 
 ## Manual fallback for unsupported platforms
 

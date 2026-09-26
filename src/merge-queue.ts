@@ -899,6 +899,10 @@ export function ejectionReason(work: Work, ciAppIds: number[], all: Work[] = [],
   // observed adverse conclusion about the tip, which only a new head can answer. It names every
   // file and the item that owns it; a file the observation could not compare ejects nothing.
   const regressions = queuedRegressions(work, observation, all);
+  // A tip still built behind an entry that left without landing (GY-568) is not reverting anything
+  // of its own: it leaves the queue so the control plane restores it, and the reason says so.
+  const stale = regressions.length ? staleSpeculativeTip(work, all) : null;
+  if (stale) return `Speculative tip ${tip} was built behind ${stale.departed.join(', ')}, which left the merge queue without landing; landing it on ${regressions[0].base.slice(0, 12)} would carry their unlanded work (${regressions.map(entry => entry.text).join('; ')}), so the branch is restored to its own reviewed head`;
   if (regressions.length) return `Landing speculative tip ${tip} on ${regressions[0].base.slice(0, 12)} would revert work outside its planned files: ${regressions.map(entry => entry.text).join('; ')}`;
   // Observations retain every run, including superseded ones; only the newest trusted run
   // for a required check decides, exactly as the test gate does, so a successful retry
@@ -988,6 +992,50 @@ export function ejectedTipRestore(work: Work, all: Work[]): { contaminated: stri
   const contamination = branchContamination(work, all);
   if (!contamination) return null;
   return { contaminated: contamination.head, foreign: contamination.foreign, own: contamination.own, reason: `ejected from the merge queue: ${ejection.reason}` };
+}
+
+/**
+ * GY-568. The speculative tip the current candidate is, when it was built behind predecessors of
+ * which one or more has since left the merge queue without landing: `departed` names them. Such a
+ * tip holds their unlanded commits by the queue's own construction, so its tree says nothing about
+ * the item's change until the control plane restores the branch to the item's own reviewed head
+ * (`ejectedTipRestore`) or the queue rebuilds the tip from it. Null for any other head: a worker's
+ * push, a restored or refreshed head, or a tip whose predecessors are all still queued ahead or landed.
+ */
+export function staleSpeculativeTip(work: Pick<Work, 'id' | 'candidate' | 'queueHistory'>, all: Work[]): { tip: string; own: string | null; predecessors: string[]; departed: string[] } | null {
+  const candidate = work.candidate;
+  if (!candidate) return null;
+  const predicted = [...(work.queueHistory ?? [])].reverse().find(entry => entry.event === 'predicted' && entry.tip === candidate.sha);
+  if (!predicted?.predecessors?.length) return null;
+  const departed = predicted.predecessors.filter(key => {
+    const item = all.find(entry => entry.key === key);
+    if (!item || item.id === work.id || item.stage === 'done' || item.observation?.merged) return false;
+    // Still queued ahead of where this tip was predicted: the tip holds it as the queue intends.
+    return !item.queue || item.queue.sequence > predicted.sequence;
+  });
+  return departed.length ? { tip: candidate.sha, own: predicted.from && predicted.from !== candidate.sha ? predicted.from : null, predecessors: predicted.predecessors, departed } : null;
+}
+/** The build-gate reason of a candidate waiting for its branch to be restored after a predecessor's ejection (GY-568). */
+export const restoringAfterEjectionPrefix = 'Restoring after predecessor ejection: ';
+/**
+ * GY-568. Why the tree of this candidate is not judged yet, or null when it may be. A stale
+ * speculative tip (`staleSpeculativeTip`) is refused by nothing its tree shows — no out-of-scope
+ * revert, no conflict, no failed mechanical proof — and sent to no worker: it waits under this one
+ * reason while the control plane restores the branch, and until GitHub is observed at the head the
+ * restore produced. Only a restore that found no own head (`unrepairable`) hands the head back to
+ * the gates, whose record names rework as the remedy.
+ */
+export function restoringAfterEjection(work: Work, all: Work[]): string | null {
+  if (work.stage === 'done' || work.observation?.merged || !work.submission) return null;
+  const stale = staleSpeculativeTip(work, all);
+  if (!stale) return null;
+  const refresh = currentRestore(work), restore = refresh?.restore;
+  if (restore?.outcome === 'unrepairable') return null;
+  const restored = restore?.performedAt && refresh!.head && refresh!.head !== stale.tip ? refresh!.head : null;
+  const own = stale.own ? `its own reviewed head ${stale.own.slice(0, 12)}` : 'its own reviewed head';
+  return `${restoringAfterEjectionPrefix}candidate ${stale.tip.slice(0, 12)} is a speculative tip built behind ${stale.departed.join(', ')}, which left the merge queue without landing, so its tree holds their unlanded work; ${restored
+    ? `Graphyard restored the branch to ${restored.slice(0, 12)} (${own} brought onto the base), and its gates are judged once GitHub is observed at that head`
+    : `Graphyard restores the branch to ${own} brought onto the base before its tree is judged`}, and no worker is asked to change it`;
 }
 
 /** The reason `advanceQueue` ejects an entry whose speculative merge conflicts (github.ts SpeculativeConflict). */
