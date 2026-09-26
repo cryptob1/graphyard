@@ -6,6 +6,7 @@ import { migration, tables } from './schema.js';
 import { releaseInfo, schemaVersion } from '../release.js';
 import { appendSave, resolvedPayloadSql } from './snapshot-delta.js';
 import { advisoryLocks } from './locks.js';
+import { lockRebuiltTriggerTables, retryDeadlocks } from './migration-locks.js';
 import { coordinationDocumentSql, coordinationRelevance, coordinationTail, coordinationTrimSql, detoasted, type CoordinationTrim } from './coordination-sql.js';
 import { namedPool, reportPool, type ReportPoolOptions } from './report-pool.js';
 import { closePool, leasePoolConnections, reserve, trackedPool } from './pools.js';
@@ -125,20 +126,19 @@ export class Store {
       await guard.query('SET statement_timeout = 5000');
       const pid = Number((await db.query('SELECT pg_backend_pid() AS pid')).rows[0].pid);
       poll = setTimeout(() => { polling = watch(pid); }, Math.max(0, deadline - Date.now()));
-      await db.query('BEGIN');
-      // The pool's statement timeout bounds coordination reads and writes, not the migration's own
-      // work: its lock waits share the deadline above, and a backfill or index build still completes.
-      await db.query('SET LOCAL statement_timeout = 0');
-      // The migration's own lock, never the coordination lock (GY-203): two migrations serialize,
-      // while the live replica's coordination transactions run on beside it.
-      await step(waitingOn, 'SELECT pg_advisory_xact_lock($1)', [advisoryLocks.migration]);
-      await step('a lock on the migration\'s shared function graphyard_immutable', migrationPrelude);
-      for (const table of tables) await step(`a lock on table ${table.name} (or an object its migration touches)`, table.ddl);
-      const current = Number((await step('a lock on table graphyard_schema', 'SELECT COALESCE(MAX(version),0) AS version FROM graphyard_schema')).rows[0].version);
-      if (current > schemaVersion) throw newerSchema(current);
-      if (current < schemaVersion) await step(waitingOn, 'INSERT INTO graphyard_schema(version, graphyard_version) VALUES($1,$2)', [schemaVersion, releaseInfo().version]);
-      await step(waitingOn, `COMMENT ON TABLE graphyard_schema IS ${literal(digest)}`);
-      await Promise.race([db.query('COMMIT'), abandoned]);
+      const migrate = async () => {
+        // The pool's statement timeout bounds coordination work, not the migration's: its lock waits share the deadline above.
+        await db.query('BEGIN'); await db.query('SET LOCAL statement_timeout = 0');
+        // The migration's own lock, never the coordination lock (GY-203): two migrations serialize beside live coordination.
+        await step(waitingOn, 'SELECT pg_advisory_xact_lock($1)', [advisoryLocks.migration]);
+        await step('a lock on the migration\'s shared function graphyard_immutable', migrationPrelude);
+        for (const { name, ddl } of tables) { const waiting = `a lock on table ${name} (or an object its migration touches)`; await lockRebuiltTriggerTables(step, waiting, ddl); await step(waiting, ddl); }
+        const current = Number((await step('a lock on table graphyard_schema', 'SELECT COALESCE(MAX(version),0) AS version FROM graphyard_schema')).rows[0].version);
+        if (current > schemaVersion) throw newerSchema(current);
+        if (current < schemaVersion) await step(waitingOn, 'INSERT INTO graphyard_schema(version, graphyard_version) VALUES($1,$2)', [schemaVersion, releaseInfo().version]);
+        await step(waitingOn, `COMMENT ON TABLE graphyard_schema IS ${literal(digest)}`);
+        await Promise.race([db.query('COMMIT'), abandoned]);
+      }; await retryDeadlocks(migrate, () => !aborted && Date.now() < deadline, () => db.query('ROLLBACK').catch(() => {}));
     } catch (error) {
       // An abandoned migration's connection is still busy: it is destroyed below, which rolls it back.
       if (aborted) throw aborted;
