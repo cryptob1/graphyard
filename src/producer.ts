@@ -14,9 +14,8 @@ import { assertSessionLedgerRoom, boundSessionLedger, readReviewLedger, releaseC
 import { closedQuestionFor } from './model/closed-question.js';
 import { paneAlreadyGone, withPaneGone } from './request-settlement.js';
 import { narrowRoleRuntime, piRuntimeSchema } from './runner/payloads.js';
-import { liveRun, registeredRun } from './runner/registry.js';
-import { narrowRunner, piProducerPrompt, producerRunOptions, registryRunner, startNarrowRun, submitEvidence } from './runner/roles.js';
-import { liveRunCheckouts } from './runner/registry.js';
+import { liveRun, liveRunCheckouts, registeredRun } from './runner/registry.js';
+import { narrowRunner, piProducerPrompt, producerRunOptions, registryRunner, runOutcome, startNarrowRun, submitEvidence } from './runner/roles.js';
 import { runRecordSchema, type RunRecord, type Runner } from './runner/types.js';
 
 /**
@@ -396,7 +395,8 @@ async function launchHeadlessProducer(root: string, config: MasterConfig, work: 
     throw error;
   }
   // A registry session is the run: its slot is given back the moment the run ends.
-  const settled = started.settled.finally(() => registry?.release(`the headless producer run for ${binding.key} ended`)).then(run => updateProducerRecord(root, session.id, entry => ({ ...entry, run })).then(() => run));
+  const settled = started.settled.then(async run => { await registry?.release(`the headless producer run for ${binding.key} ended`, runOutcome(run)); return run; },
+    async error => { await registry?.release(`the headless producer run for ${binding.key} ended`); throw error; }).then(run => updateProducerRecord(root, session.id, entry => ({ ...entry, run })).then(() => run));
   settled.catch(() => { /* reconciliation settles the record on its expiry */ });
   return { producer: record.id, requestId: request.id, attempt: record.attempt, work: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, group: binding.group, proofs: binding.proofs,
     profile: profile.name, principal: profile.principal, agentName: session.agentName, pane: null, checkout: checkout.directory, expiresAt: record.expiresAt, runtime: 'pi' as const, delivery: 'request' as const,
