@@ -23,7 +23,7 @@ Dispatch is optimistic (overlap holds nothing), smallest planned scope first; `g
 
 **A merge-base dismissal is not a reviewer withdrawing a verdict.** An approval of the current head dismissed with `The merge-base changed after approval.` is restored (`observation.reviews[].dismissal`); no other dismissal is. Its re-post is no second verdict (`observation.dismissedReviewIds`).
 
-**A branch must never keep another item's unlanded commits.** Tips build from the reviewed head; an ejection restores the branches it leaves (`baseRefresh.restore`). A tip behind an entry that left unlanded waits (`Restoring after predecessor ejection`) until its restored head is observed; files another item carried are that item's (`Carried from another item's tip`), not rework.
+**A branch must never keep another item's unlanded commits.** Tips build from reviewed heads; ejection restores left branches (`baseRefresh.restore`). A tip behind an unlanded departed entry waits (`Restoring after predecessor ejection`) for its restored head; another item's carried files (`Carried from another item's tip`) are not rework. Git decides landing (`landing.landed`); landed peers deliver immediately.
 
 #### A contaminated branch
 
@@ -51,7 +51,7 @@ A harness classifier refuses routine administration; `master harness claude --ap
 
 Each item has one typed action (`nextAction`): `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment` or `escalate`. Executors claim rows under their own credential; `escalate` and `request-rework` are judgements (`actions.needsHuman`). `graphyard init` starts `graphyard-executor@N` user units; `master executors restart` moves them to the current release.
 
-A `resync` completes only on a fresh observation (GY-607). The executor calls `POST /api/work/:id/resync` with `{ since }` (its claim time); the server wakes the item's observation job, answering `observed`, `observedAt` and `job`, the job's `availableAt`, `lockedUntil`, `attempts`, `error`, `heldUntil` and `heldReason`. `wake: false` only reads. It waits up to 90 seconds for a newer observation, else fails with `no observation newer than the claim was saved` and the job's condition. Three such claims in a row stall the row; `master status` names the item and condition. Claiming, renewing or settling a row is only action bookkeeping, so an observation read before it still saves; any other change since the read refuses it.
+A `resync` completes only on a fresh observation. The executor calls `POST /api/work/:id/resync` with `{ since }` (its claim time); the server wakes the item's observation job, answering `observed`, `observedAt` and `job`, the job's `availableAt`, `lockedUntil`, `attempts`, `error`, `heldUntil` and `heldReason`. `wake: false` only reads. It waits up to 90 seconds for a newer observation, else fails with `no observation newer than the claim was saved` and the job's condition. Three such claims in a row stall the row; `master status` names the item and condition. Claiming, renewing or settling a row is only action bookkeeping, so an observation read before it still saves; any other change since the read refuses it.
 
 Three failures with an unchanged reason mark a row stalled rather than retrying (a fleet that looks idle): once in no count and no list, it shows in `actions.stalled` and on the item's own card; backoff, doubling from one minute, never outlives it. Eight escalate it (half-hourly); ticks requeue ownerless items (`liveness.violations`).
 

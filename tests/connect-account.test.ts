@@ -257,7 +257,7 @@ test('unit:agents-page-simple-default — the page opens on account cards and th
     runtimes: [{ name: 'claude', launch: { kind: 'claude', args: [], environment: {}, homeVariable: 'CLAUDE_CONFIG_DIR', modelFlag: null, login: null, loginFile: '.credentials.json' } }],
     models: [{ name: 'claude-default', id: null, cost: { inputPerMTok: null, outputPerMTok: null }, capability: { tier: 'strong', contextTokens: null } }],
     accounts: [{ name: 'claude-a', runtime: 'claude', model: 'claude-default', modelId: null, cost: null, capability: { tier: 'strong', contextTokens: null }, host: HOST, home: '/tmp/claude-a', enabled: true, maxSessions: null, note: null,
-      roles: [{ role: 'worker', preference: 1, of: 1 }], liveSessions: [], quota: 'unknown', loggedIn: true, usage: [], resetsAt: null, observedAt: at, quotaSource: 'probe', eligible: true, ineligible: null }],
+      roles: [{ role: 'worker', preference: 1, of: 1 }], liveSessions: [], quota: 'unknown', loggedIn: true, usage: [], resetsAt: null, observedAt: at, quotaSource: 'probe', eligible: true, ineligible: null, smoke: null, held: [] }],
     roles: [], sessions: [], refusals: [], lastMutation: null, attention: [],
   };
   const connects: ConnectView[] = [{

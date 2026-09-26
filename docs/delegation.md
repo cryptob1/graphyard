@@ -1,7 +1,7 @@
 <!-- page: Operate Graphyard | 11 | leads and escalations. -->
 # Slice-lead delegation
 
-Optional slices (`product`, `infrastructure`, `docs-experience`) are each led by an AI session with its own `slice-lead` principal.
+Optional slices (`product`, `infrastructure`, `docs-experience`), each led by an AI `slice-lead` session.
 
 ## Authority boundaries
 
@@ -28,4 +28,4 @@ Each resolution records `escalation.resolved`: resolver, session kind, reason, a
 - Control-plane `lease-loss` of a superseded or stopped epoch: the loop's two-party decision, stale if the superseding lease lapses.
 - `security-concern`, `requirement-weakening`, `evidence-policy-conflict`, and any `lease-loss` a lead raised: a two-party decision the master requests, or a declared human session.
 
-A declared human session (`admin`, `sessionKind: "human"`) settles any. A two-party `master decide GY-N resolve` applies once an independent approver approves; nobody else resolves alone.
+A declared human session (`admin`, `sessionKind: "human"`) settles any; nobody else resolves alone.
