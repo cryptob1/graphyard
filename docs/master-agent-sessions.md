@@ -55,6 +55,12 @@ A runtime stopped on a first-run prompt is **`awaiting consent`**. The launcher 
 
 A reviewer or producer is `awaiting acknowledgement` until 30 s of activity (`counts.dispatchAwaiting`). Still quiet after `run.acknowledgementSeconds` (30–900, default 90), it is re-prompted once; if it then settles without a result it is **`never started`**, relaunched a minute later without spending retry budget. Three exhaust the request (`retry.neverStarted`).
 
+### Lost runs and spent producer requests
+
+A producer run that ended without a verdict because its process was killed or lost is **`lost`**, not failed: a headless run that exited 143 (SIGTERM) or 137 (SIGKILL), a Herdr session that vanished, or a headless run whose launcher process is gone (a supervisor restart; the record's `launcherPid`). Its resolution starts `lost:`; it spends no attempt and is relaunched on the next tick (`retry.lost`). Only runs that produced failing or unexercised evidence, ended on their own without it, or ran past `run.producerTimeoutMinutes` count toward the four attempts. Every request stays bounded at 12 sessions however they ended.
+
+A producer request that does use up its attempts is never left waiting. The dispatcher records it in `dispatch.abandoned` with its proof group, and `master status` raises one attention item naming the group, each attempt's outcome and the next step's owner. The loop records the same as an `escalation:proof-exhausted` action, and on its next cycle requests a **rework** decision for the head whose reason quotes the attempts; the independent approver judges it as any other rework. A trusted producer workflow (`--proof-workflow`) that could not be requested three times is escalated with the last failure too.
+
 ### The dispatcher's own state
 
 - **The dispatcher bounds its own state where it composes it**, each cut marked with an ellipsis.

@@ -73,6 +73,8 @@ export const producerRecordSchema = z.object({
   checkoutFailure: z.string().min(1).max(500).optional(),
   /** `pi`: a headless run (GY-169), with no pane; absent is a Herdr session. */
   runtime: z.enum(['herdr', 'pi']).optional(),
+  /** The process that launched a headless run: when it is gone the run went with it (GY-496, `lostRun`). */
+  launcherPid: z.number().int().positive().optional(),
   /** A headless run's record: its last events, its result, and what became of each submission. */
   run: runRecordSchema.optional(),
 }).strict();
@@ -105,29 +107,48 @@ export const producerIdleGraceMs = producerLedgerSpec.idleGraceMs;
  * toward the limit nor widens the wait, and the request is launched again after the base wait.
  * Such sessions have a bound of their own, `unstartedRetryLimit`, because a request whose
  * sessions keep not starting has a launcher problem that more launches will not fix.
+ *
+ * A run that was lost (GY-496, `lostRun`) — killed on exit 143 or 137, gone from Herdr, or stopped
+ * with the supervisor that launched it — reached no verdict at all, so it neither counts toward
+ * the limit nor waits: the request is launched again on the next tick. Only runs that produced
+ * failing or unexercised evidence, ended without it on their own, or ran past their timeout count.
+ * Every session a request had, however it ended, stays bounded by `requestAttemptLimit`.
  */
 /** Every session one request may have in all, however each ended: the dispatch failure limit (auto-dispatch.ts). */
 export const requestAttemptLimit = 12;
 export const sessionRetryLimit = 4, sessionRetryBaseMs = 60_000, sessionRetryMaxMs = 30 * 60_000, unstartedRetryLimit = 3;
 export const sessionRetryDelay = (attempts: number) => Math.min(sessionRetryBaseMs * 4 ** Math.max(0, attempts - 1), sessionRetryMaxMs);
 const retriedStates = ['failed', 'expired'];
+/**
+ * GY-496. The prefix of a settled session's resolution when the run ended without a verdict
+ * because its process was killed or lost, rather than because it did the work and failed. On
+ * 2026-09-25 GY-421's four unit-producer runs were all killed by loop restarts (exit 143), spent
+ * every attempt, and the request was stranded with nothing asking for another.
+ */
+export const lostRunReason = 'lost';
+export const lostRun = (record: { state: string; resolution?: string | null }) => retriedStates.includes(record.state) && !!record.resolution?.startsWith(`${lostRunReason}: `);
+/** A headless run that exited on a kill signal (143 is SIGTERM, 137 is SIGKILL) rather than on its own. */
+export const killedRun = (result: RunRecord['result'] | null | undefined) => !!result && !result.ok && result.reason === 'exit' && /\b(?:on SIG(?:TERM|KILL)|with code (?:143|137))\b/.test(result.detail);
+/** Whether a process is alive: signal 0 probes it, and a probe refused for permission means it exists. */
+export const processAlive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (error: any) { return error?.code === 'EPERM'; } };
 export function sessionRetry(records: { requestId?: string; state: string; requestedAt: string; closedAt?: string | null; resolution?: string | null }[], requestId: string, now: number) {
   const launched = records.filter(record => record.requestId === requestId);
   const last = launched.at(-1);
-  const unstarted = launched.filter(neverStarted);
-  const started = launched.length - unstarted.length;
-  const report = { requestId, attempts: launched.length, started, neverStarted: unstarted.length, limit: sessionRetryLimit, unstartedLimit: unstartedRetryLimit, last: last ? { state: last.state, resolution: last.resolution ?? null } : null };
+  const unstarted = launched.filter(neverStarted), lost = launched.filter(lostRun);
+  // `started` is the attempts counted against the limit: a lost run reached no verdict to count.
+  const started = launched.length - unstarted.length - lost.length;
+  const report = { requestId, attempts: launched.length, started, neverStarted: unstarted.length, lost: lost.length, limit: sessionRetryLimit, unstartedLimit: unstartedRetryLimit, last: last ? { state: last.state, resolution: last.resolution ?? null } : null };
   if (!last) return { ...report, launch: true, settled: false, nextAt: null, exhausted: false };
   if (!retriedStates.includes(last.state)) return { ...report, launch: false, settled: true, nextAt: null, exhausted: false };
-  if (started >= sessionRetryLimit || unstarted.length >= unstartedRetryLimit) return { ...report, launch: false, settled: false, nextAt: null, exhausted: true };
-  const nextAt = Date.parse(last.closedAt ?? last.requestedAt) + (neverStarted(last) ? sessionRetryBaseMs : sessionRetryDelay(started));
+  if (started >= sessionRetryLimit || unstarted.length >= unstartedRetryLimit || launched.length >= requestAttemptLimit) return { ...report, launch: false, settled: false, nextAt: null, exhausted: true };
+  const nextAt = Date.parse(last.closedAt ?? last.requestedAt) + (lostRun(last) ? 0 : neverStarted(last) ? sessionRetryBaseMs : sessionRetryDelay(started));
   return { ...report, launch: now >= nextAt, settled: false, nextAt: new Date(nextAt).toISOString(), exhausted: false };
 }
 /** The retry schedule of every request whose latest session failed or expired, as master status reports it. */
 export function sessionRetries(records: { requestId?: string; state: string; requestedAt: string; closedAt?: string | null; resolution?: string | null }[], now: number): SessionRetryReport[] {
   const requests = [...new Set(records.map(record => record.requestId).filter((id): id is string => !!id))];
   return requests.map(id => sessionRetry(records, id, now)).filter(retry => retry.last && retriedStates.includes(retry.last.state))
-    .map(({ requestId, attempts, started, neverStarted: unstarted, limit, unstartedLimit, nextAt, exhausted, last }) => ({ requestId, attempts, started, neverStarted: unstarted, limit, unstartedLimit, nextAt, exhausted, last }));
+    .map(({ requestId, attempts, started, neverStarted: unstarted, lost, limit, unstartedLimit, nextAt, exhausted, last }) => ({ requestId, attempts, started, neverStarted: unstarted, lost, limit, unstartedLimit, nextAt, exhausted, last }));
 }
 
 // The request must still be the one the record holds for the exact current candidate; a session
@@ -237,10 +258,10 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
   // One live session per request: a request whose sessions all failed or expired may be launched
   // again, as its next attempt, until the retry limit. A session that settled any other way while
   // the request still stands answered nothing, and the dispatcher attempts it again (GY-193), up to
-  // `requestAttemptLimit` sessions for the request in all.
+  // `requestAttemptLimit` sessions for the request in all. A lost run is not a failed one (GY-496).
   const prior = ledger.producers.filter(record => record.requestId === request.id);
   if (prior.some(record => record.state === 'pending')) throw new Error(`Request ${request.id} was already launched for ${work.key}; one session per request`);
-  const failedRuns = prior.filter(record => retriedStates.includes(record.state)).length;
+  const failedRuns = prior.filter(record => retriedStates.includes(record.state) && !lostRun(record)).length;
   if (retriedStates.includes(prior.at(-1)?.state ?? '') && failedRuns >= sessionRetryLimit) throw new Error(`Request ${request.id} for ${work.key} already had ${failedRuns} sessions fail or expire; no further automatic attempt`);
   if (prior.length >= requestAttemptLimit) throw new Error(`Request ${request.id} for ${work.key} already had ${prior.length} sessions; no further automatic attempt`);
   // The profile's room (GY-107): one session per name, and no more sessions than it declares.
@@ -344,7 +365,7 @@ async function launchHeadlessProducer(root: string, config: MasterConfig, work: 
     group: binding.group, proofs: binding.proofs, profile: profile.name, principal: profile.principal, agentName: session.agentName, pane: null,
     // A run holds its request on its command line from its first instant: there is nothing to re-prompt.
     requestedAt: requestedAt.toISOString(), expiresAt: new Date(requestedAt.getTime() + timeoutMs).toISOString(), state: 'pending', outcome: Object.fromEntries(binding.proofs.map(proof => [proof, 'missing'])),
-    delivery: 'request', acknowledgedAt: requestedAt.toISOString(), checkout: checkout.directory, runtime: 'pi' });
+    delivery: 'request', acknowledgedAt: requestedAt.toISOString(), checkout: checkout.directory, runtime: 'pi', launcherPid: process.pid });
   const ledger = await readProducerLedger(root);
   try { await saveProducerLedger(root, { ...ledger, producers: [...ledger.producers, record] }); }
   catch (error) { await removeSessionCheckout(root, dirname(checkout.directory), checkout.directory).catch(() => {}); await registry?.release('the producer record could not be written'); throw error; }
@@ -403,12 +424,15 @@ export async function reconcileProducers(root: string, config: MasterConfig, wor
   now?: () => Date;
   /** Re-prompts a quiet session with its request; the default delivers it in Herdr. */
   reprompt?: (record: ProducerRecord, message: string) => void | Promise<void>;
+  /** Whether the process that launched a headless run is still alive; the default probes it. */
+  alive?: (pid: number) => boolean;
 } = {}) {
   const ledger = await readProducerLedger(root);
   const now = (dependencies.now ?? (() => new Date()))();
   const run = dependencies.run ?? defaultChildRun;
   const reprompt = dependencies.reprompt ?? (async (record: ProducerRecord, message: string) => { await deliverPrompt(record.agentName, message, run); });
   const ackMs = acknowledgementMs(config);
+  const alive = dependencies.alive ?? processAlive;
   let changed = 0;
   for (const record of ledger.producers) {
     if (record.state !== 'pending') continue;
@@ -445,6 +469,10 @@ export async function reconcileProducers(root: string, config: MasterConfig, wor
     else if (results.every(result => result === 'pass')) next = { state: 'completed', resolution: `trusted passing evidence recorded for ${record.proofs.join(', ')}` };
     else if (request && request.state === 'cancelled') next = { state: 'cancelled', resolution: request.resolution ?? 'the control plane withdrew the request' };
     else if (item && (!item.candidate || item.candidate.sha !== record.sha || item.candidate.baseSha !== record.baseSha || item.policyRevision !== record.policyRevision)) next = { state: 'cancelled', resolution: `head changed from ${record.sha.slice(0, 12)} to ${item.candidate?.sha.slice(0, 12) ?? 'none'}` };
+    // A headless run whose launcher is gone went with it — a supervisor restart stops the run
+    // (GY-453) — and no process is left to record its end: it is lost, not left to its expiry.
+    else if (headless && !ended && !liveRun(record.agentName) && record.launcherPid && record.launcherPid !== process.pid && !alive(record.launcherPid)) next = { state: 'failed',
+      resolution: `${lostRunReason}: the headless run's launcher (pid ${record.launcherPid}) is gone, a supervisor restart, so the run stopped with it before it reached a verdict; it is relaunched and not counted as an attempt` };
     else if (Date.parse(record.expiresAt) <= now.getTime()) next = { state: 'expired', resolution: `no trusted evidence for ${record.proofs.filter(proof => outcome[proof] !== 'pass').join(', ')} within ${config.run.producerTimeoutMinutes} minutes` };
     else if (finished) {
       if (!record.idleSince) { record.idleSince = now.toISOString(); changed++; }
@@ -452,11 +480,13 @@ export async function reconcileProducers(root: string, config: MasterConfig, wor
         const missing = record.proofs.filter(proof => outcome[proof] !== 'pass').map(proof => `${proof} (${outcome[proof]})`).join(', ');
         if (headless) {
           const result = ended?.result, refused = ended?.applied.filter(entry => entry.outcome === 'refused').map(entry => `${entry.subject}: ${entry.detail}`) ?? [];
-          next = { state: 'failed', resolution: `the headless run ended (${!result ? 'no result recorded' : result.ok ? `${result.submitted} submission(s)` : `${result.reason}: ${result.detail}`}) without trusted evidence for ${missing}${refused.length ? `; refused: ${refused.join('; ')}` : ''}`.slice(0, 900) };
+          if (killedRun(result) && !refused.length) next = { state: 'failed', resolution: `${lostRunReason}: the headless run was killed (${result && !result.ok ? result.detail : 'on a signal'}) before it reached a verdict, without trusted evidence for ${missing}; it is relaunched and not counted as an attempt`.slice(0, 900) };
+          else next = { state: 'failed', resolution: `the headless run ended (${!result ? 'no result recorded' : result.ok ? `${result.submitted} submission(s)` : `${result.reason}: ${result.detail}`}) without trusted evidence for ${missing}${refused.length ? `; refused: ${refused.join('; ')}` : ''}`.slice(0, 900) };
         } else {
         const failure = agent?.agent_status === 'blocked'
           ? `the session ended waiting on input (Herdr reports it blocked) instead of deciding on its own, without trusted evidence for ${missing}`
-          : `the session finished (${agent?.agent_status ?? 'gone from Herdr'}) without trusted evidence for ${missing}`;
+          : !agent ? `${lostRunReason}: the session vanished from Herdr before it reached a verdict, without trusted evidence for ${missing}; it is relaunched and not counted as an attempt`
+          : `the session finished (${agent.agent_status}) without trusted evidence for ${missing}`;
         next = { state: 'failed', resolution: await settlementReason(record, agent, { now: now.getTime(), ackMs, screen }, failure) };
         }
       }

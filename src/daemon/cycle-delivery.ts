@@ -8,7 +8,7 @@ import { boundDeployment, deploymentObservationSchema, maxProofAttempts, message
 import { candidateKey, decisionKey } from './reconcile.js';
 import { missingProofs } from './metrics.js';
 import { readyToRetry } from './sessions.js';
-import { detailChanged, maxApproverLaunches, standingVerdict } from './decisions.js';
+import { detailChanged, exhaustedProofEscalation, exhaustedProofKey, maxApproverLaunches, standingVerdict } from './decisions.js';
 import { record } from './effects.js';
 import type { Cycle } from './cycle.js';
 import { deploymentDetail } from './deployment.js';
@@ -48,6 +48,9 @@ export async function shepherdStep(cycle: Cycle) {
   // 5. Shepherd reviews and proofs for submitted candidates. Graphyard dispatches provider reviews
   //    and trusted producers publish evidence; the daemon records exactly one request per candidate
   //    and escalates what only a human or a producer may resolve.
+  //    A producer request whose attempts are used up is raised here the cycle it is first seen
+  //    (GY-496); the decision step requests the rework on a later cycle (cycle-decisions.ts).
+  const exhausted = await effects.exhaustedProofs?.().catch(() => []) ?? [];
   for (const item of open.filter(candidate => candidate.submission && candidate.candidate && !candidate.reworkRequested && !standingVerdict(candidate))) await isolate('proof', item, item.key, async () => {
     const reviewGate = item.gates.find(gate => gate.name === 'review');
     if (reviewGate && !reviewGate.passed) {
@@ -65,6 +68,10 @@ export async function shepherdStep(cycle: Cycle) {
         if (detailChanged(state.actions[key], detail)) performed.push(await record(state, key, { kind: 'review', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
       }
     }
+    for (const entry of exhausted.filter(entry => entry.work === item.key && entry.sha === item.candidate!.sha)) {
+      const key = exhaustedProofKey(entry);
+      if (!state.actions[key]) performed.push(await record(state, key, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail: exhaustedProofEscalation(entry), attempts: 1, cycle: state.cycle }, now(), effects.persist));
+    }
     const outstanding = missingProofs(item, new Date(clock));
     if (!outstanding.length) return;
     const manual = outstanding.filter(proof => proof.startsWith('manual:'));
@@ -76,6 +83,12 @@ export async function shepherdStep(cycle: Cycle) {
     if (!automatable.length) return;
     const key = candidateKey('proof', item);
     const previous = state.actions[key];
+    if (previous?.state === 'failed' && previous.attempts >= maxProofAttempts) {
+      // Spent requests are named, never left silent (GY-496): the last failure says what to fix.
+      const escalationKey = `escalation:proof-workflow:${item.id}:${item.candidate!.sha}:${item.policyRevision}`;
+      if (!state.actions[escalationKey]) performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail: `${item.key}: the trusted producer workflow was requested ${previous.attempts} times for ${automatable.join(', ')} on ${item.candidate!.sha.slice(0, 12)} and the loop stops asking; the master fixes what the last attempt names: ${previous.detail}`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
+      return;
+    }
     if (previous && (previous.state === 'done' || previous.attempts >= maxProofAttempts || !readyToRetry(previous, state.cycle))) return;
     if (!config.run.proofWorkflow) {
       if (previous?.state !== 'failed') performed.push(await record(state, key, { kind: 'proof', work: item.key, principal: null, state: 'failed', detail: `${item.key} needs trusted evidence for ${automatable.join(', ')}; configure master run --proof-workflow so the loop can request it from the trusted producer workflow`, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
