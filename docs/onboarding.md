@@ -27,7 +27,7 @@ Agents treat Herdr's bracketed paste as untrusted data (prompt injection), so wi
 
 ### Agent environments
 
-Each agent account has a login home under `~/.coding_agents`, selected by `CLAUDE_CONFIG_DIR` (Claude Code), `CODEX_HOME` (Codex), `XDG_DATA_HOME` (OpenCode) or `CURSOR_CONFIG_DIR` (Cursor). Tokens go in `~/.config/graphyard/workers/` and `producers/` (mode 0600). Then:
+Each agent account has a login home under `~/.coding_agents`, selected by `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_DATA_HOME` (OpenCode) or `CURSOR_CONFIG_DIR`. Tokens go in `~/.config/graphyard/workers/` and `producers/` (mode 0600). Then:
 
 ```sh
 node "$GRAPHYARD_CLI" master environments --create claude,codex --apply  # new login homes
@@ -39,7 +39,7 @@ Profiles default to `"approvals": "auto"` so sessions never block on a permissio
 
 ### Configure the fleet
 
-The **agent registry** (Settings › **Agents**) records runtimes, accounts, roles and policies, proposed from `~/.coding_agents`:
+The **agent registry** (Settings › **Agents**) records the fleet, proposed from `~/.coding_agents`:
 
 ```sh
 node "$GRAPHYARD_CLI" master registry propose
@@ -48,33 +48,35 @@ node "$GRAPHYARD_CLI" master registry propose --apply
 
 ### Add a runtime
 
-Join a dash-led value to its flag with `=`:
+Join dash-led values with `=`:
 
 ```sh
 node "$GRAPHYARD_CLI" master registry runtime set aider --kind aider --arg=--yes-always \
   --home-variable AIDER_HOME --model-flag=--model --login 'AIDER_HOME={home} aider --login' --login-file session.json \
-  --reason "Add the Aider runtime"
+  --reason "Aider"
 ```
 
 ### Add an account
 
-An account is one login, held by reference:
+One login per account, by reference:
 
 ```sh
-node "$GRAPHYARD_CLI" master registry model set opus --provider Anthropic --id claude-opus-5 \
-  --input-cost 15 --output-cost 75 --tier frontier --context 1000000 --reason "Record the model and its price"
+node "$GRAPHYARD_CLI" master registry model set opus --id claude-opus-5 \
+  --input-cost 15 --output-cost 75 --tier frontier --reason "Price"
 node "$GRAPHYARD_CLI" master registry account set claude-b --runtime claude --model opus \
-  --home ~/.coding_agents/claude-b --max-sessions 2 --reason "Second Claude subscription"
-node "$GRAPHYARD_CLI" master registry account quota opencode-a exhausted --resets-at 2026-09-22T00:00:00Z --reason "Plan cut off until Monday"
+  --home ~/.coding_agents/claude-b --max-sessions 2 --reason "Second login"
+node "$GRAPHYARD_CLI" master registry account quota opencode-a exhausted --resets-at 2026-09-22T00:00:00Z --reason "Cut off"
 ```
+
+`--key-file zai.key --key-variable ZAI_API_KEY` names an API key by reference: a 0600 home file read into that variable per headless run. Pi accounts are smoke-tested first and when changed; failing (Pi's error), or two unjudged runs of a role (an hour), makes one ineligible.
 
 ### Add a role
 
 Preferred account first; applies next launch:
 
 ```sh
-node "$GRAPHYARD_CLI" master registry role set worker claude-b,claude-c,codex-a --concurrency 4 --reason "Prefer Claude; Codex is overflow"
-node "$GRAPHYARD_CLI" master registry role set reviewer codex-a,claude-c --concurrency 2 --tool Read --model opus --reason "Read-only, frontier model"
+node "$GRAPHYARD_CLI" master registry role set worker claude-b,claude-c,codex-a --concurrency 4 --reason "Overflow"
+node "$GRAPHYARD_CLI" master registry role set reviewer codex-a,claude-c --concurrency 2 --tool Read --model opus --reason "Read-only"
 ```
 
 ### Size review and proof capacity
@@ -96,7 +98,7 @@ node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST   # now installs th
 node "$GRAPHYARD_CLI" master start codex     # or: master start claude
 ```
 
-Run it under an OS identity whose GitHub credentials workers cannot read. `--browser-profile` is the Chrome profile signed in to GitHub as administrator, for `master browser` flows; *Confirm access* in GitHub Mobile stays human-only. Add the reviewer with `master reviewer setup` and `master reviewer add PROFILE` ([Claude](../examples/master/claude-reviewer.json) template); its manifest flow is the only App confirmation.
+Run it under an OS identity whose GitHub credentials workers cannot read. `--browser-profile` (Chrome, signed in as GitHub administrator) serves [`master browser`](master-agent-reference.md#github-administration-through-the-browser). Add the reviewer with `master reviewer setup` and `master reviewer add PROFILE` ([Claude](../examples/master/claude-reviewer.json) template); its manifest flow is the only App confirmation.
 
 ### The loop must be supervised
 
@@ -110,4 +112,4 @@ CI workflows should cancel superseded pull-request runs: group each by `${{ gith
 
 ## What stays manual
 
-Logins (provider, GitHub, agent environments, browser profile), the App confirmation, plan approval, *Confirm access*, producer grants, and the [human-only decisions](glossary.md#who-decides).
+Logins (provider, GitHub, agent environments, browser profile), the App confirmation, plan approval, *Confirm access* on GitHub Mobile, producer grants, and the [human-only decisions](glossary.md#who-decides).
