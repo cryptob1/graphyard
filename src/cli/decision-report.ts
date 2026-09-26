@@ -4,8 +4,8 @@ import { elapsed } from '../model/sessions.js';
 import { mapBounded, readConcurrency } from '../master/timings.js';
 
 type DecisionRow = { id: string; action: string; state: string; requestedAt: string; outcome?: string | null; race?: unknown; refusal?: { approver: string; reason: string; at: string } | null };
-type ApprovalWatch = { work: string; decision: string; agentName: string | null; settledAt?: string | null };
-export interface UnansweredDecision { work: string; id: string; action: string; requestedAt: string; session: string; ageMs: number; age: string }
+type ApprovalWatch = { work: string; decision: string; agentName: string | null; settledAt?: string | null; ended?: string[] };
+export interface UnansweredDecision { work: string; id: string; action: string; requestedAt: string; session: string; ageMs: number; age: string; ends?: string[] }
 
 /**
  * Decisions left at `requested` with no live approver session (GY-141): the session the loop
@@ -20,11 +20,15 @@ export function unansweredDecisions(items: { key: string; decisions: DecisionRow
   if (!runtime.available) return [];
   return items.flatMap(item => standingCapacity(item, 'approver').length ? [] : item.decisions.flatMap(decision => {
     if (decision.state !== 'requested') return [];
-    const session = approvals.find(watch => watch.decision === decision.id)?.agentName ?? approverSessionName(item, decision.id);
+    const watch = approvals.find(watch => watch.decision === decision.id);
+    const session = watch?.agentName ?? approverSessionName(item, decision.id);
     const live = runtime.agents.find(agent => agent.name === session);
     if (live && live.agent_status !== 'done') return [];
     const ageMs = Math.max(0, now - Date.parse(decision.requestedAt));
-    return [{ work: item.key, id: decision.id, action: decision.action, requestedAt: decision.requestedAt, session, ageMs, age: elapsed(ageMs) }];
+    const entry = { work: item.key, id: decision.id, action: decision.action, requestedAt: decision.requestedAt, session, ageMs, age: elapsed(ageMs) };
+    // GY-551. How each session the loop launched for it ended without judging it, when the loop
+    // says: after the launch bound every reason is here, so the silence is readable at once.
+    return watch?.ended?.length ? { ...entry, ends: watch.ended } : entry;
   }));
 }
 
@@ -73,7 +77,7 @@ export async function terminalDecisions(masterApi: (path: string) => Promise<any
   }
   const unanswered = unansweredDecisions(histories, sessions.approvals, sessions.runtime, sessions.now);
   for (const entry of unanswered)
-    attentionItems.push({ subject: entry.work, text: `Decision ${entry.id} (${entry.action}) is unanswered after ${entry.age}: approver session ${entry.session} is not running and recorded no outcome — a stall, not a refusal`,
+    attentionItems.push({ subject: entry.work, text: `Decision ${entry.id} (${entry.action}) is unanswered after ${entry.age}: approver session ${entry.session} is not running and recorded no outcome — a stall, not a refusal${entry.ends?.length ? ` Every session launched for it ended without judging it: ${entry.ends.join('; ')}` : ''}`,
       ...agentOwner('master', `graphyard master approver ${entry.work} ${entry.id} [AGENT_KIND] puts it to a fresh approver`, 'approver') });
   return { listed, attentionItems, unanswered, refused };
 }
