@@ -15,7 +15,7 @@ The next claim, a higher epoch, keeps the worktree. An unexplained lapse raises 
 
 ## Supervisor died leaving a containment quarantine
 
-On the worker's machine `graphyard master settle-containment GY-N "reason"` verifies no process survives (`containment.held` lists them). If refused, confirm the stop, then `graphyard rework GY-N --previous-worker-stopped "reason"`, or `graphyard recover-containment` likewise once delivered.
+On the worker's machine `graphyard master settle-containment GY-N "reason"` verifies no process survives (`containment.held` lists them). If refused, confirm the stop, then [rework](#submitted-implementation-needs-rework), or `graphyard recover-containment` likewise once delivered.
 
 ## Submitted implementation needs rework
 
@@ -78,11 +78,11 @@ It stays Done, marked **delivered with failure**. Revert through a new item; nev
 
 ## Merged but not deployed
 
-A merge production never served is a `delivery.deployment-incident` ([observation](deployment.md#production-deployment-observation)). Fix the deployment; it recovers once served.
+An unserved merge is a `delivery.deployment-incident` ([observation](deployment.md#production-deployment-observation)). Fix the deployment; it recovers once served.
 
 ## Merge bypass
 
-An ungated merge is a permanent violation: repair access, open a follow-up item, never backfill evidence. An admin opens a direct-merge window with `graphyard operator direct-merges on --since ISO REASON`.
+An ungated merge is a permanent violation: repair access, open a follow-up item, never backfill evidence. An admin opens a direct-merge window: `graphyard operator direct-merges on --since ISO REASON`.
 
 ## Credentials
 
@@ -100,7 +100,7 @@ Only an `admin` grants, only to `producer` principals. Patterns: an exact name, 
 
 ## Setup proposals and drift
 
-`graphyard init --scan` writes `.graphyard/setup-proposal.json`; `--apply` applies it. Later scans and `doctor --profile through-merge|preview-validation|production-verification` report drift without repairing it.
+`graphyard init --scan` writes `.graphyard/setup-proposal.json`; `--apply` applies it. Later scans and `doctor --profile through-merge|preview-validation|production-verification` report unrepaired drift.
 
 ## Scale limits
 

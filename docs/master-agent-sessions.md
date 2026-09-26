@@ -45,7 +45,7 @@ The typed line is bounded at **512 bytes** whatever the request is.
 
 #### The start bound reads the pane
 
-The runtime is **ready** when Herdr reports it working, idle or done with no prompt on screen, or its banner shows (`the claude runtime is on screen while Herdr reports it unknown`). Ready within **60 seconds** (`run.launchStartSeconds`) means started, logged with its duration; one still starting gets up to **120 seconds** (`started.extended`). Otherwise it is refused naming the case and the pane's last non-empty line, never Herdr's own `agent_not_found`: `the claude runtime never started within 60 s in pane w1V:pR6 (command still echoing)`, `… was still starting after 120 s` or `… is blocked before it is ready`; it is retried. A failed launch closes its pane, stopping any supervisor first, then releases its claim.
+The runtime is **ready** when Herdr reports it working, idle or done with no prompt on screen, or its banner shows (`the claude runtime is on screen while Herdr reports it unknown`). Ready within **60 seconds** (`run.launchStartSeconds`) means started, logged with its duration; one still starting gets up to **120 seconds** (`started.extended`). Otherwise it is refused naming the case and the pane's last non-empty line, never Herdr's own `agent_not_found`: `the claude runtime never started within 60 s in pane w1V:pR6 (command still echoing)`, `… was still starting after 120 s` or `… is blocked before it is ready`; retried as `Automatic producer launch for GY-N refused 1 time(s): …`. A failed launch closes its pane, stopping any supervisor first, then releases its claim.
 
 #### First-run consent prompts
 
@@ -62,4 +62,4 @@ A reviewer or producer is `awaiting acknowledgement` until 30 s of activity (`co
   path that failed.
 - **A tick failure is attributed and surfaced.** `dispatch.lastFailure` names it. Three consecutive failures raise one attention item saying no reviewer or producer session is being launched for any item. `graphyard master restart` repairs the cursor.
 
-**A session that exits at launch is classified from its pane.** `herdr agent get` answers only `agent_not_found` for such a runtime, so the dispatcher uses `herdr pane read`: a **provider limit notice** fails over exactly as a mid-session exhaustion does; any other cause is refused with the pane's last words and retried.
+**A session that exits at launch is classified from its pane.** `herdr agent get` answers only `agent_not_found` for a runtime that exits **at launch**, so the dispatcher uses `herdr pane read`: a **provider limit notice** fails over exactly as a mid-session exhaustion does; any other cause is refused with the pane's last words and retried.
