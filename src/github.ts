@@ -1608,7 +1608,6 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     await this.request(existing ? `/check-runs/${existing.id}` : '/check-runs', existing ? 'PATCH' : 'POST', body);
   }
 }
-/** Whether GitHub attributes a commit to the control-plane App's bot account: by the linked author, or by the App's noreply address. */
 /** Required checks by name, deduplicated, without Graphyard's own merge check (GY-430). */
 function mergeRequiredChecks(checks: { name: unknown; appId: unknown }[]): { name: string; appId: number | null }[] {
   const merged = new Map<string, { name: string; appId: number | null }>();
@@ -1621,6 +1620,7 @@ function mergeRequiredChecks(checks: { name: unknown; appId: unknown }[]): { nam
   }
   return [...merged.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
+/** Whether GitHub attributes a commit to the control-plane App's bot account: by the linked author, or by the App's noreply address. */
 function appAuthored(commit: any, login: string): boolean {
   const author = typeof commit?.author?.login === 'string' ? commit.author.login : null;
   const email = typeof commit?.commit?.author?.email === 'string' ? commit.commit.author.email : '';
