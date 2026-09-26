@@ -6,7 +6,7 @@ import { impliedScopeRequests, type Work } from '../model/work.js';
 import { actionReport, agentRequestReport, sessionReport } from './loop-report.js';
 import { needsHumanActions, routedScopeStatus } from './owed-report.js';
 import { installationMerger } from '../executor.js';
-import { daemonSummary, loopAttention, readDaemonState, type CycleMetrics, type DaemonState } from '../master-daemon.js';
+import { daemonSummary, loopAttention, readDaemonState } from '../master-daemon.js';
 import { readReviewLedger, reconcileReviews, reviewLedgerSpec, sessionLedgerHeadroom, summarizeReviews } from '../reviewer.js';
 import { producerLedgerSpec, readProducerLedger, reconcileProducers, sessionRetries, summarizeProducers } from '../producer.js';
 import { defaultAwaitReviewers, dispatchFailureAttention, dispatchSummary, readDispatchCursor } from '../auto-dispatch.js';
@@ -35,6 +35,9 @@ import { slowReportReader } from '../master/report-cache.js';
 import { repairLaneAttention } from '../master/repair-lane.js';
 
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
+// The cycle-budget measure is a daemon metric (src/daemon/metrics.ts); it is read from here,
+// as it always was, by `master status` and its tests.
+export { cycleBudget } from '../daemon/metrics.js';
 // `master scope` lives in its own module; it is read from here as it always was.
 export { approveScopeRequest } from './master-scope.js';
 
@@ -229,23 +232,4 @@ export async function reportedAttention(root: string, master: MasterConfig, mast
   // The report's last step over the whole list, which the loop runs too: a cause named once, in place of its symptoms.
   const attribute = (status: { work: any[]; attentionItems: AttentionItem[] }) => attributeAttention(ledgerRefusalAttention(status, snapshot.work).attentionItems, resources.readings);
   return { generatedFiles, overflow, interventions, releases, decisions, throughput, resources, derived, items, attribute, unavailable: sections.unavailable };
-}
-
-/**
- * How the coordination cycle keeps to its configured interval, from the durations the daemon
- * records for its retained cycles: the last one, the p95, and every cycle that overran. A cycle
- * longer than its interval means the loop is falling behind the work it shepherds.
- */
-export function cycleBudget(state: Pick<DaemonState, 'metrics'>, intervalMs: number) {
-  const metrics = state.metrics;
-  const last = metrics.at(-1) ?? null;
-  const durations = metrics.map(metric => metric.durationMs).sort((a, b) => a - b);
-  const p95Ms = durations.length ? durations[Math.min(durations.length - 1, Math.ceil(durations.length * 0.95) - 1)] : null;
-  const overruns = metrics.filter(metric => metric.durationMs > intervalMs);
-  const describe = (m: CycleMetrics) => ({ cycle: m.cycle, at: m.at, durationMs: m.durationMs, childWaitMs: m.childWaitMs ?? null, workMs: m.workMs ?? null });
-  return {
-    intervalMs, measured: metrics.length, lastCycle: last ? describe(last) : null,
-    withinInterval: last ? last.durationMs <= intervalMs : null, p95Ms, overruns: overruns.length,
-    lastOverrun: overruns.length ? describe(overruns.at(-1)!) : null,
-  };
 }
