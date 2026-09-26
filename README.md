@@ -2,7 +2,7 @@
 
 **Turn a fleet of coding agents into an engineering system.**
 
-Graphyard is an open-source control plane for coding agents: agents write the code, and Graphyard records ownership and evidence and merges only the exact change every gate allowed.
+Graphyard is an open-source control plane for coding agents: agents write the code; Graphyard records ownership and evidence, and merges only the exact change every gate allowed.
 
 ```text
 Backlog → Ready → Build → Review → Test → Acceptance → Merge → Done
