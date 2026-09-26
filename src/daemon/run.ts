@@ -2,7 +2,7 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import type { ConfigReload, MasterConfig } from '../master.js';
 import { acquireDaemonLock, type DaemonAction, type DaemonState, message, storeAction } from './state.js';
-import { faultClassPolicyFromEnv } from '../model/fault-classes.js';
+import { faultClassPolicyFromEnv, type FaultClassPolicy } from '../model/fault-classes.js';
 import { faultRecurrenceReport } from './faults.js';
 import { doctorReport } from './doctor.js';
 import { latencyBudget, silenceReport } from './metrics.js';
@@ -11,8 +11,12 @@ import type { DaemonEffects } from './effects.js';
 import { Launcher, defaultLaunchConcurrency, runCycle } from './cycle.js';
 import { describeTimings } from '../master/timings.js';
 
-/** The compact daemon view `master status` joins onto Graphyard truth. */
-export function daemonSummary(state: DaemonState, now: number, intervalMs: number, hostId?: string) {
+/**
+ * The compact daemon view `master status` joins onto Graphyard truth. `faultPolicy` is the recurrence
+ * rule the faults are reported under: the loop passes the one it files by (effects.faultClassPolicy),
+ * so the reported window and threshold are the filing ones; absent, the environment's.
+ */
+export function daemonSummary(state: DaemonState, now: number, intervalMs: number, hostId?: string, faultPolicy: FaultClassPolicy = faultClassPolicyFromEnv(process.env)) {
   const lastCycleAt = state.lastCycleAt ? Date.parse(state.lastCycleAt) : Number.NaN;
   const lagMs = Number.isFinite(lastCycleAt) ? now - lastCycleAt : null;
   const recent = Object.entries(state.actions).map(([key, action]) => ({ key, ...action })).sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
@@ -47,8 +51,8 @@ export function daemonSummary(state: DaemonState, now: number, intervalMs: numbe
     // The pipeline doctor's last runs (GY-711): what each found, did and filed.
     doctor: doctorReport(state),
     // Fault instances by class in the recurrence window, and the item each recurring class filed (GY-173).
-    faults: faultRecurrenceReport(state, faultClassPolicyFromEnv(process.env), now),
-    // The system invariants as the last cycle judged them (GY-404): one line per invariant, with its threshold and reading.
+    faults: faultRecurrenceReport(state, faultPolicy, now),
+    // The system invariants as the last observation judged them (GY-404): one line per invariant, with its threshold and reading.
     invariants: { at: state.invariants.at, violated: state.invariants.report.filter(check => !check.holds).length, lines: state.invariants.report.map(check => check.line), checks: state.invariants.report },
   };
 }
