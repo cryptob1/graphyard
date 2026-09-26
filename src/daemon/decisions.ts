@@ -1,7 +1,7 @@
 // Concern: routine decisions — standing verdicts, decision reasons and the approver step.
 import { type Work, type AgentReview, reviewProviderOf, standingEscalations, leaseLossEpoch } from '../model.js';
 import { routableScopeRequest, scopeDecisionBinding, scopeDecisionReason } from '../model/scope.js';
-import { baseRefreshConflict, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, speculativeConflictReason, type ReviewThread, describeThread } from '../merge-queue.js';
+import { baseRefreshConflict, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, speculativeConflict, type ReviewThread, describeThread } from '../merge-queue.js';
 import { mechanicalFailure, mechanicalVerdicts } from '../model/mechanical-proofs.js';
 import { unexercisedFindings } from '../auto-dispatch.js';
 import { decisionBindingMax } from '../model/approval.js';
@@ -276,7 +276,7 @@ export function syncConflict(work: Work): { reason: string; binding: string } | 
   if (observation.conflicting && !work.queue)
     return { reason: `GitHub reports that candidate ${candidate.sha.slice(0, 12)} conflicts with base branch tip ${tip.slice(0, 12)}`, binding: `${candidate.sha}:sync:${tip}` };
   const ejection = work.queueEjection;
-  if (ejection && !work.queue && ejection.sha === candidate.sha && ejection.policyRevision === work.policyRevision && speculativeConflictReason.test(ejection.reason) && !ejection.predecessors?.length && !pendingBaseRefresh(work))
+  if (ejection && !work.queue && ejection.sha === candidate.sha && ejection.policyRevision === work.policyRevision && speculativeConflict(ejection) && !ejection.predecessors?.length && !pendingBaseRefresh(work))
     return { reason: `the merge queue ejected candidate ${candidate.sha.slice(0, 12)}: ${ejection.reason} (base branch tip ${tip.slice(0, 12)})`, binding: `${candidate.sha}:queue-conflict:${ejection.sequence}:${tip}` };
   return null;
 }

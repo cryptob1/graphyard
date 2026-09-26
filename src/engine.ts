@@ -1445,8 +1445,11 @@ export class Engine {
     }
     return restored;
   }
-  /** Removes an entry whose speculative validation cannot succeed, with the reason on the record. */
-  async ejectFromQueue(id: string, expectedRevision: number, reason: string, jobToken: string) {
+  /**
+   * Removes an entry whose speculative validation cannot succeed, with the reason on the record.
+   * `conflict` says the speculative merge conflicted; the record carries it as a typed flag (GY-252).
+   */
+  async ejectFromQueue(id: string, expectedRevision: number, reason: string, jobToken: string, conflict = false) {
     return this.store.transaction(async (db, now) => {
       const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
       requireCurrent(job, 'Integration job lease expired or superseded');
@@ -1456,13 +1459,13 @@ export class Engine {
       requireCurrent(work.queue, 'Queue entry already left the merge queue');
       const sequence = work.queue!.sequence;
       // A speculative conflict records the predecessors its prediction held (GY-321, model/queue.ts).
-      const ejected = queueEjectionRecord(work, all, reason, now);
+      const ejected = queueEjectionRecord(work, all, reason, now, conflict);
       work.queueEjection = ejected.ejection;
       work.queueHistory = ejected.history;
       work.queue = null;
       this.evaluate(work, all, now);
       await this.recordDispatch(db, work, now);
-      await save(db, work, 'graphyard', 'queue.ejected', now, { sequence, reason });
+      await save(db, work, 'graphyard', 'queue.ejected', now, { sequence, reason, conflict: ejected.ejection.conflict ?? null });
       for (const behind of all) if (behind.queue && behind.id !== work.id) await wakeJob(db, behind.id);
       return work;
     });

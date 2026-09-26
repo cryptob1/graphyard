@@ -1606,7 +1606,7 @@ async function advanceQueue(engine: Engine, github: GitHub, work: Work, job: { w
     return { work: await engine.bindSpeculativeTip(work.id, work.revision, speculation, job.token), published: true, held: null };
   } catch (error) {
     if (!(error instanceof SpeculativeConflict)) throw error;
-    return { work: await engine.ejectFromQueue(work.id, work.revision, error.message, job.token), published: false, held: null };
+    return { work: await engine.ejectFromQueue(work.id, work.revision, error.message, job.token, true), published: false, held: null };
   }
 }
 /**
