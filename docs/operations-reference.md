@@ -11,7 +11,7 @@ Restart `graphyard master run` freely; it never dispatches twice. `master status
 
 ## Lost worker before submission
 
-A lease expires 120 seconds after the last heartbeat; the next claim, a higher epoch, keeps the worktree. An unexplained lapse raises `lease-loss` ([classification](protocol/leases.md#how-a-lease-ends)), blocking merge until [settled](delegation.md#who-may-settle-what).
+A lease expires 120 seconds after the last heartbeat, or one further lease period after a recorded server-side renewal fault; the next claim, a higher epoch, keeps the worktree. An unexplained lapse raises `lease-loss` ([classification](protocol/leases.md#how-a-lease-ends)), blocking merge until [settled](delegation.md#who-may-settle-what).
 
 ## Supervisor died leaving a containment quarantine
 
@@ -37,7 +37,7 @@ Stop the worker, then `graphyard rework GY-N --previous-worker-stopped "reason"`
 | --- | --- | --- |
 | `merge` | within two of the queue head, gates passing | 20 seconds |
 | `active` | waiting on a check, review, base refresh or rework | 1 minute |
-| `steady` | unchanged since last observed | 5 minutes, stretched by the fleet bound |
+| `steady` | unchanged since last observed | 5 minutes, fleet-stretched |
 | `idle` | next action is dispatch or escalation | 5 minutes, stretched when unchanged |
 
 Unchanged non-merge candidates spend **at most 40%** (`steadyStateShare`) of the limit.
@@ -48,7 +48,7 @@ Below **500 requests** by default, `GRAPHYARD_GITHUB_RESERVE`, non-merge observa
 
 ### What an observation costs
 
-About ten requests uncached; unchanged, none.
+About ten uncached; unchanged, none.
 
 ### What a pause means for gates
 
@@ -56,7 +56,7 @@ A rate-limit `403`/`429` pauses requests; gates read stale until it lifts.
 
 ### Reading the budget
 
-`graphyard status` (or `GET /api/status`) → `githubBudget`; `master status` attention items with subject `github`.
+`graphyard status` (or `GET /api/status`) → `githubBudget`; `master status` attention subject `github`.
 
 ### Webhook liveness
 
@@ -102,7 +102,7 @@ Only an `admin` grants, only to `producer` principals. Patterns: an exact name, 
 
 ## Scale limits
 
-Observation claims `GRAPHYARD_OBSERVATION_CONCURRENCY` jobs at once (default 4, capped at half the pool), each `SKIP LOCKED`: queue head and `max(2, batchSize)` band first, then never-observed submissions, then any job due over five minutes, then review/rework waits, then `available_at`; `master status` raises `github` once the head's observation passes two minutes. Watch `observationThroughput` lag, budget.
+`GRAPHYARD_OBSERVATION_CONCURRENCY` workers (default 4, ≤ half the pool) share one pace: budget above reserve, spread to reset. Claims: head band, in-flight merges, never-observed submissions, jobs due over five minutes, review/rework waits, running sessions (before waits when tight), `available_at`; tight, idle items await webhooks. `observationThroughput` reports budget, pace, head lag, oldest unobserved submission; `master status` raises `github` past two minutes. Heartbeat, claim, `complete` and `blocked` own the lease pool; `leaseHealth` (`GET /api/status`) reports heartbeat p50/p95 and failures, raised above 5 s p95.
 
 ### Concurrent reconciliation
 

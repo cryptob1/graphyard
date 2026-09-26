@@ -253,6 +253,18 @@ export function definiteRenewalRefusal(error: unknown) {
   return confirmedRefusal === true;
 }
 
+/**
+ * How long the server keeps a lease after a renewal it failed server-side (GY-558): it recorded the
+ * failure and answered 503 with `renewalFault` (`graceUntil`, and its own `now`), so the lease stays
+ * valid for that remainder and the supervisor keeps retrying through it. Null for any other failure.
+ */
+export function renewalGraceMs(error: unknown): number | null {
+  let grace = (error as { renewalFault?: { graceUntil?: string; now?: string } } | null)?.renewalFault;
+  if (!grace && error instanceof Error) { try { grace = JSON.parse(error.message)?.renewalFault; } catch { return null; } }
+  const ms = Date.parse(grace?.graceUntil ?? '') - Date.parse(grace?.now ?? '');
+  return Number.isFinite(ms) && ms > 0 ? ms : null;
+}
+
 // The deadline uses elapsed local time and server-reported duration, not synchronized clocks.
 export async function supervise(command: string, args: string[], epoch: number, renew: () => Promise<Renewal>, options: { intervalMs?: number; graceMs?: number; shutdownPollMs?: number; shutdownTimeoutMs?: number; safetyMarginMs?: number; retryMs?: number; retryMaxMs?: number; detached?: boolean; containment?: Containment; platform?: NodeJS.Platform; session?: SupervisedSession; quarantine?: { establish: () => Promise<unknown>; revalidate?: () => Promise<unknown>; acknowledge?: () => Promise<unknown>; settle: () => Promise<unknown> } } = {}) {
   let deadline = 0, granted = 0;
@@ -278,14 +290,22 @@ export async function supervise(command: string, args: string[], epoch: number, 
    * a supervisor whose worker is gone during an outage surrenders at once rather than after the
    * whole backoff.
    */
-  async function renewWithRetry(stopped: () => boolean, orphaned: () => string | null = () => null): Promise<'renewed' | 'refused' | 'lapsing' | 'stopped' | { orphaned: string }> {
+  async function renewWithRetry(stopped: () => boolean, orphaned: () => string | null = () => null, extended: () => void = () => {}): Promise<'renewed' | 'refused' | 'lapsing' | 'stopped' | { orphaned: string }> {
     for (let attempt = 0; ; attempt++) {
       // Inside the safety margin nothing more is attempted: the lease is left to expire on its own.
       if (attempt === 0 && deadline - margin() <= performance.now()) return 'lapsing';
+      const started = performance.now();
       try { await heartbeat(); return 'renewed'; }
       catch (error) {
         const reason = error instanceof Error ? error.message.slice(0, 300) : String(error);
         if (definiteRenewalRefusal(error)) { console.error(`Graphyard refused the lease renewal: ${reason}`); return 'refused'; }
+        // A server-side failure the server recorded keeps the lease for its grace (GY-558): the
+        // deadline moves out to it, measured from when this attempt was sent, and retries go on.
+        const grace = renewalGraceMs(error);
+        if (grace !== null && started + grace > deadline) {
+          deadline = started + grace; extended();
+          console.error(`Graphyard recorded the failed renewal server-side; the lease is kept for ${Math.round(grace / 1000)}s more while renewal is retried.`);
+        }
         const window = deadline - margin() - performance.now();
         const wait = Math.min(retryMs * 2 ** attempt, retryMaxMs, window);
         if (wait <= 0) {
@@ -450,7 +470,7 @@ export async function supervise(command: string, args: string[], epoch: number, 
           try {
             const cause = orphaned();
             if (cause) { await surrenderOrphaned(cause); return; }
-            const renewal = await renewWithRetry(() => stopping, orphaned);
+            const renewal = await renewWithRetry(() => stopping, orphaned, () => { if (!stopping) armDeadline(); });
             if (typeof renewal === 'object') await surrenderOrphaned(renewal.orphaned);
             else if (renewal === 'renewed') { if (!stopping) armDeadline(); }
             else if (renewal === 'refused') { console.error('Graphyard lease cannot be renewed. Stopping worker.'); stop(1); }

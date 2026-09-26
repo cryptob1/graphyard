@@ -8,6 +8,7 @@ import { type MasterConfig, assertOutsideWorktrees, writeFailure, diskExhaustion
 import { boundDetail } from './decisions.js';
 import { classified, faultClasses, faultInstanceSchema, noteActionOutcome, type FaultKind } from '../model/fault-classes.js';
 import { timingsSchema } from '../master/timings.js';
+import { emptyInvariantRecord, invariantRecordSchema } from '../model/invariants.js';
 
 export const daemonActionKinds = ['close', 'dispatch', 'review', 'refresh', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session', 'reclaim', 'decision', 'scope', 'settle', 'failover', 'capacity', 'human', 'preserve', 'fault'] as const;
 export type DaemonActionKind = typeof daemonActionKinds[number];
@@ -242,6 +243,8 @@ export const approvalWatchSchema = z.object({
   capacity: z.string().max(500).nullable().default(null),
   /** A headless approver's run (GY-169): its last events, its result, and what became of its verdict. */
   run: runRecordSchema.nullable().default(null),
+  /** The decision and launch whose spent-account hold and capacity `exhausted` report the loop already wrote (GY-316): a retried failover writes neither again. */
+  reportedExhaustion: z.string().max(200).nullable().default(null),
 }).strict();
 export type ApprovalWatch = z.infer<typeof approvalWatchSchema>;
 /**
@@ -290,6 +293,16 @@ export const daemonStateSchema = z.object({
   profiles: z.record(z.string(), z.object({ failures: z.number().int().min(0), reason: z.string().max(500).nullable(), cooldownUntil: z.string().nullable() }).strict()).default({}),
   metrics: z.array(cycleMetricsSchema).default([]),
   deployment: deploymentObservationSchema.nullable().default(null),
+  /**
+   * The last post-deploy throughput measurement the loop itself took (GY-393): against which
+   * release, when, with what verdict, and the file it was recorded to under
+   * `.graphyard/measurements/throughput`. The figures live in the file; this says the claim was
+   * measured against the release now serving without a master session having to run the script.
+   */
+  throughput: z.object({
+    at: z.string(), revision: z.string().max(40).nullable(), verdict: z.string().max(20),
+    file: z.string().max(500).nullable(), reason: z.string().max(500).nullable(),
+  }).strict().nullable().default(null),
   /** The last reload of .graphyard/master.json: what the running loop adopted, or why it refused. */
   config: z.object({ at: z.string(), changed: z.array(z.string().max(100)).max(100), refused: z.string().max(1000).nullable() }).strict().nullable().default(null),
   /** The last worktree reclamation: what it removed and how much room the host has. */
@@ -317,10 +330,18 @@ export const daemonStateSchema = z.object({
    */
   faults: z.object({ instances: z.array(faultInstanceSchema).default([]), open: z.record(z.string(), z.string()).default({}), failing: z.record(z.string(), z.string()).default({}) }).strict()
     .default(() => ({ instances: [], open: {}, failing: {} })),
+  /**
+   * The system invariants (GY-404): what the loop carries between cycles to judge them — base
+   * refreshes per candidate, when each merge candidate was first seen mergeable, the builds and lease
+   * losses seen — and the last cycle's report, one line per invariant, for `master status`.
+   */
+  invariants: invariantRecordSchema.default(emptyInvariantRecord),
 }).strict();
 export type DaemonState = z.infer<typeof daemonStateSchema>;
 
 export const retainedActions = 500, retainedMetrics = 100, profileCooldownMs = 600_000, maxProofAttempts = 3, retainedScopeDecisions = 200;
+/** How many times the loop tries to take one release's post-deploy throughput measurement before it leaves the claim's attention standing for a master or an operator. */
+export const maxThroughputMeasurementAttempts = 3;
 export const retainedSamples = 200, retainedClocks = 500;
 /** Reclamation scans the worktree directory, so it runs on its own bounded interval, not every cycle. */
 export const reclaimIntervalMs = 600_000;
@@ -418,6 +439,7 @@ export function boundDaemonState(state: DaemonState): DaemonState {
   }
   for (const profile of Object.values(state.profiles)) profile.reason = cut(profile.reason, 500);
   if (state.deployment) state.deployment = boundDeployment(state.deployment);
+  if (state.throughput) state.throughput = { ...state.throughput, revision: cut(state.throughput.revision, 40), verdict: cut(state.throughput.verdict, 20), file: cut(state.throughput.file, 500), reason: cut(state.throughput.reason, 500) };
   if (state.config) state.config = { ...state.config, changed: state.config.changed.slice(0, 100).map(entry => cut(entry, 100)), refused: cut(state.config.refused, 1000) };
   if (state.reclaim) state.reclaim.errors = state.reclaim.errors.slice(0, 20).map(entry => cut(entry, 500));
   for (const clock of Object.values(state.clocks)) clock.key = cut(clock.key, 40);
