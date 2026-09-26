@@ -13,7 +13,7 @@ Keep cycling: status, dispatch, review, merge, deployment verification. Stop onl
 
 1. `master status` at startup and after events.
 2. `master run` dispatches ready work in `schedule.order`.
-3. Merge exact candidates passing every gate; route findings to rework.
+3. Merge candidates passing every gate; rework findings.
 4. `master verify-deployment GY-N` after delivery ([refusals](operations-reference.md#perpetual-master-loop)). Railway: `master config productionEnvironment='graphyard / production'`.
 5. Close finished agent sessions; return to status.
 
@@ -24,6 +24,8 @@ Ordinary review findings, rework, idle workers, and proof setup are not stopping
 ### System-driven items
 
 Unless created `"systemDriven": false`, an item refuses hand `dispatch`, `merge`, `review` and `decide attest|merge`, except stopped-loop recovery, unproduced `manual:` attestations, and `decide merge` of unauthorized merges or with no operator agent. Hand `dispatch` waits out live or just-released ones.
+
+Left only unproduced `manual:` proofs, the loop requests an approver-judged attest per proof and head, withdrawn on a new head (`loopDecisions.attestations`, not `needsHuman`).
 
 ### Session liveness is reconciled, not trusted
 
@@ -39,7 +41,7 @@ that host's loop. `sessions.unseen` lists stale handles. `dispatch.sessionReconc
   way as any other. Implementation sessions are left to the lease.
 - **Duplicate**: the older of two sessions for one role and head.
 
-A closure decides no gate, ends no lease, and stops no process. A profile's concurrency is counted against live sessions only, and a name is busy only while a live session has it. A session past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) raises attention, is never closed.
+A closure decides no gate, ends no lease, and stops no process. A profile's concurrency is counted against live sessions only, and a name is busy only while a live session has it. A session past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) raises attention, never closure.
 
 **So what an operator or a master does instead of closing sessions by hand:** nothing, for a session
 that finished or died (loop stopped: `graphyard master run --once` sweeps); for an overlong one, attach to it with the command on the handle. Never mark
@@ -51,7 +53,7 @@ Each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `linge
 
 ## Research before build
 
-With `run.research` set (`model`, `timeoutMinutes` 15, `tokenBudget`), a feature (or `"research": true`) gets one read-only Pi briefing per revision. Product questions: Needs you; build proceeds on the recommendation, a differing answer requests rework, failure never blocks.
+With `run.research` set (`model`, `timeoutMinutes` 15, `tokenBudget`), a feature (or `"research": true`) gets a read-only Pi briefing per revision. Product questions: Needs you; build follows the recommendation, a differing answer requests rework, failure never blocks.
 
 ## Automatic dispatch at submit
 
@@ -67,7 +69,7 @@ The master never launches reviews or producers by hand, except `master review GY
 
 ### Proofs must exercise their criterion
 
-With a pass, the producer records `"exercise"`: the same proof run with the criterion's behaviour removed.
+A passing producer records `"exercise"`: the same proof run with the criterion's behaviour removed.
 
 ```json
 "exercise":{"criterion":"AC-1","behaviour":"the lease expiry check in claim()","result":"fail","executed":4}

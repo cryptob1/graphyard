@@ -1,6 +1,6 @@
 import { predecessorWaitReason, queueSequencingReason } from '../merge-queue.js';
-import { dispatchIneligibility, openProducerRequest, producerGroupDecisions, reviewNeed, type ProducerGroupDecision } from './dispatch.js';
-import { mechanicalProof } from './mechanical-proofs.js';
+import { dispatchIneligibility, mechanicalProof, openProducerRequest, producerGroupDecisions, reviewNeed, type ProducerGroupDecision } from './dispatch.js';
+import { attestationWait } from './unproduced-attestation.js';
 import { producerLaunchStop } from './action-progress.js';
 import { standingEscalations } from './escalation.js';
 import { deliveryState } from './delivery.js';
@@ -245,10 +245,10 @@ function computeAccount(work: Work, all: Work[], now: Date): Computed {
       // A review refusal is a dispatch only while the head's mechanical proofs have not run (GY-115).
       if (failing.name === 'acceptance' || failing.name === 'review') {
         const proof = proofStep(work, all, now);
-        // Every unproven proof is a manual one the operator holds: the control plane cannot
-        // dispatch it, and saying so is an escalation rather than a dispatch nobody can run.
-        if (!proof) return make('escalate', `${key} waits on proof no producer session may run: ${failing.reasons.join('; ')}`,
-          { kind: 'escalate', trigger: 'operator-proof', detail: refusal }, binding, failing.name, refusal);
+        // Every unproven proof is manual: the loop's attestation request (GY-521), else the operator's escalation.
+        const attest = proof ? null : attestationWait(work, all, now);
+        if (attest) return waits(attest, failing.name, refusal);
+        if (!proof) return make('escalate', `${key} waits on proof no producer session may run: ${failing.reasons.join('; ')}`, { kind: 'escalate', trigger: 'operator-proof', detail: refusal }, binding, failing.name, refusal);
         // A failed proof holds the head at this gate for good: a unit or integration failure is the
         // worker's to fix on a new head, and a manual one is the operator's judgement to make.
         if (proof.step === 'failed') {

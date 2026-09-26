@@ -7,6 +7,7 @@ import { unexercisedFindings } from '../auto-dispatch.js';
 import { decisionBindingMax } from '../model/approval.js';
 import { guardBroadScope, type MasterConfig, type ContainmentAssessment, containmentPhase, type HerdrAgent } from '../master.js';
 import { researchRework } from '../research.js';
+import { unproducedManualProofs } from '../model/unproduced-attestation.js';
 import { actionDetailMax, type ApprovalWatch, message } from './state.js';
 
 // ---- Routine decisions ---------------------------------------------------------------------
@@ -224,6 +225,23 @@ export function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge
   if (lost) return lost;
   if (!config.autoMerge && mergeableCandidate(work)) return { action: 'merge', reason: `${work.key}: every gate passes for candidate ${work.candidate!.sha.slice(0, 12)} and automatic merging is off, so the merge needs an approved decision.`, binding: work.candidate!.sha };
   return null;
+}
+/**
+ * The attestation decisions one item needs right now, one per `manual:` proof no producer session
+ * may run (`unproducedManualProofs`, GY-521), or none. Each binds the proof, the exact head, its base
+ * and the policy revision — the attest input names all four, so an approval can never apply to a
+ * later head — and asks the approver to verify the criterion on that head before approving. Like a
+ * merge decision it attests nothing about a worker, so it is requested whatever the lease says.
+ */
+export function attestDecisions(work: Work, all: Work[], now: number): RoutineDecision[] {
+  const candidate = work.candidate;
+  if (!candidate || work.stage === 'done') return [];
+  return unproducedManualProofs(work, all, new Date(now)).map(proof => {
+    const criteria = work.criteria.filter(criterion => criterion.proofs.includes(proof));
+    const named = criteria.length ? criteria.map(criterion => `${criterion.id} ("${boundDetail(criterion.text, 600)}")`).join('; ') : 'an inherited bootstrap obligation';
+    return { action: 'attest', binding: `${proof}:${candidate.sha}:${candidate.baseSha}`, input: { proof },
+      reason: `${work.key}: every gate before acceptance passes for candidate ${candidate.sha.slice(0, 12)} (base ${candidate.baseSha.slice(0, 12)}, policy revision ${work.policyRevision}), and ${proof}, required by ${named}, is a manual proof no producer session may run, so only this two-party attestation satisfies it. Approve only after verifying on that exact head that the criterion holds; refuse naming what is missing otherwise.` };
+  });
 }
 /**
  * The rework a required CI check that failed on exactly the current head calls for, or null. The

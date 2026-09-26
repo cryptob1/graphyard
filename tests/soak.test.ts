@@ -27,15 +27,18 @@ import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } f
  * (src/model/invariants.ts) holds. Fifteen items pass through it: released every fifteen minutes so
  * a merge lands about every fifteen, three sent back by their reviewer, two whose worker dies, two
  * production deploys, a file split on main that re-plans an item, one pull request GitHub reports
- * CLEAN at once and one UNSTABLE, and a reviewer bot out of quota that fails over. Every one of the
- * fifteen must be delivered. The loop carries one `Launcher` across its cycles (GY-616), as
- * `runDaemon` does, so session launches run beside the cycle — outliving it, holding their profile
- * from hand-off, and reported by the next cycle — and the invariants hold on that detached path. A
- * change to the loop that breaks an invariant fails here, in CI, before
+ * CLEAN at once and one UNSTABLE, a reviewer bot out of quota that fails over, and a `manual:` proof
+ * no producer may run, attested by the loop's own request, whose head moves while that request is
+ * open. Every one of the fifteen must be delivered. The loop carries one `Launcher` across its
+ * cycles (GY-616), as `runDaemon` does, so session launches run beside the cycle — outliving it,
+ * holding their profile from hand-off, and reported by the next cycle — and the invariants hold on
+ * that detached path. A change to the loop that breaks an invariant fails here, in CI, before
  * it merges; a new behaviour that repeats per cycle, head or item belongs in this world.
  */
 const repository = 'owner/project';
 const PROOF = 'unit:soak-behaves';
+/** GY-521: a proof no producer session may run, satisfied only by the attest decision the loop requests. */
+const MANUAL = 'manual:soak-attested';
 const principals = {
   operator: { id: 'operator', role: 'admin', sessionKind: 'ai' },
   operatorAgent: { id: 'graphyard-master-operator', role: 'admin', sessionKind: 'ai' },
@@ -59,7 +62,7 @@ const start = Date.parse('2031-06-02T08:00:00Z');
 const plan = {
   items: 15, releaseEveryMs: 15 * minute, workMs: 20 * minute,
   rework: new Set([3, 7, 11]), deaths: new Set([5, 9]), deathAfterMs: 8 * minute,
-  deploys: [2 * hour + 30 * minute, 5 * hour], split: { at: 45 * minute, item: 12 }, clean: 2, unstable: 4, slowRecompute: 8, exhaustedReviewer: 6,
+  deploys: [2 * hour + 30 * minute, 5 * hour], split: { at: 45 * minute, item: 12 }, clean: 2, unstable: 4, slowRecompute: 8, exhaustedReviewer: 6, attested: 10,
 };
 const file = (n: number) => `src/soak/item-${n}.ts`;
 
@@ -111,7 +114,8 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   // ---- The fifteen items, created in the backlog and released one every fifteen minutes. ----
   const items: Work[] = [];
   for (let n = 1; n <= plan.items; n++) {
-    let work = await engine.execute(principals.operator, 'create', null, { title: `Soak item ${n}`, plannedFiles: [file(n)], criteria: [{ id: 'AC-1', text: `Item ${n} behaves`, proofs: [PROOF] }] }, id());
+    const criteria = [{ id: 'AC-1', text: `Item ${n} behaves`, proofs: [PROOF] }, ...(n === plan.attested ? [{ id: 'AC-2', text: `Item ${n} is attested`, proofs: [MANUAL] }] : [])];
+    let work = await engine.execute(principals.operator, 'create', null, { title: `Soak item ${n}`, plannedFiles: [file(n)], criteria }, id());
     if (n === plan.exhaustedReviewer) work = await engine.execute(principals.operator, 'reviewpolicy', work.id, { provider: 'agent', expectedPolicyRevision: work.policyRevision, reason: 'Reviewed by the reviewer bots',
       reviewerProfiles: [{ name: 'claude-reviewer', runtime: 'claude', reviewerApp: 'claude-reviewer' }, { name: 'cursor-reviewer', runtime: 'cursor', reviewerApp: 'cursor-reviewer' }] }, id());
     items.push(work);
@@ -157,8 +161,18 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
 
   // ---- Approvers and producers: sessions the loop launches, each acting on the minute after. ----
   const pending: (() => Promise<void>)[] = [];
+  // The first attestation the loop requests is overtaken: its worker pushes a new head before the
+  // approver judges, so the loop must withdraw it, close its approver and ask afresh for the new head.
+  const attestations: { decision: string; sha: string; judged: 'overtaken' | 'approved' }[] = [];
   const approver: DaemonEffects['approver'] = async (work, decision) => {
     const agentName = approverSessionName(work, decision), pane = herdr.open(agentName);
+    const standing = (await api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(work.id)}/decisions`)).decisions.find((entry: { id: string }) => entry.id === decision);
+    if (standing?.action === 'attest' && !attestations.length) {
+      attestations.push({ decision, sha: standing.input.sha, judged: 'overtaken' });
+      pending.push(async () => { const session = sessions.find(entry => entry.key === work.key)!; github.push(work.key, session.branch, session.profile.principal, sha('head', work.key, 'moved'), [file(numberOf(work))]); });
+      return { agentName, pane };
+    }
+    if (standing?.action === 'attest') attestations.push({ decision, sha: standing.input.sha, judged: 'approved' });
     pending.push(async () => { await api(principals.approver, 'POST', `work/${work.id}/approve`, { decision, reason: `Approved: the loop's routine ${decision} decision for ${work.key} rests on what it verified` }); herdr.status(pane, 'done'); });
     return { agentName, pane };
   };
@@ -251,12 +265,12 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   }
 
   const final = (await store.list()).filter(item => items.some(entry => entry.id === item.id));
-  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart };
+  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, attestations };
 }
 
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 180_000 }, async () => {
   const began = performance.now();
-  const { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
+  const { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, attestations } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
   const undelivered = final.filter(item => item.stage !== 'done' || !item.delivery);
   assert.deepEqual(undelivered.map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
@@ -280,6 +294,11 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.ok(final.find(item => item.key === items[plan.split.item - 1].key)!.plannedFiles.includes(`src/soak/item-${plan.split.item}-a.ts`), 'the split file re-planned its item onto the successors');
   const reviewed = final.find(item => item.key === items[plan.exhaustedReviewer - 1].key)!;
   assert.ok(reviewed.reviewFailovers?.some(failover => failover.profile === 'claude-reviewer' && failover.exhaustion === 'usage-limit' && failover.nextProfile === 'cursor-reviewer'), `the exhausted reviewer bot failed over to the next profile: ${JSON.stringify(reviewed.reviewFailovers)}`);
+  // GY-521: the loop asked for the unproduced manual proof itself, withdrew the request a new head overtook, and the approval of the fresh one delivered the item.
+  const attested = final.find(item => item.key === items[plan.attested - 1].key)!;
+  assert.deepEqual(attestations.map(entry => entry.judged), ['overtaken', 'approved'], `one attestation overtaken by a new head, one approved: ${JSON.stringify(attestations)}`);
+  assert.notEqual(attestations[0].sha, attestations[1].sha, 'the fresh request names the new head');
+  assert.ok(attested.evidence.some(entry => entry.proof === MANUAL && entry.result === 'pass' && entry.sha === attestations[1].sha), 'the approved attestation is the evidence the item was delivered on');
   assert.ok(cycles > 24 * 6, `the loop cycled through the day (${cycles} cycles)`);
   const seconds = (performance.now() - began) / 1000;
   assert.ok(seconds < 120, `the day runs well inside the three minutes the CI test job allows it (${seconds.toFixed(1)} s)`);

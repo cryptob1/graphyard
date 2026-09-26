@@ -6,6 +6,7 @@ import { agentOwner, assessContainment, branchReport, buildMasterStatus, diskPre
 import { impliedScopeRequests, type Work } from '../model/work.js';
 import { actionReport, agentRequestReport, sessionReport } from './loop-report.js';
 import { needsHumanActions, routedScopeStatus } from './owed-report.js';
+import { loopAttestations } from './hand-actions.js';
 import { installationMerger } from '../executor.js';
 import { daemonSummary, loopAttention, readDaemonState } from '../master-daemon.js';
 import { slowCycleAttention } from '../daemon/liveness.js';
@@ -91,13 +92,11 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const dispatchCursor = await readDispatchCursor(root, master, () => {}).catch(error => ({ error: error instanceof Error ? error.message : 'Master dispatch cursor is unreadable' }));
   const stuck = stuckRequestReport({ reviews: reviewRecords, producers: producerRecords }, Date.now());
   const dispatch = 'error' in dispatchCursor ? { running: false, failures: [] as { requestId: string; kind: string; attempts: number; reason: string; at: string; nextAt: string }[], error: dispatchCursor.error } : withStuckRequests(dispatchSummary(dispatchCursor, Date.now(), master.run.dispatchIntervalSeconds * 1000, master.run.awaitReviewers ?? defaultAwaitReviewers.logins), stuck.stuck);
-  // A dispatcher that keeps failing its tick launches nothing for any item; it is named before the requests it is not launching.
+  // A dispatcher failing its tick launches nothing; it is named before the requests it is not launching.
   const dispatchItems = dispatchFailureAttention(dispatch);
   const containment = await timedStep('containment', () => assessContainment(snapshot.work, { hostId: master.hostId, observedAt: snapshot.now, clockOffset }));
-  // Disk is reported from the host, not from the cursor: the loop may be stopped, and the volume
-  // filling is exactly the condition that stops it. The plan is the one `master reclaim` computes,
-  // over the inventory the loop's reclaim step cached (GY-360): walking a thousand trees here, on
-  // every call, is what made status take minutes.
+  // Disk is reported from the host, not the cursor: the loop may be stopped, and a filling volume
+  // is what stops it. The plan is `master reclaim`'s, over the inventory its step cached (GY-360).
   const worktrees = worktreesDirectory(root);
   const inventory = await timedStep('worktrees', () => statusWorktreeInventory(root).catch(() => ({ entries: [], at: null, cached: false }))), trees = inventory.entries, reclaimPlan = planWorktreeReclaim(trees, snapshot.work, { now: Date.now(), idleMs: reclaimIdleMs(master) });
   const disk = diskPressure(worktrees, await freeBytes(worktrees), diskThresholdBytes(master), reclaimPlan);
@@ -139,10 +138,10 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   // live session are accounted and raise nothing; what is left is named, with what is missing.
   const actionless = actionlessItems(snapshot.work, new Date(snapshot.now));
   const liveness = livenessStatus(snapshot); // GY-201: open items holding no obligation, with ages
-  // Requests, conflicts, stalls, executors and owed judgments come from derivedAttention, which the loop reads too.
+  // Requests, conflicts, stalls, executors and owed judgments: derivedAttention, which the loop reads too.
   const { generatedFiles, overflow, interventions, releases, decisions, throughput, resources, derived: { scopeRequests, stalledItems: derivedStalls, actorless, executors, conflicted, stalled, owed, budget, overlong } } = await reportedAttention(root, master, masterApi, coordinator, snapshot,
     { reviews: reviewRecords, producers: producerRecords, runtime, commit: cli.commit, approvals: cycling?.approvals ?? [], loop: cycling?.liveness ?? null, rows: status.work, trees,
-      // The intervention report takes the server a minute: status reads the loop's copy, or a bounded live read.
+      // The server's intervention report is slow: status reads the loop's copy, or a bounded live read.
       reports: 'bounded', reportBoundMs: dependencies.reportReadBoundMs, sections });
   // A merge pending on a head GitHub reports mergeable is named with the stalled items (GY-344).
   // A repair-lane merge stays in front of the master until a normal merge proves the merge path healthy (GY-406).
@@ -198,6 +197,8 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     // The inverted loop: what the control plane says each item needs, who is running it, and
     // every session it can be watched through.
     actions: needsHumanActions(actionReport(snapshot), owed.rows),
+    // Attestations the loop requests (GY-521), never needsHuman.
+    loopDecisions: { attestations: loopAttestations(snapshot, cycling?.approvals ?? []) },
     // Presence and supervision (GY-105) and the release each registered executor runs (GY-126).
     executors: { ...executors, ...releases, attention: [...executors.attention, ...releases.attention] }, sessions: sessionReport(snapshot),
     // Branches the queue's own pushes contaminated and the approvals its pushes cost (GY-127).
@@ -237,7 +238,7 @@ export async function reportedAttention(root: string, master: MasterConfig, mast
   const derived = await timedStep('attention: derived', () => derivedAttention(root, master, masterApi, coordinator, snapshot, { ...observed, reviews: observed.reviews ?? [], producers: observed.producers ?? [], runtime: { available: observed.runtime.available, agents: observed.runtime.available ? observed.runtime.agents : [] } }));
   if (!derived.executors.presence.available && /^GET \/api\/actions failed/.test(derived.executors.presence.reason)) sections.mark('executors', 'GET /api/actions', derived.executors.presence.reason);
   const items = [...resources.attention, ...generatedFiles, ...overflow, ...interventions.attentionItems, ...releases.attention, ...(throughput.attention ? [throughput.attention] : []), ...decisions.attentionItems, ...derived.items];
-  // The report's last step over the whole list, which the loop runs too: a cause named once, in place of its symptoms.
+  // The report's last step, which the loop runs too: a cause named once, in place of its symptoms.
   const attribute = (status: { work: any[]; attentionItems: AttentionItem[] }) => attributeAttention(ledgerRefusalAttention(status, snapshot.work).attentionItems, resources.readings);
   return { generatedFiles, overflow, interventions, releases, decisions, throughput, resources, derived, items, attribute, unavailable: sections.unavailable };
 }
