@@ -15,11 +15,13 @@ import { createSchema, escalationTriggers, operatorCapability, type OperatorCapa
  * human-only is not a decision here: goals and priorities, spending money or opening
  * third-party accounts, and issuing credentials to people.
  */
-export const decisionActions = ['release', 'unblock', 'requirements', 'resolve', 'attest', 'merge', 'rework', 'recover', 'grant'] as const;
+export const decisionActions = ['release', 'unblock', 'requirements', 'resolve', 'attest', 'merge', 'rework', 'recover', 'grant', 'repair-merge'] as const;
 export type DecisionAction = typeof decisionActions[number];
 export const decisionCapabilities: Record<DecisionAction, OperatorCapability> = {
   release: 'intent:ready', unblock: 'intent:unblock', requirements: 'policy:requirements', resolve: 'decision:resolve',
   attest: 'decision:attest', merge: 'decision:merge', rework: 'decision:rework', recover: 'decision:rework', grant: 'decision:grant',
+  // The repair lane (GY-406): the App merges a merge-path fix past the stalled merge path.
+  'repair-merge': 'decision:merge',
 };
 export const approveCapability: OperatorCapability = 'decision:approve';
 
@@ -53,6 +55,8 @@ export const decisionInputs = {
   rework: z.object({ previousWorkerStopped: z.literal(true), binding: groundsBinding.optional() }).strict(),
   recover: z.object({ previousWorkerStopped: z.literal(true), binding: groundsBinding.optional() }).strict(),
   grant: z.object({ principal: principalId, patterns: z.array(z.string().min(1).max(200)).min(1).max(50), expectedRevision: z.number().int().min(0).optional() }).strict(),
+  // Head-bound: the repair lane merges exactly this head (expectedHeadOid) and nothing else.
+  'repair-merge': z.object({ sha }).strict(),
 } satisfies Record<DecisionAction, z.ZodType>;
 const reason = z.string().trim().min(1).max(2000);
 /**
@@ -161,8 +165,8 @@ export function approvalConflict(decision: Pick<Decision, 'id' | 'action' | 'inp
     return `Self-approval refused: ${approver.id} requested decision ${decision.id}; a second, independent agent identity must approve it`;
   if (implementerIdentities(work).includes(approver.id))
     return `Conflicted approval refused: ${approver.id} has held an assignment on ${work.key}, so it cannot approve decisions about it`;
-  if (decision.action === 'attest' || decision.action === 'merge') {
-    const own = work.evidence.filter(item => item.producer === approver.id && (decision.action === 'merge' || item.proof === decision.input.proof));
+  if (decision.action === 'attest' || decision.action === 'merge' || decision.action === 'repair-merge') {
+    const own = work.evidence.filter(item => item.producer === approver.id && (decision.action !== 'attest' || item.proof === decision.input.proof));
     if (own.length) return `Conflicted approval refused: ${approver.id} produced evidence ${[...new Set(own.map(item => item.proof))].join(', ')} on ${work.key} and may not approve its own evidence`;
   }
   if (decision.action === 'grant' && decision.input.principal === approver.id)
@@ -239,6 +243,10 @@ export function decisionPrecondition(action: DecisionAction, input: any, work: W
       return `The decision names ${String(input.sha).slice(0, 12)} but the current candidate is ${work.candidate?.sha.slice(0, 12) ?? 'none'} at policy revision ${work.policyRevision}`;
   }
   if (action === 'rework' && !work.submission) return 'Rework applies to submitted work';
+  if (action === 'repair-merge') {
+    if (work.repair !== 'merge-path') return `${work.key} does not carry "repair": "merge-path"; only a merge-path repair item may use the repair lane`;
+    if (!work.candidate || work.candidate.sha !== input.sha) return `The decision names ${String(input.sha).slice(0, 12)} but the current candidate is ${work.candidate?.sha.slice(0, 12) ?? 'none'}`;
+  }
   return null;
 }
 
