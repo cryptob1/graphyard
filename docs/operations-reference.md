@@ -1,4 +1,4 @@
-<!-- page: Operate Graphyard | 9 | every recovery procedure and limit. -->
+<!-- page: Operate Graphyard | 9 | recovery procedures and limits. -->
 # Operations reference
 
 ## Master coordination loop
@@ -7,27 +7,25 @@ Restart `graphyard master run` freely; it never dispatches twice. `master status
 
 ### Perpetual master loop
 
-`master verify-deployment GY-N` refuses a release *unobserved* (set `--deployment-url`), *stale* (rerun), not serving the merge (keep cycling), or *already recording deployment* (use a follow-up item).
+`master verify-deployment GY-N` refuses a release *unobserved*, *stale* (rerun), not serving the merge (keep cycling), or *already recording deployment* (use a follow-up item).
 
 ## Lost worker before submission
 
-A lease expires 120 seconds after the last heartbeat; the next claim, a higher epoch, keeps the worktree. An unexplained lapse raises `lease-loss` ([classification](protocol/leases.md#how-a-lease-ends)), blocking merge until settled ([settling](delegation.md#who-may-settle-what)).
+A lease expires 120 seconds after the last heartbeat; the next claim, a higher epoch, keeps the worktree. An unexplained lapse raises `lease-loss` ([classification](protocol/leases.md#how-a-lease-ends)), blocking merge until [settled](delegation.md#who-may-settle-what).
 
 ## Supervisor died leaving a containment quarantine
 
-On the worker's machine `graphyard master settle-containment GY-N "reason"` verifies no process survives (`containment.held` lists them); only the loop excuses an idle pane shell (childless, parent `herdr server`), closing its pane. If refused, confirm the stop, then `graphyard rework GY-N --previous-worker-stopped "reason"`, or `graphyard recover-containment GY-N --previous-worker-stopped "reason"` once delivered.
+On the worker's machine `graphyard master settle-containment GY-N "reason"` verifies nothing survives; only the loop excuses an idle pane shell (childless, parent `herdr server`). If refused, confirm the stop, then `graphyard rework GY-N --previous-worker-stopped "reason"`, or `graphyard recover-containment GY-N --previous-worker-stopped "reason"` once delivered.
 
 ## Submitted implementation needs rework
 
-Stop the worker, then `graphyard rework GY-N --previous-worker-stopped "reason"`; the next worker resubmits the PR.
+Stop the worker, then `graphyard rework GY-N --previous-worker-stopped "reason"`; the next worker resubmits.
 
 ## Accepted evidence turns out to be wrong
 
-`graphyard revoke GY-N revoke.json` ([body](protocol/evidence.md#revocation)): the gate closes and the queue ejects the entry.
+`graphyard revoke GY-N revoke.json` ([body](protocol/evidence.md#revocation)) closes the gate; the queue ejects the entry.
 
 ## GitHub request budget
-
-Observation spends the hourly limit, webhook-first.
 
 ### The live budget
 
@@ -54,7 +52,7 @@ About ten requests uncached; unchanged, none.
 
 ### What a pause means for gates
 
-A rate-limit `403`/`429` pauses requests; gates read stale until it lifts: nothing merges on an observation over two minutes old.
+A rate-limit `403`/`429` pauses requests; gates read stale until it lifts.
 
 ### Reading the budget
 
@@ -70,11 +68,11 @@ Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROF
 
 ## Bootstrap mode for a self-proving change
 
-For a change shipping its own proof harness, a `policy:bootstrap` holder adds `"bootstrap": {"reason": "…", "contractPaths": ["src/herdr/recovery.ts"]}` to that criterion. Other gates apply; `e2e:` proofs cannot be deferred; the next item touching those paths owes it (`graphyard obligations`).
+A `policy:bootstrap` holder adds `"bootstrap": {"reason": "…", "contractPaths": ["src/herdr/recovery.ts"]}` to that criterion. Other gates apply; `e2e:` proofs cannot be deferred; the next item touching those paths owes it (`graphyard obligations`).
 
 ## Delivered with a failed smoke proof
 
-It stays Done, marked **delivered with failure**. Revert through a new item; never backfill evidence.
+It stays Done, marked **delivered with failure**; revert through a new item, never backfill evidence.
 
 ## Merged but not deployed
 
@@ -92,19 +90,19 @@ Rotate `GRAPHYARD_PRINCIPALS` and redeploy. Operator agents hold only listed cap
 
 ```sh
 graphyard grants                                   # live authority
-graphyard grants grant ci "integration:*,unit:*" "CI proves integration and unit"
+graphyard grants grant ci "integration:*,unit:*" "CI proofs"
 graphyard grants revoke ci "integration:claim-safety" "Runner decommissioned"
 ```
 
-Only an `admin` grants, only to `producer` principals. Patterns: an exact name, `kind:*`, or a prefix like `manual:gy-43/*`.
+Only an `admin` grants, only to `producer` principals. Patterns: an exact name, `kind:*`, or a prefix (`manual:gy-43/*`).
 
 ## Setup proposals and drift
 
-`graphyard init --scan` writes `.graphyard/setup-proposal.json`; `--apply` applies it. Later scans and `doctor --profile through-merge|preview-validation|production-verification` report drift without repairing it.
+`graphyard init --scan` writes `.graphyard/setup-proposal.json`, `--apply` applies it. Later scans and `doctor --profile through-merge|preview-validation|production-verification` report drift without repairing it.
 
 ## Scale limits
 
-Four provider jobs per tick per replica; watch lock wait, job lag, budget.
+Observation claims `GRAPHYARD_OBSERVATION_CONCURRENCY` jobs at once (default 4, capped at half the pool), each `SKIP LOCKED`: queue head and `max(2, batchSize)` band first, then review/rework waits, then `available_at`; `master status` raises `github` once the head's observation passes two minutes. Watch `observationThroughput` lag, budget.
 
 ### Concurrent reconciliation
 
