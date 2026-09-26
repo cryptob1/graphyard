@@ -13,7 +13,7 @@ test('unit:gitleaksignore-test-fixtures-only — .github/gitleaksignore.txt exis
   const ignore = await readFile(new URL('../.github/gitleaksignore.txt', import.meta.url), 'utf8');
   const ci = await readFile(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
 
-  assert.match(ci, /--gitleaks-ignore-path \.github\/gitleaksignore\.txt/, 'the secrets job passes the ignore file to gitleaks');
+  assert.match(ci, /--gitleaks-ignore-path ("?\$GITHUB_WORKSPACE\/)?\.github\/gitleaksignore\.txt/, 'the secrets job passes the ignore file to gitleaks');
   const entries = ignore.split('\n')
     .map(line => line.trim())
     .filter(line => line && !line.startsWith('#'))

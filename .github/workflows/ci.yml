@@ -63,19 +63,9 @@ jobs:
           curl --fail --silent --show-error --location --retry 3 https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz -o gitleaks.tar.gz
           echo '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  gitleaks.tar.gz' | sha256sum --check
           tar -xzf gitleaks.tar.gz gitleaks
-          cd "$GITHUB_WORKSPACE"
-          # The scan reads one branch's history, never every fetched branch, so one branch's finding
-          # cannot fail another branch's check: a pull request scans its own history (the base
-          # branch's full history plus base..HEAD), a push scans the pushed branch. Test fixtures
-          # that look like credentials are written as obvious non-secrets, or their fingerprint is
-          # recorded in .github/gitleaksignore.txt (test files only).
-          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
-            base="origin/${{ github.base_ref }}"
-            "$RUNNER_TEMP/gitleaks" git --redact --gitleaks-ignore-path .github/gitleaksignore.txt --log-opts="$base" "$GITHUB_WORKSPACE"
-            "$RUNNER_TEMP/gitleaks" git --redact --gitleaks-ignore-path .github/gitleaksignore.txt --log-opts="$base..HEAD" "$GITHUB_WORKSPACE"
-          else
-            "$RUNNER_TEMP/gitleaks" git --redact --gitleaks-ignore-path .github/gitleaksignore.txt --log-opts="origin/${{ github.ref_name }}" "$GITHUB_WORKSPACE"
-          fi
+          # HEAD, not --all: a pull request is scanned over its own history (the base branch plus its
+          # commits), so one branch's finding can never fail another branch's check (GY-435).
+          ./gitleaks git --redact --log-opts=HEAD --gitleaks-ignore-path "$GITHUB_WORKSPACE/.github/gitleaksignore.txt" "$GITHUB_WORKSPACE"
   workflow-lint:
     runs-on: ubuntu-latest
     steps:

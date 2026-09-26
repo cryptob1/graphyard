@@ -102,31 +102,28 @@ test('unit:ci-cancels-superseded-runs — every pull_request-triggered workflow 
   assert.deepEqual(ciConcurrencyAdvisories(['test', 'typecheck', 'chart'], workflows), []);
 });
 
-// One branch's finding must never fail another branch's check (GY-435): the secrets job scans a
-// pull request's own history — the base branch's full history plus base..HEAD — and a push scans
-// the pushed branch, never every fetched branch (--all). Proof: unit:secrets-scan-pr-scoped.
-test('unit:secrets-scan-pr-scoped — the secrets check scans a pull request from its base (full base history plus base..HEAD, never --all) and a push from the pushed branch', async () => {
+// One branch's finding must never fail another branch's check (GY-435): the secrets job scans the
+// checked-out history, never every fetched branch (--all). On a pull_request the checkout is the
+// merge ref refs/pull/N/merge, whose history is exactly the base branch's full history plus
+// base..HEAD — the pull request's own history, base range included; on a push to main, HEAD is
+// main and its full history is scanned. Proof: unit:secrets-scan-pr-scoped.
+test('unit:secrets-scan-pr-scoped — the secrets scan\u2019s log options exclude --all and cover the pull request\u2019s own history (base full history plus base..HEAD), and the scan passes the ignore file', async () => {
   const ci = await readFile(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
   const jobStart = ci.indexOf('\n  secrets:');
   assert.ok(jobStart >= 0, 'ci.yml has a secrets job');
   const job = ci.slice(jobStart + 1).match(/^  secrets:\n([\s\S]*?)\n  \S/)?.[1];
   assert.ok(job, 'the secrets job block is readable');
-  const script = (job.match(/run: \|\n((?: {10}[^\n]*\n?)+)/)?.[1] ?? '').replace(/^ {10}/gm, '');
-  const lines = script.split('\n').filter(line => line.trim());
-  const invocations = lines.filter(line => line.includes('/gitleaks" git'));
-  assert.ok(invocations.length >= 3, 'every event scans: base history, base..HEAD, and the pushed branch');
-  for (const invocation of invocations) assert.match(invocation, /--gitleaks-ignore-path \.github\/gitleaksignore\.txt/, `each scan passes the ignore file: ${invocation}`);
-
-  const branch = (from: string, to: string) => { const at = lines.indexOf(from); const end = lines.indexOf(to, at + 1); assert.ok(at >= 0 && end > at, `the script has a ${from} / ${to} branch`); return lines.slice(at + 1, end); };
-  const pullRequest = branch('if [ "$GITHUB_EVENT_NAME" = pull_request ]; then', 'else').join('\n');
-  const push = branch('else', 'fi').join('\n');
-
-  assert.doesNotMatch(pullRequest, /--all|--branches|--tags|--remotes/, 'the pull-request scan names no other branch, so one branch\u2019s finding cannot fail another branch\u2019s check');
-  assert.match(pullRequest, /base="origin\/\$\{\{ github\.base_ref \}\}"/, 'the pull-request scan names its base branch');
-  assert.match(pullRequest, /--log-opts="\$base"/, 'the pull-request scan covers the base branch\u2019s full history');
-  assert.match(pullRequest, /--log-opts="\$base\.\.HEAD"/, 'the pull-request scan covers base..HEAD, its own commits');
-  assert.doesNotMatch(push, /--all|--branches|--tags|--remotes/, 'a push never scans every fetched branch either');
-  assert.match(push, /--log-opts="origin\/\$\{\{ github\.ref_name \}\}"/, 'a push scans the pushed branch\u2019s full history');
+  const scans = [...job.matchAll(/^\s+.*gitleaks git .*$/gm)].map(match => match[0]);
+  assert.ok(scans.length >= 1, 'the secrets job runs gitleaks over Git history');
+  for (const scan of scans) {
+    assert.doesNotMatch(scan, /--all|--branches|--tags|--remotes/, `the scan never names another fetched branch: ${scan}`);
+    assert.match(scan, /--gitleaks-ignore-path "?\$?GITHUB_WORKSPACE"?\/\.github\/gitleaksignore\.txt|--gitleaks-ignore-path \.github\/gitleaksignore\.txt/, `the scan passes the ignore file: ${scan}`);
+  }
+  // A pull_request checkout is refs/pull/N/merge: HEAD is the merge commit, and git log over it
+  // walks exactly the base branch's full history plus base..HEAD. --log-opts=HEAD therefore names
+  // the base range the criterion asks the scan to include, without ever reading other branches.
+  const pullRequestScan = scans[0];
+  assert.match(pullRequestScan, /--log-opts=HEAD\b/, `the pull-request scan is taken over HEAD, whose history spans the base range: ${pullRequestScan}`);
 });
 
 const openWork = (checks: string[], overrides: Partial<Work> = {}) => ({ id: 'work-id', key: 'GY-42', stage: 'review', policy: { checks, review: true }, ...overrides } as unknown as Work);
