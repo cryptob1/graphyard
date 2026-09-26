@@ -39,9 +39,25 @@ export interface QueueSpeculation {
   reviewedHead?: string;
   /** An approval GitHub dismissed for a merge-base change on this very tip, restored as the binding approval; see `restoredApproval`. */
   restoredApproval?: RestoredApproval | null;
+  /**
+   * An approval of the tip this publication replaced, read from the pull request's current reviews
+   * immediately before the new tip was force-pushed (GY-519): the item's stored observation can
+   * predate the approval, and republishing without reading it would drop a review of the patch
+   * being republished. The carry decided at publication carries it exactly as an observed approval.
+   */
+  observedApproval?: ObservedApproval | null;
   /** Why the tip was built (GY-375): the queue head is the one candidate brought onto the base unasked. */
   trigger?: 'queue-head';
 }
+/** An approval GitHub held at one moment, as the publisher read it: the reviewer, its id and the head it approved. */
+export interface ObservedApproval { reviewer: string; reviewId?: number; sha: string }
+/**
+ * A `head_ref_force_pushed` event on the pull request's timeline (GY-519): who pushed, when, and
+ * between which commits. `byApp` is true only when GitHub named the control-plane App's own bot
+ * identity as the actor — the fact that separates a republication the control plane made itself
+ * from a push by anyone else.
+ */
+export interface HeadForcePush { at: string | null; by: string | null; byApp: boolean; before: string | null; after: string | null }
 /**
  * One unresolved review thread on a candidate's pull request: who opened it (the author of its
  * first comment, and whether GitHub reports that author as a bot), and the path and line it is
@@ -61,7 +77,7 @@ export interface ReviewThread { id?: string; author: string; bot?: boolean; path
  * before threads were observed.
  */
 export interface ConversationResolution { required: boolean; unresolved: ReviewThread[] }
-declare module './model/work.js' { interface Observation { conversations?: ConversationResolution } }
+declare module './model/work.js' { interface Observation { conversations?: ConversationResolution; headForcePushes?: HeadForcePush[] } }
 
 /** `author on path:line`, the way every refusal and attention line names a thread. */
 export const describeThread = (thread: ReviewThread) => `${thread.author} on ${thread.path}${thread.line === null ? '' : `:${thread.line}`}${thread.outdated ? ' (outdated)' : ''}`;
@@ -239,7 +255,7 @@ export function decideIdentityCarry(input: IdentityCarryInput): QueueCarry {
   const reviewedTouched = input.reviewedFiles.filter(path => changed.includes(path));
   const approval: CarriedApproval | RequiredApproval = !input.approval ? { carried: false, reason: `no approval was bound to the reviewed head ${shortSha(from.sha)}` }
     : reviewedTouched.length ? { carried: false, reason: `${who} changed reviewed files ${listPaths(reviewedTouched)}; a fresh independent approval of ${shortSha(to.sha)} is required` }
-    : { ...input.approval, carried: true, originalSha: input.approval.sha, reason: `approval of ${shortSha(from.sha)} by ${input.approval.reviewer} carried to ${tip}: ${who} changed none of the ${input.reviewedFiles.length} reviewed files` };
+    : { ...input.approval, carried: true, originalSha: input.approval.sha, reason: `approval of ${shortSha(input.approval.sha)} by ${input.approval.reviewer}${input.approval.reviewId !== undefined ? ` (review ${input.approval.reviewId})` : ''} carried to ${tip}: ${who} changed none of the ${input.reviewedFiles.length} reviewed files` };
   const evidence = input.proofs.map(({ proof, evidence }): CarriedProof => {
     if (!evidence) return { proof, carried: false, reason: `no trusted evidence was bound to the reviewed head ${shortSha(from.sha)}` };
     if (!changed.length) return { proof, carried: true, evidenceId: evidence.id, producer: evidence.producer, reason: `evidence ${evidence.id} from ${evidence.producer} carried to ${tip}: ${who} changed no file relative to ${shortSha(from.baseSha)}` };
@@ -288,10 +304,18 @@ export interface ReviewDismissal {
   verdict: 'approved' | 'changes_requested' | 'commented' | null;
   /** The commit GitHub attributed the dismissal to, when it named one. */
   commit: string | null;
-  at: string | null; by: string | null; unread?: string;
+  at: string | null; by: string | null;
+  /** The actor was the control-plane App's own bot identity (GY-519); absent on records that predate the field. */
+  byApp?: boolean;
+  unread?: string;
 }
-/** The record of an approval the control plane restored after GitHub dismissed it for a merge-base change on an unchanged head. */
-export interface RestoredApproval { reviewer: string; reviewId?: number; sha: string; dismissal: ReviewDismissal; at: string }
+/**
+ * The record of an approval the control plane restored after GitHub dismissed it for a merge-base
+ * change (GY-127 unchanged head, GY-519 replaced tip). `sha` is the tip the restored binding binds;
+ * `originalSha` names the tip the approval was actually given on when a republication had replaced
+ * it — the approval id, the approved tip and the carried-to tip are what the record must show.
+ */
+export interface RestoredApproval { reviewer: string; reviewId?: number; sha: string; originalSha?: string; dismissal: ReviewDismissal; at: string }
 /** GitHub's own dismissal message when `dismiss_stale_reviews` fires on a merge-base change, and nothing looser. */
 export const mergeBaseDismissalPattern = /^\s*the merge-base changed after approval\.?\s*$/i;
 /** The verdict a timeline `review_dismissed` event names, when it is one GitHub reports. */
@@ -304,31 +328,70 @@ export function reviewDismissal(review: Observation['reviews'][number]): ReviewD
   return review.state === 'DISMISSED' && dismissal && typeof dismissal === 'object' ? dismissal : null;
 }
 /**
- * An approval of exactly the current head that GitHub dismissed with its merge-base reason: the
- * head the reviewer approved is the head the branch still has, so nothing the reviewer judged has
- * changed. It is distinguished from a withdrawn verdict by the recorded reason and the recorded
+ * An approval GitHub dismissed with its merge-base reason that the control plane can restore as
+ * the binding one. Two shapes:
+ *
+ * - An approval of exactly the current head: the head the reviewer approved is the head the branch
+ *   still has, so nothing the reviewer judged has changed (GY-127).
+ * - An approval of a tip the control plane itself replaced (GY-519): the head sha changed, but the
+ *   reviewer judged the same patch. The dismissal must be GitHub's own merge-base dismissal, and
+ *   both the dismissal and the `head_ref_force_pushed` event that caused it must be the
+ *   control-plane App's; the approved tip must be one the queue itself published from the same
+ *   author head the current tip was built from, with the patch-id it was approved under unchanged.
+ *   Anything else — the author head moved, the patch changed, a person dismissed, a person pushed —
+ *   restores nothing.
+ *
+ * A dismissal is distinguished from a withdrawn verdict by the recorded reason and the recorded
  * verdict, never inferred from timing: the reason must be GitHub's exact merge-base message, and
- * the dismissed review must have been an approval — a dismissed change request is a change
- * request the reviewer gave and never an approval, whatever message its dismissal carried. Only a
- * formal GitHub approval from someone other than the author qualifies — the same identity rule
- * `exactApproval` applies, baseline included. The engine restores such an
- * approval as the binding one (see `Engine.observe`) so no review round and no attempt is spent on
- * a commit the reviewer already approved; the reviewer App re-posts it before the merge.
+ * the dismissed review must have been an approval — a dismissed change request is a change request
+ * the reviewer gave and never an approval, whatever message its dismissal carried. Only a formal
+ * GitHub approval from someone other than the author qualifies — the same identity rule
+ * `exactApproval` applies, baseline included. The engine restores such an approval as the binding
+ * one (see `Engine.observe`) so no review round and no attempt is spent on a commit the reviewer
+ * already approved; the reviewer App re-posts it before the merge. `originalSha` names the tip the
+ * approval was given on when a republication replaced it.
  */
-export function dismissedApproval(work: Work): { reviewer: string; reviewId?: number; sha: string; dismissal: ReviewDismissal } | null {
+export function dismissedApproval(work: Work): { reviewer: string; reviewId?: number; sha: string; originalSha?: string; dismissal: ReviewDismissal } | null {
   const candidate = work.candidate, observation = work.observation;
   if (!candidate || !observation || observation.candidate.sha !== candidate.sha || observation.candidate.baseSha !== candidate.baseSha || observation.merged) return null;
   if (!work.policy.review || reviewProviderOf(work.policy) !== 'github') return null;
   const baseline = work.formalReviewBaseline;
   for (const review of observation.reviews) {
-    if (review.state !== 'DISMISSED' || review.sha !== candidate.sha || review.reviewer === candidate.author) continue;
+    if (review.state !== 'DISMISSED' || review.reviewer === candidate.author) continue;
     const dismissal = reviewDismissal(review);
     if (!dismissal?.mergeBase || dismissal.verdict !== 'approved') continue;
     if (work.formalReviewResetRequired && !(baseline?.pr === candidate.pr && baseline.policyRevision === work.policyRevision && Number.isSafeInteger(review.id) && review.id! > 0 && !baseline.reviewIds.includes(review.id!))) continue;
-    return { reviewer: review.reviewer, ...(review.id !== undefined ? { reviewId: review.id } : {}), sha: candidate.sha, dismissal };
+    if (review.sha === candidate.sha) return { reviewer: review.reviewer, ...(review.id !== undefined ? { reviewId: review.id } : {}), sha: candidate.sha, dismissal };
+    const replaced = appDismissed(dismissal) && replacedTipDismissal(work, review.sha, candidate.sha);
+    if (replaced) return { reviewer: review.reviewer, ...(review.id !== undefined ? { reviewId: review.id } : {}), sha: candidate.sha, originalSha: review.sha, dismissal };
   }
   return null;
 }
+/**
+ * Whether a dismissal of an approval of `approvedSha` was the control plane's own republication of
+ * that tip as `candidateSha` (GY-519): the queue published the approved tip from the author head
+ * the current tip is built from, the current tip's carry shows the patch-id unchanged since that
+ * author head, and the App's own force-pushes lead from the approved tip to the current one.
+ */
+function replacedTipDismissal(work: Work, approvedSha: string, candidateSha: string): boolean {
+  const speculation = work.queue?.speculation;
+  if (!speculation || speculation.tip !== candidateSha || speculation.policyRevision !== work.policyRevision) return false;
+  const authorHead = speculation.reviewedHead ?? speculation.merge?.from ?? null;
+  if (!authorHead || speculation.carry?.ground?.rule !== 'diff unchanged') return false;
+  // The approved tip was this queue's own publication from that same author head, or the author
+  // head itself — either way the reviewer judged exactly the patch the current tip re-shows.
+  const published = approvedSha === authorHead
+    || (work.queueHistory ?? []).some(entry => entry.event === 'predicted' && entry.tip === approvedSha && entry.from === authorHead);
+  if (!published) return false;
+  // The App's own pushes must lead from the approved tip to the current head; one push by anyone
+  // else along the way breaks the chain.
+  const pushes = (work.observation?.headForcePushes ?? []).filter(entry => entry.byApp && /^[a-f0-9]{40}$/.test(entry.before ?? '') && /^[a-f0-9]{40}$/.test(entry.after ?? ''));
+  const reaches = (from: string, to: string, fuel: number): boolean =>
+    from === to || fuel > 0 && pushes.some(entry => entry.before === from && reaches(entry.after!, to, fuel - 1));
+  return reaches(approvedSha, candidateSha, pushes.length + 1);
+}
+/** Whether a recorded dismissal names the control-plane App as its actor; records that predate the attribution restore nothing across a head change. */
+export const appDismissed = (dismissal: ReviewDismissal): boolean => dismissal.byApp === true;
 /** The restored approval that binds the current candidate, for status and the merge broker's re-post; null when none does. */
 export function restoredApproval(work: Pick<Work, 'candidate' | 'queue' | 'baseRefresh' | 'policyRevision'>): RestoredApproval | null {
   const candidate = work.candidate;
@@ -337,6 +400,29 @@ export function restoredApproval(work: Pick<Work, 'candidate' | 'queue' | 'baseR
   if (speculation?.tip === candidate.sha && speculation.policyRevision === work.policyRevision && speculation.restoredApproval?.sha === candidate.sha) return speculation.restoredApproval;
   const refresh = work.baseRefresh;
   return refresh?.head === candidate.sha && refresh.policyRevision === work.policyRevision && refresh.restoredApproval?.sha === candidate.sha ? refresh.restoredApproval : null;
+}
+/**
+ * The approval of exactly `sha` in a pull request's current reviews, as the publisher reads them
+ * immediately before force-pushing a new tip over it (GY-519), under the identity rule
+ * `exactApproval` applies: a formal GitHub approval by
+ * someone other than the author, after the requirement-review baseline when one is set. The last
+ * matching review wins, so the identity names the verdict GitHub currently holds. Null when the
+ * list shows none — never a guess from an earlier head's reviews.
+ */
+export function approvalOfHead(reviews: unknown[], sha: string, author: string | null, pr: number, work: Pick<Work, 'formalReviewResetRequired' | 'formalReviewBaseline' | 'policyRevision'>): ObservedApproval | null {
+  let found: ObservedApproval | null = null;
+  for (const row of reviews as { state?: unknown; commit_id?: unknown; user?: { login?: unknown }; id?: unknown }[]) {
+    if (row?.state !== 'APPROVED' || row.commit_id !== sha) continue;
+    const reviewer = typeof row.user?.login === 'string' ? row.user.login : null;
+    const id = Number.isSafeInteger(row.id) ? row.id as number : null;
+    if (!reviewer || reviewer === author) continue;
+    if (work.formalReviewResetRequired) {
+      const baseline = work.formalReviewBaseline;
+      if (!(baseline?.pr === pr && baseline.policyRevision === work.policyRevision && id !== null && id > 0 && !baseline.reviewIds.includes(id))) continue;
+    }
+    found = { reviewer, ...(id !== null ? { reviewId: id } : {}), sha };
+  }
+  return found;
 }
 export interface QueuePlacement {
   /**
@@ -806,6 +892,10 @@ export function ejectionReason(work: Work, ciAppIds: number[], all: Work[] = [],
   // observed adverse conclusion about the tip, which only a new head can answer. It names every
   // file and the item that owns it; a file the observation could not compare ejects nothing.
   const regressions = queuedRegressions(work, observation, all);
+  // A tip still built behind an entry that left without landing (GY-568) is not reverting anything
+  // of its own: it leaves the queue so the control plane restores it, and the reason says so.
+  const stale = regressions.length ? staleSpeculativeTip(work, all) : null;
+  if (stale) return `Speculative tip ${tip} was built behind ${stale.departed.join(', ')}, which left the merge queue without landing; landing it on ${regressions[0].base.slice(0, 12)} would carry their unlanded work (${regressions.map(entry => entry.text).join('; ')}), so the branch is restored to its own reviewed head`;
   if (regressions.length) return `Landing speculative tip ${tip} on ${regressions[0].base.slice(0, 12)} would revert work outside its planned files: ${regressions.map(entry => entry.text).join('; ')}`;
   // Observations retain every run, including superseded ones; only the newest trusted run
   // for a required check decides, exactly as the test gate does, so a successful retry
@@ -893,6 +983,50 @@ export function ejectedTipRestore(work: Work, all: Work[]): { contaminated: stri
   const contamination = branchContamination(work, all);
   if (!contamination) return null;
   return { contaminated: contamination.head, foreign: contamination.foreign, own: contamination.own, reason: `ejected from the merge queue: ${ejection.reason}` };
+}
+
+/**
+ * GY-568. The speculative tip the current candidate is, when it was built behind predecessors of
+ * which one or more has since left the merge queue without landing: `departed` names them. Such a
+ * tip holds their unlanded commits by the queue's own construction, so its tree says nothing about
+ * the item's change until the control plane restores the branch to the item's own reviewed head
+ * (`ejectedTipRestore`) or the queue rebuilds the tip from it. Null for any other head: a worker's
+ * push, a restored or refreshed head, or a tip whose predecessors are all still queued ahead or landed.
+ */
+export function staleSpeculativeTip(work: Pick<Work, 'id' | 'candidate' | 'queueHistory'>, all: Work[]): { tip: string; own: string | null; predecessors: string[]; departed: string[] } | null {
+  const candidate = work.candidate;
+  if (!candidate) return null;
+  const predicted = [...(work.queueHistory ?? [])].reverse().find(entry => entry.event === 'predicted' && entry.tip === candidate.sha);
+  if (!predicted?.predecessors?.length) return null;
+  const departed = predicted.predecessors.filter(key => {
+    const item = all.find(entry => entry.key === key);
+    if (!item || item.id === work.id || item.stage === 'done' || item.observation?.merged) return false;
+    // Still queued ahead of where this tip was predicted: the tip holds it as the queue intends.
+    return !item.queue || item.queue.sequence > predicted.sequence;
+  });
+  return departed.length ? { tip: candidate.sha, own: predicted.from && predicted.from !== candidate.sha ? predicted.from : null, predecessors: predicted.predecessors, departed } : null;
+}
+/** The build-gate reason of a candidate waiting for its branch to be restored after a predecessor's ejection (GY-568). */
+export const restoringAfterEjectionPrefix = 'Restoring after predecessor ejection: ';
+/**
+ * GY-568. Why the tree of this candidate is not judged yet, or null when it may be. A stale
+ * speculative tip (`staleSpeculativeTip`) is refused by nothing its tree shows — no out-of-scope
+ * revert, no conflict, no failed mechanical proof — and sent to no worker: it waits under this one
+ * reason while the control plane restores the branch, and until GitHub is observed at the head the
+ * restore produced. Only a restore that found no own head (`unrepairable`) hands the head back to
+ * the gates, whose record names rework as the remedy.
+ */
+export function restoringAfterEjection(work: Work, all: Work[]): string | null {
+  if (work.stage === 'done' || work.observation?.merged || !work.submission) return null;
+  const stale = staleSpeculativeTip(work, all);
+  if (!stale) return null;
+  const refresh = currentRestore(work), restore = refresh?.restore;
+  if (restore?.outcome === 'unrepairable') return null;
+  const restored = restore?.performedAt && refresh!.head && refresh!.head !== stale.tip ? refresh!.head : null;
+  const own = stale.own ? `its own reviewed head ${stale.own.slice(0, 12)}` : 'its own reviewed head';
+  return `${restoringAfterEjectionPrefix}candidate ${stale.tip.slice(0, 12)} is a speculative tip built behind ${stale.departed.join(', ')}, which left the merge queue without landing, so its tree holds their unlanded work; ${restored
+    ? `Graphyard restored the branch to ${restored.slice(0, 12)} (${own} brought onto the base), and its gates are judged once GitHub is observed at that head`
+    : `Graphyard restores the branch to ${own} brought onto the base before its tree is judged`}, and no worker is asked to change it`;
 }
 
 /** The reason `advanceQueue` ejects an entry whose speculative merge conflicts (github.ts SpeculativeConflict). */

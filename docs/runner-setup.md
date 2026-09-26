@@ -1,7 +1,7 @@
-<!-- page: Build integrations | 3 | the packaged runner and collector. -->
-# The packaged Playwright runner and collector
+<!-- page: Build integrations | 3 | host setup. -->
+# Playwright runner and collector
 
-An approved oracle bundle runs in an isolated container supervised by a host attestor; a separately trusted collector verifies it before publishing.
+An approved oracle bundle runs in an isolated container under a host attestor; a separately trusted collector verifies it before publishing.
 
 ## Approve the bundle
 
@@ -11,7 +11,7 @@ graphyard runner snapshot selected-files.json > oracle-source.json
 graphyard runner bundle-digest ./oracle                 # the digest the runner will execute
 ```
 
-The bundle holds the reviewed specs with every helper and lockfile, owned by the attestor and not group- or world-writable. Pin `digest` and `runnerImageDigest` with `validation define`. The image builds from `docker/runner/Dockerfile`; specs read the target from `GRAPHYARD_TARGET_URL`.
+The bundle holds the reviewed specs, helpers and lockfiles, attestor-owned, not group- or world-writable. Pin `digest` and `runnerImageDigest` with `validation define`. The image builds from `docker/runner/Dockerfile`; specs read the target from `GRAPHYARD_TARGET_URL`.
 
 ## Run an attempt
 
@@ -30,13 +30,13 @@ The runner uses a `worker` credential with no proof scope; `graphyard runner att
 }
 ```
 
-`runAsUser` is a non-root container UID and the boundary-group GID; target, digests, network and key come only in the dispatch grant. The attestor (`graphyard runner supervise`, its own OS account) runs `enumerate` offline then `execute`, read-only with all capabilities dropped, and signs what it observed.
+`runAsUser` is a non-root container UID and boundary-group GID; target, digests, network and key come only in the dispatch grant. The attestor (`graphyard runner supervise`, own OS account) runs `enumerate` offline then `execute`, read-only, all capabilities dropped, signing what it observed.
 
 ### The acknowledgement is retried, never repeated
 
-- Every send carries the request key `ATTEMPT_ID-ack` and an identical body; the idempotency receipt makes them one commit.
+- Every send carries request key `ATTEMPT_ID-ack` and an identical body; the idempotency receipt makes them one commit.
 - An already-acknowledged answer is success; any other 2xx is refused.
-- A confirmed refusal is a decision and is never retried; only transport failures, timeouts, 408, 429 and 5xx are.
+- A confirmed refusal is a decision, never retried; only transport failures, timeouts, 408, 429 and 5xx are.
 - At most **5 sends**, paused 1, 2, 4 and 8 seconds apart, and no send starts more than **60 seconds** after the first.
 - No heartbeat is sent and the attestor is not told to proceed until the acknowledgement is confirmed.
 
@@ -52,7 +52,7 @@ install -d -o graphyard-attestor -g graphyard-boundary -m 2750 /srv/graphyard/at
 setfacl -d -m g:graphyard-boundary:rx /srv/graphyard/attempts
 ```
 
-The container writes through the group, the attestor and collector read; **never add the runner account to the group**.
+The container writes through the group; the attestor and collector read; **never add the runner account to it**.
 
 ## Collect and publish
 
@@ -74,7 +74,7 @@ The collector uses a separate `producer` credential scoped to the proof and its 
     "deadline":"2026-09-16T01:00:00.000Z",
     "testAccountDigest":"sha256:5b8e0d3a7f21c94e6082d5b1a3f7c0e94d26b8a15f309c7e4b1d02a6f8395c7e"
   },
-  "record":{"…":"the execution record the host attestor produced"},
+  "record":{"…":"the host attestor's execution record"},
   "outputPath":"/srv/graphyard/attempts/b1d7c05e-8a24-4f6b-93ec-2f7a1d905c38",
   "executionAttestation":{"payload":{"…":"signed host facts"},"signature":"base64…"},
   "requiredArtifacts":["inventory","report"],
@@ -84,4 +84,4 @@ The collector uses a separate `producer` credential scoped to the proof and its 
 }
 ```
 
-Copy `grant` from the runner's output. The collector takes `collection-authority`, verifies the attestor signature and inventory, confirms both containers are gone, and uploads artifacts privately for seven days. `observations` must bracket the run with no gap over `maxGapMs`; any difference, gap or `unknown` measurement refuses, and infrastructure problems publish `blocked`.
+Copy `grant` from the runner's output. The collector takes `collection-authority`, verifies the attestor signature and inventory, confirms both containers are gone, and uploads artifacts privately for seven days. `observations` must bracket the run with no gap over `maxGapMs`; any difference, gap or `unknown` measurement refuses; infrastructure problems publish `blocked`.

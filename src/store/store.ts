@@ -8,7 +8,7 @@ import { appendSave, resolvedPayloadSql } from './snapshot-delta.js';
 import { advisoryLocks } from './locks.js';
 import { coordinationDocumentSql, coordinationRelevance, coordinationTail, coordinationTrimSql, detoasted, type CoordinationTrim } from './coordination-sql.js';
 import { namedStatements } from './statements.js';
-import { closePool, reserve, trackedPool } from './pools.js';
+import { closePool, leasePoolConnections, reserve, trackedPool } from './pools.js';
 
 export * from './snapshot-delta.js';
 export type { CoordinationTrim } from './coordination-sql.js';
@@ -30,11 +30,11 @@ const literal = (text: string) => `'${text.replace(/'/g, "''")}'`;
 const newerSchema = (current: number) => new Error(`Database schema generation ${current} is newer than this release supports (${schemaVersion}); deploy the release that migrated it, or restore a backup taken at generation ${schemaVersion} or earlier`);
 
 /**
- * Which connections a transaction may use (GY-274). Lease renewals run on a reserved pool, so a
- * saturated main pool never lets a live worker's lease lapse; background work (the reconciliation
+ * Which connections a transaction may use (GY-274). Lease commands run on the lease pool (pools.ts, GY-558),
+ * so a saturated main pool never lets a live worker's lease lapse; background work (the reconciliation
  * tick, whose first pass after a deploy ran 65 s) holds at most half the main pool.
  */
-export type StoreLane = 'request' | 'lease' | 'background'; export const leaseLaneConnections = 2;
+export type StoreLane = 'request' | 'lease' | 'background';
 /** A counting semaphore over the background share; a waiter inherits a released permit directly. */
 export class BackgroundLane {
   private held = 0; private waiting: (() => void)[] = []; constructor(readonly limit: number) {}
@@ -48,12 +48,12 @@ export class BackgroundLane {
 
 export class Store {
   pool: pg.Pool;
-  /** Lease renewals only; `background` bounds the tick to half the main pool. */
+  /** Lease commands only (pools.ts `leaseCommands`); `background` bounds the tick to half the main pool. */
   leasePool: pg.Pool; readonly background: BackgroundLane;
-  constructor(url: string, options: { max?: number } = {}) {
+  constructor(url: string, options: { max?: number; leaseMax?: number } = {}) {
     const max = Math.max(2, Math.floor(options.max ?? 12));
     this.pool = trackedPool(namedStatements(new pg.Pool({ connectionString: url, max, connectionTimeoutMillis: storeConnectionTimeoutMs, statement_timeout: storeStatementTimeoutMs })));
-    this.leasePool = trackedPool(new pg.Pool({ connectionString: url, max: leaseLaneConnections, connectionTimeoutMillis: storeConnectionTimeoutMs, statement_timeout: storeStatementTimeoutMs }));
+    this.leasePool = trackedPool(new pg.Pool({ connectionString: url, max: Math.max(1, Math.floor(options.leaseMax ?? leasePoolConnections)), connectionTimeoutMillis: storeConnectionTimeoutMs, statement_timeout: storeStatementTimeoutMs }));
     this.background = new BackgroundLane(Math.max(1, Math.floor(max / 2)));
   }
   /**
@@ -221,12 +221,16 @@ export class Store {
    * Claim the next due job. `order` names work ids in claim-priority order (GY-492) — the
    * merge-queue head and its batch, then items whose next action waits on an observation; the
    * unnamed keep the available_at order. `woken` says the claim follows a webhook delivery, observed at once.
+   * The first `headCount` named ids (the queue-head band) always come first; after them any job due
+   * for longer than `starvedAfterMs` is claimed before the rest of the named list, so a job the list
+   * never names is still claimed within that bound (2026-09-26: an item whose only refusal was a stale
+   * observation waited 40 minutes behind review-waiting items that came due again every cycle).
    */
-  async takeJob(order: string[] = []) {
+  async takeJob(order: string[] = [], headCount = 0, starvedAfterMs = observationStarvedAfterMs) {
     const token = randomUUID();
-    const result = await this.pool.query(`WITH picked AS (SELECT work_id, generation<>claimed_generation AS woken FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now()) ORDER BY array_position($1::uuid[], work_id), available_at FOR UPDATE SKIP LOCKED LIMIT 1)
+    const result = await this.pool.query(`WITH picked AS (SELECT work_id, generation<>claimed_generation AS woken FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now()) ORDER BY CASE WHEN array_position($1::uuid[], work_id) <= $3::int THEN 0 WHEN available_at < now() - ($4::text||' milliseconds')::interval THEN 1 WHEN array_position($1::uuid[], work_id) IS NOT NULL THEN 2 ELSE 3 END, array_position($1::uuid[], work_id), available_at FOR UPDATE SKIP LOCKED LIMIT 1)
       UPDATE jobs SET token=$2, locked_until=now()+interval '90 seconds', attempts=attempts+1,claimed_generation=generation
-      FROM picked WHERE jobs.work_id=picked.work_id RETURNING jobs.*, picked.woken`, [order.length ? order : null, token]);
+      FROM picked WHERE jobs.work_id=picked.work_id RETURNING jobs.*, picked.woken`, [order.length ? order : null, token, Math.max(0, Math.floor(headCount)), String(Math.max(0, Math.floor(starvedAfterMs)))]);
     return result.rows[0] as { work_id: string; token: string; attempts: number; woken: boolean } | undefined;
   }
   /**
@@ -294,8 +298,16 @@ export class Store {
   }
 }
 
+/** How long a due observation job may wait behind the claim-priority list before it is claimed first. */
+export const observationStarvedAfterMs = 5 * 60_000;
+
+/**
+ * Make an item's observation job due now. A wake never moves a job that is already due later: an
+ * item saved every minute would otherwise look freshly due forever and never reach the starvation
+ * bound `takeJob` claims ahead of the priority list (2026-09-26: items stuck for an hour on stale reads).
+ */
 export async function wakeJob(db: pg.PoolClient, id: string) {
-  await db.query('INSERT INTO jobs(work_id) VALUES($1) ON CONFLICT(work_id) DO UPDATE SET available_at=now(),generation=jobs.generation+1', [id]);
+  await db.query('INSERT INTO jobs(work_id) VALUES($1) ON CONFLICT(work_id) DO UPDATE SET available_at=LEAST(jobs.available_at, now()),generation=jobs.generation+1', [id]);
 }
 
 export async function save(db: pg.PoolClient, work: Work, actor: string, kind: string, now: Date, details?: unknown) {

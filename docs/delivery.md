@@ -1,11 +1,11 @@
-<!-- page: Build integrations | 4 | releases and observed delivery. -->
-# Releases and observed production delivery
+<!-- page: Build integrations | 4 | the release API. -->
+# Releases and observed delivery
 
-Graphyard records which release each environment should run and verifies it only from what service-scoped observers measured running. Rollback is in [recovery](recovery.md#rollback).
+Graphyard records which release each environment should run, verified only from what service-scoped observers measured. Rollback is in [recovery](recovery.md#rollback).
 
 ## Who writes what
 
-Policy and approvals are `admin`'s; builds from a `producer` with a `builder` registration, selection from `admin` or a `promoter`, observations from a `producer` with an `observer` registration and a lease (`POST /api/delivery/lease`).
+Policy and approvals are `admin`'s; builds come from a `producer` with a `builder` registration, selection from `admin` or a `promoter`, observations from a `producer` with an `observer` registration and lease (`POST /api/delivery/lease`).
 
 ```json
 {"kind":"environment","id":"production","expectedRevision":0,"repository":"owner/repository",
@@ -30,7 +30,7 @@ Policy and approvals are `admin`'s; builds from a `producer` with a `builder` re
  "provenanceUrl":"https://ci.example.test/builds/812"}
 ```
 
-`POST /api/delivery/release` names the build and its explicit membership; each member cites its merge SHA, and a reverted change stays listed with `included: false`:
+`POST /api/delivery/release` names the build and explicit members, each citing its merge SHA; a reverted change stays listed, `included: false`:
 
 ```json
 {"id":"2026.09.18-1","expectedRevision":0,"environment":{"id":"production","revision":1},
@@ -41,7 +41,7 @@ Policy and approvals are `admin`'s; builds from a `producer` with a `builder` re
             {"workId":"3a8e2b6f-4c9d-4eaf-9021-2b3c4d5e6f70","mergeSha":"9abcdef0123456789abcdef0123456789abcdef0","included":false,"note":"Reverted in #812"}]}
 ```
 
-Approve with `POST /api/delivery/approve` `{"release": {...}, "environment": {...}}`, then select; one concurrent selection per generation wins:
+Approve with `POST /api/delivery/approve` `{"release": {...}, "environment": {...}}`, then select (one concurrent selection per generation wins):
 
 ```json
 {"environment":{"id":"production","revision":1},"release":{"id":"2026.09.18-1","revision":1},
@@ -50,7 +50,7 @@ Approve with `POST /api/delivery/approve` `{"release": {...}, "environment": {..
 
 ## Observe and verify
 
-The observer submits what it measured through `POST /api/delivery/observe`:
+The observer submits measurements through `POST /api/delivery/observe`:
 
 ```json
 {"registration":{"id":"production-observer","revision":1},"epoch":4,"environment":{"id":"production","revision":1},
@@ -63,8 +63,8 @@ The observer submits what it measured through `POST /api/delivery/observe`:
    "instances":[{"instance":"web-1","digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222","measurement":"host-attestation","healthy":true}]}]}
 ```
 
-Only complete listings measured by `provider` or `host-attestation` can verify; a repeated `snapshotId` returns the original receipt, and `POST /api/delivery/notify` is a hint only. A sweep every two seconds (`graphyard delivery sweep` drains sooner) verifies a generation once every service shares a common interval within the freshness bound, adding a `releaseDeliveries` entry to each included item. Otherwise status reads `unobserved`, `mismatched`, `unknown`, `unhealthy`, `incomplete`, `no-common-interval`, `stale` or `degraded`. `graphyard delivery` shows the state.
+Only complete `provider` or `host-attestation` listings can verify; a repeated `snapshotId` returns the original receipt; `POST /api/delivery/notify` is only a hint. A two-second sweep (`graphyard delivery sweep` drains sooner) verifies a generation once every service shares a common interval within the freshness bound, adding `releaseDeliveries` to each included item. Otherwise status reads `unobserved`, `mismatched`, `unknown`, `unhealthy`, `incomplete`, `no-common-interval`, `stale` or `degraded`. `graphyard delivery` shows the state.
 
 ## Attribution
 
-A validation pass is a claim about one artifact on one target. Each request binds the candidate's manifest, a compatibility signature (manifest, build inputs, test bundle, configuration, source, policy, artifacts) and what observers measured across the run; workers and client-supplied SHAs establish nothing, and `POST /api/validation/result` refuses a top-level SHA field. A mismatch inside an accepted pass's window records `attribution-undermined` and the pass stops counting. `GET /api/analytics/attribution` reports mismatches and paid-run cost.
+Each validation request binds the candidate's manifest, a compatibility signature (manifest, build inputs, test bundle, configuration, source, policy, artifacts) and the run's observed measurements; workers and client-supplied SHAs establish nothing; `POST /api/validation/result` refuses a top-level SHA field. A mismatch inside an accepted pass's window records `attribution-undermined`; the pass stops counting. `GET /api/analytics/attribution` reports mismatches and paid-run cost.

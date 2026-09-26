@@ -74,6 +74,8 @@ export const statusRoutes = defineRoutes('status', [
         fleet: ['admin', 'coordinator', 'reader', 'slice-lead'].includes(actor.role) ? await services.agentRegistry.snapshot(executorHost(url, req)) : null,
         // Direct-merge mode (direct-merge.ts): the open windows and the one line master status shows while any is.
         directMerge: await directMergeStatus(engine.store.pool, engine.directMergeEnvironment, observedAt),
+        // Heartbeat latency and the renewals refused or failed server-side, this process, last 10 minutes (GY-558).
+        leaseHealth: engine.leaseHealth.report(),
         now: observedAt.toISOString(), release: releaseInfo(), schema: schemaVersion };
     },
   },
@@ -123,11 +125,13 @@ export const statusRoutes = defineRoutes('status', [
       if (batchSize !== undefined) demand(Number.isSafeInteger(batchSize) && batchSize >= 1 && batchSize <= maxMergeBatchSize, `batchSize must be an integer from 1 to ${maxMergeBatchSize}`, 400);
       if (rerunFailedChecks !== undefined) demand(Number.isSafeInteger(rerunFailedChecks) && rerunFailedChecks >= 0 && rerunFailedChecks <= maxRerunFailedChecks, `rerunFailedChecks must be an integer from 0 to ${maxRerunFailedChecks}`, 400);
       let recorded = false;
+      // Each value is applied only once the ledger holds it (GY-384): a failed INSERT leaves the
+      // evaluation on the recorded value and the master unpublished, so its next cycle retries.
       const record = async (kind: string, field: string, value: number, previous: number, apply: () => void) => {
         const latest = (await engine.store.pool.query('SELECT 1 FROM events WHERE work_id IS NULL AND kind=$1 LIMIT 1', [kind])).rowCount;
-        apply();
-        if (latest && previous === value) return;
+        if (latest && previous === value) return apply();
         await engine.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, kind, JSON.stringify({ [field]: value, previous: latest ? previous : null })]);
+        apply();
         recorded = true;
       };
       if (batchSize !== undefined) await record(mergeBatchSizeEvent, 'batchSize', batchSize, await engine.loadMergeBatchSize(), () => { engine.mergeBatchSize = batchSize; });
@@ -193,7 +197,10 @@ export const statusRoutes = defineRoutes('status', [
     method: 'GET', path: '/api/events',
     async handle({ actor, url, services, operatorVisible }) {
       const query = parseEventHistoryQuery(url.searchParams);
-      if (actor.role === 'operator-agent') { demand(query.work, 'Operator-agent history reads require a scoped work item', 403); const item = (await services.engine.store.list()).find(w => w.id === query.work); demand(item && operatorVisible([item]).length, 'Work item is outside this operator-agent scope', 403); }
+      // An approver judges decisions resting on the ledger (GY-642), so one scoped to every item
+      // reads it whole; the read grants nothing, and every other operator agent names its item.
+      const wholeLedger = actor.role === 'operator-agent' && !!actor.capabilities?.includes('decision:approve') && !!actor.scope?.workItems.includes('*');
+      if (actor.role === 'operator-agent' && !wholeLedger) { demand(query.work, 'Operator-agent history reads require a scoped work item', 403); const item = (await services.engine.store.list()).find(w => w.id === query.work); demand(item && operatorVisible([item]).length, 'Work item is outside this operator-agent scope', 403); }
       const history = await readEventHistory(services.engine.store.pool, query);
       return query.view === 'rows' ? history.events : history;
     },

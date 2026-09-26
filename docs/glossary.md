@@ -1,17 +1,17 @@
-<!-- page: Start here | 2 | terms, roles and who decides. -->
+<!-- page: Start here | 2 | terms, roles, who decides. -->
 # Glossary
 
 ## The eight distinctions
 
 ### 1. Human operator (human authority)
 
-The person holding an `admin` credential declaring `sessionKind: "human"`, who alone decides goals and priorities, spending money or opening accounts, and credentials for people.
+The `admin` credential holder declaring `sessionKind: "human"`, who alone decides goals and priorities, spending money or opening accounts, and credentials for people.
 
 **Canonical usage:** *human operator*; bare *operator* means this person.
 
 ### 2. AI agent
 
-A model acting through a runtime, with only its credential's authority.
+A model acting through a runtime with only its credential's authority.
 
 **Canonical usage:** name the role (*worker*, *master*, *approver*, *reviewer*, *proof producer*).
 
@@ -29,13 +29,13 @@ A *principal* is an authenticated identity, its *role* the authority class, its 
 
 ### 5. Worker lease and worktree
 
-A *lease* is one worker's time-limited ownership of one item at one *epoch*. The *assigned worktree* is the registered `(host, path)` checkout with a reserved branch.
+A *lease* is one worker's time-limited ownership of one item at one *epoch*; the *assigned worktree* is the registered `(host, path)` checkout with a reserved branch.
 
 **Canonical usage:** *lease*, *epoch*, *assigned worktree*.
 
 ### 6. Independent reviewer and proof producer
 
-A *reviewer* is a non-author GitHub identity approving the exact head; a *proof producer* is a `producer` principal granted exact proof names; neither implements it.
+A *reviewer* is a non-author GitHub identity approving the exact head; a *proof producer*, a `producer` principal granted exact proof names; neither implements it.
 
 **Canonical usage:** *reviewer*, *proof producer*.
 
@@ -47,7 +47,7 @@ The server, database, dashboard and CLI.
 
 ### 8. Herdr runtime
 
-The supervisor that launches sessions and reports whether they are alive.
+The supervisor that launches sessions and reports their liveness.
 
 **Canonical usage:** *Herdr*; other runtimes by product name.
 
@@ -65,7 +65,7 @@ The supervisor that launches sessions and reports whether they are alive.
 
 ## Who decides
 
-The master applies non-weakening intent (create, release, unblock, add requirements) directly. Rewriting requirements, resolving escalations, rework, recovery, `manual:` attestation, proof grants, repair-lane merges and merge with automatic merging off are requested with `graphyard master decide GY-N ACTION REASON` and applied by a separate approver with `graphyard master approve GY-N DECISION REASON`; the server refuses an approver that requested the decision, held an assignment on the item, produced its evidence, or would receive the grant. Reviewers, producers and the merge gate decide the rest. A human-only decision parks the item (`graphyard park`) until the human answers (`graphyard answer` or **Work → Needs you**).
+The master applies non-weakening intent (create, release, unblock, add requirements) directly. Rewriting requirements, resolving escalations, rework, recovery, `manual:` attestation, proof grants, repair-lane merges and merges with automatic merging off are requested with `graphyard master decide GY-N ACTION REASON` and applied by a separate approver with `graphyard master approve GY-N DECISION REASON`; the server refuses an approver that requested the decision, held an assignment on the item, produced its evidence, or would receive the grant. Reviewers, producers and the merge gate decide the rest. A human-only decision parks the item (`graphyard park`) until the human answers (`graphyard answer` or **Work → Needs you**).
 
 ## Diagram legend
 

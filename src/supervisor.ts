@@ -237,16 +237,32 @@ export function assignmentSurrender(epoch: number, argv: string[] = process.argv
 /** How long before the lease's own expiry a supervisor stops retrying a failed renewal (GY-274). */
 export const renewalSafetyMarginMs = 15_000;
 /**
- * Whether a failed renewal is the server's definite answer rather than a transient failure: a 4xx
- * refusal naming the epoch, the lease or its ownership, or a renewal that came back for another
- * epoch. A network error, a timeout, a 5xx, a 408 or 429, or a proxy's page during a deploy is
- * transient, and the lease that is still running is what decides whether the worker stops.
+ * Whether a failed renewal is the server's definite answer rather than a transient failure: a
+ * renewal that came back for another epoch, or the 409 Conflict every epoch, lease and ownership
+ * refusal carries. A network error, a timeout, a 5xx, a 408 or 429, or a proxy's page during a
+ * deploy is transient, and the lease that is still running is what decides whether the worker
+ * stops. So is any other 4xx (GY-392): a 401 or 403 from an expired or rotated token, or a 404
+ * from a mis-routed proxy, says nothing about the lease, so the worker keeps it until it lapses.
+ * An error that carries no status falls back to the client's own classification of the refusal.
  */
 export function definiteRenewalRefusal(error: unknown) {
   if (!error || typeof error !== 'object') return false;
   const { confirmedRefusal, status, definite } = error as { confirmedRefusal?: unknown; status?: unknown; definite?: unknown };
-  if (confirmedRefusal === true || definite === true) return true;
-  return typeof status === 'number' && status >= 400 && status < 500 && status !== 408 && status !== 429;
+  if (definite === true) return true;
+  if (typeof status === 'number') return status === 409;
+  return confirmedRefusal === true;
+}
+
+/**
+ * How long the server keeps a lease after a renewal it failed server-side (GY-558): it recorded the
+ * failure and answered 503 with `renewalFault` (`graceUntil`, and its own `now`), so the lease stays
+ * valid for that remainder and the supervisor keeps retrying through it. Null for any other failure.
+ */
+export function renewalGraceMs(error: unknown): number | null {
+  let grace = (error as { renewalFault?: { graceUntil?: string; now?: string } } | null)?.renewalFault;
+  if (!grace && error instanceof Error) { try { grace = JSON.parse(error.message)?.renewalFault; } catch { return null; } }
+  const ms = Date.parse(grace?.graceUntil ?? '') - Date.parse(grace?.now ?? '');
+  return Number.isFinite(ms) && ms > 0 ? ms : null;
 }
 
 // The deadline uses elapsed local time and server-reported duration, not synchronized clocks.
@@ -270,15 +286,26 @@ export async function supervise(command: string, args: string[], epoch: number, 
    * the pool; the lease is 120 s precisely so that a worker survives that. Returns 'renewed', or
    * 'refused' on the server's definite answer, or 'lapsing' when the retry window closed; a
    * lapsing lease is left to the expiry timer, which stops the worker only once it has expired.
+   * Between retries the session is checked for orphaning as the interval tick would (GY-392), so
+   * a supervisor whose worker is gone during an outage surrenders at once rather than after the
+   * whole backoff.
    */
-  async function renewWithRetry(stopped: () => boolean): Promise<'renewed' | 'refused' | 'lapsing' | 'stopped'> {
+  async function renewWithRetry(stopped: () => boolean, orphaned: () => string | null = () => null, extended: () => void = () => {}): Promise<'renewed' | 'refused' | 'lapsing' | 'stopped' | { orphaned: string }> {
     for (let attempt = 0; ; attempt++) {
       // Inside the safety margin nothing more is attempted: the lease is left to expire on its own.
       if (attempt === 0 && deadline - margin() <= performance.now()) return 'lapsing';
+      const started = performance.now();
       try { await heartbeat(); return 'renewed'; }
       catch (error) {
         const reason = error instanceof Error ? error.message.slice(0, 300) : String(error);
         if (definiteRenewalRefusal(error)) { console.error(`Graphyard refused the lease renewal: ${reason}`); return 'refused'; }
+        // A server-side failure the server recorded keeps the lease for its grace (GY-558): the
+        // deadline moves out to it, measured from when this attempt was sent, and retries go on.
+        const grace = renewalGraceMs(error);
+        if (grace !== null && started + grace > deadline) {
+          deadline = started + grace; extended();
+          console.error(`Graphyard recorded the failed renewal server-side; the lease is kept for ${Math.round(grace / 1000)}s more while renewal is retried.`);
+        }
         const window = deadline - margin() - performance.now();
         const wait = Math.min(retryMs * 2 ** attempt, retryMaxMs, window);
         if (wait <= 0) {
@@ -288,6 +315,8 @@ export async function supervise(command: string, args: string[], epoch: number, 
         console.error(`Graphyard lease renewal failed transiently (${reason}); retrying in ${Math.round(wait)} ms with ${Math.round((deadline - performance.now()) / 1000)}s of lease left.`);
         await delay(wait);
         if (stopped()) return 'stopped';
+        const cause = orphaned();
+        if (cause) return { orphaned: cause };
       }
     }
   }
@@ -432,17 +461,18 @@ export async function supervise(command: string, args: string[], epoch: number, 
         timer = setInterval(async () => {
           if (pending || stopping) return;
           pending = true;
+          const surrenderOrphaned = async (cause: string) => {
+            clearInterval(timer);
+            console.error(`Graphyard worker supervision has nothing left to supervise: ${cause}. Releasing the lease and stopping.`);
+            await surrenderAssignment(cause);
+            stop(1);
+          };
           try {
             const cause = orphaned();
-            if (cause) {
-              clearInterval(timer);
-              console.error(`Graphyard worker supervision has nothing left to supervise: ${cause}. Releasing the lease and stopping.`);
-              await surrenderAssignment(cause);
-              stop(1);
-              return;
-            }
-            const renewal = await renewWithRetry(() => stopping);
-            if (renewal === 'renewed') { if (!stopping) armDeadline(); }
+            if (cause) { await surrenderOrphaned(cause); return; }
+            const renewal = await renewWithRetry(() => stopping, orphaned, () => { if (!stopping) armDeadline(); });
+            if (typeof renewal === 'object') await surrenderOrphaned(renewal.orphaned);
+            else if (renewal === 'renewed') { if (!stopping) armDeadline(); }
             else if (renewal === 'refused') { console.error('Graphyard lease cannot be renewed. Stopping worker.'); stop(1); }
           }
           catch { console.error('Graphyard lease cannot be renewed. Stopping worker.'); stop(1); }

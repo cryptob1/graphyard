@@ -8,6 +8,7 @@ import { type MasterConfig, assertOutsideWorktrees, writeFailure, diskExhaustion
 import { boundDetail } from './decisions.js';
 import { classified, faultClasses, faultInstanceSchema, noteActionOutcome, type FaultKind } from '../model/fault-classes.js';
 import { timingsSchema } from '../master/timings.js';
+import { emptyInvariantRecord, invariantRecordSchema } from '../model/invariants.js';
 
 export const daemonActionKinds = ['close', 'dispatch', 'review', 'refresh', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session', 'reclaim', 'decision', 'scope', 'settle', 'failover', 'capacity', 'human', 'preserve', 'fault'] as const;
 export type DaemonActionKind = typeof daemonActionKinds[number];
@@ -242,6 +243,8 @@ export const approvalWatchSchema = z.object({
   capacity: z.string().max(500).nullable().default(null),
   /** A headless approver's run (GY-169): its last events, its result, and what became of its verdict. */
   run: runRecordSchema.nullable().default(null),
+  /** The decision and launch whose spent-account hold and capacity `exhausted` report the loop already wrote (GY-316): a retried failover writes neither again. */
+  reportedExhaustion: z.string().max(200).nullable().default(null),
 }).strict();
 export type ApprovalWatch = z.infer<typeof approvalWatchSchema>;
 /**
@@ -317,6 +320,12 @@ export const daemonStateSchema = z.object({
    */
   faults: z.object({ instances: z.array(faultInstanceSchema).default([]), open: z.record(z.string(), z.string()).default({}), failing: z.record(z.string(), z.string()).default({}) }).strict()
     .default(() => ({ instances: [], open: {}, failing: {} })),
+  /**
+   * The system invariants (GY-404): what the loop carries between cycles to judge them — base
+   * refreshes per candidate, when each merge candidate was first seen mergeable, the builds and lease
+   * losses seen — and the last cycle's report, one line per invariant, for `master status`.
+   */
+  invariants: invariantRecordSchema.default(emptyInvariantRecord),
 }).strict();
 export type DaemonState = z.infer<typeof daemonStateSchema>;
 
