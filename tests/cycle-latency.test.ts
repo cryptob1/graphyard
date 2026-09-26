@@ -220,8 +220,9 @@ test('unit:cycle-latency-budget — with 170 open items and 1,100 worktrees at t
     assert.equal((warm.interventions as { stale?: boolean }).stale, false);
 
     // Independent worker launches run at once, bounded by capacity: four free profiles, six ready items, 400 ms per launch.
+    // The launcher beside the cycle runs `run.launchConcurrency` of them at once (GY-616, default 3), set here to the four profiles.
     const profiles = ['a', 'b', 'c', 'd'].map(name => ({ name: `worker-${name}`, principal: `graphyard-${name}`, agentName: `agent-${name}`, mode: 'launch', kind: 'claude', credentialFile: join(root, `${name}.token`) }));
-    const launching = { ...master, workers: profiles } as unknown as MasterConfig;
+    const launching = { ...master, workers: profiles, run: { ...master.run, launchConcurrency: 4 } } as unknown as MasterConfig;
     const ready = Array.from({ length: 6 }, (_, index) => ({ ...item(500 + index, new Date().toISOString()), stage: 'build', ready: true, blocker: null, plannedFiles: [`src/file-${index}.ts`] }) as unknown as Work);
     let inFlight = 0, peak = 0;
     const dispatched: string[] = [];
