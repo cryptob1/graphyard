@@ -5,6 +5,25 @@ import type { Dashboard } from './dashboard';
 export const VERIFY_TIMEOUT_MS = 10_000;
 export const REJECTED_NOTICE = 'That token was not accepted';
 export const HELPER_TEXT = 'Tokens are scoped to your role and kept for this browser session.';
+/** How the human operator signs in without a token (GY-738). */
+export const SIGN_IN_LINK_TEXT = 'Operator? Open the one-time link graphyard login prints: it signs you in as a human, no token needed.';
+export const LINK_REFUSED_NOTICE = 'That sign-in link has expired or was already used. Ask for a new one.';
+
+/** The one-time code a sign-in link carries in its fragment (`/#sign-in=CODE`), which never reaches a server log. */
+export const signInCode = (hash: string) => /^#sign-in=([A-Za-z0-9_-]{16,200})$/.exec(hash)?.[1] ?? null;
+/**
+ * Redeem a sign-in link's code for a human session token. The link is single use: the server
+ * forgets it on the first attempt, whatever the outcome.
+ */
+export async function redeemSignIn(code: string, fetcher: typeof fetch): Promise<{ kind: 'signed-in'; token: string } | { kind: 'refused' } | { kind: 'unreachable' }> {
+  try {
+    const response = await fetcher('/api/sign-in', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code }) });
+    if (response.status === 401 || response.status === 400) return { kind: 'refused' };
+    if (!response.ok) return { kind: 'unreachable' };
+    const { token } = await response.json() as { token?: unknown };
+    return typeof token === 'string' ? { kind: 'signed-in', token } : { kind: 'unreachable' };
+  } catch { return { kind: 'unreachable' }; }
+}
 
 /** What the sign-in page shows: the token form, the first status read in flight, or that read gone unanswered. */
 export type LoginState = { kind: 'form' } | { kind: 'verifying' } | { kind: 'unreachable'; host: string };
@@ -52,6 +71,7 @@ export function LoginView({ state, error, draftToken, setDraftToken, submit, ret
       {error && <p role="alert" className="notice danger">{error}</p>}
       <label>Access token<input type="password" required autoFocus value={draftToken} onChange={e => setDraftToken(e.target.value)} autoComplete="off" placeholder="Your Graphyard token"/></label>
       <button type="submit">Open control plane ↗</button>
+      <p className="login-help">{SIGN_IN_LINK_TEXT}</p>
     </form>}
     {state.kind === 'verifying' && <div className="login-status">
       <p role="status" aria-busy="true" aria-live="polite" className="login-progress"><span className="spinner" aria-hidden="true"/>Verifying connection…</p>
@@ -69,6 +89,19 @@ export function LoginView({ state, error, draftToken, setDraftToken, submit, ret
 export default function LoginPage({ token, error, signOut, setError, sessionEpoch, setToken, draftToken, setDraftToken, host, onVerified }: Pick<Dashboard, 'token' | 'error' | 'signOut' | 'setError' | 'sessionEpoch'> & { setToken(token: string): void; draftToken: string; setDraftToken(value: string): void; host: string; onVerified(status: unknown, signal: AbortSignal): Promise<void> }) {
   const [unreachable, setUnreachable] = useState(false);
   const [attempt, setAttempt] = useState(0);
+  // A sign-in link opens here: its code is taken out of the address bar at once, redeemed, and the
+  // human session token it returns is verified exactly as a typed token is.
+  useEffect(() => {
+    const code = signInCode(location.hash);
+    if (!code) return;
+    history.replaceState(null, '', location.pathname + location.search);
+    const epoch = ++sessionEpoch.current;
+    void redeemSignIn(code, (input, init) => fetch(input, init)).then(outcome => {
+      if (epoch !== sessionEpoch.current) return;
+      if (outcome.kind === 'signed-in') { setError(''); sessionStorage.setItem('graphyard-token', outcome.token); setToken(outcome.token); }
+      else setError(outcome.kind === 'refused' ? LINK_REFUSED_NOTICE : `Can't reach the control plane at ${host}`);
+    });
+  }, []);
   useEffect(() => {
     if (!token) return;
     setUnreachable(false);

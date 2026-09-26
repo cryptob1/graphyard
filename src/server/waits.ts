@@ -1,8 +1,8 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { createCipheriv, createHash, publicEncrypt, randomBytes, randomUUID, constants as cryptoConstants } from 'node:crypto';
 import type pg from 'pg';
 import { activeLease, demand, operatorScopeIncludes, type Principal, type Work } from '../model.js';
 import { capacityEventSchema, capacityRetryAt, capacitySignature, retainedExhaustions, type CapacityState, type ExhaustionRecord } from '../model/capacity.js';
-import { describeHumanRequest, humanAnswerSchema, humanDecisionLabel, humanOnlyReadsDecisions, humanOnlyRefusal, humanRequestBlocker, humanRequestSchema, openHumanOnly, parkRule, retainedHumanRequests, type HumanOnlySubject, type HumanRequest } from '../model/human-request.js';
+import { describeHumanRequest, humanAnswerSchema, humanDecisionLabel, humanOnlyReadsDecisions, humanOnlyRefusal, humanRequestBlocker, humanRequestSchema, openHumanOnly, parkRule, resolveHumanAnswer, retainedHumanRequests, type HumanOnlySubject, type HumanRequest } from '../model/human-request.js';
 import { decisionsByWork } from './decision-ledger.js';
 import { endAttempt, recordIntervention } from '../pipeline-speed.js';
 import { save } from '../store.js';
@@ -61,7 +61,9 @@ export async function requestHumanDecision(services: Services, actor: Principal,
     demand(work!.stage !== 'done', 'Delivered work is immutable');
     activeLease(work!, actor, data.epoch, now);
     demand(!work!.humanRequest, `${work!.key} already waits on human request ${work!.humanRequest?.id}; answer it before recording another`);
-    const request: HumanRequest = { id: randomUUID(), kind: data.kind, reason: data.reason, needed: data.needed, requestedBy: actor.id, epoch: data.epoch, at: now.toISOString() };
+    // The requester's choices are kept as they chose them; a request without any offers its kind's defaults (`requestChoices`).
+    const request: HumanRequest = { id: randomUUID(), kind: data.kind, reason: data.reason, needed: data.needed, requestedBy: actor.id, epoch: data.epoch, at: now.toISOString(),
+      ...(data.choices ? { choices: data.choices } : {}), ...(data.sealTo ? { sealTo: data.sealTo } : {}) };
     work!.humanRequest = request;
     work!.blocker = describeHumanRequest(request);
     recordIntervention(work!, 'blocked');
@@ -79,7 +81,8 @@ export async function requestHumanDecision(services: Services, actor: Principal,
  */
 export async function answerHumanDecision(services: Services, actor: Principal, id: string, body: unknown, key: string) {
   const data = humanAnswerSchema.parse(body);
-  const fingerprint = digest({ id, answer: data });
+  // The receipt's fingerprint never covers the secret, so not even its digest is stored.
+  const fingerprint = digest({ id, answer: { ...data, secret: data.secret ? 'sealed' : undefined } });
   return services.engine.store.transaction(async (db, now) => {
     const replay = await receipt(db, actor, key, fingerprint); if (replay) return replay;
     // The rule the human surface lists this request under is the rule that refuses the answer,
@@ -90,12 +93,30 @@ export async function answerHumanDecision(services: Services, actor: Principal, 
     const request = work!.humanRequest;
     demand(request, `${work!.key} has no open human-only request`, 404);
     demand(request!.id === data.request, `${work!.key}'s open request is ${request!.id}, not ${data.request}; reload before answering`);
-    const answered: HumanRequest = { ...request!, answer: { by: actor.id, at: now.toISOString(), outcome: data.outcome, text: data.answer, waitedMs: Math.max(0, now.getTime() - Date.parse(request!.at)) } };
+    const resolved = resolveHumanAnswer(request!, data);
+    const sealed = resolved.secret ? sealToHost(request!.sealTo!, data.secret!) : null;
+    const answered: HumanRequest = { ...request!, answer: { by: actor.id, at: now.toISOString(), outcome: resolved.outcome, text: resolved.text, waitedMs: Math.max(0, now.getTime() - Date.parse(request!.at)),
+      ...(resolved.choice ? { choice: resolved.choice, note: resolved.note } : {}), ...(sealed ? { sealed } : {}) } };
     work!.humanRequests = [...(work!.humanRequests ?? []), answered].slice(-retainedHumanRequests);
     work!.humanRequest = null;
-    if (work!.blocker?.startsWith(humanRequestBlocker)) work!.blocker = data.outcome === 'provided' ? null : `A human declined ${humanDecisionLabel[answered.kind]} for this item: ${data.answer}`.slice(0, 2000);
-    return commit(services, db, now, work!, all, actor, 'human.answered', { request: answered, resumed: data.outcome === 'provided' }, key, fingerprint);
+    if (work!.blocker?.startsWith(humanRequestBlocker)) work!.blocker = resolved.outcome === 'provided' ? null : `A human declined ${humanDecisionLabel[answered.kind]} for this item: ${resolved.text}`.slice(0, 2000);
+    return commit(services, db, now, work!, all, actor, 'human.answered', { request: answered, resumed: resolved.outcome === 'provided' }, key, fingerprint);
   });
+}
+
+/**
+ * Seal a secret to the requesting host (GY-738): a fresh AES-256-GCM key encrypts the value and
+ * the host's RSA public key wraps that key (OAEP, SHA-256), so only the host holding the private
+ * key reads it (`graphyard unseal`). The value itself is never written anywhere.
+ */
+export function sealToHost(publicKey: string, secret: string) {
+  const key = randomBytes(32), iv = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', key, iv);
+  const data = Buffer.concat([cipher.update(secret, 'utf8'), cipher.final()]);
+  let wrapped: Buffer;
+  try { wrapped = publicEncrypt({ key: publicKey, padding: cryptoConstants.RSA_PKCS1_OAEP_PADDING, oaepHash: 'sha256' }, key); }
+  catch { demand(false, 'The requesting host\'s key cannot seal this value; the request must be raised again', 422); throw new Error('unreachable'); }
+  return Buffer.from(JSON.stringify({ alg: 'RSA-OAEP-256+A256GCM', key: wrapped.toString('base64'), iv: iv.toString('base64'), tag: cipher.getAuthTag().toString('base64'), data: data.toString('base64') })).toString('base64');
 }
 
 /**
