@@ -1582,8 +1582,11 @@ export async function gateMerge(github: MergeGateClient, work: Work, request: Me
  * audit entry is appended before GitHub is asked, so the delivery it produces is attributed to it;
  * a refused GitHub call is appended as `repair.failed`. A refusal of the lane itself is appended as
  * `repair.refused`, naming the missing condition, once per head and condition.
+ * The bypass merge runs behind the job's fencing guard, as gateMerge and publish do (GY-428): a job
+ * that lost its lock or whose item moved writes nothing. A retry after a failed GitHub merge reuses
+ * the audit entry already appended for the same head and decision instead of appending a second.
  */
-export async function repairLaneStep(engine: Pick<Engine, 'store' | 'enqueueRequest'>, github: Pick<GitHub, 'repairMerge'>, work: Work, now = new Date()): Promise<RepairLaneVerdict> {
+export async function repairLaneStep(engine: Pick<Engine, 'store' | 'enqueueRequest'>, github: Pick<GitHub, 'repairMerge'>, work: Work, now = new Date(), beforeWrite: () => Promise<void> = async () => {}): Promise<RepairLaneVerdict> {
   const rows = (await engine.store.pool.query("SELECT actor, kind, payload, created_at FROM events WHERE work_id=$1 AND kind LIKE 'decision.%' ORDER BY seq", [work.id])).rows;
   const decisions = foldDecisions(work.id, rows.map(row => ({ kind: row.kind, actor: row.actor, at: new Date(row.created_at).toISOString(), payload: row.payload })));
   const verdict = repairLaneVerdict(work, decisions, normalMergeState(work, await engine.enqueueRequest(work.id)), now.getTime());
@@ -1594,8 +1597,11 @@ export async function repairLaneStep(engine: Pick<Engine, 'store' | 'enqueueRequ
     if (last?.head !== work.candidate?.sha || last?.condition !== verdict.condition) await record('repair.refused', { head: work.candidate?.sha ?? null, condition: verdict.condition, refusal: verdict.refusal, at: now.toISOString() });
     return verdict;
   }
-  const audit = repairAudit(work, verdict, now.toISOString());
-  await record(repairAuditEvent, audit);
+  const recorded = (await engine.store.pool.query(`SELECT payload->'details' AS audit FROM events WHERE work_id=$1 AND kind=$2 AND payload->'details'->>'head'=$3 AND payload->'details'->>'decision'=$4 ORDER BY seq DESC LIMIT 1`,
+    [work.id, repairAuditEvent, verdict.sha, verdict.decision.id])).rows[0]?.audit as RepairAudit | undefined;
+  await beforeWrite();
+  const audit = recorded ?? repairAudit(work, verdict, now.toISOString());
+  if (!recorded) await record(repairAuditEvent, audit);
   try { await github.repairMerge(work, audit); }
   catch (error) { await record('repair.failed', { ...audit, error: error instanceof Error ? error.message : String(error) }); throw error; }
   return verdict;
@@ -1811,7 +1817,7 @@ export async function processJob(engine: Engine, github: GitHub) {
         }
         else await github.publish(work, undefined, guard(work, work.gates.every(g => g.passed) && !work.violations.length));
         // A merge-path repair whose normal merge is stalled may take the audited repair lane (GY-406).
-        if (work.repair === 'merge-path' && !unpublishable && typeof github.repairMerge === 'function') await repairLaneStep(engine, github, work);
+        if (work.repair === 'merge-path' && !unpublishable && typeof github.repairMerge === 'function') await repairLaneStep(engine, github, work, new Date(), guard(work, true));
       }
       return false;
     });

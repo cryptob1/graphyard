@@ -178,3 +178,11 @@ test('unit:live-scope-change-guard — only adding planned files is a live widen
   const echoed = { ...bootstrapped, criteria: [{ proofs: ['unit:works'], id: 'AC-1', text: 'Works', bootstrap: { policyRevision: 1, declaredAt: 't0', declaredBy: 'op', contractPaths: ['src/a.ts'], reason: 'harness' } }], plannedFiles: ['src/a.ts', 'src/b.ts'] };
   assert.equal(liveScopeWidening(bootstrapped, echoed), true, 'a verbatim echo of the stored criteria, any key order, widens');
 });
+
+test('integration:repair-scope-on-requirements — a merge-path repair keeps its plannedFiles within the merge path on every requirements revision (GY-428)', async () => {
+  let work = await engine.execute(operator, 'create', randomUUID(), { title: 'Repair the merge path', plannedFiles: ['src/merge-queue.ts'], criteria: [{ id: 'AC-1', text: 'Merges again', proofs: ['unit:merges'] }], repair: 'merge-path' }, randomUUID());
+  await assert.rejects(engine.execute(operator, 'requirements', work.id, { ...widen(work, ['src/engine.ts']), reason: 'Widen past the merge path' }, randomUUID()),
+    /carries "repair": "merge-path" but plans files outside the merge path .*: src\/engine\.ts/);
+  work = await engine.execute(operator, 'requirements', work.id, { ...widen(work, ['src/daemon/cycle.ts']), reason: 'Widen within the merge path' }, randomUUID());
+  assert.deepEqual(work.plannedFiles, ['src/merge-queue.ts', 'src/daemon/cycle.ts']);
+});
