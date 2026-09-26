@@ -3,7 +3,7 @@ import type { ActionRow } from './model/actions.js';
 import { classified, classifyAttention, groupFaults } from './model/fault-classes.js';
 import type { Work } from './model.js';
 import { producerLedgerSpec, sessionRetries, summarizeProducers, type ProducerRecord } from './producer.js';
-import { reviewLedgerSpec, sessionLedgerRefusal, sessionLedgerRemedy, summarizeReviews, type ReviewRecord } from './reviewer.js';
+import { reviewLedgerSpec, sessionLedgerRefusal, sessionLedgerRemedy, stoppedFollowUpAttention, summarizeReviews, type ReviewRecord } from './reviewer.js';
 import { reviewConflictAttention } from './model/review-conflict.js';
 import type { SettledReviewSession } from './model/dispatch.js';
 import { dispatchFailureAttention, dispatchSummary, readDispatchCursor } from './auto-dispatch.js';
@@ -198,6 +198,8 @@ export async function derivedAttention(root: string, master: MasterConfig, maste
   const budget = githubBudgetAttention(coordinator);
   const overlong = overlongSessionAttention(snapshot, { ...observed.runtime, hostId: master.hostId }, { proof: master.run.producerTimeoutMinutes * 60_000 });
   const stuck = stuckRequestReport({ reviews: observed.reviews, producers: observed.producers }, now).attentionItems;
+  // A loop retry stopped after one unchanged 4xx error on consecutive attempts (GY-598).
+  const stoppedRetries = stoppedFollowUpAttention(observed.reviews);
   const host: AttentionItem[] = [];
   if (observed.standalone) {
     const cursor = await readDispatchCursor(root, master, () => {}).catch(error => ({ error: error instanceof Error ? error.message : 'Master dispatch cursor is unreadable' }));
@@ -209,5 +211,5 @@ export async function derivedAttention(root: string, master: MasterConfig, maste
       .map(item => ({ ...item, ...classified('concurrency-starved') })));
   }
   return { scopeRequests, unobtainable, unanswered, stalledItems, actorless, executors, conflicted, stalled, owed, budget, overlong,
-    items: [...host, ...executors.attention, ...scopeRequests, ...unanswered, ...unobtainable, ...conflicted, ...stuck, ...stalledItems, ...actorless, ...stalled, ...overlong, ...budget, ...owed.items] };
+    items: [...host, ...executors.attention, ...scopeRequests, ...unanswered, ...unobtainable, ...conflicted, ...stuck, ...stoppedRetries, ...stalledItems, ...actorless, ...stalled, ...overlong, ...budget, ...owed.items] };
 }
