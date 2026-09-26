@@ -2,6 +2,7 @@
 # Read endpoints
 
 - `GET /healthz`: unauthenticated.
+- `GET /time`: unauthenticated `{now}`, the plane's clock and nothing else; hosts bound their clock offset with its round trip (containment settlement).
 - `GET /api/status`: principal, integrations, `appPermissions`, held/failed jobs, `githubBudget`, clock.
 - `GET /api/work-snapshot`: `{work, now}` with `autoDispatch` requests; age leases against `now`. Open items whole; settled deliveries `summary: true`, without prose or histories. `view=coordination` trims open items; `view=full` exports everything.
 - `GET /api/work/ID|KEY`: one whole document; `/api/work`: all.

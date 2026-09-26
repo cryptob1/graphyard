@@ -62,13 +62,51 @@ export async function snapshotWithClock<T extends { now: string }>(read: () => P
   return { snapshot, clockOffset: { min: bound(before), max: bound(after) } };
 }
 
+/** A clock offset bound against the control plane and the round trip of the read that measured it. */
+export interface ControlPlaneClock { clockOffset: { min: number; max: number }; roundTripMs: number; source: 'timed read' | 'snapshot read' }
+/** How long the timed clock read may take before the loop falls back to the snapshot's bounds. */
+export const controlPlaneClockTimeoutMs = 10_000;
+/**
+ * Bound the local clock against the control plane with a light timed read (GY-795): `GET /time`
+ * answers the plane's clock and touches nothing else, so its round trip, which is the width of the
+ * bound, stays short on a plane whose work snapshot takes seconds to build. A plane that predates
+ * the endpoint still stamps its answer with a `Date` header, which is truncated to the second, so
+ * that bound is a second wider.
+ */
+export async function readControlPlaneClock(url: string, deps: { fetcher?: typeof fetch; clock?: () => number; timeoutMs?: number } = {}): Promise<ControlPlaneClock> {
+  const fetcher = deps.fetcher ?? fetch, clock = deps.clock ?? Date.now;
+  const before = clock();
+  const response = await fetcher(`${url.replace(/\/+$/, '')}/time`, { signal: AbortSignal.timeout(deps.timeoutMs ?? controlPlaneClockTimeoutMs) });
+  const body = response.ok ? await response.json().catch(() => null) : (await response.body?.cancel().catch(() => undefined), null);
+  const after = clock();
+  const answered = Date.parse(body?.now ?? ''), dated = Date.parse(response.headers.get('date') ?? '');
+  const [earliest, latest] = Number.isFinite(answered) ? [answered, answered] : Number.isFinite(dated) ? [dated, dated + 999] : [NaN, NaN];
+  if (!Number.isFinite(earliest)) throw new Error(`The control plane answered GET /time (${response.status}) with neither its time nor a Date header`);
+  return { clockOffset: { min: Math.round(before - latest), max: Math.round(after - earliest) }, roundTripMs: Math.max(0, Math.round(after - before)), source: 'timed read' };
+}
+/**
+ * The bounds a containment assessment is judged with: the timed read's, or, when that read fails,
+ * the snapshot read's, whose round trip is the width of its bound.
+ */
+export async function containmentClock(snapshotOffset: { min: number; max: number }, read: (() => Promise<ControlPlaneClock>) | undefined): Promise<ControlPlaneClock> {
+  const fallback: ControlPlaneClock = { clockOffset: snapshotOffset, roundTripMs: Math.max(0, snapshotOffset.max - snapshotOffset.min), source: 'snapshot read' };
+  if (!read) return fallback;
+  try { return await read(); } catch { return fallback; }
+}
+/** The clock-width refusal, rewritten to name the measured round trip: the uncertainty is the read's, not a disagreement of clocks. */
+function namedClockBound(refusal: string, clock: { roundTripMs?: number; source?: ControlPlaneClock['source'] }, width: number) {
+  if (!refusal.startsWith('Verifying host could not bound its clock against the control plane within ')) return refusal;
+  const trip = clock.roundTripMs ?? width;
+  return `${refusal}: the ${clock.source ?? 'timed read'} of the control-plane clock took ${trip}ms round trip, so settlement waits on a faster control-plane read, not on a clock disagreement`;
+}
+
 /**
  * Verify on this host that a quarantined supervisor is gone, and say why not when it cannot.
  * The assessment is a proposal: the control plane re-evaluates the same refusals itself.
  */
 export async function verifyContainmentDeath(
   work: Work,
-  options: { observedAt: string; hostId: string; clockOffset: { min: number; max: number }; localNow?: Date; probe?: SupervisorProbe },
+  options: { observedAt: string; hostId: string; clockOffset: { min: number; max: number }; clockRoundTripMs?: number; clockSource?: ControlPlaneClock['source']; localNow?: Date; probe?: SupervisorProbe },
 ): Promise<ContainmentAssessment> {
   const quarantine = work.containmentQuarantine!;
   const workspace = work.workspaces.find(item => item.epoch === quarantine?.epoch) ?? null;
@@ -93,11 +131,12 @@ export async function verifyContainmentDeath(
   // runs late in a cycle that can take tens of seconds, and measuring it against the snapshot's time
   // refused every automatic settlement as "dated after the control-plane clock" (2026-09-26).
   // Local time less the smallest measured offset is the latest control-plane time the probe could have run at.
-  const refusals = containmentSettlementRefusals(work, verification, { now: Math.max(Date.parse(options.observedAt), localNow.getTime() - options.clockOffset.min) });
+  const refusals = containmentSettlementRefusals(work, verification, { now: Math.max(Date.parse(options.observedAt), localNow.getTime() - options.clockOffset.min) })
+    .map(refusal => namedClockBound(refusal, { roundTripMs: options.clockRoundTripMs, source: options.clockSource }, options.clockOffset.max - options.clockOffset.min));
   return { ...assessment, settleable: !refusals.length, refusals, verification };
 }
 /** Verify every lapsed quarantine this host is responsible for, keyed by work id; a live worker's is not probed. */
-export async function assessContainment(work: Work[], options: { hostId: string; observedAt: string; clockOffset: { min: number; max: number }; probe?: SupervisorProbe }) {
+export async function assessContainment(work: Work[], options: { hostId: string; observedAt: string; clockOffset: { min: number; max: number }; clockRoundTripMs?: number; clockSource?: ControlPlaneClock['source']; probe?: SupervisorProbe }) {
   const assessments: Record<string, ContainmentAssessment> = {};
   for (const item of containmentQuarantines(work, options.hostId)) {
     if (containmentPhase(item, Date.parse(options.observedAt))?.state === 'live') continue;
