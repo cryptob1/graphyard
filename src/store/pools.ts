@@ -19,6 +19,9 @@ export const poolCloseBoundMs = 5_000;
 
 const openClients = new WeakMap<pg.Pool, Set<pg.PoolClient>>();
 
+/** Pools whose shutdown error reporter is already installed, so closing a pool twice never stacks listeners (GY-487). */
+const reportedPools = new WeakSet<pg.Pool>();
+
 /**
  * Track every connection a pool opens until the connection has actually closed (GY-483). pg-pool's
  * `end()` resolves once it has asked its idle clients to end, not once their sockets have closed,
@@ -35,21 +38,37 @@ export function trackedPool<P extends pg.Pool>(pool: P): P {
 }
 
 /**
- * End a pool and resolve only once every connection it opened has emitted 'end', or after `boundMs`
- * with a warning naming the stragglers. Pool and client 'error' events raised during shutdown (an
- * administrator terminating a closing connection) are logged, never left unhandled.
+ * Log pool and client 'error' events raised during shutdown (an administrator terminating a closing
+ * connection) instead of leaving them unhandled. Installed once per pool: a second `closePool` call
+ * adds nothing.
+ */
+function reportShutdownErrors(pool: pg.Pool, name: string, log: (message: string) => void) {
+  if (reportedPools.has(pool)) return;
+  reportedPools.add(pool);
+  const report = (error: Error) => log(`[store] ${name} pool connection error during shutdown: ${error.message}`);
+  pool.on('error', report);
+  pool.on('connect', client => client.on('error', report));
+  const open = openClients.get(pool);
+  if (open) for (const client of open) client.on('error', report);
+}
+
+/**
+ * End a pool and resolve once `end()` itself has settled and every connection it opened has emitted
+ * 'end' — or after `boundMs`, measured from the start of the close, with a warning naming the
+ * stragglers (GY-487: pg-pool's `end()` does not resolve while a client is still checked out, so
+ * the bound must cover it too, not only the closing sockets). Errors raised during shutdown are
+ * logged, never left unhandled, through one reporter per pool (see `reportShutdownErrors`).
  */
 export async function closePool(pool: pg.Pool, name: string, boundMs = poolCloseBoundMs, log: (message: string) => void = message => console.warn(message)) {
   const open = openClients.get(pool) ?? new Set<pg.PoolClient>();
-  const report = (error: Error) => log(`[store] ${name} pool connection error during shutdown: ${error.message}`);
-  pool.on('error', report);
-  for (const client of open) client.on('error', report);
-  pool.on('connect', client => client.on('error', report));
+  reportShutdownErrors(pool, name, log);
   let timer: NodeJS.Timeout | undefined;
   const closed = Promise.all([...open].map(client => new Promise<void>(resolve => client.once('end', () => resolve()))));
+  const ending = pool.end();
+  // An end() that settles after the bound released the wait must not surface as an unhandled rejection.
+  ending.catch(error => log(`[store] ${name} pool end() error: ${error.message}`));
   try {
-    await pool.end();
-    const outcome = await Promise.race([closed.then(() => 'closed' as const), new Promise<'bounded'>(resolve => { timer = setTimeout(() => resolve('bounded'), boundMs); })]);
+    const outcome = await Promise.race([Promise.all([ending, closed]).then(() => 'closed' as const), new Promise<'bounded'>(resolve => { timer = setTimeout(() => resolve('bounded'), boundMs); })]);
     if (outcome === 'bounded') log(`[store] ${name} pool: ${[...open].length} connection(s) still open ${boundMs} ms after end(); continuing shutdown`);
   } finally { clearTimeout(timer); }
 }
