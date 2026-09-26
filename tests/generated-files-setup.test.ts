@@ -162,8 +162,10 @@ test('integration:generated-files-setup — the server refuses an unparseable va
   assert.match(main, /delegationLimits\.deployed\[generatedFilesVariable\] = process\.env\.GRAPHYARD_GENERATED_FILES/);
   // The wiring that carries the drift to master status and the principals instruction.
   const status = await readFile(new URL('../src/cli/master-status.ts', import.meta.url), 'utf8');
-  assert.match(status, /generatedFilesAssignment\(root\)/);
-  assert.match(status, /installationOwner\('delegation-limits', text\)/);
+  const drift = await readFile(new URL('../src/cli/status-attention.ts', import.meta.url), 'utf8');
+  assert.match(status, /const generatedFiles = generatedFilesAttention\(root, coordinator\);/);
+  assert.match(drift, /generatedFilesAssignment\(root\)/);
+  assert.match(drift, /installationOwner\('delegation-limits', text\)/);
   // The drift is counted like every other attention item, so the summary count never hides it.
   assert.match(status, /attention: status\.counts\.attention \+ diskAttention\.length \+ generatedFiles\.length/);
   const setup = await readFile(new URL('../src/repository-setup.ts', import.meta.url), 'utf8');
