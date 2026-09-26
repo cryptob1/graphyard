@@ -112,6 +112,9 @@ export function decisionRace(decision: DecisionRecord, work: Work): StaleRace | 
       current: { sha: work.candidate?.sha ?? null, baseSha: work.candidate?.baseSha ?? null, policyRevision: work.policyRevision } };
   if ((decision.action === 'release' || decision.action === 'unblock') && decision.input.expectedRevision !== work.revision)
     return { expected: { revision: decision.input.expectedRevision }, current: { revision: work.revision } };
+  // A triage closure binds the judgement it applies; a newer judgement, or a settled one, never returns to it.
+  if (decision.action === 'close' && (work.triage?.state !== 'proposed' || work.triage.at !== decision.input.triageAt))
+    return { expected: { triageAt: decision.input.triageAt }, current: { triageAt: work.triage?.at ?? null, state: work.triage?.state ?? null } };
   if (decision.action === 'resolve') {
     // A decision requested before the pin existed falls back to the revision it named:
     // revisions never move back, so a refused request can never become applicable either.

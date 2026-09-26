@@ -16,7 +16,7 @@ Reuse is off until the operator defines a `reuse` policy with `graphyard validat
  "ignorable":["docs/**","*.md"]}
 ```
 
-`relevant.services` must name every environment service. A changed relevant path forbids reuse, and a path matching neither list is **unknown, and unknown refuses**. `identical` requires the same artifact manifest; `scoped` allows another when build inputs are unchanged and every change ignorable.
+`relevant.services` names every environment service. A changed relevant path forbids reuse; a path matching neither list is **unknown, and unknown refuses**. `identical` requires the same artifact manifest; `scoped` allows another when build inputs are unchanged and every change is ignorable.
 
 ## Reuse decisions
 
@@ -27,7 +27,7 @@ After a builder attests the new head, `graphyard validation reuse decision.json`
  "policy":{"id":"preview-reuse","revision":1},"buildAttestationId":"5c2e9a1b-7d3f-4a8e-b6c4-0f1d2e3a4b5c"}
 ```
 
-It is refused, listing every reason, unless the newest attempt is a fresh settled pass with the same pinned revisions and base and no relevant or unknown change; a grant records evidence whose `reuse` block expires at the freshness bound.
+Refused, with every reason, unless the newest attempt is a fresh settled pass with the same pinned revisions and base and no relevant or unknown change; a grant's `reuse` block expires at the freshness bound.
 
 ## Replay and analytics
 
