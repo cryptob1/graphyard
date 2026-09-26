@@ -4,7 +4,8 @@
 // the file that holds it. On 2026-09-25 a master granted six such requests by hand (GY-259, GY-402,
 // GY-406, GY-409, GY-413 twice). The loop reads each requested file from the base branch outside
 // every transaction and grants it when it defines or directly calls a symbol a criterion names, or
-// — for a test — when it holds a label, route or CLI output a criterion changes. Nothing here reads
+// — for a test — when it pins a label, route or CLI output a criterion changes: quoted, or as the
+// assertion its comment describes (GY-438 review follow-up). Nothing here reads
 // a file; anything these rules do not ground still goes to the approver.
 // ---------------------------------------------------------------------------
 import { namedPaths, pathScope, testFile, type ScopeCriterion } from './scope.js';
@@ -194,10 +195,21 @@ export function barrelSuccessorGround(path: string, planned: readonly { path: st
   return null;
 }
 
+/** Whether `value` reads as a pinned string in a test: a quoted literal on one of its lines holds it (comment tails cut, so a remark after a string pins nothing), or a comment opens on it as the description of what the test asserts (`GY-170 AC-3: Settings › Agents lists…`) — a remark that merely mentions it pins nothing. */
+function pinnedText(text: string, value: string) {
+  const quoted = new RegExp(`['"\`][^'"\`\n]*${escapeRegExp(value)}`);
+  const describes = new RegExp(`^\\s*(?://+|/?\\*+)?\\s*(?:[^:\\n]*:)?\\s*${escapeRegExp(value)}(?![A-Za-z0-9])`);
+  return text.split('\n').some(line => quoted.test(line.replace(/(?<=[\s;{},(=]|^)\/\/[^\n]*/g, '')) || describes.test(line));
+}
+
 /**
  * The ground an existing test file is granted on because it pins a UI label, route or CLI output a
  * criterion changes — the test holds that string, so the change breaks it — or null. A browser
  * test pins labels, never source, so the pinning rule (scope.ts pinningTestGround) cannot ground it; this one can.
+ * The pin reads like an assertion, never a mention (GY-438 review follow-up): a one-word label only
+ * where the test quotes it whole; a multi-word label or a route only where a quoted string holds it
+ * or a comment describes the test by it — a bare `text.includes` also matched a label a comment or
+ * an unrelated remark named, which exercises nothing the change would break.
  */
 export function criterionTestGround(path: string, text: string | null, symbols: readonly CriterionSymbol[]): string | null {
   if (!text || !testFile(path)) return null;
@@ -205,7 +217,7 @@ export function criterionTestGround(path: string, text: string | null, symbols: 
     // A command's name is not its output: dozens of tests run `master status`, few pin what it prints.
     if (entry.kind !== 'label' && entry.kind !== 'route') continue;
     // A one-word label is only a pinned string where the test quotes it whole.
-    const pinned = entry.kind === 'label' && !/\s/.test(entry.symbol) ? literal(text, entry.symbol) && new RegExp(`['"\`]${escapeRegExp(entry.symbol)}['"\`]`).test(text) : text.includes(entry.symbol);
+    const pinned = entry.kind === 'label' && !/\s/.test(entry.symbol) ? literal(text, entry.symbol) && new RegExp(`['"\`]${escapeRegExp(entry.symbol)}['"\`]`).test(text) : pinnedText(text, entry.symbol);
     if (pinned) return `${path} pins the ${entry.kind === 'label' ? 'label or output' : entry.kind} "${entry.symbol.length > 80 ? `${entry.symbol.slice(0, 79)}…` : entry.symbol}" that ${entry.criterion} changes`;
   }
   return null;
