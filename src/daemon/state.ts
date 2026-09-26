@@ -152,6 +152,13 @@ export const reclaimSummarySchema = z.object({
 }).strict();
 export type ReclaimSummary = z.infer<typeof reclaimSummarySchema>;
 
+/** The host's memory at the last cycle (GY-612): below its floor, new launches on the host are deferred. */
+export const hostMemoryStateSchema = z.object({
+  host: z.string().max(200).nullable(), at: z.string(), totalBytes: z.number().min(0), availableBytes: z.number().min(0), floorBytes: z.number().min(0),
+  low: z.boolean(), since: z.string().nullable(),
+  consumers: z.array(z.object({ command: z.string().max(200), processes: z.number().int().min(0), rssBytes: z.number().min(0) }).strict()).max(10).default([]),
+}).strict();
+
 export const scopeMeasurementSchema = z.object({
   work: z.string().max(200), epoch: z.number().int().min(0), at: z.string(),
   waitedMs: z.number().int().min(0), state: z.enum(['approved', 'refused']),
@@ -297,6 +304,8 @@ export const daemonStateSchema = z.object({
   config: z.object({ at: z.string(), changed: z.array(z.string().max(100)).max(100), refused: z.string().max(1000).nullable() }).strict().nullable().default(null),
   /** The last worktree reclamation: what it removed and how much room the host has. */
   reclaim: reclaimSummarySchema.nullable().default(null),
+  /** The host's memory as the last cycle read it, and whether launches are deferred on it. */
+  memory: hostMemoryStateSchema.nullable().default(null),
   /** Per-item passage clocks and the samples they produced; the loop's own latency measurement. */
   clocks: z.record(z.string(), itemClockSchema).default({}),
   latency: z.array(latencySampleSchema).default([]),

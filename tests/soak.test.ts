@@ -14,6 +14,8 @@ import { processJob } from '../src/github.js';
 import { Refusal, type Principal, type Work } from '../src/model.js';
 import { approverSessionName, decisionInput, masterConfigSchema, mergeExecutor, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { memoryActionKey } from '../src/daemon/cycle-dispatch.js';
+import type { HostMemoryReading } from '../src/master-resources.js';
 import { Launcher } from '../src/daemon/cycle.js';
 import { successorWidening } from '../src/model/successors.js';
 import { systemInvariants, type InvariantCheck } from '../src/model/invariants.js';
@@ -60,6 +62,11 @@ const plan = {
   items: 15, releaseEveryMs: 15 * minute, workMs: 20 * minute,
   rework: new Set([3, 7, 11]), deaths: new Set([5, 9]), deathAfterMs: 8 * minute,
   deploys: [2 * hour + 30 * minute, 5 * hour], split: { at: 45 * minute, item: 12 }, clean: 2, unstable: 4, slowRecompute: 8, exhaustedReviewer: 6,
+  // GY-612: the host's memory dips below its floor for an hour in the morning and then recovers,
+  // the way the day this item records went; the top consumers' ranking moves between cycles under
+  // it. It ends early enough that the backlog it builds drains before the deploys, so a delayed
+  // worker death is not mistaken for a lease the deploy lost.
+  memoryDip: { from: 30 * minute, until: 90 * minute },
 };
 const file = (n: number) => `src/soak/item-${n}.ts`;
 
@@ -123,10 +130,11 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
 
   // ---- Workers: the loop dispatches, the simulated session claims, works, pushes and submits (or dies). ----
   interface Session { work: string; key: string; branch: string; profile: WorkerProfile; epoch: number; pane: string; pushAt: number; diesAt: number | null; state: 'working' | 'submitted' | 'dead' }
-  const sessions: Session[] = [], lost: string[] = [];
+  const sessions: Session[] = [], lost: string[] = [], launches: number[] = [];
   const attempts = new Map<string, number>();
   const principalOf = (profile: WorkerProfile): Principal => ({ id: profile.principal, role: 'worker' });
   const dispatch: DaemonEffects['dispatch'] = async (work, profile) => {
+    launches.push(clock.now());
     const principal = principalOf(profile);
     const claimed = await engine.execute(principal, 'claim', work.id, {}, id());
     const epoch = claimed.epoch, key = work.key, n = numberOf(work);
@@ -180,6 +188,19 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     try { return await engine.requestEnqueue(principals.coordinator, match[1], data, key); }
     catch (error) { if (error instanceof Refusal) throw Object.assign(new Error(JSON.stringify({ error: error.message })), { confirmedRefusal: error.status >= 400 && error.status < 500 }); throw error; }
   };
+  // ---- Host memory (GY-612): below its floor the loop launches nothing, recording the crossing once each way. ----
+  const GiB = 2 ** 30;
+  let memoryReads = 0;
+  const memoryReading = (): HostMemoryReading => {
+    const elapsed = clock.now() - dayStart;
+    if (elapsed < plan.memoryDip.from || elapsed >= plan.memoryDip.until) return { totalBytes: 62 * GiB, availableBytes: 20 * GiB };
+    // The same two consumers with their ranking reversed every other read: the host's `ps` ranking
+    // moves while a dip stands, and a fault keyed on that wording would churn instances (GY-612).
+    const consumers = [{ command: 'node', processes: 3, rssBytes: 6 * GiB }, { command: 'claude', processes: 2, rssBytes: 5 * GiB }];
+    if (memoryReads++ % 2 === 1) consumers.reverse();
+    return { totalBytes: 62 * GiB, availableBytes: 2 * GiB, consumers };
+  };
+
   // One executor instance for the loop's process, and a fresh request per merge the loop asks for, as `master run` wires it.
   const executor = { principal: principals.coordinator.id, instance: `soak-${randomUUID()}` };
   const merge: DaemonEffects['merge'] = work => mergeExecutor(config, snapshot, transport, executor, randomUUID(), github.gh(repository))(work);
@@ -200,6 +221,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       return { source: 'endpoint', sha: production.sha, at: new Date(clock.now()).toISOString(), reason: null, deployed: serving.map(item => item.key), pending: delivered.filter(item => !serving.includes(item)).map(item => item.key) };
     },
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    hostMemory: async () => memoryReading(),
   };
 
   // ---- The day. ----
@@ -251,12 +273,12 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   }
 
   const final = (await store.list()).filter(item => items.some(entry => entry.id === item.id));
-  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart };
+  return { items, final, github, sessions, lost, launches, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart };
 }
 
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 180_000 }, async () => {
   const began = performance.now();
-  const { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
+  const { items, final, github, sessions, lost, launches, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
   const undelivered = final.filter(item => item.stage !== 'done' || !item.delivery);
   assert.deepEqual(undelivered.map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
@@ -280,6 +302,17 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.ok(final.find(item => item.key === items[plan.split.item - 1].key)!.plannedFiles.includes(`src/soak/item-${plan.split.item}-a.ts`), 'the split file re-planned its item onto the successors');
   const reviewed = final.find(item => item.key === items[plan.exhaustedReviewer - 1].key)!;
   assert.ok(reviewed.reviewFailovers?.some(failover => failover.profile === 'claude-reviewer' && failover.exhaustion === 'usage-limit' && failover.nextProfile === 'cursor-reviewer'), `the exhausted reviewer bot failed over to the next profile: ${JSON.stringify(reviewed.reviewFailovers)}`);
+  // GY-612: the host's memory dipped below its floor mid-morning and recovered. No worker launched
+  // while it stood, the crossing is recorded once each way, and one memory-pressure fault stands
+  // for the whole dip even though the consumers' ranking moved between cycles.
+  const memory = state.actions[memoryActionKey];
+  assert.ok(memory, 'the memory crossing was recorded');
+  assert.equal(memory.attempts, 2, 'one record on the way down, one on the way back up');
+  assert.match(memory.detail, /^Launches resumed: /, 'the last crossing recorded is the resumption');
+  const during = (at: number) => { const elapsed = at - dayStart; return elapsed >= plan.memoryDip.from && elapsed < plan.memoryDip.until; };
+  assert.deepEqual(launches.filter(during).map(at => new Date(at).toISOString()), [], 'no worker launched while the host was below its floor');
+  assert.ok(launches.some(at => at - dayStart >= plan.memoryDip.until), 'launching resumed once memory recovered');
+  assert.equal(state.faults.instances.filter(instance => instance.kind === 'memory-pressure').length, 1, 'one memory-pressure fault stands for the whole dip');
   assert.ok(cycles > 24 * 6, `the loop cycled through the day (${cycles} cycles)`);
   const seconds = (performance.now() - began) / 1000;
   assert.ok(seconds < 120, `the day runs well inside the three minutes the CI test job allows it (${seconds.toFixed(1)} s)`);

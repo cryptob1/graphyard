@@ -5,6 +5,7 @@ import { agentOwner, atomicPrivateWrite, closeHerdrPane, diskThresholdBytes, isP
 import { pinnedSessionRecords, readReviewLedger, sessionLedgerBound, SessionLedgerFullError, sessionLedgerRefusal, terminalSessionStates, updateReviewLedger, type ReviewRecord } from './reviewer.js';
 import { readProducerLedger, saveProducerLedger, type ProducerRecord } from './producer.js';
 import type { Work } from './model.js';
+import { runChild } from './child-runner.js';
 
 /**
  * The control plane's own resources (GY-132).
@@ -643,4 +644,79 @@ export async function dispatchRefusal(url: string, fetcher: typeof fetch = fetch
     if (response.ok && body.healthy !== false) return null;
     return `the control plane reports itself unhealthy (${(body.causes ?? [`HTTP ${response.status}`]).join('; ')}), so nothing is dispatched into a plane that cannot record the result`;
   } catch (error) { return `the control plane's /healthz could not be read (${error instanceof Error ? error.message : String(error)}), so nothing is dispatched into a plane that may not record the result`; }
+}
+
+/**
+ * Host memory (GY-612). The loop launched sessions whatever the host had left: on 26 September 2026
+ * a 62 GB host fell to one or two gigabytes available with nineteen verification runs live, and
+ * agent runtimes were reaped mid-session. Before any worker, reviewer or producer launch the loop
+ * reads the host's available memory; below the floor — 10% of total or 4 GB, whichever is larger —
+ * it defers new launches on that host with the reason recorded, raises one `resources` attention
+ * item naming the top memory consumers, and resumes launching once memory is back above the floor.
+ * Sessions already running are never stopped for it.
+ */
+export interface MemoryConsumer { command: string; processes: number; rssBytes: number }
+export interface HostMemoryReading { totalBytes: number; availableBytes: number; consumers?: MemoryConsumer[] }
+export interface HostMemoryState { host: string | null; at: string; totalBytes: number; availableBytes: number; floorBytes: number; low: boolean; since: string | null; consumers: MemoryConsumer[] }
+export const memoryFloorShare = 0.1, memoryFloorMinimumBytes = 4 * 2 ** 30;
+export const hostMemoryFloor = (totalBytes: number) => Math.max(totalBytes * memoryFloorShare, memoryFloorMinimumBytes);
+const gib = (bytes: number) => `${(bytes / 2 ** 30).toFixed(1)} GB`;
+
+/** The largest resident-memory users on the host, summed by command name. */
+export function memoryConsumers(listing: string, limit = 5): MemoryConsumer[] {
+  const byCommand = new Map<string, MemoryConsumer>();
+  for (const line of listing.split('\n')) {
+    const match = /^\s*(\d+)\s+(.+?)\s*$/.exec(line);
+    if (!match) continue;
+    const entry = byCommand.get(match[2]) ?? { command: match[2], processes: 0, rssBytes: 0 };
+    entry.processes++; entry.rssBytes += Number(match[1]) * 1024;
+    byCommand.set(match[2], entry);
+  }
+  return [...byCommand.values()].sort((a, b) => b.rssBytes - a.rssBytes).slice(0, limit);
+}
+
+/** This host's memory from /proc/meminfo, with its top consumers when it is below the floor; null where it cannot be read. */
+export async function readHostMemory(): Promise<HostMemoryReading | null> {
+  let meminfo: string;
+  try { meminfo = await readFile('/proc/meminfo', 'utf8'); } catch { return null; }
+  const field = (name: string) => { const match = new RegExp(`^${name}:\\s+(\\d+) kB`, 'm').exec(meminfo); return match ? Number(match[1]) * 1024 : null; };
+  const totalBytes = field('MemTotal'), availableBytes = field('MemAvailable');
+  if (totalBytes === null || availableBytes === null) return null;
+  if (availableBytes >= hostMemoryFloor(totalBytes)) return { totalBytes, availableBytes };
+  let listing = '';
+  try { listing = await runChild('ps', ['-eo', 'rss=,comm='], { timeoutMs: 5_000 }); } catch { /* the deferral stands without its consumers */ }
+  return { totalBytes, availableBytes, consumers: memoryConsumers(listing) };
+}
+
+const describeConsumers = (consumers: MemoryConsumer[]) => consumers.map(entry => `${entry.command}${entry.processes > 1 ? ` ×${entry.processes}` : ''} ${gib(entry.rssBytes)}`).join(', ');
+/** Why launches wait on this host, while its memory is below the floor. */
+export const memoryDeferral = (state: HostMemoryState) =>
+  `host ${state.host ?? 'this host'} has ${gib(state.availableBytes)} of ${gib(state.totalBytes)} memory available, below its ${gib(state.floorBytes)} floor, so new session launches on it are deferred until memory recovers${state.consumers.length ? `; top consumers: ${describeConsumers(state.consumers)}` : ''}`;
+
+/**
+ * Judge one reading against the last: the state the loop keeps, and the event to record when the
+ * host crossed its floor — `deferred` on the way down, `resumed` on the way back up.
+ */
+export function judgeHostMemory(previous: HostMemoryState | null, reading: HostMemoryReading, now: number, host: string | null = null): { state: HostMemoryState; event: 'deferred' | 'resumed' | null; detail: string } {
+  const floorBytes = hostMemoryFloor(reading.totalBytes), low = reading.availableBytes < floorBytes, at = new Date(now).toISOString();
+  const state: HostMemoryState = { host, at, totalBytes: reading.totalBytes, availableBytes: reading.availableBytes, floorBytes, low,
+    since: low ? previous?.low ? previous.since : at : null, consumers: low ? reading.consumers ?? previous?.consumers ?? [] : [] };
+  if (low && !previous?.low) return { state, event: 'deferred', detail: `Launches deferred: ${memoryDeferral(state)}` };
+  if (!low && previous?.low) return { state, event: 'resumed', detail: `Launches resumed: host ${host ?? 'this host'} has ${gib(reading.availableBytes)} of ${gib(reading.totalBytes)} memory available again, above its ${gib(floorBytes)} floor (deferred since ${previous.since})` };
+  return { state, event: null, detail: low ? `Launches deferred: ${memoryDeferral(state)}` : '' };
+}
+
+/** The one `resources` attention item a host below its memory floor raises, naming its top consumers. */
+export function hostMemoryAttention(state: HostMemoryState | null | undefined): AttentionItem[] {
+  if (!state?.low) return [];
+  return [{ subject: 'memory', text: `${memoryDeferral(state)}. Deferred since ${state.since}`,
+    ...agentOwner('master', 'Let running verification finish or stop what holds the memory named here; master run resumes launches on its own once available memory is back above the floor, and GRAPHYARD_VERIFICATION_SLOTS on the host lowers how many full suites and type checks run at once') }];
+}
+
+/** Why no session may be launched on `host` now, or null: an executor's `launchHold` (GY-612). */
+export async function hostMemoryHold(host: string | null, read: () => Promise<HostMemoryReading | null> = readHostMemory, now: () => number = Date.now): Promise<string | null> {
+  const reading = await read();
+  if (!reading) return null;
+  const { state } = judgeHostMemory(null, reading, now(), host);
+  return state.low ? memoryDeferral(state) : null;
 }

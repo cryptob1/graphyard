@@ -11,11 +11,11 @@
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "dev:web": "vite --host 127.0.0.1",
-    "build": "tsc --noEmit && vite build",
+    "build": "node --import tsx tests/helpers/run-tests.ts --typecheck && vite build",
     "start": "tsx src/server.ts",
     "cli": "tsx src/cli.ts",
     "test": "node --import tsx tests/helpers/run-tests.ts",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "node --import tsx tests/helpers/run-tests.ts --typecheck",
     "docs:check": "node scripts/check-docs.mjs",
     "test:browser": "node --import tsx tests/helpers/run-tests.ts --browser"
   },

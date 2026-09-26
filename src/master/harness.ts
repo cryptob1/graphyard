@@ -12,6 +12,8 @@ import { accountLaunch } from './environments.js';
 import { type RequestDelivery, startAgentSession } from './launch.js';
 import { createdHerdrTab, type HerdrAgent, herdrJson, stopCreatedHerdrTab } from './herdr.js';
 import type { PreparedWorker } from './dispatch.js';
+import { worktreeRoot } from '../install/worktree-root.js';
+import { verificationEnvironment } from './verification-slots.js';
 
 /**
  * The master's harness rules cover everything the master owns, not only the coordination loop:
@@ -141,16 +143,24 @@ async function repositoryCarriesClaudeSettings(root: string) {
  * out the repository's AGENTS.md, so such a session carries the launch authorization written there
  * (repository-setup.ts launchAuthorization) as its role text, loaded from the session's role file.
  */
+/** A session's verification slot variables (GY-612), or none when the managed worktree root cannot be written: master status reports that root. */
+export function sessionVerificationEnvironment(root: string, config: Pick<MasterConfig, 'repository' | 'run'>): Record<string, string> {
+  try { return verificationEnvironment(worktreeRoot(root, config)); } catch { return {}; }
+}
 export async function prepareSessionHarness(root: string, config: MasterConfig, input: Omit<SessionHarnessInput, 'cliPath' | 'repository' | 'baseBranch' | 'credentialHome' | 'credentialDirectories'> & { profile: string; credentialFiles?: string[] }) {
   const plan = sessionHarnessPlan({ ...input, cliPath: config.cliPath, repository: config.repository, baseBranch: config.baseBranch, credentialHome: dirname(dirname(config.credentialFile)),
     credentialDirectories: [dirname(config.credentialFile), ...(config.reviewer ? [dirname(config.reviewer.credentialFile)] : []), ...(input.credentialFiles ?? []).map(file => dirname(file))] });
-  if (input.kind !== 'claude' || !await repositoryCarriesClaudeSettings(root)) return { plan, file: null, args: [] as string[], role: null as string | null };
+  // Every session's heavy verification runs share the host's slots (GY-612): its tab carries the
+  // lock directory under the managed worktree root, the bound, and the wrappers first on its PATH.
+  // A root that cannot be written leaves the session unbounded rather than unlaunched.
+  const environment = sessionVerificationEnvironment(root, config);
+  if (input.kind !== 'claude' || !await repositoryCarriesClaudeSettings(root)) return { plan, file: null, args: [] as string[], role: null as string | null, environment };
   const file = sessionHarnessFile(root, input.role, input.profile);
   await mkdir(dirname(file), { recursive: true, mode: 0o700 });
   await atomicPrivateText(file, `${JSON.stringify({ permissions: { allow: plan.allow.map(entry => entry.rule), deny: plan.deny.map(entry => entry.rule) } }, null, 2)}\n`);
   // The authorization is the session's role text: startAgentSession writes it to the session's
   // role file and the command line loads that file (GY-121), never the text itself.
-  return { plan, file, args: ['--setting-sources', 'user', '--settings', file], role: launchAuthorization.replace(/\s+/g, ' ') as string | null };
+  return { plan, file, args: ['--setting-sources', 'user', '--settings', file], role: launchAuthorization.replace(/\s+/g, ' ') as string | null, environment };
 }
 export async function startMaster(root: string, kind: WorkerProfile['kind'], agentArgs: string[], agents: HerdrAgent[], run?: ChildRun) {
   if (!kind) throw new Error('Choose a supported master agent kind');

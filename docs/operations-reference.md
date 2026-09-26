@@ -68,6 +68,12 @@ After an hour without deliveries `master status` points to `https://github.com/s
 
 Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow the volume and `GRAPHYARD_DATABASE_MAX_BYTES`.
 
+### Host memory
+
+Heavy verification runs a session starts (`npm test`, `npm run test:browser`, `npm run typecheck`, `tsc --noEmit`, `npx tsc`) take a host slot first: a lock directory, `.verification-slots` under the managed worktree root. Default slots: max(2, floor(total memory GB / 8)); set `GRAPHYARD_VERIFICATION_SLOTS` in the loop's environment on that host. A run finding every slot held prints that it waits, naming the directory and holders. Runs outside sessions (CI, your shell) are unbounded.
+
+Below max(10% of total, 4 GB) available, the loop, dispatcher and executors launch no worker, reviewer or producer on that host, recording `Launches deferred` (`escalation:dispatch:memory`) and one `memory` attention item (class `resources`) naming the top consumers; launches resume, recorded, once memory recovers. Running sessions are untouched. The dip stands as one `memory-pressure` fault instance however the consumers' ranking moves between cycles: the fault's text is fixed, and the attention item keeps the moving detail.
+
 ## Bootstrap mode for a self-proving change
 
 A `policy:bootstrap` holder adds `"bootstrap": {"reason": "…", "contractPaths": ["src/herdr/recovery.ts"]}` to that criterion. Other gates apply; `e2e:` proofs cannot be deferred; the next item touching those paths owes it (`graphyard obligations`).

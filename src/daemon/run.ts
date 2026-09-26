@@ -45,6 +45,8 @@ export function daemonSummary(state: DaemonState, now: number, intervalMs: numbe
     profiles: state.profiles,
     config: state.config,
     reclaim: state.reclaim,
+    // The host's memory as the last cycle read it; while `low`, launches on this host are deferred (GY-612).
+    memory: state.memory,
     // Every decision the loop has put to an approver and not yet seen applied and retired.
     approvals: Object.entries(state.approvals).map(([key, watch]) => ({ key, ...watch })),
     // Fault instances by class in the recurrence window, and the item each recurring class filed (GY-173).
