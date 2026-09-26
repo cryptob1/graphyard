@@ -1,0 +1,201 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { createHash, randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { GitHub, ObservationPacer, budgetTight, mergePathReserve, observationClaimOrder, observationPace, observationThroughputStatus, tightBudgetDecision, type GitHubBudget } from '../src/github.js';
+import { githubBudgetAttention } from '../src/cli/github-budget-attention.js';
+import { evaluate, type Work } from '../src/model.js';
+
+// GY-567. Each test is named for the proof it produces: unit:observation-rate-paced,
+// unit:observation-priority-under-budget, unit:budget-projection-reported.
+
+const CI = 15368;
+const sha = (seed: string) => createHash('sha1').update(seed).digest('hex');
+
+// ---- The hour, simulated: workers, a shared budget, and a fleet of due jobs ----
+
+interface Hour { minRemaining: number; maxHeadGapMs: number; headObservations: number; jobs: number; belowReserveAt: number | null }
+/**
+ * One budget hour at 100 ms resolution. `workers` loops each wait for the pacer (when `paced`),
+ * claim the merge-queue head first when it is due (every 20 s after its last observation) and
+ * otherwise the oldest due of `backlog` other jobs (due 60 s after theirs), and spend `cost`
+ * requests spread across a 4-second job. The budget is what GitHub's headers would report.
+ */
+function simulateHour(workers: number, options: { paced: boolean; limit?: number; cost?: number; backlog?: number }): Hour {
+  const limit = options.limit ?? 5000, cost = options.cost ?? 12, backlog = options.backlog ?? 30, hour = 3_600_000, step = 100, duration = 4_000;
+  const resetAt = hour;
+  let remaining = limit;
+  const pacer = new ObservationPacer();
+  const due = [0, ...Array.from({ length: backlog }, (_, index) => index * 1000)];
+  const busy = new Set<number>();
+  const state = Array.from({ length: workers }, () => ({ sleepUntil: 0, job: null as null | { index: number; startedAt: number; spent: number; settle?: (charged?: number, at?: number) => void } }));
+  let lastHead = 0, maxHeadGapMs = 0, headObservations = 0, jobs = 0, minRemaining = remaining, belowReserveAt: number | null = null;
+  for (let now = 0; now < hour; now += step) {
+    for (const worker of state) {
+      if (worker.job) {
+        const job = worker.job;
+        const owed = Math.min(cost, Math.floor((now - job.startedAt) / duration * cost) + 1);
+        remaining -= owed - job.spent; job.spent = owed;
+        if (now - job.startedAt >= duration) {
+          busy.delete(job.index); due[job.index] = now + (job.index === 0 ? 20_000 : 60_000);
+          if (job.index === 0) { maxHeadGapMs = Math.max(maxHeadGapMs, now - lastHead); lastHead = now; headObservations++; }
+          job.settle?.(job.spent, now); worker.job = null; jobs++;
+        }
+        continue;
+      }
+      if (worker.sleepUntil > now) continue;
+      const slot = options.paced ? pacer.start({ remaining, resetAt, reserve: mergePathReserve }, cost, now) : null;
+      if (slot && !slot.settle) { worker.sleepUntil = now + Math.min(slot.wait, 5000); continue; }
+      const candidates = due.map((at, index) => ({ at, index })).filter(entry => entry.at <= now && !busy.has(entry.index));
+      const next = candidates.find(entry => entry.index === 0) ?? candidates.sort((a, b) => a.at - b.at)[0];
+      if (!next) { slot?.settle(0, now); worker.sleepUntil = now + 1000; continue; }
+      busy.add(next.index);
+      worker.job = { index: next.index, startedAt: now, spent: 0, settle: slot?.settle };
+    }
+    minRemaining = Math.min(minRemaining, remaining);
+    if (belowReserveAt === null && remaining < mergePathReserve) belowReserveAt = now;
+  }
+  maxHeadGapMs = Math.max(maxHeadGapMs, hour - lastHead);
+  return { minRemaining, maxHeadGapMs, headObservations, jobs, belowReserveAt };
+}
+
+test('unit:observation-rate-paced — 4 workers sharing one paced budget of 5000 requests an hour at 12 requests a job keep it above the merge-path reserve all hour and observe the queue head at least every 2 minutes', () => {
+  assert.equal(mergePathReserve, 500, 'the default reserve the simulation keeps');
+  // The incident this replaces: four unpaced workers drained the budget in minutes (2026-09-26).
+  const unpaced = simulateHour(4, { paced: false });
+  assert.ok(unpaced.belowReserveAt !== null && unpaced.belowReserveAt < 1_800_000, `unpaced workers breach the reserve early (at ${unpaced.belowReserveAt} ms)`);
+  const four = simulateHour(4, { paced: true });
+  assert.ok(four.minRemaining > mergePathReserve, `paced, the budget never falls to the reserve (lowest ${four.minRemaining})`);
+  assert.ok(four.maxHeadGapMs <= 120_000, `the queue head is observed at least every 2 minutes (longest gap ${four.maxHeadGapMs} ms)`);
+  assert.ok(four.jobs * 12 >= (5000 - mergePathReserve) * 0.9, `pacing spends the budget above the reserve rather than starving (${four.jobs} jobs)`);
+  // The same bound at every concurrency the installation may set.
+  for (let workers = 1; workers <= 8; workers++) {
+    const hour = simulateHour(workers, { paced: true });
+    assert.ok(hour.minRemaining > mergePathReserve, `${workers} worker(s): lowest remaining ${hour.minRemaining}`);
+    assert.ok(hour.maxHeadGapMs <= 120_000, `${workers} worker(s): longest head gap ${hour.maxHeadGapMs} ms`);
+  }
+});
+
+test('unit:observation-rate-paced — the pace is the budget above the reserve, less what is in flight, over the time to the reset; a job it cannot afford waits for a near reset or spends from the reserve', () => {
+  const now = 1_000_000;
+  assert.deepEqual(observationPace({ remaining: null, resetAt: null, reserve: 500 }, 0, 12, now), { tier: 'unpaced', rate: null }, 'an unknown budget is never held against');
+  assert.deepEqual(observationPace({ remaining: 5000, resetAt: now - 1, reserve: 500 }, 0, 12, now), { tier: 'unpaced', rate: null }, 'nor is one whose reset has passed');
+  const spendable = observationPace({ remaining: 5000, resetAt: now + 3_600_000, reserve: 500 }, 100, 12, now);
+  assert.equal(spendable.tier, 'spendable');
+  assert.equal(spendable.rate, 4400 / 3_600_000);
+  assert.deepEqual(observationPace({ remaining: 505, resetAt: now + 30_000, reserve: 500 }, 0, 12, now), { tier: 'reset', rate: 0, until: now + 31_000 }, 'a reset under a minute away is waited for');
+  assert.deepEqual(observationPace({ remaining: 505, resetAt: now + 600_000, reserve: 500 }, 0, 12, now), { tier: 'reserve', rate: 505 / 600_000 }, 'further off, the merge path is paced from the reserve');
+  // The shared pacer: one slot per estimate / rate, a deferral gives its time back.
+  const pacer = new ObservationPacer();
+  const budget = { remaining: 4100, resetAt: now + 3_600_000, reserve: 500 };
+  const first = pacer.start(budget, 12, now);
+  assert.ok(first.settle);
+  assert.equal(pacer.inFlight, 12);
+  const second = pacer.start(budget, 12, now);
+  assert.ok(!second.settle && second.wait === 12 / (3600 / 3_600_000), 'a second worker waits one spacing (12 s at 1 request/s)');
+  first.settle(0, now);
+  assert.equal(pacer.inFlight, 0);
+  assert.ok(pacer.start(budget, 12, now).settle, 'a job that charged nothing returns its slot at once');
+  assert.deepEqual(pacer.report().tier, 'spendable');
+});
+
+test('unit:observation-rate-paced — the GitHub client paces its workers from the budget its responses report and reports the pace in force', () => {
+  const github = new GitHub({ repository: 'owner/project', base: 'main', appId: 1, installationId: 2, privateKey: 'not-used' });
+  const now = Date.now();
+  Object.assign(github, { rate: { limit: 5000, remaining: 2300, used: 2700, resetAt: now + 1_800_000, observedAt: now } });
+  const slot = github.paceObservation(now);
+  assert.ok(slot.settle, 'the first worker starts');
+  const waiting = github.paceObservation(now);
+  assert.ok(!waiting.settle && waiting.wait > 0, 'the next waits for the pace');
+  const pace = github.budget(now).pace;
+  assert.equal(pace.tier, 'spendable');
+  assert.equal(pace.perMinute, Math.round((2300 - mergePathReserve - 10) / 30 * 100) / 100, 'the spendable budget less the estimate in flight, spread over the 30 minutes to the reset');
+  slot.settle(12, now);
+});
+
+// ---- Work items, as observation-throughput.test.ts builds them ----
+
+const item = (key: string, pr: number, head: string, baseSha: string, overrides: Partial<Work> = {}): Work => ({
+  id: randomUUID(), key, title: key, description: '', type: 'feature', priority: 2, dependencies: [], criteria: [{ id: 'AC-1', text: 'Proven', proofs: [] }],
+  policy: { checks: ['test', 'typecheck'], review: true }, plannedFiles: ['src/'], stage: 'merge', revision: 3, policyRevision: 1, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+  stageEnteredAt: new Date().toISOString(), ready: true, epoch: 1, lease: null, workspaces: [{ host: 'machine', path: `/w/${key}`, branch: `graphyard/${key.toLowerCase()}-1`, epoch: 1, owner: 'implementer' }],
+  candidate: { sha: head, baseSha, pr, branch: `graphyard/${key.toLowerCase()}-1`, author: 'implementer' }, submission: { epoch: 1, pr }, reworkRequested: false, scenarioRequirements: [],
+  evidence: [], observation: null, blocker: null, gates: [], violations: [], escalations: [], implementers: [], queueHistory: [], ...overrides } as unknown as Work);
+const observed = (work: Work, approved = true) => ({
+  candidate: work.candidate!, checks: ['test', 'typecheck'].map((name, index) => ({ name, result: 'success', appId: CI, id: index + 1 })),
+  reviews: approved ? [{ reviewer: 'independent-reviewer', sha: work.candidate!.sha, state: 'APPROVED', id: 900, submittedAt: new Date().toISOString() }] : [],
+  merged: false, mergeSha: null, mergeable: true, prState: 'open' as const, draft: false,
+  baseTip: work.candidate!.baseSha, baseTipContained: true, protected: true, files: ['src/feature.ts'], at: new Date(Date.now() - 30_000).toISOString(),
+  scopeFiles: [{ path: 'src/feature.ts', status: 'modified' as const, sha: sha(`scope-${work.key}`), additions: 3, deletions: 1, binary: false }],
+}) as Work['observation'];
+const settle = (work: Work, all: Work[], approved = true) => { const observation = observed(work, approved); return { ...work, observation, ...evaluate({ ...work, observation }, all, new Date(), [CI]) } as Work; };
+
+const budgetOf = (overrides: Partial<GitHubBudget> = {}) => ({ belowReserve: false, exhaustsBeforeReset: false, steadyStateBudget: 2000, resetAt: new Date(Date.now() + 1_800_000).toISOString(),
+  pace: { tier: 'spendable' as const, perMinute: 75, intervalMs: 9600, inFlight: 0, estimate: 12 }, ...overrides });
+
+test('unit:observation-priority-under-budget — under a tight budget the queue head and in-flight merge are claimed first, then items with running sessions, then the rest; idle items wait for webhooks', () => {
+  const base = sha('main-567');
+  const queue = [0, 1, 2].map(index => item(`GY-Q${index}`, 300 + index, sha(`q${index}`), base, { queue: { sequence: index + 1, enqueuedAt: new Date(Date.now() - 3_600_000).toISOString(), policyRevision: 1, speculation: null } } as Partial<Work>));
+  const settledQueue = queue.map(work => settle(work, queue));
+  const flightWork = settle(item('GY-FLIGHT', 400, sha('flight'), base), settledQueue);
+  const flight = { ...flightWork, stage: 'merge', gates: flightWork.gates.map(gate => ({ ...gate, passed: true, reasons: [] })), violations: [],
+    mergeAuthorization: { sha: flightWork.candidate!.sha, baseSha: flightWork.candidate!.baseSha, policyRevision: 1, at: new Date().toISOString() } } as Work;
+  const running = item('GY-RUN', 401, sha('run'), base, { stage: 'build', candidate: null, observation: null,
+    sessions: [{ id: 'worker:1', state: 'running', endedAt: null, kind: 'implementation' }] } as unknown as Partial<Work>);
+  const waiting = settle(item('GY-WAIT', 402, sha('wait'), base, { criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['manual:budget'] }] }), settledQueue, false);
+  const idle = item('GY-IDLE', 403, sha('idle'), base, { stage: 'build', candidate: null, observation: null });
+  const all = [idle, waiting, running, flight, ...settledQueue];
+  const keys = (order: string[]) => order.map(id => all.find(work => work.id === id)!.key);
+
+  const tight = keys(observationClaimOrder(all, 1, Date.now(), true));
+  // The authorized merge in flight is itself the predicted head; the head band and it come first.
+  const mergePath = tight.slice(0, tight.indexOf('GY-RUN'));
+  assert.ok(mergePath.includes('GY-FLIGHT') && mergePath.includes('GY-Q0') && mergePath.every(key => key === 'GY-FLIGHT' || key.startsWith('GY-Q')), `the head band and the in-flight merge come first: ${tight.join(', ')}`);
+  assert.equal(tight.indexOf('GY-WAIT'), tight.indexOf('GY-RUN') + 1, `then the running session, then everything else: ${tight.join(', ')}`);
+  assert.ok(!tight.includes('GY-IDLE'), 'an idle item is left to availability order');
+  const relaxed = keys(observationClaimOrder(all, 1, Date.now(), false));
+  assert.ok(relaxed.indexOf('GY-WAIT') < relaxed.indexOf('GY-RUN'), 'with budget to spare, the observation a review waits on stays ahead of running sessions');
+
+  // What makes a budget tight, and what a tight budget does to an idle observation.
+  assert.equal(budgetTight(budgetOf()), false, '75/min paced is above the steady-state share (2000/h)');
+  assert.equal(budgetTight(budgetOf({ pace: { tier: 'spendable', perMinute: 20, intervalMs: 36_000, inFlight: 0, estimate: 12 } })), true, 'paced under the steady-state share per minute');
+  assert.equal(budgetTight(budgetOf({ exhaustsBeforeReset: true })), true);
+  assert.equal(budgetTight(budgetOf({ belowReserve: true })), true);
+  const now = new Date();
+  const tightBudget = budgetOf({ exhaustsBeforeReset: true });
+  const deferral = tightBudgetDecision('idle', tightBudget, false, now);
+  assert.ok(deferral && Date.parse(deferral.until) === Date.parse(tightBudget.resetAt!) + 2000 && /webhook wakes and conditional reads/.test(deferral.reason), 'an idle poll waits for the reset or a webhook');
+  assert.equal(tightBudgetDecision('idle', tightBudget, true, now), null, 'a webhook wake is observed');
+  assert.equal(tightBudgetDecision('merge', tightBudget, false, now), null);
+  assert.equal(tightBudgetDecision('active', tightBudget, false, now), null);
+  assert.equal(tightBudgetDecision('idle', budgetOf(), false, now), null, 'with budget to spare idle polling continues');
+});
+
+test('unit:budget-projection-reported — master status reports remaining, reset, rate per minute and projected exhaustion, and raises attention when exhaustion comes before the reset', () => {
+  const github = new GitHub({ repository: 'owner/project', base: 'main', appId: 1, installationId: 2, privateKey: 'not-used' });
+  const now = Date.now();
+  Object.assign(github, { rate: { limit: 5000, remaining: 2545, used: 2455, resetAt: now + 1_800_000, observedAt: now },
+    charges: Array.from({ length: 6130 }, (_, index) => ({ at: now - (index % 600) * 1000, kind: 'pulls' })) });
+  const budget = github.budget(now);
+  assert.equal(budget.perMinute, 613, 'the incident\'s 613 requests a minute');
+  assert.equal(budget.exhaustsBeforeReset, true);
+  assert.ok(Date.parse(budget.projectedExhaustionAt!) < Date.parse(budget.resetAt!));
+
+  const report = observationThroughputStatus({ githubBudget: budget }, { work: [], now: new Date(now).toISOString(), jobs: [] }, now);
+  assert.deepEqual(report.budget && { remaining: report.budget.remaining, resetAt: report.budget.resetAt, perMinute: report.budget.perMinute, projectedExhaustionAt: report.budget.projectedExhaustionAt, exhaustsBeforeReset: report.budget.exhaustsBeforeReset },
+    { remaining: 2545, resetAt: budget.resetAt, perMinute: 613, projectedExhaustionAt: budget.projectedExhaustionAt, exhaustsBeforeReset: true });
+  assert.equal(report.budget!.pacedPerMinute, budget.pace.perMinute, 'the pace in force is reported beside the spend rate');
+  assert.equal(observationThroughputStatus(null, { work: [], now: new Date(now).toISOString() }, now).budget, null, 'no reading, no budget');
+
+  github.paceObservation(now);
+  const [item] = githubBudgetAttention({ githubBudget: github.budget(now) }, now);
+  assert.equal(item.subject, 'github');
+  assert.match(item.text, /2545 of 5000 requests remain and the spend rate is 613\/min/);
+  assert.match(item.text, /exhausted at .* before it resets at/);
+  assert.match(item.text, /observation workers are paced to [\d.]+\/min \(spendable\)/);
+  assert.deepEqual(githubBudgetAttention({ githubBudget: { ...github.budget(now), exhaustsBeforeReset: false } }, now), [], 'no attention while the budget lasts to the reset');
+
+  const docs = readFileSync(new URL('../docs/operations-reference.md', import.meta.url), 'utf8');
+  assert.match(docs, /GRAPHYARD_OBSERVATION_CONCURRENCY/);
+  assert.match(docs, /pace/i, 'the pacing rule is documented');
+});
