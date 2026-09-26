@@ -312,6 +312,20 @@ test('unit:loop-applies-routine-remedies — the loop settles a lapsed containme
   await relaunchUnansweredApprovers(adopted);
   assert.deepEqual(launched, ['d-old'], 'a decision whose approver session is still live is left alone');
 
+  // In the loop's own cycles the launch goes to the launcher beside the cycle (GY-616), never awaited in it.
+  const handed: string[] = [];
+  const detachedCycle = cycle([waiting], {
+    agents: [], detached: true,
+    launch: (_kind, _item, key) => { handed.push(key); return true; },
+    effects: {
+      decisions: async () => ({ decisions: [{ id: 'd-slow', action: 'unblock', state: 'requested', input: null, approvedBy: null, requestedAt: asked }] }),
+      approver: async (_target, decision) => { launched.push(decision); return { agentName: 'approver-s', pane: null }; },
+    },
+  });
+  await relaunchUnansweredApprovers(detachedCycle);
+  assert.deepEqual(handed, ['launch:approver:d-slow'], 'the relaunch is handed to the shared launcher');
+  assert.deepEqual(launched, ['d-old'], 'and not run inside the cycle');
+
   // A decision the loop's approval supervision watches is relaunched there (GY-551), never here too.
   const watchedCycle = cycle([waiting], {
     agents: [],

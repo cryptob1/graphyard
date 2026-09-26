@@ -427,12 +427,19 @@ export async function relaunchUnansweredApprovers(cycle: Cycle) {
         // decision requested with no approver at all is never given up on.
         if (previous && (previous.attempts >= maxApproverLaunches || (previous.state === 'done' ? clock - Date.parse(previous.at) < unansweredDecisionMs : !readyToRetry(previous, state.cycle)))) continue;
         const attempts = (previous?.attempts ?? 0) + 1;
-        try {
-          const launched = await approver(item, decision.id);
-          performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `Relaunched approver ${launched.agentName} for ${item.key}'s unanswered ${decision.action} decision ${decision.id} (requested ${decision.requestedAt}, unanswered past ${unansweredDecisionMs / 60_000} min; launch ${attempts} of ${maxApproverLaunches})`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
-        } catch (error) {
-          performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'failed', detail: `Could not relaunch the approver for ${item.key}'s unanswered decision ${decision.id}: ${message(error)}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
-        }
+        const relaunch = async (sink: DaemonAction[]) => {
+          try {
+            const launched = await approver(item, decision.id);
+            sink.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `Relaunched approver ${launched.agentName} for ${item.key}'s unanswered ${decision.action} decision ${decision.id} (requested ${decision.requestedAt}, unanswered past ${unansweredDecisionMs / 60_000} min; launch ${attempts} of ${maxApproverLaunches})`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+          } catch (error) {
+            sink.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'failed', detail: `Could not relaunch the approver for ${item.key}'s unanswered decision ${decision.id}: ${message(error)}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+          }
+        };
+        // The launch runs on the launcher beside the loop's cycle (GY-616), as the loop's own approver
+        // launches do, so slow launches never hold up this cycle's merges and dispatches; its result
+        // is reported next cycle. A cycle run on its own launches in place.
+        if (cycle.detached) cycle.launch('decision', item, `launch:approver:${decision.id}`, [], relaunch);
+        else await relaunch(performed);
       }
     });
   }
