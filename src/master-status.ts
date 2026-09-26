@@ -18,6 +18,7 @@ import { overlongSessionAttention } from './cli/overlong-sessions.js';
 import { githubBudgetAttention } from './cli/github-budget-attention.js';
 import { unansweredRequestAttention, unobtainableReviewAttention } from './cli/unanswered-requests.js';
 import { consentHoldItems } from './cli/consent-holds.js';
+import { untriagedAttention } from './triage.js';
 import { setupHealth } from './cli/master-setup.js';
 import { attributionFor, describeReading, loadedRevision, readDisk, readPlaneResources, readReclaimReports, readResources, resourceAttention, type ResourceReading } from './master-resources.js';
 
@@ -198,6 +199,8 @@ export async function derivedAttention(root: string, master: MasterConfig, maste
   const budget = githubBudgetAttention(coordinator);
   const overlong = overlongSessionAttention(snapshot, { ...observed.runtime, hostId: master.hostId }, { proof: master.run.producerTimeoutMinutes * 60_000 });
   const stuck = stuckRequestReport({ reviews: observed.reviews, producers: observed.producers }, now).attentionItems;
+  // A machine-filed item no triage has judged within a day of filing (GY-402).
+  const triage = untriagedAttention(snapshot);
   const host: AttentionItem[] = [];
   if (observed.standalone) {
     const cursor = await readDispatchCursor(root, master, () => {}).catch(error => ({ error: error instanceof Error ? error.message : 'Master dispatch cursor is unreadable' }));
@@ -208,6 +211,6 @@ export async function derivedAttention(root: string, master: MasterConfig, maste
     host.push(...concurrencyAttention([roleConcurrency('reviewer', master.reviewers, snapshot.work, observed.runtime.agents, reviews, sessions, now), roleConcurrency('producer', master.producers, snapshot.work, observed.runtime.agents, sessions.producers, sessions, now)])
       .map(item => ({ ...item, ...classified('concurrency-starved') })));
   }
-  return { scopeRequests, unobtainable, unanswered, stalledItems, actorless, executors, conflicted, stalled, owed, budget, overlong,
-    items: [...host, ...executors.attention, ...scopeRequests, ...unanswered, ...unobtainable, ...conflicted, ...stuck, ...stalledItems, ...actorless, ...stalled, ...overlong, ...budget, ...owed.items] };
+  return { scopeRequests, unobtainable, unanswered, stalledItems, actorless, executors, conflicted, stalled, owed, budget, overlong, triage,
+    items: [...host, ...executors.attention, ...scopeRequests, ...unanswered, ...unobtainable, ...conflicted, ...stuck, ...stalledItems, ...actorless, ...stalled, ...overlong, ...budget, ...triage, ...owed.items] };
 }

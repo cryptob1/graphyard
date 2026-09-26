@@ -5,6 +5,7 @@ import { scopeRefusalBlocker, unplannedPaths } from '../model/scope.js';
 import { save } from '../store.js';
 import { authenticated, digest, findWork, readDecisions, receipt, record } from './decisions.js';
 import type { Services } from './routes.js';
+import { refuseTriageClosure } from './followups.js';
 
 /**
  * The approver's considered decline, recorded rather than expressed by ending the session: the
@@ -28,6 +29,8 @@ export async function refuseDecision(services: Services, caller: Principal, id: 
     demand(decision!.state === 'requested', `Decision ${decision!.id} is already ${decision!.state}; only a requested decision can be refused`, 409);
     await record(db, work!, actor.id, 'decision.declined', { id: decision!.id, action: decision!.action, reason: data.reason, requestedBy: decision!.requestedBy, approver: { id: actor.id, role: actor.role } });
     await answerScopeRequest(db, work!, decision!, actor, data.reason, now);
+    // A refused triage closure returns the item to triage (GY-402).
+    if (decision!.action === 'close') await refuseTriageClosure(db, work!, decision!, actor.id, data.reason, now);
     const result = (await readDecisions(db, work!)).find(entry => entry.id === decision!.id)!;
     await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
     return result;

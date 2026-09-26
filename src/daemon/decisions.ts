@@ -6,6 +6,7 @@ import { mechanicalFailure, mechanicalVerdicts } from '../model/mechanical-proof
 import { unexercisedFindings } from '../auto-dispatch.js';
 import { guardBroadScope, type MasterConfig, type ContainmentAssessment, containmentPhase, type HerdrAgent } from '../master.js';
 import { researchRework } from '../research.js';
+import { triageClosure } from '../model/machine-backlog.js';
 import { actionDetailMax, type ApprovalWatch, message } from './state.js';
 
 // ---- Routine decisions ---------------------------------------------------------------------
@@ -94,7 +95,7 @@ export function reworkObservationWait(work: Work, now: number, pause: GitHubPaus
   return null;
 }
 
-export const routineDecisionActions = ['rework', 'recover', 'merge', 'resolve', 'requirements'] as const;
+export const routineDecisionActions = ['rework', 'recover', 'merge', 'resolve', 'requirements', 'close'] as const;
 export type RoutineDecisionAction = typeof routineDecisionActions[number];
 /** `input` is what the decision names beyond what `decisionInput` derives from the item (a resolve's trigger). */
 /** `escalation` is the one standing escalation a resolve settles: a standing request for any other is not this decision. */
@@ -135,7 +136,8 @@ export function scopeRoutineDecision(work: Work, now: number, judged: boolean): 
 export function routineDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>, now: number, assessment?: ContainmentAssessment | null): RoutineDecision | null {
   const needed = neededDecision(work, config);
   if (!needed) return null;
-  if (needed.action === 'merge') return needed;
+  // Neither attests anything about a worker: a merge is of a mergeable candidate, a triage closure of an unreleased backlog item.
+  if (needed.action === 'merge' || needed.action === 'close') return needed;
   // A lease-loss a newer attempt superseded rests on the record, not on this host: see supersededLeaseLoss.
   if (needed.action === 'resolve' && supersededLeaseLoss(work)?.superseded) return needed;
   const stopped = workerStopped(work, now, assessment);
@@ -149,6 +151,11 @@ export function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge
     return work.containmentQuarantine
       ? { action: 'recover', reason: `${work.key} is delivered and still fenced by its epoch ${work.containmentQuarantine.epoch} containment quarantine; recovery releases it without touching the delivery.`, binding: String(work.containmentQuarantine.epoch) } : null;
   }
+  // A triage closure the triage agent proposed for a machine-filed item (GY-402) is applied only
+  // once the independent approver agrees; the decision binds the judgement it applies.
+  const closure = work.triage?.state === 'proposed' ? triageClosure(work.triage.judgement) : null;
+  if (closure) return { action: 'close', reason: `${work.key} is a machine-filed backlog item the triage agent judged should be closed (${closure.kind}${closure.ref ? ` of ${closure.ref}` : ''}): ${closure.reason}`.slice(0, 2000),
+    binding: `triage:${work.triage!.at}`, input: { ...closure, triageAt: work.triage!.at } };
   // Like a verdict, a conflict keeps matching the head it was found on until a new one is pushed,
   // and the engine's `rework` does not clear it: once the round is requested the item needs a
   // worker, not a second decision, even when that round's worker dies before pushing.

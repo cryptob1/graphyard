@@ -9,6 +9,7 @@ import { answerHumanDecision, listHumanRequests, recordCapacity, requestHumanDec
 import { readEscalationContext } from '../escalation-context.js';
 import { judgeClosedQuestion } from '../closed-question.js';
 import { closeWork } from '../close.js';
+import { appendFollowUps, migrateFollowUps, recordTriage } from '../followups.js';
 import { answerResearch, recordResearch } from '../../research.js';
 
 // Every mutating work route refuses a slice lead the same way and leaves the same
@@ -65,6 +66,23 @@ export const workRoutes = defineRoutes('work', [
     async handle(context, [id]) {
       await refuseLead(context, id, 'close');
       return closeWork(context.services, context.actor, decodeURIComponent(id), await parseJson(context), context.idempotencyKey());
+    },
+  },
+  // The machine-filed backlog (GY-402): a later approval's findings appended to the parent's one
+  // follow-up item, the one-time migration of the duplicates, and the triage agent's judgement.
+  {
+    method: 'POST', path: /^\/api\/work\/([^/]+)\/(followups|triage)$/,
+    async handle(context, [id, action]) {
+      await refuseLead(context, id, action);
+      const target = decodeURIComponent(id), data = await parseJson(context), key = context.idempotencyKey();
+      return action === 'followups' ? appendFollowUps(context.services, context.actor, target, data, key) : recordTriage(context.services, context.actor, target, data, key);
+    },
+  },
+  {
+    method: 'POST', path: '/api/followups/migrate',
+    async handle(context) {
+      await refuseLead(context, null, 'followups-migrate');
+      return migrateFollowUps(context.services, context.actor, context.idempotencyKey());
     },
   },
   // A closed-question proof (GY-109): the control plane asks the configured responder against the
