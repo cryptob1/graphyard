@@ -4,6 +4,7 @@ import { reviewProviderOf } from './model/review.js';
 import { pathScopesOverlap } from './model/scope.js';
 import { queuedRegressions } from './regression-guard.js';
 import { missingAncestryReason, missingBaseAncestry } from './merge-base-ancestry.js';
+import { ciCheckName } from './model/ci-refusal.js';
 
 // Graphyard publishes speculative tips outside refs/heads and refs/tags: the namespace is
 // owned by the App, is never a branch a worker can push, and never appears as a PR head.
@@ -219,7 +220,7 @@ export function tipValidation(work: Pick<Work, 'key' | 'candidate' | 'policyRevi
  * yet passed on the candidate (GY-332). Any other test-gate refusal is the candidate's own and
  * stays on the test gate, never relabelled as queue progress.
  */
-export const ciPendingReason = (reason: string) => /^Required CI check .+ has not passed on the current candidate$/.test(reason);
+export const ciPendingReason = (reason: string) => ciCheckName(reason) !== null;
 /** The carry decisions on record that moved bindings onto `sha`, under the current policy: a base refresh's, or a tip's. */
 export function onto(work: Pick<Work, 'queue' | 'baseRefresh' | 'policyRevision'>, sha: string): QueueCarry[] {
   return [work.queue?.speculation?.carry, work.baseRefresh?.carry].filter((carry): carry is QueueCarry => !!carry && carry.to.sha === sha && carry.policyRevision === work.policyRevision);

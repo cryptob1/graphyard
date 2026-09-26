@@ -4,6 +4,7 @@ import { standingEscalations } from './escalation.js';
 import { leadHoldRefusal } from './delegation.js';
 import type { Work } from './work.js';
 import type { NextActionKind } from './action-kinds.js';
+import { ciCheckName, ciCheckRefusalPattern } from './ci-refusal.js';
 
 /**
  * From a gate's refusal to the one action kind that answers it.
@@ -54,7 +55,7 @@ export const refusalRules: { gate: string | null; match: RegExp; kind: NextActio
   { gate: 'review', match: /^Outstanding change requests/, kind: 'request-rework' },
   { gate: 'review', match: /.*/, kind: 'request-review' },
   // test: a check that failed needs a new head; one that has not answered yet needs a fresh read.
-  { gate: 'test', match: /^Required CI check .+ has not passed on the current candidate$/, kind: 'resync' },
+  { gate: 'test', match: ciCheckRefusalPattern, kind: 'resync' },
   // acceptance
   { gate: 'acceptance', match: /is no longer independent:/, kind: 'escalate' },
   { gate: 'acceptance', match: /needs trusted passing evidence/, kind: 'dispatch' },
@@ -129,8 +130,8 @@ export function reviewStandstill(work: Work, all: Work[] = [work], now = new Dat
  * review refusal standing over a head no review can be asked for (`reviewStandstill`).
  */
 export function refusalAction(work: Work, gate: string, refusal: string, all: Work[] = [work], now = new Date()): NextActionKind {
-  if (gate === 'test' && /^Required CI check (.+) has not passed on the current candidate$/.test(refusal)) {
-    const name = refusal.match(/^Required CI check (.+) has not passed on the current candidate$/)![1];
+  const name = gate === 'test' ? ciCheckName(refusal) : null;
+  if (name !== null) {
     const runs = (work.observation?.checks ?? []).filter(check => check.name === name);
     const latest = runs.length ? runs.reduce((newest, check) => (check.attempt ?? 0) >= (newest.attempt ?? 0) ? check : newest) : null;
     return latest && ['failure', 'timed_out', 'action_required', 'cancelled'].includes(latest.result) ? 'request-rework' : 'resync';

@@ -2,6 +2,7 @@ import { baseRefreshConflict, ciPendingReason, conversationProtectionRefusal, la
 import type { QueueEjection, QueueEntry, QueueHistoryEntry } from '../merge-queue.js';
 import type { Gate, Stage, Work } from './work.js';
 import { escalationRefusals } from './escalation.js';
+import { ciCheckRefusal } from './ci-refusal.js';
 import { leadHoldRefusal } from './delegation.js';
 import { currentEvidence, evidenceIndependenceRefusals } from './evidence.js';
 import { inheritedObligations } from './bootstrap.js';
@@ -69,7 +70,7 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[],
   add('test', work.policy.checks.filter(name => {
     const checks = current ? obs!.checks.filter(c => c.name === name && ciAppIds.includes(c.appId)) : [];
     return latestCheck(checks)?.result !== 'success';
-  }).map(name => `Required CI check ${name} has not passed on the current candidate`));
+  }).map(ciCheckRefusal));
   const reasons: string[] = [];
   const unproven = (proof: string) => {
     const evidence = currentEvidence(work, proof, now);
