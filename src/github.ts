@@ -206,6 +206,7 @@ export function observationFingerprint(observation: Observation | null | undefin
     sha: observation.candidate.sha, baseSha: observation.candidate.baseSha, baseTip: observation.baseTip,
     prState: observation.prState, draft: observation.draft, merged: observation.merged, mergeable: observation.mergeable, conflicting: observation.conflicting || undefined,
     checks: observation.checks.map(check => [check.name, check.result, check.appId, check.id ?? null, check.attempt ?? null]),
+    ...(observation.requiredChecks?.length ? { requiredChecks: observation.requiredChecks.map(check => [check.name, check.appId]) } : {}),
     reviews: observation.reviews.map(review => [review.id, review.reviewer, review.sha, review.state]),
     agentReview: observation.agentReview ? [observation.agentReview.sha, observation.agentReview.approved, observation.agentReview.reason ?? null] : null,
   });
@@ -676,15 +677,30 @@ export class GitHub {
    * requires, and whether it requires every review conversation resolved before a merge (GY-139).
    * An unreadable protection is neither.
    */
-  async branchProtection(requireNativeReview = false): Promise<{ protected: boolean; conversationResolution: boolean }> {
+  async branchProtection(requireNativeReview = false): Promise<{ protected: boolean; conversationResolution: boolean; requiredChecks: { name: string; appId: number | null }[] }> {
     try {
       const p = await this.request(`/branches/${encodeURIComponent(this.config.base)}/protection`);
       // `strict` must be off: a queued tip is deliberately behind the base branch, and the merge
       // queue supersedes that setting with a published tip that already contains its validated base.
       const verified = (!requireNativeReview || p.required_pull_request_reviews?.required_approving_review_count >= 1 && p.required_pull_request_reviews?.dismiss_stale_reviews && p.required_pull_request_reviews?.require_last_push_approval) && p.required_status_checks?.strict === false && !!p.enforce_admins?.enabled && !p.allow_force_pushes?.enabled && !p.allow_deletions?.enabled
         && p.required_status_checks.checks?.some((c: any) => c.context === CHECK_NAME && c.app_id === this.config.appId);
-      return { protected: !!verified, conversationResolution: p.required_conversation_resolution?.enabled === true };
-    } catch { return { protected: false, conversationResolution: false }; }
+      const classic = [...(p.required_status_checks?.checks ?? []).map((c: any) => ({ name: c?.context, appId: c?.app_id ?? null })),
+        ...(p.required_status_checks?.contexts ?? []).map((name: any) => ({ name, appId: null }))];
+      return { protected: !!verified, conversationResolution: p.required_conversation_resolution?.enabled === true, requiredChecks: mergeRequiredChecks(classic) };
+    } catch { return { protected: false, conversationResolution: false, requiredChecks: [] }; }
+  }
+  /**
+   * The status checks the base branch's active rulesets require (GY-430), read from GitHub's
+   * branch-rules endpoint, which reports every ruleset rule that applies to the branch. An
+   * unreadable answer requires nothing extra: the policy's checks still gate.
+   */
+  private async requiredStatusChecks(): Promise<{ name: string; appId: number | null }[]> {
+    try {
+      const rules = await this.request(`/rules/branches/${this.config.base.split('/').map(encodeURIComponent).join('/')}`);
+      if (!Array.isArray(rules)) return [];
+      return mergeRequiredChecks(rules.filter((rule: any) => rule?.type === 'required_status_checks')
+        .flatMap((rule: any) => (rule.parameters?.required_status_checks ?? []).map((check: any) => ({ name: check?.context, appId: check?.integration_id ?? null }))));
+    } catch { return []; }
   }
   /**
    * One GraphQL query as the installation. GitHub answers a failed query with 200 and `errors`,
@@ -819,8 +835,9 @@ export class GitHub {
     const pr = await this.request(`/pulls/${work.submission!.pr}`);
     demand(pr.base.repo.full_name.toLowerCase() === this.config.repository.toLowerCase() && pr.head.repo?.full_name.toLowerCase() === this.config.repository.toLowerCase(), 'MVP requires same-repository pull requests');
     demand(pr.base.ref === this.config.base, 'Pull request targets an unmanaged branch');
-    const [checks, reviews, protection, files, branch] = await Promise.all([
+    const [checks, reviews, protection, files, branch, rulesetChecks] = await Promise.all([
       this.pages(`/commits/${pr.head.sha}/check-runs?filter=all`, 'check_runs'), this.pages(`/pulls/${pr.number}/reviews`), this.branchProtection(nativeReviewRequired(work.policy)), this.pages(`/pulls/${pr.number}/files`), this.baseBranch(),
+      this.requiredStatusChecks(),
     ]);
     // Review threads are never a merge blocker in Graphyard's gate: the reviewer reads them itself
     // at launch and judges them in its verdict. The observation spends its one GraphQL read on them
@@ -881,7 +898,7 @@ export class GitHub {
       reviews: [...latest.values()].map(r => ({ id: r.id, reviewer: r.user.login, sha: r.commit_id, state: r.state, submittedAt: r.submitted_at,
         ...(r.state === 'DISMISSED' && dismissalOf(r.id) ? { dismissal: dismissalOf(r.id)! } : {}) })),
       prState: pr.state, draft: pr.draft, prCreatedAt: pr.created_at, merged: pr.merged, mergeSha: pr.merge_commit_sha, mergedAt: pr.merged_at, mergeable: pr.mergeable === true && !pr.draft && pr.state === 'open', conflicting: pr.mergeable === false && pr.state === 'open',
-      protected: protection.protected, conversations, files: files.map(f => f.filename), at: startedAt,
+      protected: protection.protected, requiredChecks: mergeRequiredChecks([...protection.requiredChecks, ...rulesetChecks]), conversations, files: files.map(f => f.filename), at: startedAt,
       baseTip: branch.tip, baseTree: branch.tree, baseTipContained, baseTipAncestor: contained, scopeFiles,
       ...(landing ? { landing } : {}), ...(revertedDelivery ? { revertedDelivery } : {}),
     };
@@ -1505,6 +1522,18 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
   }
 }
 /** Whether GitHub attributes a commit to the control-plane App's bot account: by the linked author, or by the App's noreply address. */
+/** Required checks by name, deduplicated, without Graphyard's own merge check (GY-430). */
+function mergeRequiredChecks(checks: { name: unknown; appId: unknown }[]): { name: string; appId: number | null }[] {
+  const merged = new Map<string, { name: string; appId: number | null }>();
+  for (const check of checks) {
+    if (typeof check.name !== 'string' || !check.name || check.name === CHECK_NAME) continue;
+    const appId = Number.isSafeInteger(check.appId) ? check.appId as number : null;
+    const known = merged.get(check.name);
+    // A check some rule binds to no app is satisfied by any source, so the looser binding stands.
+    merged.set(check.name, { name: check.name, appId: known && (known.appId === null || known.appId !== appId) ? null : appId });
+  }
+  return [...merged.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
 function appAuthored(commit: any, login: string): boolean {
   const author = typeof commit?.author?.login === 'string' ? commit.author.login : null;
   const email = typeof commit?.commit?.author?.email === 'string' ? commit.commit.author.email : '';

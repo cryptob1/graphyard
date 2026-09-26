@@ -35,11 +35,11 @@ Grants are checked every five minutes and after a 403; a shortfall shows under `
 
 On the base branch require `Graphyard / merge` bound to this App, leave `strict` **off**, enforce for administrators, forbid force pushes and deletion, give workers no bypass. `master browser protection` reconciles it; `master protection --apply`, `install --apply` and `init --scan --apply` give organization repositories a merge queue requiring it (CI on `merge_group`), user-owned ones or a 422 `allow_auto_merge`.
 
-The gate also requires CI checks from `GITHUB_CI_APP_IDS` Apps, current-head approval, trusted evidence (executed > 0, skipped 0), a mergeable non-draft PR, and the queue head.
+Gates also require `GITHUB_CI_APP_IDS` CI checks and base-branch protection's (failures request rework), current-head approval, trusted evidence (executed > 0, skipped 0), a mergeable non-draft PR, and the queue head.
 
 ## Merge queue
 
-A candidate enters once its gates pass. Its speculative tip (predicted base merged in), pushed onto the candidate branch and `refs/graphyard/queue/KEY`, binds every check, review and proof. A failed check, requested changes, a revoked proof, a conflict or rework ejects the entry; repaired, it re-enters at the back. One conflicting only with entries ahead of it re-enters unchanged once one lands or leaves; one leaving validation is skipped until revalidated. Once requested, the App passes the check for an authorized head and its merge group, then asks GitHub to merge: queue, auto-merge, or a [direct merge](#direct-merges). Branch protection decides; withdrawal fails and dequeues it. `master status` shows refusals (`merge.enqueue.refused`).
+A candidate enters once its gates pass. Its speculative tip (predicted base merged in), pushed onto the candidate branch and `refs/graphyard/queue/KEY`, binds every check, review and proof. A failed check, requested changes, a revoked proof, a conflict or rework ejects the entry; repaired, it re-enters at the back. One conflicting only with entries ahead of it re-enters unchanged once one lands or leaves; one leaving validation is skipped until revalidated. Once requested, the App passes the check on an authorized head and merge group, then asks GitHub to merge (queue, auto-merge or [direct](#direct-merges)). Withdrawal fails and dequeues it. `master status` shows `merge.enqueue.refused`.
 
 ### Bindings and carry
 
@@ -51,11 +51,11 @@ Reviews and proofs bind one head, base and policy revision. The queue head's tip
 
 ### Direct merges
 
-Without a queue, mergeable `CLEAN`, `UNSTABLE` (optional checks failing) and `HAS_HOOKS` PRs merge at once, head-bound; one pending five minutes is `merge-stalled`.
+Without a queue, mergeable `CLEAN`, `UNSTABLE` (optional checks failing) and `HAS_HOOKS` PRs merge at once, head-bound; one pending five minutes, or `BLOCKED` auto-merge ten (naming why), is `merge-stalled`.
 
 ### Proofs in CI
 
-A protected `pull_request_target` workflow, with the default branch's workflow and secrets, runs on every `graphyard/*` PR push: **plan** finds the item's `unit:*` and `integration:*` proofs, **exercise** runs one secret-free job each against the candidate merged with its base, **publish** submits reports via the [CI producer](deployment.md#ci-producer) bound by `ciRun`. Queue tips too; dependencies are cached. Manual proofs stay producer sessions.
+A protected `pull_request_target` workflow (default-branch workflow and secrets) runs on every `graphyard/*` PR push: **plan** finds the item's `unit:*` and `integration:*` proofs, **exercise** runs one secret-free job each against the candidate merged with its base, **publish** submits reports via the [CI producer](deployment.md#ci-producer) bound by `ciRun`. Queue tips too; dependencies are cached. Manual proofs stay producer sessions.
 
 ## Post-deployment smoke proof
 

@@ -36,7 +36,7 @@ export { actionReport, agentRequestAttention, agentRequestReport, sessionReport 
 // `master scope` lives in its own module; it is read from here as it always was.
 export { approveScopeRequest } from './master-scope.js';
 
-/** A merge pending past five minutes on a head GitHub reports mergeable, with no refusal (GY-344). */
+/** A merge pending past five minutes on a head GitHub reports mergeable, with no refusal (GY-344), or past ten under auto-merge on a BLOCKED head, named with why (GY-430). */
 export const mergeStallAttention = (snapshot: { work: Work[]; now: string }): AttentionItem[] =>
   mergeStalls(snapshot.work, Date.parse(snapshot.now)).map(stall => ({ subject: stall.key, text: stall.text, ...agentOwner('master', stall.next) }));
 // The attention builders live beside each other in `status-attention.ts`; the report reads them
