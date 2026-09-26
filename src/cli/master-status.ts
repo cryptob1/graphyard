@@ -5,6 +5,7 @@ import { agentOwner, assessContainment, branchReport, buildMasterStatus, diskPre
 import { impliedScopeRequests, type Work } from '../model/work.js';
 import { actionReport, agentRequestReport, sessionReport } from './loop-report.js';
 import { needsHumanActions, routedScopeStatus } from './owed-report.js';
+import { loopAttestations } from './hand-actions.js';
 import { installationMerger } from '../executor.js';
 import { daemonSummary, loopAttention, readDaemonState } from '../master-daemon.js';
 import { readReviewLedger, reconcileReviews, reviewLedgerSpec, sessionLedgerHeadroom, summarizeReviews } from '../reviewer.js';
@@ -190,6 +191,9 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     // The inverted loop: what the control plane says each item needs, who is running it, and
     // every session it can be watched through.
     actions: needsHumanActions(actionReport(snapshot), owed.rows),
+    // The loop's pending decisions it requests itself (GY-521): attestations of `manual:` proofs no
+    // producer may run. They are the loop's steps, so they are listed here and never under needsHuman.
+    loopDecisions: { attestations: loopAttestations(snapshot, cycling?.approvals ?? []) },
     // Presence and supervision (GY-105) and the release each registered executor runs (GY-126).
     executors: { ...executors, ...releases, attention: [...executors.attention, ...releases.attention] }, sessions: sessionReport(snapshot),
     // Branches the queue's own pushes contaminated and the approvals its pushes cost (GY-127).

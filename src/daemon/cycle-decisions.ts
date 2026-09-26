@@ -5,7 +5,7 @@ import { type ContainmentAssessment, type HerdrAgent, type RoleCapacity, approve
 import { type ApprovalWatch, approvalWatchSchema, carriedSession, type DaemonActionKind, latencySampleSchema, message, scopeMeasurementSchema } from './state.js';
 import { decisionKey, scopeAnsweredAt, scopeKey, scopeOutcomeAnswered } from './reconcile.js';
 import { readyToRetry } from './sessions.js';
-import { approvalStep, boundDetail, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, maxApproverCloses, maxRefusalAnswers, maxApproverLaunches, maxDecisionRequests, namePaths, neededDecision, observedFrom, resolveCovers, reworkDecisionReason, refusalNamedIn, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, standingVerdict, withheldDecision } from './decisions.js';
+import { approvalStep, attestDecisions, boundDetail, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, maxApproverCloses, maxRefusalAnswers, maxApproverLaunches, maxDecisionRequests, namePaths, neededDecision, observedFrom, resolveCovers, reworkDecisionReason, refusalNamedIn, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, standingVerdict, withheldDecision } from './decisions.js';
 import { type DaemonEffects, failoverKey, record, stoppedStates } from './effects.js';
 import { detectExhaustion } from '../model/capacity.js';
 import { capacityRefusal } from '../fleet.js';
@@ -174,6 +174,19 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
         if (standing.state !== 'requested' || !effects.withdraw) throw new Error(`${stale}, and ${effects.withdraw ? 'only a requested decision can be withdrawn' : 'this loop has no way to withdraw it'}: graphyard master decisions ${item.key}`);
         await effects.withdraw(item, standing.id, `The candidate moved to ${decision.binding.slice(0, 12)}; ${stale}, so it can never apply and is withdrawn for a request that names the current candidate`);
         standing = undefined;
+      }
+      // Nor more than one attest decision (GY-521), and an attestation binds a proof on one head.
+      // One for an earlier head can never apply and is taken back, as a merge is; one for another
+      // proof on this head is judged first, and this one is asked once it settles.
+      if (standing && decision.action === 'attest') {
+        const head = standing.input?.sha === item.candidate?.sha && standing.input?.baseSha === item.candidate?.baseSha && standing.input?.policyRevision === item.policyRevision;
+        if (!head || standing.input?.proof !== decision.input?.proof) {
+          const other = `attest decision ${standing.id} is ${standing.state} for ${String(standing.input?.proof)} on ${String(standing.input?.sha).slice(0, 12)}, not ${String(decision.input?.proof)} on ${item.candidate?.sha.slice(0, 12)}`;
+          if (head) throw new Error(`${other}; the control plane holds one attest decision at a time, so this one is requested once it settles: graphyard master decisions ${item.key}`);
+          if (standing.state !== 'requested' || !effects.withdraw) throw new Error(`${other}, and ${effects.withdraw ? 'only a requested decision can be withdrawn' : 'this loop has no way to withdraw it'}: graphyard master decisions ${item.key}`);
+          await effects.withdraw(item, standing.id, `The candidate moved to ${item.candidate?.sha.slice(0, 12)}; ${other}, so it can never apply and is withdrawn for a request that names the current head`);
+          standing = undefined;
+        }
       }
       // Nor does the server keep more than one resolve standing, whatever its trigger. One for
       // another escalation (a security-concern a master asked about) is not this decision: adopting
@@ -426,6 +439,34 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       return;
     }
     await request(item, decision, key, null);
+  });
+  // 4c+. Attestations (GY-521). A `manual:` proof no producer session may run is satisfied only by
+  //      a two-party attest decision, and an item whose only refusal left is such a proof used to
+  //      wait hours for a master to notice. The loop requests one per proof, bound to the proof and
+  //      the exact head, and supervises it exactly as a routine decision; the control plane holds
+  //      one attest decision at a time, so a second proof is asked once the first settles. A head
+  //      change moves the binding, and the cleanup below withdraws the request nobody judged.
+  for (const item of snapshot.work) await isolate('decision', item, item.key, async () => {
+    const attestations = attestDecisions(item, snapshot.work, clock);
+    let judging = false;
+    for (const decision of attestations) {
+      const key = decisionKey(item, decision), watch = state.approvals[key];
+      needed.add(key);
+      if (!watch) continue;
+      if (!watch.settledAt) { judging = true; await supervise(item, decision, key, watch); }
+      else if (watch.session) await endApproverSession(item, watch, `approver for ${watch.work} decision ${watch.decision} settled`);
+    }
+    const next = judging ? undefined : attestations.find(decision => !state.approvals[decisionKey(item, decision)]);
+    if (!next) return;
+    const key = decisionKey(item, next), previous = state.actions[key];
+    if (previous?.state === 'failed' && !readyToRetry(previous, state.cycle)) return;
+    if (!effects.decide || !effects.approver) {
+      const escalationKey = `escalation:decision:${item.id}:${next.binding}`;
+      const detail = `${item.key} needs an attest decision: ${next.reason} This loop runs without the decision effects, so it cannot request one: graphyard master decide ${item.key} attest '${JSON.stringify(next.input)}' REASON, then graphyard master approver ${item.key} DECISION`;
+      if (detailChanged(state.actions[escalationKey], detail)) await note(escalationKey, item, 'escalation', 'done', detail);
+      return;
+    }
+    await request(item, next, key, null);
   });
   // A watch whose item no longer needs its decision — applied and moved on, or overtaken by a new
   // head — has nothing left to judge. Its session is closed rather than left holding a provider

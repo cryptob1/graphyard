@@ -1,6 +1,8 @@
 import { predecessorWaitReason, queueSequencingReason } from '../merge-queue.js';
 import { dispatchIneligibility, openProducerRequest, producerGroupDecisions, reviewNeed, type ProducerGroupDecision } from './dispatch.js';
-import { mechanicalProof } from './mechanical-proofs.js';
+import { automatableProof, mechanicalProof } from './mechanical-proofs.js';
+import { currentEvidence } from './evidence.js';
+import { requiredProofs } from './bootstrap.js';
 import { producerLaunchStop } from './action-progress.js';
 import { standingEscalations } from './escalation.js';
 import { deliveryState } from './delivery.js';
@@ -115,6 +117,29 @@ function proofStep(work: Work, all: Work[], now: Date): ProofStep | null {
   return { step: 'wait', detail: pending.state === 'ineligible' ? `${pending.group} proofs ${pending.unproven.join(', ')} wait: ${pending.reason}`
     : `no ${pending.group} producer request is open yet for ${short(candidate.sha)} (${pending.unproven.join(', ')}); the control plane's reconciliation opens it` };
 }
+
+/**
+ * The `manual:` proofs the loop puts to a two-party attestation itself (GY-521), or none. A proof
+ * no producer session may run — not in `producerProofs`, and no producer request names it — is
+ * satisfied only by an attestation decision an independent approver judges. GY-374 and GY-393 sat
+ * in acceptance for two hours with an approved review and passing CI, logged every cycle as a
+ * human step while nobody requested anything. So when acceptance is the first gate refusing a
+ * live, observed candidate with no violation, and every one of its refusals is such a proof with
+ * no evidence at all on this head, the loop requests one attest decision per proof, exactly as it
+ * requests a merge decision. A proof whose attestation failed stays the operator's judgement.
+ */
+export function unproducedManualProofs(work: Work, all: Work[], now: Date): string[] {
+  if (!work.candidate || work.violations.length || dispatchIneligibility(work)) return [];
+  const failing = work.gates.find(gate => !gate.passed);
+  if (failing?.name !== 'acceptance' || !failing.reasons.length) return [];
+  const requested = new Set((work.autoDispatch?.producers ?? []).filter(request => request.state === 'requested').flatMap(request => request.proofs ?? []));
+  const proofs = [...new Set(requiredProofs(work, all))].filter(proof => proof.startsWith('manual:') && !automatableProof(work, proof) && !requested.has(proof) && !currentEvidence(work, proof, now));
+  const named = (reason: string) => proofs.find(proof => reason.includes(`: ${proof} needs trusted passing evidence`));
+  if (!failing.reasons.every(reason => named(reason))) return [];
+  return proofs.filter(proof => failing.reasons.some(reason => named(reason) === proof));
+}
+/** Who owns the attestation of an unproduced `manual:` proof: the loop's decisions step, never a person. */
+export const attestationOwner = 'graphyard';
 
 const resyncInputs = (work: Work): NextActionInputs => ({ kind: 'resync', pr: work.candidate?.pr ?? work.submission?.pr ?? null, sha: work.candidate?.sha ?? null, baseSha: work.candidate?.baseSha ?? null, baseTip: work.observation?.baseTip ?? null, observedAt: work.observation?.at ?? null });
 
@@ -247,6 +272,12 @@ function computeAccount(work: Work, all: Work[], now: Date): Computed {
         const proof = proofStep(work, all, now);
         // Every unproven proof is a manual one the operator holds: the control plane cannot
         // dispatch it, and saying so is an escalation rather than a dispatch nobody can run.
+        // A manual proof no producer may run, and nothing else refusing: the loop's decisions step
+        // requests its two-party attestation and launches the approver (GY-521), so it is a wait
+        // on the loop, not an escalation to a person.
+        const attest = proof ? [] : unproducedManualProofs(work, all, now);
+        if (attest.length) return waits({ kind: 'session', on: attestationOwner,
+          detail: `${key} waits on the loop's two-party attestation request for ${attest.join(', ')} on ${short(work.candidate?.sha)}: no producer session may run ${attest.length === 1 ? 'it' : 'them'}, so master run requests one attest decision per proof and launches an independent approver for it` }, failing.name, refusal);
         if (!proof) return make('escalate', `${key} waits on proof no producer session may run: ${failing.reasons.join('; ')}`,
           { kind: 'escalate', trigger: 'operator-proof', detail: refusal }, binding, failing.name, refusal);
         // A failed proof holds the head at this gate for good: a unit or integration failure is the
