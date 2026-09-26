@@ -102,7 +102,7 @@ export function controlPlaneEffects(modules, context) {
     agents: async () => { const runtime = await m.observeHerdrAgents(run); return runtime.available ? runtime.agents : null; },
     workerCredentials: profiles => m.inspectWorkerCredentials(root, profiles),
     producerCredentials: profiles => m.inspectProducerCredentials(root, profiles),
-    dispatchWorker: (work, profile, agents, snap) => m.dispatchWork(root, work, profile, agents, run, snap.work, undefined, undefined, undefined, snap.now),
+    dispatchWorker: (work, profile, agents, snap) => m.dispatchWork(root, work, profile, agents, run, snap.work, undefined, undefined, undefined, snap.now, { agents: () => m.listHerdrAgents(run) }),
     launchReview: (work, review, agents, observedAt) => r.launchReview(root, work, current().run.reviewerProfile, agents, observedAt, { run, requestId: review.id }),
     launchProducer: (work, producerRequest, profile, agents, observedAt) => pr.launchProducer(root, work, producerRequest, profile, agents, observedAt, { run }),
     // Every merge this process brokers is owned by this executor instance (GY-92), never by the
