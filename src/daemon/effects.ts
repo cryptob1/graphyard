@@ -37,6 +37,7 @@ import { observeDeployment } from './deployment.js';
 import { serverCallName, timedCall, timedFetch, timedRun } from '../master/timings.js';
 import type { RunRecord, Runner } from '../runner/types.js';
 import type { ResearchEvent } from '../research.js';
+import { tailPublisherEffect, type SessionTailEffect } from '../session-tail.js';
 import type { TriageJudgement } from '../model/machine-backlog.js';
 
 /** A reviewer or producer session a launch ledger holds as pending, as the failover step reads it. */
@@ -189,6 +190,12 @@ export interface DaemonEffects {
    * A loop wired without it, or whose config has no `run.research`, researches nothing and dispatches as before.
    */
   recordResearch?: (work: Work, event: ResearchEvent) => Promise<unknown>;
+  /**
+   * Live session tails (GY-713): each cycle hands the publisher the sessions this loop launched
+   * (`launchedTailSources`); it reads and publishes their tails beside the cycles, every 3 s while a
+   * dashboard viewer watches one and every 30 s otherwise. A loop wired without it publishes none.
+   */
+  sessionTails?: SessionTailEffect;
   research?: { cwd: string; runner?: Runner };
   /** Records a triage judgement on a machine-filed item as the coordinator (GY-402, POST work/ID/triage). */
   recordTriage?: (work: Work, body: { judgement: TriageJudgement; runtime?: string }) => Promise<unknown>;
@@ -480,7 +487,24 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   const withdraw: DaemonEffects['withdraw'] = (work, decision, reason) => asOperatorAgent('POST', `work/${work.id}/decide`, { action: 'withdraw', decision, reason });
   const decisions: DaemonEffects['decisions'] = work => asOperatorAgent('GET', `work/${encodeURIComponent(work.id)}/decisions`);
   let publishedEnvironment: string | null = null, publishedBatchSize: number | null = null;
+  // The tails are read and published beside the cycles, on their own bounded runner and fetch, so
+  // they never count against a cycle's child waits or server calls.
+  const tailRun = deps.run ?? childRunner({ timeoutMs: 10_000 }), tailFetch = deps.fetcher ?? fetch;
+  const asTailPublisher = async (method: 'GET' | 'POST', path: string, body?: unknown) => {
+    const config = current();
+    const response = await tailFetch(`${config.url}/api/${path}`, { method, headers: { Authorization: `Bearer ${await readCredentialFile(config.credentialFile)}`, 'Content-Type': 'application/json' },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(10_000) });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(`Graphyard refused ${path} (${response.status}): ${(result as any)?.error ?? ''}`);
+    return result as any;
+  };
+  const sessionTails = tailPublisherEffect(() => current().hostId, {
+    readPane: async (pane, lines) => tailRun('herdr', ['pane', 'read', pane, '--source', 'recent-unwrapped', '--lines', String(lines), '--format', 'text']),
+    publish: (host, batch) => asTailPublisher('POST', 'session-tails', { host, tails: batch }),
+    watched: async () => (await asTailPublisher('GET', 'session-tails/watched')).watched ?? [],
+  }, async () => (await readEnvironmentLog(current())).selected ?? {});
   return {
+    sessionTails,
     agents: () => listHerdrAgents(run).catch(() => []),
     // A reviewer or producer session ends with its ledger record (GY-205): its Herdr name is not one the registry session determines.
     reconcileSessions: async (runtime, finished) => {

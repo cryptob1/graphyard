@@ -12,6 +12,7 @@ import { judgeClosedQuestion } from '../closed-question.js';
 import { closeWork } from '../close.js';
 import { appendFollowUps, migrateFollowUps, recordTriage } from '../followups.js';
 import { answerResearch, recordResearch } from '../../research.js';
+import { sessionTails } from '../../session-tail.js';
 
 /** Whether a request is a lease command (store/pools.ts `leaseCommands`), which authenticates and runs on the lease pool (GY-558). */
 export const leaseCommandRequest = (method: string | undefined, pathname: string) => {
@@ -28,8 +29,35 @@ const refuseLead = async ({ actor, services }: RouteContext, id: string | null, 
   demand(false, 'Slice leads cannot perform lifecycle mutations', 403);
 };
 
+const tailPublisher = (role: string) => role === 'coordinator' || role === 'admin';
+
 /** Work mutations: two-party decisions, the guarded merge broker and every engine command. */
 export const workRoutes = defineRoutes('work', [
+  // Live session tails (GY-713, src/session-tail.ts): the loop publishes, as the coordinator, the
+  // redacted tail of each session it launched; a viewer's read marks it watched. No route here, or
+  // anywhere, sends input to a session.
+  {
+    method: 'POST', path: '/api/session-tails',
+    async handle(context) {
+      demand(tailPublisher(context.actor.role), 'Coordinator permission required to publish session tails', 403);
+      return sessionTails(context.services.engine).publish(await parseJson(context, 2_000_000));
+    },
+  },
+  {
+    method: 'GET', path: '/api/session-tails/watched',
+    async handle({ actor, services }) {
+      demand(tailPublisher(actor.role), 'Coordinator permission required', 403);
+      return { watched: sessionTails(services.engine).watched() };
+    },
+  },
+  { method: 'GET', path: '/api/session-tails', handle: async ({ services, url }) => ({ tails: sessionTails(services.engine).list(url.searchParams.get('work')) }) },
+  {
+    method: 'GET', path: /^\/api\/work\/([^/]+)\/session-tails\/([^/]+)$/,
+    async handle({ services, send }, [work, session]) {
+      const tail = sessionTails(services.engine).read(decodeURIComponent(work), decodeURIComponent(session));
+      return tail ?? send(404, { error: 'No tail has been published for this session yet; the loop that launched it publishes one within 30 seconds' });
+    },
+  },
   // Two-party decisions: an agent requests, a second independent agent approves, and the
   // control plane applies. They precede the generic route, which would read them as commands.
   { method: 'GET', path: /^\/api\/work\/([^/]+)\/decisions$/, handle: ({ actor, services }, [id]) => listDecisions(services, actor, decodeURIComponent(id)) },

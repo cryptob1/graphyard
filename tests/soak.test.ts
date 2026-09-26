@@ -1,7 +1,8 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp } from 'node:fs/promises';
+import { readdirSync, utimesSync, writeFileSync } from 'node:fs';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -17,6 +18,9 @@ import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-da
 import { Launcher } from '../src/daemon/cycle.js';
 import { successorWidening } from '../src/model/successors.js';
 import { systemInvariants, type InvariantCheck } from '../src/model/invariants.js';
+import { runLogDirectory, runLogFile, tailPublisherEffect, type PublishedTail } from '../src/session-tail.js';
+import { clearRuns, endRun, registerRun } from '../src/runner/registry.js';
+import type { Run } from '../src/runner/types.js';
 import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } from './helpers/soak-world.js';
 
 /**
@@ -32,7 +36,10 @@ import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } f
  * `runDaemon` does, so session launches run beside the cycle — outliving it, holding their profile
  * from hand-off, and reported by the next cycle — and the invariants hold on that detached path. A
  * change to the loop that breaks an invariant fails here, in CI, before
- * it merges; a new behaviour that repeats per cycle, head or item belongs in this world.
+ * it merges; a new behaviour that repeats per cycle, head or item belongs in this world. The live
+ * session tails (GY-713) run here too: every cycle hands the loop's publisher its roster, and the
+ * day asserts the roster, the stored tails, the timer and the per-run logs stay bounded, and that
+ * no pane the loop did not launch is ever read.
  */
 const repository = 'owner/project';
 const PROOF = 'unit:soak-behaves';
@@ -135,6 +142,8 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     await engine.execute(principal, 'workspace', work.id, { epoch, host: 'soak-host', path: `/tmp/soak/${key.toLowerCase()}-${epoch}`, branch }, id());
     const attempt = (attempts.get(key) ?? 0) + 1; attempts.set(key, attempt);
     const pane = herdr.open(profile.agentName);
+    // The worker's supervisor registers its handle with a launch token, as `watch` does: what makes its pane a launched session.
+    await engine.execute(principal, 'session', work.id, { id: `${principal.id}:${epoch}`, kind: 'implementation', epoch, runtime: 'claude', host: config.hostId, subject: `Implement ${key}`, launch: randomUUID().replace(/-/g, '') }, id());
     sessions.push({ work: work.id, key, branch, profile, epoch, pane, pushAt: clock.now() + plan.workMs, diesAt: plan.deaths.has(n) && attempt === 1 ? clock.now() + plan.deathAfterMs : null, state: 'working' });
     return { key, epoch };
   };
@@ -159,6 +168,8 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   const pending: (() => Promise<void>)[] = [];
   const approver: DaemonEffects['approver'] = async (work, decision) => {
     const agentName = approverSessionName(work, decision), pane = herdr.open(agentName);
+    // Beside it, a headless run this process started (a Pi approver's shape), writing its per-run log for a few minutes.
+    headlessRun(`${agentName}-headless`, work.key, decision);
     pending.push(async () => { await api(principals.approver, 'POST', `work/${work.id}/approve`, { decision, reason: `Approved: the loop's routine ${decision} decision for ${work.key} rests on what it verified` }); herdr.status(pane, 'done'); });
     return { agentName, pane };
   };
@@ -170,6 +181,28 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
         exercise: { criterion: 'AC-1', behaviour: `item ${numberOf(current)}'s change`, result: 'fail', executed: 1 } }, id());
     });
   };
+
+  // ---- Live session tails (GY-713): the loop's publisher, publishing to the real control plane. ----
+  const runs = await mkdtemp(join(tmpdir(), 'graphyard-soak-runs-'));
+  let headlessRuns = 0;
+  function headlessRun(name: string, work: string, subject: string) {
+    const log = runLogFile(runs, name, clock.now());
+    writeFileSync(log, `${name} judging ${subject}\nGRAPHYARD_TOKEN=ghp_${'s'.repeat(36)}\n`);
+    utimesSync(log, new Date(clock.now()), new Date(clock.now()));
+    const run = { id: randomUUID(), events: [], log, onEvent: () => () => {}, cancel: () => {}, result: () => new Promise(() => {}) } as unknown as Run<unknown>;
+    registerRun({ name, role: 'approver', work, subject, run, runtime: 'pi', account: 'pi-a login', startedAt: new Date(clock.now()).toISOString() });
+    headlessRuns++;
+    headlessEnds.push({ at: clock.now() + 5 * minute, end: () => endRun(name, { runtime: 'pi', startedAt: new Date(clock.now()).toISOString(), endedAt: new Date(clock.now()).toISOString(), events: [], result: null, applied: [] }) });
+  }
+  const headlessEnds: { at: number; end: () => void }[] = [];
+  const operatorPane = herdr.open('operator-shell');
+  const paneReads: string[] = [], published: PublishedTail[] = [];
+  const tails = tailPublisherEffect(() => config.hostId, {
+    now: clock.now,
+    readPane: async pane => { paneReads.push(pane); return `${herdr.agents.get(pane)?.name ?? pane} working\nexport GH_TOKEN=ghp_${'t'.repeat(36)}`; },
+    publish: async (host, batch) => { published.push(...batch); return api(principals.coordinator, 'POST', 'session-tails', { host, tails: batch }); },
+    watched: async () => (await api(principals.coordinator, 'GET', 'session-tails/watched')).watched,
+  });
 
   // ---- Production: two deploys, each a new control-plane build serving the base tip it was cut from. ----
   const production = { build: sha('build', 0), sha: github.tip, deploys: [] as { at: number; build: string; sha: string }[] };
@@ -200,6 +233,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       return { source: 'endpoint', sha: production.sha, at: new Date(clock.now()).toISOString(), reason: null, deployed: serving.map(item => item.key), pending: delivered.filter(item => !serving.includes(item)).map(item => item.key) };
     },
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    sessionTails: tails,
   };
 
   // ---- The day. ----
@@ -209,7 +243,8 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   // handed it over — here, before the simulated clock moves on.
   const launcher = new Launcher();
   const violations: string[] = [], observed = new Set<string>(), failures: string[] = [];
-  let released = 0, split = false, deploys = 0, cycles = 0, reportedDispatches = 0;
+  let released = 0, split = false, deploys = 0, cycles = 0, reportedDispatches = 0, maxRoster = 0, maxStored = 0;
+  const publisherIds = new Set<object>(), tailFaults: string[] = [];
   const jobsDue = async () => Number((await store.pool.query('SELECT count(*) AS due FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now())')).rows[0].due);
   for (let elapsed = 0; elapsed <= options.hours * hour;) {
     const now = clock.now();
@@ -227,6 +262,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     // sessions have renewed: for the rest of that minute nothing reaches it, the loop included.
     github.tick(now);
     await workersTick(now);
+    for (const run of headlessEnds.filter(entry => entry.at <= now)) { run.end(); headlessEnds.splice(headlessEnds.indexOf(run), 1); }
     if (!deploying) {
       for (const act of pending.splice(0)) await act();
       await engine.reconcile();
@@ -240,6 +276,19 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       // The interval between cycles is when a hand-off launch settles; the day's clock waits for
       // them so the world never acts on a half-finished launch.
       await launcher.idle();
+      // The publisher's refresh, driven by the simulated clock; a dashboard viewer watches one session a while each hour.
+      const publisher = tails.publisher();
+      if (publisher) {
+        publisherIds.add(publisher);
+        await publisher.tick();
+        const roster = publisher.roster(), launchedPanes = new Set(sessions.filter(session => session.state === 'working').map(session => session.pane));
+        maxRoster = Math.max(maxRoster, roster.length);
+        if (publisher.running !== roster.length > 0) tailFaults.push(`+${Math.round(elapsed / minute)} min: the refresh timer runs ${publisher.running} with ${roster.length} sessions`);
+        for (const source of roster) if (source.surface.kind === 'herdr' && !launchedPanes.has(source.surface.pane)) tailFaults.push(`+${Math.round(elapsed / minute)} min: ${source.session} (${source.surface.pane}) is on the roster but no running worker launched it`);
+        const listed = (await api(principals.operator, 'GET', 'session-tails')).tails as { work: string; session: string }[];
+        maxStored = Math.max(maxStored, listed.length);
+        if (listed.length && elapsed % hour < 10 * minute) await api(principals.operator, 'GET', `work/${encodeURIComponent(listed[0].work)}/session-tails/${encodeURIComponent(listed[0].session)}`);
+      }
       for (const check of state.invariants.report as InvariantCheck[]) {
         if (check.observed) observed.add(check.invariant);
         if (!check.holds) violations.push(`${new Date(now).toISOString()} (+${Math.round(elapsed / minute)} min) ${check.line}`);
@@ -251,12 +300,17 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   }
 
   const final = (await store.list()).filter(item => items.some(entry => entry.id === item.id));
-  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart };
+  tails.publisher()?.stop(); clearRuns();
+  const runFiles = readdirSync(runLogDirectory(runs));
+  await rm(runs, { recursive: true, force: true });
+  const storedAtEnd = (await api(principals.operator, 'GET', 'session-tails')).tails.length as number;
+  const liveTails = { maxRoster, maxStored, storedAtEnd, publishers: publisherIds.size, faults: tailFaults, paneReads, operatorPane, published, runFiles, headlessRuns };
+  return { liveTails, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart };
 }
 
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 180_000 }, async () => {
   const began = performance.now();
-  const { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
+  const { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, liveTails } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
   const undelivered = final.filter(item => item.stage !== 'done' || !item.delivery);
   assert.deepEqual(undelivered.map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
@@ -281,6 +335,19 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   const reviewed = final.find(item => item.key === items[plan.exhaustedReviewer - 1].key)!;
   assert.ok(reviewed.reviewFailovers?.some(failover => failover.profile === 'claude-reviewer' && failover.exhaustion === 'usage-limit' && failover.nextProfile === 'cursor-reviewer'), `the exhausted reviewer bot failed over to the next profile: ${JSON.stringify(reviewed.reviewFailovers)}`);
   assert.ok(cycles > 24 * 6, `the loop cycled through the day (${cycles} cycles)`);
+  // Live session tails (GY-713) over the day: one publisher and one timer, running only while a
+  // launched session lives; a roster and a store bounded by the sessions running, emptied once they
+  // end; one log per headless run and no sidecar; and no pane the loop did not launch ever read.
+  assert.deepEqual(liveTails.faults, [], 'the roster held only launched sessions and the timer ran only while it held one');
+  assert.equal(liveTails.publishers, 1, 'one publisher for the whole day');
+  assert.ok(liveTails.maxRoster > 0 && liveTails.maxRoster <= workers.length * 2 + 2, `the roster stayed bounded by the sessions running (at most ${liveTails.maxRoster})`);
+  assert.ok(liveTails.maxStored > 0 && liveTails.maxStored <= 40, `the control plane held a bounded set of tails (at most ${liveTails.maxStored})`);
+  assert.equal(liveTails.storedAtEnd, 0, 'every tail was dropped once its session ended');
+  assert.ok(liveTails.published.some(tail => tail.surface === 'herdr') && liveTails.published.some(tail => tail.surface === 'headless'), `both panes and headless runs were published: ${JSON.stringify({ published: liveTails.published.length, headless: liveTails.headlessRuns, maxRoster: liveTails.maxRoster })}`);
+  assert.ok(liveTails.published.every(tail => tail.lines.every(line => !/ghp_[a-z]{36}/.test(line))), 'no token-shaped string was published');
+  assert.ok(liveTails.published.filter(tail => tail.surface === 'headless').every(tail => tail.account === 'pi-a login'), 'a headless run is published with its account');
+  assert.ok(!liveTails.paneReads.includes(liveTails.operatorPane), 'the operator\'s own pane was never read');
+  assert.equal(liveTails.runFiles.length, liveTails.headlessRuns, `one log per headless run and nothing else: ${liveTails.runFiles.slice(0, 5).join(', ')}`);
   const seconds = (performance.now() - began) / 1000;
   assert.ok(seconds < 120, `the day runs well inside the three minutes the CI test job allows it (${seconds.toFixed(1)} s)`);
 });

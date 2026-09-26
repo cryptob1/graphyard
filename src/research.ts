@@ -4,6 +4,10 @@ import { z } from 'zod';
 import { demand, operatorScopeIncludes, type Principal, type Work } from './model.js';
 import { humanOnlyRefusal, parkRule } from './model/human-request.js';
 import { defaultPiModel, piRunner } from './runner/pi.js';
+import { roleSurfaces } from './runner/role-surface.js';
+import { herdrSurface, surfacePane } from './runner/herdr-surface.js';
+import { agentRuntimeRun } from './master/herdr.js';
+import { commandAccount, runLogFile, type LaunchedRun } from './session-tail.js';
 import type { Run, RunResult, Runner } from './runner/types.js';
 import { save } from './store.js';
 import type { Services } from './server/routes.js';
@@ -89,6 +93,8 @@ export const researchSettingsSchema = z.object({
   timeoutMinutes: z.number().int().min(1).max(60).default(15),
   tokenBudget: z.number().int().min(1_000).max(5_000_000).default(200_000),
   questionDeadlineHours: z.number().min(0.25).max(168).default(4),
+  // Where the research run runs (GY-713): `headless` (default) or `herdr`, inside a Herdr pane.
+  surface: z.enum(roleSurfaces).default('headless'),
 }).strict();
 export type ResearchSettings = z.infer<typeof researchSettingsSchema> & { command: string };
 /** The research settings in force: `run.research` over its defaults, Pi's command from `run.pi` when research names none. */
@@ -251,15 +257,23 @@ export function researchReviewSection(work: Pick<Work, 'key' | 'title' | 'descri
 // ---- The loop's step -----------------------------------------------------------------------------
 
 export interface ResearchStepAction { work: string; state: 'started' | 'done' | 'failed'; detail: string }
-interface LiveResearch { revision: string; run: Run<ResearchBrief>; settled: Promise<void> }
+interface LiveResearch { revision: string; run: Run<ResearchBrief>; settled: Promise<void>; startedAt: string; runtime: string; account: string }
 const live = new Map<string, LiveResearch>();
 /** The research run this process has live for an item, if any. */
 export const researchRunning = (workId: string) => live.get(workId) ?? null;
+/** The research runs this process has live, as the loop's session-tail roster reads them (GY-713). */
+export const researchRuns = (): LaunchedRun[] => [...live.entries()].map(([work, entry]) => ({ name: `research-${entry.run.id.slice(0, 8)}`, work, role: 'research', runtime: entry.runtime, account: entry.account,
+  startedAt: entry.startedAt, log: entry.run.log ?? null, pane: surfacePane(entry.run.id) }));
 /** Test seam: stop and forget every research run. */
 export function clearResearchRuns() { for (const entry of live.values()) entry.run.cancel('the research runs were cleared'); live.clear(); }
 
-/** The research runner: Pi on the research account and model. */
-export const researchRunner = (settings: ResearchSettings): Runner => piRunner({ command: settings.command, model: settings.model });
+/**
+ * The research runner: Pi on the research account and model, writing its per-run log under the
+ * checkout it reads, as a child of the loop or, with `run.research.surface` `herdr`, in a Herdr pane.
+ */
+export const researchRunner = (settings: ResearchSettings): Runner => piRunner({ command: settings.command, model: settings.model,
+  log: ({ id, cwd }) => runLogFile(cwd, `research-${id.slice(0, 8)}`),
+  ...(settings.surface === 'herdr' ? { surface: herdrSurface({ run: agentRuntimeRun(), label: 'Research' }) } : {}) });
 /** Roughly four characters a token: what a run has streamed, for its budget. */
 const estimatedTokens = (text: string) => Math.ceil(text.length / 4);
 
@@ -317,7 +331,7 @@ export async function researchStep(input: ResearchStepInput): Promise<{ held: Se
       if (streamed > input.settings.tokenBudget && !overBudget) { overBudget = true; run.cancel(`the run streamed about ${streamed} tokens, over its ${input.settings.tokenBudget}-token budget`); }
     });
     const settled = run.result().then(result => settleResearch(input, work, revision, result, overBudget)).catch(() => {}).finally(() => { if (live.get(work.id)?.run === run) live.delete(work.id); });
-    live.set(work.id, { revision, run, settled });
+    live.set(work.id, { revision, run, settled, startedAt: new Date().toISOString(), runtime: input.runner.name, account: commandAccount(input.settings.command) });
     actions.push({ work: work.key, state: 'started', detail: `Researching ${work.key} on ${input.settings.model} before build (at most ${input.settings.timeoutMinutes} minutes and ${input.settings.tokenBudget} tokens); dispatch waits for its brief` });
   }
   return { held, actions };

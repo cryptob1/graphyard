@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { lstatSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { defaultPiModel, piRunner, piSmoke, type SmokeResult } from './pi.js';
+import { defaultPiModel, piRunner, piSmoke, type PiRunnerOptions, type SmokeResult } from './pi.js';
 import type { FleetLaunchAccount } from '../fleet.js';
 import { registryToolsArgs } from '../master/environments.js';
 import { endRun, liveRun, registerRun } from './registry.js';
@@ -17,10 +17,13 @@ import { runRecord, type Run, type RunOptions, type RunRecord, type RunResult, t
  * producer's grants and the exercise rule, never by what the run says.
  */
 
-export function narrowRunner(pi: unknown): Runner {
+export function narrowRunner(pi: unknown, where: RunSurface = {}): Runner {
   const configured = piRuntimeSchema.parse(pi ?? {});
-  return piRunner({ command: configured.command, model: configured.model });
+  return piRunner({ command: configured.command, model: configured.model, ...where });
 }
+
+/** Where a headless run writes its log and which surface it runs on (GY-713): `headlessSurface` builds it. */
+export type RunSurface = Pick<PiRunnerOptions, 'log' | 'surface'>;
 
 /**
  * A narrow role's headless run on the account the agent registry chose for it (GY-170): the
@@ -54,9 +57,9 @@ export function accountKeyEnvironment(account: Pick<FleetLaunchAccount, 'name' |
   return { [account.key.variable]: value };
 }
 /** A registry account's headless runner: every run reads the account's key afresh, into its own environment only. */
-export function registryRunner(account: FleetLaunchAccount): Runner {
+export function registryRunner(account: FleetLaunchAccount, where: RunSurface = {}): Runner {
   const launch = registryHeadlessLaunch(account);
-  return { name: 'pi', start: (prompt, options) => piRunner({ command: launch.command, model: launch.model, args: launch.args, environment: { ...launch.environment, ...accountKeyEnvironment(account) } }).start(prompt, options) };
+  return { name: 'pi', start: (prompt, options) => piRunner({ command: launch.command, model: launch.model, args: launch.args, environment: { ...launch.environment, ...accountKeyEnvironment(account) }, ...where }).start(prompt, options) };
 }
 /**
  * The one-prompt smoke test of a registry account (GY-446): its runtime, login home, key and model,
@@ -85,11 +88,12 @@ const failure = (error: unknown) => error instanceof Error ? error.message : Str
  * keeps: the run's last events, its result, and what became of each submission.
  */
 export function startNarrowRun<T>(input: { runner: Runner; name: string; role: 'approver' | 'producer'; work: string; subject: string; prompt: string; options: RunOptions<T>; checkout?: string;
+  /** The account the run is on, as the dashboard's live view names it (GY-713). */ account?: string | null;
   apply: (result: RunResult<T>) => Promise<Applied[]> }) {
   const live = liveRun(input.name);
   if (live) throw new Error(`A ${live.role} run named ${input.name} is already running for ${live.work}`);
   const run = input.runner.start(input.prompt, input.options), startedAt = new Date().toISOString();
-  registerRun({ name: input.name, role: input.role, work: input.work, subject: input.subject, run: run as Run<unknown>, ...(input.checkout ? { checkout: input.checkout } : {}) });
+  registerRun({ name: input.name, role: input.role, work: input.work, subject: input.subject, run: run as Run<unknown>, runtime: input.runner.name, account: input.account ?? null, startedAt, ...(input.checkout ? { checkout: input.checkout } : {}) });
   const settled = run.result().then(async result => {
     let applied: Applied[];
     try { applied = await input.apply(result); }

@@ -12,10 +12,22 @@ import { boundDetail } from './decisions.js';
 import { clearProfileFailure, orphanedSupervisors, readyToRetry } from './sessions.js';
 import { blockedPromptAnswers, blockedPromptFailMs, blockedPromptSettleMs, failoverKey, handlerSettleMs, launchAppearanceMs, launcherRetry, promptDigest, type LaunchedSession, preserveInterruptedAttempt, record, stoppedStates } from './effects.js';
 import type { Cycle } from './cycle.js';
+import { launchedTailSources } from '../session-tail.js';
+import { launchedRuns } from '../runner/registry.js';
+import { researchRuns } from '../research.js';
 
 /** Steps 1–1d: close finished sessions, fail over exhausted ones, and settle what dead workers and orphaned supervisors left. */
 export async function closeStep(cycle: Cycle) {
   const { config, state, effects, now, snapshot, clock, performed, isolate, agents, open, owns, heldBy } = cycle;
+  // 0. Live session tails (GY-713): the sessions this loop launched — the running handles this host
+  //    registered, whose panes Herdr lists under their own names, and the headless runs this process
+  //    started — and nothing else, handed to the publisher that reads and publishes their tails. A
+  //    pane's account is the one this host's environment log recorded choosing for its launch.
+  if (effects.sessionTails) {
+    const choices = await effects.sessionTails.accounts?.().catch(() => ({})) ?? {};
+    effects.sessionTails.observe(launchedTailSources(snapshot.work, agents, config.hostId, [...launchedRuns(), ...researchRuns()],
+      config.workers.filter(worker => worker.mode === 'launch').map(worker => ({ principal: worker.principal, agentName: worker.agentName })), choices));
+  }
   // Whether a live lease of `principal` is worked in the worktree `cwd` names (…/worktrees/GY-N-EPOCH).
   const workedHere = (principal: string, cwd: string | undefined) => open.some(item => !!item.lease && item.lease.owner === principal
     && Date.parse(item.lease.expiresAt) > clock && !!cwd && cwd.replace(/ \(deleted\)$/, '').endsWith(`/${item.key}-${item.lease.epoch}`));
