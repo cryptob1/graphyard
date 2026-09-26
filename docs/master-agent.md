@@ -73,6 +73,18 @@ With a pass, the producer records `"exercise"`: the same proof run with the crit
 
 A pass is trusted only when that stripped run failed with a case executed; otherwise it is recorded as not exercising its criterion rather than as passing (`unexercised`, `evidence.exercise.refused`); the loop requests rework quoting it. `decide attest` adds `exercise` (fails on base), approver-confirmed; unexercised `manual:` proofs: re-attest, never rework.
 
+### Measuring the prereview-proof claim (GY-136)
+
+GY-115's claim that prereview mechanical proofs remove rework rounds is measured from the ledger, never asserted:
+
+```
+node scripts/measure-pipeline-speed.mjs --claim GY-115 --record .graphyard/measurements/rework-claim
+```
+
+- **Window**: deliveries merged after GY-115's merge commit (named), GY-115 excluded. It starts at the deployment observation of a release carrying it, else at the merge instant, named as the weaker basis. Deployed-revision ancestry is informational.
+- **Counted**: the median of `speed.reworkRounds` (ledger-replayed timelines, coverage named) against the fixed pre-merge median of 2, judged over at least ten deliveries. A miss is the finding: measured values, a named follow-up, exit code 2; window, population and baseline are never narrowed.
+- **Causes**: `rework` events of submitted items, per head and cause, over the window and an equal-length window before the merge (or `--since`), classified by decision binding (`:proof:`, `:ci:` mechanical; `:threads:`, `:verdict:` review; `:conflict:`, `:sync:` integration), else the loop's reason templates. The mechanical share of finding rounds is reported for both, reconciled against the summary's count.
+
 ## Guarded merges
 
 `master merge GY-N|--all` (skipping system-driven items) asks [GitHub to merge](github.md#merge-queue) only under a current authorization for the exact head, base and policy. Protocol skew refuses (`server runs <sha>, CLI expects <sha>: deploy main first`).
