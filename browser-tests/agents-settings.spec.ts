@@ -111,6 +111,13 @@ test('integration:agents-settings-page — Settings › Agents renders every run
   expect(await main.innerText()).not.toMatch(secretShaped);
   expect(await page.content()).not.toMatch(secretShaped);
 
+  // The default view is the account cards and one connect button; every registry form waits behind a collapsed Advanced.
+  await expect(main.locator('[data-connect-account]')).toBeVisible();
+  const advanced = main.locator('details.advanced');
+  await expect(advanced).not.toHaveAttribute('open', '');
+  expect(await main.locator('input:visible, select:visible, textarea:visible').count()).toBe(0);
+  await advanced.locator('summary').click();
+
   // A pasted credential is refused in the browser and never sent.
   const form = main.getByRole('form', { name: 'Set a role' });
   await form.getByLabel('Accounts, most preferred first').fill('claude-b');
