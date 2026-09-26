@@ -12,6 +12,7 @@ import { detailChanged, maxApproverLaunches, standingVerdict } from './decisions
 import { record } from './effects.js';
 import type { Cycle } from './cycle.js';
 import { deploymentDetail } from './deployment.js';
+import { loopAttested } from '../model/unproduced-attestation.js';
 
 /** How many times one cycle re-reads and retries a guarded merge that lost a race to a concurrent write. */
 export const mergeRaceRetries = 3;
@@ -67,7 +68,9 @@ export async function shepherdStep(cycle: Cycle) {
     }
     const outstanding = missingProofs(item, new Date(clock));
     if (!outstanding.length) return;
-    const manual = outstanding.filter(proof => proof.startsWith('manual:'));
+    // A proof the loop attests itself (GY-521) is not an operator's, when this loop may request decisions.
+    const attests = !!effects.decide && !!effects.approver;
+    const manual = outstanding.filter(proof => proof.startsWith('manual:') && !(attests && loopAttested(item, proof, new Date(clock))));
     const automatable = outstanding.filter(proof => !proof.startsWith('manual:'));
     if (manual.length) {
       const key = `escalation:proof:${item.id}:${item.candidate!.sha}:${item.policyRevision}`;

@@ -19,10 +19,18 @@ export function unproducedManualProofs(work: Work, all: Work[], now: Date): stri
   const failing = work.gates.find(gate => !gate.passed);
   if (failing?.name !== 'acceptance' || !failing.reasons.length) return [];
   const requested = new Set((work.autoDispatch?.producers ?? []).filter(request => request.state === 'requested').flatMap(request => request.proofs ?? []));
-  const proofs = [...new Set(requiredProofs(work, all))].filter(proof => proof.startsWith('manual:') && !automatableProof(work, proof) && !requested.has(proof) && !currentEvidence(work, proof, now));
+  const proofs = [...new Set(requiredProofs(work, all))].filter(proof => loopAttested(work, proof, now) && !requested.has(proof));
   const named = (reason: string) => proofs.find(proof => reason.includes(`: ${proof} needs trusted passing evidence`));
   if (!failing.reasons.every(reason => named(reason))) return [];
   return proofs.filter(proof => failing.reasons.some(reason => named(reason) === proof));
+}
+/**
+ * Whether the loop, not a person, attests `proof` once it is the only refusal left: a `manual:` proof
+ * no producer may run with no evidence on this head. The delivery step does not escalate one to an
+ * operator while the rest of the candidate settles; a failed attestation is evidence, and stays theirs.
+ */
+export function loopAttested(work: Work, proof: string, now: Date): boolean {
+  return proof.startsWith('manual:') && !automatableProof(work, proof) && !currentEvidence(work, proof, now);
 }
 /** Who owns the attestation of an unproduced `manual:` proof: the loop's decisions step, never a person. */
 export const attestationOwner = 'graphyard';

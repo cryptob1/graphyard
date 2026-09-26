@@ -99,8 +99,9 @@ test('unit:unproduced-manual-proof-attestation-requested — requested once with
   const effects = loopEffects(() => work, decided, approvers, withdrawn);
   const state = emptyDaemonState(config());
 
-  await runCycle(config(), state, effects, () => clock);
+  const first = await runCycle(config(), state, effects, () => clock);
   assert.equal(decided.length, 1, 'one attestation decision for the one unproduced proof');
+  assert.ok(!first.actions.some(action => action.kind === 'escalation' && action.detail.includes(proof)), 'the proof the loop attests is not escalated to an operator as well');
   assert.equal(decided[0].action, 'attest');
   assert.deepEqual(decided[0].input, { proof, sha, baseSha, policyRevision: 2 }, 'names the proof, the exact head, base and policy revision');
   assert.match(decided[0].reason, /manual:fault-class-configuration/);

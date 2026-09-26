@@ -25,7 +25,7 @@ Ordinary review findings, rework, idle workers, and proof setup are not stopping
 
 Unless created `"systemDriven": false`, an item refuses hand `dispatch`, `merge`, `review` and `decide attest|merge`, except stopped-loop recovery, unproduced `manual:` attestations, and `decide merge` of unauthorized merges or with no operator agent. Hand `dispatch` waits out live or just-released ones.
 
-Only unproduced `manual:` proofs left: the loop requests one attest decision and approver per proof and head; a new head withdraws it (`loopDecisions.attestations`, not `needsHuman`).
+Only unproduced `manual:` proofs left: the loop requests one attest decision and approver per proof and head; a new head withdraws it; no operator escalation (`loopDecisions.attestations`, not `needsHuman`).
 
 ### Session liveness is reconciled, not trusted
 
