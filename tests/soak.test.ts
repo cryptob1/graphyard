@@ -15,6 +15,7 @@ import { Refusal, type Principal, type Work } from '../src/model.js';
 import { approverSessionName, decisionInput, masterConfigSchema, mergeExecutor, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { Launcher } from '../src/daemon/cycle.js';
+import { resetFollowUpMigration } from '../src/daemon/cycle-triage.js';
 import { successorWidening } from '../src/model/successors.js';
 import { systemInvariants, type InvariantCheck } from '../src/model/invariants.js';
 import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } from './helpers/soak-world.js';
@@ -60,6 +61,7 @@ const plan = {
   items: 15, releaseEveryMs: 15 * minute, workMs: 20 * minute,
   rework: new Set([3, 7, 11]), deaths: new Set([5, 9]), deathAfterMs: 8 * minute,
   deploys: [2 * hour + 30 * minute, 5 * hour], split: { at: 45 * minute, item: 12 }, clean: 2, unstable: 4, slowRecompute: 8, exhaustedReviewer: 6,
+  followShiftEndMs: 4 * hour,
 };
 const file = (n: number) => `src/soak/item-${n}.ts`;
 
@@ -87,19 +89,21 @@ before(async () => {
 after(async () => { clock.uninstall(); if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (pgServer) await pgServer.stop(); });
 
 const id = () => randomUUID();
-async function api(principal: Principal, method: 'GET' | 'POST', path: string, body?: unknown) {
-  const response = await fetch(`${url}/api/${path}`, { method, headers: { Authorization: `Bearer ${token(principal)}`, 'Content-Type': 'application/json', 'Idempotency-Key': id() }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+async function api(principal: Principal, method: 'GET' | 'POST', path: string, body?: unknown, key: string = id()) {
+  const response = await fetch(`${url}/api/${path}`, { method, headers: { Authorization: `Bearer ${token(principal)}`, 'Content-Type': 'application/json', 'Idempotency-Key': key }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   const result = await response.json() as any;
   if (!response.ok) throw new Error(`Graphyard refused ${path} (${response.status}): ${result?.error ?? JSON.stringify(result)}`);
   return result;
 }
 
 /**
- * One simulated day of the loop against this world. `regression` injects a fault into the loop's own
+ * One simulated day of the real loop against this world. `regression` injects a fault into the loop's own
  * effects, standing for a change that breaks an invariant, so the soak shows it would fail.
  */
 let days = 0;
 async function simulateDay(options: { hours: number; regression?: 'approvers-left-open' }) {
+  // Each day starts its own loop process as far as the one-time migration is concerned.
+  resetFollowUpMigration();
   const dayStart = clock.now();
   const github = new SimulatedGitHub({ repository, baseBranch: 'main', appId: 1234, ciAppId: 15368, reviewerApps, ciMs: 5 * minute, reviewMs: 3 * minute, firstPullRequest: 100 * ++days },
     [...Array.from({ length: plan.items }, (_, index) => file(index + 1)), 'README.md']);
@@ -120,6 +124,27 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   for (const n of plan.rework) github.verdicts.set(items[n - 1].key, ['CHANGES_REQUESTED']);
   github.unstable.add(items[plan.unstable - 1].key); github.slowRecompute.add(items[plan.slowRecompute - 1].key);
   github.exhaustedProfiles.add('claude-reviewer');
+
+  // ---- GY-431: a parent's duplicate follow-up intake, leased for part of the day. ----
+  // Two origin-based follow-up items of one parent, the state the one-time migration finds. Before
+  // the first cycle a simulated worker releases the later one, claims it and records a blocked
+  // report, so the migration defers it; its shift ends mid-day, the lapse is explained by that
+  // report, and the loop asks again exactly once, folding the duplicate into the survivor. Neither
+  // item carries the title or triage-proof marker the system invariants judge a follow-up by, so
+  // the deferral window — two open items on one parent, the state the migration itself waits out —
+  // does not read as a follow-ups-per-parent violation.
+  const followParent = items[8].key;
+  const followIntake = (title: string, text: string) => ({
+    title, description: `The follow-up intake of ${followParent} that the migration folds (soak).`, type: 'chore' as const,
+    criteria: [{ id: 'AC-1', text: 'The intake holds every finding named for it', proofs: [PROOF] }], plannedFiles: [file(16)],
+    origin: { reviewFollowUps: { parent: followParent, findings: [{ path: file(9), text }] } },
+  });
+  const followSurvivor = await engine.execute(principals.operator, 'create', null, followIntake(`Review follow-ups intake for ${followParent}`, 'the widget leaks under load'), id());
+  const followDuplicate = await engine.execute(principals.operator, 'create', null, followIntake(`Review follow-ups intake for ${followParent}, later round`, 'the retry loop double-counts'), id());
+  const followWorker: Principal = { id: 'worker-followups', role: 'worker' };
+  await engine.execute(principals.operator, 'ready', followDuplicate.id, {}, id());
+  const followClaim = await engine.execute(followWorker, 'claim', followDuplicate.id, {}, id());
+  await engine.execute(followWorker, 'blocked', followDuplicate.id, { epoch: followClaim.epoch, reason: 'This worker holds the duplicate while the soak runs; the migration defers a leased item (GY-431)' }, id());
 
   // ---- Workers: the loop dispatches, the simulated session claims, works, pushes and submits (or dies). ----
   interface Session { work: string; key: string; branch: string; profile: WorkerProfile; epoch: number; pane: string; pushAt: number; diesAt: number | null; state: 'working' | 'submitted' | 'dead' }
@@ -183,11 +208,17 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   // One executor instance for the loop's process, and a fresh request per merge the loop asks for, as `master run` wires it.
   const executor = { principal: principals.coordinator.id, instance: `soak-${randomUUID()}` };
   const merge: DaemonEffects['merge'] = work => mergeExecutor(config, snapshot, transport, executor, randomUUID(), github.gh(repository))(work);
+  // The migration as the loop asks it, with the production wiring's idempotency keys, counted (GY-431).
+  const migrateCalls: number[] = [];
+  const migrateFollowUps: DaemonEffects['migrateFollowUps'] = async pass => {
+    migrateCalls.push(clock.now());
+    return api(principals.operatorAgent, 'POST', 'followups/migrate', {}, pass ? `graphyard-followups-migration:${pass}` : 'graphyard-followups-migration');
+  };
   const effects: DaemonEffects = {
     agents: () => herdr.list(),
     herdr: () => ({ agents: herdr.list(), available: true }),
     credentials: async profiles => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])),
-    snapshot, dispatch, requestProof, approver, merge,
+    snapshot, dispatch, requestProof, approver, merge, migrateFollowUps,
     closeSession: pane => { if (options.regression === 'approvers-left-open' && /approver/.test(herdr.agents.get(pane)?.name ?? '')) return; herdr.close(pane); },
     decide: (work, action, reason, input = {}) => api(principals.operatorAgent, 'POST', `work/${work.id}/decide`, { action, input: decisionInput(action, work, input), reason }),
     decisions: work => api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(work.id)}/decisions`),
@@ -227,6 +258,9 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     // sessions have renewed: for the rest of that minute nothing reaches it, the loop included.
     github.tick(now);
     await workersTick(now);
+    // The leased duplicate's worker renews its lease until its shift ends, then stops: the lapse
+    // is what the migration's re-ask waits for (GY-431).
+    if (elapsed < plan.followShiftEndMs) await engine.execute(followWorker, 'heartbeat', followDuplicate.id, { epoch: followClaim.epoch }, id());
     if (!deploying) {
       for (const act of pending.splice(0)) await act();
       await engine.reconcile();
@@ -251,12 +285,13 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   }
 
   const final = (await store.list()).filter(item => items.some(entry => entry.id === item.id));
-  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart };
+  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart,
+    followUps: { survivor: followSurvivor.key, duplicate: followDuplicate.key, calls: migrateCalls } };
 }
 
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 180_000 }, async () => {
   const began = performance.now();
-  const { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
+  const { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, followUps } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
   const undelivered = final.filter(item => item.stage !== 'done' || !item.delivery);
   assert.deepEqual(undelivered.map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
@@ -283,6 +318,22 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.ok(cycles > 24 * 6, `the loop cycled through the day (${cycles} cycles)`);
   const seconds = (performance.now() - began) / 1000;
   assert.ok(seconds < 120, `the day runs well inside the three minutes the CI test job allows it (${seconds.toFixed(1)} s)`);
+  // GY-431: the duplicate follow-up intake the migration deferred for its lease folded into the
+  // survivor once the lease ended, and the loop asked the migration exactly twice — once at the
+  // deferral, once at the fold — never again once nothing was deferred, one receipt per ask.
+  const every = await store.list();
+  const survivor = every.find(item => item.key === followUps.survivor)!, duplicate = every.find(item => item.key === followUps.duplicate)!;
+  assert.equal(duplicate.stage, 'done', 'the leased duplicate folded once its lease ended');
+  assert.equal(duplicate.closure?.kind, 'duplicate');
+  assert.equal(duplicate.closure?.ref, followUps.survivor);
+  assert.equal(duplicate.closure?.from, 'ready', 'the duplicate was released to its worker before it was leased, and folded from there');
+  assert.deepEqual(survivor.origin?.reviewFollowUps?.findings.map(finding => finding.text).sort(), ['the retry loop double-counts', 'the widget leaks under load'], 'the survivor holds every finding of its parent');
+  assert.equal(survivor.stage, 'backlog', 'the survivor stays open');
+  assert.equal(followUps.calls.length, 2, `the migration was asked once at the deferral and once at the fold, not on a timer: ${followUps.calls.map(at => `+${Math.round((at - dayStart) / minute)} min`).join(', ')}`);
+  assert.ok(followUps.calls[1]! - followUps.calls[0]! >= plan.followShiftEndMs - minute, 'the second ask waited for the lease to end instead of polling through the deferral');
+  assert.ok(followUps.calls[1]! - followUps.calls[0]! <= plan.followShiftEndMs + 10 * minute, 'the fold was asked for as soon as a cycle saw the lease end');
+  const receipts = await store.pool.query(`SELECT count(*)::int AS spent FROM receipts WHERE actor=$1 AND key LIKE 'graphyard-followups-migration%'`, [principals.operatorAgent.id]);
+  assert.equal(receipts.rows[0].spent, 2, 'each ask spent one receipt, and nothing else spent one');
 });
 
 test('unit:soak-invariants-hold — a loop change that breaks an invariant fails the soak: approver sessions the loop no longer closes are named within the hour', { timeout: 120_000 }, async () => {

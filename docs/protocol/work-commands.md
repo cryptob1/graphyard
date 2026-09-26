@@ -13,5 +13,5 @@ Create with `POST /api/work` ([example](../../examples/work.json)): `title` and 
 - `workspace`: `{"epoch":1,"host":…,"path":…,"branch":"graphyard/gy-1-1"}`.
 - `submit`: `{"epoch":1,"pr":123}`, refused (`409`) when a file outside `plannedFiles` [regresses shipped code](../coordination.md#refuse-candidates-that-revert-shipped-code-outside-their-scope).
 - `deployment`: `{"sha":…, "mergeSha":…, "source":"endpoint", "observedAt":…}`; coordinator or admin, delivered work, once.
-- `followups` `{findings,reason}` (master; `409` unless open), `triage` `{judgement}` (coordinator), `POST /api/followups/migrate` (once): [backlog](../master-agent.md#machine-filed-backlog).
+- `followups` `{findings,reason}` (master; `409` unless open), `triage` `{judgement}` (coordinator), `POST /api/followups/migrate` (once; asked again only while it names items deferred for their leases, each re-ask under a new key once the loop sees one of those leases end, a no-op once none are): [backlog](../master-agent.md#machine-filed-backlog).
 No endpoint sets lifecycle state.
