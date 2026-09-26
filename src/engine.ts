@@ -2081,7 +2081,8 @@ export class Engine {
       // GitHub's stale reading (GY-375): it is stored disproved — the head merges cleanly, which is
       // all GitHub's `mergeable: false` withheld from an open, non-draft pull request — so nothing
       // refreshes, holds or reworks it for that reading again. GitHub's raw reading is kept beside
-      // it under `disproved` (GY-390), so status and diagnose still show what GitHub reported.
+      // it under `disproved` (GY-390), so the stored observation `graphyard status` prints still
+      // carries what GitHub reported.
       const disproved = observation.conflicting ? disprovedConflict(work, observation) : null;
       work.observation = disproved ? withDisprovedConflict(observation, disproved) : observation;
       // A submission recorded without an observation has no files (GY-293): the first observation
