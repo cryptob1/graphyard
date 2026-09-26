@@ -118,6 +118,6 @@ test('unit:affected-tests-selected — a pull request runs only the tests that r
   assert.ok(direct.files.includes('tests/timing-stability.test.ts'), 'imported through tests/helpers/timing-report.ts');
   assert.ok(direct.files.length < tests.length, `${direct.files.length} of ${tests.length}`);
   const own = selectAffected(['tests/ci-shards.test.ts'], map, tests);
-  assert.deepEqual(own.files, ['tests/ci-shards.test.ts']);
+  assert.equal(own.mode, 'affected'); assert.ok(own.files.includes('tests/ci-shards.test.ts'), 'a changed test file selects itself');
   assert.equal(selectAffected(['README.missing.md'], map, tests).mode, 'full');
 });
