@@ -5,18 +5,18 @@ The master (`coordinator`) routes work, merges, verifies deployments and adminis
 
 ## Autonomy: agents approve agents
 
-Only three decisions are human-only: goals and priorities, spending money or opening third-party accounts, and issuing credentials to people. Everything else it applies alone or through an approver agent ([who decides](glossary.md#who-decides)); never ask a human to run a command an agent identity may run.
+The master acts without asking. Only three decisions are human-only: goals and priorities, spending money or opening third-party accounts, and issuing credentials to people. Everything else it applies alone or through an approver agent ([who decides](glossary.md#who-decides)).
 
 ## Operate
 
 Keep cycling: status, dispatch, review, merge, deployment verification. Stop only when every in-scope item is Done or has a genuinely external blocker recorded in Graphyard, and every merged change is verified against the exact deployed release or has a recorded deployment blocker.
 
-1. `master status`.
+1. `master status` at startup and after events.
 2. `master run` dispatches ready work in `schedule.order`.
 3. Route findings to rework.
 4. Merge only exact candidates passing every gate.
 5. `master verify-deployment GY-N` after delivery ([refusals](operations-reference.md#perpetual-master-loop)). Railway: `master config productionEnvironment='graphyard / production'`.
-6. Close finished agent sessions.
+6. Close finished agent sessions; return to status.
 
 Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions. `controlPlane.production` flags main ahead of production.
 
@@ -24,7 +24,7 @@ Ordinary review findings, rework, idle workers, and proof setup are not stopping
 
 ### System-driven items
 
-The loop drives every item. Unless created `"systemDriven": false`, one refuses hand `dispatch`, `merge`, `review` and `decide attest|merge`, naming the loop step, except stopped-loop recovery, unproduced `manual:` attestations, and `decide merge` of unauthorized merges or with no operator agent. Hand `dispatch` waits out live or just-released ones.
+The loop drives every item. Unless created `"systemDriven": false`, one refuses hand `dispatch`, `merge`, `review` and `decide attest|merge`, naming the loop step, except stopped-loop recovery, unproduced `manual:` attestations, and `decide merge` of unauthorized merges or with no operator agent.
 
 ### Session liveness is reconciled, not trusted
 
@@ -68,14 +68,14 @@ The master never launches reviews or producers by hand, except `master review GY
 With a pass, the producer records `"exercise"`: the same proof run with the criterion's behaviour removed.
 
 ```json
-"exercise":{"criterion":"AC-1","behaviour":"the lease expiry check in claim()","result":"fail","executed":4}
+"exercise":{"criterion":"AC-1","behaviour":"<the removed behaviour>","result":"fail","executed":4}
 ```
 
-A pass is trusted only when that stripped run failed with a case executed; otherwise it is recorded as not exercising its criterion rather than as passing (`unexercised`, `evidence.exercise.refused`); the loop requests rework quoting it.
+A pass is trusted only when that stripped run failed with a case executed; otherwise it is recorded as not exercising its criterion rather than as passing (`unexercised`, `evidence.exercise.refused`).
 
 ## Guarded merges
 
-`master merge GY-N|--all` (skipping system-driven items) asks [GitHub to merge](github.md#merge-queue) only under a current authorization for the exact head, base and policy. Protocol skew refuses (`server runs <sha>, CLI expects <sha>: deploy main first`).
+`master merge GY-N|--all` (skipping system-driven items) asks [GitHub to merge](github.md#merge-queue) only under a current authorization for the exact head, base and policy. Protocol skew refuses with `deploy main first`.
 
 ### Repair lane
 
