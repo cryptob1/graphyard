@@ -39,11 +39,9 @@ that host's loop. `sessions.unseen` lists stale handles. `dispatch.sessionReconc
   way as any other. Implementation sessions are left to the lease.
 - **Duplicate**: the older of two sessions for one role and head.
 
-A closure decides no gate, ends no lease, and stops no process. A profile's concurrency is counted against live sessions only, and a name is busy only while a live session has it. A session past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) raises attention, is never closed.
+A closure decides no gate, ends no lease, and stops no process. Concurrency and session names count live sessions only. A session past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) raises attention, is never closed.
 
-**So what an operator or a master does instead of closing sessions by hand:** nothing, for a session
-that finished or died (loop stopped: `graphyard master run --once` sweeps); for an overlong one, attach to it with the command on the handle. Never mark
-another session's handle finished to free a slot.
+**Instead of closing sessions by hand:** do nothing for a finished or dead one (loop stopped: `graphyard master run --once` sweeps); attach to an overlong one with its handle's command. Never mark another session's handle finished to free a slot.
 
 ### System invariants
 
@@ -57,7 +55,7 @@ With `run.research` set (`model`, `timeoutMinutes` 15, `tokenBudget`), a feature
 
 A candidate passing the build gate gets, in `autoDispatch`, one producer request per proof group (`unit`, `integration`, `manual` for `producerProofs`), then a review request once its unit and integration proofs pass (`proofs-pending` until then; failure returns it to its worker). `*-postmerge` proofs are refused. **The loop launches each request within 30 seconds**: every `dispatchIntervalSeconds` it starts the reviewer profile (`run.reviewerProfile`) and one producer session per proof group on a `master producer add FILE` profile ([template](../examples/master/claude-producer.json)), recorded in `.graphyard/reviews.json` and `.graphyard/producers.json`. A reviewer launch awaits the head's bot reviews (`run.awaitReviewers`) for `awaitReviewersMinutes` (default 8, 0 disables), skipping one that last posted a usage-limit notice until it next reviews (`skipped: <bot> exhausted since <time>`; `dispatch.botReviewers`).
 
-**Concurrency is per role.** A profile's `concurrency` (1–20, default 1) caps its simultaneous sessions, each with a name unique to its request above one. It applies without a restart; lowering it drains sessions first; see `longestWaitMs`; a role starved ten minutes counts in `counts.concurrencyStarved`.
+**Concurrency is per role.** A profile's `concurrency` (1–20, default 1) caps its simultaneous sessions, each with a name unique to its request above one. It applies without a restart (lowering it drains sessions first; see `longestWaitMs`); a role starved ten minutes counts in `counts.concurrencyStarved`.
 
 **Requests always settle.** A gone pane (`pane_not_found`) is closed. No request outlives its own token: expired, unreported by Herdr, it settles `expired`; one still pending counts in `dispatch.sessionReconcile.stuck`. Unanswered sessions relaunch elsewhere (12 per request, then `dispatch.abandoned`); an unposted reviewer is reminded first. [Lost producer runs](master-agent-sessions.md#lost-runs-and-spent-producer-requests) spend no attempt.
 

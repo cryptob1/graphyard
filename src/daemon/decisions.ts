@@ -264,7 +264,8 @@ export function exhaustedProofRework(work: Work, exhausted: readonly ExhaustedPr
   if (!spent.length) return null;
   const each = Math.max(200, Math.floor(1600 / spent.length));
   return { reason: `${work.key}: the producer attempts for ${spent.map(entry => `${groupName(entry)} on ${candidate.sha.slice(0, 12)} ended without trusted evidence — ${quoteAttempts(entry, each)}`).join('. And ')}. No producer is launched for this head again, so it cannot pass its proofs; the item returns to a worker to fix what the attempts name and push a fresh head the producers are requested for.`,
-    binding: `${candidate.sha}:proof-exhausted:${spent.map(entry => entry.requestId).sort().join(',')}` };
+    // Keyed on the head alone: a second group spent on the same head asks for no second rework.
+    binding: `${candidate.sha}:proof-exhausted` };
 }
 /**
  * GY-193. The rework a head's own proofs call for, or null. A trusted proof that failed on the head

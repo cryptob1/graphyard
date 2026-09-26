@@ -3,7 +3,7 @@ import type { Work } from '../model.js';
 import type { MasterConfig, WorkerProfile, HerdrAgent } from '../master.js';
 import { cycleMetricsSchema, type CycleStepName, type DaemonAction, type DaemonActionKind, type DaemonState, emptyCycleSteps, message, pruneDaemonState } from './state.js';
 import { reconcilePendingActions } from './reconcile.js';
-import { setAsideFollowUpThreads } from './decisions.js';
+import { type ExhaustedProof, setAsideFollowUpThreads } from './decisions.js';
 import { actionableSubjects, latencyBudget, observeItemClock, stageMetrics, trackSilence } from './metrics.js';
 import { profileHealth } from './sessions.js';
 import { boundedPersist } from './liveness.js';
@@ -83,7 +83,9 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   /** The item a worker profile holds a live lease on, which a failure while handling that profile is recorded against. */
   const heldBy = (profile: WorkerProfile) => open.find(item => !!item.lease && item.lease.owner === profile.principal && Date.parse(item.lease.expiresAt) > clock) ?? null;
 
-  const cycle: Cycle = { config, state, effects, now, snapshot, clock, clockOffset, performed, isolate, agents, credentials, open, owns, heldBy, timings };
+  let exhausted: Promise<ExhaustedProof[]> | undefined;
+  const exhaustedProofs = () => exhausted ??= effects.exhaustedProofs?.().catch(() => []) ?? Promise.resolve([]);
+  const cycle: Cycle = { config, state, effects, now, snapshot, clock, clockOffset, performed, isolate, agents, credentials, open, owns, heldBy, timings, exhaustedProofs };
   await timings.step('close', () => closeStep(cycle));
 
   // A pane this cycle just closed frees its profile, so health is read after the closures.
@@ -168,4 +170,6 @@ export interface Cycle {
   owns: (principal: string) => boolean; heldBy: (profile: WorkerProfile) => Work | null;
   /** This cycle's step and call timings (GY-377); a step may time a phase of its own inside it. */
   timings: Timings;
+  /** The producer requests the dispatcher stopped attempting (GY-496), read once per cycle for the proof and decision steps. */
+  exhaustedProofs: () => Promise<ExhaustedProof[]>;
 }

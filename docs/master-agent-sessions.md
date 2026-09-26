@@ -21,7 +21,7 @@ Sessions run in no-approval mode (`"approvals": "auto"`): `--permission-mode byp
 
 A profile's `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`), in order, unless the [agent registry](onboarding.md#configure-the-fleet) defines the role. A launch takes the first logged-in account under `run.quotaCeilingPercent`, else **fails over** to the next (`dispatch.accounts`).
 
-On a mid-session limit notice the loop commits worker changes as unpushed `WIP:`, records `capacity.exhausted` (not `lease-loss`) and relaunches on the next account or waits for the first reset.
+On a mid-session limit notice the loop commits worker changes as unpushed `WIP:`, records `capacity.exhausted` (not `lease-loss`) and relaunches on the next account or after the first reset.
 
 ## How a session starts
 
@@ -37,35 +37,34 @@ The launcher writes `.graphyard/launch/NAME.request` (and a Claude session's `NA
 GY=/path/to/checkout/.graphyard/launch/NAME; claude --permission-mode bypassPermissions --setting-sources user --settings /path/to/repo/.graphyard/harness/producer-PROFILE.json --append-system-prompt-file "$GY.role" "$(cat "$GY.request")"
 ```
 
-The typed line is bounded at **512 bytes** whatever the request is.
+The typed line is at most **512 bytes**.
 
 #### The start bound reads the pane
 
-The runtime is **ready** when Herdr reports it active with no prompt, or its banner shows (`the claude runtime is on screen while Herdr reports it unknown`). Ready within **60 seconds** (`run.launchStartSeconds`) is started; one still starting gets **120 seconds** (`started.extended`). Otherwise it is refused with the case and the pane's last non-empty line, never Herdr's own `agent_not_found`: `the claude runtime never started within 60 s in pane w1V:pR6 (command still echoing)`, `… was still starting after 120 s` or `… is blocked before it is ready`; retried as `Automatic producer launch for GY-N refused 1 time(s): …`. A failed launch stops its supervisor, closes its pane and releases its claim.
+The runtime is **ready** when Herdr reports it active with no prompt, or its banner shows (`the claude runtime is on screen while Herdr reports it unknown`). Ready within **60 seconds** (`run.launchStartSeconds`) is started; one still starting gets **120 seconds** (`started.extended`). Otherwise it is refused naming the case and the pane's last non-empty line, not Herdr's `agent_not_found`: `the claude runtime never started within 60 s in pane w1V:pR6 (command still echoing)`, `… was still starting after 120 s` or `… is blocked before it is ready`; retried as `Automatic producer launch for GY-N refused 1 time(s): …`. A failed launch stops its supervisor, pane and claim.
 
 #### First-run consent prompts
 
-A runtime stopped on a first-run prompt is **`awaiting consent`**. The launcher answers only `hooks-continue-untrusted` (**Continue without trusting**) and `telemetry-decline`, with the least-privilege option, never one that grants hook execution or a sandbox escape; everything else, above all a **credential** or **payment** prompt, is escalated. A worker is held in `.graphyard/launch/NAME.consent` (attach: `herdr pane attach`); after **15 minutes** the supervisor stops renewing and stops the session, so the item is dispatchable again.
+A runtime stopped on a first-run prompt is **`awaiting consent`**. The launcher answers only `hooks-continue-untrusted` (**Continue without trusting**) and `telemetry-decline`, with the least-privilege option, never one that grants hook execution or a sandbox escape; anything else (a **credential** or **payment** prompt above all) is escalated. A worker is held in `.graphyard/launch/NAME.consent` (attach: `herdr pane attach`); after **15 minutes** its supervisor stops it and the item is dispatchable again.
 
 ### Acknowledgement, the one re-prompt, and never started
 
-A reviewer or producer is `awaiting acknowledgement` until 30 s of activity (`counts.dispatchAwaiting`). Quiet after `run.acknowledgementSeconds` (default 90), it is re-prompted once; settling resultless makes it **`never started`**, relaunched a minute later without retry cost. Three exhaust the request (`retry.neverStarted`).
+A reviewer or producer is `awaiting acknowledgement` until 30 s of activity (`counts.dispatchAwaiting`). Quiet after `run.acknowledgementSeconds` (default 90), it is re-prompted once; settling resultless, it is **`never started`** and relaunched a minute later at no retry cost. Three exhaust the request (`retry.neverStarted`).
 
 ### Resume, idle-with-lease and exited sessions
 
-When a live attempt's blocker or scope request resolves, its inactive session is re-prompted once (item, epoch, change, `complete GY-N EPOCH PR`), recorded on its handle. **Idle-with-lease** (30 quiet minutes, nothing open) shows on its handle with the pane, re-prompted once, then after 30 more handed to a new attempt on its branch. Sessions with an agentless pane, or whose item left build, close with a reason.
+When a live attempt's blocker or scope request resolves, its inactive session is re-prompted once (item, epoch, change, `complete GY-N EPOCH PR`), recorded on its handle. **Idle-with-lease** (30 quiet minutes, nothing open) shows on its handle, is re-prompted once, and after 30 more goes to a new attempt on its branch. Sessions with an agentless pane, or whose item left build, close with a reason.
 
 ### Lost runs and spent producer requests
 
-A producer run killed before a verdict (exit 143/137, vanished session, dead `launcherPid`) settles `lost:` and relaunches next tick, spending no attempt; failing, unexercised, empty or timed-out runs count.
+A producer run killed before a verdict (exit 143/137, vanished session, dead `launcherPid`) settles `lost:`, relaunches next tick and counts in `retry.lost`; `retry.started` counts failing, unexercised, empty or timed-out runs. 12 sessions per request bound both.
 
-Spent attempts raise attention (`escalation:proof-exhausted`) naming the group, each attempt and the next owner; a cycle later the loop requests **rework** quoting them. An unrequestable `--proof-workflow` escalates too.
+Spent attempts raise `escalation:proof-exhausted` (group, each attempt, next owner); a cycle later the loop requests one **rework** per head quoting them. An unrequestable `--proof-workflow` escalates too.
 
 ### The dispatcher's own state
 
 - **The dispatcher bounds its own state where it composes it**, each cut marked with an ellipsis.
-- **A cursor that fails its schema is repaired, not fatal**; the repair is logged once with the
-  path that failed.
-- **A tick failure is attributed and surfaced.** `dispatch.lastFailure` names it. Three consecutive failures raise one attention item saying no reviewer or producer session is being launched for any item. `graphyard master restart` repairs the cursor.
+- **A cursor that fails its schema is repaired, not fatal**, logged once with the failing path.
+- **A tick failure is attributed and surfaced.** `dispatch.lastFailure` names it. Three consecutive failures raise one attention item: no reviewer or producer is launching. `graphyard master restart` repairs the cursor.
 
-**A session that exits at launch is classified from its pane.** `herdr agent get` answers only `agent_not_found` for a runtime that exits **at launch**, so the dispatcher uses `herdr pane read`: a **provider limit notice** fails over exactly as a mid-session exhaustion does; any other cause is refused with the pane's last words and retried.
+**A session that exits at launch is classified from its pane.** `herdr agent get` only answers `agent_not_found` for it, so the dispatcher reads the pane: a **provider limit notice** fails over like a mid-session exhaustion; any other cause is refused with the pane's last words and retried.

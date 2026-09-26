@@ -50,7 +50,7 @@ export async function shepherdStep(cycle: Cycle) {
   //    and escalates what only a human or a producer may resolve.
   //    A producer request whose attempts are used up is raised here the cycle it is first seen
   //    (GY-496); the decision step requests the rework on a later cycle (cycle-decisions.ts).
-  const exhausted = await effects.exhaustedProofs?.().catch(() => []) ?? [];
+  const exhausted = await cycle.exhaustedProofs();
   for (const item of open.filter(candidate => candidate.submission && candidate.candidate && !candidate.reworkRequested && !standingVerdict(candidate))) await isolate('proof', item, item.key, async () => {
     const reviewGate = item.gates.find(gate => gate.name === 'review');
     if (reviewGate && !reviewGate.passed) {
