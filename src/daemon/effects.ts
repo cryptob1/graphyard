@@ -1,6 +1,7 @@
 // Concern: the effects a cycle acts through — their interface, cursor records, and the production wiring.
 import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
+import { allocateSessionCheckout, removeSessionCheckout, worktreeRoot } from '../install/worktree-root.js';
 import { productionEnvironmentFromEnv } from '../flow-analytics.js';
 import { type ChildRun, ChildWaitLedger, childRunner } from '../child-runner.js';
 import type { Work } from '../model.js';
@@ -35,7 +36,7 @@ import type { daemonSummary } from './run.js';
 import { observeDeployment } from './deployment.js';
 import { serverCallName, timedCall, timedFetch, timedRun } from '../master/timings.js';
 import type { RunRecord, Runner } from '../runner/types.js';
-import type { ResearchEvent } from '../research.js';
+import { type ResearchCheckout, type ResearchEvent } from '../research.js';
 
 /** A reviewer or producer session a launch ledger holds as pending, as the failover step reads it. */
 export interface LaunchedSession { role: 'reviewer' | 'producer'; record: string; profile: string; agentName: string; pane: string | null; work: string; requestId: string | null }
@@ -182,10 +183,12 @@ export interface DaemonEffects {
   /**
    * Research before build (GY-259): records a research run's start, brief or failure on the item as
    * the coordinator, and names the checkout the research session reads (and, in a test, its runner).
-   * A loop wired without it, or whose config has no `run.research`, researches nothing and dispatches as before.
+   * A loop wired without it, or whose config turns research off (`run.research.enabled: false`),
+   * researches nothing and dispatches as before. The session never reads this checkout itself:
+   * `checkout` gives each run a detached throwaway worktree of it (GY-401); a test may pass `cwd`.
    */
   recordResearch?: (work: Work, event: ResearchEvent) => Promise<unknown>;
-  research?: { cwd: string; runner?: Runner };
+  research?: { cwd?: string; checkout?: (work: Work) => Promise<ResearchCheckout>; runner?: Runner };
   /** The reviewer and producer sessions the launch ledgers hold as pending. */
   launchedSessions?: () => Promise<LaunchedSession[]>;
   /** The account the profile's current session was launched on, as its launcher recorded it. */
@@ -482,7 +485,19 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     promptSession: async (agent, text) => { await deliverPrompt(agent.name ?? agent.pane_id!, text, run); },
     reportCapacity: (work, event) => mutate(`work/${work.id}/capacity`, event),
     recordResearch: (work, event) => mutate(`work/${work.id}/research`, event),
-    research: { cwd: root },
+    // A research session never reads this checkout (GY-401): each run gets a detached throwaway
+    // worktree of its HEAD, allocated under the managed checkout root like a proof or review
+    // checkout and removed when the run settles — the prompt's read-only instruction is no
+    // longer the only guard, and a run the loop died under is reclaimed as any other orphan.
+    research: {
+      checkout: async work => {
+        const base = worktreeRoot(root, current());
+        const head = (await run('git', ['-C', root, 'rev-parse', 'HEAD'])).trim();
+        const checkout = await allocateSessionCheckout(base, 'research', work.key, head, randomUUID());
+        await run('git', ['-C', root, 'worktree', 'add', '--detach', checkout.worktree, head]);
+        return { cwd: checkout.worktree, dispose: () => removeSessionCheckout(root, base, checkout.directory, run) };
+      },
+    },
     launchedSessions: async () => [
       ...(await readReviewLedger(root)).reviews.filter(entry => entry.state === 'pending' && !entry.launching).map(entry => ({ role: 'reviewer' as const, record: entry.id, profile: entry.profile, agentName: entry.agentName, pane: entry.pane, work: entry.key, requestId: entry.requestId ?? null })),
       ...(await readProducerLedger(root)).producers.filter(entry => entry.state === 'pending').map(entry => ({ role: 'producer' as const, record: entry.id, profile: entry.profile, agentName: entry.agentName, pane: entry.pane, work: entry.key, requestId: entry.requestId })),

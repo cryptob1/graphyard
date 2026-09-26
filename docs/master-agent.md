@@ -49,7 +49,7 @@ another session's handle finished to free a slot.
 
 ## Research before build
 
-With `run.research` set (`model`, `timeoutMinutes` 15, `tokenBudget`), a feature (or `"research": true`) gets one read-only Pi session per requirements revision, briefing worker and reviewer: reusable code, prior art, risks, approach. Product questions go under Needs you with recommendation and deadline; build proceeds on it, a differing answer requests rework, failure never blocks.
+Default on (`run.research`: `model`, `tokenBudget`, `enabled: false`), a feature (or `"research": true`) gets one read-only Pi session per revision, briefing worker and reviewer: reusable code, prior art, risks, approach. Product questions go under Needs you with recommendation and deadline; build proceeds on it, a differing answer requests rework, failure never blocks.
 
 ## Automatic dispatch at submit
 
