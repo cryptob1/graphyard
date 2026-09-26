@@ -1,7 +1,7 @@
 <!-- page: Build integrations | 4 | releases and observed delivery. -->
 # Releases and observed production delivery
 
-Graphyard records which release each environment should run and verifies it only from what service-scoped observers measured running. Rollback is in [recovery](recovery.md#rollback).
+Graphyard records which release each environment should run and verifies it only from what service-scoped observers measured.
 
 ## Who writes what
 
