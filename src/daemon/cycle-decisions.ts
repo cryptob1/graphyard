@@ -139,7 +139,8 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
         // past `maxApproverRefusals` in a row the decision is escalated instead of retried forever.
         // The count is not a fault of its own: the failed launch note already reports it.
         const orphan = (error as { registrySession?: string })?.registrySession, refusals = approverRefusalKey(watch.decision);
-        Object.assign(watch, { launches: watch.launches - 1, agentName: null, pane: null, launchedAt: null, account: null, runtime: null, session: orphan ?? null });
+        // A refusal after a wait for a slot is no longer that wait, so the refusal bound applies to it.
+        Object.assign(watch, { launches: watch.launches - 1, agentName: null, pane: null, launchedAt: null, account: null, runtime: null, session: orphan ?? null, capacity: null });
         await record(state, refusals, { kind: 'decision', work: item.key, principal: null, state: 'failed', detail: message(error), attempts: (state.actions[refusals]?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist, null);
         await effects.persist(state);
         throw error;

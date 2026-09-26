@@ -102,6 +102,46 @@ test('a hand-launched approver whose launch is refused for a reason other than c
   assert.equal(fourth.actions.filter(action => action.kind === 'escalation').length, 1);
 }));
 
+test('a launch that first waited for an approver slot and is then refused for another reason is still escalated after three refusals', async () => withConfig(async config => {
+  const work = item('GY-589'), decision = decisionId('7c1e3a4b'), name = approverSessionName(work, decision);
+  const agents: HerdrAgent[] = [{ name, pane_id: 'pane-1', agent_status: 'working' }];
+  const history = { 'GY-589': [{ id: decision, action: 'release', state: 'requested', requestedAt: iso() }] };
+  const tick = { at: clock }, reads = { count: 0 }, launches = { calls: 0 };
+  const loop = effects([work], agents, history, tick, reads, {
+    approver: async () => {
+      launches.calls += 1;
+      if (launches.calls === 1) throw Object.assign(new Error('approver role is at its concurrency limit'), { roleAtCapacity: 'approver 1/1' });
+      throw new Error('approver credential file is missing');
+    },
+  });
+  const state = emptyDaemonState(config);
+  const cycle = (at: number) => { tick.at = at; return runCycle(config, state, loop, () => tick.at); };
+
+  await cycle(clock);
+  agents.length = 0;
+  await cycle(clock + 30_000);
+  let watch = Object.values(state.approvals).find(entry => entry.decision === decision)!;
+  assert.equal(launches.calls, 1);
+  assert.ok(watch.capacity, 'the first launch waits for a slot');
+  assert.equal(state.actions[`approver:${decision}:refused`], undefined, 'a wait for a slot is not a refusal');
+  for (let round = 1; round <= 3; round += 1) {
+    await cycle(clock + (round + 1) * 30_000);
+    watch = Object.values(state.approvals).find(entry => entry.decision === decision)!;
+    assert.equal(launches.calls, round + 1);
+    assert.equal(watch.capacity, null, 'a refusal for another reason ends the wait for a slot');
+    assert.equal(state.actions[`approver:${decision}:refused`]?.attempts, round);
+  }
+  const escalated = await cycle(clock + 150_000);
+  watch = Object.values(state.approvals).find(entry => entry.decision === decision)!;
+  assert.equal(launches.calls, 4, 'no launch is made past the refusal bound');
+  assert.ok(watch.exhaustedAt, 'the decision is marked spent');
+  const escalation = escalated.actions.find(action => action.kind === 'escalation');
+  assert.ok(escalation, 'the refused decision is escalated despite its earlier wait for a slot');
+  assert.match(escalation.detail, /refused 3 times in a row \(last: approver credential file is missing\)/);
+  await cycle(clock + 180_000);
+  assert.equal(launches.calls, 4, 'an escalated decision is left for the master');
+}));
+
 test('a hand watch is not judged while its relaunch is still with the launcher, so it is neither recorded as ended nor counted again', async () => withConfig(async config => {
   const work = item('GY-589'), decision = decisionId('6b9d2f3a'), name = approverSessionName(work, decision);
   const agents: HerdrAgent[] = [{ name, pane_id: 'pane-1', agent_status: 'working' }];
