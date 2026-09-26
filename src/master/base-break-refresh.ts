@@ -1,3 +1,4 @@
+// Concern: base-branch breakage — telling a failure the base caused from the candidate's own, and the refresh and waking that answer it.
 import type { Observation, Work } from '../model.js';
 import { currentRestore, latestCheck } from '../merge-queue.js';
 

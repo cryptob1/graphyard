@@ -27,9 +27,7 @@ Unless created `"systemDriven": false`, an item refuses hand `dispatch`, `merge`
 
 ### Base-branch breakages and fresh observations
 
-A required check that failed only on tests the base branch broke is not the worker's. CI's `test` step publishes one `Failed tests` annotation naming every failed test (`graphyard-failed-tests:` record) on each run, pull requests and base-branch pushes alike. The observation reads it for the head, the base commit it was built against and the base tip; when every failing test also fails on that base and passes on the tip, it records `observation.baseBreak`, the loop requests no rework, and the observation job merges the tip into the candidate's branch (refresh trigger `base breakage`, recorded with the breakage on `baseRefresh.baseBreak` and `base.refreshed`), carrying the approval and proofs the refresh carry rule keeps. `master status` names such an item with the failing test, the base commit that broke it and the tip that fixed it, owned by the control plane, never as needing a new head. A merge conflict goes back to the worker as any base conflict does.
-
-A rework decision waits for an observation under two minutes old. The decision step wakes the item's own observation job itself (`POST /api/work/:id/resync`) and re-decides from the reading the moment it lands, within 15 seconds per cycle in all; an item woken once that budget is spent is decided on the next cycle, and an item is woken again only after a minute.
+CI's `test` step annotates each run with its failed tests (`graphyard-failed-tests:`). When every test failing on a head also fails on its built-against base and passes on the base tip, the observation records `baseBreak`, no rework is requested, and the observation job merges the tip in (refresh trigger `base breakage`, carry as any refresh). `master status` names the test, the base that broke it and the tip that fixed it. A rework decision needing a fresh observation wakes the item's own (`resync`) and re-decides when it lands (15 s per cycle; re-woken after a minute).
 
 ### Session liveness is reconciled, not trusted
 

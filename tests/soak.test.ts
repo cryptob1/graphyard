@@ -15,6 +15,7 @@ import { Refusal, type Principal, type Work } from '../src/model.js';
 import { approverSessionName, decisionInput, masterConfigSchema, mergeExecutor, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { Launcher } from '../src/daemon/cycle.js';
+import { wakeOwnObservation } from '../src/master/base-break-refresh.js';
 import { successorWidening } from '../src/model/successors.js';
 import { systemInvariants, type InvariantCheck } from '../src/model/invariants.js';
 import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } from './helpers/soak-world.js';
@@ -200,6 +201,9 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       return { source: 'endpoint', sha: production.sha, at: new Date(clock.now()).toISOString(), reason: null, deployed: serving.map(item => item.key), pending: delivered.filter(item => !serving.includes(item)).map(item => item.key) };
     },
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    // A rework decision waiting on a stale observation wakes the item's own job (GY-793): the real
+    // resync, with the observation job run while the step waits, as the control plane runs it.
+    observe: (work, waitMs) => wakeOwnObservation(body => engine.resyncWork(principals.coordinator, work.id, body), async () => { await processJob(engine, adapter); }, { waitMs }),
   };
 
   // ---- The day. ----
