@@ -1,7 +1,7 @@
-<!-- page: Build integrations | 4 | releases and observed delivery. -->
-# Releases and observed production delivery
+<!-- page: Build integrations | 4 | the release API. -->
+# Releases and observed delivery
 
-Graphyard records which release each environment should run and verifies it only from what service-scoped observers measured running. Rollback is in [recovery](recovery.md#rollback).
+Graphyard records which release each environment should run and verifies it only from what service-scoped observers measured. Rollback is in [recovery](recovery.md#rollback).
 
 ## Who writes what
 
@@ -30,7 +30,7 @@ Policy and approvals are `admin`'s; builds from a `producer` with a `builder` re
  "provenanceUrl":"https://ci.example.test/builds/812"}
 ```
 
-`POST /api/delivery/release` names the build and its explicit membership; each member cites its merge SHA, and a reverted change stays listed with `included: false`:
+`POST /api/delivery/release` names the build and its explicit members, each citing its merge SHA; a reverted change stays listed with `included: false`:
 
 ```json
 {"id":"2026.09.18-1","expectedRevision":0,"environment":{"id":"production","revision":1},
@@ -41,7 +41,7 @@ Policy and approvals are `admin`'s; builds from a `producer` with a `builder` re
             {"workId":"3a8e2b6f-4c9d-4eaf-9021-2b3c4d5e6f70","mergeSha":"9abcdef0123456789abcdef0123456789abcdef0","included":false,"note":"Reverted in #812"}]}
 ```
 
-Approve with `POST /api/delivery/approve` `{"release": {...}, "environment": {...}}`, then select; one concurrent selection per generation wins:
+Approve with `POST /api/delivery/approve` `{"release": {...}, "environment": {...}}`, then select (one concurrent selection per generation wins):
 
 ```json
 {"environment":{"id":"production","revision":1},"release":{"id":"2026.09.18-1","revision":1},
@@ -67,4 +67,4 @@ Only complete listings measured by `provider` or `host-attestation` can verify; 
 
 ## Attribution
 
-A validation pass is a claim about one artifact on one target. Each request binds the candidate's manifest, a compatibility signature (manifest, build inputs, test bundle, configuration, source, policy, artifacts) and what observers measured across the run; workers and client-supplied SHAs establish nothing, and `POST /api/validation/result` refuses a top-level SHA field. A mismatch inside an accepted pass's window records `attribution-undermined` and the pass stops counting. `GET /api/analytics/attribution` reports mismatches and paid-run cost.
+Each validation request binds the candidate's manifest, a compatibility signature (manifest, build inputs, test bundle, configuration, source, policy, artifacts) and what observers measured across the run; workers and client-supplied SHAs establish nothing, and `POST /api/validation/result` refuses a top-level SHA field. A mismatch inside an accepted pass's window records `attribution-undermined` and the pass stops counting. `GET /api/analytics/attribution` reports mismatches and paid-run cost.
