@@ -4,6 +4,7 @@ import type { Engine } from './engine.js';
 import { demand, pathScopeContains, standingEscalations, type Principal, type Stage, type Work } from './model.js';
 import { interventionKindLabel, interventionKinds, interventionWindows, judgementVerdictLabel, type Intervention, type InterventionKind, type InterventionPattern, type InterventionPolicy, type InterventionReport, type InterventionRecordInput, type InterventionWindow, type Judgement, type JudgementInput } from './model/interventions.js';
 import type { Store } from './store.js';
+import { boundedSnapshot } from './store/bounded-snapshot.js';
 
 /**
  * Interventions read from the ledger (GY-98; see model/interventions.ts for the concept).
@@ -49,10 +50,15 @@ const ledgerColumns = `seq, work_id, actor, kind, created_at, doc->>'updatedAt' 
   CASE WHEN doc IS NOT NULL THEN jsonb_build_object('key', doc->'key', 'stage', doc->'stage', 'title', doc->'title', 'epoch', doc->'epoch', 'blocker', doc->'blocker',
     'plannedFiles', doc->'plannedFiles', 'quarantine', doc->'containmentQuarantine', 'escalations', doc->'escalations', 'candidate', doc->'candidate', 'submission', doc->'submission') ELSE NULL END AS work,
   CASE WHEN work_id IS NULL THEN NULL ELSE (SELECT graphyard_event_work(earlier.work_id, earlier.payload)->>'stage' FROM events earlier WHERE earlier.work_id=ledger.work_id AND earlier.seq<ledger.seq AND (earlier.payload ? 'work' OR earlier.payload ? 'delta') ORDER BY earlier.seq DESC LIMIT 1) END AS stage_before`;
-/** The newest `limit` rows of the kinds the fold reads, in ledger order. */
-export async function readInterventionLedger(db: Db, options: { limit?: number; workId?: string | null } = {}): Promise<{ rows: InterventionLedgerRow[]; truncated: boolean }> {
+/**
+ * The newest `limit` rows of the kinds the fold reads, in ledger order; with `since`, only those
+ * written from that instant on (GY-422). A report reads its window this way — the rows come from
+ * the (kind, created_at) index, so a ledger of any age costs what the window holds — and every
+ * per-row lookup below (the embedded document, the stage before) runs for those rows alone.
+ */
+export async function readInterventionLedger(db: Db, options: { limit?: number; workId?: string | null; since?: string | null } = {}): Promise<{ rows: InterventionLedgerRow[]; truncated: boolean }> {
   const limit = options.limit ?? interventionLedgerLimit;
-  const result = await db.query(`SELECT ${ledgerColumns} FROM (SELECT *, graphyard_event_work(work_id, payload) AS doc FROM (SELECT * FROM events WHERE kind = ANY($1) AND ($3::uuid IS NULL OR work_id=$3) ORDER BY seq DESC LIMIT $2) newest) ledger ORDER BY seq DESC`, [[...interventionLedgerKinds], limit + 1, options.workId ?? null]);
+  const result = await db.query(`SELECT ${ledgerColumns} FROM (SELECT *, graphyard_event_work(work_id, payload) AS doc FROM (SELECT * FROM events WHERE kind = ANY($1) AND ($3::uuid IS NULL OR work_id=$3) AND ($4::timestamptz IS NULL OR created_at >= $4::timestamptz) ORDER BY seq DESC LIMIT $2) newest) ledger ORDER BY seq DESC`, [[...interventionLedgerKinds], limit + 1, options.workId ?? null, options.since ?? null]);
   const truncated = result.rows.length > limit;
   // A row written with the document carries the transaction instant the document's own
   // timestamps use (`updatedAt`); a raw row has only its insertion instant.
@@ -344,9 +350,10 @@ const minutes = (value: number) => `${Math.round(value / 60_000)} min`;
  * never count towards a second one.
  */
 export async function openPatternItems(engine: Engine, policy: InterventionPolicy, options: { now?: string; actor?: Principal; limit?: number } = {}) {
-  const snapshot = await engine.store.workSnapshot();
+  const snapshot = await boundedSnapshot(engine.store.pool);
   const now = options.now ?? snapshot.now;
-  const { rows, truncated } = await readInterventionLedger(engine.store.pool, { limit: options.limit });
+  // Detection reads the policy window of the ledger and nothing older (GY-422).
+  const { rows, truncated } = await readInterventionLedger(engine.store.pool, { limit: options.limit, since: windowStart(now, policy.windowDays) });
   const folded = foldInterventions(rows, snapshot.work, now);
   const opened: Work[] = [];
   for (const pattern of detectPatterns(folded.interventions, snapshot.work, policy, now)) {
@@ -439,11 +446,23 @@ export async function judgementToWork(engine: Engine, actor: Principal, judgemen
   }, key);
 }
 
-/** The full read behind the API and the CLI: the ledger folded against the current snapshot, then reported over the window. */
+/** The instant `days` before `now`: where a windowed ledger read starts. */
+const windowStart = (now: string, days: number) => new Date(Date.parse(now) - days * day).toISOString();
+
+/**
+ * The read behind the API and the CLI: the ledger folded against the current snapshot, then
+ * reported over the window. It is bounded by its window in SQL (GY-422): the ledger rows are those
+ * written inside the report window or the recurrence policy's, whichever reaches further back, and
+ * the snapshot is the bounded one — open items whole, settled deliveries as the summaries the
+ * report reads (key, title, stage, origin, delivery). A signal whose need was recorded before the
+ * window opened is outside its reach; `ledger.since` says where the reach begins.
+ */
 export async function readInterventionReport(store: Store, policy: InterventionPolicy, options: { days?: InterventionWindow; kind?: InterventionKind | null; stage?: Stage | null; work?: string | null; limit?: number } = {}) {
-  const snapshot = await store.workSnapshot();
-  const { rows, truncated } = await readInterventionLedger(store.pool, { limit: options.limit });
+  const days = options.days ?? 30;
+  const snapshot = await boundedSnapshot(store.pool);
+  const since = windowStart(snapshot.now, Math.max(days, policy.windowDays));
+  const { rows, truncated } = await readInterventionLedger(store.pool, { limit: options.limit, since });
   const folded = foldInterventions(rows, snapshot.work, snapshot.now);
-  const report = computeInterventionReport(folded, snapshot.work, policy, { days: options.days ?? 30, now: snapshot.now, kind: options.kind, stage: options.stage, work: options.work });
-  return { ...report, ledger: { rows: rows.length, truncated, oldest: rows[0]?.at ?? null }, kinds: interventionKinds, windows: interventionWindows };
+  const report = computeInterventionReport(folded, snapshot.work, policy, { days, now: snapshot.now, kind: options.kind, stage: options.stage, work: options.work });
+  return { ...report, ledger: { rows: rows.length, truncated, oldest: rows[0]?.at ?? null, since }, kinds: interventionKinds, windows: interventionWindows };
 }

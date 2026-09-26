@@ -57,7 +57,7 @@ function effects(overrides: Partial<DaemonEffects> = {}, log: string[] = []): Da
     closeSession: pane => { log.push(`close:${pane}`); },
     dispatch: async item => { log.push(`dispatch:${item.key}`); },
     requestProof: item => { log.push(`proof:${item.key}`); },
-    merge: async item => { log.push(`merge:${item.key}`); return { result: 'merge requested' }; },
+    merge: async item => { log.push(`merge:${item.key}`); return { result: 'merged', merged: true }; },
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async (item, observation) => { log.push(`record:${item.key}:${observation.sha.slice(0, 4)}`); },
     requestSmoke: item => { log.push(`smoke:${item.key}`); },
@@ -621,7 +621,7 @@ test('a persistently refused merge backs off instead of calling the provider eve
     assert.deepEqual([attempts < 8, attempts >= 3], [true, true], `a refusal should retry on a widening interval, not 8 times (saw ${attempts})`);
     // A new commit is a new candidate and retries immediately.
     const fresh = { ...mergeable, candidate: { ...mergeable.candidate!, sha: 'f'.repeat(40) } } as Work;
-    await runCycle(master, state, effects({ snapshot: async () => ({ work: [fresh], now: iso(0) }), merge: async () => { attempts++; return { result: 'merge requested' }; } }), () => clock + 8 * 20_000);
+    await runCycle(master, state, effects({ snapshot: async () => ({ work: [fresh], now: iso(0) }), merge: async () => { attempts++; return { result: 'merged', merged: true }; } }), () => clock + 8 * 20_000);
     assert.equal(state.actions[candidateKey('merge', fresh)].state, 'done');
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
