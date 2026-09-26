@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { humanDecisionLabel, humanOnlyRefusal, openHumanOnly, researchQuestionRows, type HumanOnlyPost, type HumanRequestRow } from '../../src/model/human-request';
-import { formatDuration } from '../duration';
-import { shortShas } from '../format';
+import { formatDuration } from '../../src/model/duration';
+import { shortShas } from '../../src/model/format';
 import type { Dashboard } from './dashboard';
 
 /** The research rows now live beside the rule table (src/model/human-request.ts); kept on the page's surface for its readers. */
