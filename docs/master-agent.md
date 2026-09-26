@@ -35,13 +35,12 @@ that host's loop. `sessions.unseen` lists stale handles. `dispatch.sessionReconc
 - **Vanished**: missing from two consecutive listings.
 - **Ended**: agentless pane or terminal state. `idle`, `done` and
   `blocked` are deliberately not terminal.
-- **Superseded**: a review or proof session for a head the item moved past; a delivered item is closed the same
-  way as any other. Implementation sessions are left to the lease.
+- **Superseded**: a review or proof session for a head the item moved past, delivered items included. Implementation sessions are left to the lease.
 - **Duplicate**: the older of two sessions for one role and head.
 
 A closure decides no gate, ends no lease, and stops no process. A profile's concurrency is counted against live sessions only, and a name is busy only while a live session has it. A session past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) raises attention, is never closed.
 
-**So what an operator or a master does instead of closing sessions by hand:** nothing, for a session
+**Instead of closing sessions by hand:** nothing, for a session
 that finished or died (loop stopped: `graphyard master run --once` sweeps); for an overlong one, attach to it with the command on the handle. Never mark
 another session's handle finished to free a slot.
 
@@ -59,7 +58,7 @@ A candidate passing the build gate gets, in `autoDispatch`, one producer request
 
 **Concurrency is per role.** A profile's `concurrency` (1–20, default 1) caps its simultaneous sessions, each with a name unique to its request above one. It applies without a restart; lowering it drains sessions first (`longestWaitMs`); a role starved ten minutes counts in `counts.concurrencyStarved`.
 
-**Requests always settle.** A gone pane (`pane_not_found`) is closed. No request outlives its own token: expired, unreported by Herdr, it settles `expired`; one still pending counts in `dispatch.sessionReconcile.stuck`. Unanswered sessions relaunch elsewhere (12 per request, then `dispatch.abandoned`); an unposted reviewer is reminded first.
+**Requests always settle.** A gone pane (`pane_not_found`) is closed. No request outlives its own token: expired, unreported by Herdr, it settles `expired`; one still pending counts in `dispatch.sessionReconcile.stuck`. Unanswered sessions relaunch elsewhere (12 per request, then `dispatch.abandoned`); an unposted reviewer is reminded first. A proof row whose group has a session pending on its head completes on it; one pending on another head is refused until reconciled.
 
 **Every role, approvers too, fails over on spent quota** or waits as one `capacity` line.
 
