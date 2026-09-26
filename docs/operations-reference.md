@@ -64,7 +64,12 @@ After an hour without deliveries `master status` points to `https://github.com/s
 
 ## Control-plane resources
 
-Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow the volume and `GRAPHYARD_DATABASE_MAX_BYTES`.
+Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow the volume and `GRAPHYARD_DATABASE_MAX_BYTES`; `loaded-revision`, `graphyard master restart`.
+
+A reading the loop is about to undo itself reports its usage but raises no attention (`overdue: false`):
+
+- **`loaded-revision`.** Every merge moves the coordinator checkout ahead of the loop's code. Under its supervisor (the `master init` unit) the loop exits after the first cycle once it is behind and has no child process still running (a headless run is one), and the unit restarts it on the checkout's revision; the run's output says `stopped: "reloading"`. It warns once the checkout has stood ahead for 30 minutes, or at once when the reflog cannot say when it moved. A loop outside a supervisor never reloads itself.
+- **`agent-names:PROFILE`.** A name held by nothing live (a worker pane whose lease just ended, a reviewer or producer pane whose record just settled) warns once the reclaim pass has seen it unowned for 180 seconds. The pass records each sighting as `unowned:NAME` under `seen` in `.graphyard/resource-reclaims.json`. With no reclaim record, it warns at once.
 
 ## Bootstrap mode for a self-proving change
 

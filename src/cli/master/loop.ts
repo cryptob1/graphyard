@@ -7,6 +7,7 @@ import { dispatchEffects, dispatchReadTimeoutMs, readDispatchCursor, runAutoDisp
 import { coordinationViewHeader } from '../../server/work-view.js';
 import { unhandled, type MasterSession } from './session.js';
 import { timedApi } from '../../master/timings.js';
+import { codeReloadReason } from '../../master-resources.js';
 
 /** The durable coordination loop and the dispatcher beside it, until stopped. */
 export async function loopCommand(session: MasterSession): Promise<unknown> {
@@ -35,11 +36,15 @@ export async function loopCommand(session: MasterSession): Promise<unknown> {
     // Automatic dispatch runs beside the cycle on a shorter cadence; it stops with the daemon.
     const dispatchCursor = await readDispatchCursor(root, master);
     const stopping = new AbortController();
-    const daemonRun = runDaemon(master, state, effects, { once: values.once, intervalMs: values.interval ? intervalSeconds * 1000 : () => current().run.intervalSeconds * 1000, identity: { pid: process.pid, host: master.hostId }, reload }).finally(() => stopping.abort());
+    const daemonRun = runDaemon(master, state, effects, { once: values.once, intervalMs: values.interval ? intervalSeconds * 1000 : () => current().run.intervalSeconds * 1000, identity: { pid: process.pid, host: master.hostId }, reload,
+      codeReload: () => codeReloadReason(root, process.pid) }).finally(() => stopping.abort());
     const dispatchRun = runAutoDispatch(master, dispatchCursor, dispatchEffects(root, current, { snapshot: () => coordinationSnapshot(dispatchReadTimeoutMs) }), { once: values.once, intervalMs: () => current().run.dispatchIntervalSeconds * 1000, signal: stopping.signal, reload });
     const [result, dispatched] = await Promise.all([daemonRun, dispatchRun]);
+    // A loop reloading onto new code must end for its supervisor to start the new revision: a handle
+    // left open (a pooled socket, a timer) would otherwise hold it until the watchdog noticed.
+    if (result.reloading) setTimeout(() => process.exit(0), 5_000).unref();
     // A cycle that threw was recorded and retried in-process (GY-119); it is reported here, never as an exit.
-    return print({ repository: master.repository, coordinator: coordinator.actor.id, intervalSeconds, dispatchIntervalSeconds: master.run.dispatchIntervalSeconds, cycles: result.cycles.length, failedCycles: result.failed.length, stopped: result.stopped ? 'signal' : 'completed', last: result.cycles.at(-1) ?? null, lastFailure: result.failed.at(-1) ?? null,
+    return print({ repository: master.repository, coordinator: coordinator.actor.id, intervalSeconds, dispatchIntervalSeconds: master.run.dispatchIntervalSeconds, cycles: result.cycles.length, failedCycles: result.failed.length, stopped: result.stopped ? 'signal' : result.reloading ? 'reloading' : 'completed', ...(result.reloading ? { reloading: result.reloading } : {}), last: result.cycles.at(-1) ?? null, lastFailure: result.failed.at(-1) ?? null,
       dispatch: { ticks: dispatched.ticks.length, launched: dispatched.ticks.reduce((total, tick) => total + tick.launched.length, 0), refused: dispatched.ticks.reduce((total, tick) => total + tick.refused.length, 0), last: dispatched.ticks.at(-1) ?? null } });
   }
   return unhandled;
