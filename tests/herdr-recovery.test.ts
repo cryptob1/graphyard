@@ -2,14 +2,13 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { existsSync } from 'node:fs';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine, launchFenceMs } from '../src/engine.js';
 import { server } from '../src/server.js';
 import type { Principal } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 // @ts-expect-error The trusted runner intentionally uses dependency-free JavaScript outside the candidate source.
 import { createInventory, exercise as run, requiredCases, requiredFences } from '../scripts/herdr-recovery-contract.mjs';
 // @ts-expect-error Dependency-free protected workflow script.
@@ -29,7 +28,7 @@ const identities = () => [{ ...operator, token: 'r'.repeat(32) }, ...machines];
 const exercise = (target: string, principals: unknown[], fences?: typeof shortFences, inventory = createInventory()) => run(target, principals, inventory, fences);
 before(async () => {
   const port = Number(process.env.GRAPHYARD_HERDR_RECOVERY_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 7);
-  pg = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-recovery-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('recovery'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('recovery_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/recovery_test`); await store.init();
   http = server(new Engine(store, [15368], leaseSeconds, 'owner/project', launchFence), [{ ...operator, token: 'r'.repeat(32) }, ...machines]);

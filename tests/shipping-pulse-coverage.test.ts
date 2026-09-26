@@ -1,7 +1,5 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createElement } from 'react';
@@ -12,6 +10,7 @@ import { Engine } from '../src/engine.js';
 import { FLOW_DEPLOYMENT_ENDPOINT, PRODUCTION_OBSERVATION_ENDPOINT, shippingPulse, type ShippingPulse } from '../src/shipping-pulse.js';
 import { ProductionDelivery } from '../src/production-delivery.js';
 import { ShippingPulseView } from '../web/shipping-pulse.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-129: the PR-to-production split must say when it has no inputs at all, must count a
 // delivery the master verified with `master verify-deployment`, and must never show a
@@ -20,7 +19,7 @@ import { ShippingPulseView } from '../web/shipping-pulse.js';
 let database: EmbeddedPostgres; let store: Store;
 before(async () => {
   const port = Number(process.env.GRAPHYARD_PULSE_COVERAGE_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 46);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-pulse-coverage-test-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('pulse-coverage-test'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_pulse_coverage_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_pulse_coverage_test`); await store.init();
 });

@@ -1,8 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -14,6 +13,7 @@ import { expiredRequestBoundMs, paneAlreadyGone, stuckRequests } from '../src/re
 import { sessionReconcileIntervalMs } from '../src/model/sessions.js';
 import { stuckRequestReport, withStuckRequests } from '../src/cli/stuck-requests.js';
 import type { Observation, Work } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // Each test is named for the proof it produces (GY-137): integration:absent-pane-resolves-request,
 // integration:expired-request-never-blocks and unit:stuck-request-surfaced. A session whose pane is
@@ -28,7 +28,7 @@ const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id:
 const mint = async () => ({ token: 'ghs_review_session_token', expiresAt: new Date(Date.now() + 3_500_000).toISOString() });
 
 async function boundMaster() {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-session-reconcile-')), credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-session-reconcile-credentials-'));
+  const root = await temporaryDirectory('session-reconcile'), credentialDirectory = await temporaryDirectory('session-reconcile-credentials');
   execFileSync('git', ['init', '-q', root]);
   execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
   await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory, herdrWorkspace: 'wE' }, coordinatorStatus as typeof fetch);

@@ -1,8 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createElement } from 'react';
@@ -21,6 +20,7 @@ import { scopeRefusalBlocker } from '../src/model/scope.js';
 import { NOW, boardApi, boardStatus, boardWork } from '../browser-tests/ui-board.js';
 import OverviewPage from '../web/pages/overview.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-173: recurring faults were fixed one instance at a time, and noticing that several symptoms
 // share a cause was a coordinator's memory. Every fault the loop records now carries a class from
@@ -260,7 +260,7 @@ test('unit:recurring-class-item — a class past the threshold files one item as
 });
 
 test('unit:recurring-class-item — the loop files through the master operator-agent identity', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-fault-root-')), secrets = await mkdtemp(join(tmpdir(), 'graphyard-fault-secrets-'));
+  const root = await temporaryDirectory('fault-root'), secrets = await temporaryDirectory('fault-secrets');
   try {
     execFileSync('git', ['init', '-q', root]);
     const token = join(secrets, 'operator.token');
@@ -517,7 +517,7 @@ test('unit:recurring-class-item — a failing run ends when its action is retire
 });
 
 test('unit:recurring-class-item — the loop reads status-level faults with coordinator visibility, so held jobs and production recur', async () => {
-  const secrets = await mkdtemp(join(tmpdir(), 'graphyard-fault-secrets-'));
+  const secrets = await temporaryDirectory('fault-secrets');
   try {
     const coordinatorToken = join(secrets, 'coordinator.token'), operatorToken = join(secrets, 'operator.token');
     await writeFile(coordinatorToken, 'coordinator-token-'.padEnd(48, 'c'), { mode: 0o600 });
@@ -632,7 +632,7 @@ test('unit:recurring-class-item — distinct faults of one kind on one subject a
 });
 
 test('unit:recurring-class-item — the loop reads the attention master status adds with the coordinator credential, so intervention patterns recur', async () => {
-  const secrets = await mkdtemp(join(tmpdir(), 'graphyard-fault-secrets-'));
+  const secrets = await temporaryDirectory('fault-secrets');
   try {
     const coordinatorToken = join(secrets, 'coordinator.token'), operatorToken = join(secrets, 'operator.token');
     const coordinator = 'coordinator-token-'.padEnd(48, 'c'), operator = 'operator-token-'.padEnd(48, 'o');
@@ -652,7 +652,7 @@ test('unit:recurring-class-item — the loop reads the attention master status a
     }) as typeof fetch;
     const deps = { snapshot: async () => ({ work: [], now: iso(0) }), mutate: async () => { throw new Error('not used'); }, executor: { principal: 'coordinator', instance: 'fault' }, fetcher };
     const source = { ...config(), credentialFile: coordinatorToken, operatorAgent: { id: 'graphyard-master-operator', credentialFile: operatorToken } } as MasterConfig;
-    const effects = daemonEffects(await mkdtemp(join(secrets, 'root-')), source, deps);
+    const effects = daemonEffects(await temporaryDirectory('root', secrets), source, deps);
     const { items: reported } = await effects.reportedAttention!([], { github: true } as any, { agents: [], approvals: [], loop: {} as any, now: iso(0) });
     const interventionReads = reads.filter(entry => entry.path.startsWith('interventions'));
     assert.ok(interventionReads.length > 0, `the intervention report is read: ${reads.map(entry => entry.path).join(', ')}`);

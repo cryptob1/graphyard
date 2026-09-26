@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -12,6 +11,7 @@ import { controlPlaneHandlers } from '../src/executor.js';
 import type { ActionRow } from '../src/model/actions.js';
 import type { Work } from '../src/model.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-273: the loop and the executors dispatch implementation work from their own snapshots of
 // Herdr's agents. Two of them picking one profile used to mean two claims, two runtimes started,
@@ -70,7 +70,7 @@ function fakeClaims(root: string) {
 }
 
 async function installation() {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-dispatch-collision-')); const credentials = await mkdtemp(join(tmpdir(), 'graphyard-dispatch-collision-credentials-'));
+  const root = await temporaryDirectory('dispatch-collision'); const credentials = await temporaryDirectory('dispatch-collision-credentials');
   execFileSync('git', ['init', '-q', root]); execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
   const credential = join(credentials, 'worker.token'); await writeFile(credential, workerToken, { mode: 0o600 });
   const coordinator = join(credentials, 'coordinator.token'); await writeFile(coordinator, coordinatorToken, { mode: 0o600 });

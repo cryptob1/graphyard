@@ -2,17 +2,17 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtemp, mkdir, readFile, rm, stat, writeFile, symlink, chmod } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readFile, rm, stat, writeFile, symlink, chmod } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
 import { handoff, loadConnection, managedInstructions, setupRepository } from '../src/repository-setup.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const secret = 'fixture-worker-token-'.padEnd(40, 'x');
 const connection = { url: 'https://example.com', token: secret, cliPath: launcher, hostId: 'machine-a' };
 const fetcher = async () => new Response(JSON.stringify({ actor: { id: 'worker-a', role: 'worker' } }));
-async function repo() { const root = await mkdtemp(join(tmpdir(), 'graphyard-init-')); execFileSync('git', ['init', '-q', root]); return root; }
+async function repo() { const root = await temporaryDirectory('init'); execFileSync('git', ['init', '-q', root]); return root; }
 
 test('managed instructions refresh one section and preserve all surrounding operator content', () => {
   const bootstrap = "The initial MVP is a single-agent bootstrap under the operator's supervision. Do not launch other agents for bootstrap work.";

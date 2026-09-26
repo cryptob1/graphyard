@@ -1,8 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -10,6 +9,7 @@ import { setupMaster } from '../src/master.js';
 import { expandTypedCommand, requestOf, startedAtOnce } from './helpers/launch-shell.js';
 import { bindReviewer, launchReview, readReviewLedger, reviewHistory, reviewPrompt, reviewRetryPrompt, reviewRoundCap, saveReviewerProfile, updateReviewLedger, type ReviewRecord } from '../src/reviewer.js';
 import type { Observation, Work } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-167, 2026-09-24: every review round re-read the whole change and found new edge cases, and
 // nothing bounded the rounds. From the second review of a pull request the reviewer judges only
@@ -135,7 +135,7 @@ const mint = async () => ({ token: 'ghs_review_session_token', expiresAt: new Da
 const herdrRun = (_command: string, args: string[]) => startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { type: 'tab_created', root_pane: { pane_id: 'pane-review', tab_id: 'tab-review' } } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} });
 
 async function boundMaster() {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-rounds-')), credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-rounds-credentials-'));
+  const root = await temporaryDirectory('rounds'), credentialDirectory = await temporaryDirectory('rounds-credentials');
   execFileSync('git', ['init', '-q', root]);
   execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
   await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory, herdrWorkspace: 'wE' }, coordinatorStatus as typeof fetch);

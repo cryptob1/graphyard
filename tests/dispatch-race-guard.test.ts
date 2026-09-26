@@ -2,9 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -18,6 +17,7 @@ import { controlPlaneHandlers } from '../src/executor.js';
 import { dispatchWork, masterConfigSchema, managedMasterInstructions, prepareWorkerLaunch, runAutonomyCommand, unauthorizedMergeViolation, workAttentionOwner, type WorkerProfile } from '../src/master.js';
 import { assertHandDispatch, dispatchRaceRefusal, handDecision, mergeDecisionRecovery, handDispatchClaimMarginMs, handDispatchClaimTimeoutMs, handDispatchFenceMs, loopOwned, producerRecovery, releaseEventKinds, reviewRecovery, systemDriven, systemDrivenRefusal } from '../src/cli/hand-actions.js';
 import { dispatchFailureLimit } from '../src/auto-dispatch.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-175: the master-side rules the loop depends on are enforced by the master CLI itself, not
 // remembered by one agent. A hand dispatch never races the executor's, and a system-driven item is
@@ -53,8 +53,8 @@ const claimed = (): Partial<ActionRow> => ({ state: 'claimed', attempts: 1, clai
 
 /** A master checkout bound to a stub control plane; `run` executes one master command through the launcher. */
 async function masterHarness(state: { work: Work[]; releasedAt?: string | null }, options: { operatorAgent?: boolean } = {}) {
-  const root = await mkdtemp(join(tmpdir(), 'gy-hand-'));
-  const credentials = await mkdtemp(join(tmpdir(), 'gy-hand-cred-'));
+  const root = await temporaryDirectory('gy-hand');
+  const credentials = await temporaryDirectory('gy-hand-cred');
   const credentialFile = join(credentials, 'coordinator.token');
   const reads: string[] = [];
   const http = createServer((req, res) => {

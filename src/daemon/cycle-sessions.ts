@@ -2,7 +2,8 @@
 import type { Work } from '../model.js';
 import type { WorkerProfile } from '../master.js';
 import type { DaemonAction } from './state.js';
-import { detectExhaustion, type CapacityRole } from '../model/capacity.js';
+import { type CapacityRole } from '../model/capacity.js';
+import { detectRuntimeExhaustion } from '../master/environments.js';
 import { classifyRuntimePrompt, continueAfterDecline, type EscalationSession, escalationProfile, type HerdrAgent, ownLoginAccounts, profileAccount, type RuntimePrompt } from '../master.js';
 import { standingEscalations } from '../model/escalation.js';
 import { capacityRecheckMs } from '../auto-dispatch.js';
@@ -43,7 +44,12 @@ export async function closeStep(cycle: Cycle) {
   const failedOver = new Set<string>();
   if (effects.sessionOutput && effects.reportCapacity) {
     const stopped = (name: string) => { const agent = agents.find(candidate => candidate.name === name); return agent && stoppedStates.includes(agent.agent_status ?? '') ? agent : null; };
-    const notice = async (agent: HerdrAgent) => { try { const output = await effects.sessionOutput!(agent); return output ? detectExhaustion(output, clock) : null; } catch { return null; } };
+    // The notice is judged against the session's own runtime's provider messages, never generic
+    // quota wording: a worker's prose about a quota (a disk's) is not its provider's notice (GY-421).
+    const notice = async (agent: HerdrAgent, runtime: string | null | undefined) => { try { const output = await effects.sessionOutput!(agent); return output ? detectRuntimeExhaustion(output, runtime, clock) : null; } catch { return null; } };
+    /** The runtime a launched role's profile names, for the notice the loop reads off its pane. */
+    const profileRuntime = (role: string, profile: string) =>
+      (role === 'reviewer' ? config.reviewers : role === 'producer' ? config.producers : []).find(entry => entry.name === profile)?.kind;
     const held = async (role: CapacityRole, profile: string, item: Work, signal: { reason: string; resetsAt: string | null }) => {
       const selected = await effects.selectedAccount?.(role, profile) ?? null;
       const account = selected?.environment ?? null;
@@ -58,7 +64,7 @@ export async function closeStep(cycle: Cycle) {
       if (!agent || !item || item.submission?.epoch === item.lease!.epoch) return;
       const key = failoverKey('worker', item, item.lease!.epoch), previous = state.actions[key];
       if (previous?.state === 'done' || !readyToRetry(previous, state.cycle)) { if (previous) failedOver.add(item.id); return; }
-      const signal = await notice(agent);
+      const signal = await notice(agent, profile.kind);
       if (!signal) return;
       failedOver.add(item.id);
       const epoch = item.lease!.epoch, attempts = (previous?.attempts ?? 0) + 1;
@@ -89,7 +95,7 @@ export async function closeStep(cycle: Cycle) {
       const key = failoverKey(session.role, item, session.record), previous = state.actions[key];
       // Its relaunch is still on the launcher: the failover is in flight, not due again.
       if (cycle.launcher.busy(key) || previous?.state === 'done' || !readyToRetry(previous, state.cycle)) return;
-      const signal = await notice(agent);
+      const signal = await notice(agent, profileRuntime(session.role, session.profile));
       if (!signal) return;
       const attempts = (previous?.attempts ?? 0) + 1, resets = signal.resetsAt ? `resets ${signal.resetsAt}` : 'reset time unknown';
       await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'started', detail: `${session.role} session ${session.agentName} for ${item.key} stopped on its provider's limit notice: ${signal.reason}`, attempts, cycle: state.cycle }, now(), effects.persist);
@@ -178,7 +184,7 @@ export async function closeStep(cycle: Cycle) {
       }
       const agent = stopped(session.agentName);
       if (previous?.state === 'done' || !readyToRetry(previous, state.cycle)) return;
-      const signal = agent ? await notice(agent) : null;
+      const signal = agent ? await notice(agent, session.runtime ?? session.kind) : null;
       if (!signal) { await handlerFinished(session, !!agent); return; }
       const attempts = (previous?.attempts ?? 0) + 1, resets = signal.resetsAt ? `resets ${signal.resetsAt}` : 'reset time unknown';
       try {

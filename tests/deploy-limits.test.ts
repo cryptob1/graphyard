@@ -1,7 +1,6 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
@@ -13,6 +12,7 @@ import { delegationLimitAssignments, readDeployedDelegationLimits } from '../src
 import { capacityForPrincipals } from '../src/cli/install.js';
 import { controlPlaneAttention } from '../src/master.js';
 import type { Principal } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-59 AC-1 / AC-2: the reviewer limit derives from the configured roster, an over-limit
 // roster of already-running principals starts with an attention item, only a newly added
@@ -117,7 +117,7 @@ test('integration:deploy-limit-install — installers derive the variables from 
   for (const variable of ['GRAPHYARD_PRINCIPALS', 'GRAPHYARD_MAX_SLICE_LEADS', 'GRAPHYARD_MAX_ENGINEERS_PER_LEAD', 'GRAPHYARD_MIN_REVIEWERS', 'GRAPHYARD_MAX_REVIEWERS', 'RAILWAY_API_TOKEN']) assert.match(iac, new RegExp(`${variable}: preserve\\(\\)`), `.railway/railway.ts preserves ${variable}`);
 
   // `init --scan --apply` prints the lines for the principals it registered and compares them with the deployment.
-  const principalsFile = join(await mkdtemp(join(tmpdir(), 'graphyard-init-capacity-')), 'principals.json');
+  const principalsFile = join(await temporaryDirectory('init-capacity'), 'principals.json');
   await writeFile(principalsFile, JSON.stringify({ version: 1, principals: [operator, { id: 'master', role: 'coordinator' }, { id: 'worker-1', role: 'worker' }, { id: 'evidence', role: 'producer' }, { id: 'acceptance', role: 'producer' }, { id: 'observer', role: 'producer' }] }));
   const capacity = await capacityForPrincipals(principalsFile, async () => ({ delegationLimits: { deployed: { GRAPHYARD_MAX_REVIEWERS: '2' } } }));
   assert.equal(capacity.variables.GRAPHYARD_MAX_REVIEWERS, '3');
@@ -149,7 +149,7 @@ test('manual:deploy-limit-docs — the deployment, install, operations and maste
 let database: EmbeddedPostgres, store: Store;
 before(async () => {
   const port = Number(process.env.GRAPHYARD_DEPLOY_LIMIT_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 11);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-deploy-limits-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('deploy-limits'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('deploy_limits_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/deploy_limits_test`); await store.init();
 });

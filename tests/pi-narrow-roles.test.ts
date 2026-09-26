@@ -2,8 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { chmod, mkdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Work } from '../src/model.js';
@@ -15,6 +14,7 @@ import { clearRuns, liveRun, registerRun } from '../src/runner/registry.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { attestConfirmation, piApproverWithAttestation } from '../src/master/autonomy.js';
 import type { FilesystemProbe } from '../src/install/worktree-root.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-169 AC-3, proof integration:pi-narrow-roles. The master config selects the runtime of each
 // narrow role; with `pi` the approver and the unit proof producer run through the headless runner
@@ -61,7 +61,7 @@ out({ type: 'agent_settled' });
 `;
 
 async function installation(runtimes?: { approver?: 'herdr' | 'pi'; producer?: 'herdr' | 'pi' }) {
-  const scratch = await realpath(await mkdtemp(join(tmpdir(), 'graphyard-pi-roles-')));
+  const scratch = await realpath(await temporaryDirectory('pi-roles'));
   const root = join(scratch, 'repository'), credentials = join(scratch, 'credentials'), managed = join(scratch, 'data', 'worktrees');
   await mkdir(root); await mkdir(credentials, { mode: 0o700 });
   const git = (...args: string[]) => execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });

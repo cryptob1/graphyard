@@ -2,9 +2,8 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { rm, writeFile } from 'node:fs/promises';
 import type { Server } from 'node:http';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import EmbeddedPostgres from 'embedded-postgres';
@@ -14,6 +13,7 @@ import { server } from '../src/server.js';
 import { isConfirmedCoordinationRefusal } from '../src/quarantine.js';
 import { definiteRenewalRefusal, supervise } from '../src/supervisor.js';
 import type { Principal, Work } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // Each test is named for the proof it produces (GY-274): a transient renewal failure never stops a
 // worker, the first reconcile after boot cannot starve renewals, and a deploy loses no worker.
@@ -22,7 +22,7 @@ const refusal = (status: number, error: string) => Object.assign(new Error(JSON.
 const quiet = { visible: () => null, unconsented: () => null };
 /** A worker that runs until the test says it is done, and exits 0 on its own. */
 const worker = (marker: string) => [process.execPath, ['-e', `const fs = require('node:fs'); setInterval(() => { if (fs.existsSync(${JSON.stringify(marker)})) process.exit(0); }, 20);`]] as const;
-const scratch = () => mkdtemp(join(tmpdir(), 'graphyard-renewal-'));
+const scratch = () => temporaryDirectory('renewal');
 
 test('unit:renewal-transient-tolerated a renewal that throws twice and then succeeds never stops the worker', async () => {
   const dir = await scratch(); const marker = join(dir, 'done');
@@ -121,7 +121,7 @@ const tokens: Record<string, string> = { [operator.id]: `operator-token-${'x'.re
 let database: EmbeddedPostgres, connection: string;
 before(async () => {
   const port = Number(process.env.GRAPHYARD_RENEWAL_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 274);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-renewal-pg-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('renewal-pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('renewal_test');
   connection = `postgres://graphyard:testing-only@127.0.0.1:${port}/renewal_test`;
   const store = new Store(connection); await store.init(); await store.close();

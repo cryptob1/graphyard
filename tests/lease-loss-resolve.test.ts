@@ -1,13 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { daemonEffects, emptyDaemonState, routineDecision, runCycle, supersededLeaseLoss, type DaemonEffects } from '../src/master-daemon.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import type { Work } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-161, 2026-09-24: the first worker (epoch 1) exited five minutes in, its lease lapsed and the
 // control plane raised a lease-loss; the loop dispatched epoch 2, but nothing settled the standing
@@ -130,7 +130,7 @@ test('unit:lease-loss-resolve-requested — a standing resolve for another escal
 });
 
 test('unit:lease-loss-resolve-requested — a request refused on a moved revision is asked again only on the same grounds', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-lease-loss-root-')), secrets = await mkdtemp(join(tmpdir(), 'graphyard-lease-loss-secrets-'));
+  const root = await temporaryDirectory('lease-loss-root'), secrets = await temporaryDirectory('lease-loss-secrets');
   try {
     execFileSync('git', ['init', '-q', root]);
     const token = join(secrets, 'operator.token');

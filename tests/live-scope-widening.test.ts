@@ -1,7 +1,6 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
@@ -13,6 +12,7 @@ import type { Principal, ScopeFile, Work } from '../src/model.js';
 import { regressionRefusals } from '../src/regression-guard.js';
 import { approveScopeRequest, scopeRequestAttention } from '../src/cli/master-status.js';
 import { Store } from '../src/store.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-76: a purely additive plannedFiles widening applies to an item under an active lease
 // without ending the attempt, a worker asks for it through a scope request the master approves
@@ -54,7 +54,7 @@ const snapshotRead = (path: string) => ok(token(operator), 'GET', path);
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 21;
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-live-scope-db-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('live-scope-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('live_scope_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/live_scope_test`); await store.init();
   engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null;
@@ -62,7 +62,7 @@ before(async () => {
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
   await ok(token(operator), 'POST', 'operator-agents', { id: master.id, displayName: master.id, capabilities: master.capabilities, scope: { repositories: [repository], workItems: ['*'] }, token: master.token, reason: 'Onboarding provisions the master operator agent' });
-  operatorTokenFile = join(await mkdtemp(join(tmpdir(), 'graphyard-live-scope-')), 'operator.token');
+  operatorTokenFile = join(await temporaryDirectory('live-scope'), 'operator.token');
   await writeFile(operatorTokenFile, `${master.token}\n`, { mode: 0o600 });
 });
 after(async () => { http?.close(); await store?.close(); await database?.stop(); });

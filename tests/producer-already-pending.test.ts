@@ -1,13 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Observation, Work } from '../src/model.js';
 import type { ActionRow } from '../src/model/actions.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { loadMasterConfig, saveProducerProfile, setupMaster } from '../src/master.js';
 import { launchProducer, readProducerLedger } from '../src/producer.js';
 import { controlPlaneHandlers, type ControlPlaneEffects } from '../src/executor.js';
@@ -44,59 +44,57 @@ function item(instance: typeof instances[number], pr: number): Work {
 const herdr = (_command: string, args: string[]) => startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-1', tab_id: 'tab-1' } } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} });
 
 test('manual:fault-class-unclassified — a proof dispatch row whose head already has a pending producer session is settled on that session, not failed until it ends', async t => {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-gy-415-')), credentials = await mkdtemp(join(tmpdir(), 'graphyard-gy-415-credentials-'));
-  try {
-    execFileSync('git', ['init', '-q', root]); execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
-    const status = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
-    await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory: credentials, herdrWorkspace: 'wE' }, status as typeof fetch);
-    const credential = join(credentials, 'producer.token'); await writeFile(credential, 'producer-token-'.padEnd(40, 'x'), { mode: 0o600 });
-    await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: credential, concurrency: 4 },
-      async () => ({ actor: { id: 'proof-runner', role: 'producer', proofs: ['unit:*'] } }));
-    const config = await loadMasterConfig(root);
-    const items = instances.map((instance, index) => item(instance, 200 + index));
-    const effects: ControlPlaneEffects = {
-      snapshot: async () => ({ work: items, now: new Date().toISOString() }), mutate: async () => ({}), agents: () => [],
-      workerCredentials: async () => ({}), producerCredentials: async profiles => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])),
-      dispatchWorker: async () => ({}), launchReview: async () => ({}), merge: async () => ({}),
-      observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'none', deployed: [], pending: [] }),
-      launchProducer: (work, request, profile, agents, observedAt) => launchProducer(root, work, request, profile, agents, observedAt, { run: herdr }),
-    };
-    const handlers = controlPlaneHandlers(() => config, effects);
-    const executor: ExecutorIdentity = { id: 'graphyard-master@test/1', host: 'test' };
-    for (const work of items) await t.test(`manual:fault-class-unclassified — ${work.key}: the executor's unit dispatch row settles on the session the loop launched on ${work.candidate!.sha.slice(0, 7)}`, async () => {
-      const request = work.autoDispatch!.producers.find(entry => entry.group === 'unit')!;
-      // The loop's tick launches the session first.
-      await launchProducer(root, work, request, config.producers[0], [], new Date().toISOString(), { run: herdr });
-      // Then an executor claims the dispatch row for the same request.
-      const action = { id: `row-${work.key}`, key: work.key, work: work.id, kind: 'dispatch', gate: 'test', state: 'claimed', attempts: 1, history: [],
-        inputs: { kind: 'dispatch', target: 'proof', group: 'unit', proofs: request.proofs, requestId: request.id, pr: request.pr, sha: request.sha, baseSha: request.baseSha, policyRevision: request.policyRevision } } as unknown as ActionRow;
-      const settled = await handlers.dispatch!(action, executor);
-      assert.match(String(settled), new RegExp(`${work.key}'s unit proofs on ${work.candidate!.sha.slice(0, 12)} are left to producer session produce-a\\S* already pending on that head`));
-      // Claimed again while the session runs, it settles the same way: nothing accumulates into a stall.
-      assert.match(String(await handlers.dispatch!(action, executor)), /are left to producer session/);
-      assert.equal((await readProducerLedger(root)).producers.filter(record => record.key === work.key).length, 1, 'no second session was launched');
-    });
-    // The race's other side: the loop's tick asking for a head an executor's session already answers
-    // records a wait on that session, not a refusal it would repeat every tick until the session ends.
-    const tickEffects: DispatchEffects = {
-      snapshot: effects.snapshot, agents: () => [], credentials: effects.producerCredentials,
-      reconcileReviews: async () => ({ reviews: [] }), reconcileProducers: async () => ({ producers: [] }), launchReview: async () => ({}),
-      launchProducer: effects.launchProducer, persist: async () => {},
-    };
-    const tick = await runDispatchTick(config, emptyDispatchCursor(config), tickEffects);
-    assert.deepEqual(tick.refused, [], 'the tick refuses no request an executor\'s session is answering');
-    assert.deepEqual(tick.launched, [], 'the tick launches no second session');
-    for (const work of items) assert.ok(tick.waiting.some(entry => entry.kind === 'producer' && entry.work === work.key && /producer session produce-a\S* is already pending on/.test(entry.reason)),
-      `the tick waits on ${work.key}'s pending session: ${JSON.stringify(tick.waiting)}`);
-    // A session pending on another head is not this request's answer: the launch is still refused.
-    const ledger = await readProducerLedger(root);
-    ledger.producers = ledger.producers.map(record => record.key === 'GY-274' ? { ...record, sha: base } : record);
-    await writeFile(join(root, '.graphyard/producers.json'), JSON.stringify(ledger), { mode: 0o600 });
-    const stale = items[0], request = stale.autoDispatch!.producers.find(entry => entry.group === 'unit')!;
-    await assert.rejects(async () => handlers.dispatch!({ id: 'row-stale', key: stale.key, work: stale.id, kind: 'dispatch', state: 'claimed', attempts: 1, history: [],
-      inputs: { kind: 'dispatch', target: 'proof', group: 'unit', proofs: request.proofs, requestId: request.id, pr: request.pr, sha: request.sha, baseSha: request.baseSha, policyRevision: request.policyRevision } } as unknown as ActionRow, executor),
-    /already pending on 2f76b9b; reconcile it with master status/);
-    const staleTick = await runDispatchTick(config, emptyDispatchCursor(config), tickEffects);
-    assert.ok(staleTick.refused.some(entry => entry.work === stale.key && /already pending on 2f76b9b/.test(entry.reason)), `the tick still refuses ${stale.key}: ${JSON.stringify(staleTick.refused)}`);
-  } finally { await rm(root, { recursive: true, force: true }); await rm(credentials, { recursive: true, force: true }); }
+  const root = await temporaryDirectory('gy-415'), credentials = await temporaryDirectory('gy-415-credentials');
+  execFileSync('git', ['init', '-q', root]); execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
+  const status = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
+  await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory: credentials, herdrWorkspace: 'wE' }, status as typeof fetch);
+  const credential = join(credentials, 'producer.token'); await writeFile(credential, 'producer-token-'.padEnd(40, 'x'), { mode: 0o600 });
+  await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: credential, concurrency: 4 },
+    async () => ({ actor: { id: 'proof-runner', role: 'producer', proofs: ['unit:*'] } }));
+  const config = await loadMasterConfig(root);
+  const items = instances.map((instance, index) => item(instance, 200 + index));
+  const effects: ControlPlaneEffects = {
+    snapshot: async () => ({ work: items, now: new Date().toISOString() }), mutate: async () => ({}), agents: () => [],
+    workerCredentials: async () => ({}), producerCredentials: async profiles => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])),
+    dispatchWorker: async () => ({}), launchReview: async () => ({}), merge: async () => ({}),
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'none', deployed: [], pending: [] }),
+    launchProducer: (work, request, profile, agents, observedAt) => launchProducer(root, work, request, profile, agents, observedAt, { run: herdr }),
+  };
+  const handlers = controlPlaneHandlers(() => config, effects);
+  const executor: ExecutorIdentity = { id: 'graphyard-master@test/1', host: 'test' };
+  for (const work of items) await t.test(`manual:fault-class-unclassified — ${work.key}: the executor's unit dispatch row settles on the session the loop launched on ${work.candidate!.sha.slice(0, 7)}`, async () => {
+    const request = work.autoDispatch!.producers.find(entry => entry.group === 'unit')!;
+    // The loop's tick launches the session first.
+    await launchProducer(root, work, request, config.producers[0], [], new Date().toISOString(), { run: herdr });
+    // Then an executor claims the dispatch row for the same request.
+    const action = { id: `row-${work.key}`, key: work.key, work: work.id, kind: 'dispatch', gate: 'test', state: 'claimed', attempts: 1, history: [],
+      inputs: { kind: 'dispatch', target: 'proof', group: 'unit', proofs: request.proofs, requestId: request.id, pr: request.pr, sha: request.sha, baseSha: request.baseSha, policyRevision: request.policyRevision } } as unknown as ActionRow;
+    const settled = await handlers.dispatch!(action, executor);
+    assert.match(String(settled), new RegExp(`${work.key}'s unit proofs on ${work.candidate!.sha.slice(0, 12)} are left to producer session produce-a\\S* already pending on that head`));
+    // Claimed again while the session runs, it settles the same way: nothing accumulates into a stall.
+    assert.match(String(await handlers.dispatch!(action, executor)), /are left to producer session/);
+    assert.equal((await readProducerLedger(root)).producers.filter(record => record.key === work.key).length, 1, 'no second session was launched');
+  });
+  // The race's other side: the loop's tick asking for a head an executor's session already answers
+  // records a wait on that session, not a refusal it would repeat every tick until the session ends.
+  const tickEffects: DispatchEffects = {
+    snapshot: effects.snapshot, agents: () => [], credentials: effects.producerCredentials,
+    reconcileReviews: async () => ({ reviews: [] }), reconcileProducers: async () => ({ producers: [] }), launchReview: async () => ({}),
+    launchProducer: effects.launchProducer, persist: async () => {},
+  };
+  const tick = await runDispatchTick(config, emptyDispatchCursor(config), tickEffects);
+  assert.deepEqual(tick.refused, [], 'the tick refuses no request an executor\'s session is answering');
+  assert.deepEqual(tick.launched, [], 'the tick launches no second session');
+  for (const work of items) assert.ok(tick.waiting.some(entry => entry.kind === 'producer' && entry.work === work.key && /producer session produce-a\S* is already pending on/.test(entry.reason)),
+    `the tick waits on ${work.key}'s pending session: ${JSON.stringify(tick.waiting)}`);
+  // A session pending on another head is not this request's answer: the launch is still refused.
+  const ledger = await readProducerLedger(root);
+  ledger.producers = ledger.producers.map(record => record.key === 'GY-274' ? { ...record, sha: base } : record);
+  await writeFile(join(root, '.graphyard/producers.json'), JSON.stringify(ledger), { mode: 0o600 });
+  const stale = items[0], request = stale.autoDispatch!.producers.find(entry => entry.group === 'unit')!;
+  await assert.rejects(async () => handlers.dispatch!({ id: 'row-stale', key: stale.key, work: stale.id, kind: 'dispatch', state: 'claimed', attempts: 1, history: [],
+    inputs: { kind: 'dispatch', target: 'proof', group: 'unit', proofs: request.proofs, requestId: request.id, pr: request.pr, sha: request.sha, baseSha: request.baseSha, policyRevision: request.policyRevision } } as unknown as ActionRow, executor),
+  /already pending on 2f76b9b; reconcile it with master status/);
+  const staleTick = await runDispatchTick(config, emptyDispatchCursor(config), tickEffects);
+  assert.ok(staleTick.refused.some(entry => entry.work === stale.key && /already pending on 2f76b9b/.test(entry.reason)), `the tick still refuses ${stale.key}: ${JSON.stringify(staleTick.refused)}`);
 });

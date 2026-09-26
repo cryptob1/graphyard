@@ -1,8 +1,6 @@
 import { before, after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import EmbeddedPostgres from 'embedded-postgres';
@@ -15,6 +13,7 @@ import { currentEvidence, type Observation, type Principal, type Work } from '..
 import { server } from '../src/server.js';
 import { queueRef, type QueueSpeculation } from '../src/merge-queue.js';
 import { attributionDrilldown, candidateManifest, compatibilitySignature, computeAttribution, digestHash, manifestHash, readAttribution, releaseManifest, signatureDifferences, targetIdentity, windowIdentity, type AttributionRecord } from '../src/attribution.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-39: candidate/deployment attribution integrity, safe re-anchoring and analytics. One
@@ -46,7 +45,7 @@ let serial = 0;
 const tokens = Object.fromEntries(principals.map(p => [p.id, `${p.id}-token-${'x'.repeat(32)}`]));
 before(async () => {
   const port = Number(process.env.GRAPHYARD_ATTRIBUTION_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 15);
-  pg = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-attribution-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('attribution'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('attribution_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/attribution_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'test/repository'); validation = new Validation(engine, principals, 'test/repository'); delivery = new Delivery(validation);

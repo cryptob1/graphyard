@@ -1,12 +1,12 @@
 import { before, after, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import pg from 'pg';
 import EmbeddedPostgres from 'embedded-postgres';
 import { advisoryLocks, Store } from '../src/store.js';
 import { schemaVersion } from '../src/release.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // A new release boots while the live replica is mid-coordination: holding the advisory lock
 // every coordination transaction takes, with a transaction open on the ledger's tables.
@@ -15,7 +15,7 @@ const url = (database: string) => `postgres://graphyard:testing-only@127.0.0.1:$
 
 before(async () => {
   port = Number(process.env.GRAPHYARD_STORE_INIT_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 181);
-  const scratch = await mkdtemp(join(tmpdir(), 'graphyard-store-init-'));
+  const scratch = await temporaryDirectory('store-init');
   postgres = new EmbeddedPostgres({ databaseDir: join(scratch, 'data'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await postgres.initialise(); await postgres.start();
   for (const name of ['migrated', 'changed', 'pending', 'tables', 'deadline', 'statements', 'watchdog', 'work']) await postgres.createDatabase(name);

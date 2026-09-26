@@ -1,8 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { generateKeyPairSync } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -12,6 +11,7 @@ import { followUpCreateKey, followUpItem } from '../src/review-threads.js';
 import { bindReviewer, existingFollowUpItem, followUpBodyKey, followUpExhaustedRetryMs, launchReview, reconcileReviews, saveReviewerProfile, stoppedFollowUpAttention } from '../src/reviewer.js';
 import { clientErrorStatus, nextClientErrorRun, repeatedClientErrorLimit, retryStopped } from '../src/retry-stop.js';
 import type { Observation, Work } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-598, 2026-09-26: the loop logged "follow-up filing for GY-169 approval 5322137349 failed
 // (attempt 84): ... Graphyard refused the follow-up item (409): Idempotency key reused with
@@ -29,7 +29,7 @@ const verdict = () => ({ state: 'APPROVED', reviewer, reviewId: 77, submittedAt 
 const keyReuse = 'Graphyard refused the follow-up item (409): Idempotency key reused with different input';
 
 async function boundMaster() {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-key-reuse-')), credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-key-reuse-credentials-'));
+  const root = await temporaryDirectory('key-reuse'), credentialDirectory = await temporaryDirectory('key-reuse-credentials');
   execFileSync('git', ['init', '-q', root]);
   execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
   await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory, herdrWorkspace: 'wE' }, coordinatorStatus as typeof fetch);

@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, readdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { buildMasterStatus } from '../src/master.js';
 import type { Work } from '../src/model.js';
@@ -9,6 +8,7 @@ import { parseTimingAnnotations, qualifyTimingFailures, timingFailureReason } fr
 import { TimingAssertionError, assertTiming, measureTiming, minimumSamples, observationsAbove, parseTimingRecord, percentile, percentileRank, steadyState, timingFailureMarker } from './helpers/timing.js';
 import { annotationCommand, failedTestCount, readBaseline, timingFailures, timingSpread, timingSummary } from './helpers/timing-report.js';
 import { baselineRecordingVariable, requiredCheckEnvironment, requiredRuns, stabilityRecord, testFilePorts, testPortBase, type StabilityRecord } from './helpers/timing-stability.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const source = (path: string) => readFile(new URL(path, import.meta.url), 'utf8');
 
@@ -62,7 +62,7 @@ function heldOnTest(overrides: Partial<Work> = {}) {
 const published = (command: string) => ({ annotation_level: 'failure', title: 'Timing-dependent assertion over budget', message: command.slice(command.indexOf('::', 2) + 2).replace(/%0A/g, '\n').replace(/%0D/g, '\r').replace(/%25/g, '%') });
 
 test('unit:timing-failure-reported — a failed timing-dependent assertion is recorded with what it measured, and master status reports it with the measured value against the budget instead of an unqualified red check', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-timing-record-'));
+  const directory = await temporaryDirectory('timing-record');
   try {
     // The run records every timing-dependent assertion, passed or failed, with what it measured.
     const file = join(directory, 'timing.jsonl');

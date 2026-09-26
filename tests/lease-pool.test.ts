@@ -1,14 +1,14 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import type { Server } from 'node:http';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import pg from 'pg';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { Engine, LeaseHealth, RenewalFault, heartbeatLatencyAttentionMs, leaseHealthWindowMs, renewalFaultEvent } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { leaseCommands, leasePoolConnections } from '../src/store/pools.js';
@@ -28,7 +28,7 @@ let database: EmbeddedPostgres, connection: string;
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 196;
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-lease-pool-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('lease-pool'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('lease_pool');
   connection = `postgres://graphyard:testing-only@127.0.0.1:${port}/lease_pool`;
   const store = new Store(connection); await store.init(); await store.close();
@@ -182,7 +182,7 @@ test('unit:server-fault-keeps-lease — a renewal that failed server-side keeps 
 });
 
 test('unit:server-fault-keeps-lease — the supervisor keeps renewing through a recorded server-side failure past its local deadline', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'graphyard-lease-pool-')); const marker = join(dir, 'done');
+  const dir = await temporaryDirectory('lease-pool'); const marker = join(dir, 'done');
   const leaseMs = 1500;
   let calls = 0, renewedAfterDeadline = false;
   const started = performance.now();
@@ -209,7 +209,6 @@ test('unit:server-fault-keeps-lease — the supervisor keeps renewing through a 
   // Without a recorded grace the failure is no reason to outlive the lease.
   assert.equal(renewalGraceMs(new Error(JSON.stringify({ error: 'Internal error; consult server logs' }))), null);
   assert.equal(renewalGraceMs(new TypeError('fetch failed')), null);
-  await rm(dir, { recursive: true, force: true });
 });
 
 test('unit:heartbeat-latency-reported — status reports heartbeat p50/p95 and failed or refused renewals, and master status raises p95 over 5 s', async () => {

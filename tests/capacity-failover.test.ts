@@ -1,8 +1,7 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -28,6 +27,7 @@ import type { Observation, Principal, Work } from '../src/model.js';
 import HumanRequestsPage from '../web/pages/human-requests.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-89: mid-session exhaustion and human-only waits must not stall an item or a fleet. A
 // session that runs out of provider quota is detected from its own output and its action moves
@@ -166,14 +166,14 @@ const kinds = (state: DaemonState, kind: string) => Object.entries(state.actions
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_CAPACITY_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 44);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-capacity-db-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('capacity-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('capacity_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/capacity_test`); await store.init();
   engine = new Engine(store, [15368], 300, repository); engine.submissionObserver = null; engine.controlPlaneAppId = 1234;
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
-  home = await mkdtemp(join(tmpdir(), 'graphyard-capacity-'));
+  home = await temporaryDirectory('capacity');
   // env-a and env-b are logged in; env-out is a real environment with no credential at all.
   await mkdir(join(home, 'env-a'), { recursive: true }); await mkdir(join(home, 'env-b'), { recursive: true }); await mkdir(join(home, 'env-out'), { recursive: true });
   await writeFile(join(home, 'env-a/.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'not-a-real-token', refreshToken: 'not-a-real-token' } }));
@@ -212,7 +212,7 @@ test('integration:midsession-exhaustion-failover — a session that exhausts its
   await fresh();
   const config = loopConfig([profileOf('builder', workerA, ['env-a', 'env-b'])]);
   const herdr: Herdr = { agents: [], output: {} }, clock = { skewMs: 0 };
-  const worktree = await mkdtemp(join(tmpdir(), 'graphyard-capacity-worktree-'));
+  const worktree = await temporaryDirectory('capacity-worktree');
   git(worktree, 'init', '-q', '-b', 'graphyard/attempt'); await writeFile(join(worktree, 'README.md'), 'base\n');
   git(worktree, 'add', '-A'); git(worktree, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'base');
   const base = git(worktree, 'rev-parse', 'HEAD');
@@ -321,7 +321,7 @@ test('integration:midsession-exhaustion-failover — a session that exhausts its
 
 test('integration:capacity-exhausted-escalation — with every account of a role exhausted the item records one capacity escalation naming each account and its reset, the role is not launched again, nothing else is delayed, and status says it in one line', async () => {
   await fresh();
-  const capacityHome = await mkdtemp(join(tmpdir(), 'graphyard-capacity-spent-'));
+  const capacityHome = await temporaryDirectory('capacity-spent');
   const config = loopConfig([profileOf('builder', workerA, ['env-a']), profileOf('second', workerB, ['env-b'])], { credentialFile: join(capacityHome, 'coordinator.token') });
   const herdr: Herdr = { agents: [], output: {} }, clock = { skewMs: 0 };
   const { cycle, calls, now } = loop(config, herdr, clock);
@@ -448,7 +448,7 @@ test('integration:capacity-exhausted-escalation — with every account of a role
 
 test('integration:human-decision-parking — a human-only decision is a typed request with the reason and the exact thing needed; the session ends without a lease, the item parks, the rest of the graph continues, and the request is listed with its wait and how to answer it', async () => {
   await fresh();
-  const config = loopConfig([profileOf('builder', workerB)], { credentialFile: join(await mkdtemp(join(tmpdir(), 'graphyard-capacity-park-')), 'coordinator.token') });
+  const config = loopConfig([profileOf('builder', workerB)], { credentialFile: join(await temporaryDirectory('capacity-park'), 'coordinator.token') });
   const herdr: Herdr = { agents: [], output: {} }, clock = { skewMs: 0 };
   const { cycle, calls } = loop(config, herdr, clock);
   const parked = await launcherClaims(await released('needs a provider account'), workerA);
@@ -521,7 +521,7 @@ test('integration:human-decision-parking — a human-only decision is a typed re
 
 test('integration:human-answer-resumes-item — answering from the CLI or the dashboard route returns the item to the loop, which dispatches it, and it is delivered with no coordinator session present', async () => {
   await fresh();
-  const config = loopConfig([profileOf('builder', workerA)], { credentialFile: join(await mkdtemp(join(tmpdir(), 'graphyard-capacity-answer-')), 'coordinator.token') });
+  const config = loopConfig([profileOf('builder', workerA)], { credentialFile: join(await temporaryDirectory('capacity-answer'), 'coordinator.token') });
   const herdr: Herdr = { agents: [], output: {} }, clock = { skewMs: 0 };
   const { cycle, calls } = loop(config, herdr, clock);
   const state = emptyDaemonState(config);
@@ -586,7 +586,7 @@ test('integration:human-answer-resumes-item — answering from the CLI or the da
 const reviewerOn = (accounts: string[]) => ({ name: 'reviewer-a', agentName: 'agent-reviewer-a', kind: 'claude' as const, agentArgs: [], approvals: 'auto' as const, environment: {}, accounts });
 async function approverLoop(label: string, accounts = ['env-a', 'env-b'], extra: (now: () => number) => Partial<DaemonEffects> = () => ({})) {
   await fresh();
-  const approverHome = await mkdtemp(join(tmpdir(), `graphyard-capacity-${label}-`));
+  const approverHome = await temporaryDirectory(`capacity-${label}`);
   const config = { ...loopConfig([profileOf('builder', workerA)], { credentialFile: join(approverHome, 'coordinator.token'), autoMerge: false }), reviewers: [reviewerOn(accounts)] } as MasterConfig;
   const herdr: Herdr = { agents: [], output: {} }, clock = { skewMs: 0 };
   const decisions: { id: string; action: string; state: string; input: any; approvedBy: string | null }[] = [];
@@ -666,7 +666,7 @@ test('unit:approver-exhaustion-fails-over — an approver session stopped on its
 
 test('unit:exhaustion-shared-across-roles — an account a worker session exhausted is skipped by the approver, reviewer, producer and registry-chosen launches until its reset, and is eligible again after it', async () => {
   await fresh();
-  const sharedHome = await mkdtemp(join(tmpdir(), 'graphyard-capacity-shared-'));
+  const sharedHome = await temporaryDirectory('capacity-shared');
   const config = { ...loopConfig([profileOf('builder', workerA, ['env-a', 'env-b'])], { credentialFile: join(sharedHome, 'coordinator.token') }), reviewers: [reviewerOn(['env-a', 'env-b'])] } as MasterConfig;
   const at = Date.now(), resetsAt = new Date(at + 3 * 3_600_000).toISOString();
   // What the loop's worker failover holds when a worker stops on its notice.
@@ -703,7 +703,7 @@ test('unit:exhaustion-shared-across-roles — an account a worker session exhaus
     },
   };
   // The registry's own cache sits beside the credential, so the registry-decided roles get a home of their own.
-  const fleetConfig = { ...config, credentialFile: join(await mkdtemp(join(tmpdir(), 'graphyard-capacity-fleet-')), 'coordinator.token') };
+  const fleetConfig = { ...config, credentialFile: join(await temporaryDirectory('capacity-fleet'), 'coordinator.token') };
   for (const role of ['approver', 'reviewer'] as const) {
     const chosen = await selectFleetSession(fleetConfig, role, { name: `${role}-fleet` }, await heldAwareProbe(config, { ...before, registry: client }));
     assert.equal(chosen?.account.name, 'env-b', `${role}: the registry chose around the held account`);
@@ -778,7 +778,7 @@ test('unit:role-exhausted-waits-for-reset — with every approver account exhaus
 
 /** A repository of its own for the loop's local records (`.graphyard/local`). */
 async function localRoot(label: string) {
-  const root = await mkdtemp(join(tmpdir(), `graphyard-capacity-${label}-`));
+  const root = await temporaryDirectory(`capacity-${label}`);
   execFileSync('git', ['init', '-q'], { cwd: root });
   return root;
 }
@@ -1101,7 +1101,7 @@ test('a waiting escalation handler record whose item has closed is ended with it
 });
 test('an escalation handler launched with every account already spent is kept as a waiting record due at the first reset, so the loop launches it without a retry', async () => {
   await fresh();
-  const root = await localRoot('escalation-spent-at-start'), home = await mkdtemp(join(tmpdir(), 'graphyard-capacity-esc-start-'));
+  const root = await localRoot('escalation-spent-at-start'), home = await temporaryDirectory('capacity-esc-start');
   const operatorToken = join(home, 'master-operator.token');
   await writeFile(operatorToken, `master-operator-${'m'.repeat(32)}\n`, { mode: 0o600 });
   const config = { ...loopConfig([profileOf('builder', workerA)], { credentialFile: join(home, 'coordinator.token') }), operatorAgent: { id: 'master-operator', credentialFile: operatorToken } } as MasterConfig;
@@ -1125,7 +1125,7 @@ test('an escalation handler launched with every account already spent is kept as
 });
 
 test('an approver launched on an explicit runtime is refused while that runtime\'s login is held, and allowed after its reset', async () => {
-  const home = await mkdtemp(join(tmpdir(), 'graphyard-capacity-explicit-'));
+  const home = await temporaryDirectory('capacity-explicit');
   const config = { ...loopConfig([profileOf('builder', workerA)], { credentialFile: join(home, 'coordinator.token') }) } as MasterConfig;
   const at = Date.now(), resetsAt = new Date(at + 2 * 86_400_000).toISOString();
   // An approver on the runtime's own login stopped on its notice: that login is held as profile:approver.
@@ -1139,7 +1139,7 @@ test('an approver launched on an explicit runtime is refused while that runtime\
 });
 
 test('an approver and an escalation handler on the same runtime\'s own login share its hold, whichever of them spent it', async () => {
-  const root = await localRoot('runtime-login-shared'), home = await mkdtemp(join(tmpdir(), 'graphyard-capacity-runtime-login-'));
+  const root = await localRoot('runtime-login-shared'), home = await temporaryDirectory('capacity-runtime-login');
   const operatorToken = join(home, 'master-operator.token');
   await writeFile(operatorToken, `master-operator-${'m'.repeat(32)}\n`, { mode: 0o600 });
   const config = { ...loopConfig([profileOf('builder', workerA)], { credentialFile: join(home, 'coordinator.token') }), operatorAgent: { id: 'master-operator', credentialFile: operatorToken } } as MasterConfig;
@@ -1160,7 +1160,7 @@ test('an approver and an escalation handler on the same runtime\'s own login sha
   assert.equal(other.account, null, 'another runtime\'s own login is not held');
 
   // The other way round: a handler spent claude's own login, and the approver is refused it.
-  const second = { ...config, credentialFile: join(await mkdtemp(join(tmpdir(), 'graphyard-capacity-runtime-login-b-')), 'coordinator.token') } as MasterConfig;
+  const second = { ...config, credentialFile: join(await temporaryDirectory('capacity-runtime-login-b'), 'coordinator.token') } as MasterConfig;
   for (const name of ownLoginAccounts({ name: escalationProfile, kind: 'claude' })) await recordObservedExhaustion(second, name, { ...observed, role: 'escalation-handler', profile: escalationProfile }, at);
   await assert.rejects(heldRuntimeLogin(second, 'approver', approverProfile, 'GY-7', { now: () => at }, 'claude'), (error: Error & { capacityExhausted?: boolean; skipped: { environment: string }[] }) => {
     assert.equal(error.capacityExhausted, true);
@@ -1228,7 +1228,7 @@ test('a spent escalation handler waits for the earliest reset its relaunch compu
 
 test('an escalation handler whose launch record cannot be written is closed and fails, rather than running untracked', async () => {
   await fresh();
-  const root = await localRoot('escalation-unrecorded'), home = await mkdtemp(join(tmpdir(), 'graphyard-capacity-esc-unrecorded-'));
+  const root = await localRoot('escalation-unrecorded'), home = await temporaryDirectory('capacity-esc-unrecorded');
   const operatorToken = join(home, 'master-operator.token');
   await writeFile(operatorToken, `master-operator-${'m'.repeat(32)}\n`, { mode: 0o600 });
   const config = { ...loopConfig([profileOf('builder', workerA)], { credentialFile: join(home, 'coordinator.token') }), operatorAgent: { id: 'master-operator', credentialFile: operatorToken } } as MasterConfig;

@@ -1,8 +1,5 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
@@ -13,6 +10,7 @@ import { resyncUnobservedPrefix } from '../src/model/action-kinds.js';
 import { controlPlaneHandlers } from '../src/executor.js';
 import type { MasterConfig } from '../src/master.js';
 import { stalledActionAttention } from '../src/cli/master-status.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-607: an executor claiming an item's `resync` row saved the item, so the GitHub observation
@@ -37,7 +35,7 @@ let database: EmbeddedPostgres, store: Store, engine: Engine;
 before(async () => {
   // An offset no other file takes: two files sharing a port fail whichever starts second.
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 137;
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-claim-observation-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('claim-observation'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'owner/project');

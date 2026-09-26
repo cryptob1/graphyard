@@ -1,14 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { assertOutsideRepository, ensureTokens, fingerprint, generateToken, installDirectory, plannedPrincipals, prepareInstallDirectory, principalsVariable, readInstallRecord, tokenFile, workerPrincipals, writeInstallRecord, Vault } from '../src/install/secrets.js';
 import { principalSchema } from '../src/server.js';
 import { REDACTED } from '../src/install/types.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
-async function scratch() { return mkdtemp(join(tmpdir(), 'graphyard-secrets-')); }
+async function scratch() { return temporaryDirectory('secrets'); }
 
 test('every principal token is crypto-random, role-scoped, and at least 32 characters', async () => {
   const tokens = new Set(Array.from({ length: 200 }, () => generateToken()));

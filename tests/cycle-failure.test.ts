@@ -1,13 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { cycleFailureAttentionAfter, cycleFailureCeiling, cycleFailureCeilingMs, cycleFailureDelay, daemonStateSchema, daemonSummary, emptyDaemonState, loopAttention, loopLiveness, runDaemon, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // Each test is named for the proof it produces (GY-119): unit:cycle-failure-survived,
 // unit:cycle-failure-backoff and unit:detached-rejection-survived.
@@ -16,7 +16,7 @@ const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url))
 const iso = (offsetMs: number) => new Date(Date.parse('2030-01-01T00:00:00Z') + offsetMs).toISOString();
 
 async function privateDirectory() {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-cycle-failure-'));
+  const directory = await temporaryDirectory('cycle-failure');
   const token = join(directory, 'coordinator.token');
   await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
   return { directory, token };
@@ -159,7 +159,7 @@ test('unit:cycle-failure-backoff — consecutive failures wait longer each time 
 test('unit:detached-rejection-survived — an unhandled rejection or uncaught exception anywhere in the loop process is caught, logged with its origin, counted on the cursor, and the process keeps cycling until its stop signal', async () => {
   // A real process, since the claim is that it survives: the loop runs under tsx with effects that
   // reject a detached promise on the first cycle and throw from a timer on the second.
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-detached-rejection-'));
+  const directory = await temporaryDirectory('detached-rejection');
   try {
     const token = join(directory, 'coordinator.token');
     await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });

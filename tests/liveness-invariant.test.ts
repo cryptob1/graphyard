@@ -2,8 +2,7 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import EmbeddedPostgres from 'embedded-postgres';
@@ -18,6 +17,7 @@ import { livenessStatus } from '../src/cli/liveness-report.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
 import { emptyDaemonState, writeDaemonState } from '../src/master-daemon.js';
 import { masterConfigSchema } from '../src/master.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-201: every open item always has exactly one owned next step with a deadline, and the server
@@ -39,7 +39,7 @@ let serial = 0;
 before(async () => {
   // An offset no other test file takes: two files sharing a port fail in their `before` hook.
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 201;
-  pg = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-liveness-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('liveness'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('liveness_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/liveness_test`); await store.init();
   engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null;
@@ -379,7 +379,7 @@ test('unit:liveness-count-reported — master status reports the count of livene
   const settled = { work: await store.list(), now: new Date().toISOString() };
   assert.deepEqual(livenessStatus(settled), { violations: 0, oldestMs: null, items: [] }, 'every open item holds an obligation');
 
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-liveness-status-')), root = await mkdtemp(join(tmpdir(), 'graphyard-liveness-root-'));
+  const directory = await temporaryDirectory('liveness-status'), root = await temporaryDirectory('liveness-root');
   try {
     const credentialFile = join(directory, 'coordinator.token');
     await writeFile(credentialFile, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });

@@ -1,7 +1,6 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -10,6 +9,7 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import type { Principal, Work } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 import {
   agentOwner, approvedMerge, buildMasterStatus, humanOnlyDecisions, installWorkerHarness, loadMasterConfig, managedMasterInstructions, masterHarness,
   previewPrincipalRotation, restartMasterLoop, runAutonomyCommand, setupAutonomy, setupMaster, workAttentionOwner, workerHarnessPlan, type AttentionItem, type AutonomyDependencies,
@@ -33,7 +33,7 @@ const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id:
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 41;
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-master-autonomy-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('master-autonomy'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('autonomy_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/autonomy_test`); await store.init();
   engine = new Engine(store, [15368], 120, repositoryName); engine.submissionObserver = null;
@@ -44,13 +44,13 @@ before(async () => {
 after(async () => { http?.close(); await store?.close(); await database?.stop(); });
 
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-autonomy-root-'));
+  const root = await temporaryDirectory('autonomy-root');
   execFileSync('git', ['init', '-q', root]);
   execFileSync('git', ['remote', 'add', 'origin', `https://github.com/${repositoryName}.git`], { cwd: root });
   await writeFile(join(root, '.gitignore'), '.graphyard/\n.claude/settings.local.json\n');
-  const credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-autonomy-credentials-'));
+  const credentialDirectory = await temporaryDirectory('autonomy-credentials');
   // A launcher that records how it was invoked, so a restarted loop is observable without a server.
-  const launcher = join(await mkdtemp(join(tmpdir(), 'graphyard-autonomy-cli-')), 'graphyard.mjs');
+  const launcher = join(await temporaryDirectory('autonomy-cli'), 'graphyard.mjs');
   await writeFile(launcher, `import { appendFileSync } from 'node:fs';\nappendFileSync(${JSON.stringify(join(root, 'launched.txt'))}, process.argv.slice(2).join(' ') + '\\n');\n`);
   await setupMaster(root, { url: publicUrl, token: token(coordinator), cliPath: launcher, credentialDirectory }, coordinatorStatus as typeof fetch);
   return { root, cleanup: () => Promise.all([rm(root, { recursive: true, force: true }), rm(credentialDirectory, { recursive: true, force: true }), rm(launcher, { force: true })]) };
@@ -156,7 +156,7 @@ test('integration:master-autonomy-setup — onboarding provisions the master and
     await assert.rejects(restartMasterLoop(root, config, { pid: 1, host: 'another-host', heartbeatAt: new Date().toISOString() }), /runs on another-host/);
 
     // Worker sessions get their own rules in their worktree and can push their assigned branch.
-    const worktree = await mkdtemp(join(tmpdir(), 'graphyard-autonomy-worktree-'));
+    const worktree = await temporaryDirectory('autonomy-worktree');
     try {
       execFileSync('git', ['init', '-q', worktree]);
       // Only the worktree's own ignore rules count, whatever this machine's global excludes say.

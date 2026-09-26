@@ -1,6 +1,6 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -16,6 +16,7 @@ import { decideScopeRequest, documentationConsumerScopes, impliedScopes, namedPa
 import { regressionRefusals } from '../src/regression-guard.js';
 import { basePaths, findingScope, namesPath, negatesPath, readReviewFindings } from '../src/review-scope.js';
 import type { Observation, Principal, ScopeFile, Work } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-85: an additive scope request is decided by the loop, not by a master command. A worker
 // records the ask as structured state; the master loop asks the control plane to decide it on the
@@ -94,7 +95,7 @@ const escalations = (state: DaemonState) => Object.entries(state.actions).filter
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_AUTO_SCOPE_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 43);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-auto-scope-db-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('auto-scope-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('auto_scope_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/auto_scope_test`); await store.init();
   engine = new Engine(store, [15368], 300, repository); engine.submissionObserver = null;
@@ -102,7 +103,7 @@ before(async () => {
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
   await ok(token(operator), 'POST', 'operator-agents', { id: master.id, displayName: master.id, capabilities: master.capabilities, scope: { repositories: [repository], workItems: ['*'] }, token: master.token, reason: 'Onboarding provisions the master operator agent' });
-  operatorTokenFile = join(await mkdtemp(join(tmpdir(), 'graphyard-auto-scope-')), 'operator.token');
+  operatorTokenFile = join(await temporaryDirectory('auto-scope'), 'operator.token');
   await writeFile(operatorTokenFile, `${master.token}\n`, { mode: 0o600 });
 });
 after(async () => { http?.close(); await store?.close(); await database?.stop(); });
@@ -593,13 +594,13 @@ test('unit:review-finding-scope — only a file on the base that a finding names
       { id: 3, user: { login: 'graphyard-reviewer[bot]' }, commit_id: 'h'.repeat(40), state: 'COMMENTED', body: '' }]]);
   };
   // Existence on the base: only a genuine absence is false; a missing base ref or failing git throws, so the loop retries.
-  const repo = await mkdtemp(join(tmpdir(), 'gy-finding-base-'));
+  const repo = await temporaryDirectory('gy-finding-base');
   const git = (args: string[]) => execFileSync('git', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   git(['-C', repo, 'init', '-q']); await mkdir(join(repo, 'src')); await writeFile(join(repo, 'src', 'present.ts'), 'export {};\n');
   git(['-C', repo, 'add', '.']); git(['-C', repo, '-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-qm', 'base']);
   git(['-C', repo, 'branch', '-M', 'main']);
   // The loop's checkout: its origin/main is read once and then left stale while the remote moves on.
-  const checkout = await mkdtemp(join(tmpdir(), 'gy-finding-checkout-'));
+  const checkout = await temporaryDirectory('gy-finding-checkout');
   git(['clone', '-q', repo, checkout]);
   await writeFile(join(repo, 'src', 'added.ts'), 'export {};\n'); git(['-C', repo, 'rm', '-q', 'src/present.ts']); git(['-C', repo, 'add', '.']);
   git(['-C', repo, '-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-qm', 'base moves']);

@@ -3,6 +3,7 @@ import { readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isolatedTestEnvironment, reserveTestPorts, testPortEnvironment, type ReserveOptions } from '../../src/cli/test-isolation.js';
+import { describeTmpReclaim, reclaimTmpDirectories } from '../../src/tmp-reclaim.js';
 
 // The suite's own runner (GY-174): `npm test` and `npm run test:browser` start here, so a clean run
 // needs nothing the session has to know about the host.
@@ -14,6 +15,24 @@ import { isolatedTestEnvironment, reserveTestPorts, testPortEnvironment, type Re
 // harness controls in src/cli/test-isolation.ts; GRAPHYARD_TEST_PORT is a window of free ports this
 // run holds until it exits, and GRAPHYARD_BROWSER_PORT the dev server's port. Two runs on one host —
 // two worktrees, or a worker beside a producer — therefore never share a database or a server.
+//
+// Before and after the suite it runs, the runner sweeps the `<tmpdir>/graphyard-*` directories
+// earlier runs left behind (GY-421): one whose owning process is gone is removed whatever its age,
+// an old ownerless one once nothing live holds it open, and one a live run still owns is never
+// touched. A run that was killed mid-test therefore stops leaking its embedded-Postgres data dirs
+// into the tmpfs — and each run's own backstop removes whatever this one's children leaked.
+
+/** The most leftovers one sweep of this runner removes, so a backlog cannot stall the suite's start. */
+export const runnerTmpSweepLimit = 40;
+
+async function sweepLeftoverTempDirectories(when: string) {
+  try {
+    const sweep = await reclaimTmpDirectories({ prefixes: ['graphyard-'], limit: runnerTmpSweepLimit });
+    const freed = describeTmpReclaim(sweep.removed.length, sweep.bytes);
+    if (freed) console.error(`[run-tests] ${when}: ${freed}, ${sweep.kept} kept (a live run's or not yet due)`);
+    for (const error of sweep.errors) console.error(`[run-tests] ${when}: could not remove ${error}`);
+  } catch { /* a sweep that cannot run must never stop the suite */ }
+}
 
 /** The browser suite's historical port, tried first. */
 export const defaultBrowserPort = 4319;
@@ -30,6 +49,7 @@ export interface RunOptions {
 export interface RunResult { code: number; base: number; environment: Record<string, string>; stdout: string; stderr: string }
 
 export async function runTests(options: RunOptions = {}): Promise<RunResult> {
+  await sweepLeftoverTempDirectories('before the suite');
   const cwd = resolve(options.cwd ?? process.cwd()), args = options.args ?? [];
   // The browser window is the dev server's port and the sentinel above it that holds the window.
   const reservation = await reserveTestPorts(options.browser ? { first: defaultBrowserPort, span: 2, last: 65_000, ...options.ports } : options.ports);
@@ -48,6 +68,9 @@ export async function runTests(options: RunOptions = {}): Promise<RunResult> {
     process.on('SIGINT', forward); process.on('SIGTERM', forward);
     const code = await new Promise<number>(done => child.on('close', (status, signal) => done(status ?? (signal ? 1 : 0))));
     process.off('SIGINT', forward); process.off('SIGTERM', forward);
+    // Whatever this run's children leaked — a failure before an after hook, a killed file — its
+    // processes are gone now, so the sweep takes their directories back at once.
+    await sweepLeftoverTempDirectories('after the suite');
     return { code, base: reservation.base, environment, stdout, stderr };
   } finally { reservation.release(); }
 }

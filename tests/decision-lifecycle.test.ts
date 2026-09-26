@@ -2,8 +2,7 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
@@ -15,6 +14,7 @@ import { standingEscalations, type Observation, type Principal, type Work } from
 import { Store } from '../src/store.js';
 import { MERGE_PROTOCOL } from '../src/protocol-version.js';
 import { samePin } from '../src/server/decision-ledger.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-75: a decision whose approval is refused on a revision race must never stay 'requested'
 // forever. A pinned race settles the decision as stale, resolve and attest are pinned to what
@@ -83,7 +83,7 @@ const lapse = (work: Work) => overwrite(work, document => { document.lease = { .
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 42;
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-decision-lifecycle-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('decision-lifecycle'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('decision_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/decision_test`); await store.init();
   engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null;
@@ -380,8 +380,8 @@ test('integration:decision-withdraw — the master withdraws its own requested d
 });
 
 test('master withdraw takes back the master\'s own request through the decide route and master status lists stale decisions with the next command', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-decision-cli-'));
-  const credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-decision-cli-credentials-'));
+  const root = await temporaryDirectory('decision-cli');
+  const credentialDirectory = await temporaryDirectory('decision-cli-credentials');
   const credentialFile = join(credentialDirectory, 'coordinator.token');
   const operatorFile = join(credentialDirectory, 'operator.token');
   const decisionId = randomUUID();

@@ -1,8 +1,6 @@
 import { before, after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
@@ -14,6 +12,7 @@ import { type Principal, type Work, evaluate } from '../src/model.js';
 import { server } from '../src/server.js';
 import { proofPreview } from '../src/coordination.js';
 import type { Definition } from '../src/validation.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 const operator: Principal = { id: 'operator', role: 'admin' };
 const worker: Principal = { id: 'implementer', role: 'worker' };
 const runner: Principal = { id: 'runner', role: 'worker' };
@@ -26,7 +25,7 @@ let pg: EmbeddedPostgres, store: Store, engine: Engine, validation: Validation;
 let serial = 0;
 before(async () => {
   const port = Number(process.env.GRAPHYARD_VALIDATION_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1);
-  pg = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-validation-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('validation'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('validation_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/validation_test`); await store.init(); engine = new Engine(store, [15368], 120, 'test/repository'); validation = new Validation(engine, principals, 'test/repository');
 });

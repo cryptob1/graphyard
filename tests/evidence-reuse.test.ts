@@ -1,8 +1,6 @@
 import { before, after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
@@ -14,6 +12,7 @@ import { defineScenario } from '../src/scenarios.js';
 import { server } from '../src/server.js';
 import { currentEvidence } from '../src/model.js';
 import type { Principal, ScopeFile, Work } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * D6 acceptance checks of the turnkey delivery roadmap, one test per check, named
@@ -38,7 +37,7 @@ let serial = 0;
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_REUSE_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 17);
-  pg = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-reuse-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('reuse'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('reuse_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/reuse_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'test/repository'); validation = new Validation(engine, principals, 'test/repository');

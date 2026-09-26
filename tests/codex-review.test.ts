@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { observeCodex, CODEX_APP_ID, CODEX_USER_ID } from '../src/codex-review.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 const head = 'a'.repeat(40), base = 'b'.repeat(40);
 function fixture() {
   const bot = { id: CODEX_USER_ID, type: 'Bot' };
@@ -164,9 +165,9 @@ test('explicit results refuse stale, edited, spoofed, conflicting and changing e
  });
 
 test('migration refuses required code-owner review before making any external changes', async () => {
-  const {mkdtemp,writeFile,readFile,rm} = await import('node:fs/promises');
-  const {tmpdir} = await import('node:os'); const {join} = await import('node:path'); const {spawnSync} = await import('node:child_process');
-  const dir = await mkdtemp(join(tmpdir(),'graphyard-protection-'));
+  const {writeFile,readFile,rm} = await import('node:fs/promises');
+  const {join} = await import('node:path'); const {spawnSync} = await import('node:child_process');
+  const dir = await temporaryDirectory('protection');
   try {
     const log = join(dir,'calls.jsonl');
     await writeFile(join(dir,'gh'), `#!${process.execPath}\nconst fs=require('node:fs');fs.appendFileSync(${JSON.stringify(log)},JSON.stringify(process.argv.slice(2))+'\\n');console.log(JSON.stringify({required_pull_request_reviews:{require_code_owner_reviews:true}}));\n`, {mode:0o700});
