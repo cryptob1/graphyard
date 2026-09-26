@@ -13,9 +13,10 @@ import { server } from '../src/server.js';
 import { processJob } from '../src/github.js';
 import { Refusal, type Principal, type Work } from '../src/model.js';
 import { approverSessionName, decisionInput, masterConfigSchema, mergeExecutor, type MasterConfig, type WorkerProfile } from '../src/master.js';
-import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { successorWidening } from '../src/model/successors.js';
 import { systemInvariants, type InvariantCheck } from '../src/model/invariants.js';
+import { performSelfUpgrade, type SelfUpgradeOutcome } from '../src/daemon/upgrade.js';
 import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } from './helpers/soak-world.js';
 
 /**
@@ -26,8 +27,9 @@ import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } f
  * (src/model/invariants.ts) holds. Fifteen items pass through it: released every fifteen minutes so
  * a merge lands about every fifteen, three sent back by their reviewer, two whose worker dies, two
  * production deploys, a file split on main that re-plans an item, one pull request GitHub reports
- * CLEAN at once and one UNSTABLE, and a reviewer bot out of quota that fails over. Every one of the
- * fifteen must be delivered. A change to the loop that breaks an invariant fails here, in CI, before
+ * CLEAN at once and one UNSTABLE, a reviewer bot out of quota that fails over, and the loop's
+ * between-cycles self-upgrade (GY-437) against a simulated coordinator checkout that stands dirty
+ * across the second deploy for a while. Every one of the fifteen must be delivered. A change to the loop that breaks an invariant fails here, in CI, before
  * it merges; a new behaviour that repeats per cycle, head or item belongs in this world.
  */
 const repository = 'owner/project';
@@ -55,7 +57,7 @@ const start = Date.parse('2031-06-02T08:00:00Z');
 const plan = {
   items: 15, releaseEveryMs: 15 * minute, workMs: 20 * minute,
   rework: new Set([3, 7, 11]), deaths: new Set([5, 9]), deathAfterMs: 8 * minute,
-  deploys: [2 * hour + 30 * minute, 5 * hour], split: { at: 45 * minute, item: 12 }, clean: 2, unstable: 4, slowRecompute: 8, exhaustedReviewer: 6,
+  deploys: [2 * hour + 30 * minute, 5 * hour], dirtyCheckout: { from: 4 * hour + 50 * minute, to: 6 * hour }, split: { at: 45 * minute, item: 12 }, clean: 2, unstable: 4, slowRecompute: 8, exhaustedReviewer: 6,
 };
 const file = (n: number) => `src/soak/item-${n}.ts`;
 
@@ -198,8 +200,51 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
   };
 
+  // ---- The coordinator checkout the loop runs from, and its supervisor (GY-437). ----
+  // A detached checkout of the base branch, at the tip the day starts on; git answers from the
+  // simulated GitHub, and a restart of the fleet or of the loop itself is recorded, not performed.
+  const checkout = { head: github.tip, origin: github.tip, dirty: false };
+  const upgrades = { fetches: 0, checkouts: [] as { at: number; from: string; to: string }[], executors: [] as string[], self: 0, outcomes: [] as SelfUpgradeOutcome['outcome'][] };
+  /** The paths the base branch changed between two commits: every merged pull request's files, and what any other commit added or removed. */
+  const changedPaths = (from: string, to: string) => {
+    const paths = new Set<string>(), seen = new Set<string>(), queue = [to];
+    while (queue.length) {
+      const at = queue.pop()!;
+      if (seen.has(at) || github.contains(from, at)) continue;
+      seen.add(at);
+      const commit = github.commits.get(at)!, merged = github.merges.find(entry => entry.sha === at);
+      if (merged) for (const path of github.prs.get(merged.pr)!.files) paths.add(path);
+      else if (commit.parents[0]) {
+        const before = new Set(github.commits.get(commit.parents[0])!.files), after = new Set(commit.files);
+        for (const path of [...before, ...after]) if (before.has(path) !== after.has(path)) paths.add(path);
+      }
+      if (!merged) queue.push(...commit.parents);
+      else queue.push(commit.parents[0]);
+    }
+    return [...paths];
+  };
+  const coordinatorGit = async (command: string, args: string[]): Promise<string> => {
+    assert.equal(command, 'git');
+    const [op, ...operands] = args.slice(2);
+    if (op === 'fetch') { upgrades.fetches++; checkout.origin = github.tip; return ''; }
+    if (op === 'rev-parse') return `${operands[0] === 'HEAD' ? checkout.head : checkout.origin}\n`;
+    if (op === 'symbolic-ref') throw Object.assign(new Error('fatal: ref HEAD is not a symbolic ref'), { status: 1 });
+    if (op === 'status') return checkout.dirty ? ' M src/master.ts\n' : '';
+    if (op === 'diff') { const [from, to] = operands[1].split('..'); return `${changedPaths(from, to).join('\n')}\n`; }
+    if (op === 'checkout') { assert.ok(!checkout.dirty, 'a dirty checkout is never touched'); upgrades.checkouts.push({ at: clock.now(), from: checkout.head, to: operands[2] }); checkout.head = operands[2]; return ''; }
+    throw new Error(`the simulated coordinator checkout cannot answer git ${args.slice(2).join(' ')}`);
+  };
+  const selfUpgrade = (state: DaemonState) => performSelfUpgrade(config, state, {
+    root: '/soak/coordinator', run: coordinatorGit, now: clock.now, persist: async () => {},
+    restartExecutors: async to => { upgrades.executors.push(to); return { result: 'restarted', reason: null, coordinator: { commit: to }, held: [], restarted: [], unsupervised: [], forgotten: [] }; },
+    // The supervisor re-executes the loop: the next process loads the release the checkout holds, as runDaemon records it.
+    restartSelf: async () => { upgrades.self++; state.release = { commit: checkout.head, dirty: checkout.dirty }; },
+  });
+
   // ---- The day. ----
   const state = emptyDaemonState(config);
+  /** The cursor's upgrade actions and the refusal's attempts, sampled every cycle the checkout stood refused. */
+  const refusalSamples: { keys: number; attempts: number }[] = [];
   const violations: string[] = [], observed = new Set<string>(), failures: string[] = [];
   let released = 0, split = false, deploys = 0, cycles = 0;
   const jobsDue = async () => Number((await store.pool.query('SELECT count(*) AS due FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now())')).rows[0].due);
@@ -228,6 +273,12 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
         if (process.env.SOAK_TRACE) for (const action of result.actions) console.error(`+${Math.round(elapsed / minute)} ${action.kind} ${action.state} ${action.work ?? ''}: ${action.detail.slice(0, 300)}`);
       }
       catch (error) { failures.push(`${new Date(now).toISOString()}: ${error instanceof Error ? error.message : String(error)}`); }
+      // Between cycles, as runDaemon runs it: the self-upgrade against the simulated checkout.
+      checkout.dirty = elapsed >= plan.dirtyCheckout.from && elapsed < plan.dirtyCheckout.to;
+      const upgraded = await selfUpgrade(state);
+      upgrades.outcomes.push(upgraded.outcome);
+      if (upgraded.outcome === 'failed') failures.push(`${new Date(now).toISOString()}: self-upgrade failed: ${upgraded.reason}`);
+      if (upgraded.outcome === 'refused') refusalSamples.push({ keys: Object.keys(state.actions).filter(key => key.startsWith('upgrade:')).length, attempts: state.actions['upgrade:refused']?.attempts ?? 0 });
       for (const check of state.invariants.report as InvariantCheck[]) {
         if (check.observed) observed.add(check.invariant);
         if (!check.holds) violations.push(`${new Date(now).toISOString()} (+${Math.round(elapsed / minute)} min) ${check.line}`);
@@ -239,12 +290,12 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   }
 
   const final = (await store.list()).filter(item => items.some(entry => entry.id === item.id));
-  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, state, dayStart };
+  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, state, dayStart, upgrades, refusalSamples, checkout };
 }
 
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 180_000 }, async () => {
   const began = performance.now();
-  const { items, final, github, sessions, lost, violations, observed, failures, production, cycles, dayStart } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
+  const { items, final, github, sessions, lost, violations, observed, failures, production, cycles, dayStart, state, upgrades, refusalSamples, checkout } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
   const undelivered = final.filter(item => item.stage !== 'done' || !item.delivery);
   assert.deepEqual(undelivered.map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
@@ -266,6 +317,23 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   const reviewed = final.find(item => item.key === items[plan.exhaustedReviewer - 1].key)!;
   assert.ok(reviewed.reviewFailovers?.some(failover => failover.profile === 'claude-reviewer' && failover.exhaustion === 'usage-limit' && failover.nextProfile === 'cursor-reviewer'), `the exhausted reviewer bot failed over to the next profile: ${JSON.stringify(reviewed.reviewFailovers)}`);
   assert.ok(cycles > 24 * 6, `the loop cycled through the day (${cycles} cycles)`);
+  // GY-437: the between-cycles self-upgrade ran after every cycle of the day. Each deploy aligned
+  // the checkout once, and restarted the fleet and the loop once (every merge touches src/); the
+  // dirty checkout across the second deploy was refused, untouched, without growing the cursor,
+  // and aligned once it was clean again.
+  const summary = `${upgrades.checkouts.map(entry => `+${Math.round((entry.at - dayStart) / minute)} min ${entry.from.slice(0, 7)}..${entry.to.slice(0, 7)}`).join(', ')}`;
+  assert.equal(upgrades.outcomes.length, cycles, 'the self-upgrade ran between every cycle');
+  assert.equal(upgrades.checkouts.length, production.deploys.length, `one alignment per deploy: ${summary}`);
+  assert.equal(upgrades.executors.length, production.deploys.length, 'one fleet restart per deploy');
+  assert.equal(upgrades.self, production.deploys.length, 'one re-execution of the loop per deploy');
+  assert.deepEqual(upgrades.executors, upgrades.checkouts.map(entry => entry.to), 'the fleet restarts against the tip the checkout moved to');
+  assert.ok(upgrades.checkouts[1].at >= dayStart + plan.dirtyCheckout.to, `the second deploy aligned only once the checkout was clean: ${summary}`);
+  assert.ok(refusalSamples.length >= 3, `the dirty checkout stood refused across the second deploy (${refusalSamples.length} cycles)`);
+  assert.deepEqual(new Set(refusalSamples.map(sample => JSON.stringify(sample))).size, 1, `a standing refusal does not grow the cursor's actions: ${JSON.stringify(refusalSamples.slice(0, 3))}`);
+  assert.equal(state.upgrade.refused, null, 'the refusal cleared with the alignment');
+  assert.equal(state.upgrade.alignedRelease, production.deploys[1].sha, 'the loop stands aligned with the last deployed release');
+  assert.equal(state.release?.commit, checkout.head, 'the re-executed loop reports the release the checkout holds');
+  assert.ok(Object.keys(state.actions).filter(key => key.startsWith('upgrade:')).length <= production.deploys.length + 1, `the cursor holds one upgrade action per deploy and one refusal: ${Object.keys(state.actions).filter(key => key.startsWith('upgrade:')).join(', ')}`);
   const seconds = (performance.now() - began) / 1000;
   assert.ok(seconds < 120, `the day runs well inside the three minutes the CI test job allows it (${seconds.toFixed(1)} s)`);
 });
