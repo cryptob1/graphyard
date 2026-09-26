@@ -48,8 +48,6 @@ test('unit:attestation-carries-exercise — the approver prompt says to confirm 
     assert.ok(confirmation.includes(phrase), `${phrase} appears in the approver's instruction`);
   const pi = piApproverWithAttestation({ repository: 'owner/project', cliPath: '/bin/graphyard.mjs', approver: { id: 'approver' } } as any, item(), 'd1');
   assert.ok(pi.includes(attestConfirmation(base)) && pi.indexOf(attestConfirmation(base)) < pi.indexOf('graphyard_decide'), 'the Pi approver is told before it decides');
-  const scratch = piApproverWithAttestation({ repository: 'owner/project', cliPath: '/bin/graphyard.mjs', approver: { id: 'approver' } } as any, item(), 'd1', '/repo');
-  assert.ok(scratch.includes('the repository is at /repo and is read-only') && scratch.includes(attestConfirmation(base)), 'an approver in its own directory is still told to confirm the exercise record');
 });
 
 test('unit:attestation-carries-exercise — an unexercised manual proof leads to an attestation request, never to rework', () => {

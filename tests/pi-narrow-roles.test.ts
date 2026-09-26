@@ -13,6 +13,7 @@ import { launchProducer, readProducerLedger, reclaimCheckouts, reconcileProducer
 import { narrowRoleRuntime, piRuntimeSchema } from '../src/runner/payloads.js';
 import { clearRuns, liveRun, registerRun } from '../src/runner/registry.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
+import { attestConfirmation, piApproverWithAttestation } from '../src/master/autonomy.js';
 import type { FilesystemProbe } from '../src/install/worktree-root.js';
 
 // GY-169 AC-3, proof integration:pi-narrow-roles. The master config selects the runtime of each
@@ -266,4 +267,12 @@ test('integration:pi-narrow-roles without the setting, and for non-unit proof gr
     assert.equal(launched.pane, 'pane-1', 'an integration group still launches in Herdr');
     assert.equal(existsSync(`${selected.scenario}.launched`), false);
   } finally { await selected.cleanup(); }
+});
+
+test('integration:pi-narrow-roles the headless approver\'s prompt names the read-only repository and still carries the attestation confirmation (GY-523)', () => {
+  const config = { repository: 'owner/project', cliPath: launcher, approver: { id: 'approver' } } as any;
+  const work = { key: 'GY-88', candidate: { sha: H, baseSha: B } } as unknown as Work;
+  const prompt = piApproverWithAttestation(config, work, 'd1', '/repo');
+  assert.ok(prompt.includes('the repository is at /repo and is read-only'), 'the approver is told the repository is not its to write');
+  assert.ok(prompt.includes(attestConfirmation(B)) && prompt.indexOf(attestConfirmation(B)) < prompt.indexOf('graphyard_decide'), 'and is told to confirm an exercise record before it decides');
 });
