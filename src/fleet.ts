@@ -66,8 +66,10 @@ const approverPrefixes = (key: string) => ['graphyard-approver', 'gy-approver'].
  * `concurrency` launches the role stopped launching (GY-190). Herdr is the host's own record of what
  * runs, so a session selected on this host, past the launch grace, whose runtime session Herdr no
  * longer lists, has ended. Only roles whose runtime session name the registry session determines are
- * judged here — an approver is named for its item — and only from an inventory that could be read;
- * every other role's liveness stays with its lease or request, which the control plane settles.
+ * judged here — an approver is named for its item — and only from an inventory that could be read.
+ * A reviewer's or producer's Herdr name comes from its local profile and request, which the registry
+ * session does not carry, so those end with the ledger record that keeps their session id instead
+ * (`settledRecordSessions`, GY-205); every other role's liveness stays with its lease or request.
  */
 export function runtimeSessionGone(session: FleetSession, runtime: RuntimeInventory | undefined, host: string | null | undefined, now: number): string | null {
   if (session.endedAt || !runtime?.available || !host || session.host !== host) return null;
@@ -221,6 +223,16 @@ export async function fleetRoleHealth(config: FleetConfig, role: FleetRoleName, 
   const full = running >= definition.concurrency ? `role ${role} is at its concurrency limit (${running} of ${definition.concurrency} live)` : null;
   const usable = !full && accounts.some(account => account.healthy);
   return { available: usable, reason: usable ? null : full ?? `No eligible account for ${role}: ${accounts.map(account => account.reason).join('; ') || 'the role names no account'}`, accounts };
+}
+
+/**
+ * The registry sessions of reviewer and producer launches whose ledger record has settled, each with
+ * why (GY-205). The record is where those sessions' ends are observed — a verdict, evidence, an
+ * expiry, a vanished pane — so a settled record's session no longer holds its role's slot.
+ */
+export function settledRecordSessions(role: 'reviewer' | 'producer', records: readonly { session?: string; state: string; key: string; agentName: string }[]): [string, string][] {
+  return records.filter(record => record.session && record.state !== 'pending')
+    .map(record => [record.session!, `its ${role} session ${record.agentName} for ${record.key} is ${record.state}`]);
 }
 
 /**

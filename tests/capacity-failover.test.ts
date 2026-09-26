@@ -302,16 +302,19 @@ test('integration:midsession-exhaustion-failover — a session that exhausts its
   const session: LaunchedSession = { role: 'producer', record: randomUUID(), profile: 'prover', agentName: 'agent-prover', pane: 'pane-prover', work: work.key, requestId: 'request-1' };
   const ended: string[] = [], relaunched: string[] = [];
   herdr.agents.push({ name: 'agent-prover', pane_id: 'pane-prover', agent_status: 'blocked' });
-  herdr.output['agent-prover'] = 'Error: Weekly usage limit reached for GLM Coding Plan.\nYour quota will reset at 2026-09-26 08:30:00 UTC';
+  // A reset in the future whenever the suite runs; a fixed date failed this test once it passed (2026-09-26).
+  const quotaReset = new Date(Math.ceil(Date.now() / 3_600_000) * 3_600_000 + 30 * 86_400_000).toISOString();
+  herdr.output['agent-prover'] = `Error: Weekly usage limit reached for GLM Coding Plan.\nYour quota will reset at ${quotaReset.slice(0, 19).replace('T', ' ')} UTC`;
   const producerLoop = loop(config, herdr, clock, { dispatch: async () => {}, launchedSessions: async () => [session], endSession: async (entry, resolution) => { ended.push(resolution); herdr.agents = herdr.agents.filter(agent => agent.name !== entry.agentName); }, relaunch: async entry => { relaunched.push(entry.requestId!); return { profile: 'prover-b' }; } });
   await producerLoop.cycle(state);
   const producerFailover = state.actions[failoverKey('producer', work, session.record)];
   assert.equal(producerFailover.state, 'done', producerFailover.detail);
-  assert.match(producerFailover.detail, /exhausted prover's own account mid-session .*resets 2026-09-26T08:30:00.000Z\); relaunched on profile prover-b/);
+  assert.match(producerFailover.detail, /exhausted prover's own account mid-session .*; relaunched on profile prover-b/);
+  assert.ok(producerFailover.detail.includes(`resets ${quotaReset}); relaunched on profile prover-b`), producerFailover.detail);
   assert.deepEqual(relaunched, ['request-1']); assert.match(ended[0], /provider quota exhausted/);
   assert.ok((await observedExhaustions(config))[profileAccount('prover')], 'a profile that names no account is held under its own name');
   const recorded = (await reload(work.id)).capacity!.exhaustions.at(-1)!;
-  assert.deepEqual([recorded.role, recorded.requestId, recorded.profile, recorded.resetsAt, recorded.partialWork.state], ['producer', 'request-1', 'prover', '2026-09-26T08:30:00.000Z', 'not-applicable']);
+  assert.deepEqual([recorded.role, recorded.requestId, recorded.profile, recorded.resetsAt, recorded.partialWork.state], ['producer', 'request-1', 'prover', quotaReset, 'not-applicable']);
   await producerLoop.cycle(state);
   assert.equal((await reload(work.id)).capacity!.exhaustions.length, 2, 'an exhaustion already on the record is not written twice');
 });
