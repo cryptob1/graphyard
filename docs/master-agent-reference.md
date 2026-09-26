@@ -59,7 +59,7 @@ A failed snapshot read retries once after 0.5–1.5 s jitter; a failed cycle wai
 
 ### Running executors under supervision
 
-`graphyard init` starts `graphyard-executor@N` user units; `master executors restart` moves them to the current release. After a verified deployment the loop, between cycles, checks out the base tip (clean detached checkouts only; else `upgrade` attention); on `src/`, `scripts/`, `bin/` or `package.json` changes it restarts the executors, then itself. `releaseLag` (`master status`) flags processes >1 delivery behind for 10 minutes.
+`graphyard init` starts `graphyard-executor@N` user units; `master executors restart` moves them to the current release. After a verified deployment the loop checks out the base tip between cycles (clean detached checkouts; else `upgrade` attention); `src/`, `scripts/`, `bin/` or `package.json` changes restart executors, then the loop. `master status` `releaseLag` flags one >1 delivery behind 10 minutes.
 
 ## Resources and disk
 

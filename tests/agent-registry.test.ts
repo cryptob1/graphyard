@@ -195,6 +195,8 @@ test('integration:agent-registry-model — the control plane stores runtimes wit
   const served = apiRoutes.flatMap(module => module.routes).filter(route => route.method !== 'GET').map(route => route.path);
   const posted = [...page.matchAll(/=> [`']agent-registry\/([^`']+)[`']/g)].map(match => `/api/agent-registry/${match[1].replace(/\$\{field\(form, 'collection'\)\}/, 'accounts').replace(/\$\{[^}]+\}/g, 'name')}`);
   assert.ok(posted.length >= 6, 'runtime, model, account, role, quota and remove forms');
+  // GY-397: the browser's credential check reads the launch data only; the audit reason is prose that may name a token prefix.
+  assert.match(page, /form\.entries\(\)\]\.some\(\(\[name, value\]\) => name !== 'reason' && typeof value === 'string' && value\.split\([^)]*\)\.some\(looksLikeSecret\)/);
   for (const path of posted) assert.ok(served.some(route => typeof route === 'string' ? route === path : route.test(path)), `${path} is served`);
   assert.ok(visibleViews({ status: { actor: { role: 'admin' } }, features: {} } as any).some(view => view.id === 'agents') && !visibleViews({ status: { actor: { role: 'worker' } }, features: {} } as any).some(view => view.id === 'agents'));
   assert.ok(views.some(view => view.id === 'agents'));
@@ -314,7 +316,7 @@ test('integration:registry-driven-selection — an executor\'s action runs on th
 
   // The approver's runtime comes from its role too — here a runtime with no login home and its own contract.
   const approverCalls: string[][] = [];
-  const approver = await launchApprover(root, readyWork('GY-950'), 'decision-1', undefined, [], herdr(approverCalls), probe);
+  const approver = await launchApprover(root, readyWork('GY-950'), 'decision-1', undefined, { agents: [], available: true }, herdr(approverCalls), probe);
   assert.equal(approver.account!.environment, 'muse-a');
   const started = expandTypedCommand(approverCalls.find(args => args[0] === 'pane' && args[1] === 'run')![3]);
   assert.equal(started.kind, 'muse'); assert.deepEqual(started.args.slice(0, 3), ['--approval-mode', 'never', '--trust-workspace']);
