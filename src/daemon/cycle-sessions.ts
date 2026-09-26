@@ -286,9 +286,21 @@ export async function closeStep(cycle: Cycle) {
   for (const session of await effects.launchedSessions?.().catch(() => [] as LaunchedSession[]) ?? []) await isolate('session', open.find(candidate => candidate.key === session.work) ?? null, session.agentName, async () => {
     const agent = agents.find(candidate => candidate.name === session.agentName), item = open.find(candidate => candidate.key === session.work);
     if (!agent?.pane_id || !item || agent.agent_status !== 'blocked' || state.actions[failoverKey(session.role, item, session.record)]?.state === 'done') return;
-    await unblock(`${session.role} session ${session.agentName}`, `${session.role}:${session.record}`, agent, item, null, null, null, async () => {}, async reason => {
-      if (!effects.endSession) { await effects.closeSession(agent.pane_id!); return 'its pane was closed and its request launches again on the next dispatch tick'; }
+    // The session's own handle on the item — the one its launcher registered — carries the prompt
+    // and the loop's answer, as a worker's does (GY-223). One the launcher never registered has
+    // only the loop's ledger entry: the loop does not mint a handle under an id it would have to guess.
+    const registered = item.sessions?.find(entry => entry.state === 'running' && (entry.kind === 'review' || entry.kind === 'proof')
+      && (entry.agentName === session.agentName || (!!session.pane && entry.pane === session.pane)));
+    const handle = async (outcome: string, finished: boolean) => {
+      if (!registered) return;
+      await effects.recordSession?.(item, { id: registered.id, kind: registered.kind, runtime: registered.runtime, host: registered.host, subject: registered.subject,
+        state: finished ? 'finished' : 'running', outcome: outcome.slice(0, 500) }).catch(() => {});
+    };
+    await unblock(`${session.role} session ${session.agentName}`, `${session.role}:${session.record}`, agent, item, null, null, null, handle, async reason => {
+      // The handle ends before any relaunch: a relaunch reopens the same handle for its new session.
+      if (!effects.endSession) { await effects.closeSession(agent.pane_id!); await handle(`closed as failed: ${reason}`, true); return 'its pane was closed and its request launches again on the next dispatch tick'; }
       await effects.endSession(session, `closed as failed: ${reason}`.slice(0, 500));
+      await handle(`closed as failed: ${reason}`, true);
       if (!session.requestId || !effects.relaunch) return 'its request launches again on the next dispatch tick';
       try { return `relaunched on profile ${(await effects.relaunch(session, item, snapshot)).profile}`; }
       catch (error) { return `it could not be launched again at once (${message(error)}), so the dispatcher launches it on its retry schedule`; }
