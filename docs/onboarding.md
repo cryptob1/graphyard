@@ -7,7 +7,7 @@ Follow [install](install.md): `node "$GRAPHYARD_CLI" install --provider railway 
 
 ## 2. Add machines
 
-Raise `install --workers` (one per session) or connect a machine:
+Raise `install --workers` or connect a machine:
 
 ```sh
 node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST --herdr --host-id UNIQUE_MACHINE_NAME --token-stdin
@@ -35,7 +35,7 @@ CLAUDE_CONFIG_DIR=~/.coding_agents/claude-a claude                       # /logi
 node "$GRAPHYARD_CLI" master environments --apply                        # report quota, write profiles
 ```
 
-Profiles default to [`"approvals": "auto"`](master-agent-sessions.md#approval-modes); `"prompt"` is refused at launch.
+Profiles default to [`"approvals": "auto"`](master-agent-sessions.md#approval-modes) (trade-off: unattended sessions); `"prompt"` is refused at launch.
 
 ### Configure the fleet
 
@@ -68,7 +68,7 @@ node "$GRAPHYARD_CLI" master registry account quota opencode-a exhausted --reset
 
 ### Add a role
 
-Preferred first; applies next launch:
+Preferred first:
 
 ```sh
 node "$GRAPHYARD_CLI" master registry role set worker claude-b,claude-c,codex-a --concurrency 4 --reason "Codex overflow"

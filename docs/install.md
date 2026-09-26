@@ -64,9 +64,9 @@ Dispatch a small item ([onboarding](onboarding.md#4-prove-the-first-pr)); after 
 
 ## Self-contained host
 
-`--target host --ssh-host HOST` or `--target hetzner` runs server, Postgres, loop, executors, Herdr, Claude Code, Codex, OpenCode, Pi on one machine (systemd), credentials `0600` for `graphyard`; sign in via `signIn`.
+`--target host --ssh-host HOST` or `--target hetzner` runs server, Postgres, loop, executors, Herdr, Claude, Codex, OpenCode, Pi on one machine (systemd), credentials `0600` for `graphyard`.
 
-**Sizing:** 3 GB per concurrent agent, 2 GB per verification slot, 2 GB base, max(10%, 4 GB) spare. Confirm `price`: `--confirm-price X` or `--max-monthly N`.
+**Sizing:** 3 GB per concurrent agent, 2 GB per verification slot, 2 GB base, max(10%, 4 GB) spare. Confirm `price` (`--confirm-price X` or `--max-monthly N`).
 
 **Moving:** `--migrate` stops the old loop, restores `GRAPHYARD_MIGRATE_DATABASE_URL` there.
 

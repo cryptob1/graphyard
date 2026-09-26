@@ -30,7 +30,7 @@ Tag `vX.Y.Z` publishes `ghcr.io/cryptob1/graphyard:X.Y.Z`. `/healthz` reports ve
 | `GRAPHYARD_BUILD_SHA` | The image's source commit (Railway supplies `RAILWAY_GIT_COMMIT_SHA`) |
 | `GRAPHYARD_ARTIFACT_BACKEND` | `postgres` or `s3` ([artifacts](recovery.md#artifact-backends-capacity-and-migration)) |
 | `RAILWAY_API_TOKEN` | Optional; records failed or missing deployments as incidents |
-| `GRAPHYARD_SIGNIN_CLAIM` | [Host](install.md#self-contained-host) one-time sign-in hash |
+| `GRAPHYARD_SIGNIN_CLAIM` | [Host](install.md#self-contained-host) single-use sign-in hash |
 
 Installers derive the four capacity limits from the deployed principals; an unset one is derived at start-up as `delegationLimits` drift.
 

@@ -15,6 +15,7 @@ Keep cycling: status, dispatch, review, merge, deployment verification. Stop onl
 2. `master run` dispatches ready work in `schedule.order`.
 3. Merge exact candidates passing every gate; route findings to rework.
 4. `master verify-deployment GY-N` after delivery ([refusals](operations-reference.md#perpetual-master-loop)). Railway: `master config productionEnvironment='graphyard / production'`.
+5. Close finished agent sessions; return to status.
 
 Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions. `controlPlane.production` flags main ahead of production.
 
