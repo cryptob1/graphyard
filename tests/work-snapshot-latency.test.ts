@@ -118,7 +118,7 @@ test('integration:work-snapshot-latency — the coordination snapshot of a 100-i
   const { warmup, samples } = await steadyState(async () => { compact = await read('work-snapshot?view=coordination'); }, { warmup: WARMUP_READS, samples: LATENCY_SAMPLES });
   assert.equal(samples.length, 100);
   assertTiming({ name: 'work-snapshot-latency.p95', test: 'integration:work-snapshot-latency', statistic: 'p95', fraction: 0.95, budgetMs: SNAPSHOT_BUDGET_MS, samples, warmup });
-  const full = await read('work-snapshot');
+  const full = await read('work-snapshot?view=full');
   const view = compact!.body;
   assert.equal(view.view, 'coordination'); assert.equal(view.work.length, ITEMS); assert.equal(view.jobs.length, ITEMS);
   // Bounded: history no longer grows with the ledger's age, and no event payload or per-file scope rides along.
@@ -225,13 +225,13 @@ test('integration:store-bounded-waits — the store pool bounds the wait for a c
     assert.ok(view.omitted.actionHistory >= history.length - coordinationHistoryLimit, 'and the view still says how many it left out');
     // The evidence kept is exactly what the view's own rule keeps from the whole document, and the
     // records the SQL dropped are still counted as left out.
-    const full = (await read('work-snapshot')).body as { work: Work[] };
+    const full = (await read('work-snapshot?view=full')).body as { work: Work[] };
     const whole = full.work.find(item => item.id === first.id)!;
     assert.deepEqual(trimmed.evidence.map(entry => entry.id), coordinationWork(whole, { evidence: 0, dispatchHistory: 0, queueHistory: 0, actionHistory: 0, sessions: 0 }).evidence.map(entry => entry.id));
     assert.ok(trimmed.evidence.length > 0, 'the candidate\'s own evidence is kept');
     assert.equal(view.omitted.evidence, trimInProcess(full).omitted.evidence, 'the records the SQL dropped are counted as the in-process trim would count them');
     // The full view is untouched: it still carries every row.
-    assert.equal(((await read('work-snapshot')).body.work as Work[]).find(item => item.id === first.id)!.actionQueue!.history.length, history.length);
+    assert.equal(((await read('work-snapshot?view=full')).body.work as Work[]).find(item => item.id === first.id)!.actionQueue!.history.length, history.length);
   } finally {
     await store.pool.query("UPDATE work_items SET document=jsonb_set(document-'actionQueue','{evidence}',$2::jsonb) WHERE id=$1", [first.id, JSON.stringify(first.evidence)]);
   }
