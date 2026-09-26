@@ -82,3 +82,27 @@ export interface NextAction {
    */
   binding: string;
 }
+
+/**
+ * A `resync` is satisfied by a fresh observation, never by a re-read that saves nothing (GY-607).
+ *
+ * The executor asks the control plane to wake the item's observation job and waits for an
+ * observation newer than its claim. One that does not arrive fails the attempt with a reason
+ * beginning `resyncUnobservedPrefix` and naming the job's condition (`describeObservationJob`),
+ * worded without instants or counters so that the same condition gives the same reason on every
+ * claim: the third such claim in a row marks the row stalled (`actionStall`), and `master status`
+ * raises its attention item naming the item and that condition.
+ */
+export const resyncUnobservedPrefix = 'no observation newer than the claim was saved';
+/** The item's durable observation job, as `POST /api/work/:id/resync` reports it. */
+export interface ObservationJobState {
+  availableAt: string | null; lockedUntil: string | null; attempts: number;
+  error: string | null; heldUntil: string | null; heldReason: string | null;
+}
+/** The observation job's condition in one clause, identical for as long as the condition stands. */
+export function describeObservationJob(job: ObservationJobState | null | undefined, now: number): string {
+  if (!job) return 'the item has no observation job, so nothing observes it';
+  if (job.heldUntil && Date.parse(job.heldUntil) > now) return `its observation job is held${job.heldReason ? `: ${job.heldReason}` : ''}`;
+  if (job.error) return `its observation job last failed: ${job.error}`;
+  return 'its observation job is scheduled and records no error, yet saved no observation';
+}

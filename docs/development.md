@@ -23,7 +23,7 @@ npm ci && npm run build && npm test
 
 ## Documentation
 
-`docs/README.md` and `docs/protocol.md` are generated in full from each page's `<!-- page: Section | order | summary -->` line by `npm run docs:check -- --write`; never edit them by hand; the regression guard exempts them via `GRAPHYARD_GENERATED_FILES` (what `scripts/check-docs.mjs --list` prints). README.md and `docs/` stay within 12,000 words, no page over 1,200, and each topic lives on one page (`tests/docs-budget.test.ts`): link, never restate. Within 3% of the total, `master status` raises `docs` and the loop files one trim item to restore 5% headroom.
+`docs/README.md` and `docs/protocol.md` are generated in full from each page's `<!-- page: Section | order | summary -->` line by `npm run docs:check -- --write`; never hand-edit them; the regression guard exempts them via `GRAPHYARD_GENERATED_FILES` (what `scripts/check-docs.mjs --list` prints). README.md and `docs/` stay within 12,000 words, no page over 1,200, and each topic lives on one page (`tests/docs-budget.test.ts`): link, never restate. Within 3% of it, `master status` raises `docs` and the loop files one trim item restoring 5% headroom.
 
 ## Trusted contracts
 
