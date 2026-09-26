@@ -2,6 +2,7 @@ import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describeTiming, parseTimingRecord, percentile, type TimingMeasurement } from './timing.js';
 import { timingAnnotationMarker, type TimingFailure } from '../../src/cli/timing-failures.js';
+import { failingTestTitle } from '../../src/merge-queue.js';
 
 // The CI half of a distinguishable timing failure. The required `test` job runs this after the
 // suite, whatever the suite's outcome: it reads the run's timing record and publishes, on the
@@ -32,6 +33,28 @@ export const timingAnnotationTitle = 'Timing-dependent assertion over budget';
 /** The annotation message: a sentence for the pull request, then the record `master status` parses. */
 export const annotationMessage = (failure: TimingFailure) => `${describeTiming({ ...failure, passed: false })} in ${failure.test}. ${timingAnnotationMarker}${JSON.stringify(failure)}`;
 export const annotationCommand = (failure: TimingFailure) => `::error title=${escapeProperty(timingAnnotationTitle)}::${escapeData(annotationMessage(failure))}`;
+
+// GY-471. Each failing test is annotated too, on its test file, with its name and the first lines
+// of its failure. The control plane reads a failed required check's annotations back and compares
+// the files they name with the diffs a speculative queue tip holds, so a failure a predecessor's
+// change caused is attributed to that predecessor rather than to the entry under test.
+export const failingTestAnnotationsMax = 8, failingTestDetailLines = 12;
+export interface FailingTest { file: string; name: string; detail: string[] }
+/** The failing tests the spec reporter's closing `failing tests:` section lists, each with its file. */
+export function failingTests(log: string): FailingTest[] {
+  const plain = log.replace(/\u001b\[[0-9;]*m/g, '');
+  const at = plain.lastIndexOf('✖ failing tests:');
+  if (at < 0) return [];
+  return plain.slice(at).split(/^test at /m).slice(1).flatMap(block => {
+    const [where, heading = '', ...rest] = block.split('\n');
+    const file = /^(.+?):\d+:\d+\s*$/.exec(where)?.[1];
+    const name = /^\s*✖\s+(.*?)(?:\s+\([\d.]+m?s\))?\s*$/.exec(heading)?.[1];
+    if (!file || !name) return [];
+    const detail = rest.map(line => line.trimEnd()).filter(line => line.trim() && !/^\s+at (?:node:|.*\(node:)/.test(line)).slice(0, failingTestDetailLines);
+    return [{ file, name, detail }];
+  });
+}
+export const failingTestCommand = (failure: FailingTest) => `::error file=${escapeProperty(failure.file)},title=${escapeProperty(failingTestTitle)}::${escapeData([failure.name, ...failure.detail].join('\n'))}`;
 
 export interface TimingSpread { name: string; test: string; statistic: string; budgetMs: number; comparison: '<' | '<='; runs: number; failures: number; minMs: number; medianMs: number; maxMs: number; spreadMs: number; headroomMs: number }
 
@@ -72,8 +95,10 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const [recordFile, logFile] = process.argv.slice(2);
   if (!recordFile) throw new Error('Usage: timing-report RECORD.jsonl [TEST.log]');
   const record = existsSync(recordFile) ? parseTimingRecord(readFileSync(recordFile, 'utf8')) : [];
-  const failures = timingFailures(record, logFile && existsSync(logFile) ? failedTestCount(readFileSync(logFile, 'utf8')) : null);
+  const log = logFile && existsSync(logFile) ? readFileSync(logFile, 'utf8') : null;
+  const failures = timingFailures(record, log === null ? null : failedTestCount(log));
   for (const failure of failures) console.log(annotationCommand(failure));
+  for (const failure of log === null ? [] : failingTests(log).slice(0, failingTestAnnotationsMax)) console.log(failingTestCommand(failure));
   const summary = timingSummary(record, failures, readBaseline());
   if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, summary); else console.log(summary);
 }

@@ -13,7 +13,7 @@ import { nextAction } from './model/next-action.js';
 import { foldDecisions } from './model/approval.js';
 import { normalMergeState, repairAudit, repairAuditEvent, repairLaneVerdict, type RepairAudit, type RepairLaneVerdict } from './master/repair-lane.js';
 export { CHECK_NAME };
-import { alreadyMergeableRefusal, baseRefreshNeeded, dismissedVerdict, enqueueRequestCurrent, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, pendingRestore, queuePlacement, queueRef, mergeCheckBranch, treeIdenticalPrediction, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread } from './merge-queue.js';
+import { alreadyMergeableRefusal, baseRefreshNeeded, checkFailureOf, type CheckFailure, dismissedVerdict, enqueueRequestCurrent, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, pendingRestore, queuePlacement, queueRef, mergeCheckBranch, treeIdenticalPrediction, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread } from './merge-queue.js';
 import { blockedFeatures, controlPlanePermissions, describeShortfall, permissionShortfalls, requiredPermissions, type PermissionFeature, type PermissionLevel, type PermissionShortfall } from './github-permissions.js';
 
 /** Out-of-scope paths compared against the base tip per observation; the rest are refused as uncompared. */
@@ -869,6 +869,7 @@ export class GitHub {
         ? { provider: 'codex' as const, sha: pr.head.sha, approved: false, reason: unready }
         : await observeCodex(this, pr.number, pr.head.sha, reviews, pr.user.id, work.reviewRequest, candidateBase, work.policyRevision, this.config.appId)
       : await this.observeAgent(work, pr, reviews, candidateBase, unready);
+    const checkFailures = await this.checkFailures(work, checks);
     const confirmed = await this.request(`/pulls/${work.submission!.pr}`);
     demand(confirmed.head.sha === pr.head.sha && confirmed.base.sha === pr.base.sha && confirmed.base.ref === pr.base.ref && confirmed.head.ref === pr.head.ref
       && confirmed.state === pr.state && confirmed.draft === pr.draft && confirmed.merged === pr.merged, 'PR changed while collecting evidence; retry');
@@ -885,8 +886,34 @@ export class GitHub {
       prState: pr.state, draft: pr.draft, prCreatedAt: pr.created_at, merged: pr.merged, mergeSha: pr.merge_commit_sha, mergedAt: pr.merged_at, mergeable: pr.mergeable === true && !pr.draft && pr.state === 'open', conflicting: pr.mergeable === false && pr.state === 'open',
       protected: protection.protected, conversations, files: files.map(f => f.filename), at: startedAt,
       baseTip: branch.tip, baseTree: branch.tree, baseTipContained, baseTipAncestor: contained, scopeFiles,
-      ...(landing ? { landing } : {}), ...(revertedDelivery ? { revertedDelivery } : {}),
+      ...(landing ? { landing } : {}), ...(revertedDelivery ? { revertedDelivery } : {}), ...(checkFailures.length ? { checkFailures } : {}),
     };
+  }
+  private annotations = new Map<number, any[]>();
+  /**
+   * What each failed required check names (GY-471): for the newest completed run of a required
+   * check that failed, the files and failing tests in its output and annotations, which the merge
+   * queue compares with the diffs a speculative tip holds before blaming the entry under test. A
+   * completed run's annotations never change, so each run's are read once; an unreadable list
+   * leaves the run's own output as the only record.
+   */
+  private async checkFailures(work: Work, checks: any[]): Promise<CheckFailure[]> {
+    const failures: CheckFailure[] = [];
+    for (const name of work.policy.checks) {
+      const runs = checks.filter(check => check.name === name && check.status === 'completed');
+      const run = runs.reduce<any>((newest, check) => !newest || (check.id ?? 0) > (newest.id ?? 0) ? check : newest, null);
+      if (!run || ['success', 'skipped'].includes(run.conclusion)) continue;
+      const id = Number.isSafeInteger(run.id) ? run.id as number : undefined;
+      let annotations = id === undefined ? [] : this.annotations.get(id);
+      if (!annotations) {
+        const read = (run.output?.annotations_count ?? 1) > 0 ? await this.pages(`/check-runs/${id}/annotations`).catch(() => null) : [];
+        annotations = read ?? [];
+        if (read) this.annotations.set(id!, read);
+        if (this.annotations.size > ancestryEntries) this.annotations.delete(this.annotations.keys().next().value!);
+      }
+      failures.push(checkFailureOf({ name, id, output: run.output }, annotations));
+    }
+    return failures;
   }
   /**
    * The commit the candidate would land on, and what landing there would revert (see

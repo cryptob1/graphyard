@@ -1,5 +1,5 @@
-import { baseRefreshConflict, defaultMergeBatchSize, ejectedTipRestore, ejectionReason, nextQueueSequence, pendingBaseRefresh, pendingRestore, predecessorWait, predecessorWaitText, queueHistoryLimit, queueBatch, queuePlacement, speculativeConflictReason } from '../merge-queue.js';
-import type { QueueEjection, QueueHistoryEntry, QueuePlacement } from '../merge-queue.js';
+import { attributeTipFailure, baseRefreshConflict, blamedTipFailure, defaultMergeBatchSize, ejectedTipRestore, ejectionReason, nextQueueSequence, pendingBaseRefresh, pendingRestore, predecessorWait, predecessorWaitText, queueHistoryLimit, queueBatch, queuePlacement, speculativeConflictReason, tipCheckFailureReason } from '../merge-queue.js';
+import type { FailureAttribution, QueueEjection, QueueHistoryEntry, QueuePlacement } from '../merge-queue.js';
 import type { Work } from './work.js';
 import { behindBaseHold } from './behind-base.js';
 import { carriedApproval, currentCarry, describeGround } from './carry.js';
@@ -24,9 +24,20 @@ export function placeInQueue(work: Work, all: Work[], now: Date, ciAppIds: numbe
   // The batch plan (GY-330) decides which failed tip ejects: it is read from the queue as it
   // stands, with this entry's own record as just observed.
   const batchOf = (subject: Work) => queueBatch(subject, all.map(item => item.id === subject.id ? subject : item), now.getTime(), batchSize, ciAppIds);
-  const reason = queue ? ejectionReason(probe, ciAppIds, all, batchOf(probe)) : null;
+  const ejected = queue ? ejectionReason(probe, ciAppIds, all, batchOf(probe)) : null;
+  // A required check that failed on this entry's speculative tip is attributed before anything
+  // is asked of its worker (GY-471): a failure a predecessor explains ejects the entry to wait for
+  // that predecessor, never to rework, and the predecessor leaves the queue on the same record
+  // (`blamedTipFailure`). A bisection isolates an entry only once the tip before it passed, so
+  // there a predecessor is blamed only by the files the failing output names.
+  const failedCheck = ejected ? tipCheckFailureReason.exec(ejected) : null;
+  const attribution: FailureAttribution | null = failedCheck ? attributeTipFailure(probe, all, failedCheck[1], ciAppIds) : null;
+  const blamed = queue && !ejected ? blamedTipFailure(probe, all) : null;
+  const culprits = attribution?.verdict === 'predecessor' ? attribution.culprits.map(entry => entry.key) : null;
+  const reason = blamed ? blamed.reason : ejected && culprits ? `${ejected}; attributed to predecessor${culprits.length === 1 ? '' : 's'} ${culprits.join(', ')} (${attribution!.culprits.map(entry => entry.evidence).join('; ')}), so ${work.key} waits for ${culprits.length === 1 ? 'it' : 'them'} and asks no rework` : ejected;
   if (queue && reason) {
-    ejection = { at: now.toISOString(), sequence: queue.sequence, reason, sha: candidate?.sha ?? null, policyRevision: work.policyRevision };
+    ejection = { at: now.toISOString(), sequence: queue.sequence, reason, sha: candidate?.sha ?? null, policyRevision: work.policyRevision,
+      ...(culprits ? { predecessors: culprits } : {}), ...(blamed ? { attribution: blamed.attribution } : attribution ? { attribution } : {}) };
     record('ejected', reason, queue.speculation?.tip ?? candidate?.sha);
     queue = null;
   } else if (!queue && eligible && (!(ejection && candidate && ejection.sha === candidate.sha && ejection.policyRevision === work.policyRevision) || predecessorReentry(work, all))) {
@@ -45,7 +56,7 @@ export function placeInQueue(work: Work, all: Work[], now: Date, ciAppIds: numbe
   }
   const reasons = placement ? placement.reasons
     : work.observation?.merged || work.stage === 'done' ? []
-    : waiting?.length ? [predecessorWaitText(work, waiting)]
+    : waiting?.length ? [predecessorWaitText({ ...work, queueEjection: ejection } as Work, waiting)]
     : ejection ? [`Ejected from the merge queue: ${ejection.reason}; a new candidate re-enters at the back of the queue`]
     : eligible ? ['Candidate has not entered the merge queue'] : [];
   return { queue, queueSequence, ejection, history, reasons, placement };
