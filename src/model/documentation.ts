@@ -75,7 +75,8 @@ export function configuredDocumentation(env: NodeJS.ProcessEnv = typeof process 
  */
 export function documentationDrift(committed: DocumentationPolicy | null, deployed: DocumentationPolicy) {
   if (!committed) return null;
-  const same = (a: readonly string[], b: readonly string[]) => a.length === b.length && a.every(path => b.includes(path));
+  // Compared as sets: order and repeats are not drift, but a path present on one side only is.
+  const same = (a: readonly string[], b: readonly string[]) => { const left = new Set(a), right = new Set(b); return left.size === right.size && [...left].every(path => right.has(path)); };
   if (same(committed.paths, deployed.paths) && committed.changelog === deployed.changelog) return null;
   const assignment = documentationAssignment(committed);
   return { committed, deployed, variable: assignment.variable,

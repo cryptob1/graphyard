@@ -156,6 +156,8 @@ test('unit:docs-policy-drift — doctor reports a committed graphyard.json the c
   assert.equal(documentationDrift(null, siteRepository), null, 'a checkout that commits no policy has nothing to drift from');
   assert.equal(documentationDrift(siteRepository, { ...siteRepository }), null);
   assert.equal(documentationDrift({ paths: ['README.md', 'docs/'], changelog: null }, { paths: ['docs/', 'README.md'], changelog: null }), null, 'path order is not drift');
+  assert.equal(documentationDrift({ paths: ['docs/', 'docs/', 'README.md'], changelog: null }, { paths: ['README.md', 'docs/'], changelog: null }), null, 'a repeated path is not drift');
+  assert.ok(documentationDrift({ paths: ['docs/', 'docs/'], changelog: null }, { paths: ['docs/', 'README.md'], changelog: null }), 'a repeated path cannot stand in for a missing one (GY-470)');
   const drift = documentationDrift(siteRepository, defaultDocumentationPolicy)!;
   assert.deepEqual(drift.committed, siteRepository); assert.deepEqual(drift.deployed, defaultDocumentationPolicy);
   assert.ok(drift.attention.includes(documentationAssignment(siteRepository).line), drift.attention);
