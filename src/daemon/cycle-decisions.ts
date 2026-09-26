@@ -534,7 +534,8 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   //     launch, not a process, and nothing reports its end: an approver that judged its decision and
   //     exited kept its role's slot, and after `concurrency` launches the role stopped launching.
   //     Each cycle therefore ends every live registry session whose runtime session is gone from
-  //     Herdr, and every session of an approver whose decision is judged, naming why; a launch
+  //     Herdr, every session of an approver whose decision is judged, and every reviewer or
+  //     producer session whose ledger record has settled (GY-205), naming why; a launch
   //     step 4c left waiting for a slot is made on the next cycle, into the room this frees.
   if (effects.reconcileSessions) await isolate('decision', null, 'agent-registry', async () => {
     const finished = new Map<string, string>();
