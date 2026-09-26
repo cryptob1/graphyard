@@ -9,7 +9,7 @@ import type { DispatchRequest } from '../src/model/dispatch.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { assertMergeCandidate } from '../src/master/merge.js';
 import { assertReviewCandidate } from '../src/reviewer.js';
-import { dispatchFailureAttention, dispatchSummary, emptyDispatchCursor, launchWaitAttention, launchWaits, reviewLaunchWaitAttentionMs, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
+import { dispatchFailureAttention, dispatchSummary, emptyDispatchCursor, launchWaitAttention, launchWaitLimit, launchWaits, reviewLaunchWaitAttentionMs, tickWaits, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { emptyDaemonState, observationWakeRetryMs, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 
 /**
@@ -190,5 +190,12 @@ test('unit:launch-wait-reported — master status reports each waiting launch wi
     assert.match(row.reason, /launch refused 4 time\(s\): a reviewer launch failed; next attempt at/);
     // A request the item no longer holds waits for nothing.
     assert.deepEqual(launchWaits([item(iso(0), { autoDispatch: { review: null, producers: [], history: [] } } as Partial<Work>)], cursor, clock), []);
+
+    // Past the cursor's bound the most recent waits drop, never the longest: reviews first, oldest first.
+    const many = Array.from({ length: launchWaitLimit + 5 }, (_, n) => ({ kind: 'review' as const, work: `GY-${n}`, requestId: `request-${n}`, sha: head, reason: 'waiting', requestedAt: iso(-n * minute) }));
+    const kept = tickWaits([{ kind: 'producer', work: 'GY-900', requestId: 'producer-1', sha: head, reason: 'waiting', requestedAt: iso(-999 * minute) }, ...many]);
+    assert.equal(kept.length, launchWaitLimit);
+    assert.equal(kept[0].requestId, `request-${launchWaitLimit + 4}`, 'the longest-waiting review is kept first');
+    assert.ok(!kept.some(wait => wait.requestId === 'request-0' || wait.requestId === 'producer-1'), 'the newest waits drop past the bound');
   });
 });

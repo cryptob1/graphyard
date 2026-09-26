@@ -59,7 +59,7 @@ const start = Date.parse('2031-06-02T08:00:00Z');
 const plan = {
   items: 15, releaseEveryMs: 15 * minute, workMs: 20 * minute,
   rework: new Set([3, 7, 11]), deaths: new Set([5, 9]), deathAfterMs: 8 * minute,
-  deploys: [2 * hour + 30 * minute, 5 * hour], split: { at: 45 * minute, item: 12 }, clean: 2, unstable: 4, slowRecompute: 8, exhaustedReviewer: 6,
+  deploys: [2 * hour + 30 * minute, 5 * hour], split: { at: 45 * minute, item: 12 }, clean: 2, unstable: 4, slowRecompute: 8, exhaustedReviewer: 6, slowObservationMs: 10 * minute,
 };
 const file = (n: number) => `src/soak/item-${n}.ts`;
 
@@ -157,6 +157,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
 
   // ---- Approvers and producers: sessions the loop launches, each acting on the minute after. ----
   const pending: (() => Promise<void>)[] = [];
+  const wakes: { key: string; at: number }[] = [];
   const approver: DaemonEffects['approver'] = async (work, decision) => {
     const agentName = approverSessionName(work, decision), pane = herdr.open(agentName);
     pending.push(async () => { await api(principals.approver, 'POST', `work/${work.id}/approve`, { decision, reason: `Approved: the loop's routine ${decision} decision for ${work.key} rests on what it verified` }); herdr.status(pane, 'done'); });
@@ -200,6 +201,9 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       return { source: 'endpoint', sha: production.sha, at: new Date(clock.now()).toISOString(), reason: null, deployed: serving.map(item => item.key), pending: delivered.filter(item => !serving.includes(item)).map(item => item.key) };
     },
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    // A rework refused on a stale observation wakes the item's observation job (GY-710) through
+    // the server's own resync endpoint, as `master run` wires it.
+    wakeObservation: work => { wakes.push({ key: work.key, at: clock.now() }); return api(principals.coordinator, 'POST', `work/${work.id}/resync`, {}); },
   };
 
   // ---- The day. ----
@@ -210,6 +214,27 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   const launcher = new Launcher();
   const violations: string[] = [], observed = new Set<string>(), failures: string[] = [];
   let released = 0, split = false, deploys = 0, cycles = 0, reportedDispatches = 0;
+  // A stale rework (GY-710). The loop restarts just after a changes request on a rework item is
+  // observed, and is down for three minutes; the observation fleet is busy and reads that item
+  // again only ten minutes on, unless the loop wakes its job. So when the loop is back, the only
+  // observation of the request is stale: its rework waits, and the loop wakes the observation job.
+  let loopDownUntil = 0;
+  const restarts = new Map<string, number>();
+  const restartOnVerdict = async (now: number) => {
+    const rework = new Set([...plan.rework].map(n => items[n - 1].id));
+    const requested = (await store.list()).find(item => rework.has(item.id) && item.candidate && !restarts.has(item.candidate.sha)
+      && !!item.observation?.reviews.some(review => review.sha === item.candidate!.sha && review.state === 'CHANGES_REQUESTED'));
+    if (!requested) return false;
+    restarts.set(requested.candidate!.sha, now); loopDownUntil = now + 3 * minute;
+    return true;
+  };
+  const busyFleet = async (now: number) => {
+    for (const item of (await store.list()).filter(entry => entry.candidate && restarts.has(entry.candidate.sha))) {
+      const since = restarts.get(item.candidate!.sha)!, readAt = since + plan.slowObservationMs;
+      if (now >= readAt || wakes.some(wake => wake.key === item.key && wake.at >= since)) continue;
+      await store.pool.query('UPDATE jobs SET available_at=GREATEST(available_at, $2) WHERE work_id=$1', [item.id, new Date(readAt)]);
+    }
+  };
   const jobsDue = async () => Number((await store.pool.query('SELECT count(*) AS due FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now())')).rows[0].due);
   for (let elapsed = 0; elapsed <= options.hours * hour;) {
     const now = clock.now();
@@ -227,10 +252,12 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     // sessions have renewed: for the rest of that minute nothing reaches it, the loop included.
     github.tick(now);
     await workersTick(now);
-    if (!deploying) {
+    if (!deploying && now >= loopDownUntil) {
       for (const act of pending.splice(0)) await act();
       await engine.reconcile();
+      await busyFleet(now);
       for (let guard = 0; guard < 200 && await jobsDue(); guard++) await processJob(engine, adapter);
+      if (await restartOnVerdict(now)) { elapsed += minute; await moveClock(minute); continue; }
       try {
         const result = await runCycle(config, state, effects, clock.now, launcher); cycles++;
         reportedDispatches += result.actions.filter(action => action.kind === 'dispatch' && action.state === 'done').length;
@@ -251,12 +278,12 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   }
 
   const final = (await store.list()).filter(item => items.some(entry => entry.id === item.id));
-  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart };
+  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, wakes };
 }
 
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 180_000 }, async () => {
   const began = performance.now();
-  const { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
+  const { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, wakes, state } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
   const undelivered = final.filter(item => item.stage !== 'done' || !item.delivery);
   assert.deepEqual(undelivered.map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
@@ -272,6 +299,10 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.ok(github.merges.some(entry => entry.key === items[plan.unstable - 1].key && entry.state === 'UNSTABLE' && entry.mode === 'immediate'), 'an UNSTABLE pull request merged at once');
   assert.ok(github.merges.some(entry => entry.key === items[plan.slowRecompute - 1].key && entry.mode === 'auto-merge'), 'one GitHub reported BLOCKED when asked was set to auto-merge, and GitHub merged it once it recomputed');
   assert.equal(final.reduce((total, item) => total + (item.pipeline?.reworkRounds ?? 0), 0), plan.rework.size, 'three rework rounds');
+  // Each rework the restart left on a stale observation woke its item's observation job once, and
+  // the rework rounds above still came to pass: no wake storm, and no growth of state.actions.
+  assert.deepEqual(wakes.map(wake => wake.key), [...plan.rework].map(n => items[n - 1].key), `one observation wake per stale rework: ${JSON.stringify(wakes)}`);
+  assert.ok(Object.keys(state.actions).filter(key => key.startsWith('wake:observation:')).length <= plan.rework.size, 'one wake entry per item woken');
   assert.equal(sessions.filter(session => session.state === 'dead').length, plan.deaths.size, 'two workers died');
   // Every dispatch the launcher settled was reported by a later cycle (GY-616): one dispatch-done
   // per session, none lost between the hand-off and the drain.

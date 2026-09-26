@@ -566,7 +566,7 @@ export function reportClosure(entry: SessionReportEntry): SessionClosure {
 export const herdrSessionListing = (agents: HerdrAgent[]): HerdrAgent[] => agents.map(entry => ({ ...entry, agent: entry.agent || null }));
 
 export interface DispatchLaunch { kind: 'review' | 'producer'; work: string; requestId: string; sha: string; profile: string; group?: string; proofs?: string[]; failover?: string[]; relaunched?: boolean; reason?: string }
-export interface DispatchWait { kind: 'review' | 'producer'; work: string; requestId: string; sha: string; reason: string; group?: string }
+export interface DispatchWait { kind: 'review' | 'producer'; work: string; requestId: string; sha: string; reason: string; group?: string; requestedAt?: string }
 export interface DispatchTick { at: string; launched: DispatchLaunch[]; refused: (DispatchFailure & { requestId: string })[]; waiting: DispatchWait[]; skipped: number;
   /** Session records this tick reconciled against the runtime, and the ones whose closure could not be written back. */
   closed: SessionClosure[]; closeFailures: { work: string; id: string; reason: string }[];
@@ -710,7 +710,7 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
   // cannot be taken again, whatever state it is in, and that check is theirs to make.
   const room = (profile: ReviewerProfile | ProducerProfile, records: { profile: string; agentName: string; state: string }[]) => profileSessions(profile, [...inventory(), ...held()], records);
   const atLimit = (profile: ReviewerProfile | ProducerProfile, records: { profile: string; agentName: string; state: string }[]) => { const sessions = room(profile, records); return `${profile.name}: at its concurrency limit (${sessions.running.length} running, limit ${sessions.limit})`; };
-  const wait = (kind: 'review' | 'producer', item: Work, request: DispatchRequest, reason: string) => tick.waiting.push({ kind, work: item.key, requestId: request.id, sha: request.sha, reason, ...(request.group ? { group: request.group } : {}) });
+  const wait = (kind: 'review' | 'producer', item: Work, request: DispatchRequest, reason: string) => tick.waiting.push({ kind, work: item.key, requestId: request.id, sha: request.sha, reason, requestedAt: request.requestedAt, ...(request.group ? { group: request.group } : {}) });
   const refuse = (kind: 'review' | 'producer', item: Work, request: DispatchRequest, error: unknown) => {
     const previous = cursor.failures[request.id];
     const attempts = (previous?.attempts ?? 0) + 1;
@@ -1226,11 +1226,13 @@ export function dispatchSummary(cursor: DispatchCursor, now: number, intervalMs:
     } : { environments: [], skipped: [] } };
 }
 
-/** The waits a tick keeps (GY-710): one per request, its last reason, reviews first, bounded for the cursor. */
+/** The waits a tick keeps (GY-710): one per request, its last reason, reviews first and the longest waiting first, bounded for the cursor. */
 export function tickWaits(waiting: DispatchWait[]) {
   const byRequest = new Map<string, DispatchWait>();
   for (const entry of waiting) byRequest.set(entry.requestId, entry);
-  return [...byRequest.values()].sort((a, b) => (a.kind === 'review' ? 0 : 1) - (b.kind === 'review' ? 0 : 1)).slice(0, launchWaitLimit)
+  // Past the bound the most recent requests drop, so the longest waits still raise attention.
+  const requested = (entry: DispatchWait) => { const at = Date.parse(entry.requestedAt ?? ''); return Number.isFinite(at) ? at : Number.MAX_SAFE_INTEGER; };
+  return [...byRequest.values()].sort((a, b) => (a.kind === 'review' ? 0 : 1) - (b.kind === 'review' ? 0 : 1) || requested(a) - requested(b)).slice(0, launchWaitLimit)
     .map(({ kind, work, requestId, sha, reason, group }) => ({ kind, work: work.slice(0, 40), requestId: requestId.slice(0, 64), sha: sha.slice(0, 40), reason: bounded(reason, cursorTextLimit), ...(group ? { group: group.slice(0, 40) } : {}) }));
 }
 /** A review request waiting longer than this without a launch raises attention (GY-710). */
