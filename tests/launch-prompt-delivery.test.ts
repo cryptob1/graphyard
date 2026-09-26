@@ -159,7 +159,7 @@ test('integration:launch-prompt-is-a-request — a producer, a reviewer, an appr
     assert.equal((await readProducerLedger(root)).producers[0].delivery, 'request');
 
     // Approver on Cursor: the same, for the decision it judges.
-    const approved = await launchApprover(root, work(), 'decision-1', 'cursor', [], herdr.run);
+    const approved = await launchApprover(root, work(), 'decision-1', 'cursor', { agents: [], available: true }, herdr.run);
     assert.equal(approved.delivery, 'request');
     // Looked up under the name the launcher reports: how an approver session is named is the
     // launcher's to decide, and what this asserts is how that session received its request.
@@ -179,7 +179,7 @@ test('integration:launch-prompt-is-a-request — a producer, a reviewer, an appr
     assert.equal(herdr.calls.filter(call => call[0] === 'agent' && call[1] === 'prompt').length, 0, 'no launch typed anything into a session');
 
     // Muse, which GY-93 once prompted after start, now takes its request positionally too (GY-184).
-    const approvedMuse = await launchApprover(root, work({ key: 'GY-94', id: 'work-94' }), 'decision-2', 'muse', [], herdr.run);
+    const approvedMuse = await launchApprover(root, work({ key: 'GY-94', id: 'work-94' }), 'decision-2', 'muse', { agents: [], available: true }, herdr.run);
     assert.equal(approvedMuse.delivery, 'request');
     assert.deepEqual(herdr.named(approvedMuse.agentName).pasted, []);
 

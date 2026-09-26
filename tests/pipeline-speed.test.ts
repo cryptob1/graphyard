@@ -332,11 +332,14 @@ test('integration:speed-reconcile-latency — a GitHub webhook delivery wakes th
   await store.pool.query("UPDATE jobs SET available_at=now()+interval '1 hour' WHERE work_id=$1", [item.id]);
   await deliver(randomUUID(), { repository: { full_name: 'owner/project' }, ref: 'refs/heads/main', after: 'f'.repeat(40) });
   assert.ok(Number((await job()).due_in_ms) <= 0, 'a push to the base branch wakes every job');
-  // The server's own loop: a 2-second tick over the store's cadence, four jobs per tick.
+  // The server's own loop: a 2-second tick over the store's cadence, and the observation workers
+  // beside it (GY-492), which claim up to GRAPHYARD_OBSERVATION_CONCURRENCY due jobs at once.
   const main = await read('src/server/main.ts');
   const interval = Number(main.match(/\}, (\d+)\);\s*\n\s*http\.listen/)?.[1]);
   assert.ok(interval > 0 && interval <= 60_000, `the reconciliation tick is ${interval} ms`);
-  assert.match(main, /Array\.from\(\{ length: 4 \}, \(\) => processJob\(engine, github\)\)/);
+  assert.match(main, /startObservationWorkers\(engine, github\)/);
+  assert.match(main, /GRAPHYARD_OBSERVATION_CONCURRENCY/);
+  assert.match(main, /Promise\.all\(Array\.from\(\{ length: Math\.max\(1, Math\.floor\(concurrency\)\) \}, worker\)\)/);
   assert.match(await read('docs/protocol/github-webhook.md'), /wakes durable jobs/);
 });
 

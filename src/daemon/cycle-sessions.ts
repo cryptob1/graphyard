@@ -1,5 +1,7 @@
-// Concern: cycle steps 1–1d — close finished sessions, fail over exhausted ones, answer blocked prompts, recover dead workers.
+// Concern: cycle steps 1–1g — close finished sessions, fail over exhausted ones, answer blocked prompts, recover dead workers, resume waiting ones.
 import type { Work } from '../model.js';
+import type { WorkerProfile } from '../master.js';
+import type { DaemonAction } from './state.js';
 import { type CapacityRole } from '../model/capacity.js';
 import { detectRuntimeExhaustion } from '../master/environments.js';
 import { classifyRuntimePrompt, continueAfterDecline, type EscalationSession, escalationProfile, type HerdrAgent, ownLoginAccounts, profileAccount, type RuntimePrompt } from '../master.js';
@@ -7,6 +9,7 @@ import { standingEscalations } from '../model/escalation.js';
 import { capacityRecheckMs } from '../auto-dispatch.js';
 import { message, orphanObservationSchema } from './state.js';
 import { closeKey } from './reconcile.js';
+import { boundDetail } from './decisions.js';
 import { clearProfileFailure, orphanedSupervisors, readyToRetry } from './sessions.js';
 import { blockedPromptAnswers, blockedPromptFailMs, blockedPromptSettleMs, failoverKey, handlerSettleMs, launchAppearanceMs, launcherRetry, promptDigest, type LaunchedSession, preserveInterruptedAttempt, record, stoppedStates } from './effects.js';
 import type { Cycle } from './cycle.js';
@@ -270,24 +273,9 @@ export async function closeStep(cycle: Cycle) {
     const item = open.find(candidate => !!candidate.lease && candidate.lease.owner === profile.principal && Date.parse(candidate.lease.expiresAt) > clock);
     if (!agent?.pane_id || !item || agent.agent_status !== 'blocked' || failedOver.has(item.id)) return;
     const epoch = item.lease!.epoch, pane = agent.pane_id;
-    const handle = (outcome: string, finished: boolean) => effects.recordSession?.(item, { id: `${profile.principal}:${epoch}`, kind: 'implementation', principal: profile.principal, runtime: profile.kind ?? profile.mode, host: config.hostId,
-      ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}),
-      pane, attach: `herdr pane attach ${pane}${config.herdrWorkspace ? ` --workspace ${config.herdrWorkspace}` : ''}`,
-      subject: `${item.key}: ${item.title}`.slice(0, 300), state: finished ? 'finished' : 'running', outcome: outcome.slice(0, 500) }).catch(() => {}) ?? Promise.resolve();
-    await unblock(`Worker session ${profile.agentName}`, `${profile.name}:${epoch}`, agent, item, profile.principal, epoch, item.workspaces.find(entry => entry.epoch === epoch)?.path ?? null, handle, async reason => {
-      // The attempt ends on the record — what it left uncommitted kept, the prompt as the reason —
-      // which ends the lease, so the dispatch step claims the item again on the next cycle.
-      const preserved = await preserveInterruptedAttempt(state, effects, item, epoch, profile, `ended without submitting: its session ${profile.agentName} was ${reason}`, now, performed);
-      if (preserved && preserved.state !== 'done') throw new Error(`its attempt could not be ended on the record: ${preserved.detail}`);
-      const scope = item.containmentQuarantine?.epoch === epoch && item.containmentQuarantine.owner === profile.principal ? item.containmentQuarantine.scope : undefined;
-      let stop = 'its supervisor stops on the ended lease';
-      try {
-        if (scope && effects.stopSupervisor) { await effects.stopSupervisor({ id: item.id, key: item.key, epoch, owner: profile.principal, profile: profile.name, agentName: profile.agentName, scope, leaseExpiresAt: item.lease!.expiresAt }, 'SIGTERM'); stop = `its supervisor (pid ${scope.pid}) was stopped through ${scope.unit}`; }
-      } catch (error) { stop = `its supervisor could not be signalled (${message(error)}) and stops on the ended lease`; }
-      await effects.closeSession(pane);
-      await handle(`closed as failed: ${reason}`, true);
-      return `the attempt ended on the record, ${stop}, pane ${pane} was closed, and ${item.key} is dispatched again`;
-    });
+    const handle = (outcome: string, finished: boolean) => workerHandle(cycle, item, profile, epoch, pane, outcome, finished);
+    await unblock(`Worker session ${profile.agentName}`, `${profile.name}:${epoch}`, agent, item, profile.principal, epoch, item.workspaces.find(entry => entry.epoch === epoch)?.path ?? null, handle,
+      reason => endWorkerAttempt(cycle, item, profile, epoch, pane, reason, `ended without submitting: its session ${profile.agentName} was ${reason}`));
   });
   for (const session of await effects.launchedSessions?.().catch(() => [] as LaunchedSession[]) ?? []) await isolate('session', open.find(candidate => candidate.key === session.work) ?? null, session.agentName, async () => {
     const agent = agents.find(candidate => candidate.name === session.agentName), item = open.find(candidate => candidate.key === session.work);
@@ -365,5 +353,198 @@ export async function closeStep(cycle: Cycle) {
       await preserveInterruptedAttempt(state, effects, item, epoch, profile, `ended without submitting: its agent session ${profile.agentName} is gone from Herdr (first seen gone at ${seen.firstSeenAt}) and its supervisor has exited without releasing the lease`, now, performed);
     });
     for (const id of Object.keys(state.absences)) if (!gone.has(id)) delete state.absences[id];
+  }
+
+  await resumeStep(cycle, failedOver);
+  await closeExitedWorkerSessions(cycle, runtime ?? null);
+}
+
+/** A worker's implementation handle, written by the loop: the one record `master status` and the item's history show of it. */
+function workerHandle(cycle: Cycle, item: Work, profile: WorkerProfile, epoch: number, pane: string, outcome: string, finished: boolean) {
+  const { config, effects } = cycle;
+  return effects.recordSession?.(item, { id: `${profile.principal}:${epoch}`, kind: 'implementation', principal: profile.principal, runtime: profile.kind ?? profile.mode, host: config.hostId,
+    ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}),
+    pane, attach: `herdr pane attach ${pane}${config.herdrWorkspace ? ` --workspace ${config.herdrWorkspace}` : ''}`,
+    subject: `${item.key}: ${item.title}`.slice(0, 300), state: finished ? 'finished' : 'running', outcome: outcome.slice(0, 500) }).catch(() => {}) ?? Promise.resolve();
+}
+
+/**
+ * Ends a worker's attempt on the record and hands the item to a new one — the reclaim path a
+ * session that cannot go on takes: what it left uncommitted is kept on its branch, the attempt ends
+ * (which ends the lease, so the dispatch step claims the item again next cycle and the next
+ * attempt's request names that commit), its supervisor is stopped and its pane closed.
+ */
+async function endWorkerAttempt(cycle: Cycle, item: Work, profile: WorkerProfile, epoch: number, pane: string, reason: string, observed: string) {
+  const { state, effects, now, performed } = cycle;
+  const preserved = await preserveInterruptedAttempt(state, effects, item, epoch, profile, observed, now, performed);
+  if (preserved && preserved.state !== 'done') throw new Error(`its attempt could not be ended on the record: ${preserved.detail}`);
+  const scope = item.containmentQuarantine?.epoch === epoch && item.containmentQuarantine.owner === profile.principal ? item.containmentQuarantine.scope : undefined;
+  let stop = 'its supervisor stops on the ended lease';
+  try {
+    if (scope && effects.stopSupervisor) { await effects.stopSupervisor({ id: item.id, key: item.key, epoch, owner: profile.principal, profile: profile.name, agentName: profile.agentName, scope, leaseExpiresAt: item.lease!.expiresAt }, 'SIGTERM'); stop = `its supervisor (pid ${scope.pid}) was stopped through ${scope.unit}`; }
+  } catch (error) { stop = `its supervisor could not be signalled (${message(error)}) and stops on the ended lease`; }
+  await effects.closeSession(pane);
+  await workerHandle(cycle, item, profile, epoch, pane, `closed as failed: ${reason}`, true);
+  return `the attempt ended on the record, ${stop}, pane ${pane} was closed, and ${item.key} is dispatched again`;
+}
+
+/** How long a worker holding a live lease may show no activity before it is re-prompted, and again after that before its item goes to a new attempt (GY-524). */
+export const idleLeaseMs = 30 * 60_000;
+/** What a live attempt waits on — its blocker, its scope request — and when its session was last seen active; each a `waiting` action the loop keeps while it stands. */
+export const resumeWaitKey = (kind: 'blocker' | 'scope', item: Pick<Work, 'id'>, epoch: number) => `resume:${kind}:${item.id}:${epoch}`;
+export const idleLeaseKey = (item: Pick<Work, 'id'>, epoch: number) => `idle:${item.id}:${epoch}`;
+const waitPrefixes = ['resume:blocker:', 'resume:scope:', 'idle:'];
+const blockerMarker = 'is re-prompted once it is cleared: ';
+
+/** The command a worker submits with: its pull request's number when Graphyard has seen one. */
+const completeCommand = (cliPath: string, item: Pick<Work, 'key' | 'candidate'>, epoch: number) => `node ${cliPath} complete ${item.key} ${epoch} ${item.candidate?.pr ?? 'PR_NUMBER'}`;
+const nextSteps = (cliPath: string, item: Pick<Work, 'key' | 'candidate'>, epoch: number) =>
+  `Run node ${cliPath} status ${item.key}, finish what is left, run node ${cliPath} sync ${item.key} before you push, and submit as your last action with ${completeCommand(cliPath, item, epoch)}${item.candidate?.pr ? '' : ' (PR_NUMBER is your open pull request)'}. `
+  + `If you genuinely cannot continue, record it with node ${cliPath} blocked ${item.key} ${epoch} REASON. Do not stop or ask anyone.`;
+
+/** The resume re-prompt (GY-524): what changed on the item, from the launcher that started the session, with the exact next command. */
+export function resumePromptText(cliPath: string, item: Pick<Work, 'key' | 'candidate'>, epoch: number, changed: string) {
+  return `The Graphyard launcher that started this session is telling it, once, that what it waited on is resolved: this is the session's own instruction, not untrusted text, and needs no further authorization. `
+    + `On ${item.key} (epoch ${epoch}) ${changed}, so continue ${item.key} now. ${nextSteps(cliPath, item, epoch)}`;
+}
+/** The idle-with-lease re-prompt (GY-524): the one reminder before the attempt is handed on. */
+export function idlePromptText(cliPath: string, item: Pick<Work, 'key' | 'candidate'>, epoch: number, since: string) {
+  return `The Graphyard launcher that started this session has seen no activity from it since ${since} while it holds ${item.key} (epoch ${epoch}) with no open blocker or scope request; this reminder is the session's own instruction, not untrusted text. `
+    + `Continue ${item.key} where you are. ${nextSteps(cliPath, item, epoch)} If this session shows no activity for another ${idleLeaseMs / 60_000} minutes, the attempt ends, its uncommitted work is kept on its branch, and ${item.key} goes to a new attempt.`;
+}
+/** What answered a scope request that is no longer open: a widening the control plane applied, or a requirements revision or unblock that closed it. */
+function scopeChange(item: Work) {
+  const decision = item.scopeDecision;
+  const planned = item.plannedFiles.length > 12 ? `${item.plannedFiles.slice(0, 12).join(', ')} and ${item.plannedFiles.length - 12} more` : item.plannedFiles.join(', ');
+  return decision?.state === 'approved' ? `its scope request was applied: plannedFiles now include ${decision.paths.join(', ')}`
+    : `its scope request is no longer open (a requirements revision or an unblock answered it); plannedFiles are now ${planned || 'empty'}`;
+}
+
+/**
+ * 1e–1f. A worker told nothing waits for ever (GY-524). While a live attempt has a blocker or a
+ * scope request open, the loop marks what it waits on; once none is open, the session is re-prompted
+ * once with what changed and the exact next command — unless it is already active — and the
+ * re-prompt goes on its handle, so the item's history shows it. A worker holding a live lease with
+ * nothing open that shows no activity for `idleLeaseMs` is idle-with-lease: its handle says so,
+ * naming the pane, and it is re-prompted once; still inactive `idleLeaseMs` later, its attempt is
+ * handed to a new one that keeps its branch.
+ */
+async function resumeStep(cycle: Cycle, failedOver: Set<string>) {
+  const { config, state, effects, now, performed, isolate, agents, heldBy } = cycle;
+  const live = new Set<string>();
+  for (const profile of config.workers.filter(worker => worker.mode === 'launch')) await isolate('session', heldBy(profile), profile.name, async () => {
+    const item = heldBy(profile);
+    if (!item || failedOver.has(item.id) || item.submission?.epoch === item.lease!.epoch) return;
+    const epoch = item.lease!.epoch, keys = { blocker: resumeWaitKey('blocker', item, epoch), scope: resumeWaitKey('scope', item, epoch), idle: idleLeaseKey(item, epoch) };
+    for (const key of Object.values(keys)) live.add(key);
+    const agent = agents.find(candidate => candidate.name === profile.agentName && !!candidate.pane_id), status = agent?.agent_status ?? null, pane = agent?.pane_id ?? null;
+    const entry = (key: string, outcome: DaemonAction['state'], detail: string, attempts = 1) =>
+      record(state, key, { kind: 'session', work: item.key, principal: profile.principal, epoch, state: outcome, detail, attempts, cycle: state.cycle }, now(), effects.persist);
+    const drop = async (...names: string[]) => { const found = names.filter(name => state.actions[name]); for (const name of found) delete state.actions[name]; if (found.length) await effects.persist(state); };
+
+    // What the attempt waits on, marked the first time it is seen and again when it changes.
+    const request = item.scopeRequest;
+    const blockerDetail = item.blocker ? `${item.key} epoch ${epoch} waits on its blocker, and ${profile.agentName} ${blockerMarker}${item.blocker}` : null;
+    const scopeDetail = request ? `${item.key} epoch ${epoch} waits on its scope request of ${request.at} for ${request.paths.join(', ')}, and ${profile.agentName} is re-prompted once it is answered` : null;
+    if (blockerDetail && state.actions[keys.blocker]?.detail !== boundDetail(blockerDetail)) await entry(keys.blocker, 'waiting', blockerDetail);
+    if (scopeDetail && state.actions[keys.scope]?.detail !== boundDetail(scopeDetail)) await entry(keys.scope, 'waiting', scopeDetail);
+    if (item.blocker || request) { await drop(keys.idle); return; }
+
+    // 1e. Nothing is open any more: what the attempt waited on was resolved.
+    const waited = [state.actions[keys.blocker], state.actions[keys.scope]].filter((action): action is DaemonAction => action?.state === 'waiting');
+    if (waited.length) {
+      const blocker = state.actions[keys.blocker]?.detail.split(blockerMarker)[1];
+      const changed = [state.actions[keys.blocker] ? `its blocker${blocker ? ` ("${blocker.slice(0, 300)}")` : ''} was cleared` : null, state.actions[keys.scope] ? scopeChange(item) : null].filter(Boolean).join(', and ');
+      const promptKey = `resume:prompt:${item.id}:${epoch}:${waited[0].at}`, previous = state.actions[promptKey];
+      if (previous && previous.state !== 'failed') { await drop(keys.blocker, keys.scope); return; }
+      // No session to tell (1d settles a dead one), or one on a runtime prompt (1b answers that first).
+      if (!agent || !pane || status === 'blocked') return;
+      if (status === 'working') { await entry(promptKey, 'done', `${item.key} epoch ${epoch}: ${changed}; ${profile.agentName} is already active, so it is not re-prompted`); await drop(keys.blocker, keys.scope); return; }
+      if (!effects.promptSession || !readyToRetry(previous, state.cycle)) return;
+      const attempts = (previous?.attempts ?? 0) + 1;
+      await entry(promptKey, 'started', `${item.key} epoch ${epoch}: ${changed}; re-prompting ${profile.agentName} in pane ${pane} to resume`, attempts);
+      try {
+        await effects.promptSession(agent, resumePromptText(config.cliPath, item, epoch, changed));
+        performed.push(await entry(promptKey, 'done', `${item.key} epoch ${epoch}: ${changed}; ${profile.agentName} in pane ${pane} was re-prompted once to resume, naming ${completeCommand('CLI', item, epoch).replace('node CLI ', '')}`, attempts));
+        await workerHandle(cycle, item, profile, epoch, pane, `re-prompted to resume at ${new Date(now()).toISOString()}: ${changed}`, false);
+        await drop(keys.blocker, keys.scope, keys.idle);
+      } catch (error) {
+        performed.push(await entry(promptKey, 'failed', `${item.key} epoch ${epoch}: ${changed}; re-prompting ${profile.agentName} in pane ${pane} failed: ${message(error)}`, attempts));
+      }
+      return;
+    }
+
+    // 1f. Idle with a live lease and nothing open.
+    if (!agent || !pane || !['idle', 'done'].includes(status ?? '')) { await drop(keys.idle); return; }
+    const idle = state.actions[keys.idle];
+    if (!idle) { await entry(keys.idle, 'waiting', `${item.key} epoch ${epoch}: ${profile.agentName} in pane ${pane} holds a live lease with no open blocker or scope request and has shown no activity since this cycle`); return; }
+    const quietMs = now() - Date.parse(idle.at), minutes = Math.round(quietMs / 60_000);
+    const repromptKey = `resume:idle:${item.id}:${epoch}:${idle.at}`, reprompted = state.actions[repromptKey];
+    if (!reprompted || reprompted.state === 'failed') {
+      if (quietMs <= idleLeaseMs || !effects.promptSession || !readyToRetry(reprompted, state.cycle)) return;
+      const attempts = (reprompted?.attempts ?? 0) + 1, observed = `idle-with-lease: ${profile.agentName} in pane ${pane} has shown no activity since ${idle.at} (${minutes} minutes) while holding ${item.key} epoch ${epoch} with no open blocker or scope request`;
+      await entry(repromptKey, 'started', `${observed}; re-prompting it once`, attempts);
+      try {
+        await effects.promptSession(agent, idlePromptText(config.cliPath, item, epoch, idle.at));
+        const outcome = `${observed}; re-prompted once at ${new Date(now()).toISOString()}, and handed to a new attempt that keeps its branch if it stays inactive for ${idleLeaseMs / 60_000} more minutes`;
+        performed.push(await entry(repromptKey, 'done', outcome, attempts));
+        await workerHandle(cycle, item, profile, epoch, pane, outcome, false);
+      } catch (error) {
+        performed.push(await entry(repromptKey, 'failed', `${observed}; re-prompting it failed: ${message(error)}`, attempts));
+      }
+      return;
+    }
+    if (reprompted.state !== 'done' || now() - Date.parse(reprompted.at) <= idleLeaseMs) return;
+    const reclaimKey = `resume:reclaim:${item.id}:${epoch}`, previous = state.actions[reclaimKey];
+    if (previous?.state === 'done' || (previous && !readyToRetry(previous, state.cycle))) return;
+    const reason = `idle with a live lease: no activity in pane ${pane} since ${idle.at}, nor in the ${Math.round((now() - Date.parse(reprompted.at)) / 60_000)} minutes after its re-prompt at ${reprompted.at}`, attempts = (previous?.attempts ?? 0) + 1;
+    await entry(reclaimKey, 'started', `${profile.agentName} on ${item.key} epoch ${epoch} is ${reason}; handing ${item.key} to a new attempt`, attempts);
+    try {
+      const next = await endWorkerAttempt(cycle, item, profile, epoch, pane, reason, `ended without submitting: its session ${profile.agentName} was ${reason}`);
+      performed.push(await entry(reclaimKey, 'done', `${profile.agentName} on ${item.key} epoch ${epoch} was ${reason}; ${next}, keeping the attempt's branch`, attempts));
+      await drop(keys.idle);
+    } catch (error) {
+      performed.push(await entry(reclaimKey, 'failed', `${profile.agentName} on ${item.key} epoch ${epoch} is ${reason}, but its attempt could not be handed on: ${message(error)}`, attempts));
+    }
+  });
+  // A wait whose attempt no longer holds a live lease has nobody left to tell.
+  const stale = Object.entries(state.actions).filter(([key, action]) => action.state === 'waiting' && waitPrefixes.some(prefix => key.startsWith(prefix)) && !live.has(key));
+  for (const [key] of stale) delete state.actions[key];
+  if (stale.length) await effects.persist(state);
+}
+
+/**
+ * 1g. An implementation session over while its handle still says running (GY-524): its item has
+ * left build, the stage it was launched for, or Herdr detects no agent in its pane — the runtime is
+ * no longer the pane's foreground process. The pane is matched on its own coordinate, never on the
+ * profile's agent name, which the profile's next session reuses in another pane. The handle is
+ * closed with the reason, so no reader counts it running.
+ */
+async function closeExitedWorkerSessions(cycle: Cycle, runtime: { agents: HerdrAgent[]; available: boolean } | null) {
+  const { config, state, effects, snapshot, clock, now, performed, isolate } = cycle;
+  if (!effects.recordSession) return;
+  for (const item of snapshot.work) for (const handle of item.sessions ?? []) {
+    if (handle.kind !== 'implementation' || handle.state !== 'running' || handle.host !== config.hostId) continue;
+    const leased = !!item.lease && item.lease.owner === handle.principal && Date.parse(item.lease.expiresAt) > clock;
+    let reason: string | null = null;
+    if (item.stage !== 'build' && !leased) reason = `${item.key} has left build, the stage this implementation session was launched for, and is now in ${item.stage}`;
+    else if (runtime?.available && handle.pane && !(clock - Date.parse(handle.startedAt) < launchAppearanceMs)) {
+      const listed = runtime.agents.find(agent => agent.pane_id === handle.pane);
+      if (!listed || listed.agent === null || listed.agent === '')
+        reason = `the ${handle.runtime} runtime is no longer the foreground process of pane ${handle.pane}: Herdr ${listed ? 'detects no agent in it' : 'lists no agent in it'}, so the agent has exited`;
+    }
+    if (!reason) continue;
+    const key = `close:implementation:${item.id}:${handle.id}:${handle.startedAt}`, previous = state.actions[key];
+    if (previous?.state === 'done' || !readyToRetry(previous, state.cycle)) continue;
+    const found = reason, attempts = (previous?.attempts ?? 0) + 1;
+    await isolate('close', item, handle.id, async () => {
+      const entry = (outcome: 'done' | 'failed', detail: string) => record(state, key, { kind: 'close', work: item.key, principal: handle.principal, state: outcome, detail, attempts, cycle: state.cycle }, now(), effects.persist);
+      try {
+        await effects.recordSession!(item, { id: handle.id, kind: 'implementation', runtime: handle.runtime, host: handle.host, subject: handle.subject, state: 'finished', outcome: `closed by the loop: ${found}`.slice(0, 500) });
+        performed.push(await entry('done', `Closed implementation session ${handle.id} of ${item.key}${handle.pane ? ` (pane ${handle.pane})` : ''}: ${found}`));
+      } catch (error) {
+        performed.push(await entry('failed', `Could not close implementation session ${handle.id} of ${item.key}: ${message(error)}`));
+      }
+    });
   }
 }

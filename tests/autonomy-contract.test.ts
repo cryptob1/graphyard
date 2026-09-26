@@ -108,7 +108,7 @@ test('unit:every-role-carries-autonomy-contract — worker, reviewer, producer, 
 
     // Approver on Cursor.
     stub = herdr();
-    await launchApprover(root, work(), 'decision-1', 'cursor', [], stub.run);
+    await launchApprover(root, work(), 'decision-1', 'cursor', { agents: [], available: true }, stub.run);
     capture('approver', stub);
 
     // Worker on OpenCode, under the supervisor.

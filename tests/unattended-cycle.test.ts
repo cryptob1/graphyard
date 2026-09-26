@@ -418,8 +418,8 @@ test('integration:unattended-full-cycle — with no master session and no human 
   // The launch contract itself, which the loop has to live inside: a name still listed refuses a
   // second session for the same decision, and says nothing about another decision on the item.
   const lingering = [{ name: first, pane_id: 'pane-lingering', agent_status: 'done' }];
-  await assert.rejects(launchApprover(host.root, item, requested[0].id, 'claude', lingering, simulation.sessions.run), /is already visible in Herdr; let it finish or close it first/);
-  const beside = await launchApprover(host.root, item, requested[1].id, 'claude', lingering, simulation.sessions.run);
+  await assert.rejects(launchApprover(host.root, item, requested[0].id, 'claude', { agents: lingering, available: true }, simulation.sessions.run), /is already visible in Herdr; let it finish or close it first/);
+  const beside = await launchApprover(host.root, item, requested[1].id, 'claude', { agents: lingering, available: true }, simulation.sessions.run);
   assert.equal(beside.agentName, second);
   assert.deepEqual((await listHerdrAgents(simulation.sessions.run)).map(agent => [agent.name, agent.agent_status]), [[second, 'working']]);
 

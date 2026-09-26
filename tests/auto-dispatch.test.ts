@@ -741,7 +741,10 @@ test('integration:instant-exit-classified — a session Herdr cannot find second
     await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: credential, accounts: ['env-a', 'env-b'] }, async () => ({ actor: { id: 'proof-runner', role: 'producer', proofs: ['unit:*', 'integration:*'] } }));
     const config = await loadMasterConfig(root);
     const item = requestedWork();
-    const resetsAt = '2026-09-26T07:00:00Z';
+    // A reset in the future, on the hour, whenever the suite runs: a fixed date here held the account
+    // only until that date passed, then failed every candidate's CI (2026-09-26).
+    const resetsIso = new Date(Math.ceil(Date.now() / 3_600_000) * 3_600_000 + 30 * 86_400_000).toISOString();
+    const resetsAt = resetsIso.replace('.000Z', 'Z');
     // The stub runtime under a stub Herdr: on env-a it prints the weekly-limit notice and exits before Herdr ever
     // sees it (`agent get` answers agent_not_found with a long JSON body on every read, the pane holds the notice
     // under the banner); on env-b it starts at once.
@@ -766,11 +769,11 @@ test('integration:instant-exit-classified — a session Herdr cannot find second
     const launched = tick.launched.find(entry => entry.kind === 'producer')!;
     assert.ok(launched, JSON.stringify(tick));
     assert.equal(launched.profile, 'producer-a'); assert.equal(launched.relaunched, undefined, 'no prompt was dropped');
-    assert.deepEqual(launched.failover, [`producer-a: env-a exited at launch on its provider's limit notice (You've hit your weekly limit · resets ${resetsAt}); held until it resets 2026-09-26T07:00:00.000Z`]);
+    assert.deepEqual(launched.failover, [`producer-a: env-a exited at launch on its provider's limit notice (You've hit your weekly limit · resets ${resetsAt}); held until it resets ${resetsIso}`]);
     // Held exactly as a mid-session exhaustion holds it, and the request launched on the next account.
     const held = await observedExhaustions(config);
     assert.deepEqual(Object.keys(held), ['env-a']);
-    assert.deepEqual([held['env-a'].resetsAt, held['env-a'].until, held['env-a'].role, held['env-a'].profile, held['env-a'].work], ['2026-09-26T07:00:00.000Z', '2026-09-26T07:00:00.000Z', 'producer', 'producer-a', 'GY-64']);
+    assert.deepEqual([held['env-a'].resetsAt, held['env-a'].until, held['env-a'].role, held['env-a'].profile, held['env-a'].work], [resetsIso, resetsIso, 'producer', 'producer-a', 'GY-64']);
     assert.equal(held['env-a'].reason, `You've hit your weekly limit · resets ${resetsAt}`);
     const tabs = calls.filter(args => args[0] === 'tab' && args[1] === 'create').map(args => args.find(arg => arg.startsWith('CLAUDE_CONFIG_DIR='))!.split('/').at(-1));
     assert.deepEqual(tabs, ['env-a', 'env-b']);
@@ -785,7 +788,7 @@ test('integration:instant-exit-classified — a session Herdr cannot find second
     // The exhaustion is recorded on the item, as the control plane's own schema accepts it.
     const capacity = mutations.find(entry => entry.path === `work/${item.id}/capacity`);
     assert.ok(capacity, JSON.stringify(mutations.map(entry => entry.path)));
-    assert.deepEqual(exhaustionReportSchema.parse(capacity.body), { event: 'exhausted', role: 'producer', requestId: launched.requestId, profile: 'producer-a', account: 'env-a', runtime: 'claude', reason: `You've hit your weekly limit · resets ${resetsAt}`, resetsAt: '2026-09-26T07:00:00.000Z',
+    assert.deepEqual(exhaustionReportSchema.parse(capacity.body), { event: 'exhausted', role: 'producer', requestId: launched.requestId, profile: 'producer-a', account: 'env-a', runtime: 'claude', reason: `You've hit your weekly limit · resets ${resetsAt}`, resetsAt: resetsIso,
       partialWork: { state: 'not-applicable', detail: 'the session exited at launch on the provider limit notice: it read nothing and edited nothing' } });
     assert.ok(mutations.some(entry => entry.path === `work/${item.id}/session`), 'the launched session records its handle');
     // Any other cause is the refusal the launcher worded — the case it saw and the pane's last words, never the
@@ -816,7 +819,7 @@ test('integration:instant-exit-classified — a session Herdr cannot find second
     let exited: any; try { noticed.start.wait!(500); } catch (error) { exited = error; }
     assert.ok(exited instanceof InstantExitError, 'the pause between polls refuses the launch rather than waiting out the bound');
     assert.equal(exited.message, `the session exited within seconds of its launch on its provider's limit notice: You've hit your weekly limit · resets ${resetsAt}`);
-    assert.deepEqual(exited.instantExit, { pane: 'pane-1', words: `╭─ Claude Code ─╮ ● Starting… ⎿ You've hit your weekly limit · resets ${resetsAt}`, notice: { reason: `You've hit your weekly limit · resets ${resetsAt}`, resetsAt: '2026-09-26T07:00:00.000Z' } });
+    assert.deepEqual(exited.instantExit, { pane: 'pane-1', words: `╭─ Claude Code ─╮ ● Starting… ⎿ You've hit your weekly limit · resets ${resetsAt}`, notice: { reason: `You've hit your weekly limit · resets ${resetsAt}`, resetsAt: resetsIso } });
     assert.match((exited.cause as { stdout: string }).stdout, /agent_not_found/); assert.equal(exited.message.includes('agent_not_found'), false);
     const atBound = new SessionStartError('still starting', 'pane-1', paneLastLine(noticeScreen), 120_000, 'the claude runtime was still starting after 120 s in pane pane-1 (the claude banner is on screen)');
     assert.deepEqual((noticed.classify(atBound) as InstantExitError).instantExit, exited.instantExit);
@@ -825,7 +828,7 @@ test('integration:instant-exit-classified — a session Herdr cannot find second
     const dialog = new SessionStartError('blocked', 'pane-1', 'Yes, I trust this folder', 0, 'the claude runtime is blocked before it is ready in pane pane-1 (Herdr reports it blocked); the pane last showed: "Yes, I trust this folder"');
     assert.equal(noticed.classify(dialog), dialog, 'a runtime Herdr found at a dialog did not exit');
     // A dispatcher wired without an account hold records the notice itself as the refusal, bounded, never the JSON.
-    const bareNotice = new InstantExitError({ pane: 'pane-1', words: '', notice: { reason: `You've hit your weekly limit · resets ${resetsAt}`, resetsAt: '2026-09-26T07:00:00.000Z' } }, exited.cause);
+    const bareNotice = new InstantExitError({ pane: 'pane-1', words: '', notice: { reason: `You've hit your weekly limit · resets ${resetsAt}`, resetsAt: resetsIso } }, exited.cause);
     const bareTick = await runDispatchTick(masterConfig(join(credentialDirectory, 'coordinator.token')), emptyDispatchCursor(config), stubEffects(() => [item], [], { launchProducer: async () => { throw bareNotice; } }), () => clock);
     assert.equal(bareTick.refused.length, 2); assert.equal(bareTick.refused[0].reason, `the session exited within seconds of its launch on its provider's limit notice: You've hit your weekly limit · resets ${resetsAt}`);
   } finally { await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); await rm(homes, { recursive: true, force: true }); }
