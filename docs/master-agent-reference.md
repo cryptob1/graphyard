@@ -23,7 +23,7 @@ Dispatch is optimistic (overlap holds nothing), smallest planned scope first; `g
 
 **A merge-base dismissal is not a reviewer withdrawing a verdict.** An approval of the current head dismissed with `The merge-base changed after approval.` is restored (`observation.reviews[].dismissal`); no other dismissal is. Its re-post is no second verdict (`observation.dismissedReviewIds`).
 
-**A branch must never keep another item's unlanded commits.** Tips build from the reviewed head; an ejection restores the branches it leaves (`baseRefresh.restore`). A tip behind an entry that left unlanded waits (`Restoring after predecessor ejection`) until its restored head is observed; files another item carried are that item's (`Carried from another item's tip`), not rework.
+**A branch must never keep another item's unlanded commits.** Tips build from the reviewed head; an ejection restores the branches it leaves (`baseRefresh.restore`). A tip behind an unlanded entry waits (`Restoring after predecessor ejection`) for the restored head's observation; files another item carried are that item's (`Carried from another item's tip`), not rework.
 
 #### A contaminated branch
 
@@ -33,7 +33,7 @@ A worker restores its own: `git reset --hard REVIEWED_HEAD`, `graphyard sync GY-
 
 ## GitHub administration through the browser
 
-Protection reconciles via `master protection --apply`; where GitHub offers only a page, `master browser FLOW` drives the `master init --browser-profile` profile: `master browser app-permissions`, `master browser installation-accept` or `master browser protection`.
+Protection reconciles via `master protection --apply`; where GitHub offers only a page, `master browser FLOW` drives the `master init --browser-profile` profile.
 
 | Flow | What it does |
 | --- | --- |
@@ -41,7 +41,7 @@ Protection reconciles via `master protection --apply`; where GitHub offers only 
 | `installation-accept` | Accepts the pending permission request |
 | `protection` | Reconciles branch protection |
 
-Each flow records `record.json` under `.graphyard/master-actions/`, appending to `ledger.json`. Approving its *Confirm access* GitHub Mobile code on the device is human-only. The master never stores the profile's cookies, and must never use a merge bypass, push code or read a worker credential.
+Each flow records `record.json` under `.graphyard/master-actions/`, appending to `ledger.json`. Approving its *Confirm access* GitHub Mobile code is human-only. The master never stores the profile's cookies, and must never use a merge bypass, push code or read a worker credential.
 
 ## Harness permissions
 
@@ -51,9 +51,9 @@ A harness classifier refuses routine administration; `master harness claude --ap
 
 Each item has one typed action (`nextAction`): `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment` or `escalate`. Executors claim rows under their own credential; `escalate` and `request-rework` are judgements (`actions.needsHuman`). `graphyard init` starts `graphyard-executor@N` user units; `master executors restart` moves them to the current release. An executor whose checkout moves exits 0 for systemd to restart; one killed mid-action names its action and item in `master status`.
 
-A `resync` completes only on a fresh observation (GY-607). The executor calls `POST /api/work/:id/resync` with `{ since }` (its claim time); the server wakes the item's observation job and answers `observed`, `observedAt` and `job`, the job's `availableAt`, `lockedUntil`, `attempts`, `error`, `heldUntil` and `heldReason`. `wake: false` only reads. The claim never waits (GY-646): unobserved, it fails with `no observation newer than the claim was saved` and the job's condition and backs off; a later claim completes on an observation newer than the first. Three stall it, named with its condition in `master status`. Claiming, renewing or settling a row is only action bookkeeping, so an observation read before it still saves; any other change since the read refuses it.
+A `resync` completes only on a fresh observation. The executor calls `POST /api/work/:id/resync` with `{ since }`, its claim time; the server wakes the item's observation job, answering `observed`, `observedAt`, `job` and the job's `availableAt`, `lockedUntil`, `attempts`, `error`, `heldUntil` and `heldReason`. `wake: false` only reads. The claim never waits (GY-646): unobserved, it fails with `no observation newer than the claim was saved`, the job's condition, and backs off; a later claim completes on a newer observation. Three stall it, named with its condition in `master status`. Claiming, renewing or settling a row is only action bookkeeping; an observation read before it still saves, any other change since the read refuses it.
 
-Three failures with an unchanged reason mark a row stalled rather than retrying (a fleet that looks idle): once in no count and no list, it shows in `actions.stalled` and on the item's own card; backoff, doubling from one minute, never outlives it. Eight escalate it (half-hourly); ticks requeue ownerless items (`liveness.violations`).
+Three failures with an unchanged reason mark a row stalled rather than retrying: once in no count and no list, it shows in `actions.stalled` and on the item's own card; backoff, doubling from one minute, never outlives it. Eight escalate it (half-hourly); ticks requeue ownerless items (`liveness.violations`).
 
 ### Loop failure recovery
 
