@@ -4,6 +4,7 @@ import type { ConfigReload, MasterConfig } from '../master.js';
 import { acquireDaemonLock, type DaemonAction, type DaemonState, message, storeAction } from './state.js';
 import { faultClassPolicyFromEnv } from '../model/fault-classes.js';
 import { faultRecurrenceReport } from './faults.js';
+import { diagnosisReport } from './diagnosis.js';
 import { latencyBudget, silenceReport } from './metrics.js';
 import { boundedPersist, cycleCost, cycleDelay, cycleFailureCeiling, describeFailingCall, loopLiveness, namedEffects, noteCycleFailure, noteCycleSuccess, noteUnhandled, watchdogPlan } from './liveness.js';
 import type { DaemonEffects } from './effects.js';
@@ -43,6 +44,8 @@ export function daemonSummary(state: DaemonState, now: number, intervalMs: numbe
     approvals: Object.entries(state.approvals).map(([key, watch]) => ({ key, ...watch })),
     // Fault instances by class in the recurrence window, and the item each recurring class filed (GY-173).
     faults: faultRecurrenceReport(state, faultClassPolicyFromEnv(process.env), now),
+    // Each diagnosis the diagnostician returned, and the fix item or covering item answering it (GY-439).
+    diagnoses: diagnosisReport(state),
   };
 }
 

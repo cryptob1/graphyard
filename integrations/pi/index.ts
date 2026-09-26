@@ -11,7 +11,7 @@ import { autonomyContract } from '../../src/autonomy';
  * never run blindly. Nothing here asks a person anything: there is no UI call anywhere in this
  * file, and a refused call returns its reason to the agent so it retries safely.
  *
- * `GRAPHYARD_PI_ROLE` (approver | producer | research) selects the role's tool; unset, the approver's
+ * `GRAPHYARD_PI_ROLE` (approver | producer | research | diagnostician) selects the role's tool; unset, the approver's
  * and the producer's are registered.
  * The tools submit nothing to the control plane themselves: the runner hands the validated payload
  * to the loop, which applies it through the same routes a terminal session uses, and the gates
@@ -73,6 +73,29 @@ export const researchParameters: JsonSchema = {
   },
 };
 
+/** The diagnostician's diagnosis (GY-439, src/runner/payloads.ts diagnosisPayloadSchema): the cause, its evidence, its class, and exactly one answer. */
+const faultClassNames = ['session-liveness', 'review-convergence', 'decision', 'scope', 'overlap-hold', 'observation', 'deployment', 'configuration',
+  'containment', 'merge', 'proof', 'capacity', 'resources', 'loop', 'human-decision', 'stalled-gate', 'unclassified'] as const;
+export const diagnoseParameters: JsonSchema = {
+  type: 'object', additionalProperties: false, required: ['subject', 'cause', 'evidence', 'faultClass'],
+  properties: {
+    subject: text(400, 'The work item key or invariant instance you were asked to diagnose, exactly as given'),
+    cause: text(4000, 'The root cause the instances share, stated so a worker can remove it'),
+    evidence: { type: 'object', additionalProperties: false, required: ['logLines', 'commands'], description: 'What the cause rests on: at least one log line or command',
+      properties: { logLines: { type: 'array', maxItems: 50, items: text(1000, 'A log line, quoted exactly') }, commands: { type: 'array', maxItems: 50, items: text(1000, 'A command you ran and what it showed') } } },
+    faultClass: { type: 'string', enum: faultClassNames, description: 'The fault class the cause belongs to' },
+    covering: { type: 'string', pattern: '^GY-\\d+$', description: 'An existing open item that already covers this cause; omit when you give fix' },
+    fix: { type: 'object', additionalProperties: false, required: ['title', 'description', 'priority', 'criteria', 'plannedFiles'], description: 'The root-cause item to file; omit when you give covering',
+      properties: {
+        title: text(200, 'The fix item title'), description: text(20000, 'The cause, the evidence and what to change'),
+        type: { type: 'string', enum: ['feature', 'bug', 'chore'] }, priority: { type: 'integer', minimum: 0, description: 'The priority to release it at, 0 (highest) to 4' },
+        criteria: { type: 'array', minItems: 1, maxItems: 20, items: { type: 'object', additionalProperties: false, required: ['id', 'text', 'proofs'],
+          properties: { id: { type: 'string', pattern: '^[A-Z]+-\\d+$', description: 'AC-1, AC-2, ...' }, text: text(4000, 'A testable criterion'), proofs: { type: 'array', minItems: 1, maxItems: 10, items: text(200, 'A proof such as unit:name') } } } },
+        plannedFiles: { type: 'array', minItems: 1, maxItems: 100, items: text(500, 'A file or directory the fix changes; name files, not the repository root') },
+      } },
+  },
+};
+
 /** Every reason `value` does not match `schema`; empty when it does. */
 export function schemaErrors(schema: JsonSchema, value: unknown, path = 'input'): string[] {
   const type = Array.isArray(value) ? 'array' : value === null ? 'null' : typeof value;
@@ -122,7 +145,8 @@ export function graphyardTools(role: string | undefined = process.env.GRAPHYARD_
   };
   const decide = tool('graphyard_decide', 'Graphyard decide', 'Record your verdict on the Graphyard decision you were asked to judge: approve true or false, with your reason. Call it exactly once; it is your answer.', decideParameters, params => `decision ${params.decision}`, true);
   const evidence = tool('graphyard_submit_evidence', 'Graphyard evidence', 'Submit one proof\'s result on the exact head, base and policy revision you were given, with the exercise run against the tree with the criterion\'s behaviour removed. Call it once per proof, pass or fail.', evidenceParameters, params => `proof ${params.proof}`, false);
-  // The research session's brief (GY-259) is registered for its own role only.
+  // The research session's brief (GY-259) and the diagnostician's diagnosis (GY-439) are registered for their own roles only.
+  if (role === 'diagnostician') return [tool('graphyard_diagnose', 'Graphyard diagnose', 'Record your diagnosis of the recurring fault or invariant violation you were asked to diagnose: its cause, the log lines and commands it rests on, its fault class, and either the existing open item that covers it or the fix item to file. Call it exactly once; it is your result.', diagnoseParameters, params => `diagnosis ${params.subject}`, true)];
   if (role === 'research') return [tool('graphyard_research_brief', 'Graphyard research brief', 'Record the research brief for the item you were asked to research: existing code to reuse, patterns and prior art with sources, risks, the approach you recommend, and the operator\'s product questions with your recommended answers. Call it exactly once; it is your result.', researchParameters, () => 'the brief', true)];
   return role === 'approver' ? [decide] : role === 'producer' ? [evidence] : [decide, evidence];
 }

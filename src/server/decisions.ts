@@ -8,6 +8,7 @@ import { canonical, decisionRace, readDecisions, resolvePin, samePin, type Decis
 import type { Services } from './routes.js';
 import { refuseDecision, withdrawDecision } from './decision-refusal.js';
 import { precedentAvailability } from './escalation-context.js';
+import { closeWork } from './close.js';
 
 type Db = pg.PoolClient;
 // The ledger's read half lives in decision-ledger.ts (GY-102); decision-refusal.ts reads it from here too.
@@ -227,6 +228,7 @@ async function applyThroughEngine(services: Services, decision: DecisionRecord, 
     case 'recover': await engine.execute(actor, 'recover', decision.workId, { reason, previousWorkerStopped: true }, key); return 'Containment quarantine recovered';
     case 'attest': await engine.execute(actor, 'evidence', decision.workId, input, key); return `${input.proof} attested ${input.result} for ${input.sha}`;
     case 'grant': { const grant = await services.proofGrants.grant(actor, input.principal, { patterns: input.patterns, reason, ...(input.expectedRevision === undefined ? {} : { expectedRevision: input.expectedRevision }) }, key); return `Granted ${input.patterns.join(', ')} to ${input.principal} (grant revision ${grant.revision})`; }
+    case 'close': { const work = await closeWork(services, actor, decision.workId, { kind: input.kind, reason, ref: input.ref ?? null }, key); return `Closed ${work.key} as ${input.kind}${input.ref ? ` of ${input.ref}` : ''}`; }
     default: throw new Error(`No engine application for ${decision.action}`);
   }
 }
