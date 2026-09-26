@@ -563,8 +563,9 @@ export async function readFlow(store: Store, query: FlowQuery): Promise<FlowData
   const deploymentMergesTruncated = mergeRows.length > flowLimits.deploymentMerges;
   const mergedForDeployments = mergeRows.slice(0, flowLimits.deploymentMerges).map(rowToFact);
   const scanEnd = truncated && lastFact ? { observedAt: lastFact.observedAt, id: lastFact.id! } : undefined;
-  // The conflict hotspots (GY-566) read the last day of confirmed conflicts and docs-sync refreshes.
-  const conflictRows = (await store.pool.query(`SELECT w.document->>'key' AS key, e.kind, e.created_at, e.payload->'details' AS details FROM events e JOIN work_items w ON w.id=e.work_id
+  // The conflict hotspots (GY-566) read the last day of confirmed conflicts and docs-sync refreshes,
+  // through the report pool like every other report read (GY-491).
+  const conflictRows = (await store.reportPool.query(`SELECT w.document->>'key' AS key, e.kind, e.created_at, e.payload->'details' AS details FROM events e JOIN work_items w ON w.id=e.work_id
     WHERE e.kind IN ('base.conflict','base.refreshed') AND e.created_at>=$1 AND e.created_at<$2 ORDER BY e.seq LIMIT $3`, [new Date(time(to)! - conflictHotspotWindowMs).toISOString(), to, flowLimits.scan])).rows;
   const conflicts = ledgerConflicts(conflictRows.map(row => ({ key: row.key, kind: row.kind, at: iso(row.created_at), details: row.details })));
   return { observedAt, from, to, days: query.days, work, included, facts, latest, carryIn, deployments, mergedForDeployments, scanned, truncated, workTruncated, deploymentsTruncated, deploymentMergesTruncated, covered, kindCovered, scanEnd, production, stepEntries: stepEntries(carryIn, entryFacts), projection, conflicts };
