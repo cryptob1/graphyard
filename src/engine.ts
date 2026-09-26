@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { stableJson } from './model/stable-json.js';
 import { z } from 'zod';
 import type { PoolClient } from 'pg';
 import { Store, save, wakeJob, documentBefore, eventWorkSql } from './store.js';
@@ -10,9 +11,9 @@ import { Refusal } from './model/refusal.js';
 import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
 import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
-import { branchContamination, disprovedConflict, currentRestore, decideIdentityCarry, defaultMergeBatchSize, mergeBatchSizeEvent, dismissedApproval, keptTipCarry, onto, pendingRestore, reviewedFilesOf, queueHistoryLimit, queueSequencingReason, reconciliationRefusalPrefix, tipReplacesHead, type BaseRefresh, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type QueueSpeculation, type RestoredApproval } from './merge-queue.js';
+import { branchContamination, nextQueueEntries, disprovedConflict, currentRestore, decideIdentityCarry, defaultMergeBatchSize, mergeBatchSizeEvent, dismissedApproval, keptTipCarry, onto, pendingRestore, reviewedFilesOf, queueHistoryLimit, queueSequencingReason, reconciliationRefusalPrefix, tipReplacesHead, type BaseRefresh, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type QueueSpeculation, type RestoredApproval } from './merge-queue.js';
 import { queueEjectionRecord } from './model/queue.js';
-import { githubFromEnv } from './github.js';
+import { githubFromEnv, mergeBandQueueDepth } from './github.js';
 import { regressionRefusals } from './regression-guard.js';
 import { ciFamilyAllows, ciProofFamilies, ciRunBindingSchema, ciRunRefusal, isCiProducer, refuseCiProducer, staleCiAttemptRefusal, type CiRunObservation } from './model/ci-proofs.js';
 import { decideScopeRequest, liveScopeWidening, scopeRefusalBlocker, type ScopeDecision } from './model/scope.js';
@@ -1590,7 +1591,7 @@ export class Engine {
       if (leftover && settleDelivered(work, all, now)) await save(db, work, 'graphyard', 'delivery.settled', now);
       return;
     }
-    const before = JSON.stringify(work);
+    const before = stableJson(work);
     // The liveness invariant (GY-201) is judged on the record as it stood, before this tick
     // touched it, so a violation the tick repairs is recorded rather than silently absorbed.
     const stranded = livenessOf(work, all, now).violation;
@@ -1635,7 +1636,7 @@ export class Engine {
     // Every violation found at the start of the tick is repaired by the evaluation above — the
     // derivation names its successor and the queue opens its row — and the ledger says so.
     if (stranded) ledger.push(livenessRepairEntry(stranded, work, all, now));
-    if (JSON.stringify(work) !== before) {
+    if (stableJson(work) !== before) {
       for (const entry of ledger) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', entry.kind, JSON.stringify({ details: { ...entry.details, at: now.toISOString() } })]);
       await this.recordDispatch(db, work, now);
       await save(db, work, 'graphyard', 'reconciled', now, ledger.length ? { ledger: ledger.map(entry => entry.kind) } : undefined);
@@ -1855,8 +1856,9 @@ export class Engine {
           // Delivered in this transaction: what it still owes is recomputed now, its leftover rows
           // retired and its queue entry cleared, so nothing retries against the delivery (GY-185).
           settleDelivered(work, all, now);
-          // The queue shifted: every entry behind this one has a new position and predicted base.
-          for (const behind of all) if (behind.queue && behind.id !== work.id) await wakeJob(db, behind.id);
+          // The queue shifted. The entries that can land next (the head and its batch) are woken now; the rest are observed on
+          // their own schedule and re-predict their base when they near the head.
+          for (const behind of nextQueueEntries(all, work.id, Math.max(mergeBandQueueDepth, this.mergeBatchSize))) await wakeJob(db, behind.id);
         } else {
           if (!work.violations.includes(violation)) work.violations.push(violation);
           if (refusedReconciliation) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'merge.reconciliation.refused',
@@ -1870,7 +1872,7 @@ export class Engine {
       if (queuedBefore !== null && !work.queue && work.queueEjection?.sequence === queuedBefore) {
         await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'queue.ejected',
           JSON.stringify({ details: { sequence: queuedBefore, reason: work.queueEjection.reason, ...(refusedReconciliation ? { decision: refusedReconciliation.decision, mergeSha: observation.mergeSha } : {}), at: now.toISOString() } })]);
-        for (const behind of all) if (behind.queue && behind.id !== work.id) await wakeJob(db, behind.id);
+        for (const behind of nextQueueEntries(all, work.id, Math.max(mergeBandQueueDepth, this.mergeBatchSize))) await wakeJob(db, behind.id);
       }
       await this.recordDispatch(db, work, now);
       await save(db, work, 'github', 'github.observed', now);

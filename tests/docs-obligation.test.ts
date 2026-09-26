@@ -37,7 +37,7 @@ before(async () => {
   engine = new Engine(store, [15368], 300, 'owner/site-repository'); engine.submissionObserver = null;
 });
 after(async () => {
-  await store?.pool.end();
+  await store?.close();
   await database?.stop();
   await rm(dataDirectory, { recursive: true, force: true });
 });
