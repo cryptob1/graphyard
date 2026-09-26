@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { interventionKindLabel, interventionWindows, judgementVerdictLabel, judgementVerdicts, type Intervention, type InterventionReport, type InterventionWindow, type Judgement, type JudgementVerdict } from '../../src/model/interventions';
-import { formatDuration } from '../duration';
+import { formatDuration } from '../../src/model/duration';
 import type { Dashboard } from './dashboard';
 
 type Report = InterventionReport & { ledger: { rows: number; truncated: boolean; oldest: string | null } };
