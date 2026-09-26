@@ -2043,7 +2043,9 @@ export const headClaimBand = (batchSize: number) => Math.max(2, Math.max(1, Math
  */
 export function waitsOnObservation(work: Work, all: Work[], now = new Date()): boolean {
   const kind = nextAction(work, all, now)?.kind;
-  return kind === 'request-rework' || kind === 'request-review';
+  // A resync is the wait for a fresher reading itself (a first reading has its own tier): unnamed, it was
+  // claimed only after every named starved job, and under a paced budget never (2026-09-26: GY-393, GY-430 for 3 h).
+  return kind === 'request-rework' || kind === 'request-review' || (kind === 'resync' && !firstObservationOwed(work));
 }
 /** Whether a session is running on the item now: a worker, reviewer or producer whose result an observation reads. */
 export const runningSession = (work: Work) => (work.sessions ?? []).some(session => session.state === 'running' && !session.endedAt);
