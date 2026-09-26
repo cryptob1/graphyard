@@ -38,10 +38,10 @@ const running = (entry: string) => `${entry}->>'state' = 'running'`;
 
 /**
  * A delivery nothing is owed for any more: done, with no next action, no queue entry, no lease,
- * no action row and no running session. The SQL form of `deliverySettled` in src/server/work-view.ts;
- * the two must agree, and tests/store-locks.test.ts holds them to it.
+ * no containment quarantine, no action row and no running session. The SQL form of `deliverySettled`
+ * in src/server/work-view.ts; the two must agree, and tests/store-locks.test.ts holds them to it.
  */
-export const settledSql = `COALESCE(d.document->>'stage' = 'done' AND ${absent("d.document->'nextAction'")} AND ${absent("d.document->'queue'")} AND ${absent("d.document->'lease'")}
+export const settledSql = `COALESCE(d.document->>'stage' = 'done' AND ${absent("d.document->'nextAction'")} AND ${absent("d.document->'queue'")} AND ${absent("d.document->'lease'")} AND ${absent("d.document->'containmentQuarantine'")}
   AND ${length("d.document->'actionQueue'->'actions'")} = 0
   AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(${array("d.document->'sessions'")}) AS s(entry) WHERE ${running('s.entry')}), false)`;
 

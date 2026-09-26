@@ -243,6 +243,18 @@ test('integration:index-matches-documents — the index equals the documents aft
   assert.equal((await store.pool.query('SELECT settled FROM work_index WHERE id=$1', [w.id])).rows[0].settled, false, 'a running session unsettles it');
   await store.pool.query("UPDATE work_items SET document = jsonb_set(document, '{sessions}', $2::jsonb) WHERE id=$1", [w.id, JSON.stringify([{ ...handle, state: 'finished', endedAt: new Date().toISOString() }])]);
   await check('session finished');
+  // GY-257: a delivered item still under containment quarantine is not settled, so the coordination
+  // view keeps the finished implementation session containment recovery finds its pane from.
+  const worked = { id: 'agent-a:1', kind: 'implementation', principal: 'agent-a', epoch: 1, pane: 'w1:p1', state: 'finished', agentName: 'agent-a', startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), endedAt: new Date().toISOString(), outcome: null };
+  const quarantine = { owner: 'agent-a', epoch: 1, at: new Date().toISOString(), settlementHash: 'f'.repeat(64) };
+  await store.pool.query("UPDATE work_items SET document = jsonb_set(jsonb_set(document, '{sessions}', $2::jsonb), '{containmentQuarantine}', $3::jsonb) WHERE id=$1", [w.id, JSON.stringify([worked]), JSON.stringify(quarantine)]);
+  await check('quarantined delivery');
+  assert.equal((await store.pool.query('SELECT settled FROM work_index WHERE id=$1', [w.id])).rows[0].settled, false, 'a containment quarantine unsettles it');
+  const quarantined = (await store.pool.query('SELECT document FROM work_items WHERE id=$1', [w.id])).rows[0].document as Work;
+  assert.deepEqual(coordinationWork(quarantined, noOmissions()).sessions?.map(entry => entry.id), ['agent-a:1'], 'the view keeps the quarantined epoch\'s session');
+  await store.pool.query("UPDATE work_items SET document = document || '{\"containmentQuarantine\": null}' WHERE id=$1", [w.id]);
+  await check('quarantine settled');
+  assert.equal((await store.pool.query('SELECT settled FROM work_index WHERE id=$1', [w.id])).rows[0].settled, true, 'settling the quarantine settles the delivery');
   await engine.execute(operator, 'ready', other.id, {}, randomUUID()); await check('bystander released');
   // A rollback leaves the index as it was: it is written in the document's own transaction.
   const before = (await store.pool.query('SELECT revision FROM work_index WHERE id=$1', [other.id])).rows[0].revision;

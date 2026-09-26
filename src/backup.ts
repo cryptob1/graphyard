@@ -111,12 +111,12 @@ export async function restoreBackup(pool: pg.Pool, input: unknown) {
     // the coordination lock (GY-203): the target must be empty, so a replica already running against
     // it holds that lock over nothing a restore needs. But an empty target does not keep a write from
     // landing between the emptiness check and the inserts, whichever lock that writer took, so every
-    // ledger table is locked against writes (EXCLUSIVE still admits readers) before the check: a
-    // coordination write waits for the restore, then sees the restored ledger (GY-257).
+    // ledger table is locked against writes (EXCLUSIVE still admits readers) before that check, once the
+    // schema check has shown the tables exist: a write waits for the restore, then sees its ledger (GY-257).
     await db.query('SELECT pg_advisory_xact_lock($1)', [advisoryLocks.backup]);
-    await db.query(`LOCK TABLE ${ledgerTables.join(', ')} IN EXCLUSIVE MODE`);
     const current = Number((await db.query('SELECT COALESCE(MAX(version),0) AS version FROM graphyard_schema')).rows[0].version);
     if (current !== schemaVersion) throw new Error(`Restore requires a database migrated to schema generation ${schemaVersion} (found ${current}); run \`graphyard db migrate\` with the release that took the backup or a newer one, then restore`);
+    await db.query(`LOCK TABLE ${ledgerTables.join(', ')} IN EXCLUSIVE MODE`);
     for (const name of ledgerTables) {
       if (name === 'graphyard_schema' || ledgerSeeded.includes(name)) continue;
       const count = Number((await db.query(`SELECT count(*) AS n FROM ${name}`)).rows[0].n);
