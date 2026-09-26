@@ -171,7 +171,8 @@ test('integration:headroom-warned-before-exhaustion — status reports each reso
       : args.includes('rev-parse') ? `${'c'.repeat(40)}\n`
       : args.includes('reflog') ? `${'c'.repeat(40)} HEAD@{${started + 60}}\n${'l'.repeat(40)} HEAD@{${started - 60}}\n`
       : '3\n';
-    assert.deepEqual(loadedRevision('/nonexistent', 1, git), { loaded: 'l'.repeat(40), checkout: 'c'.repeat(40), behind: 3 });
+    // It also says when the checkout moved past the loaded commit: the next reflog entry (GY-531).
+    assert.deepEqual(loadedRevision('/nonexistent', 1, git), { loaded: 'l'.repeat(40), checkout: 'c'.repeat(40), behind: 3, movedAt: (started + 60) * 1000 });
   });
 });
 

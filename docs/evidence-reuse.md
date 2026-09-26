@@ -5,7 +5,7 @@ Reuse lets the newest compatible E2E pass stand for a new head.
 
 ## Reuse policy
 
-Reuse is off until the operator defines a `reuse` policy with `graphyard validation define`:
+Reuse is off until the operator defines a `reuse` policy (`graphyard validation define`):
 
 ```json
 {"kind":"reuse","id":"preview-reuse","expectedRevision":0,"environment":{"id":"preview","revision":1},"enabled":true,
@@ -31,4 +31,4 @@ It is refused, listing every reason, unless the newest attempt is a fresh settle
 
 ## Replay and analytics
 
-`graphyard validation replay REQUEST ATTEMPT` re-verifies retained artifacts, re-running the pinned report adapter; target, bundle and deployment health are always `not-covered`. A replay authorizes nothing; `liveVerification` is always `not-established`. `graphyard validation analytics` reports outcomes and cost per proof and runner.
+`graphyard validation replay REQUEST ATTEMPT` re-verifies retained artifacts, re-running the pinned report adapter; target, bundle and deployment health are always `not-covered`. A replay authorizes nothing (`liveVerification`: `not-established`). `graphyard validation analytics` reports outcomes and cost per proof and runner.

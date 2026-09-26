@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { readdirSync, readFileSync } from 'node:fs';
 import { readFile, statfs } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { agentOwner, atomicPrivateWrite, closeHerdrPane, diskThresholdBytes, isProfileSession, neverStartedReason, privateFile, profileConcurrency, worktreesDirectory, type AttentionItem, type HerdrAgent, type MasterConfig } from './master.js';
@@ -37,6 +38,11 @@ export interface ResourceReading {
   reclaimable: number;
   /** Requests waiting on this resource; a full slot pool with nobody waiting is the fleet working, not a warning. */
   waiting?: number;
+  /**
+   * False while what gives this resource back is still inside its own bound (GY-531): the reading
+   * is reported as it stands, but a state the loop is about to undo itself raises no attention.
+   */
+  overdue?: boolean;
 }
 
 /** `advisory`: the bound is a default nobody configured, so reaching it warns but does not fail health. */
@@ -56,8 +62,14 @@ export interface ResourceInputs {
   work: Work[];
   plane: PlaneResources | null;
   loop: { lagMs: number | null; stalledAfterMs: number; detail: string } | null;
-  revision: { behind: number; loaded: string; checkout: string } | null;
+  /** `movedAt`: when the checkout first moved past the loaded revision (its reflog entry), in ms. */
+  revision: { behind: number; loaded: string; checkout: string; movedAt?: number | null } | null;
   disk: { path: string; totalBytes: number; freeBytes: number; thresholdBytes: number } | null;
+  /**
+   * When the reclaim pass first saw each profile name held by nothing live (`unowned:<name>`), from
+   * its record. Absent when no reclaim pass has recorded anything: then nothing is giving a name back.
+   */
+  unowned?: Record<string, string> | null;
 }
 
 export interface ResourceDefinition {
@@ -87,6 +99,19 @@ export const ledgerRetentionMs = 15 * 60_000;
 export const stuckSessionMs = 10 * 60_000;
 /** A finished session is closed once its record has been settled this long (the launcher's own close gets the first chance). */
 export const finishedSessionGraceMs = 60_000;
+/**
+ * How long a profile name may be held by nothing live before it warns (GY-531): the reclaim pass
+ * closes a finished reviewer or producer pane a grace after its record settles and a second pass a
+ * grace later, and the loop's first step closes a worker pane once its lease ends. A holder the
+ * reclaim pass has seen unowned for longer than this is one those did not give back.
+ */
+export const unownedNameGraceMs = 3 * finishedSessionGraceMs;
+/**
+ * How long the checkout may stand ahead of the code the loop loaded before it warns (GY-531): a
+ * supervised loop reloads itself at the end of the first cycle after the checkout moves with nothing
+ * it launched in-process still running (codeReloadReason), so only a reload this overdue is a fault.
+ */
+export const revisionReloadGraceMs = 30 * 60_000;
 /** The plane's database bound when GRAPHYARD_DATABASE_MAX_BYTES is unset. */
 export const defaultDatabaseMaxBytes = 10 * 1024 ** 3;
 /** The default warning line: a tenth of the bound, and at least one unit. */
@@ -116,6 +141,12 @@ function liveRequests(work: Work[]) {
   }
   return ids;
 }
+/** Whether a name nothing live owns has outlasted the reclaim's bound; without any reclaim record nothing is giving it back. */
+const unownedOverdue = (name: string, input: Pick<ResourceInputs, 'unowned' | 'now'>) => {
+  if (!input.unowned) return true;
+  const first = input.unowned[`unowned:${name}`];
+  return !!first && input.now - Date.parse(first) >= unownedNameGraceMs;
+};
 /** Whether a live session owns an agent name: a pending ledger record, or a worker's live lease. */
 function liveOwner(profile: ReturnType<typeof roleProfiles>[number], name: string, input: Pick<ResourceInputs, 'reviews' | 'producers' | 'work' | 'now'>) {
   if (profile.role === 'worker') return input.work.some(item => !!item.lease && item.lease.owner === profile.principal && Date.parse(item.lease.expiresAt) > input.now);
@@ -163,15 +194,17 @@ export const resourceRegistry: ResourceDefinition[] = [
     id: 'agent-names', title: 'Herdr agent-name namespace', unit: 'names',
     bound: "each launch profile's concurrency: its fixed agent name at concurrency 1, or that many derived <agentName>-<8hex> names above it",
     usage: 'Herdr agent list: every agent whose name is one of the profile\'s session names', owner: 'Herdr, through the worker, reviewer and producer launchers in src/master.ts',
-    reclaim: `the reclaim pass closes a finished pane on one of the names once its record has been settled ${finishedSessionGraceMs / 1000}s and two passes that far apart saw it unowned (a worker pane is closed by the loop's first step once its lease ends)`,
+    reclaim: `the reclaim pass closes a finished pane on one of the names once its record has been settled ${finishedSessionGraceMs / 1000}s and two passes that far apart saw it unowned (a worker pane is closed by the loop's first step once its lease ends); a name only warns once the reclaim pass has seen it unowned for ${unownedNameGraceMs / 1000}s`,
     remedy: 'close the finished panes holding the names (graphyard master run --once, or herdr pane close PANE after confirming the session posted its result)',
-    // A name held by a live session is the slot pool working; only names nothing live owns warn.
+    // A name held by a live session is the slot pool working; only names nothing live owns warn, and
+    // only once the reclaim that gives them back has had its bound (GY-531).
     warnBelow: () => 1, symptoms: [/\b(?:reviewer|producer) agent (\S+) is (?:busy|already visible) in Herdr/i, /agent_name_taken/],
     read: input => roleProfiles(input).map(profile => {
       if (!input.agents) return { id: profile.name, used: null, bound: profileConcurrency(profile), detail: 'Herdr could not be read', reclaimable: 0 };
       const held = input.agents.filter(agent => isProfileSession(profile, agent.name));
       const stale = held.filter(agent => !liveOwner(profile, agent.name!, input));
-      return { id: profile.name, used: held.length, bound: profileConcurrency(profile), reclaimable: stale.length,
+      const overdue = stale.filter(agent => unownedOverdue(agent.name!, input));
+      return { id: profile.name, used: held.length, bound: profileConcurrency(profile), reclaimable: overdue.length,
         detail: held.length ? `${profile.role} profile ${profile.name}: ${held.map(agent => `${agent.name} (${agent.agent_status ?? 'unknown'}${stale.includes(agent) ? ', no live session' : ''}${agent.pane_id ? `, pane ${agent.pane_id}` : ''})`).join(', ')}` : `${profile.role} profile ${profile.name}: no name held` };
     }),
   },
@@ -221,10 +254,11 @@ export const resourceRegistry: ResourceDefinition[] = [
     id: 'loaded-revision', title: 'Loop loaded-code revision', unit: 'commits behind',
     bound: 'zero: the loop must run the code its checkout holds',
     usage: 'commits the coordinator checkout moved past the one the running loop process loaded, from the checkout\'s HEAD reflog and the process start time', owner: 'the master loop process and the coordinator checkout',
-    reclaim: 'a restart loads the checkout\'s revision',
-    remedy: 'graphyard master restart so the loop runs the code the checkout holds',
+    reclaim: `the loop reloads itself: under a supervisor that restarts it, it exits at the end of the first cycle after the checkout moves with nothing it launched in-process still running, and the supervisor starts it on the checkout's revision; it warns once the checkout has stood ahead of it for ${revisionReloadGraceMs / 60_000} minutes`,
+    remedy: 'graphyard master restart so the loop runs the code the checkout holds (a loop outside a supervisor cannot reload itself; one under it is still waiting on an in-process run)',
     warnBelow: () => 0, symptoms: [],
-    read: input => [{ id: '', used: input.revision?.behind ?? null, bound: 0, detail: input.revision ? `the loop loaded ${input.revision.loaded.slice(0, 12)}; the checkout is at ${input.revision.checkout.slice(0, 12)}` : 'no running loop process, or its start could not be read', reclaimable: 0 }],
+    read: input => [{ id: '', used: input.revision?.behind ?? null, bound: 0, detail: input.revision ? `the loop loaded ${input.revision.loaded.slice(0, 12)}; the checkout is at ${input.revision.checkout.slice(0, 12)}` : 'no running loop process, or its start could not be read', reclaimable: 0,
+      ...(input.revision?.behind && typeof input.revision.movedAt === 'number' ? { overdue: input.now - input.revision.movedAt >= revisionReloadGraceMs } : {}) }],
   },
   {
     id: 'database-capacity', title: 'Control-plane database', unit: 'bytes',
@@ -289,6 +323,7 @@ export const describeReading = (reading: ResourceReading) =>
  */
 export function needsAttention(reading: ResourceReading) {
   if (reading.state !== 'low' && reading.state !== 'exhausted') return false;
+  if (reading.overdue === false) return false;
   if (reading.resource === 'agent-names') return reading.reclaimable > 0;
   if (reading.resource === 'session-slots') return (reading.waiting ?? 0) > 0;
   return true;
@@ -396,10 +431,35 @@ export function loadedRevision(root: string, pid: number, run: (command: string,
     // a checkout that fast-forwards onto an older commit moved after the process started.
     const moves = run('git', ['-C', root, 'reflog', 'show', '--date=unix', '--format=%H %gd', '-n', '200', 'HEAD']).trim().split('\n')
       .map(line => { const [sha, selector] = line.split(' '); return [sha, /@\{(\d+)\}/.exec(selector ?? '')?.[1]] as const; }).filter(([sha, at]) => sha && at);
-    const loaded = moves.find(([, at]) => Number(at) <= startedAt)?.[0] ?? (moves.length && moves.length < 200 ? moves.at(-1)![0] : null);
+    const loadedAt = moves.findIndex(([, at]) => Number(at) <= startedAt);
+    const loaded = loadedAt >= 0 ? moves[loadedAt][0] : moves.length && moves.length < 200 ? moves.at(-1)![0] : null;
     if (!loaded) return null;
-    return { loaded, checkout, behind: loaded === checkout ? 0 : Number(run('git', ['-C', root, 'rev-list', '--count', `${loaded}..${checkout}`]).trim()) || 0 };
+    // The first move after the one the process loaded: when the checkout went ahead of it.
+    const moved = loadedAt > 0 ? Number(moves[loadedAt - 1][1]) * 1000 : null;
+    return { loaded, checkout, behind: loaded === checkout ? 0 : Number(run('git', ['-C', root, 'rev-list', '--count', `${loaded}..${checkout}`]).trim()) || 0, ...(moved === null ? {} : { movedAt: moved }) };
   } catch { return null; }
+}
+
+/** The processes a process has started that are still running, or null where that cannot be read (Linux /proc only). */
+export function liveChildren(pid: number): number | null {
+  try {
+    const tasks = readdirSync(`/proc/${pid}/task`);
+    return tasks.reduce((count, task) => count + readFileSync(`/proc/${pid}/task/${task}/children`, 'utf8').trim().split(/\s+/).filter(Boolean).length, 0);
+  } catch { return null; }
+}
+
+/**
+ * Why the running loop should exit now so its supervisor starts it on the checkout's code (GY-531),
+ * or null. Every delivery the loop merges moves the coordinator checkout, so a loop that waited for
+ * a person to restart it ran old code after each one. It reloads itself once it is behind, but
+ * only with nothing it launched still running: a headless run is a child of the loop, and a restart
+ * would end it. A process whose children cannot be read is not reloaded.
+ */
+export function codeReloadReason(root: string, pid: number, deps: { revision?: typeof loadedRevision; children?: (pid: number) => number | null } = {}): string | null {
+  const revision = (deps.revision ?? loadedRevision)(root, pid);
+  if (!revision || revision.behind <= 0) return null;
+  if ((deps.children ?? liveChildren)(pid) !== 0) return null;
+  return `the checkout moved ${revision.behind} commit(s) past the code this loop loaded (${revision.loaded.slice(0, 12)} → ${revision.checkout.slice(0, 12)}) and nothing it launched is still running; exiting so the supervisor starts it on the checkout's revision`;
 }
 
 export async function readDisk(root: string, config: MasterConfig) {
@@ -429,6 +489,11 @@ async function readReclaimFile(root: string): Promise<ReclaimFile> {
   catch { return { version: 1, reports: [], seen: {} }; }
 }
 export async function readReclaimReports(root: string): Promise<ResourceReclaimReport[]> { return (await readReclaimFile(root)).reports; }
+/** What the reclaim pass has recorded seeing, or null when it has recorded nothing (see ResourceInputs.unowned). */
+export async function readReclaimSightings(root: string): Promise<Record<string, string> | null> {
+  try { await privateFile(resourceReportFile(root)); return JSON.parse(await readFile(resourceReportFile(root), 'utf8')).seen ?? {}; }
+  catch { return null; }
+}
 
 /**
  * Gives every reclaimable resource back, and records what it took. Within the bounds the registry
@@ -444,7 +509,7 @@ export async function readReclaimReports(root: string): Promise<ResourceReclaimR
  * or a running session needs, and it never touches a worker's pane: the loop's first step closes
  * those once their lease ends.
  */
-export async function reclaimResources(root: string, config: Pick<ProfileSet, 'reviewers' | 'producers'>, observed: { work: Work[]; agents: HerdrAgent[] | null }, options: { now?: number; closePane?: (pane: string) => void | Promise<void> } = {}): Promise<ResourceReclaimReport> {
+export async function reclaimResources(root: string, config: Pick<ProfileSet, 'reviewers' | 'producers'> & Partial<Pick<ProfileSet, 'workers'>>, observed: { work: Work[]; agents: HerdrAgent[] | null }, options: { now?: number; closePane?: (pane: string) => void | Promise<void> } = {}): Promise<ResourceReclaimReport> {
   const now = options.now ?? Date.now();
   const close = options.closePane ?? (pane => { closeHerdrPane(pane); });
   const report: ResourceReclaimReport = { at: new Date(now).toISOString(), reaped: { review: 0, producer: 0 }, closed: [], released: [], errors: [] };
@@ -511,6 +576,22 @@ export async function reclaimResources(root: string, config: Pick<ProfileSet, 'r
     report.reaped[kind] = records.length - kept.length;
     return { records: kept, changed: changed || kept.length !== records.length };
   };
+  // Every profile name held by nothing live is noted when first seen, a worker's too though its pane
+  // is the loop's to close: the namespace warns only once a holder outlasts the reclaim (GY-531).
+  const holders: HerdrAgent[] | null = observed.agents;
+  if (holders) {
+    const inputs: Pick<ResourceInputs, 'reviews' | 'producers' | 'work' | 'now'> = { reviews: null, producers: null, work: observed.work, now };
+    try { inputs.reviews = (await readReviewLedger(root)).reviews; } catch { /* unread: its holders are not noted this pass */ }
+    try { inputs.producers = (await readProducerLedger(root)).producers; } catch { /* as above */ }
+    for (const profile of roleProfiles({ profiles: { workers: config.workers ?? [], reviewers: config.reviewers, producers: config.producers } })) {
+      if ((profile.role === 'reviewer' && !inputs.reviews) || (profile.role === 'producer' && !inputs.producers)) continue;
+      for (const holder of holders) {
+        if (!holder.name || !isProfileSession(profile, holder.name) || liveOwner(profile, holder.name, inputs)) continue;
+        const key = `unowned:${holder.name}`;
+        seen[key] = file.seen[key] ?? report.at;
+      }
+    }
+  }
   try {
     const decided = await reclaimLedger('review', (await readReviewLedger(root)).reviews, config.reviewers);
     if (decided.failed.size || decided.reap.size) await updateReviewLedger(root, ledger => { ledger.reviews = apply('review', ledger.reviews, decided).records; });

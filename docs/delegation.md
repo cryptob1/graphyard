@@ -18,7 +18,7 @@ A producer that ever held an assignment on the item, or belongs to its slice, is
 | `security-concern` | A lead files an `escalate` ruling naming it. |
 | `requirement-weakening` | A revision retires a criterion or narrows its proofs. |
 
-An unresolved trigger drops merge authorization and refuses the merge gate; raising one dequeues the head. A lapse the ledger explains is instead a `lease.expired` entry with its [cause](protocol/leases.md#how-a-lease-ends): `submitted`, `blocked-awaiting-operator`, `stopped-by-attestation` or `exhausted-capacity`. Reconciliation auto-settles a later-explained `lease-loss`, recording `escalation.auto-settled` with a note such as `auto-settled: blocked report for epoch N explains the lapse` or `auto-settled: stopped-worker attestation for epoch N explains the lapse`. A replacement worker may claim meanwhile; delivery waits.
+An unresolved trigger drops merge authorization and refuses the merge gate; raising one dequeues the head. A lapse the ledger explains is instead a `lease.expired` entry with its [cause](protocol/leases.md#how-a-lease-ends): `submitted`, `blocked-awaiting-operator`, `stopped-by-attestation` or `exhausted-capacity`. Reconciliation auto-settles a later-explained `lease-loss`, recording `escalation.auto-settled` with a note (`auto-settled: blocked report for epoch N explains the lapse` or `auto-settled: stopped-worker attestation for epoch N explains the lapse`). A replacement worker may claim meanwhile; delivery waits.
 
 ### Who may settle what
 
@@ -28,4 +28,4 @@ Each resolution records `escalation.resolved`: resolver, session kind, reason, a
 - Control-plane `lease-loss` of a superseded or stopped epoch: the loop's two-party decision, stale if the superseding lease lapses.
 - `security-concern`, `requirement-weakening`, `evidence-policy-conflict`, and any `lease-loss` a lead raised: a two-party decision the master requests, or a declared human session.
 
-A declared human session (`admin`, `sessionKind: "human"`) settles any. A two-party `master decide GY-N resolve` applies once an independent approver approves; nobody else resolves alone.
+A declared human session (`admin`, `sessionKind: "human"`) settles any. A two-party `master decide GY-N resolve` applies once an independent approver approves; nobody resolves alone.

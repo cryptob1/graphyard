@@ -3,7 +3,7 @@
 
 ## Master coordination loop
 
-Restart `graphyard master run` freely; it never dispatches twice. `master status` (cached interventions) → `daemon` gives health and `cycleTime` (30-minute p50/p95); `journalctl --user -u graphyard-master`, the log. `daemon.metrics.timings` time steps and calls over 1s; cycles over 60 s raise `loop` attention naming three slowest. Launches run beside cycles, `run.launchConcurrency` (default 3) at once. Failed requests log route and SQL.
+Restart `graphyard master run` freely; it never dispatches twice. `master status` → `daemon` gives health and `cycleTime` (30-minute p50/p95); `journalctl --user -u graphyard-master`, the log. `daemon.metrics.timings` time steps and calls over 1s; cycles over 60 s raise `loop` attention naming three slowest. Launches run beside cycles, `run.launchConcurrency` (default 3) at once. Failed requests log route and SQL.
 
 ### Perpetual master loop
 
@@ -15,7 +15,7 @@ A lease expires 120 seconds after the last heartbeat, or one further lease perio
 
 ## Supervisor died leaving a containment quarantine
 
-On the worker's machine `graphyard master settle-containment GY-N "reason"` verifies nothing survives; only the loop excuses an idle pane shell (childless, parent `herdr server`). If refused, confirm the stop, then `rework`, or `recover-containment` once delivered ([recipes](operations.md#recovery-recipes)).
+On the worker's machine `graphyard master settle-containment GY-N "reason"` verifies nothing survives; only the loop excuses an idle pane shell (childless, parent `herdr server`). If refused, confirm the stop, then `rework` (`recover-containment` once delivered) ([recipes](operations.md#recovery-recipes)).
 
 ## Submitted implementation needs rework
 
@@ -66,7 +66,9 @@ After an hour without deliveries `master status` points to `https://github.com/s
 
 ## Control-plane resources
 
-Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow the volume and `GRAPHYARD_DATABASE_MAX_BYTES`.
+Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow the volume and `GRAPHYARD_DATABASE_MAX_BYTES`; `loaded-revision`, `graphyard master restart`.
+
+Self-correcting readings raise no attention (`overdue: false`): a supervised loop behind its checkout reloads after a childless cycle (`stopped: "reloading"`), warning after 30 minutes, or at once without a reflog date; an unowned name warns after 180 s (`unowned:NAME`, `.graphyard/resource-reclaims.json`).
 
 ## Bootstrap mode for a self-proving change
 
@@ -74,11 +76,11 @@ A `policy:bootstrap` holder adds `"bootstrap": {"reason": "…", "contractPaths"
 
 ## Delivered with a failed smoke proof
 
-It stays Done, marked **delivered with failure**; revert through a new item, never backfill evidence.
+It stays Done, **delivered with failure**; revert through a new item, never backfill evidence.
 
 ## Merged but not deployed
 
-A merge production never served is a `delivery.deployment-incident` ([observation](deployment.md#production-deployment-observation)). Fix the deployment; it recovers once served.
+An unserved merge is a `delivery.deployment-incident` ([observation](deployment.md#production-deployment-observation)); fix the deployment and it recovers once served.
 
 ## Merge bypass
 
@@ -96,11 +98,11 @@ graphyard grants grant ci "integration:*,unit:*" "CI proofs"
 graphyard grants revoke ci "integration:claim-safety" "Runner decommissioned"
 ```
 
-Only an `admin` grants, only to `producer` principals. Patterns: an exact name, `kind:*`, or a prefix (`manual:gy-43/*`).
+Only an `admin` grants, to `producer` principals. Patterns: an exact name, `kind:*`, or a prefix (`manual:gy-43/*`).
 
 ## Setup proposals and drift
 
-`graphyard init --scan` writes `.graphyard/setup-proposal.json`, `--apply` applies it. Later scans and `doctor --profile through-merge|preview-validation|production-verification` report drift without repairing it.
+`graphyard init --scan` writes `.graphyard/setup-proposal.json`, `--apply` applies it. Later scans and `doctor --profile through-merge|preview-validation|production-verification` report drift, repairing nothing.
 
 ## Scale limits
 
