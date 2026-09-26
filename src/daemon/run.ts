@@ -45,6 +45,8 @@ export function daemonSummary(state: DaemonState, now: number, intervalMs: numbe
     faults: faultRecurrenceReport(state, faultClassPolicyFromEnv(process.env), now),
     // Required checks failing on the base head as well as on the candidates they hold (GY-528).
     baseFailures: Object.values(state.baseFailures),
+    // The system invariants as the last cycle judged them (GY-404): one line per invariant, with its threshold and reading.
+    invariants: { at: state.invariants.at, violated: state.invariants.report.filter(check => !check.holds).length, lines: state.invariants.report.map(check => check.line), checks: state.invariants.report },
   };
 }
 

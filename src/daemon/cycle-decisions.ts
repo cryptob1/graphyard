@@ -236,13 +236,16 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       // refusals the item gathers, the citation stays the newest one or few (GY-163). A refusal
       // stands only against the candidate and base it judged (GY-229): one refused for an earlier
       // candidate is not this request's to answer, so only this candidate's refusals are cited.
-      let refused = decision.action === 'rework' ? uncitedRefusals(history.map(entry => ({ ...entry, reason: entry.reason ?? '' })), 'rework', decisionInput('rework', item, {}), (a, b) => JSON.stringify(a) === JSON.stringify(b), decisionSituation('rework', item)) : [];
-      let reason = decision.action === 'rework' ? reworkDecisionReason(`${observedFrom(item)} `, decision.reason, refused) : fitDecisionReason('', decision.reason, '');
+      // A recover request is situated the same way and answers its refusals alike (GY-265).
+      const situated = decision.action === 'rework' || decision.action === 'recover' ? decision.action : null;
+      const prefix = decision.action === 'rework' ? `${observedFrom(item)} ` : '';
+      let refused = situated ? uncitedRefusals(history.map(entry => ({ ...entry, reason: entry.reason ?? '' })), situated, decisionInput(situated, item, {}), (a, b) => JSON.stringify(a) === JSON.stringify(b), decisionSituation(situated, item)) : [];
+      let reason = situated ? reworkDecisionReason(prefix, decision.reason, refused, situated) : fitDecisionReason('', decision.reason, '');
       if (reason === null) {
         // Retrying would be refused every time; the request is not sent, and the master is told once.
-        const escalation = `escalation:rework-refusals:${item.key}:${refused.length}`;
-        performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'failed', detail: `Did not request the rework decision for ${item.key}: its ${refused.length} uncited refused rework decisions no longer fit, cited, within the reason bound`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
-        if (!state.actions[escalation]) await note(escalation, item, 'escalation', 'failed', `${item.key} has ${refused.length} refused rework decisions that no later refused request cited, and a rework request must cite each by id within the ${decisionReasonMax}-character reason bound; they no longer fit beside its grounds (${decision.reason.slice(0, 300)}), so the loop has stopped requesting it: read them with graphyard master decisions ${item.key}, then request it with graphyard master decide ${item.key} rework --precedent ID[,ID] REASON citing them, or act on the item yourself`);
+        const escalation = `escalation:${situated}-refusals:${item.key}:${refused.length}`;
+        performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'failed', detail: `Did not request the ${situated} decision for ${item.key}: its ${refused.length} uncited refused ${situated} decisions no longer fit, cited, within the reason bound`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+        if (!state.actions[escalation]) await note(escalation, item, 'escalation', 'failed', `${item.key} has ${refused.length} refused ${situated} decisions that no later refused request cited, and a ${situated} request must cite each by id within the ${decisionReasonMax}-character reason bound; they no longer fit beside its grounds (${decision.reason.slice(0, 300)}), so the loop has stopped requesting it: read them with graphyard master decisions ${item.key}, then request it with graphyard master decide ${item.key} ${situated} --precedent ID[,ID] REASON citing them, or act on the item yourself`);
         return;
       }
       // The history the loop read can miss a refusal the server holds (the read failed, or a refusal
@@ -253,8 +256,8 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       for (let answers = 0; !requested; answers++) {
         try { requested = await effects.decide!(item, decision.action, reason, decision.input); }
         catch (error) {
-          const named = decision.action === 'rework' && answers < maxRefusalAnswers ? refusalNamedIn(message(error)) : null;
-          const cited = named && !refused.includes(named) ? reworkDecisionReason(`${observedFrom(item)} `, decision.reason, [...refused, named]) : null;
+          const named = situated && answers < maxRefusalAnswers ? refusalNamedIn(error, situated) : null;
+          const cited = named && situated && !refused.includes(named) ? reworkDecisionReason(prefix, decision.reason, [...refused, named], situated) : null;
           if (!named || cited === null) throw error;
           refused = [...refused, named];
           reason = cited;
@@ -534,7 +537,8 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   //     launch, not a process, and nothing reports its end: an approver that judged its decision and
   //     exited kept its role's slot, and after `concurrency` launches the role stopped launching.
   //     Each cycle therefore ends every live registry session whose runtime session is gone from
-  //     Herdr, and every session of an approver whose decision is judged, naming why; a launch
+  //     Herdr, every session of an approver whose decision is judged, and every reviewer or
+  //     producer session whose ledger record has settled (GY-205), naming why; a launch
   //     step 4c left waiting for a slot is made on the next cycle, into the room this frees.
   if (effects.reconcileSessions) await isolate('decision', null, 'agent-registry', async () => {
     const finished = new Map<string, string>();
