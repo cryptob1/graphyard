@@ -61,14 +61,14 @@ Once a live attempt's blocker or scope request is resolved, its inactive session
 
 ### Lost runs and spent producer requests
 
-A producer run killed before a verdict (exit 143/137, vanished session, restart's dead `launcherPid`) settles `lost:` and relaunches next tick, spending no attempt. Failing, unexercised, empty or timed-out runs count.
+A producer run killed before a verdict (exit 143/137, vanished session, dead `launcherPid`) settles `lost:` and relaunches next tick, spending no attempt; failing, unexercised, empty or timed-out runs count.
 
-Spent attempts raise attention (`escalation:proof-exhausted`) naming the proof group, each attempt's outcome and next owner; a cycle later the loop requests a **rework** decision quoting them. An unrequestable `--proof-workflow` escalates too.
+Spent attempts raise attention (`escalation:proof-exhausted`) naming the group, each attempt and the next owner; a cycle later the loop requests **rework** quoting them. An unrequestable `--proof-workflow` escalates too.
 
 ### The dispatcher's own state
 
 - **The dispatcher bounds its own state where it composes it**, each cut marked with an ellipsis.
 - **A cursor that fails its schema is repaired, not fatal**, logged once with the path that failed.
-- **A tick failure is attributed and surfaced.** `dispatch.lastFailure` names it. Three consecutive failures raise one attention item saying no reviewer or producer session is being launched for any item. `graphyard master restart` repairs the cursor.
+- **A tick failure is attributed and surfaced.** `dispatch.lastFailure` names it. Three consecutive failures raise one attention item: no reviewer or producer session is launching. `graphyard master restart` repairs the cursor.
 
-**A session that exits at launch is classified from its pane.** `herdr agent get` answers only `agent_not_found` for a runtime that exits **at launch**, so the dispatcher uses `herdr pane read`: a **provider limit notice** fails over exactly as a mid-session exhaustion does; any other cause is refused with the pane's last words and retried.
+**A session that exits at launch is classified from its pane.** `herdr agent get` answers only `agent_not_found` for a runtime that exits **at launch**, so the dispatcher uses `herdr pane read`: a **provider limit notice** fails over as a mid-session exhaustion does; any other cause is refused with the pane's last words and retried.
