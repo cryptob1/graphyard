@@ -4,10 +4,9 @@ import { fileURLToPath } from 'node:url';
 import { agentOwner, masterConfigSchema, type AttentionItem, type MasterConfig } from '../src/master.js';
 import { cycleFaults, emptyDaemonState, fileRecurringFaultClasses, type DaemonEffects } from '../src/master-daemon.js';
 import { faultRecurrenceReport } from '../src/daemon/faults.js';
-import { recurringClasses } from '../src/model/fault-classes.js';
-import { trackFaults } from '../src/model/fault-tracking.js';
+import { classified, recurringClasses, trackFaults, type FaultRecord } from '../src/model/fault-classes.js';
 import { describeUnserved, startExecutorFor, type ExecutorPresence, type UnservedAction } from '../src/model/executor-presence.js';
-import { attributeUnserved, executorFleetReport, type ExecutorRegistration } from '../src/executor-fleet.js';
+import * as executorFleet from '../src/executor-fleet.js';
 import type { NextActionKind } from '../src/model/next-action.js';
 import type { Work } from '../src/model.js';
 
@@ -19,12 +18,31 @@ import type { Work } from '../src/model.js';
 // line names the coordinator's commit, which every merge moves, and each item reaching merge while
 // those executors waited for their restart opened one more "Nothing can run merge" instance. Each
 // instance below is the text the item lists, replayed through the loop's own tracking.
+//
+// The file runs on both shapes of the code, so the fault is reproducible against the base and its
+// absence provable at the candidate: every import resolves on either, `attributeUnserved` degrades to
+// the lines themselves where the base has no marking, and a probe decides which tests this code path
+// can carry. The tests of the fix's own marking skip on the base; the reproduction test below runs on
+// both and fails there, where the counts are the fault.
+
+// `attributeUnserved` marks an unserved kind that only executors awaiting a restart serve as that restart's
+// symptom (GY-374); the base code path has no marking, and there the lines stand for themselves.
+const attributeUnserved = (executorFleet as { attributeUnserved?: typeof executorFleet.attributeUnserved }).attributeUnserved
+  ?? ((items: AttentionItem[]): AttentionItem[] => items);
+type ExecutorRegistration = executorFleet.ExecutorRegistration;
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const policy = { threshold: 3, windowHours: 24 };
 const clock = Date.parse('2026-09-25T20:18:35.111Z');
 const iso = (offsetMs: number) => new Date(clock + offsetMs).toISOString();
 const minute = 60_000;
+
+// Whether this code path carries the fix: what a fresh record's first cycle opens is marked `baseline`
+// (GY-374), so the installation's standing state is not an occurrence inside the window.
+const probe: FaultRecord = { instances: [], open: {}, failing: {} };
+trackFaults(probe, [{ ...classified('fleet'), subject: 'probe', text: 'probe' }], iso(0));
+const tracksBaseline = probe.instances[0]?.baseline === true;
+const skipWithoutTheFix = tracksBaseline ? false : 'the baseline marking this test judges is not on this code path; the reproduction test runs against it';
 
 function config(): MasterConfig {
   return masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: launcher,
@@ -54,7 +72,7 @@ const waiting = (key: string, waitedMs: number): UnservedAction =>
 
 /** What the loop reads from `master status` for one cycle: the fleet's release line and the unserved-kind lines, attributed as reportedAttention does. */
 function executorLines(coordinator: string, merging: UnservedAction[], restarted = false): AttentionItem[] {
-  const releases = executorFleetReport(restarted ? registrations.map(entry => ({ ...entry, state: 'running' as const, standDown: null, release: { commit: coordinator, dirty: false } })) : registrations,
+  const releases = executorFleet.executorFleetReport(restarted ? registrations.map(entry => ({ ...entry, state: 'running' as const, standDown: null, release: { commit: coordinator, dirty: false } })) : registrations,
     { commit: coordinator }, { hostId: 'vishrog', alive: () => true });
   const unserved = describeUnserved({ live, unserved: merging });
   const lines = unserved.map(entry => ({ subject: entry.keys[0], text: entry.text, ...agentOwner('master', entry.start) }));
@@ -69,7 +87,7 @@ const filing = () => {
   return { filed, effects };
 };
 
-test('unit:fault-class-configuration — the eight lines standing on the first tracked cycle are the baseline, and file nothing', async () => {
+test('unit:fault-class-configuration — the eight lines standing on the first tracked cycle are the baseline, and file nothing', { skip: skipWithoutTheFix }, async () => {
   const state = emptyDaemonState(config());
   const first = [...fleetLines, ...executorLines('f7260fa41f2c9a8b7c6d5e4f3a2b1c0d9e8f7a6b', [waiting('GY-321', 32_000)]), browserProfile];
   const opened = observe(state, first, clock);
@@ -90,6 +108,28 @@ test('unit:fault-class-configuration — the eight lines standing on the first t
   assert.ok(observe(partial, [...fleetLines, browserProfile], clock + 90_000).every(entry => entry.baseline));
 });
 
+// The reproduction AC-1 asks for, and the only test here that must run on both shapes of the code: on the
+// base it fails, because that path counts the snapshot's standing lines as occurrences in the window and
+// reopens the fleet each time a deploy moves the commit its line names; with the fix it passes, because
+// the same cycles record the baseline and one standing instance, count zero occurrences, and file nothing.
+test('unit:fault-class-configuration — reproduction: one snapshot\'s standing lines and a commit hash moving across deploys count as recurrences on the base and not with the fix', async () => {
+  const state = emptyDaemonState(config());
+  // Cycle one, 2026-09-25T20:18:35.111Z: the eight lines the item lists, all already standing when tracking began.
+  observe(state, [...fleetLines, ...executorLines('f7260fa41f2c9a8b7c6d5e4f3a2b1c0d9e8f7a6b', [waiting('GY-321', 32_000)]), browserProfile], clock);
+  // The deploys after it move the commit the split-executor line names; nothing else about the installation changes.
+  const deploys = ['4f141c984a602222', '4bb6305644f73333', '11ae54632e2c4444', 'b574e0cff6285555', 'd5dce35d70056666', 'e50f230396e27777', '22ae381881388888', '419c23e316ff9999'];
+  deploys.forEach((commit, index) => observe(state, executorLines(commit, []), clock + (index + 1) * 90_000));
+  const now = clock + deploys.length * 90_000;
+  const counted = recurringClasses(state.faults.instances, [], policy, now).find(entry => entry.faultClass === 'configuration')?.count ?? 0;
+  assert.equal(counted, 0, `this code path counts ${counted} configuration occurrences inside the window: one snapshot's standing lines counted as recurrences (${state.faults.instances.length} instances recorded)`);
+  assert.equal(state.faults.instances.filter(entry => entry.kind === 'executor' && entry.subject === 'executors').length, 1,
+    'the split fleet is one instance across every deploy; a path that reopens it per commit names a different count here');
+  assert.deepEqual(faultRecurrenceReport(state, policy, now).classes, [], 'the recurrence report reads the class quiet: what stood when tracking began is the baseline, not a recurrence');
+  const { filed, effects } = filing();
+  await fileRecurringFaultClasses(state, effects, [], now, () => clock, []);
+  assert.deepEqual(filed, [], `this code path filed "${filed[0] ?? 'nothing'}" from one snapshot's standing lines`);
+});
+
 test('unit:fault-class-configuration — a configuration fault that appears after the record began still counts, so the baseline hides nothing new', async () => {
   const state = emptyDaemonState(config());
   observe(state, [], clock); // the record's first complete cycle: nothing standing
@@ -101,7 +141,7 @@ test('unit:fault-class-configuration — a configuration fault that appears afte
   assert.deepEqual(filed, ['Recurring configuration faults: 6 in 24 hours']);
 });
 
-test('unit:fault-class-configuration — split executors are one standing fault across every release the coordinator moves to', () => {
+test('unit:fault-class-configuration — split executors are one standing fault across every release the coordinator moves to', { skip: skipWithoutTheFix }, () => {
   const state = emptyDaemonState(config());
   observe(state, [], clock);
   // The releases the coordinator ran after 20:18 while exec-1 and exec-2 waited for their restart.
@@ -114,7 +154,7 @@ test('unit:fault-class-configuration — split executors are one standing fault 
   assert.equal(observe(state, executorLines('2f76b9b7e0001111', []), clock + 21 * 90_000).length, 1);
 });
 
-test('unit:fault-class-configuration — an item waiting on merge only split executors serve restates the split, not a fault of its own', async () => {
+test('unit:fault-class-configuration — an item waiting on merge only split executors serve restates the split, not a fault of its own', { skip: skipWithoutTheFix }, async () => {
   const state = emptyDaemonState(config());
   observe(state, [], clock);
   const merges = ['GY-321', 'GY-344', 'GY-349', 'GY-360', 'GY-200', 'GY-330', 'GY-169', 'GY-375', 'GY-274', 'GY-377', 'GY-170', 'GY-259', 'GY-394', 'GY-403'];
@@ -133,7 +173,7 @@ test('unit:fault-class-configuration — an item waiting on merge only split exe
   assert.deepEqual(observe(state, lines, clock + 31 * 90_000).map(entry => entry.subject), ['GY-403']);
 });
 
-test('unit:fault-class-configuration — a record kept before the baseline existed has been tracking since its first instance', () => {
+test('unit:fault-class-configuration — a record kept before the baseline existed has been tracking since its first instance', { skip: skipWithoutTheFix }, () => {
   const state = emptyDaemonState(config());
   observe(state, [], clock);
   observe(state, [browserProfile], clock + 90_000);

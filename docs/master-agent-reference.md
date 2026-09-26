@@ -21,7 +21,7 @@ Dispatch is optimistic (overlap holds nothing), smallest planned scope first; `g
 
 **An approval must survive a tip publication.** [Carry rules](github.md#bindings-and-carry) apply.
 
-**A merge-base dismissal is not a reviewer withdrawing a verdict.** An approval of the current head dismissed with `The merge-base changed after approval.` is restored (`observation.reviews[].dismissal`); no other dismissal is.
+**A merge-base dismissal is not a reviewer withdrawing a verdict.** An approval of the current head dismissed with `The merge-base changed after approval.` is restored (`observation.reviews[].dismissal`); no other is.
 
 **A branch must never keep another item's unlanded commits.** Tips build from the reviewed head; an ejection restores the branches it leaves (`baseRefresh.restore`).
 
@@ -41,7 +41,7 @@ Protection reconciles through `master protection --apply`; where GitHub offers o
 | `installation-accept` | Accepts the pending permission request |
 | `protection` | Reconciles branch protection |
 
-Each flow records `record.json` under `.graphyard/master-actions/` and appends to `ledger.json`. Approving its *Confirm access* GitHub Mobile code on the device is human-only. The master never stores the profile's cookies, and must never use a merge bypass, push code or read a worker credential.
+Each flow records `record.json` under `.graphyard/master-actions/`, appends to `ledger.json`. Approving its *Confirm access* GitHub Mobile code on the device is human-only. The master never stores the profile's cookies, never uses a merge bypass, pushes no code and reads no worker credential.
 
 ## Harness permissions
 
@@ -79,8 +79,8 @@ An unexplained lapsed lease raises `lease-loss` (`blocked-awaiting-operator` and
 
 ## Fault classes
 
-Faults carry `faultClass` (`master status` `faults`); recurring non-`baseline` ones file one item (`GRAPHYARD_FAULT_CLASS_*`).
+Faults carry `faultClass` (`master status` `faults`); non-`baseline` recurrences file one item (`GRAPHYARD_FAULT_CLASS_*`); `daemon.faults.since` dates the first full cycle.
 
 ## Pipeline speed
 
-Target: submit→merge p50 ≤ 30 minutes and p90 ≤ 60 minutes over ten-plus deliveries. Each row's `speed` carries `executionMs`, `waitMs`, `reworkRounds` and `interventions`; `speed.submitToMerge` gives the verdict. `node scripts/measure-pipeline-speed.mjs` records what `manual:speed-target-met` reads.
+Target: submit→merge p50 ≤ 30 minutes and p90 ≤ 60 minutes over ten-plus deliveries. Each row's `speed` carries `executionMs`, `waitMs`, `reworkRounds`, `interventions`; `speed.submitToMerge` gives the verdict. `scripts/measure-pipeline-speed.mjs` records what `manual:speed-target-met` reads.
