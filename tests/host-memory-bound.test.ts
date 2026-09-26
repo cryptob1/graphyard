@@ -16,7 +16,7 @@ import { cycleFaults } from '../src/daemon/faults.js';
 import { memoryActionKey } from '../src/daemon/cycle-dispatch.js';
 import { emptyDispatchCursor, launchingKinds, runDispatchTick, runExecutorTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { hostMemoryAttention, hostMemoryFloor, hostMemoryHold, memoryConsumers, type HostMemoryReading } from '../src/master-resources.js';
-import { acquireVerificationSlot, defaultVerificationSlots, heavyCommand, heldSlots, verificationEnvironment, verificationSlotsDirectory } from '../src/master/verification-slots.js';
+import { acquireVerificationSlot, defaultVerificationSlots, heavyCommand, heldSlots, verificationBin, verificationEnvironment, verificationSlotsDirectory } from '../src/master/verification-slots.js';
 
 /**
  * GY-612: concurrent agent test runs exhausted host memory. On a 62 GB host fourteen full suites
@@ -50,8 +50,9 @@ test('unit:host-verification-slots — heavy verification runs started by a sess
     const directory = verificationSlotsDirectory(managedRoot);
     assert.equal(environment.GRAPHYARD_VERIFICATION_SLOTS_DIR, directory);
     assert.equal(environment.GRAPHYARD_VERIFICATION_SLOTS, '2');
-    assert.equal(environment.PATH.split(delimiter)[0], join(directory, 'bin'));
-    assert.ok(existsSync(join(directory, 'bin', 'tsc')) && existsSync(join(directory, 'bin', 'npx')));
+    assert.equal(environment.PATH.split(delimiter)[0], verificationBin);
+    assert.ok(existsSync(join(verificationBin, 'tsc')) && existsSync(join(verificationBin, 'npx')));
+    assert.ok(!existsSync(managedRoot), 'nothing is written under the managed root at launch');
 
     // Five runs, two slots: `tsc --noEmit` as a session types it, through the wrapper on its PATH.
     const runs = 5;

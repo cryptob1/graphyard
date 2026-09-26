@@ -1,5 +1,4 @@
 // Concern: host verification slots — the per-host bound on concurrent full suites and type checks, and the PATH wrapper sessions run them through.
-import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { totalmem } from 'node:os';
 import { delimiter, join, resolve } from 'node:path';
@@ -152,46 +151,25 @@ export function onPathOf(name: string, path: string) {
   return null;
 }
 
-export const wrappedCommands = ['tsc', 'npx'] as const;
 /**
- * The wrapper directory a session's PATH starts with: one script per wrapped command, which runs
- * this module's entry point with the command's name. Written under the lock directory, once per
- * content; the scripts carry this installation's node, tsx and module paths.
+ * The wrapper directory a session's PATH starts with: `tsc` and `npx` scripts shipped in this
+ * installation (bin/verification), each running bin/graphyard-verify.mjs with its command's name.
+ * Nothing is written at launch: the lock directory itself is created by the first run that takes a slot.
  */
-export function writeVerificationWrappers(directory: string, node = process.execPath) {
-  const bin = join(directory, 'bin'), module = fileURLToPath(import.meta.url), tsx = import.meta.resolve('tsx');
-  mkdirSync(bin, { recursive: true });
-  const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
-  for (const command of wrappedCommands) {
-    const file = join(bin, command), text = `#!/bin/sh\nexec ${quote(node)} --import ${quote(tsx)} ${quote(module)} ${command} "$@"\n`;
-    let current: string | null = null;
-    try { current = readFileSync(file, 'utf8'); } catch { /* not written yet */ }
-    if (current !== text) { writeFileSync(`${file}.${process.pid}`, text, { mode: 0o755 }); renameSync(`${file}.${process.pid}`, file); }
-  }
-  return bin;
-}
+export const verificationBin = fileURLToPath(new URL('../../bin/verification', import.meta.url));
 
 /** The variables a session's tab carries: the lock directory, the bound, and PATH with the wrappers first. */
 export function verificationEnvironment(managedRoot: string, environment: NodeJS.ProcessEnv = process.env): Record<string, string> {
-  const directory = verificationSlotsDirectory(managedRoot);
-  const bin = writeVerificationWrappers(directory);
-  return { [slotsDirectoryVariable]: directory, [slotsVariable]: String(configuredVerificationSlots(environment)), PATH: [bin, pathWithout(environment.PATH, bin)].filter(Boolean).join(delimiter) };
+  return { [slotsDirectoryVariable]: verificationSlotsDirectory(managedRoot), [slotsVariable]: String(configuredVerificationSlots(environment)),
+    PATH: [verificationBin, pathWithout(environment.PATH, verificationBin)].filter(Boolean).join(delimiter) };
 }
 
-/** The wrapper: run the real command, under a slot when it is a heavy verification run. */
-export async function runWrapped(command: string, args: string[], environment: NodeJS.ProcessEnv = process.env) {
-  const bin = environment[slotsDirectoryVariable] ? join(environment[slotsDirectoryVariable]!, 'bin') : null;
-  const path = bin ? pathWithout(environment.PATH, bin) : environment.PATH ?? '';
-  const real = onPathOf(command, path);
-  if (!real) { process.stderr.write(`graphyard: ${command} is not on PATH\n`); return 127; }
-  const held = heavyCommand(command, args) ? await sessionVerificationSlot(`${command} ${args.join(' ')}`.trim(), environment) : null;
-  const child = spawn(real, args, { stdio: 'inherit', env: { ...environment, PATH: path, ...(held || environment[heldVariable] ? { [heldVariable]: '1' } : {}) } });
-  const forward = (signal: NodeJS.Signals) => child.kill(signal);
-  process.on('SIGINT', forward); process.on('SIGTERM', forward);
-  try { return await new Promise<number>(done => { child.on('error', () => done(127)); child.on('close', (status, signal) => done(status ?? (signal ? 1 : 0))); }); }
-  finally { held?.release(); }
-}
-
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  process.exitCode = await runWrapped(process.argv[2], process.argv.slice(3));
+/**
+ * The wrapper's plan for one command: the real executable (PATH without the wrappers), the PATH its
+ * child runs with, and whether it is a heavy verification run that takes a slot. bin/graphyard-verify.mjs
+ * spawns it; children go through src/child-runner.ts everywhere else.
+ */
+export function wrappedCommand(command: string, args: string[], environment: NodeJS.ProcessEnv = process.env) {
+  const path = pathWithout(environment.PATH, verificationBin);
+  return { real: onPathOf(command, path), path, heavy: heavyCommand(command, args) };
 }

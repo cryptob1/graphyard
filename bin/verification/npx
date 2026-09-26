@@ -1,0 +1,3 @@
+#!/bin/sh
+# Graphyard host verification slot wrapper (GY-612): see bin/graphyard-verify.mjs.
+exec node "$(dirname "$0")/../graphyard-verify.mjs" npx "$@"

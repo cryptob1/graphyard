@@ -5,6 +5,7 @@ import { agentOwner, atomicPrivateWrite, closeHerdrPane, diskThresholdBytes, isP
 import { pinnedSessionRecords, readReviewLedger, sessionLedgerBound, SessionLedgerFullError, sessionLedgerRefusal, terminalSessionStates, updateReviewLedger, type ReviewRecord } from './reviewer.js';
 import { readProducerLedger, saveProducerLedger, type ProducerRecord } from './producer.js';
 import type { Work } from './model.js';
+import { runChild } from './child-runner.js';
 
 /**
  * The control plane's own resources (GY-132).
@@ -683,7 +684,7 @@ export async function readHostMemory(): Promise<HostMemoryReading | null> {
   if (totalBytes === null || availableBytes === null) return null;
   if (availableBytes >= hostMemoryFloor(totalBytes)) return { totalBytes, availableBytes };
   let listing = '';
-  try { listing = execFileSync('ps', ['-eo', 'rss=,comm='], { encoding: 'utf8', timeout: 5_000, stdio: ['ignore', 'pipe', 'ignore'] }); } catch { /* the deferral stands without its consumers */ }
+  try { listing = await runChild('ps', ['-eo', 'rss=,comm='], { timeoutMs: 5_000 }); } catch { /* the deferral stands without its consumers */ }
   return { totalBytes, availableBytes, consumers: memoryConsumers(listing) };
 }
 
