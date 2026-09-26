@@ -10,6 +10,7 @@ import { daemonSummary, loopAttention, readDaemonState, type CycleMetrics, type 
 import { readReviewLedger, reconcileReviews, reviewLedgerSpec, sessionLedgerHeadroom, summarizeReviews } from '../reviewer.js';
 import { producerLedgerSpec, readProducerLedger, reconcileProducers, sessionRetries, summarizeProducers } from '../producer.js';
 import { defaultAwaitReviewers, dispatchFailureAttention, dispatchSummary, readDispatchCursor } from '../auto-dispatch.js';
+import { accountStartFailureAttention, accountStartFailureLimit, readAccountStartFailures, readProfileLaunchRecords, workerLaunchRows, type AccountStartFailures, type ProfileLaunchRecord } from '../master/dispatch.js';
 import { actionlessItems, stallBoundMs } from '../model/action-account.js';
 import { approverLaunchAttention, directMergeLine, nameOrphanSupervisors } from './status-attention.js';
 import { nameUnobtainableReviews, type SettledReviewSession } from '../model/dispatch.js';
@@ -139,13 +140,18 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   // Exactly one component merges (GY-245): the loop, where one is installed or running, else the executors.
   const merger = installationMerger({ loop: { configured: !!setup.supervisor.installed, running: !!cycling?.running, autoMerge: master.autoMerge },
     declaration: executors.supervision.declaration, served: executors.presence.served });
+  // Launch records and account start failures per profile (GY-417).
+  const startFailures = await readAccountStartFailures(master);
+  const launchRecords = await timedStep('launch records', () => readProfileLaunchRecords(root, master.workers));
+  const launchRows = workerLaunchRows(master.workers, launchRecords);
+  const launchItems = accountStartFailureAttention(startFailures, master.cliPath);
   const attentionItems = [...diskAttention, ...scopeRequests, ...unanswered, ...conflicted, ...stuck.attentionItems, ...stalledItems, ...actorless, ...stalled, ...overlong, ...budget, ...owed.items, ...(sudo ? [...status.attentionItems, { subject: 'installation', text: sudo.instruction,
     ...(Date.parse(sudo.deadline) <= Date.now() ? agentOwner('master', `graphyard master browser ${sudo.flow}`) : humanOwner('issuing credentials to people', sudo.instruction)) }] : [...status.attentionItems])];
   // The loop's own health goes in front of all of it (see loopItems above), then the dispatcher's,
   // then an action no live executor can claim: nothing below any of the three is moving until they are.
   attentionItems.unshift(...loopItems, ...dispatchItems, ...executors.attention, ...merger.attention);
   // Setup that stops every launch, or leaves the loop unsupervised, is the master's to repair.
-  attentionItems.push(...setupItems);
+  attentionItems.push(...setupItems, ...launchItems);
   attentionItems.push(...generatedFiles, ...overflow); attentionItems.push(...interventions.attentionItems, ...releases.attention, ...(throughput.attention ? [throughput.attention] : []));
   attentionItems.splice(loopItems.length + dispatchItems.length, 0, ...resources.attention);
   // Everything the control plane takes from the operator's own credential alone, from the
@@ -158,8 +164,12 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
       // Items with no action, split the way a reader has to read them: one waiting on another
       // item is the pipeline working, one with nothing moving it is the pipeline stopped.
       actionless: actionless.length, actorless: actorless.length, livenessViolations: liveness.violations, waitingOnAnother: actionless.filter(entry => entry.outcome === 'waiting-on').length, stalled: stalledItems.length,
-      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + conflicted.length + stuck.attentionItems.length + stalledItems.length + actorless.length + stalled.length + overlong.length + loopItems.length + dispatchItems.length + executors.attention.length + merger.attention.length + releases.attention.length + overflow.length + budget.length + (throughput.attention ? 1 : 0) + owed.counted + resources.attention.length } }, snapshot.work);
+      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + conflicted.length + stuck.attentionItems.length + stalledItems.length + actorless.length + stalled.length + overlong.length + loopItems.length + dispatchItems.length + executors.attention.length + merger.attention.length + releases.attention.length + overflow.length + budget.length + (throughput.attention ? 1 : 0) + owed.counted + resources.attention.length + launchItems.length,
+      // Accounts at the start-failure bound (GY-417), so a silent runtime is countable at a glance.
+      accountStartFailures: Object.keys(startFailures).length } }, snapshot.work);
   return { ...directMergeLine(coordinator), ...status, ...attributed, ...faulted(attributeAttention(attributed.attentionItems, resources.readings)), resources: resources.report,
+    // Last dispatch per profile: runtime, account, fallback (GY-417).
+    workers: status.workers.map(row => ({ ...row, ...(launchRows[row.profile] ?? { runtime: null, account: null, fallback: null }) })),
     // The board (GY-200): what the master owes first, with commands, then the rest.
     board: await timedStep('board', () => masterBoard(masterApi, snapshot, coordinator, decisions.unanswered)),
     humanOnly: humanOnly.map(humanOnlyStatusRow),

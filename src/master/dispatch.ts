@@ -1,6 +1,7 @@
 // Concern: dispatching a worker — dispatchability, the worker launch, its prompt and environment.
-import { writeFile } from 'node:fs/promises';
-import { isAbsolute } from 'node:path';
+import { readFile, writeFile } from 'node:fs/promises';
+import { basename, dirname, isAbsolute, resolve } from 'node:path';
+import { z } from 'zod';
 import { type ChildRun, defaultChildRun } from '../child-runner.js';
 import { researchWorkerSection } from '../research.js';
 import { discover, assertRepository } from '../onboarding.js';
@@ -12,10 +13,11 @@ import { documentationWorkerSection } from '../model/documentation.js';
 import type { Work } from '../model.js';
 import { type ConsentAnswer, type ConsentHold, consentHoldAttention, consentHoldMs, writeConsentHold } from '../consent-prompt.js';
 import type { MasterConfig, WorkerProfile } from './profiles.js';
-import { loadMasterConfig, readCredentialFile, readWorkerCredential } from './config.js';
-import { accountLaunch, agentLaunchPlan, type EnvironmentProbe, onSelectedSession, selectAccount, sharedGitDirectory } from './environments.js';
-import { type PromptDelivery, PromptNotAcceptedError, type RequestDelivery, startAgentSession, type StartBounds } from './launch.js';
+import { atomicPrivateWrite, loadMasterConfig, readCredentialFile, readWorkerCredential } from './config.js';
+import { accountLaunch, agentLaunchPlan, type EnvironmentProbe, NoHealthyAccountError, onSelectedSession, selectAccount, sharedGitDirectory } from './environments.js';
+import { PromptNotAcceptedError, type PromptDelivery, type RequestDelivery, SessionStartError, startAgentSession, type StartBounds } from './launch.js';
 import { createdHerdrTab, type HerdrAgent, herdrJson, stopCreatedHerdrTab } from './herdr.js';
+import { agentOwner, type AttentionItem } from './attention.js';
 import { containmentHold } from './containment.js';
 import { dependencyDirectories, failureText, type SharedDependencies, shareDependencies } from './worktrees.js';
 import { humanOnlyDecisions, installWorkerHarness, prepareSessionHarness } from './harness.js';
@@ -75,6 +77,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
   let dependencies: PreparedWorker['dependencies'] | null = null;
   let delivery: RequestDelivery | null = null, sandbox: ReturnType<typeof verifyWorkerSandbox> | null = null;
   let started: 'started' | 'awaiting consent' = 'started', consent: { answered: ConsentAnswer[]; awaiting: ConsentHold | null } = { answered: [], awaiting: null };
+  const startFailures: AccountStartFailure[] = [];
   if (profile.mode === 'existing') {
     if (!target) throw new Error('Existing worker is not visible in Herdr');
     throw new Error('Existing sessions are observable but cannot be safely adopted for new work; use a launch profile so Graphyard supervises the agent process');
@@ -90,31 +93,63 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
       if ((await currentAgents(root, profile, agents, observedAt, run, options.agents)).some(agent => agent.name === profile.agentName))
         throw new DispatchReservedError('profile', profile.name, `Launch profile agent name ${profile.agentName} is already visible in Herdr; pick another profile`);
       // The account is chosen before anything is claimed: a profile whose accounts are all logged out
-      // or out of quota claims nothing, and the refusal names every account it skipped and why.
-      selected = await selectAccount(config, 'worker', profile, { ...options.probe, work: work.key });
-      // The Git directories the worker writes are granted once its worktree exists (launchWorker).
-      // A launch refused for its effective arguments gives the chosen session back at once (GY-184).
-      const chosen = selected;
-      const launch = await onSelectedSession(chosen, `worker launch for ${work.key} failed`, async () => accountLaunch(profile, chosen.account));
-      launched = launch;
-      // A prompt the runtime never accepted closes the session and releases the claim; the launch is
-      // then made once more from a fresh claim, rather than leaving an idle session holding the item.
-      for (let attempt = 1; ; attempt++) {
+      // or out of quota claims nothing, and the refusal names every account it skipped and why. An
+      // account whose runtime already failed to start under this dispatch is passed over, so the
+      // fallback lands on the next account rather than the same one again (GY-417).
+      let startError: unknown = null;
+      for (;;) {
+        const accounts = profile.accounts?.length ? profile.accounts.filter(name => !startFailures.some(failure => failure.account === name)) : undefined;
+        if (accounts && !accounts.length)
+          throw new Error(`${describeStartFailures(startFailures, null)}; no further account of profile ${profile.name} to fall back to`, { cause: startError });
         try {
-          assertClaimDeadline(work.key, options.claimBy);
-          let epoch: number;
-          ({ target, harness, dependencies, delivery, sandbox, started, consent, epoch } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt, options.start, options.sandbox ?? (prepare === prepareWorkerLaunch ? 'host' : null), options.claimBy, options.supervisor));
-          // The epoch this launch claimed outlives the reservation, so a dispatcher still holding the older snapshot is refused cleanly.
-          const at = new Date().toISOString();
-          await writeFile(dispatchedFile(root, work.key), JSON.stringify({ epoch, at }), { mode: 0o600 }).catch(() => {});
-          await writeFile(profileLaunchedFile(root, profile.name), JSON.stringify({ key: work.key, epoch, agentName: profile.agentName, at }), { mode: 0o600 }).catch(() => {});
-          break;
+          selected = await selectAccount(config, 'worker', accounts && accounts.length < (profile.accounts?.length ?? 0) ? { ...profile, accounts } : profile, { ...options.probe, work: work.key });
         } catch (error) {
-          if (error instanceof PromptNotAcceptedError && attempt < 2) { relaunched++; continue; }
-          // The registry session chosen for this launch never ran; its account is free again at once.
-          await selected.release?.(`worker launch for ${work.key} failed: ${failureText(error).slice(0, 300)}`);
-          throw error;
+          if (!startFailures.length || !(error instanceof NoHealthyAccountError)) throw error;
+          throw new Error(`${describeStartFailures(startFailures, null)}; no further account of profile ${profile.name} could be launched: ${failureText(error).slice(0, 300)}`, { cause: error });
         }
+        // The Git directories the worker writes are granted once its worktree exists (launchWorker).
+        // A launch refused for its effective arguments gives the chosen session back at once (GY-184).
+        const chosen = selected;
+        const launch = await onSelectedSession(chosen, `worker launch for ${work.key} failed`, async () => accountLaunch(profile, chosen.account));
+        launched = launch;
+        // A prompt the runtime never accepted closes the session and releases the claim; the launch is
+        // then made once more from a fresh claim, rather than leaving an idle session holding the item.
+        try {
+          for (let attempt = 1; ; attempt++) {
+            try {
+              assertClaimDeadline(work.key, options.claimBy);
+              let epoch: number;
+              ({ target, harness, dependencies, delivery, sandbox, started, consent, epoch } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt, options.start, options.sandbox ?? (prepare === prepareWorkerLaunch ? 'host' : null), options.claimBy, options.supervisor));
+              // The epoch this launch claimed outlives the reservation, so a dispatcher still holding the older snapshot is refused cleanly.
+              const at = new Date().toISOString();
+              await writeFile(dispatchedFile(root, work.key), JSON.stringify({ epoch, at }), { mode: 0o600 }).catch(() => {});
+              // The dispatch record names the runtime and account the session runs on, and every
+              // account whose runtime failed to start first, so a slot running one runtime under a
+              // profile named for another is on the record, not a surprise (GY-417).
+              await writeFile(profileLaunchedFile(root, profile.name), JSON.stringify({ key: work.key, epoch, agentName: profile.agentName, at,
+                runtime: launch.kind ?? null, account: chosen.account?.name ?? null, ...(startFailures.length ? { failedAccounts: startFailures } : {}) }), { mode: 0o600 }).catch(() => {});
+              // A start on the account clears its own run of consecutive start failures.
+              if (chosen.account) await clearAccountStartFailures(config, chosen.account.name).catch(() => {});
+              break;
+            } catch (error) {
+              if (error instanceof PromptNotAcceptedError && attempt < 2) { relaunched++; continue; }
+              // The registry session chosen for this launch never ran; its account is free again at once.
+              await chosen.release?.(`worker launch for ${work.key} failed: ${failureText(error).slice(0, 300)}`);
+              throw error;
+            }
+          }
+        } catch (error) {
+          // The chosen account's runtime never came up — refused at the bound as never started, or
+          // still starting at the ceiling: its pane is closed and its claim released, so the
+          // profile's next account takes the launch rather than the dispatch dying silently (GY-417).
+          if (!(error instanceof SessionStartError) || !chosen.account || !['never started', 'still starting'].includes(error.startCase)) throw error;
+          startError = error;
+          const failure: AccountStartFailure = { account: chosen.account.name, kind: launch.kind ?? 'unknown', reason: failureText(error).slice(0, 500), at: new Date().toISOString() };
+          await recordAccountStartFailure(config, failure.account, failure.kind, failure.reason).catch(() => {});
+          startFailures.push(failure);
+          continue;
+        }
+        break;
       }
     } finally { await unreserve(); }
   }
@@ -124,12 +159,94 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
     // `awaiting consent` is not a started session: the runtime has not read its request (GY-130).
     started, consent: { answered: consent.answered, awaiting: consent.awaiting ? { prompt: consent.awaiting.prompt, kind: consent.awaiting.kind, pane: consent.awaiting.pane, attach: consent.awaiting.attach, releaseAt: consent.awaiting.releaseAt, attention: consentHoldAttention(consent.awaiting) } : null },
     account: selected?.account ? { environment: selected.account.name, kind: selected.account.kind, quota: selected.health?.quota ?? null, skipped: selected.skipped } : null, relaunched,
+    // A dispatch whose preferred account's runtime never started names what happened and where the
+    // session runs instead, so the fallback is on the record rather than silent (GY-417).
+    fallback: selected && startFailures.length ? { failed: startFailures, note: describeStartFailures(startFailures, selected.account?.name ?? null) } : null,
     // Planned-file overlap is recorded with the dispatch, never held on: the item runs beside the
     // in-flight items that touch the same files and whichever lands second is re-integrated.
     overlap: concurrent.length ? { concurrent, note: `Dispatched beside ${describeOverlap(concurrent)}; the merge queue orders them and whichever lands second is re-integrated by base refresh, or sent back for a sync on a real conflict` } : null };
 }
 
 export const herdrAttach = (pane: string, workspace?: string | null) => `herdr pane attach ${pane}${workspace ? ` --workspace ${workspace}` : ''}`;
+
+/**
+ * One account whose runtime was launched and never came up, recorded with why (GY-417). A launch
+ * that starts like this falls back to the profile's next account, so nothing else would show the
+ * failure: the account, its runtime and the start refusal are what master status names.
+ */
+export interface AccountStartFailure { account: string; kind: string; reason: string; at: string }
+/** How many launches one account's runtime may fail to start in a row before master status raises one attention item naming the account and its runtime (GY-417). */
+export const accountStartFailureLimit = 3;
+const accountStartFailureSchema = z.object({ kind: z.string().min(1).max(40), failures: z.number().int().min(1), reason: z.string().min(1).max(500), at: z.string() }).strict();
+const accountStartFailureLogSchema = z.object({ version: z.literal(1), accounts: z.record(z.string(), accountStartFailureSchema).default({}) }).strict();
+export type AccountStartFailures = z.infer<typeof accountStartFailureLogSchema>['accounts'];
+/** Beside the coordinator's other private launch state (the environment log), outside every worktree. */
+export const accountStartFailurePath = (config: Pick<MasterConfig, 'credentialFile'>) =>
+  resolve(dirname(config.credentialFile), `${basename(config.credentialFile).replace(/\.token$/, '')}.start-failures.json`);
+/** The accounts whose runtime recently failed to start, each with its consecutive count. */
+export async function readAccountStartFailures(config: Pick<MasterConfig, 'credentialFile'>): Promise<AccountStartFailures> {
+  try { return accountStartFailureLogSchema.parse(JSON.parse(await readFile(accountStartFailurePath(config), 'utf8'))).accounts; }
+  catch { return {}; }
+}
+/** Count one more consecutive start failure of `account`, replacing the stored reason and time. */
+export async function recordAccountStartFailure(config: Pick<MasterConfig, 'credentialFile'>, account: string, kind: string, reason: string, now = Date.now()) {
+  const log = await readAccountStartFailures(config);
+  log[account] = { kind: kind.slice(0, 40), failures: (log[account]?.failures ?? 0) + 1, reason: reason.slice(0, 500), at: new Date(now).toISOString() };
+  await atomicPrivateWrite(accountStartFailurePath(config), { version: 1, accounts: log });
+  return log[account];
+}
+/** A launch on `account` started: its run of consecutive start failures is over. */
+export async function clearAccountStartFailures(config: Pick<MasterConfig, 'credentialFile'>, account: string) {
+  const log = await readAccountStartFailures(config);
+  if (!log[account]) return;
+  delete log[account];
+  await atomicPrivateWrite(accountStartFailurePath(config), { version: 1, accounts: log });
+}
+/** The fallback line a dispatch that fell forward reads as: every account that failed, then the one launched on. */
+export const describeStartFailures = (failures: readonly AccountStartFailure[], launchedOn: string | null) =>
+  `${failures.map(failure => `${failure.account} failed to start: ${failure.reason}`).join('; ')}; launched on ${launchedOn ?? 'no named account'}`;
+/**
+ * What each launch profile's last worker dispatch recorded, joined onto its `master status` row
+ * (GY-417): the runtime and account the session runs on — a slot is named by what runs in it,
+ * never by the profile's name alone — and, when the preferred account's runtime failed to start,
+ * one `fallback` line naming that account and the one launched on.
+ */
+export function workerLaunchRows(profiles: { name: string }[], records: Record<string, ProfileLaunchRecord>): Record<string, { runtime: string | null; account: string | null; fallback: string | null }> {
+  const rows: Record<string, { runtime: string | null; account: string | null; fallback: string | null }> = {};
+  for (const profile of profiles) {
+    const record = records[profile.name];
+    if (record) rows[profile.name] = { runtime: record.runtime, account: record.account, fallback: record.failedAccounts.length ? describeStartFailures(record.failedAccounts, record.account) : null };
+  }
+  return rows;
+}
+/**
+ * One attention item per account whose runtime failed to start `accountStartFailureLimit` launches
+ * in a row (GY-417): every launch fell back to the profile's next account, so no session, no item
+ * and no refused launch would otherwise show that this runtime never starts at all.
+ */
+export function accountStartFailureAttention(failures: AccountStartFailures, cliPath: string): AttentionItem[] {
+  return Object.entries(failures).filter(([, entry]) => entry.failures >= accountStartFailureLimit).map(([account, entry]) => ({
+    subject: `${account} never starts`,
+    text: `Worker account ${account} (runtime ${entry.kind}) failed to start ${entry.failures} launches in a row; each launch fell back to the profile's next account, so no session shows the failure. Last refusal at ${entry.at}: ${entry.reason}`,
+    ...agentOwner('master', `Re-check the account with node ${cliPath} master environments --apply and log its runtime in, or drop it from the profiles' account order with node ${cliPath} master config accounts:PROFILE=… until it starts`) }));
+}
+/** What a profile's last worker dispatch recorded, as master status reads it (GY-417). */
+export interface ProfileLaunchRecord { key: string; epoch: number; agentName: string; at: string; runtime: string | null; account: string | null; failedAccounts: AccountStartFailure[] }
+const profileLaunchRecordSchema = z.object({
+  key: z.string().min(1), epoch: z.number().int().min(1), agentName: z.string().min(1), at: z.string().min(1),
+  runtime: z.string().nullable().default(null), account: z.string().nullable().default(null),
+  failedAccounts: z.array(z.object({ account: z.string().min(1), kind: z.string().min(1), reason: z.string().min(1), at: z.string().min(1) }).strict()).default([]),
+}).strict();
+/** The last dispatch record of each launch profile; a profile never dispatched reads as absent. */
+export async function readProfileLaunchRecords(root: string, profiles: { name: string }[]): Promise<Record<string, ProfileLaunchRecord>> {
+  const records: Record<string, ProfileLaunchRecord> = {};
+  for (const profile of profiles) {
+    try { records[profile.name] = profileLaunchRecordSchema.parse(JSON.parse(await readFile(profileLaunchedFile(root, profile.name), 'utf8'))); }
+    catch { /* no launch of this profile has been recorded yet */ }
+  }
+  return records;
+}
+
 export function consentHold(config: Pick<MasterConfig, 'herdrWorkspace'>, key: string, epoch: number, agentName: string, pane: string, awaiting: { prompt: string; kind: ConsentHold['kind']; request?: string | null; named?: boolean }, now = Date.now()): ConsentHold {
   return { key, epoch, agentName, pane, attach: herdrAttach(pane, config.herdrWorkspace), prompt: awaiting.prompt, kind: awaiting.kind, since: new Date(now).toISOString(), releaseAt: new Date(now + consentHoldMs).toISOString(), ...(awaiting.request ? { request: awaiting.request } : {}), ...(awaiting.named === false ? { named: false } : {}) };
 }

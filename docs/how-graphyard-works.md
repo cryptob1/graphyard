@@ -16,19 +16,19 @@ A card stops at its first refusing gate and says what is missing; nothing can se
 
 ![Bootstrap versus normal operation: one supervised worker, then a fleet with separate credentials.](diagrams/bootstrap-vs-normal.svg)
 
-Text equivalent: in bootstrap the human operator supervises one worker while the gates are activated; in normal operation the master dispatches to many workers, each with its own credential and worktree, and reviewers and producers judge candidates under the same gates.
+Text equivalent: bootstrap supervises one worker while the gates activate; normal operation dispatches to many credentialed workers, judged under the same gates.
 
 ## Who holds which authority
 
 ![Who holds which authority: the operator, Graphyard, Herdr-hosted sessions, reviewer and producer.](diagrams/roles-and-authority.svg)
 
-Text equivalent: the human operator sends human-only decisions to Graphyard. Herdr hosts the master (`coordinator`), slice lead and worker (epoch, worktree); the reviewer is a GitHub identity and the producer holds a grant. Each session commands Graphyard under its own credential; Graphyard merges only through the guarded path. Colours follow the [legend](glossary.md#diagram-legend).
+Text equivalent: the operator sends human-only decisions; Herdr hosts the master, slice lead and worker; the reviewer is a GitHub identity, the producer holds a grant; each session acts under its own credential, merged only through the guarded path. Colours: [legend](glossary.md#diagram-legend).
 
 ## Correctness rules
 
 ![Control-plane components: callers, engine, Postgres, reconciliation worker and GitHub.](diagrams/control-plane-components.svg)
 
-Text equivalent: sessions, the dashboard and producers call the API; the coordination engine applies each mutation in one locked Postgres transaction and appends an event; the reconciliation worker syncs GitHub, publishes the required check and runs the guarded merge; the webhook only wakes a job.
+Text equivalent: sessions, the dashboard and producers call the API; the engine applies each mutation in one locked Postgres transaction, appending an event; the reconciliation worker syncs GitHub, publishes the check and merges; the webhook wakes a job.
 
 - Gates are deterministic checks of one candidate, `(PR, head SHA, base SHA)`, under the current policy revision; a push or base change invalidates old evidence.
 - Every claim increments the epoch; commands from an old epoch or an expired lease are refused.
