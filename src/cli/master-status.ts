@@ -6,7 +6,7 @@ import { impliedScopeRequests, type Work } from '../model/work.js';
 import { actionReport, agentRequestReport, sessionReport } from './loop-report.js';
 import { needsHumanActions, routedScopeStatus } from './owed-report.js';
 import { installationMerger } from '../executor.js';
-import { daemonSummary, loopAttention, readDaemonState, type CycleMetrics, type DaemonState } from '../master-daemon.js';
+import { daemonSummary, loopAttention, readDaemonState } from '../master-daemon.js';
 import { readReviewLedger, reconcileReviews, reviewLedgerSpec, sessionLedgerHeadroom, summarizeReviews } from '../reviewer.js';
 import { producerLedgerSpec, readProducerLedger, reconcileProducers, sessionRetries, summarizeProducers } from '../producer.js';
 import { defaultAwaitReviewers, dispatchFailureAttention, dispatchSummary, readDispatchCursor } from '../auto-dispatch.js';
@@ -25,7 +25,8 @@ import type { LoopSupervisorHost } from '../supervisor.js';
 import { attributeAttention, derivedAttention, faulted, ledgerRefusalAttention, resourceStatus } from '../master-status.js';
 import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable, generatedManifestScript } from '../install/generated-files.js';
 import { contextOverflows } from '../model/escalation-context.js';
-import { interventionSummary } from './intervention-status.js';
+import { interventionSummary, interventionSummaryRoute } from './intervention-status.js';
+import { ReportSections } from '../master/sections.js';
 import { terminalDecisions } from './decision-report.js';
 import { masterBoard } from '../model/board.js';
 import { executorFleetReport, readCommit, readExecutorRegistrations } from '../executor-fleet.js';
@@ -35,6 +36,9 @@ import { slowReportReader } from '../master/report-cache.js';
 import { repairLaneAttention } from '../master/repair-lane.js';
 
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
+// The cycle-budget measure is a daemon metric (src/daemon/metrics.ts); it is read from here,
+// as it always was, by `master status` and its tests.
+export { cycleBudget } from '../daemon/metrics.js';
 // `master scope` lives in its own module; it is read from here as it always was.
 export { approveScopeRequest } from './master-scope.js';
 
@@ -67,6 +71,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const credentials = await timedStep('credentials', () => inspectWorkerCredentials(root, master.workers));
   let reviewRecords = (await readReviewLedger(root)).reviews, reviewRuntime = { available: true, reason: null as string | null };
   const { snapshot, clockOffset } = await timedStep('snapshot', () => snapshotWithClock(() => masterApi('work-snapshot')));
+  const sections = new ReportSections(); // optional sections (GY-422)
   // Sessions the automatic dispatcher launched are settled against this same snapshot: a
   // head change cancels them here as well as in the loop, so status never shows a stale one.
   try { reviewRecords = (await timedStep('reconcile reviews', () => reconcileReviews(root, master, { work: snapshot.work, agents: runtime.available ? runtime.agents : null }))).reviews; }
@@ -135,7 +140,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const { generatedFiles, overflow, interventions, releases, decisions, throughput, resources, derived: { scopeRequests, stalledItems: derivedStalls, actorless, executors, conflicted, stalled, owed, budget, overlong } } = await reportedAttention(root, master, masterApi, coordinator, snapshot,
     { reviews: reviewRecords, producers: producerRecords, runtime, commit: cli.commit, approvals: cycling?.approvals ?? [], loop: cycling?.liveness ?? null, rows: status.work, trees,
       // The intervention report takes the server a minute: status reads the loop's copy, or a bounded live read.
-      reports: 'bounded', reportBoundMs: dependencies.reportReadBoundMs });
+      reports: 'bounded', reportBoundMs: dependencies.reportReadBoundMs, sections });
   // A merge pending on a head GitHub reports mergeable is named with the stalled items (GY-344).
   // A repair-lane merge stays in front of the master until a normal merge proves the merge path healthy (GY-406).
   const stalledItems = [...derivedStalls, ...mergeStallAttention(snapshot), ...repairLaneAttention(snapshot.work)];
@@ -165,6 +170,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   return { ...directMergeLine(coordinator), ...status, ...attributed, ...faulted(attributeAttention(attributed.attentionItems, resources.readings)), resources: resources.report,
     // The board (GY-200): what the master owes first, with commands, then the rest.
     board: await timedStep('board', () => masterBoard(masterApi, snapshot, coordinator, decisions.unanswered)),
+    unavailable: sections.unavailable,
     humanOnly: humanOnly.map(humanOnlyStatusRow),
     // Every open item the control plane names no action for, with the account it names instead
     // and how long it has held its failing gate; the bound the stalled ones were judged against.
@@ -201,7 +207,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
 export async function reportedAttention(root: string, master: MasterConfig, masterApi: (path: string, credential?: string, timeoutMs?: number) => Promise<any>, coordinator: any, snapshot: { work: Work[]; now: string },
   observed: Omit<Parameters<typeof resourceStatus>[2], 'work' | 'agents'> & Pick<Parameters<typeof terminalDecisions>[2], 'approvals' | 'runtime'> & Pick<Parameters<typeof derivedAttention>[5], 'rows' | 'trees' | 'standalone' | 'approvals'> & { commit: string | null;
     /** How the slow intervention report is read (report-cache.ts): the loop's `background`, status's `bounded`, or live. */
-    reports?: 'background' | 'bounded'; reportBoundMs?: number }) {
+    reports?: 'background' | 'bounded'; reportBoundMs?: number; sections?: ReportSections }) {
   const generatedFiles: AttentionItem[] = [];
   try {
     const deployed = coordinator?.delegationLimits?.deployed?.[generatedFilesVariable];
@@ -210,37 +216,23 @@ export async function reportedAttention(root: string, master: MasterConfig, mast
     generatedFiles.push({ subject: 'installation', text: `The repository generated-file manifest is unreadable: ${error instanceof Error ? error.message : 'unknown reason'}`,
       ...agentOwner('master', `Fix ${generatedManifestScript} so --list prints the generated paths; master status reports the deployment drift again once it does`) });
   }
-  // Per-item reads run bounded-concurrently and each read below is a step of the recorder in force (GY-377).
-  const overflow = await contextOverflows(masterApi, snapshot.work);
+  // Per-item reads run bounded-concurrently and each read below is a step of the recorder in force (GY-377);
+  // a section whose route fails is named in `unavailable` and the rest is still built (GY-422).
+  const sections = observed.sections ?? new ReportSections();
+  const overflow = await sections.optional('escalation contexts', 'GET /api/work/:id/context', () => contextOverflows(masterApi, snapshot.work), () => [] as Awaited<ReturnType<typeof contextOverflows>>);
   const reports = slowReportReader(master, masterApi, observed.reports, observed.reportBoundMs);
   const summarized = await timedStep('attention: interventions', () => interventionSummary(reports.read));
+  if (summarized.summary.error) sections.mark('interventions', interventionSummaryRoute, summarized.summary.error);
   const interventions = { ...summarized, summary: { ...summarized.summary, ...reports.freshness() } };
   const releases = executorFleetReport(await readExecutorRegistrations(master).catch(() => []), { commit: observed.commit ?? readCommit(root) }, { hostId: master.hostId });
-  const decisions = await timedStep('attention: decisions', () => terminalDecisions(masterApi, snapshot.work, { approvals: observed.approvals, runtime: observed.runtime, now: Date.now() }));
+  const decisions = await timedStep('attention: decisions', () => sections.optional('decisions', 'GET /api/work/:id/decisions', () => terminalDecisions(masterApi, snapshot.work, { approvals: observed.approvals, runtime: observed.runtime, now: Date.now() }),
+    () => ({ listed: [], attentionItems: [] as AttentionItem[], unanswered: [], refused: 0 })));
   const throughput = await timedStep('attention: throughput', () => throughputStatus(root, coordinator, snapshot.work));
   const resources = await timedStep('attention: resources', () => resourceStatus(root, master, { reviews: observed.reviews, producers: observed.producers, agents: observed.runtime.available ? observed.runtime.agents : null, work: snapshot.work, loop: observed.loop }));
   const derived = await timedStep('attention: derived', () => derivedAttention(root, master, masterApi, coordinator, snapshot, { ...observed, reviews: observed.reviews ?? [], producers: observed.producers ?? [], runtime: { available: observed.runtime.available, agents: observed.runtime.available ? observed.runtime.agents : [] } }));
+  if (!derived.executors.presence.available && /^GET \/api\/actions failed/.test(derived.executors.presence.reason)) sections.mark('executors', 'GET /api/actions', derived.executors.presence.reason);
   const items = [...resources.attention, ...generatedFiles, ...overflow, ...interventions.attentionItems, ...releases.attention, ...(throughput.attention ? [throughput.attention] : []), ...decisions.attentionItems, ...derived.items];
   // The report's last step over the whole list, which the loop runs too: a cause named once, in place of its symptoms.
   const attribute = (status: { work: any[]; attentionItems: AttentionItem[] }) => attributeAttention(ledgerRefusalAttention(status, snapshot.work).attentionItems, resources.readings);
-  return { generatedFiles, overflow, interventions, releases, decisions, throughput, resources, derived, items, attribute };
-}
-
-/**
- * How the coordination cycle keeps to its configured interval, from the durations the daemon
- * records for its retained cycles: the last one, the p95, and every cycle that overran. A cycle
- * longer than its interval means the loop is falling behind the work it shepherds.
- */
-export function cycleBudget(state: Pick<DaemonState, 'metrics'>, intervalMs: number) {
-  const metrics = state.metrics;
-  const last = metrics.at(-1) ?? null;
-  const durations = metrics.map(metric => metric.durationMs).sort((a, b) => a - b);
-  const p95Ms = durations.length ? durations[Math.min(durations.length - 1, Math.ceil(durations.length * 0.95) - 1)] : null;
-  const overruns = metrics.filter(metric => metric.durationMs > intervalMs);
-  const describe = (m: CycleMetrics) => ({ cycle: m.cycle, at: m.at, durationMs: m.durationMs, childWaitMs: m.childWaitMs ?? null, workMs: m.workMs ?? null });
-  return {
-    intervalMs, measured: metrics.length, lastCycle: last ? describe(last) : null,
-    withinInterval: last ? last.durationMs <= intervalMs : null, p95Ms, overruns: overruns.length,
-    lastOverrun: overruns.length ? describe(overruns.at(-1)!) : null,
-  };
+  return { generatedFiles, overflow, interventions, releases, decisions, throughput, resources, derived, items, attribute, unavailable: sections.unavailable };
 }
