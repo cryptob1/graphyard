@@ -51,6 +51,8 @@ export interface StabilityRecord {
   schema: 1; commit: string | null; treeUnchanged: boolean; command: string[]; recordedAt: string;
   environment: { node: string; platform: string; cpus: number; ci: boolean };
   runs: StabilityRun[]; passed: number; consecutivePasses: number; stable: boolean; spread: TimingSpread[];
+  /** Each test file's recorded wall time in ms, which CI balances its shards by (scripts/ci-tests.mjs durations). */
+  files?: Record<string, number>;
 }
 
 /** The record of a stability run: every run's verdict and the spread of every timing assertion. */
@@ -94,7 +96,9 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
     }
     const after = treeState(written);
     const record = stabilityRecord({ commit: before.commit, treeUnchanged: before.commit === after.commit && before.changes === '' && after.changes === '', command, runs: results, timings, required: runs });
-    const text = `${JSON.stringify(record, null, 2)}\n`;
+    // The per-file durations are recorded apart (scripts/ci-tests.mjs durations) and kept across a re-record.
+    const files = recordFile && existsSync(resolve(recordFile)) ? (JSON.parse(readFileSync(resolve(recordFile), 'utf8')) as StabilityRecord).files : undefined;
+    const text = `${JSON.stringify(files ? { ...record, files } : record, null, 2)}\n`;
     if (recordFile) writeFileSync(resolve(recordFile), text); else console.log(text);
     for (const spread of record.spread) console.log(`${spread.name}: ${spread.statistic} ${spread.minMs}–${spread.maxMs}ms over ${spread.runs} runs (median ${spread.medianMs}ms, budget ${spread.comparison} ${spread.budgetMs}ms, ${spread.failures} over budget)`);
     console.log(record.stable ? `Stable: ${record.consecutivePasses} consecutive runs passed on ${record.commit}` : `NOT stable: ${record.passed}/${runs} runs passed on ${record.commit}${record.treeUnchanged ? '' : '; the tree changed or carried uncommitted changes'}; failed run logs are in ${directory}`);
