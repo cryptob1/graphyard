@@ -1,4 +1,4 @@
-<!-- page: Start here | 3 | machines, accounts, the master, the first PR. -->
+<!-- page: Start here | 3 | machines, accounts, master, first PR. -->
 # Onboard a repository
 
 ## 1. Install the control plane
@@ -57,7 +57,7 @@ Advanced, or the CLI (join dash-led values to their flags with `=`):
 ```sh
 node "$GRAPHYARD_CLI" master registry runtime set aider --kind aider --arg=--yes-always \
   --home-variable AIDER_HOME --model-flag=--model --login 'AIDER_HOME={home} aider --login' --login-file session.json \
-  --reason "Add the Aider runtime"
+  --reason "Aider"
 ```
 
 ### Add an account
@@ -66,10 +66,10 @@ Connect it in the UI, or record one:
 
 ```sh
 node "$GRAPHYARD_CLI" master registry model set opus --provider Anthropic --id claude-opus-5 \
-  --input-cost 15 --output-cost 75 --tier frontier --context 1000000 --reason "Record the model and its price"
+  --input-cost 15 --output-cost 75 --tier frontier --context 1000000 --reason "Model pricing"
 node "$GRAPHYARD_CLI" master registry account set claude-b --runtime claude --model opus \
-  --home ~/.coding_agents/claude-b --max-sessions 2 --reason "Second Claude subscription"
-node "$GRAPHYARD_CLI" master registry account quota opencode-a exhausted --resets-at 2026-09-22T00:00:00Z --reason "Plan cut off until Monday"
+  --home ~/.coding_agents/claude-b --max-sessions 2 --reason "Second subscription"
+node "$GRAPHYARD_CLI" master registry account quota opencode-a exhausted --resets-at 2026-09-22T00:00:00Z --reason "Plan exhausted"
 ```
 
 ### Add a role
@@ -77,8 +77,8 @@ node "$GRAPHYARD_CLI" master registry account quota opencode-a exhausted --reset
 Preferred account first:
 
 ```sh
-node "$GRAPHYARD_CLI" master registry role set worker claude-b,claude-c,codex-a --concurrency 4 --reason "Prefer Claude; Codex is overflow"
-node "$GRAPHYARD_CLI" master registry role set reviewer codex-a,claude-c --concurrency 2 --tool Read --model opus --reason "Read-only, frontier model"
+node "$GRAPHYARD_CLI" master registry role set worker claude-b,claude-c,codex-a --concurrency 4 --reason "Codex overflow"
+node "$GRAPHYARD_CLI" master registry role set reviewer codex-a,claude-c --concurrency 2 --tool Read --model opus --reason "Read-only"
 ```
 
 ### Size review and proof capacity
