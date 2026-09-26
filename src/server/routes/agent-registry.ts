@@ -87,6 +87,10 @@ const resultSchema = z.object({
   name: z.string().trim().min(1).max(80).optional(),
   home: z.string().trim().min(1).max(500).optional(),
   error: z.string().trim().min(1).max(2000).optional(),
+  // The host's own confirmation that research can launch the account: research is host-local
+  // configuration (master.json), so the registry alone cannot verify it and the card claims it
+  // only when the host reports having appended the account's wrapper there (GY-409 AC-4).
+  research: z.boolean().optional(),
 }).strict();
 
 /** How a connect request stands, folded from its events. */
@@ -246,9 +250,11 @@ function connectAccountRoutes(): import('../routes.js').Route[] {
         }
         // The result: healthy registers the account in the registry, in the same transaction, with
         // the default placement the provider's capability decides — never one the worker names.
+        // Research placement is the host's to confirm: it joins only what the host reports having
+        // appended to its own research configuration, never a placement the fleet cannot launch.
         const result = resultSchema.parse(data);
         const provider = connectProvider(connect.provider)!;
-        const placement = connectDefaultRoles(provider.tier);
+        const placement = connectDefaultRoles(provider.tier).filter(role => role !== 'research' || (provider.tier === 'fast' && result.research === true));
         demand(result.state !== 'healthy' || !!result.name && !!result.home, 'A healthy connect names the account and its login home', 400);
         await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, `${connectEventPrefix}result`, JSON.stringify({ connect: { id, at, state: result.state, name: result.name, home: result.home, error: result.error, placement } })]);
         if (result.state === 'failed') return { id, state: 'failed' as const, error: result.error };

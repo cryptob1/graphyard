@@ -9,7 +9,7 @@ import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { sessionName } from '../session-name.js';
 import { launchPlan, assertNoApprovalOptOut, LaunchRefusedError } from '../harness.js';
 import { type CapacityRole, type CapacityAccount, capacityRetryAt, quotaRoles } from '../model/capacity.js';
-import { type FleetLaunchAccount, type FleetProbe, selectFleetSession, fleetRoleHealth, httpFleetClient, fleetRequest, connectProvider, connectDefaultRoles, redactKey, relaySubscriptionLogin, type ConnectProvider } from '../fleet.js';
+import { type FleetLaunchAccount, type FleetProbe, selectFleetSession, fleetRoleHealth, httpFleetClient, fleetRequest, connectProvider, connectDefaultRoles, redactKey, relaySubscriptionLogin, ensureResearchWrapper, appendResearchCommand, type ConnectProvider } from '../fleet.js';
 import { type AgentEnvironment, agentEnvironmentSchema, type EnvironmentKind, environmentKinds, environmentVariable, type MasterConfig, masterConfigSchema, producerProfileSchema, reviewerProfileSchema, workerProfileSchema } from './profiles.js';
 import { atomicPrivateText, atomicPrivateWrite, externalCredential, loadMasterConfig, readCredentialFile } from './config.js';
 import { failureText } from './worktrees.js';
@@ -701,41 +701,13 @@ export async function runSmokePrompt(provider: ConnectProvider, home: string, op
   } catch (error) { return { healthy: false, error: failureText(error) }; }
 }
 
-/**
- * Research joins through a Pi wrapper (GY-409 AC-4): `pi-<letter>` reads the provider key at run
- * time from the account's login home and execs `pi`, so a cheap account can serve research without
- * the key being copied anywhere. An existing wrapper is never overwritten; null says there was
- * nothing to write.
- */
-export async function ensureResearchWrapper(name: string, home: string, options: { root?: string; binDirectory?: string } = {}): Promise<string | null> {
-  const letter = name.match(/-([a-z0-9]+)$/)?.[1];
-  if (!letter) return null;
-  const bin = options.binDirectory ?? resolve(homedir(), '.local/bin');
-  const file = resolve(bin, `pi-${letter}`);
-  if (await access(file).then(() => true, () => false)) return null;
-  // Paths are shell-quoted: a home carrying a quote or a `$` must not break or inject into the wrapper.
-  const piDirectory = shellQuote(resolve(agentEnvironmentRoot(options.root), `pi-${letter}`));
-  const script = [
-    '#!/usr/bin/env bash',
-    `# pi, env ${letter}: the provider key is read at run time from its login home; never stored here.`,
-    `mkdir -p ${piDirectory}`,
-    `export PI_CODING_AGENT_DIR=${piDirectory}`,
-    `export ZAI_API_KEY="$(node -e 'process.stdout.write(require(process.argv[1])["zai-coding-plan"].key)' ${shellQuote(resolve(home, 'opencode/auth.json'))})"`,
-    'exec pi "$@"',
-    '',
-  ].join('\n');
-  await mkdir(bin, { recursive: true });
-  await writeFile(file, script, { mode: 0o755 });
-  return file;
-}
-
 /** One connect request as the worker reads it from the control plane. */
 interface ConnectAssignment { id: string; state: string; provider: string; name?: string | null; url?: string | null; code?: string | null; sealed?: { ephemeral: string; iv: string; ciphertext: string } }
 export interface ConnectWorkerReport { id: string; provider: string; state: 'healthy' | 'failed' | 'skipped'; detail: string }
 export interface ConnectAccountOptions {
   fetch?: typeof fetch; now?: () => number;
-  /** Test overrides: the smoke prompt's runner, where login homes and the host key live, and every bound. */
-  runner?: ChildRun; root?: string; keyFile?: string; pollMs?: number; loginTimeoutMs?: number; smokeTimeoutMs?: number;
+  /** Test overrides: the smoke prompt's runner, where login homes, the host key and the master file live, and every bound. */
+  runner?: ChildRun; root?: string; keyFile?: string; masterFile?: string; pollMs?: number; loginTimeoutMs?: number; smokeTimeoutMs?: number;
 }
 const connectOpen = (state: string) => state === 'pending' || state === 'claimed' || state === 'connecting';
 /**
@@ -754,7 +726,7 @@ export async function processConnectAccounts(config: Pick<MasterConfig, 'url' | 
     if (!connectOpen(connect.state)) continue;
     const provider = connectProvider(connect.provider);
     if (!provider) { reports.push({ id: connect.id, provider: connect.provider, state: 'skipped', detail: 'no known provider' }); continue; }
-    let claimed = false;
+    let claimed = false, held: string | null = null;
     try {
       await fleetRequest(config, `agent-registry/connect/${connect.id}/claim`, { body: {}, fetch: fetcher });
       claimed = true;
@@ -764,19 +736,26 @@ export async function processConnectAccounts(config: Pick<MasterConfig, 'url' | 
       const environment = (connect.name ? discovered.find(entry => entry.name === connect.name) : undefined)
         ?? await createAgentEnvironment(root, provider.runtime as EnvironmentKind, discovered);
       const name = environment.name, home = environment.home;
-      const report = async (healthy: boolean, error: string | null) => {
-        await fleetRequest(config, `agent-registry/connect/${connect.id}/result`, { body: healthy ? { state: 'healthy', name, home } : { state: 'failed', name, error: error!.slice(0, 2000) }, fetch: fetcher });
-        reports.push({ id: connect.id, provider: provider.id, state: healthy ? 'healthy' : 'failed', detail: healthy ? `${name} joined ${connectDefaultRoles(provider.tier).join(', ')}` : error!.slice(0, 500) });
+      const report = async (healthy: boolean, error: string | null, research = false) => {
+        await fleetRequest(config, `agent-registry/connect/${connect.id}/result`, { body: healthy ? { state: 'healthy', name, home, ...(research ? { research: true } : {}) } : { state: 'failed', name, error: error!.slice(0, 2000) }, fetch: fetcher });
+        const joined = connectDefaultRoles(provider.tier).filter(role => role !== 'research' || research);
+        reports.push({ id: connect.id, provider: provider.id, state: healthy ? 'healthy' : 'failed', detail: healthy ? `${name} joined ${joined.join(', ')}` : error!.slice(0, 500) });
       };
+      // Research is this host's own configuration (GY-409 AC-4): a cheap account joins it only
+      // once this host has made the account's Pi wrapper its research command, and the result is
+      // what reports it — the card never claims a placement the fleet cannot launch.
+      const researchJoined = async () => provider.tier !== 'fast' ? false
+        : await ensureResearchWrapper(name, home, options).catch(() => null)
+            .then(wrapper => wrapper ? appendResearchCommand(wrapper, options).catch(() => false) : false);
       if (provider.kind === 'api-key') {
         // The plaintext key exists only inside this block and is redacted from everything reported.
         const key = unsealToHost(privateKey, connect.sealed!);
+        held = key;
         await writeProviderAuthFile(provider, home, key);
         await fleetRequest(config, `agent-registry/connect/${connect.id}/progress`, { body: { state: 'connecting', name }, fetch: fetcher });
         const smoke = await runSmokePrompt(provider, home, options);
         if (!smoke.healthy) { await report(false, redactKey(smoke.error!, key)); continue; }
-        await report(true, null);
-        if (provider.id === 'z.ai') await ensureResearchWrapper(name, home, options).catch(() => {});
+        await report(true, null, await researchJoined());
       } else {
         await fleetRequest(config, `agent-registry/connect/${connect.id}/progress`, { body: { state: 'connecting', name }, fetch: fetcher });
         // The URL and code reach the card while the login is still waiting on the operator's sign-in.
@@ -787,10 +766,10 @@ export async function processConnectAccounts(config: Pick<MasterConfig, 'url' | 
         if (!announced.length && (relay.url || relay.code)) await waiting(relay);
         if (!relay.loggedIn) { await report(false, relay.error ?? 'the login did not complete'); continue; }
         const smoke = await runSmokePrompt(provider, home, options);
-        await report(smoke.healthy, smoke.healthy ? null : smoke.error);
+        await report(smoke.healthy, smoke.healthy ? null : smoke.error, smoke.healthy ? await researchJoined() : false);
       }
     } catch (error) {
-      const detail = failureText(error).slice(0, 2000);
+      const detail = redactKey(failureText(error), held ?? '').slice(0, 2000);
       if (claimed) await fleetRequest(config, `agent-registry/connect/${connect.id}/result`, { body: { state: 'failed', error: detail }, fetch: fetcher }).catch(() => {});
       reports.push({ id: connect.id, provider: connect.provider, state: 'failed', detail: detail.slice(0, 500) });
     }

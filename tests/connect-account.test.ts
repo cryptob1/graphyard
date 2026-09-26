@@ -62,6 +62,12 @@ before(async () => {
   originalPath = process.env.PATH ?? '';
   process.env.PATH = `${bin}:${originalPath}`;
   await writeFile(join(scratch, 'master.token'), tokens.get(coordinator.id)!, { mode: 0o600 });
+  // The coordinator checkout's own configuration, as the host's executor finds it: the research
+  // append lands here, never in the repository this test runs from.
+  await writeFile(join(scratch, 'master.json'), JSON.stringify({
+    version: 1, url: 'https://connect.test', credentialFile: join(scratch, 'master.token'), cliPath: join(bin, 'graphyard'),
+    repository: 'owner/project', baseBranch: 'main', githubAppId: 15368, hostId: HOST, masterAgentName: 'graphyard-master-project',
+  }), { mode: 0o600 });
   // The worker's first pass registers this host's public key with the control plane.
   await runWorker();
 });
@@ -85,6 +91,7 @@ const workerOptions = (overrides: Record<string, unknown> = {}) => ({
   root: join(scratch, 'agents'),
   keyFile: join(scratch, 'connect.key'),
   binDirectory: join(scratch, 'wrapper-bin'),
+  masterFile: join(scratch, 'master.json'),
   pollMs: 10,
   loginTimeoutMs: 15_000,
   smokeTimeoutMs: 10_000,
@@ -120,15 +127,30 @@ test('unit:connect-account-default-roles — a strong account joins worker and r
   const cheap = connectProviders.find(provider => provider.tier === 'fast')!;
   assert.equal(cheap.id, 'z.ai');
   await ok('agent-registry/connect', operator, { host: HOST, provider: cheap.id, sealed: await sealForHost(publicKey, KEY), reason: 'Connect the z.ai coding plan' });
-  const cheapReports = await runWorker();
+  // The smoke prompt targets the provider and model being connected, so healthy means this key worked.
+  const smoked: string[][] = [];
+  const cheapReports = await runWorker({ runner: async (_command: string, args: string[]) => { smoked.push(args); return ''; } });
   assert.equal(cheapReports[0].state, 'healthy', `the cheap account connected: ${cheapReports[0].detail}`);
+  assert.deepEqual(smoked[0], cheap.smoke.args, 'the smoke ran with the provider catalog\'s pinned command');
+  assert.ok(cheap.smoke.args.includes('zai-coding-plan/glm-5.3-flash'), 'the smoke pins the z.ai provider and model');
   const cheapName = cheapReports[0].detail.split(' ')[0];
+  // Research is the host's own configuration: the card claims it only once the host appended the
+  // account's wrapper as its research command, which this pass did.
+  const masterFile = JSON.parse(await readFile(join(scratch, 'master.json'), 'utf8'));
+  assert.equal(masterFile.run.research.command, join(scratch, 'wrapper-bin', `pi-${cheapName.split('-').at(-1)}`), 'the account\'s wrapper became the host\'s research command');
   const document = await ok('agent-registry/document', operator);
   const roleOrder = (name: string) => document.roles.find((role: { name: string }) => role.name === name)?.accounts as string[] | undefined;
   assert.deepEqual(roleOrder('approver'), ['claude-q', cheapName], 'a cheap account is appended to the approver failover order, not prepended');
   assert.deepEqual(roleOrder('producer'), [cheapName], 'a cheap account joins the unit producer');
   assert.ok(!roleOrder('worker')?.includes(cheapName), 'a cheap account does not take worker');
   assert.deepEqual((await connectViews()).find(entry => entry.provider === cheap.id)?.placement, ['research', 'approver', 'producer'], 'the card states the cheap account joined research, approver and producer');
+  // A cheap account whose research append could not land joins only the registry roles: the card
+  // never claims a placement the fleet cannot launch.
+  await ok('agent-registry/connect', operator, { host: HOST, provider: cheap.id, sealed: await sealForHost(publicKey, KEY), reason: 'Connect a second z.ai key on a host without a readable master configuration' });
+  const secondReports = await runWorker({ masterFile: join(scratch, 'absent', 'master.json') });
+  assert.equal(secondReports[0].state, 'healthy', `the second cheap account connected: ${secondReports[0].detail}`);
+  assert.equal(secondReports[0].detail, `${secondReports[0].detail.split(' ')[0]} joined approver, producer`, 'without the research append the worker claims only the registry roles');
+  assert.deepEqual((await connectViews()).filter(entry => entry.provider === cheap.id).at(-1)?.placement, ['approver', 'producer'], 'research placement is absent until the host confirms it');
   // The strong account: appended to worker and reviewer in the same way.
   const strong = connectProviders.find(provider => provider.id === 'anthropic-api')!;
   await ok('agent-registry/connect', operator, { host: HOST, provider: strong.id, sealed: await sealForHost(publicKey, KEY), reason: 'Connect the Anthropic API key' });
@@ -280,6 +302,7 @@ test('connect writes — the provider auth file lands at mode 0600 merged over w
   await writeFile(join(home, 'opencode', 'auth.json'), '{}', { mode: 0o600 });
   await writeProviderAuthFile(provider, home, KEY);
   const stored = JSON.parse(await readFile(join(home, 'opencode', 'auth.json'), 'utf8'));
+  assert.equal(stored['zai-coding-plan'].type, 'api', 'the entry is the provider/runtime union\'s api kind, so the runtime actually reads it');
   assert.equal(stored['zai-coding-plan'].key, KEY);
   assert.equal((await stat(join(home, 'opencode', 'auth.json'))).mode & 0o777, 0o600);
 });

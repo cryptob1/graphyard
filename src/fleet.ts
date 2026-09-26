@@ -1,11 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { access, readFile, readdir, stat } from 'node:fs/promises';
+import { access, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { basename, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
-import { NoHealthyAccountError, agentEnvironmentRoot, atomicPrivateWrite, checkAgentEnvironment, discoverAgentEnvironments, environmentKinds, readCredentialFile,
+import { NoHealthyAccountError, agentEnvironmentRoot, atomicPrivateWrite, checkAgentEnvironment, discoverAgentEnvironments, environmentKinds, masterConfigSchema, readCredentialFile,
   type AccountSkip, type AccountSkipCause, type AgentEnvironment, type EnvironmentHealth, type EnvironmentKind, type EnvironmentProbe, type MasterConfig } from './master.js';
+import { shellQuote } from './master/dispatch.js';
 import { sessionName } from './session-name.js';
 import { accountIneligibility, fleetRoles, liveSessions, proposedConcurrency, proposedRuntimeRoles, proposedRuntimes, rolePolicy, type AgentRegistry, type RolePolicy, type FleetAccount, type FleetAccountInput, type FleetModel, type FleetRole, type FleetRoleName, type FleetRuntime, type FleetSession, type LaunchContract, type QuotaObservation, type SessionSkip } from './model/registry.js';
 
@@ -396,8 +397,12 @@ export const connectProviders: readonly ConnectProvider[] = [
   {
     id: 'z.ai', label: 'z.ai (GLM coding plan)', kind: 'api-key', runtime: 'opencode', model: 'opencode-default', tier: 'fast',
     authFile: 'opencode/auth.json',
-    authDocument: (existing, key) => ({ ...existing, 'zai-coding-plan': { ...(existing['zai-coding-plan'] as Record<string, unknown> | undefined ?? {}), key } }),
-    smoke: { command: 'opencode', args: ['run', smokePrompt], envVariable: 'XDG_DATA_HOME' },
+    // OpenCode's auth entries are a union discriminated on `type`: without `type: 'api'` it
+    // discards the entry, so the pasted key would never be used and the smoke would pass on
+    // whatever other provider the host still had.
+    authDocument: (existing, key) => ({ ...existing, 'zai-coding-plan': { ...(existing['zai-coding-plan'] as Record<string, unknown> | undefined ?? {}), type: 'api', key } }),
+    // The smoke pins the provider and model, so "healthy" means this key answered.
+    smoke: { command: 'opencode', args: ['run', '--model', 'zai-coding-plan/glm-5.3-flash', smokePrompt], envVariable: 'XDG_DATA_HOME' },
     help: 'Your z.ai coding-plan key, wrapped by OpenCode. Cheap-model accounts join research, approval and proofs.',
   },
   {
@@ -441,8 +446,10 @@ export const connectProvider = (id: string): ConnectProvider | null => connectPr
  * The roles a newly connected account joins by default, by capability (GY-409 AC-4): strong-model
  * accounts join worker and reviewer; cheap models (GLM, Flash-class) join research, the approver
  * and the unit producer. Every role listed that exists in the registry takes the account appended
- * to its failover order; `research` joins through the account's Pi wrapper, which the host's
- * executor writes and which becomes the research command when none is set.
+ * to its failover order. `research` is the host's own (master.json) configuration, not a registry
+ * role: the account joins it only once the host has made the account's Pi wrapper the research
+ * command, and the host's result is what reports it — the card never claims a placement the
+ * fleet cannot launch.
  */
 export function connectDefaultRoles(tier: ConnectProvider['tier']): readonly string[] {
   return tier === 'fast' ? ['research', 'approver', 'producer'] : ['worker', 'reviewer'];
@@ -510,3 +517,49 @@ export async function relaySubscriptionLogin(provider: ConnectProvider, home: st
  * into a log line.
  */
 export const redactKey = (text: string, key: string) => key.length > 8 ? text.split(key).join('[redacted]') : text;
+
+/**
+ * Research joins through a Pi wrapper (GY-409 AC-4): `pi-<letter>` reads the provider key at run
+ * time from the account's login home and execs `pi`, so a cheap account can serve research without
+ * the key being copied anywhere. An existing wrapper is never overwritten; null says there was
+ * nothing to write.
+ */
+export async function ensureResearchWrapper(name: string, home: string, options: { root?: string; binDirectory?: string } = {}): Promise<string | null> {
+  const letter = name.match(/-([a-z0-9]+)$/)?.[1];
+  if (!letter) return null;
+  const bin = options.binDirectory ?? resolve(homedir(), '.local/bin');
+  const file = resolve(bin, `pi-${letter}`);
+  if (await access(file).then(() => true, () => false)) return null;
+  // Paths are shell-quoted: a home carrying a quote or a `$` must not break or inject into the wrapper.
+  const piDirectory = shellQuote(resolve(agentEnvironmentRoot(options.root), `pi-${letter}`));
+  const script = [
+    '#!/usr/bin/env bash',
+    `# pi, env ${letter}: the provider key is read at run time from its login home; never stored here.`,
+    `mkdir -p ${piDirectory}`,
+    `export PI_CODING_AGENT_DIR=${piDirectory}`,
+    `export ZAI_API_KEY="$(node -e 'process.stdout.write(require(process.argv[1])["zai-coding-plan"].key)' ${shellQuote(resolve(home, 'opencode/auth.json'))})"`,
+    'exec pi "$@"',
+    '',
+  ].join('\n');
+  await mkdir(bin, { recursive: true });
+  await writeFile(file, script, { mode: 0o755 });
+  return file;
+}
+
+/**
+ * Make the account's Pi wrapper the research command in the coordinator checkout's
+ * .graphyard/master.json (GY-409 AC-4): a cheap account joins research only once the host's own
+ * configuration can launch it. A research or Pi command the operator set is never replaced, and a
+ * host with no readable master configuration appends nothing; false says so, and the connect's
+ * result then claims only the registry roles.
+ */
+export async function appendResearchCommand(wrapper: string, options: { masterFile?: string } = {}): Promise<boolean> {
+  const file = options.masterFile ?? resolve(process.cwd(), '.graphyard/master.json');
+  let config: MasterConfig;
+  try { config = masterConfigSchema.parse(JSON.parse(await readFile(file, 'utf8'))); }
+  catch { return false; }
+  if (config.run.research?.command || config.run.pi?.command) return false;
+  const parsed = masterConfigSchema.parse({ ...config, run: { ...config.run, research: { ...config.run.research, command: wrapper } } });
+  await atomicPrivateWrite(file, parsed);
+  return true;
+}

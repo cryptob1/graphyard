@@ -3,11 +3,11 @@
 
 ## 1. Install the control plane
 
-Follow [install](install.md): review `--plan`, then `install --provider railway --repo OWNER/REPO --apply`.
+Follow [install](install.md): review `--plan`, then `install --provider railway --apply`.
 
 ## 2. Add machines
 
-Each concurrent session needs a worker identity and host ID: raise `install --workers`, or connect a machine:
+Each concurrent session needs a worker identity and host ID; raise `install --workers` or connect one:
 
 ```sh
 node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST --herdr --host-id UNIQUE_MACHINE_NAME --token-stdin
@@ -25,11 +25,11 @@ The managed `AGENTS.md` states **every session Graphyard launches receives its i
 
 ### Connect an account
 
-Settings › **Agents** › **Connect an account**: pick a provider; paste a key or start a login. The browser seals a key to the host's public key (the server relays ciphertext only); the host writes the provider's auth file (mode 0600) and smoke-tests it; the card shows the result. A subscription login shows its URL and code while waiting; finish it in your browser; **Cancel** stops it. The host's executor must run; strong accounts join worker and reviewer, cheap ones (GLM, Flash-class) research, approver and the unit producer, appended to each failover order; **change** edits roles.
+Settings › **Agents** › **Connect an account**: pick a provider; paste a key or start a login. The browser seals a key to the host's public key (the server relays ciphertext only); the host writes the provider's auth file (mode 0600) and smoke-tests that provider and model; the card shows the result. A subscription login shows its URL and code while waiting; finish it in your browser; **Cancel** stops it. The host's executor must run; strong accounts join worker and reviewer, cheap ones (GLM, Flash-class) approver and the unit producer, appended to each failover order; research joins when the host makes the account's wrapper its research command; **change** edits roles.
 
 ### Agent environments
 
-Each account's login home under `~/.coding_agents` is selected by `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_DATA_HOME` or `CURSOR_CONFIG_DIR`; Graphyard's tokens go in `~/.config/graphyard/` (mode 0600). `master environments --create claude` makes a fresh home; `--apply` reports quota and writes profiles.
+Each login home under `~/.coding_agents` is selected by `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_DATA_HOME` or `CURSOR_CONFIG_DIR`; Graphyard's tokens go in `~/.config/graphyard/` (mode 0600). `master environments --create claude` makes a fresh home; `--apply` reports quota and writes profiles.
 
 Profiles run `"approvals": "auto"` (trade-off: unattended sessions); `"prompt"` is refused at launch ([approval modes](master-agent-sessions.md#approval-modes)).
 
@@ -44,7 +44,7 @@ node "$GRAPHYARD_CLI" master registry propose --apply
 
 ### Add a runtime
 
-Advanced, or the CLI (join a dash-led value to its flag with `=`):
+Advanced, or the CLI (join dash-led values to their flags with `=`):
 
 ```sh
 node "$GRAPHYARD_CLI" master registry runtime set aider --kind aider --arg=--yes-always \
@@ -54,7 +54,7 @@ node "$GRAPHYARD_CLI" master registry runtime set aider --kind aider --arg=--yes
 
 ### Add an account
 
-Connect it in the UI, or record a login:
+Connect it in the UI, or record one:
 
 ```sh
 node "$GRAPHYARD_CLI" master registry model set opus --provider Anthropic --id claude-opus-5 \
@@ -75,18 +75,18 @@ node "$GRAPHYARD_CLI" master registry role set reviewer codex-a,claude-c --concu
 
 ### Size review and proof capacity
 
-Each candidate needs one review and one producer session per proof group; a profile's `"concurrency"` caps its sessions without a restart. Adding workers? For worker count `W` and `G` proof groups: `⌈W / 2⌉` review and `G × ⌈W / 2⌉` producer slots over 2+ producer principals; watch `longestWaitMs`.
+Each candidate needs one review and one producer session per proof group; profile `"concurrency"` caps sessions without a restart. Adding workers? For worker count `W` and `G` proof groups: `⌈W / 2⌉` review and `G × ⌈W / 2⌉` producer slots over 2+ producer principals; watch `longestWaitMs`.
 
 ## 3. Start the master
 
 ```sh
 node "$GRAPHYARD_CLI" master init --url https://YOUR-GRAPHYARD-HOST --herdr-workspace HERDR_WORKSPACE_ID \
   --browser-profile Default --token-stdin < ~/.config/graphyard/INSTALL/tokens/INSTALL-master.token
-node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST   # installs the executors
+node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST
 node "$GRAPHYARD_CLI" master start codex
 ```
 
-Run it under an OS identity whose GitHub credentials workers cannot read. `--browser-profile` is the administrator's GitHub-signed-in Chrome profile, for `master browser` flows; *Confirm access* in GitHub Mobile stays human-only. Add the reviewer: `master reviewer setup`, `master reviewer add PROFILE` ([Claude](../examples/master/claude-reviewer.json)).
+Run it under an OS identity whose GitHub credentials workers cannot read. `--browser-profile` is the administrator's GitHub-signed-in Chrome profile for `master browser` flows; *Confirm access* in GitHub Mobile stays human-only. Add the reviewer: `master reviewer setup`, `master reviewer add PROFILE` ([Claude](../examples/master/claude-reviewer.json)).
 
 ### The loop must be supervised
 
