@@ -173,22 +173,22 @@ test('integration:exhaustion-only-provider-notice — a stopped session narratin
 
   // The provider's own limit notice, on the same stopped session, is the real thing: the attempt
   // ends on the record, with the reset time the notice names parsed onto the account hold.
-  const resetsAt = '2026-10-01T00:00:00Z';
+  const resetsAt = new Date(Math.ceil(Date.now() / 3_600_000) * 3_600_000 + 5 * 86_400_000).toISOString(); // a future hour, whatever the date
   herdr.output['agent-builder'] = `● Update(feature.ts)\n  ⎿ You've hit your usage limit · resets ${resetsAt}\n`;
   clock.skewMs += 20_000;
   await cycle(state);
   const failover = state.actions[failoverKey('worker', work, 1)];
   assert.equal(failover?.state, 'done', failover?.detail);
   assert.match(failover.detail, /exhausted env-a mid-session \(You've hit your usage limit/);
-  assert.match(failover.detail, /resets 2026-10-01T00:00:00\.000Z/);
+  assert.ok(failover.detail.includes(`resets ${resetsAt}`), failover.detail);
   work = await reload(work.id);
   assert.equal(work.lease, null, 'the attempt ended on the record');
   assert.equal(work.pipeline!.attempts[0].end, 'released');
   assert.equal(work.capacity!.exhaustions[0].account, 'env-a');
   assert.equal(work.capacity!.exhaustions[0].reason, `You've hit your usage limit · resets ${resetsAt}`);
-  assert.equal(work.capacity!.exhaustions[0].resetsAt, '2026-10-01T00:00:00.000Z', 'the notice\'s reset time is recorded as parsed');
+  assert.equal(work.capacity!.exhaustions[0].resetsAt, resetsAt, 'the notice\'s reset time is recorded as parsed');
   assert.deepEqual(calls.stopped, [`${work.key}:1`], 'the supervisor is stopped through the containment scope it recorded');
-  assert.equal((await observedExhaustions(config))['env-a']?.until, '2026-10-01T00:00:00.000Z', 'the spent account is held until it resets');
+  assert.equal((await observedExhaustions(config))['env-a']?.until, resetsAt, 'the spent account is held until it resets');
 
   // And the hold keeps the next dispatch off the spent account, whatever the item's readiness.
   clock.skewMs += 20_000;
