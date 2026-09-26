@@ -43,6 +43,16 @@ const evidenceArtifact = z.object({
   digest: z.string().regex(/^sha256:[a-f0-9]{64}$/).optional(), expiresAt: z.iso.datetime().optional(),
   availability: z.enum(['available', 'expired', 'redacted', 'missing', 'upload-failed', 'external']), url: publicArtifactUrl.optional(),
 }).strict().refine(value => value.availability === 'external' ? !!value.url : !value.url, 'Only external artifacts may carry a public URL');
+/**
+ * A planned or requested path never begins with '-' (GY-522): such an entry is a command-line flag
+ * a client failed to parse, such as `--wait` after the paths of `scope-request`, and recording it
+ * would put a flag in plannedFiles, which any decision built from it is then refused for. The
+ * refusal names the entry so the asker sees what was mistaken for a path.
+ */
+export function flagPathRefusal(paths: readonly string[] | undefined, field: string) {
+  const flag = paths?.find(path => path.startsWith('-'));
+  return flag === undefined ? null : `${field} entry '${flag}' begins with '-': it is a command-line flag, not a repository path`;
+}
 // Longer than acknowledgeContainment's three 30-second HTTP attempts plus retry delays.
 export const launchFenceMs = 120_000;
 export const containmentScopeSchema = z.object({ unit: z.string().trim().min(1).max(200), pid: z.number().int().positive() }).strict();
@@ -509,6 +519,7 @@ export class Engine {
       }
       if (command === 'requirements') {
         if (actor.role !== 'operator-agent') admin(actor);
+        const flag = flagPathRefusal(data.plannedFiles, 'plannedFiles'); demand(!flag, flag!, 422);
         demand(!work.observation?.merged, 'Merged work requires a follow-up task');
         // A purely additive planned-files widening is non-weakening intent: applied to a live
         // attempt it keeps the lease (and any containment fence) so the worker never hands the
@@ -744,6 +755,7 @@ export class Engine {
           // Withdrawing the ask withdraws the refusal it earned; the item is no longer blocked on scope.
           if (work.blocker?.startsWith(scopeRefusalBlocker)) work.blocker = null;
         } else {
+          const flag = flagPathRefusal(data.paths, 'Requested path') ?? flagPathRefusal(data.remove, 'Removed path'); demand(!flag, flag!, 422);
           const outside = data.paths.filter((path: string) => !(work.plannedFiles ?? []).some(planned => pathScopeContains(planned, path)));
           demand(outside.length || data.remove?.length || data.criteria?.length, 'Every named path is already inside plannedFiles; no scope request is needed');
           // A fresh ask is undecided by construction: the loop decides it on its next cycle, and
@@ -835,6 +847,7 @@ export class Engine {
             activeLease(work, actor, data.epoch, now);
           } else if (data.epoch !== undefined) activeLease(work, actor, data.epoch, now);
           demand(data.type !== 'scope-request' || data.paths?.length, 'A scope request names its attempt epoch and the paths it needs');
+          const flag = flagPathRefusal(data.paths, 'Requested path'); demand(!flag, flag!, 422);
           demand(data.type !== 'decision' || data.action, 'A decision request names the action an independent approver must approve');
           demand(data.type !== 'escalation' || data.trigger, 'An escalation request names the trigger it raises');
           const request: AgentRequest = { id: randomUUID(), type: data.type, epoch: data.epoch ?? null, requestedBy: actor.id, at: now.toISOString(), reason: data.reason,
