@@ -1,4 +1,4 @@
-<!-- page: Operate Graphyard | 2 | the App, protection, the merge queue, CI proofs. -->
+<!-- page: Operate Graphyard | 2 | App, protection, merge queue, CI proofs. -->
 # GitHub enforcement
 
 The installer's App publishes **`Graphyard / merge`** on the exact PR head.
@@ -55,7 +55,7 @@ Reviews and proofs bind one head, base and policy revision. The queue head's tip
 
 ### Direct merges
 
-Without a queue, mergeable `CLEAN`, `UNSTABLE` (optional checks failing) and `HAS_HOOKS` PRs merge at once, head-bound; pending five minutes is `merge-stalled`.
+Without a queue, mergeable `CLEAN`, `UNSTABLE` (optional checks failing) and `HAS_HOOKS` PRs merge at once, head-bound; five minutes pending is `merge-stalled`.
 
 ### Proofs in CI
 

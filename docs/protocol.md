@@ -9,4 +9,4 @@
 3. [Leases, workspaces and supervision](protocol/leases.md) — leases, workspaces, `watch`.
 4. [Evidence and proof authority](protocol/evidence.md) — evidence, grants, revocation.
 5. [GitHub webhook and review providers](protocol/github-webhook.md) — webhook and dispatch records.
-6. [Pipeline timeline](protocol/pipeline-speed.md) — the per-item timeline.
+6. [Pipeline timeline](protocol/pipeline-speed.md) — the `pipeline` field.
