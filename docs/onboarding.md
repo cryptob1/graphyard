@@ -35,7 +35,7 @@ CLAUDE_CONFIG_DIR=~/.coding_agents/claude-a claude                       # /logi
 node "$GRAPHYARD_CLI" master environments --apply                        # report quota, write profiles
 ```
 
-Profiles default to `"approvals": "auto"` so sessions never block on a prompt; `"prompt"` is refused at launch ([modes](master-agent-sessions.md#approval-modes)).
+Profiles default to `"approvals": "auto"` so sessions never block on a prompt (trade-off: unattended sessions); `"prompt"` is refused at launch ([modes](master-agent-sessions.md#approval-modes)).
 
 ### Configure the fleet
 
@@ -68,7 +68,7 @@ node "$GRAPHYARD_CLI" master registry account set claude-b --runtime claude --mo
 node "$GRAPHYARD_CLI" master registry account quota opencode-a exhausted --resets-at 2026-09-22T00:00:00Z --reason "Plan exhausted"
 ```
 
-`--key-file zai.key --key-variable ZAI_API_KEY` names a 0600 home key file by reference, read into that variable per headless run. New or changed Pi accounts are smoke-tested: a failure (Pi's error) bars the account; two unjudged runs of a role bar it from that role an hour.
+`--key-file zai.key --key-variable ZAI_API_KEY` names a 0600 home key file, read into that variable per run. New or changed Pi accounts are smoke-tested; a failure bars the account, two unjudged runs bar it from that role an hour.
 
 ### Add a role
 
@@ -81,13 +81,13 @@ node "$GRAPHYARD_CLI" master registry role set reviewer codex-a,claude-c --concu
 
 ### Size review and proof capacity
 
-Each candidate needs one review and one producer session per proof group; a profile's `"concurrency"` caps its sessions, live:
+Each candidate needs one review and one producer session per proof group; a profile's `"concurrency"` caps its sessions, changed without a restart:
 
 ```json
 "reviewers":[{"name":"claude-reviewer","agentName":"review-claude","kind":"claude","accounts":["claude-a","claude-b"],"concurrency":3}]
 ```
 
-For `W` workers and `G` proof groups: `⌈W / 2⌉` review slots and `G × ⌈W / 2⌉` producer slots over two or more producer principals. Watch `longestWaitMs`.
+Adding workers? For worker count `W` and `G` proof groups: `⌈W / 2⌉` review slots and `G × ⌈W / 2⌉` producer slots over two or more producer principals. Watch `longestWaitMs`.
 
 ## 3. Start the master
 
@@ -98,7 +98,7 @@ node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST   # now installs th
 node "$GRAPHYARD_CLI" master start codex     # or: master start claude
 ```
 
-Run it under an OS identity whose GitHub credentials workers cannot read. `--browser-profile` is the Chrome profile signed in to GitHub as admin; GitHub Mobile *Confirm access* stays human-only. Add the reviewer with `master reviewer setup` and `master reviewer add PROFILE` ([Claude](../examples/master/claude-reviewer.json) template); its manifest flow is the only App confirmation.
+Run it under an OS identity whose GitHub credentials workers cannot read. `--browser-profile` is the Chrome profile signed in to GitHub as admin, for `master browser` flows; GitHub Mobile *Confirm access* stays human-only. Add the reviewer with `master reviewer setup` and `master reviewer add PROFILE` ([Claude](../examples/master/claude-reviewer.json) template); its manifest flow is the only App confirmation.
 
 ### The loop must be supervised
 
