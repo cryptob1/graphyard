@@ -503,7 +503,8 @@ test('unit:context-overflow-surfaced — master status names the item, its trigg
   assert.deepEqual(await contextOverflows(async () => { throw new Error('offline'); }, [work]), []);
   // master status carries it: the report adds these items to its attention list and its count.
   const report = await readFile(join(root, 'src/cli/master-status.ts'), 'utf8');
-  assert.match(report, /const overflow = await contextOverflows\(masterApi, snapshot\.work\);/);
+  // As an optional section (GY-422): a context read that throws marks it unavailable, never the report.
+  assert.match(report, /const overflow = await sections\.optional\('escalation contexts', [^,]+, \(\) => contextOverflows\(masterApi, snapshot\.work\),/);
   assert.match(report, /attentionItems\.push\(\.\.\.generatedFiles, \.\.\.overflow\)/);
   // The overflow items count toward the attention total, wherever other reports sit beside them.
   assert.match(report, /attention: status\.counts\.attention \+[^\n]*\+ overflow\.length \+/);
