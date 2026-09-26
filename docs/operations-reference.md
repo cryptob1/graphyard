@@ -1,4 +1,4 @@
-<!-- page: Operate Graphyard | 9 | every recovery procedure and limit. -->
+<!-- page: Operate Graphyard | 9 | recovery procedures and limits. -->
 # Operations reference
 
 ## Master coordination loop
@@ -39,7 +39,7 @@ Observation spends the hourly limit, webhook-first.
 | --- | --- | --- |
 | `merge` | heads the queue or passes every other gate | 20 seconds |
 | `active` | waiting on a check, review, base refresh or rework | 1 minute |
-| `steady` | unchanged since last observed | 5 minutes, stretched by the fleet bound |
+| `steady` | unchanged since last observed | 5 minutes, fleet-stretched |
 | `idle` | next action is dispatch or escalation | 5 minutes, stretched when unchanged |
 
 Unchanged non-merge candidates spend **at most 40%** (`steadyStateShare`) of the limit.
@@ -50,7 +50,7 @@ Below **500 requests** by default, `GRAPHYARD_GITHUB_RESERVE`, non-merge observa
 
 ### What an observation costs
 
-About ten requests uncached; unchanged, none.
+About ten uncached; unchanged, none.
 
 ### What a pause means for gates
 
@@ -58,7 +58,7 @@ A rate-limit `403`/`429` pauses requests; gates read stale until it lifts: nothi
 
 ### Reading the budget
 
-`graphyard status` (or `GET /api/status`) → `githubBudget`; `master status` attention items with subject `github`.
+`graphyard status` (or `GET /api/status`) → `githubBudget`; `master status` attention subject `github`.
 
 ### Webhook liveness
 

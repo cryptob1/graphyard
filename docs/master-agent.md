@@ -18,7 +18,7 @@ Keep cycling: status, dispatch, review, merge, deployment verification. Stop onl
 5. `master verify-deployment GY-N` after delivery ([refusals](operations-reference.md#perpetual-master-loop)). Railway: `master config productionEnvironment='graphyard / production'`.
 6. Close finished agent sessions.
 
-Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions. `controlPlane.production` flags main ahead of production; both recover without a master session ([recoveries](deployment.md#production-deployment-observation)).
+Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions. `controlPlane.production` flags main ahead of production, which [self-recovers](deployment.md#production-deployment-observation).
 
 `master run` runs this loop under the `graphyard-master.service` unit ([supervision](onboarding.md#the-loop-must-be-supervised)); restart it (`systemctl --user restart graphyard-master`) when `daemon.liveness` is `stalled` or `absent`.
 

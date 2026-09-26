@@ -47,7 +47,7 @@ Store its token as `GRAPHYARD_CI_PRODUCER_TOKEN` on the `graphyard-reporting` en
 
 When the serving commit (`GRAPHYARD_BUILD_SHA`) changes, undeployed merges are compared once, recording answers (`delivery.deployment-contained`, `production.deployment-pending`); a same-commit restart compares nothing. One unserved after five minutes is a `delivery.deployment-incident`; `master status` shows `main is N commits ahead of production`. Probe: `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`.
 
-When main is ahead with no attempt in flight, the watch re-deploys the branch tip (hourly); the loop records the throughput measurement per release under `.graphyard/measurements/throughput`. Neither waits on a master session.
+With main ahead and no deploy in flight, the watch re-deploys its tip hourly; the loop records throughput per release in `.graphyard/measurements/throughput`, without a master session.
 
 ## Backup, upgrade, rollback
 
@@ -60,7 +60,7 @@ node bin/graphyard.mjs db verify FILE
 
 ## Manual fallback
 
-Only for an unsupported platform or an existing deployment: set the variables table by hand, run `node "$GRAPHYARD_CLI" github-setup https://YOUR-DOMAIN`, verify with `doctor`.
+For an unsupported platform or existing deployment: set the variables table by hand, run `node "$GRAPHYARD_CLI" github-setup https://YOUR-DOMAIN`, verify with `doctor`.
 
 - Compose: `cp .env.example .env`, replace every secret, `docker compose --profile full up -d`; front 4310 with TLS, never expose Postgres.
 - Kubernetes: `helm install graphyard deploy/helm/graphyard --set secrets.existingSecret=graphyard-credentials …`.
