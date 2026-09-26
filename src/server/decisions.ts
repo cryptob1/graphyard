@@ -8,6 +8,7 @@ import { canonical, decisionRace, readDecisions, resolvePin, samePin, type Decis
 import type { Services } from './routes.js';
 import { refuseDecision, withdrawDecision } from './decision-refusal.js';
 import { precedentAvailability } from './escalation-context.js';
+import { applyTriageClosure } from './followups.js';
 import { mergePath, namedMergePathFault } from '../master/repair-lane.js';
 
 type Db = pg.PoolClient;
@@ -236,6 +237,7 @@ export async function applyThroughEngine(services: Services, decision: DecisionR
     case 'rework': await engine.execute(actor, 'rework', decision.workId, { reason, previousWorkerStopped: true }, key); return 'Rework authorized';
     case 'recover': await engine.execute(actor, 'recover', decision.workId, { reason, previousWorkerStopped: true }, key); return 'Containment quarantine recovered';
     case 'attest': await engine.execute(actor, 'evidence', decision.workId, input, key, { attestation: { decision: decision.id, requestedBy: decision.requestedBy, approvedBy: approver.id } }); return `${input.proof} attested ${input.result} for ${input.sha}`;
+    case 'close': return applyTriageClosure(services, actor, decision.workId, input, decision.id, key);
     case 'grant': { const grant = await services.proofGrants.grant(actor, input.principal, { patterns: input.patterns, reason, ...(input.expectedRevision === undefined ? {} : { expectedRevision: input.expectedRevision }) }, key); return `Granted ${input.patterns.join(', ')} to ${input.principal} (grant revision ${grant.revision})`; }
     default: throw new Error(`No engine application for ${decision.action}`);
   }
