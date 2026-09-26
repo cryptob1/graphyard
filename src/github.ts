@@ -2136,6 +2136,10 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
   // it only when the installation actually changed (see Store.releaseHeldJobs).
   const heldOn = () => installationFingerprint(github.permissionReport?.() ?? null);
   let held: string | null = null;
+  // Whether this run saved an observation (GY-506): every claimed job either saves one or records
+  // why it did not — in the job's error, hold or deferral — and the job's consecutive
+  // no-observation count is reset or incremented accordingly, whichever way it ends.
+  let observed = false;
   // What this job's observation cost and when the next one is due (GY-117). The reserve is decided
   // before the observation, from the state the item starts in; the cadence after it, from the
   // state it produced. The meter counts every request the job makes, the check publication and
@@ -2150,7 +2154,7 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
     const { value: settled, requests, uncached } = await metered(async (): Promise<boolean> => {
       if (!work?.submission || work.stage === 'done') return false;
       held = hold('observation');
-      if (held) { await engine.store.holdJob(job.work_id, job.token, held, permissionHoldMs, heldOn()); return true; }
+      if (held) { await engine.store.holdJob(job.work_id, job.token, held, permissionHoldMs, heldOn(), observed); return true; }
       const now = new Date();
       github.noteFleet?.(openCandidates(all));
       // Below the merge-path reserve, an observation that is neither a merge-gate candidate's nor
@@ -2159,13 +2163,14 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
       // in the ledger, and is rescheduled to the pause's end below, which is the incident's record.
       const budget = github.budget?.(now.getTime());
       const deferral = budget && !budget.paused ? reserveDecision(observationBand(work, all, now).band, budget, !!job.woken, now) : null;
-      if (deferral) { github.recordDeferral(work.id, deferral); await engine.store.deferJob(job.work_id, job.token, deferral.until); return true; }
+      if (deferral) { github.recordDeferral(work.id, deferral); await engine.store.deferJob(job.work_id, job.token, deferral.until, deferral.reason, observed); return true; }
       // A tight budget leaves idle observations to webhook wakes and conditional reads (GY-567).
       const idle = budget && !budget.paused ? tightBudgetDecision(observationBand(work, all, now).band, budget, !!job.woken, now) : null;
-      if (idle) { github.recordDeferral(work.id, idle); await engine.store.deferJob(job.work_id, job.token, idle.until); return true; }
+      if (idle) { github.recordDeferral(work.id, idle); await engine.store.deferJob(job.work_id, job.token, idle.until, idle.reason, observed); return true; }
       const previous = work.observation ?? null;
       const observation = await github.observe(work, all);
       work = await engine.observe(work.id, work.revision, observation, job.token);
+      observed = true;
       schedule.cadence = observationCadence(work, all.map(item => item.id === work!.id ? work! : item), now, previous, github.steadyStateMs?.(now.getTime()));
       // A branch carrying another item's unlanded commits is restored by the control plane (GY-127):
       // on its own for a tip the queue ejected, on the coordinator's request otherwise. The restored
@@ -2174,7 +2179,7 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
       if (owed) {
         const restored = await restoreBranch(engine, github, work, owed, job, guard, hold);
         work = restored.work; held ??= restored.held;
-        if (restored.published) { await engine.store.finishJob(job.work_id, job.token, undefined, true); return true; }
+        if (restored.published) { await engine.store.finishJob(job.work_id, job.token, undefined, true, undefined, observed); return true; }
       }
       // A base branch that moved under this candidate is Graphyard's to absorb, not the worker's.
       // The republished head is what the review, the checks and the proofs then bind to, so the
@@ -2182,7 +2187,7 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
       if (baseRefreshNeeded(work)) {
         const refreshed = await refreshBase(engine, github, work, job, guard, hold);
         work = refreshed.work; held ??= refreshed.held;
-        if (refreshed.published) { await engine.store.finishJob(job.work_id, job.token, undefined, true); return true; }
+        if (refreshed.published) { await engine.store.finishJob(job.work_id, job.token, undefined, true, undefined, observed); return true; }
       }
       const provider = reviewProviderOf(work.policy);
       // A head behind the base tip is reviewed when it merges cleanly (GY-191): the queue
@@ -2226,7 +2231,7 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
         const advanced = await advanceQueue(engine, github, work, job, guard, hold);
         work = advanced.work; held ??= advanced.held;
         // A freshly published tip replaces the PR head; the next observation binds the gates to it.
-        if (advanced.published) { await engine.store.finishJob(job.work_id, job.token, undefined, true); return true; }
+        if (advanced.published) { await engine.store.finishJob(job.work_id, job.token, undefined, true, undefined, observed); return true; }
       }
       if (!observation.merged) {
         const unpublishable = hold('check');
@@ -2255,14 +2260,16 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
     if (cadence && work) github.recordObservation?.(work.id, { requests, uncached, band: cadence.band, cadenceMs: cadence.ms });
     if (settled) return true;
     if (work?.stage === 'done') await engine.store.pool.query('DELETE FROM jobs WHERE work_id=$1 AND token=$2', [job.work_id, job.token]);
-    if (held) await engine.store.holdJob(job.work_id, job.token, held, permissionHoldMs, heldOn());
-    else await engine.store.finishJob(job.work_id, job.token, undefined, false, cadence?.ms ?? (head ? headObservationSeconds : idleObservationSeconds) * 1000);
+    if (held) await engine.store.holdJob(job.work_id, job.token, held, permissionHoldMs, heldOn(), observed);
+    // An item with no submission has nothing to observe: the job says so and is not counted as starved.
+    else if (work && !work.submission && work.stage !== 'done') await engine.store.deferJob(job.work_id, job.token, new Date(Date.now() + idleObservationSeconds * 1000).toISOString(), 'no submission to observe', null);
+    else await engine.store.finishJob(job.work_id, job.token, undefined, false, cadence?.ms ?? (head ? headObservationSeconds : idleObservationSeconds) * 1000, observed);
   } catch (error) {
     const message = error instanceof Error ? error.message : 'GitHub reconciliation failed';
     // A rate-limit pause is one incident, not a retry every 45 seconds into the same refusal:
     // the job keeps the error and comes back when the pause lifts (a webhook still wakes it).
     const paused = github.budget?.().paused;
-    if (paused && error instanceof Refusal && /requests paused/.test(message)) { await engine.store.finishJob(job.work_id, job.token, message, false, Math.max(2000, Date.parse(paused.until) - Date.now() + 1000)); return true; }
+    if (paused && error instanceof Refusal && /requests paused/.test(message)) { await engine.store.finishJob(job.work_id, job.token, message, false, Math.max(2000, Date.parse(paused.until) - Date.now() + 1000), observed); return true; }
     const current = (await engine.store.pool.query('SELECT document,clock_timestamp() AS now FROM work_items WHERE id=$1', [job.work_id])).rows[0];
     const latest = current?.document as Work | undefined;
     if (latest?.candidate && latest.stage !== 'done' && !hold('check')) try { await github.publish(latest, 'Reconciliation failed; fresh verification required', guard(latest, false)); } catch { /* Durable retry follows. */ }
@@ -2277,7 +2284,11 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
     // (the preflight already passes) therefore stays held for the bounded hold, one attempt
     // per hold, instead of being released into the same 403 by every passing preflight.
     if (error instanceof GitHubPermissionRefusal) { await engine.store.refuseJob(job.work_id, job.token, message, permissionRefusalLimit, permissionHoldMs, heldOn()); return true; }
-    await engine.store.finishJob(job.work_id, job.token, error instanceof ReconciliationRetry ? undefined : message, error instanceof ReconciliationRetry);
+    const retry = error instanceof ReconciliationRetry;
+    // A concurrency retry comes back within seconds and is not an operator error, but a run that
+    // saved no observation never ends silent: the reason stands on the job record (GY-506).
+    if (retry && !observed) { await engine.store.retryJob(job.work_id, job.token, message, observed); return true; }
+    await engine.store.finishJob(job.work_id, job.token, retry ? undefined : message, retry, undefined, observed);
   } finally {
     // The throughput ledger (GY-492): how long the claimed job took, however it ended, so master
     // status can report what the workers actually achieve and name the lag a queue head suffers.
