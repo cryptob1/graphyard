@@ -6,7 +6,7 @@ import { Store, save, wakeJob, documentBefore, eventWorkSql } from './store.js';
 import { compactHeartbeatReceipt } from './store/receipts.js';
 import { authorizedForProof, unauthorizedProofs } from './proof-grants.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, submittedEpoch, type Attestation, requireCurrent, createSchema, criterionSchema, bindingApproval, carriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
+import { activeLease, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, submittedEpoch, type Attestation, requireCurrent, createSchema, criterionSchema, bindingApproval, carriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type ApprovalIdentity, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
 import { Refusal } from './model/refusal.js';
 import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
@@ -1293,12 +1293,17 @@ export class Engine {
     // bind the replaced head now — exact on it, or already carried onto it. `from` is that
     // reviewed head in every case; a record that predates `reviewedHead` names the merge's own.
     const from = { sha: speculation.reviewedHead ?? speculation.merge?.from ?? candidate.sha, baseSha: candidate.baseSha };
+    // The record's own binding first; the publisher's fresh read of the replaced tip's approval
+    // (GY-519) fills in when the stored observation predates it — a republication must never drop
+    // an approval of the patch it re-shows just because the observation had not caught up.
+    const approval = bindingApproval(work) ?? this.publicationApproval(work, speculation);
     // What the reviewer read is the reviewed head's own change, never the replaced tip's pull
     // request diff: GitHub lists that against the base branch, so a tip built behind an entry that
     // has not landed lists the entry's files too, and a rebuild after the entry is ejected would
-    // then be refused for files nobody reviewed.
-    const reviewedFiles = reviewedFilesOf(work, from.sha);
-    const approval = bindingApproval(work);
+    // then be refused for files nobody reviewed. An approval read off the replaced tip itself
+    // (GY-519) was given on that tip's diff, so the tip's own recorded files are what it read.
+    const reviewedFiles = reviewedFilesOf(work, from.sha)
+      ?? (approval?.sha === candidate.sha ? reviewedFilesOf(work, candidate.sha) : null);
     const input = {
       from, to: { sha: speculation.tip, baseSha: speculation.base }, policyRevision: work.policyRevision, at: now.toISOString(),
       predecessor: { key: aheadKey, validated }, reviewedFiles: reviewedFiles ?? [],
@@ -1309,11 +1314,16 @@ export class Engine {
     // never refused for lacking a merge (see merge-queue.ts decideIdentityCarry).
     const carry = !speculation.merge && speculation.tip === from.sha ? decideIdentityCarry({ ...input, baseChanges: speculation.baseChanges })
       : decideCarry({ ...input, merge: speculation.merge, app: this.controlPlaneAppId ? `control-plane (App ${this.controlPlaneAppId})` : 'control-plane' });
-    // A binding carries only from the head the tip was built from. One given on another commit —
-    // the replaced head, when the walk to the reviewed head stepped past it — never saw the
-    // content the tip holds, unless a recorded decision already carried it onto that head.
+    // A binding carries only from the head the tip was built from. One given on another commit
+    // binds it anyway when a recorded decision already carried it onto that head — or, for an
+    // approval of the tip being replaced (GY-519), when the replaced tip was itself the control
+    // plane's own Graphyard-authored publication over the same author head with the same patch:
+    // the reviewer judged exactly the change this tip re-shows.
     const reaches = onto(work, from.sha);
-    if (carry.approval.carried && approval && approval.sha !== from.sha && !reaches.some(entry => entry.approval.carried && entry.approval.originalSha === approval.sha)) {
+    const bound = !!approval && approval.sha !== from.sha && (reaches.some(entry => entry.approval.carried && entry.approval.originalSha === approval.sha)
+      || this.replacedTipOfAuthor(work, from.sha) && (approval.sha === candidate.sha
+        || onto(work, candidate.sha).some(entry => entry.approval.carried && entry.approval.originalSha === approval.sha)));
+    if (carry.approval.carried && approval && approval.sha !== from.sha && !bound) {
       carry.approval = { carried: false, reason: `the approval by ${approval.reviewer} was given on ${approval.sha.slice(0, 12)}, not on the reviewed head ${from.sha.slice(0, 12)} tip ${speculation.tip.slice(0, 12)} was built from, and no recorded decision carried it there; a fresh independent approval of ${speculation.tip.slice(0, 12)} is required` };
     }
     if (carry.approval.carried && reviewedFiles === null) {
@@ -1325,6 +1335,34 @@ export class Engine {
       return { ...entry, carried: false, reason: `evidence ${evidence.id} was produced on ${evidence.sha.slice(0, 12)}, not on the reviewed head ${from.sha.slice(0, 12)} tip ${speculation.tip.slice(0, 12)} was built from, and no recorded decision carried it there; fresh evidence for ${speculation.tip.slice(0, 12)} is required` };
     });
     return carry;
+  }
+  /**
+   * The approval of the tip being replaced that the publisher read from GitHub immediately before
+   * the force-push (GY-519), as the binding the carry decides from when the record has none of its
+   * own: the stored observation can predate the approval, and without it a republication would
+   * re-require a review of the patch being republished. Only a GitHub review provider binds it.
+   */
+  private publicationApproval(work: Work, speculation: QueueSpeculation): ApprovalIdentity | null {
+    const observed = speculation.observedApproval;
+    if (!observed || !work.policy.review || reviewProviderOf(work.policy) !== 'github') return null;
+    return { provider: 'github', reviewer: observed.reviewer, sha: observed.sha, ...(observed.reviewId !== undefined ? { reviewId: observed.reviewId } : {}) };
+  }
+  /**
+   * Whether the head this tip replaces (the candidate as the record still binds it) was itself the
+   * control plane's own Graphyard-authored tip over `authorHead` (GY-519): the record names the
+   * same author head under it, GitHub's account recorded at its publication shows the App authored
+   * it over exactly that head and its predicted base without a conflict, and the patch-id it was
+   * approved under is the one on record wherever both sides could be read.
+   */
+  private replacedTipOfAuthor(work: Work, authorHead: string): boolean {
+    const candidate = work.candidate!, previous = work.queue?.speculation;
+    if (!previous || previous.tip !== candidate.sha || candidate.sha === authorHead || previous.policyRevision !== work.policyRevision) return false;
+    if ((previous.reviewedHead ?? previous.merge?.from ?? null) !== authorHead) return false;
+    const merge = previous.merge;
+    if (!merge || merge.from !== authorHead || !merge.authoredByApp || merge.conflicts) return false;
+    const parents = new Set(merge.parents);
+    if (parents.size !== 2 || !parents.has(authorHead) || !parents.has(previous.base)) return false;
+    return !merge.diff?.reviewed || !merge.diff?.tip || merge.diff.reviewed === merge.diff.tip;
   }
   /**
    * Records what the control plane did about a base branch that moved under an in-flight
@@ -1406,11 +1444,13 @@ export class Engine {
     });
   }
   /**
-   * Restores an approval GitHub dismissed for a merge-base change while the head was unchanged
-   * (GY-127) as the binding one, carried from the head to itself: the reviewed content is exactly
-   * what the reviewer approved, so no review round and no reviewer attempt is spent on it, and the
-   * merge broker re-posts it through the reviewer App before the merge as it re-posts any carried
-   * approval. Decided before the gates are evaluated, so no review request is ever opened for it.
+   * Restores an approval GitHub dismissed for a merge-base change as the binding one, carried from
+   * the head it was given on to the current candidate: unchanged heads (GY-127) and replaced tips
+   * whose dismissal was the control plane's own republication (GY-519, see `dismissedApproval`).
+   * The reviewed content is exactly what the reviewer approved, so no review round and no reviewer
+   * attempt is spent on it, and the merge broker re-posts it through the reviewer App before the
+   * merge as it re-posts any carried approval. Decided before the gates are evaluated, so no
+   * review request is ever opened for it.
    */
   private restoreDismissedApproval(work: Work, now: Date): RestoredApproval | null {
     if (exactApproval(work) || carriedApproval(work)) return null;
@@ -1418,17 +1458,25 @@ export class Engine {
     if (!dismissed) return null;
     const candidate = work.candidate!, observation = work.observation!, at = now.toISOString();
     const short = candidate.sha.slice(0, 12);
-    const approval: CarriedApproval = { provider: 'github', reviewer: dismissed.reviewer, sha: candidate.sha, ...(dismissed.reviewId !== undefined ? { reviewId: dismissed.reviewId } : {}), carried: true, originalSha: candidate.sha,
-      reason: `approval of ${short} by ${dismissed.reviewer}${dismissed.reviewId !== undefined ? ` (review ${dismissed.reviewId})` : ''} restored: GitHub dismissed it with "${dismissed.dismissal.reason}" while the head was unchanged, so the reviewed content is exactly what was approved; the reviewer App re-posts it before the merge` };
-    const restored: RestoredApproval = { reviewer: dismissed.reviewer, ...(dismissed.reviewId !== undefined ? { reviewId: dismissed.reviewId } : {}), sha: candidate.sha, dismissal: dismissed.dismissal, at };
+    const review = dismissed.reviewId !== undefined ? ` (review ${dismissed.reviewId})` : '';
+    // A replaced tip's approval names both tips: the one it was given on, and the one it binds now.
+    const originalSha = dismissed.originalSha !== undefined && dismissed.originalSha !== candidate.sha ? dismissed.originalSha : null;
+    const replaced = originalSha !== null;
+    const approval: CarriedApproval = { provider: 'github', reviewer: dismissed.reviewer, sha: candidate.sha, ...(dismissed.reviewId !== undefined ? { reviewId: dismissed.reviewId } : {}), carried: true, originalSha: originalSha ?? candidate.sha,
+      reason: replaced
+        ? `approval of ${originalSha!.slice(0, 12)} by ${dismissed.reviewer}${review} restored and carried to tip ${short}: GitHub dismissed it for the control plane's own force-push of ${short} over the unchanged author head (patch-id unchanged), so the reviewed content is exactly what was approved; the reviewer App re-posts it before the merge`
+        : `approval of ${short} by ${dismissed.reviewer}${review} restored: GitHub dismissed it with "${dismissed.dismissal.reason}" while the head was unchanged, so the reviewed content is exactly what was approved; the reviewer App re-posts it before the merge` };
+    const restored: RestoredApproval = { reviewer: dismissed.reviewer, ...(dismissed.reviewId !== undefined ? { reviewId: dismissed.reviewId } : {}), sha: candidate.sha, ...(replaced ? { originalSha } : {}), dismissal: dismissed.dismissal, at };
     const same = { sha: candidate.sha, baseSha: candidate.baseSha };
+    const from = replaced ? { sha: originalSha!, baseSha: candidate.baseSha } : same;
     const carry = (existing: BaseRefresh['carry'] | undefined) => existing && existing.to.sha === candidate.sha && existing.to.baseSha === candidate.baseSha && existing.policyRevision === work.policyRevision
       ? { ...existing, approval }
-      : { from: same, to: same, policyRevision: work.policyRevision, at, predecessor: 'base branch', changedFiles: [], reviewedFiles: observation.files, approval, evidence: [] };
+      : { from, to: same, policyRevision: work.policyRevision, at, predecessor: 'base branch', changedFiles: [], reviewedFiles: observation.files, approval, evidence: [] };
     const speculation = work.queue?.speculation;
     if (speculation && speculation.tip === candidate.sha && speculation.policyRevision === work.policyRevision) {
-      speculation.carry = carry(speculation.carry); speculation.restoredApproval = restored;
-    } else if (work.baseRefresh && work.baseRefresh.head === candidate.sha && work.baseRefresh.policyRevision === work.policyRevision) {
+      speculation.carry = carry(speculation.carry);
+      if (!replaced) speculation.restoredApproval = restored;
+    } else if (work.baseRefresh && work.baseRefresh.head === candidate.sha && work.baseRefresh.policyRevision === work.policyRevision && !replaced) {
       work.baseRefresh.carry = carry(work.baseRefresh.carry); work.baseRefresh.restoredApproval = restored;
     } else if (work.baseRefresh && work.baseRefresh.head === null && work.baseRefresh.from.sha === candidate.sha && work.baseRefresh.policyRevision === work.policyRevision) {
       // A record of this very head that republished nothing — a refresh whose merge conflicted, or
@@ -1437,6 +1485,10 @@ export class Engine {
       // conflict, the repair moves the branch), and replacing the record would drop the conflict
       // the worker owes or the pending repair, and have the refresh retried for a conflict already
       // recorded. No review is asked for it meanwhile: the head does not contain the base tip.
+      return null;
+    } else if (replaced) {
+      // A replaced tip's approval is restored only onto the queue tip that replaced it; anything
+      // else has no record to carry it through, and the review stays required.
       return null;
     } else {
       // The head is neither a queue tip nor a refreshed head: the restored binding is recorded as
