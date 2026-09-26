@@ -15,6 +15,7 @@ import { closedQuestionFor } from './model/closed-question.js';
 import { paneAlreadyGone, withPaneGone } from './request-settlement.js';
 import { narrowRoleRuntime, piRuntimeSchema } from './runner/payloads.js';
 import { liveRun, registeredRun } from './runner/registry.js';
+import { sessionVerificationEnvironment } from './master/harness.js';
 import { narrowRunner, piProducerPrompt, producerRunOptions, registryRunner, startNarrowRun, submitEvidence } from './runner/roles.js';
 import { runRecordSchema, type RunRecord, type Runner } from './runner/types.js';
 
@@ -292,7 +293,7 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
     let pane: string | undefined, tabId: string | undefined, delivery: RequestDelivery | undefined, consent: z.infer<typeof consentAnswerSchema>[] = [];
     try {
       const harness = await prepareSessionHarness(root, config, { role: 'producer', kind: launch.kind, profile: profile.name, credentialFiles: [profile.credentialFile] });
-      const environment = { ...launch.environment, GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: profile.credentialFile, GRAPHYARD_HOST_ID: config.hostId, GRAPHYARD_PRODUCER: `${binding.key}@${binding.sha}`,
+      const environment = { ...harness.environment, ...launch.environment, GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: profile.credentialFile, GRAPHYARD_HOST_ID: config.hostId, GRAPHYARD_PRODUCER: `${binding.key}@${binding.sha}`,
         GRAPHYARD_PRODUCER_BINDING: `${binding.key}@${binding.sha}@${binding.baseSha}@${binding.policyRevision}` };
       const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root,
         '--label', `${binding.key} ${binding.group} proofs · ${agentName}`, ...Object.entries(environment).flatMap(([name, value]) => ['--env', `${name}=${value}`]), '--no-focus'], dependencies.run));
@@ -363,7 +364,7 @@ async function launchHeadlessProducer(root: string, config: MasterConfig, work: 
   const ledger = await readProducerLedger(root);
   try { await saveProducerLedger(root, { ...ledger, producers: [...ledger.producers, record] }); }
   catch (error) { await removeSessionCheckout(root, dirname(checkout.directory), checkout.directory).catch(() => {}); await registry?.release('the producer record could not be written'); throw error; }
-  const environment = { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: profile.credentialFile, GRAPHYARD_HOST_ID: config.hostId, GRAPHYARD_PRODUCER: `${binding.key}@${binding.sha}` };
+  const environment = { ...sessionVerificationEnvironment(root, config), GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: profile.credentialFile, GRAPHYARD_HOST_ID: config.hostId, GRAPHYARD_PRODUCER: `${binding.key}@${binding.sha}` };
   let started: ReturnType<typeof startNarrowRun>;
   try {
     started = startNarrowRun({ runner, name: session.agentName, role: 'producer', work: binding.key, subject: session.id,

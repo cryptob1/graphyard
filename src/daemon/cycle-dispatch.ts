@@ -15,6 +15,7 @@ import { detailChanged, routineDecision } from './decisions.js';
 import { capacityKey, record, stoppedStates } from './effects.js';
 import type { Cycle } from './cycle.js';
 import { researchHold, researchRunner, researchSettings, researchStep } from '../research.js';
+import { judgeHostMemory } from '../master-resources.js';
 
 /** Step 4: dispatch claimable work under capacity, and report base refreshes of in-flight candidates. */
 export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profileHealth>, assessments: Record<string, ContainmentAssessment>) {
@@ -134,13 +135,17 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
   const unrecordable = claimable.length && !workersSpent && effects.planeHealth ? await effects.planeHealth() : null;
   if (unrecordable && detailChanged(state.actions['escalation:dispatch:plane'], `Dispatch held: ${unrecordable}`))
     performed.push(await record(state, 'escalation:dispatch:plane', { kind: 'escalation', work: null, principal: null, state: 'done', detail: `Dispatch held: ${unrecordable}`, attempts: (state.actions['escalation:dispatch:plane']?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+  // A host below its memory floor launches no worker (GY-612): the crossing is recorded once each
+  // way — deferred with its reason and top consumers, resumed once memory recovers — and master
+  // status raises one `resources` attention item while it stands. Running sessions are left alone.
+  const memoryLow = await hostMemoryStep(cycle);
   // Each item's profile is chosen in dispatch order, one after another, and taken before the next
   // item chooses; the launches themselves do not depend on each other and run at once (GY-377),
   // so a cycle that dispatches to every free profile costs one launch, not the sum of them. The
   // concurrency is bounded by capacity: a launch holds a distinct healthy profile for its duration.
   const taken = new Set<string>();
   const launches: Promise<unknown>[] = [];
-  for (const item of workersSpent || unrecordable ? [] : claimable) if (await isolate('dispatch', item, item.key, async () => {
+  for (const item of workersSpent || unrecordable || memoryLow ? [] : claimable) if (await isolate('dispatch', item, item.key, async () => {
     const key = dispatchKey(item);
     if (state.actions[key] && state.actions[key].state !== 'failed') return;
     const free = await effects.agents();
@@ -238,4 +243,20 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
       attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
   });
   return { capacities, approversSpent };
+}
+
+/** The key of the loop's host-memory record: one deferral and one resumption per crossing. */
+export const memoryActionKey = 'escalation:dispatch:memory';
+/** Read the host's memory, keep it on the loop's state, and record a crossing of its floor. Whether launches are deferred. */
+export async function hostMemoryStep(cycle: Pick<Cycle, 'state' | 'effects' | 'now' | 'config' | 'performed'>) {
+  const { state, effects, now, config, performed } = cycle;
+  if (!effects.hostMemory) return false;
+  const reading = await effects.hostMemory().catch(() => null);
+  // An unreadable host keeps the last judgment: a deferral is not lifted by a failed read.
+  if (!reading) return !!state.memory?.low;
+  const judged = judgeHostMemory(state.memory, reading, now(), config.hostId ?? null);
+  state.memory = judged.state;
+  if (judged.event) performed.push(await record(state, memoryActionKey, { kind: 'escalation', work: null, principal: null, state: 'done', detail: judged.detail.slice(0, 1000),
+    attempts: (state.actions[memoryActionKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+  return judged.state.low;
 }

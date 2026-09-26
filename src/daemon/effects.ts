@@ -9,7 +9,7 @@ import type { ScopeRequestState } from '../model/scope.js';
 import { successorWidening } from '../model/successors.js';
 import type { SessionHandleInput } from '../model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from '../request-settlement.js';
-import { type ResourceReclaimReport, reclaimResources, dispatchRefusal } from '../master-resources.js';
+import { type HostMemoryReading, type ResourceReclaimReport, reclaimResources, dispatchRefusal, readHostMemory } from '../master-resources.js';
 import { RefusedResponse } from '../model/refusal.js';
 import { mergeBatchSize } from '../master/profiles.js';
 import type { CapacityRole, PartialWork } from '../model/capacity.js';
@@ -118,6 +118,8 @@ export interface DaemonEffects {
   reclaimResources?: (work: Work[], agents: HerdrAgent[] | null) => Promise<ResourceReclaimReport>;
   /** Why the plane cannot record a dispatch's result (its /healthz verdict), or null when it can. */
   planeHealth?: () => Promise<string | null>;
+  /** This host's memory (GY-612): below its floor, new launches are deferred. A loop wired without it never defers. */
+  hostMemory?: () => Promise<HostMemoryReading | null>;
   /**
    * Requests one routine decision with the master's own operator-agent identity and returns it.
    * A loop configured without these three keeps cycling: each routine decision is then recorded as
@@ -557,6 +559,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     closeSession: pane => closeHerdrPane(pane, run),
     reclaimResources: (work, agents) => reclaimResources(root, current(), { work, agents }, { closePane: pane => closeHerdrPane(pane, run) }),
     planeHealth: () => dispatchRefusal(current().url, fetcher),
+    hostMemory: readHostMemory,
     dispatch: (work, profile, agents, snapshot) => dispatchWork(root, work, profile, agents, run, snapshot.work, undefined, undefined, undefined, snapshot.now, { agents: () => listHerdrAgents(run) }),
     recordSession: (work, handle) => mutate(`work/${work.id}/session`, handle),
     decideScope: work => mutate(`work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch }),

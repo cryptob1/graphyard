@@ -190,6 +190,8 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     // slow handler loses its row mid-flight and another executor runs the action beside it.
     renew: action => { alive(); return mutate(`actions/${action.id}/renew`, { ...(action.claim?.executor ? { executor: action.claim.executor } : {}) }); },
     handlers: options.kinds ? Object.fromEntries(options.kinds.filter(kind => handlers[kind]).map(kind => [kind, handlers[kind]])) : handlers,
+    // A host below its memory floor launches no session (GY-612): dispatch and review rows wait in the queue until it recovers.
+    launchHold: () => a.hostMemoryHold(config.hostId),
   };
   // A supervised slot claims under a stable name, so a restart is the same executor coming back
   // rather than a new one appearing beside a ghost; the pid says which incarnation is speaking.
