@@ -14,7 +14,7 @@ import { server } from '../src/server.js';
 import { leaseCommands, leasePoolConnections } from '../src/store/pools.js';
 import { isConfirmedCoordinationRefusal } from '../src/quarantine.js';
 import { renewalGraceMs, supervise } from '../src/supervisor.js';
-import { leaseHealthStatus } from '../src/cli/master-status.js';
+import { leaseHealthStatus } from '../src/cli/lease-health-attention.js';
 import { standingEscalations, type Principal, type Work } from '../src/model.js';
 
 // GY-558: lease renewals timed out waiting for a connection behind slow report and observation
