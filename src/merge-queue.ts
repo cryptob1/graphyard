@@ -607,7 +607,7 @@ export interface RevertedDelivery {
 
 export const queueHistoryLimit = 40;
 // Pending, queued, or missing is not failure. Only a reported adverse conclusion ejects.
-const failedConclusions = new Set(['failure', 'timed_out', 'cancelled', 'action_required', 'startup_failure', 'stale', 'neutral']);
+export const failedConclusions = new Set(['failure', 'timed_out', 'cancelled', 'action_required', 'startup_failure', 'stale', 'neutral']);
 
 /** Deterministic service order: enqueue sequence, then key. Position is never bought or bypassed. */
 export function queueOrder(all: Work[]) {
@@ -1195,8 +1195,10 @@ export function describeMergeBatches(all: Work[], placements: QueuePlacement[], 
     const ahead = start > 0 ? byKey.get(chain[start - 1].key) : undefined;
     const before: TipVerdict | null = start === 0 ? { result: 'pass' } : ahead && tipOf(ahead.key) ? tipVerdict(ahead, ciAppIds) ?? null : null;
     // The docs counts each member's published tip was observed with (GY-574); the first member's base is the batch's.
+    // Only a failing tip is counted, so a prefix's count is its last member's record, or the base the member behind it recorded.
     const tipDocs = (key: string) => { const entry = byKey.get(key), docs = entry?.observation?.docsBudget; return docs && tipOf(key) && docs.sha === tipOf(key) ? docs : undefined; };
-    const step = batchStep(members, verdict, before, { base: tipDocs(members[0])?.base, count: prefix => tipDocs(prefix.at(-1)!)?.pages });
+    const counted = (prefix: string[]) => tipDocs(prefix.at(-1)!)?.pages ?? (prefix.length < members.length ? tipDocs(members[prefix.length])?.base : undefined);
+    const step = batchStep(members, verdict, before, { base: tipDocs(members[0])?.base, count: counted });
     const head = batch === 1;
     const state: MergeBatchView['state'] = !head ? 'waiting' : step.kind === 'merge' ? 'merging' : step.kind === 'eject' ? 'ejecting' : step.combination.length === members.length ? 'testing' : 'bisecting';
     const underTest = step.kind === 'test' ? { members: step.combination, tip: tipOf(step.combination.at(-1)!) } : null;

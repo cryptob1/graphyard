@@ -210,7 +210,7 @@ export async function fileDocsTrim(state: DaemonState, effects: Pick<DaemonEffec
   await record(state, docsTrimActionKey, { kind: 'fault', work: null, principal: null, state: 'started', detail: `Filing one item to restore documentation headroom: ${docs.headroom.total} of ${docs.headroom.budget} words on ${docs.base}`, attempts, cycle: state.cycle }, now(), effects.persist);
   try {
     // The trim item goes through the same operator-agent intent route as a fault-class item; it names no class.
-    const filed = await effects.fileFaultClass(docsTrimItem(docs.headroom, docs.base) as unknown as ReturnType<typeof faultClassItem>, idempotency);
+    const filed = await effects.fileFaultClass(docsTrimItem(docs.headroom, docs.base), idempotency);
     work.push(filed);
     performed.push(await record(state, docsTrimActionKey, { kind: 'fault', work: filed.key, principal: null, state: 'done', detail: `Filed ${filed.key} to restore documentation headroom (${docs.headroom.total} of ${docs.headroom.budget} words on ${docs.base}); nothing more is filed while it is open`, attempts, cycle: state.cycle }, now(), effects.persist));
   } catch (error) {

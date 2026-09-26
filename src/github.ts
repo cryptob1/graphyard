@@ -14,9 +14,10 @@ import { nextAction } from './model/next-action.js';
 import { foldDecisions } from './model/approval.js';
 import { normalMergeState, repairAudit, repairAuditEvent, repairLaneVerdict, type RepairAudit, type RepairLaneVerdict } from './master/repair-lane.js';
 export { CHECK_NAME };
-import { alreadyMergeableRefusal, baseRefreshNeeded, dismissedVerdict, enqueueRequestCurrent, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, pendingRestore, predictQueue, queuePlacement, queueRef, mergeCheckBranch, treeIdenticalPrediction, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread } from './merge-queue.js';
+import { alreadyMergeableRefusal, baseRefreshNeeded, failedConclusions as failedCheckConclusions, dismissedVerdict, enqueueRequestCurrent, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, pendingRestore, predictQueue, queuePlacement, queueRef, mergeCheckBranch, treeIdenticalPrediction, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread } from './merge-queue.js';
 import { blockedFeatures, controlPlanePermissions, describeShortfall, permissionShortfalls, requiredPermissions, type PermissionFeature, type PermissionLevel, type PermissionShortfall } from './github-permissions.js';
 import { agentOwner, type AttentionItem } from './master/attention.js';
+import { budgetedPage, docsWords, type DocsWordCount, type TipDocs } from './model/documentation.js';
 import type { IntegrationJob } from './coordination.js';
 
 /** Out-of-scope paths compared against the base tip per observation; the rest are refused as uncompared. */
@@ -931,6 +932,8 @@ export class GitHub {
         ? { provider: 'codex' as const, sha: pr.head.sha, approved: false, reason: unready }
         : await observeCodex(this, pr.number, pr.head.sha, reviews, pr.user.id, work.reviewRequest, candidateBase, work.policyRevision, this.config.appId)
       : await this.observeAgent(work, pr, reviews, candidateBase, unready);
+    // A failing published tip carries its docs counts, from which a budget overflow is attributed (GY-574).
+    const docsBudget = publishedTip && !pr.merged && pr.state === 'open' ? await this.tipDocs(work, pr.head.sha, bound, checks) : undefined;
     const confirmed = await this.request(`/pulls/${work.submission!.pr}`);
     demand(confirmed.head.sha === pr.head.sha && confirmed.base.sha === pr.base.sha && confirmed.base.ref === pr.base.ref && confirmed.head.ref === pr.head.ref
       && confirmed.state === pr.state && confirmed.draft === pr.draft && confirmed.merged === pr.merged, 'PR changed while collecting evidence; retry');
@@ -948,9 +951,56 @@ export class GitHub {
       ...(pr.mergeable === null && pr.state === 'open' && !pr.merged ? { mergeabilityUnknown: true } : {}),
       protected: protection.protected, conversations, files: files.map(f => f.filename), at: startedAt,
       baseTip: branch.tip, baseTree: branch.tree, baseTipContained, baseTipAncestor: contained, scopeFiles,
-      ...(landing ? { landing } : {}), ...(revertedDelivery ? { revertedDelivery } : {}),
+      ...(landing ? { landing } : {}), ...(revertedDelivery ? { revertedDelivery } : {}), ...(docsBudget ? { docsBudget } : {}),
     };
   }
+  /**
+   * The docs word counts of a published queue tip whose required checks failed (GY-574): the tip's
+   * own pages and those of the base it was built on, so the batch plan can attribute a docs-budget
+   * overflow to the entry that crossed it instead of bisecting to the queue head. Only a failing
+   * published tip is counted, and a page's words are read once per blob, so a passing queue costs
+   * nothing and a failing tip costs its two trees and the pages it changed. `onlyFailure` is set when
+   * no other required check failed; whether the suite's failure is the budget is read from the counts.
+   */
+  async tipDocs(work: Work, head: string, base: string, checks: { id?: number; name: string; status: string; conclusion: string | null }[]): Promise<TipDocs | undefined> {
+    const required = new Set(work.policy.checks ?? []);
+    const latest = new Map<string, string>();
+    for (const check of [...checks].sort((a, b) => (a.id ?? 0) - (b.id ?? 0))) if (required.has(check.name) && check.status === 'completed') latest.set(check.name, check.conclusion ?? '');
+    const failed = [...latest.values()].filter(result => failedCheckConclusions.has(result)).length;
+    if (!failed) return undefined;
+    // The counts only sharpen an ejection: a tip they cannot be read for is bisected as before, never left unobserved.
+    try {
+      const [pages, before] = await Promise.all([this.docsWordCount(head), this.docsWordCount(base)]);
+      return pages && before ? { sha: head, base: before, pages, onlyFailure: failed === 1 } : undefined;
+    } catch (error) {
+      console.error(`GitHub docs word counts for ${work.key} tip ${head.slice(0, 12)} were unreadable; its failure is bisected: ${error instanceof Error ? error.message : String(error)}`);
+      return undefined;
+    }
+  }
+  /** Words per budgeted page (README.md and docs/**\/*.md) at a commit, as tests/docs-budget.test.ts counts them; null when GitHub truncates the tree. */
+  async docsWordCount(ref: string): Promise<DocsWordCount | null> {
+    const counted = this.docsCounts.get(ref);
+    if (counted) return counted;
+    const tree = await this.request(`/git/trees/${encodeURIComponent(ref)}?recursive=1`);
+    if (tree?.truncated || !Array.isArray(tree?.tree)) return null;
+    const pages = (tree.tree as { path: string; type: string; sha: string }[]).filter(entry => entry.type === 'blob' && budgetedPage(entry.path));
+    const words = await boundedMap(pages, peerContainmentConcurrency, page => {
+      const known = this.docsBlobWords.get(page.sha);
+      if (known) return known;
+      const reading = this.request(`/git/blobs/${page.sha}`).then(blob => docsWords(Buffer.from(String(blob?.content ?? ''), blob?.encoding === 'base64' ? 'base64' : 'utf8').toString('utf8')));
+      this.docsBlobWords.set(page.sha, reading);
+      reading.catch(() => { if (this.docsBlobWords.get(page.sha) === reading) this.docsBlobWords.delete(page.sha); });
+      if (this.docsBlobWords.size > ancestryEntries) this.docsBlobWords.delete(this.docsBlobWords.keys().next().value!);
+      return reading;
+    });
+    const count: DocsWordCount = Object.fromEntries(pages.map((page, index) => [page.path, words[index]]));
+    // A commit's pages never change: a tip observed again while it waits is counted once.
+    if (/^[a-f0-9]{40}$/.test(ref)) { this.docsCounts.set(ref, count); if (this.docsCounts.size > 64) this.docsCounts.delete(this.docsCounts.keys().next().value!); }
+    return count;
+  }
+  private docsCounts = new Map<string, DocsWordCount>();
+  /** Words per docs blob, shared while in flight: a blob never changes, so each page version is read from GitHub once. */
+  private docsBlobWords = new Map<string, Promise<number>>();
   /**
    * The commit the candidate would land on, and what landing there would revert (see
    * merge-queue.ts LandingCheck). A tip published behind entries that have not landed lands on

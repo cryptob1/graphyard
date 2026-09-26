@@ -265,6 +265,35 @@ function boundToSpeculativeTip(f: ReturnType<typeof fixture>) {
   return f;
 }
 
+test('a published queue tip whose required check failed is observed with its docs word counts and those of its base (GY-574)', async () => {
+  const f = boundToSpeculativeTip(fixture()), request = f.github.request.bind(f.github);
+  const pages: Record<string, Record<string, string>> = { [head]: { 'README.md': '9'.repeat(40), 'docs/a.md': '1'.repeat(40) }, [predictedBase]: { 'README.md': '9'.repeat(40), 'docs/a.md': '0'.repeat(40) } };
+  const words: Record<string, number> = { ['9'.repeat(40)]: 5, ['1'.repeat(40)]: 9, ['0'.repeat(40)]: 3 };
+  let testResult = 'failure';
+  f.github.request = async (path, method, body) => {
+    if (path.startsWith('/git/')) f.calls.push({ path, method: method ?? 'GET', body });
+    const tree = path.match(/^\/git\/trees\/([a-f0-9]{40})\?recursive=1$/), blob = path.match(/^\/git\/blobs\/([a-f0-9]{40})$/);
+    if (tree) return { truncated: false, tree: [{ path: 'src/claims.ts', type: 'blob', sha: 'c'.repeat(40) }, ...Object.entries(pages[tree[1]]).map(([page, sha]) => ({ path: page, type: 'blob', sha }))] };
+    if (blob) return { encoding: 'base64', content: Buffer.from(Array(words[blob[1]]).fill('word').join(' ')).toString('base64') };
+    if (path.includes('/check-runs') && !path.includes('check_name=')) return { check_runs: [{ id: 9, name: 'test', status: 'completed', conclusion: testResult, app: { id: 15368 } }] };
+    return request(path, method, body);
+  };
+  const observed = await f.github.observe(f.work);
+  assert.deepEqual(observed.docsBudget, { sha: head, base: { 'README.md': 5, 'docs/a.md': 3 }, pages: { 'README.md': 5, 'docs/a.md': 9 }, onlyFailure: true });
+  const blobReads = f.calls.filter(call => call.path.startsWith('/git/blobs/')).length;
+  assert.equal(blobReads, 3, 'each page version is read once');
+  testResult = 'success';
+  const trees = f.calls.filter(call => call.path.startsWith('/git/trees/')).length;
+  assert.equal((await f.github.observe(f.work)).docsBudget, undefined, 'a passing tip carries no counts');
+  assert.equal(f.calls.filter(call => call.path.startsWith('/git/trees/')).length, trees, 'and costs no tree read');
+  testResult = 'failure'; pages[head] = {}; (f.github as any).docsCounts.clear();
+  const unreadable = f.github.request;
+  f.github.request = async (path, method, body) => path.startsWith('/git/trees/') ? Promise.reject(new Error('tree unavailable')) : unreadable(path, method, body);
+  const bisected = await f.github.observe(f.work);
+  assert.equal(bisected.docsBudget, undefined, 'unreadable counts leave the failure to be bisected, and the observation stands');
+  assert.equal(bisected.checks[0].result, 'failure');
+});
+
 test('the required check is published on a speculative tip whose base branch has moved on', async () => {
   const f = boundToSpeculativeTip(fixture());
   f.work.gates = [{ name: 'merge', passed: true, reasons: [] }];

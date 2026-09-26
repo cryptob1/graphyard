@@ -6,6 +6,8 @@ import { emptyDaemonState } from '../src/master-daemon.js';
 import { docsHeadroomStatus, docsTrimActionKey, docsWordCountAt, fileDocsTrim, type ReportedAttention } from '../src/daemon/faults.js';
 import { attributeDocsOverflow, docsHeadroom, docsTrimTitle, docsWordBudget, type DocsWordCount } from '../src/model/documentation.js';
 import { evaluate, type Work } from '../src/model.js';
+import { GitHub } from '../src/github.js';
+import { createHash } from 'node:crypto';
 
 // GY-574: main sat at exactly its 12,000-word docs budget, so two queued items that each added a few
 // words overflowed it together on a merge-queue tip and ejected the queue head. Headroom is now kept
@@ -24,7 +26,7 @@ test('unit:docs-headroom-kept — at 11,700 of 12,000 words master status raises
   assert.equal(status.attention.length, 1, 'within 3% of the budget raises one attention item');
   assert.equal(status.attention[0].subject, 'docs');
   assert.equal(status.attention[0].role, 'master');
-  assert.match(status.attention[0].text, /11700 of its 12000-word budget \(300 left, under 3%\).*Trim to 11400 or fewer; largest pages: docs\/master-agent\.md \(700\)/);
+  assert.match(status.attention[0].text, /11700 of its 12000-word budget \(300 left, within 3% of it\).*Trim to 11400 or fewer; largest pages: docs\/master-agent\.md \(700\)/);
 
   const filed: { input: any; key: string }[] = [], work: Work[] = [];
   const effects = { persist: async () => {}, fileFaultClass: async (input: any, key: string) => {
@@ -62,7 +64,7 @@ const base = pages(docsWordBudget.total - 15);
 const holding = (keys: string[]): DocsWordCount => ({ ...base, ...Object.fromEntries(keys.map(key => [`docs/${key}.md`, 10])) });
 const total = (count: DocsWordCount) => Object.values(count).reduce((sum, words) => sum + words, 0);
 
-test('unit:docs-budget-overflow-attributed — three entries adding 10 words each on a base at the budget minus 15: entry 2 is ejected naming the words over and the pages that grew, and entry 1 merges', () => {
+test('unit:docs-budget-overflow-attributed — three entries adding 10 words each on a base at the budget minus 15: entry 2 is ejected naming the words over and the pages that grew, and entry 1 merges', async () => {
   const keys = ['GY-1', 'GY-2', 'GY-3'];
   // The attribution: the first entry at which the running total exceeds the budget.
   const overflow = attributeDocsOverflow(base, keys.map((key, index) => ({ key, count: holding(keys.slice(0, index + 1)) })))!;
@@ -84,16 +86,19 @@ test('unit:docs-budget-overflow-attributed — three entries adding 10 words eac
   assert.deepEqual(runMergeBatches(keys, 4, failsDocs).ejected.map(entry => entry.member), ['GY-2', 'GY-3']);
 
   // The live queue: the control plane's own gate evaluation over observed tips carrying their docs counts.
-  const live = driveQueue(keys);
+  const live = await driveQueue(keys);
   assert.deepEqual(live.ejected.map(entry => entry.key), ['GY-2'], 'only entry 2 is ejected from the live queue');
   assert.match(live.ejected[0].reason, /^Required CI check test did not pass on speculative tip [0-9a-f]{12}: unit:docs-word-budget failed: its docs change takes README\.md and docs\/ to 12005 words, 5 over the 12000-word budget; pages that grew: docs\/GY-2\.md \(0 → 10\)$/);
   assert.equal(live.items.find(item => item.key === 'GY-1')!.queueEjection ?? null, null, 'the queue head is not ejected');
   assert.ok(live.items.find(item => item.key === 'GY-3')!.queue, 'entry 3 stays queued: its own tip is judged again once entry 2 has left');
+  assert.equal(live.items.find(item => item.key === 'GY-1')!.observation!.docsBudget, undefined, 'a passing tip is not counted');
+  assert.ok(live.requests.every(url => /\/git\/(trees|blobs)\//.test(url)), 'the counts are read from the tip and base trees');
+  assert.ok(live.requests.filter(url => url.includes('/git/blobs/')).length <= 23, 'each page version is read once, whatever tips hold it');
 });
 
 const sha40 = (label: string) => label.replace(/[^a-f0-9]/g, '0').padEnd(40, 'f').slice(0, 40);
 /** A live queue (as tests/queue-batching.test.ts drives it) in which CI runs on every published tip and reports its docs counts. */
-function driveQueue(keys: string[]) {
+async function driveQueue(keys: string[]) {
   const now = new Date('2026-09-26T09:00:00.000Z'), at = '2026-09-26T08:00:00.000Z', baseSha = sha40('b0');
   const holds = new Map<string, string[]>([[baseSha, []]]);
   let published = 0;
@@ -119,16 +124,40 @@ function driveQueue(keys: string[]) {
       break;
     }
   }
-  // CI on every published tip: the test check fails exactly when the tip's docs overflow, and that is its only failure.
+  // CI on every published tip: the test check fails exactly when the tip's docs overflow. The docs
+  // counts are what the GitHub observer records for a failing published tip, read from its trees.
+  const { github, requests } = docsRepository(sha => holds.has(sha) ? holding(holds.get(sha)!) : null);
   for (const item of items) {
-    const count = holding(holds.get(item.candidate!.sha)!), over = total(count) > docsWordBudget.total;
-    item.observation = { ...item.observation!, checks: [{ name: 'test', result: over ? 'failure' : 'success', appId: 15368 }],
-      docsBudget: { sha: item.candidate!.sha, base: holding(holds.get(item.candidate!.baseSha)!), pages: count, onlyFailure: true } };
+    const over = total(holding(holds.get(item.candidate!.sha)!)) > docsWordBudget.total;
+    const checks = [{ id: 1, name: 'test', status: 'completed', conclusion: over ? 'failure' : 'success', app: { id: 15368 } }, { id: 2, name: 'typecheck', status: 'completed', conclusion: 'success', app: { id: 15368 } }];
+    const docsBudget = await github.tipDocs({ ...item, policy: { checks: ['test', 'typecheck'], review: false } } as Work, item.candidate!.sha, item.candidate!.baseSha, checks);
+    item.observation = { ...item.observation!, checks: [{ name: 'test', result: over ? 'failure' : 'success', appId: 15368 }], ...(docsBudget ? { docsBudget } : {}) };
+    if (over) assert.equal(docsBudget?.onlyFailure, true, 'the test check is the only required check that failed');
   }
   const ejected: { key: string; reason: string }[] = [];
   for (const item of [...items].reverse()) {
     Object.assign(item, evaluate(item, items, now, [15368], 4));
     if (!item.queue) ejected.push({ key: item.key, reason: item.queueEjection!.reason });
   }
-  return { items, ejected };
+  return { items, ejected, requests };
+}
+
+/** A GitHub adapter over a repository whose trees hold `count(sha)`'s pages, each page a blob of that many words. */
+function docsRepository(count: (sha: string) => DocsWordCount | null) {
+  const github = new GitHub({ repository: 'owner/project', base: 'main', appId: 1234, installationId: 7, privateKey: 'not-used' });
+  Object.assign(github as any, { token: 'installation-token', expires: Date.now() + 3600_000 });
+  const blobs = new Map<string, number>(), requests: string[] = [];
+  const blobSha = (page: string, words: number) => { const sha = createHash('sha1').update(`${page}:${words}`).digest('hex'); blobs.set(sha, words); return sha; };
+  const respond = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+  const fetchStub = (async (input: string) => {
+    const url = String(input);
+    requests.push(url);
+    const tree = url.match(/\/git\/trees\/([0-9a-f]{40})\?recursive=1$/), blob = url.match(/\/git\/blobs\/([0-9a-f]{40})$/);
+    if (tree && count(tree[1])) return respond({ truncated: false, tree: [{ path: 'src/index.ts', type: 'blob', sha: 'f'.repeat(40) }, { path: 'docs', type: 'tree', sha: 'e'.repeat(40) },
+      ...Object.entries(count(tree[1])!).map(([path, words]) => ({ path, type: 'blob', sha: blobSha(path, words) }))] });
+    if (blob && blobs.has(blob[1])) return respond({ encoding: 'base64', content: Buffer.from(Array.from({ length: blobs.get(blob[1])! }, () => 'word').join(' \n')).toString('base64') });
+    throw new Error(`unexpected ${url}`);
+  }) as typeof fetch;
+  (github as any).request = async (path: string) => { const saved = globalThis.fetch; globalThis.fetch = fetchStub; try { return await (GitHub.prototype as any).request.call(github, path); } finally { globalThis.fetch = saved; } };
+  return { github, requests };
 }

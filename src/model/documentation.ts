@@ -221,7 +221,7 @@ const pageList = (pages: { page: string; words: number }[]) => pages.map(entry =
 /** The attention line `master status` shows for a saturated set, or null. */
 export function docsHeadroomText(headroom: DocsHeadroom, base: string): string | null {
   if (!headroom.saturated) return null;
-  return `The documentation on ${base} is ${headroom.total} of its ${headroom.budget}-word budget (${headroom.remaining} left, under ${Math.round(docsHeadroomWarning * 100)}%): two queued items that each add a few words will overflow it together on a merge-queue tip. Trim to ${headroom.target} or fewer; largest pages: ${pageList(headroom.largest)}`;
+  return `The documentation on ${base} is ${headroom.total} of its ${headroom.budget}-word budget (${headroom.remaining} left, within ${Math.round(docsHeadroomWarning * 100)}% of it): two queued items that each add a few words will overflow it together on a merge-queue tip. Trim to ${headroom.target} or fewer; largest pages: ${pageList(headroom.largest)}`;
 }
 /** The open trim item the loop filed, if any. */
 export const openDocsTrimItem = <W extends { title: string; stage: string; closed?: unknown }>(work: readonly W[]) =>
@@ -244,15 +244,17 @@ export interface DocsOverflow { member: string; total: number; budget: number; o
 /**
  * Attribute an overflow on a chain of tips: `base` is the count the first entry sits on, and each
  * entry's count is its own tip's, which holds every entry ahead of it. The overflow belongs to the
- * first entry at which the running total exceeds the budget; null when none does, or when a count is
- * missing. The entries ahead of it fit, so ejecting it alone leaves them to merge.
+ * first entry at which the running total exceeds the budget; null when none does, or when a count up
+ * to it (or the count just before it, which names the pages it grew) is missing. The entries ahead of
+ * it fit, so ejecting it alone leaves them to merge.
  */
 export function attributeDocsOverflow(base: DocsWordCount | undefined, entries: { key: string; count: DocsWordCount | undefined }[], budget = docsWordBudget.total): DocsOverflow | null {
   let before = base;
   for (const entry of entries) {
-    if (!before || !entry.count) return null;
+    if (!entry.count) return null;
     const total = docsTotal(entry.count);
     if (total > budget) {
+      if (!before) return null;
       const prior = before;
       const grew = Object.entries(entry.count).filter(([page, words]) => words > (prior[page] ?? 0)).map(([page, to]) => ({ page, from: prior[page] ?? 0, to }));
       return { member: entry.key, total, budget, over: total - budget, grew };
@@ -266,9 +268,10 @@ export const docsOverflowReason = (overflow: DocsOverflow) =>
   `${docsWordBudget.proof} failed: its docs change takes README.md and docs/ to ${overflow.total} words, ${overflow.over} over the ${overflow.budget}-word budget; pages that grew: ${overflow.grew.map(entry => `${entry.page} (${entry.from} → ${entry.to})`).join(', ') || 'none'}`;
 
 /**
- * The docs word counts observed for a queued entry's published tip: the tip's own pages, the pages of
- * the commit it was built on, and whether the budget proof was the tip's only failure. The planner
- * attributes an overflow only from this record; a tip without one is bisected as any other failure.
+ * The docs word counts the GitHub observer records for a queued entry's published tip whose required
+ * checks failed (src/github.ts tipDocs): the tip's own pages, the pages of the commit it was built on
+ * (the tip of the entry ahead, or the base branch), and whether no other required check failed. The
+ * planner attributes an overflow only from these records; a tip without one is bisected as before.
  */
 export interface TipDocs { sha: string; base: DocsWordCount; pages: DocsWordCount; onlyFailure: boolean }
 declare module './work.js' { interface Observation { docsBudget?: TipDocs } }
