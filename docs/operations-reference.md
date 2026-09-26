@@ -46,6 +46,8 @@ Unchanged non-merge candidates spend **at most 40%** (`steadyStateShare`) of the
 
 Below **500 requests** by default, `GRAPHYARD_GITHUB_RESERVE`, non-merge observations wait for the reset (`githubBudget.deferrals`).
 
+Budgets are per token (`githubBudget.tokens`); one projected below the reserve at its reset raises `github`.
+
 ### What an observation costs
 
 About ten requests uncached; unchanged, none.
@@ -102,7 +104,7 @@ Only an `admin` grants, only to `producer` principals. Patterns: an exact name, 
 
 ## Scale limits
 
-`GRAPHYARD_OBSERVATION_CONCURRENCY` workers (default 4, ≤ half the pool) share one pace: budget above reserve, spread to reset. Claims: head band, in-flight merges, never-observed submissions, jobs due over five minutes, review/rework waits, running sessions (before waits when tight), `available_at`; tight, idle items await webhooks. `observationThroughput` reports budget, pace, head lag, oldest unobserved submission; `master status` raises `github` past two minutes. Heartbeat, claim, `complete` and `blocked` own the lease pool; `leaseHealth` (`GET /api/status`) reports heartbeat p50/p95 and failures, raised above 5 s p95.
+`GRAPHYARD_OBSERVATION_CONCURRENCY` workers (default 4, ≤ half the pool) share one pace per token: budget above reserve, less others' projected spend, spread to reset. Claims: head band, in-flight merges, never-observed submissions, jobs due over five minutes, review/rework waits, running sessions (before waits when tight), `available_at`; tight, idle items await webhooks. `observationThroughput` reports budget, pace, head lag, oldest unobserved submission; `master status` raises `github` past two minutes. Heartbeat, claim, `complete` and `blocked` own the lease pool; `leaseHealth` (`GET /api/status`) reports heartbeat p50/p95 and failures, raised above 5 s p95.
 
 ### Concurrent reconciliation
 
