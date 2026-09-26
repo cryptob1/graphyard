@@ -14,7 +14,8 @@ import { decisionCapabilities, decisionInputs, decisionPrecondition } from '../s
 import { faultClassItem, recurringClasses as classes, type FaultInstance, type FaultClassPolicy } from '../src/model/fault-classes.js';
 import { registryRoles, roleSchema, fleetRoles } from '../src/model/registry.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
-import { standingFaultClassItem, clearDiagnoses, diagnosesSettled, diagnosisStep, diagnosisSubjects, emptyDaemonState, runCycle, type DaemonEffects, type DiagnosticianEffects, type DiagnosisContext, type DiagnosisSubject } from '../src/master-daemon.js';
+import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { standingFaultClassItem, clearDiagnoses, diagnosesSettled, diagnosisStep, diagnosisSubjects, type DiagnosticianEffects, type DiagnosisContext, type DiagnosisSubject } from '../src/daemon/diagnosis.js';
 import type { Cycle } from '../src/daemon/cycle.js';
 import { diagnosisPayloadSchema, diagnosticianSettings, type DiagnosisPayload } from '../src/runner/payloads.js';
 import type { RunOptions, RunResult, Runner } from '../src/runner/types.js';
