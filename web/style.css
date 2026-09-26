@@ -302,3 +302,12 @@ code.sha{display:inline-block;max-width:8ch;overflow:hidden;white-space:nowrap;v
 /* GY-198 sign-in: one column, one left edge. Every child of .login shares its max width and left edge (the brand drops the sidebar's inset), and the helper text is its own block below the action. */
 .login{display:flex;flex-direction:column;align-items:stretch;width:100%;max-width:450px;margin:12vh auto;padding:30px var(--space-4,16px)}.login>*{margin-left:0;margin-right:0;max-width:100%}.login .brand{padding:0;align-self:flex-start}.login h1{margin:55px 0 10px;font-size:44px}.login-tagline{margin:0}.login-form{display:grid;gap:18px;margin:35px 0 0}.login-form .notice{margin:0}.login-status{display:grid;justify-items:start;gap:14px;margin:35px 0 0}.login-status .notice{margin:0;justify-self:stretch}.login-progress{display:flex;align-items:center;gap:10px;margin:0;color:var(--text)}.spinner{width:16px;height:16px;flex-shrink:0;border-radius:50%;border:2px solid var(--border);border-top-color:var(--accent);animation:gy-spin .8s linear infinite}@keyframes gy-spin{to{transform:rotate(360deg)}}.login-actions{display:flex;flex-wrap:wrap;align-items:center;gap:16px}.login .login-escape{color:var(--accent);font-size:var(--type-body);text-decoration:underline;text-underline-offset:3px}.login-help{display:block;margin:20px 0 0;font-size:var(--type-small,12px);line-height:1.6;color:var(--text-2)}
 @media(max-width:480px){.login{margin:6vh auto;padding:24px 16px}.login h1{margin-top:40px;font-size:34px}}
+/* GY-409 connect an account: the picker, the primary action, and the collapsed advanced forms. */
+.connect-button{flex-shrink:0}
+.connect-providers{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px;list-style:none;padding:0;margin:14px 0 4px}
+.connect-providers button{width:100%;text-align:left;background:var(--raised);color:var(--text);border:1px solid var(--border);border-radius:7px;padding:14px;font-weight:400}
+.connect-providers button:hover{border-color:var(--up-next)}
+.connect-providers small{line-height:1.6;display:block;margin-top:5px}
+details.advanced{margin:26px 0}
+details.advanced>summary{cursor:pointer;color:var(--up-next);font-weight:600;padding:6px 0}
+details.advanced[open]>summary{margin-bottom:14px}

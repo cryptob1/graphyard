@@ -25,6 +25,10 @@ The managed `AGENTS.md` section states that **every session Graphyard launches r
 
 Agents treat bracketed paste as untrusted data (prompt injection), so sessions start without anybody sending `go`; Claude Code also gets `--append-system-prompt-file`. The role files under `.graphyard/harness/` hold permissions, not instructions.
 
+### Connect an account
+
+Settings › **Agents** › **Connect an account**: pick a provider; paste a key (sealed to the host's public key in the browser — the server relays ciphertext only) or start a login. The host writes the provider's auth file (0600) and smoke-tests that provider and model; the card shows the result. A subscription login shows its URL and code while waiting — finish it in your browser (**Cancel** stops it). The host's executor must run: strong accounts join worker and reviewer, cheap ones approver and producer; research joins when the host makes the account's wrapper its research command; **change** edits roles. The shell steps below remain for scripted setups.
+
 ### Agent environments
 
 Each account's login home under `~/.coding_agents` is selected by `CLAUDE_CONFIG_DIR` (Claude Code), `CODEX_HOME` (Codex), `XDG_DATA_HOME` (OpenCode) or `CURSOR_CONFIG_DIR` (Cursor). Tokens go in `~/.config/graphyard/workers/` and `producers/` (mode 0600). Then:
@@ -48,7 +52,7 @@ node "$GRAPHYARD_CLI" master registry propose --apply
 
 ### Add a runtime
 
-Dash-led values join their flag with `=`:
+Advanced, or the CLI (dash-led values join their flag with `=`):
 
 ```sh
 node "$GRAPHYARD_CLI" master registry runtime set aider --kind aider --arg=--yes-always \
@@ -58,7 +62,7 @@ node "$GRAPHYARD_CLI" master registry runtime set aider --kind aider --arg=--yes
 
 ### Add an account
 
-One login each:
+Connect it in the UI, or record one login each:
 
 ```sh
 node "$GRAPHYARD_CLI" master registry model set opus --provider Anthropic --id claude-opus-5 \

@@ -1,10 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { access, readFile, readdir, stat } from 'node:fs/promises';
+import { access, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
 import { basename, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
-import { NoHealthyAccountError, agentEnvironmentRoot, atomicPrivateWrite, checkAgentEnvironment, discoverAgentEnvironments, environmentKinds, readCredentialFile,
+import { NoHealthyAccountError, agentEnvironmentRoot, atomicPrivateWrite, checkAgentEnvironment, discoverAgentEnvironments, environmentKinds, masterConfigSchema, readCredentialFile,
   type AccountSkip, type AccountSkipCause, type AgentEnvironment, type EnvironmentHealth, type EnvironmentKind, type EnvironmentProbe, type MasterConfig } from './master.js';
+import { shellQuote } from './master/dispatch.js';
 import { sessionName } from './session-name.js';
 import { smokeRegistryAccount } from './runner/roles.js';
 import type { SmokeResult } from './runner/pi.js';
@@ -97,24 +99,30 @@ export function runtimeSessionGone(session: FleetSession, runtime: RuntimeInvent
 export const skipCause = (reason: string): AccountSkipCause =>
   /is not logged in/.test(reason) ? 'logged-out' : /quota is exhausted/.test(reason) ? 'exhausted' : 'unconfigured';
 
+/**
+ * One authenticated control-plane call for the host-side fleet workers: the coordinator credential
+ * is read here, so a credential this host cannot read is the control plane being unaskable, not a
+ * fleet decision. `httpFleetClient` and the connect-account worker (GY-409) both go through it.
+ */
+export async function fleetRequest(config: Required<Pick<FleetConfig, 'url'>> & Pick<FleetConfig, 'credentialFile'>, path: string, init: { method?: 'GET' | 'POST'; body?: unknown; fetch?: typeof fetch; timeoutMs?: number; idempotencyKey?: string } = {}): Promise<any> {
+  let token: string;
+  try { token = await readCredentialFile(config.credentialFile); }
+  catch (error) { throw new FleetUnreachableError(`The agent registry at ${config.url} cannot be asked: ${error instanceof Error ? error.message : 'the coordinator credential is unreadable'}`); }
+  const body = init.body;
+  let response: Response;
+  try {
+    const method = init.method ?? (body === undefined ? 'GET' : 'POST');
+    response = await (init.fetch ?? fetch)(`${config.url}/api/${path}`, { method, signal: AbortSignal.timeout(init.timeoutMs ?? 10_000),
+      headers: { Authorization: `Bearer ${token}`, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }), ...(method === 'POST' ? { 'Idempotency-Key': init.idempotencyKey ?? randomUUID() } : {}) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+  } catch (error) { throw new FleetUnreachableError(`The agent registry at ${config.url} is unreachable: ${error instanceof Error ? error.message : 'unknown reason'}`); }
+  const text = await response.text();
+  let parsed: any = null; try { parsed = JSON.parse(text); } catch { /* a proxy page, not the control plane */ }
+  if (!response.ok || parsed === null) throw new FleetUnreachableError(`The agent registry at ${config.url} answered ${response.status}${parsed?.error ? `: ${parsed.error}` : ''}`);
+  return parsed;
+}
+
 export function httpFleetClient(config: Required<Pick<FleetConfig, 'url'>> & Pick<FleetConfig, 'credentialFile'>, fetcher: typeof fetch = fetch, timeoutMs = 10_000): FleetClient {
-  const call = async (path: string, body?: unknown) => {
-    // A credential this host cannot read is the registry being unaskable, not a fleet decision:
-    // it takes the same path as an outage, so a role the registry never decided still launches
-    // from its local profile while a role it did decide refuses rather than falling back.
-    let token: string;
-    try { token = await readCredentialFile(config.credentialFile); }
-    catch (error) { throw new FleetUnreachableError(`The agent registry at ${config.url} cannot be asked: ${error instanceof Error ? error.message : 'the coordinator credential is unreadable'}`); }
-    let response: Response;
-    try {
-      response = await fetcher(`${config.url}/api/${path}`, { method: body === undefined ? 'GET' : 'POST', signal: AbortSignal.timeout(timeoutMs),
-        headers: { Authorization: `Bearer ${token}`, ...(body === undefined ? {} : { 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
-    } catch (error) { throw new FleetUnreachableError(`The agent registry at ${config.url} is unreachable: ${error instanceof Error ? error.message : 'unknown reason'}`); }
-    const text = await response.text();
-    let parsed: any = null; try { parsed = JSON.parse(text); } catch { /* a proxy page, not the control plane */ }
-    if (!response.ok || parsed === null) throw new FleetUnreachableError(`The agent registry at ${config.url} answered ${response.status}${parsed?.error ? `: ${parsed.error}` : ''}`);
-    return parsed;
-  };
+  const call = (path: string, body?: unknown) => fleetRequest(config, path, { body, fetch: fetcher, timeoutMs });
   return { document: () => call('agent-registry/document'), select: request => call('agent-registry/select', request), end: async (session, reason, outcome) => { await call(`agent-registry/sessions/${session}/end`, { reason, ...(outcome ? { outcome } : {}) }); } };
 }
 
@@ -383,4 +391,219 @@ export function proposeFleet(logins: HostLogin[], host: string, current: Pick<Ag
     return added.length ? [{ name, accounts: added, concurrency: proposedConcurrency[name] }] : [];
   });
   return { runtimes, models, accounts, roles };
+}
+
+// ---------------------------------------------------------------------------
+// Connect an account from the UI (GY-409).
+//
+// The catalog below is everything the browser, the control plane and the host's
+// executor agree on about the providers an operator can connect without a shell:
+// what each one is called, whether it takes a pasted API key or the provider's
+// own subscription login, which runtime and registry model its account runs,
+// which file inside the login home holds its credential and what that file
+// looks like, the login command whose output is relayed to the operator, and
+// the one-line smoke prompt that decides whether the card turns healthy.
+// Everything here is pure: the writes and spawns live in src/master/environments.ts.
+// ---------------------------------------------------------------------------
+
+/** A provider an operator connects from Settings › Agents. */
+export interface ConnectProvider {
+  /** Stable id on the wire (`connect.provider`). */
+  id: string;
+  /** The operator-facing name the UI shows. */
+  label: string;
+  /** `api-key` providers take a pasted key sealed to the agent host; `subscription` providers run their own login. */
+  kind: 'api-key' | 'subscription';
+  /** The registry runtime the account runs on. */
+  runtime: string;
+  /** The registry model the account runs; added when the registry lacks it, left alone when it has one. */
+  model: string;
+  /** The capability class the default role placement follows (GY-409 AC-4). */
+  tier: 'strong' | 'fast';
+  /** Path of the provider's own auth file inside the login home, for `api-key` providers. */
+  authFile?: string;
+  /** The provider's auth file content: what `key` becomes, laid over whatever the file already held. */
+  authDocument?: (existing: Record<string, unknown>, key: string) => Record<string, unknown>;
+  /** The provider's own login command for `subscription` providers, and the env variable that selects the login home. */
+  login?: { command: string; args: string[]; envVariable: string };
+  /** Path inside the login home whose presence means the login completed. */
+  loginFile?: string;
+  /** The one-line smoke prompt: what is run inside the login home to decide the card's health. */
+  smoke: { command: string; args: string[]; envVariable: string };
+  /** One line of UI help under the provider's picker entry. */
+  help: string;
+}
+
+const smokePrompt = 'Reply with the single word: ok';
+
+/** The providers Settings › Agents offers, in the order the picker shows them. */
+export const connectProviders: readonly ConnectProvider[] = [
+  {
+    id: 'z.ai', label: 'z.ai (GLM coding plan)', kind: 'api-key', runtime: 'opencode', model: 'opencode-default', tier: 'fast',
+    authFile: 'opencode/auth.json',
+    // OpenCode's auth entries are a union discriminated on `type`: without `type: 'api'` it
+    // discards the entry, so the pasted key would never be used and the smoke would pass on
+    // whatever other provider the host still had.
+    authDocument: (existing, key) => ({ ...existing, 'zai-coding-plan': { ...(existing['zai-coding-plan'] as Record<string, unknown> | undefined ?? {}), type: 'api', key } }),
+    // The smoke pins the provider and model, so "healthy" means this key answered.
+    smoke: { command: 'opencode', args: ['run', '--model', 'zai-coding-plan/glm-5.3-flash', smokePrompt], envVariable: 'XDG_DATA_HOME' },
+    help: 'Your z.ai coding-plan key, wrapped by OpenCode. Cheap-model accounts join research, approval and proofs.',
+  },
+  {
+    id: 'anthropic-api', label: 'Anthropic API', kind: 'api-key', runtime: 'claude', model: 'claude-default', tier: 'strong',
+    authFile: 'settings.json',
+    authDocument: (existing, key) => ({ ...existing, env: { ...((existing.env ?? {}) as Record<string, unknown>), ANTHROPIC_API_KEY: key } }),
+    smoke: { command: 'claude', args: ['-p', smokePrompt], envVariable: 'CLAUDE_CONFIG_DIR' },
+    help: 'An Anthropic API key Claude Code bills to your API account.',
+  },
+  {
+    id: 'openai-api', label: 'OpenAI API', kind: 'api-key', runtime: 'codex', model: 'codex-default', tier: 'strong',
+    authFile: 'auth.json',
+    authDocument: (existing, key) => ({ ...existing, OPENAI_API_KEY: key }),
+    smoke: { command: 'codex', args: ['exec', smokePrompt], envVariable: 'CODEX_HOME' },
+    help: 'An OpenAI API key Codex bills to your API account.',
+  },
+  {
+    id: 'claude', label: 'Claude (subscription)', kind: 'subscription', runtime: 'claude', model: 'claude-default', tier: 'strong',
+    login: { command: 'claude', args: ['login'], envVariable: 'CLAUDE_CONFIG_DIR' }, loginFile: '.credentials.json',
+    smoke: { command: 'claude', args: ['-p', smokePrompt], envVariable: 'CLAUDE_CONFIG_DIR' },
+    help: 'Your Claude subscription. Finish the sign-in in your own browser.',
+  },
+  {
+    id: 'chatgpt', label: 'ChatGPT / Codex (subscription)', kind: 'subscription', runtime: 'codex', model: 'codex-default', tier: 'strong',
+    login: { command: 'codex', args: ['login'], envVariable: 'CODEX_HOME' }, loginFile: 'auth.json',
+    smoke: { command: 'codex', args: ['exec', smokePrompt], envVariable: 'CODEX_HOME' },
+    help: 'Your ChatGPT plan, through the Codex CLI. Finish the sign-in in your own browser.',
+  },
+  {
+    id: 'cursor', label: 'Cursor (subscription)', kind: 'subscription', runtime: 'cursor', model: 'cursor-default', tier: 'strong',
+    login: { command: 'cursor-agent', args: ['login'], envVariable: 'CURSOR_CONFIG_DIR' }, loginFile: 'cli-config.json',
+    smoke: { command: 'cursor-agent', args: ['-p', smokePrompt], envVariable: 'CURSOR_CONFIG_DIR' },
+    help: 'Your Cursor plan. Finish the sign-in in your own browser.',
+  },
+];
+
+/** The provider a connect request names, or null when it names no known one. */
+export const connectProvider = (id: string): ConnectProvider | null => connectProviders.find(entry => entry.id === id) ?? null;
+
+/**
+ * The roles a newly connected account joins by default, by capability (GY-409 AC-4): strong-model
+ * accounts join worker and reviewer; cheap models (GLM, Flash-class) join research, the approver
+ * and the unit producer. Every role listed that exists in the registry takes the account appended
+ * to its failover order. `research` is the host's own (master.json) configuration, not a registry
+ * role: the account joins it only once the host has made the account's Pi wrapper the research
+ * command, and the host's result is what reports it — the card never claims a placement the
+ * fleet cannot launch.
+ */
+export function connectDefaultRoles(tier: ConnectProvider['tier']): readonly string[] {
+  return tier === 'fast' ? ['research', 'approver', 'producer'] : ['worker', 'reviewer'];
+}
+
+/** The URL a provider's login printed, and the device or one-time code beside it, or nulls. */
+export function parseLoginOutput(text: string): { url: string | null; code: string | null } {
+  const url = text.match(/https?:\/\/[^\s"'<>]+/)?.[0] ?? null;
+  const code = text.match(/(?:one-time|device|verification)?\s*code(?:\s*is)?[:\s]+([A-Za-z0-9][A-Za-z0-9-]{3,30})/i)?.[1] ?? null;
+  return { url, code };
+}
+
+/**
+ * Start the provider's own login inside a fresh login home and relay what it prints (GY-409): the
+ * URL and code reach the UI as soon as they appear, the login file's arrival ends the wait, and
+ * the caller runs the smoke prompt before the card turns healthy. The child is bounded: past the
+ * window it is stopped and the failure is what the card shows.
+ */
+export async function relaySubscriptionLogin(provider: ConnectProvider, home: string, options: { login?: { command: string; args: string[] }; pollMs?: number; loginTimeoutMs?: number; onPrinted?: (printed: { url: string | null; code: string | null }) => unknown } = {}): Promise<{ url: string | null; code: string | null; loggedIn: boolean; error: string | null }> {
+  const login = options.login ?? { command: provider.login!.command, args: provider.login!.args };
+  const pollMs = options.pollMs ?? 2_000, timeoutMs = options.loginTimeoutMs ?? 10 * 60_000;
+  const file = resolve(home, provider.loginFile ?? '');
+  const seen = () => access(file).then(() => true, () => false);
+  return await new Promise(done => {
+    let child: ReturnType<typeof spawn>;
+    try { child = spawn(login.command, login.args, { env: { ...process.env, [provider.login!.envVariable]: home }, stdio: ['ignore', 'pipe', 'pipe'] }); }
+    catch (error) { done({ url: null, code: null, loggedIn: false, error: `${login.command} could not be started: ${error instanceof Error ? error.message : 'unknown reason'}` }); return; }
+    let text = '', found: { url: string | null; code: string | null } | null = null, settled = false;
+    const finish = (result: { url: string | null; code: string | null; loggedIn: boolean; error: string | null }) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(limit); clearInterval(polling); clearTimeout(settle);
+      try { child.kill('SIGTERM'); } catch { /* already gone */ }
+      done(result);
+    };
+    const printed = () => { found ??= parseLoginOutput(text); return found; };
+    // The login blocks until the operator signs in, and the operator needs the URL to do that: hand
+    // it on the moment it is printed (with the code, once both are out or the output settles).
+    let told = false, settle: ReturnType<typeof setTimeout> | undefined;
+    const tell = () => {
+      if (told || settled) return;
+      const now = parseLoginOutput(text);
+      if (!now.url && !now.code) return;
+      clearTimeout(settle);
+      const announce = () => { if (told || settled) return; told = true; found = parseLoginOutput(text); void Promise.resolve(options.onPrinted?.(found)).catch(() => {}); };
+      if (now.url && now.code) announce(); else settle = setTimeout(announce, 500);
+    };
+    const read = (chunk: Buffer) => { text += chunk.toString(); tell(); };
+    child.stdout?.on('data', read);
+    child.stderr?.on('data', read);
+    const limit = setTimeout(() => finish({ ...(found ?? { url: null, code: null }), loggedIn: false, error: `${login.command} did not finish within ${Math.round(timeoutMs / 1000)}s and was stopped` }), timeoutMs);
+    const polling = setInterval(() => { if (settled) return; void seen().then(there => { if (there) finish({ ...(printed() ?? { url: null, code: null }), loggedIn: true, error: null }); }); }, pollMs);
+    limit.unref?.(); polling.unref?.();
+    child.on('error', error => finish({ ...(printed() ?? { url: null, code: null }), loggedIn: false, error: `${login.command} failed: ${error instanceof Error ? error.message : 'unknown reason'}` }));
+    child.on('close', status => { void seen().then(there => {
+      if (there) return finish({ ...(printed() ?? { url: null, code: null }), loggedIn: true, error: null });
+      finish({ ...(printed() ?? { url: null, code: null }), loggedIn: false, error: `${login.command} exited ${status ?? 'to a signal'} before the login file appeared` });
+    }); });
+  });
+}
+
+/**
+ * The provider error an operator is shown, with the credential itself cut out: a provider that
+ * echoes the pasted key back in an error message must not carry it onto a card, into history or
+ * into a log line.
+ */
+export const redactKey = (text: string, key: string) => key.length > 8 ? text.split(key).join('[redacted]') : text;
+
+/**
+ * Research joins through a Pi wrapper (GY-409 AC-4): `pi-<letter>` reads the provider key at run
+ * time from the account's login home and execs `pi`, so a cheap account can serve research without
+ * the key being copied anywhere. An existing wrapper is never overwritten; null says there was
+ * nothing to write.
+ */
+export async function ensureResearchWrapper(name: string, home: string, options: { root?: string; binDirectory?: string } = {}): Promise<string | null> {
+  const letter = name.match(/-([a-z0-9]+)$/)?.[1];
+  if (!letter) return null;
+  const bin = options.binDirectory ?? resolve(homedir(), '.local/bin');
+  const file = resolve(bin, `pi-${letter}`);
+  if (await access(file).then(() => true, () => false)) return null;
+  // Paths are shell-quoted: a home carrying a quote or a `$` must not break or inject into the wrapper.
+  const piDirectory = shellQuote(resolve(agentEnvironmentRoot(options.root), `pi-${letter}`));
+  const script = [
+    '#!/usr/bin/env bash',
+    `# pi, env ${letter}: the provider key is read at run time from its login home; never stored here.`,
+    `mkdir -p ${piDirectory}`,
+    `export PI_CODING_AGENT_DIR=${piDirectory}`,
+    `export ZAI_API_KEY="$(node -e 'process.stdout.write(require(process.argv[1])["zai-coding-plan"].key)' ${shellQuote(resolve(home, 'opencode/auth.json'))})"`,
+    'exec pi "$@"',
+    '',
+  ].join('\n');
+  await mkdir(bin, { recursive: true });
+  await writeFile(file, script, { mode: 0o755 });
+  return file;
+}
+
+/**
+ * Make the account's Pi wrapper the research command in the coordinator checkout's
+ * .graphyard/master.json (GY-409 AC-4): a cheap account joins research only once the host's own
+ * configuration can launch it. A research or Pi command the operator set is never replaced, and a
+ * host with no readable master configuration appends nothing; false says so, and the connect's
+ * result then claims only the registry roles.
+ */
+export async function appendResearchCommand(wrapper: string, options: { masterFile?: string } = {}): Promise<boolean> {
+  const file = options.masterFile ?? resolve(process.cwd(), '.graphyard/master.json');
+  let config: MasterConfig;
+  try { config = masterConfigSchema.parse(JSON.parse(await readFile(file, 'utf8'))); }
+  catch { return false; }
+  if (config.run.research?.command || config.run.pi?.command) return false;
+  const parsed = masterConfigSchema.parse({ ...config, run: { ...config.run, research: { ...config.run.research, command: wrapper } } });
+  await atomicPrivateWrite(file, parsed);
+  return true;
 }
