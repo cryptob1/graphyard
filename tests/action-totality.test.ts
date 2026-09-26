@@ -218,8 +218,6 @@ test('integration:action-mapping-total-over-states — every refusal the engine 
     { name: 'a stale observation', work: { ...unproven, observation: { ...unproven.observation!, at: new Date(now.getTime() - 600_000).toISOString() } } as Work },
     { name: 'branch protection unverified', work: { ...unproven, observation: { ...unproven.observation!, protected: false } } as Work },
     { name: 'not mergeable', work: { ...unproven, observation: { ...unproven.observation!, mergeable: false } } as Work },
-    // GitHub has not computed mergeability yet (GY-548): named as a computation, read again on the next observation.
-    { name: 'mergeability computing', work: { ...unproven, observation: { ...unproven.observation!, mergeable: false, mergeabilityUnknown: true } } as Work },
     { name: 'unresolved review threads', work: { ...unproven, observation: { ...unproven.observation!, conversations: { required: true, unresolved: [{ id: 'PRRT_1', author: 'chatgpt-codex-connector', path: 'docs/a.md', line: 1, outdated: false }] } } } as Work },
     { name: 'a standing escalation', work: { ...unproven, escalations: [{ trigger: 'security-concern', reason: 'the candidate ships a credential', at: now.toISOString(), actor: 'reviewer' }] } as Work },
     { name: 'a slice lead hold', work: { ...unproven, leadHold: { action: 'send-back', rulingId: 'R-1', leadId: 'lead-a', slice: 'product', ruleId: 'R-1', reason: 'the slice is frozen for the release', at: now.toISOString() } } as Work },

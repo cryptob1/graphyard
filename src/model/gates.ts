@@ -12,6 +12,15 @@ import { regressionRefusals } from '../regression-guard.js';
 import { mechanicalFailure, mechanicalVerdicts } from './mechanical-proofs.js';
 
 // Pure evaluation: neither worker assertions nor UI state can authorize progression.
+declare module './work.js' {
+  interface Observation {
+    // GitHub has not computed mergeability yet (`pr.mergeable === null`): it recomputes lazily after
+    // the base moves. Unknown is neither mergeable nor conflicting; it is re-read on the next
+    // observation rather than refused as not mergeable (GY-548). Recorded by github.ts `observe`.
+    mergeabilityUnknown?: boolean;
+  }
+}
+
 /** The merge gate's refusal while GitHub has not computed a pull request's mergeability (GY-548). */
 export const mergeabilityComputingRefusal = 'GitHub is computing mergeability against the current base; the next observation reads it again';
 
