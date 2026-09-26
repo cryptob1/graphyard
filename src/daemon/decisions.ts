@@ -7,6 +7,7 @@ import { unexercisedFindings } from '../auto-dispatch.js';
 import { decisionBindingMax } from '../model/approval.js';
 import { guardBroadScope, type MasterConfig, type ContainmentAssessment, containmentPhase, type HerdrAgent } from '../master.js';
 import { researchRework } from '../research.js';
+import { baseBreakHold } from '../master/base-break-refresh.js';
 import { triageClosure } from '../model/machine-backlog.js';
 import { actionDetailMax, type ApprovalWatch, message } from './state.js';
 
@@ -244,6 +245,9 @@ export function failedCheckRework(work: Work): { reason: string; binding: string
   const candidate = work.candidate, observation = work.observation;
   if (!work.submission || work.reworkRequested || !candidate || !observation || work.stage === 'done') return null;
   if (observation.candidate.sha !== candidate.sha || observation.merged || observation.prState === 'closed') return null;
+  // Failed only on tests the base branch broke and its tip fixed (GY-793): the observation job
+  // refreshes the candidate onto that tip, and no worker is sent back for what it did not break.
+  if (baseBreakHold(work)) return null;
   const failed = work.policy.checks.filter(name => {
     const runs = observation.checks.filter(check => check.name === name);
     const latest = runs.length ? runs.reduce((newest, check) => (check.attempt ?? 0) >= (newest.attempt ?? 0) ? check : newest) : null;

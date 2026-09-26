@@ -1,4 +1,5 @@
 // Concern: the effects a cycle acts through — their interface, cursor records, and the production wiring.
+import { wakeOwnObservation } from '../master/base-break-refresh.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { productionEnvironmentFromEnv } from '../flow-analytics.js';
@@ -59,6 +60,12 @@ export interface DaemonEffects {
    * waits for the operator exactly as it did before.
    */
   decideScope?: (work: Work) => Promise<Work>;
+  /**
+   * Wake the item's own observation job and return the item once a reading newer than the wake is
+   * saved, or null when none arrived in time (GY-793): a decision gated on a fresh observation asks
+   * for one rather than waiting for an unrelated cycle to find one.
+   */
+  observe?: (work: Work, waitMs: number) => Promise<Work | null>;
   /**
    * The review findings standing against the item's head — its unresolved threads and its
    * reviewer's latest change request (review-scope.ts) — read outside every transaction.
@@ -569,6 +576,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     dispatch: (work, profile, agents, snapshot) => dispatchWork(root, work, profile, agents, run, snapshot.work, undefined, undefined, undefined, snapshot.now, { agents: () => listHerdrAgents(run) }),
     recordSession: (work, handle) => mutate(`work/${work.id}/session`, handle),
     decideScope: work => mutate(`work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch }),
+    observe: (work, waitMs) => wakeOwnObservation(body => mutate(`work/${work.id}/resync`, body, randomUUID()), ms => new Promise(resolve => setTimeout(resolve, ms)), { waitMs }),
     // No pull request yet means no review finding: the first attempt's scope is the criteria's alone.
     // Only the configured reviewer's and the awaited bot reviewers' words are findings the loop acts on.
     reviewFindings: async work => work.candidate?.pr ? readReviewFindings({ repository: current().repository, pr: work.candidate.pr, sha: work.candidate.sha, reviewer: current().reviewer ? `${current().reviewer!.slug}[bot]` : null,
