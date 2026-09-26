@@ -56,6 +56,8 @@ export const refusalRules: { gate: string | null; match: RegExp; kind: NextActio
   // merge
   { gate: 'merge', match: /^GitHub observation missing or older than two minutes$/, kind: 'resync' },
   { gate: 'merge', match: /^Pull request is not mergeable against the current base$/, kind: 'resync' },
+  // GitHub has not finished computing mergeability (GY-548): only a fresh read answers it.
+  { gate: 'merge', match: /^GitHub is computing mergeability against the current base/, kind: 'resync' },
   { gate: 'merge', match: /branch protection have not been verified$/, kind: 'escalate' },
   { gate: 'merge', match: /^Ejected from the merge queue:/, kind: 'request-rework' },
   // Unresolved review threads never refuse a merge in Graphyard's gate; a branch that still requires
