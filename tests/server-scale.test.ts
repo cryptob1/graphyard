@@ -290,7 +290,8 @@ test('unit:status-degrades-per-section — master status still returns every oth
 
   // The server's request error log names the route and the statement that timed out.
   const strict = new Store(databaseUrl);
-  strict.pool.options.statement_timeout = 1;
+  // The report runs on the report pool (GY-491), under its own statement timeout.
+  strict.reportPool.options.statement_timeout = 1;
   const slowServer = server(new Engine(strict, [15368], 120, 'owner/project'), [{ ...coordinator, token: tokens.coordinator }]);
   await new Promise<void>(resolve => slowServer.listen(0, '127.0.0.1', resolve));
   const logged: string[] = [], original = console.error;

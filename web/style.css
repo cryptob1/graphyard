@@ -241,7 +241,14 @@ img.mark{width:26px;height:26px}
 .now-dot{position:absolute;transform:translateX(-50%);min-height:0;padding:2px var(--space-2);border-radius:999px;border:1px solid var(--group);background:color-mix(in srgb,var(--group) 20%,var(--bg));color:var(--text);font-size:11px;font-weight:500;transition:left .8s ease,top .8s ease}
 .now-dot::before{content:'';display:inline-block;width:8px;height:8px;margin-right:6px;border-radius:50%;background:var(--group);animation:gy-halo 1.8s ease-out infinite}
 @keyframes gy-halo{0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--group) 55%,transparent)}100%{box-shadow:0 0 0 8px color-mix(in srgb,var(--group) 0%,transparent)}}
-.outside{position:absolute;left:var(--space-4);bottom:var(--space-2);margin:0;font-size:var(--type-tiny);color:var(--text-3)}
+/* GY-705: the Now lane stays compact — each column wraps its dots two to a row and shows twelve before a '+N more' control; an expanded column scrolls inside the capped lane. */
+.now-lane{min-height:64px;max-height:320px;overflow-y:auto;background-attachment:local}
+.now-dot{padding:2px 6px;font-size:10px}.now-dot::before{width:6px;height:6px;margin-right:4px}
+.now-more{position:absolute;transform:translateX(-50%);min-height:0;padding:1px var(--space-2);border-radius:999px;border:1px dashed var(--text-3);background:var(--surface);color:var(--text-2);font-size:var(--type-tiny);font-weight:500;white-space:nowrap}
+.now-more:hover{color:var(--text);border-color:var(--text-2)}
+.flow-subhead{flex-wrap:wrap}.flow-subhead .outside{margin:0 0 0 auto;font-size:var(--type-tiny);color:var(--text-3)}
+/* Below the width two labelled pills fit a column, a dot is its halo alone; its key stays in its title and label. */
+@media(max-width:1250px){.now-dot{padding:3px;font-size:0}.now-dot .mono{display:none}.now-dot::before{margin-right:0}.now-more{padding:1px 4px}.now-more-word{display:none}}
 .replay-dot{position:absolute;width:10px;height:10px;margin-left:-5px;border-radius:50%;background:var(--moving);transition:left .35s ease}.replay-dot.rework{background:var(--blocked)}
 .replay-controls{display:flex;align-items:center;gap:var(--space-3);padding:10px var(--space-4) 14px;font-size:var(--type-tiny);color:var(--text-3)}.replay-controls input{flex:1;padding:0}
 /* GY-204: the replay waits under a video-style play button; every colour is a token, so it follows the dashboard in either theme. */
@@ -277,7 +284,7 @@ img.mark{width:26px;height:26px}
   .row-key{grid-area:key;color:var(--group);font-size:var(--type-tiny)}.row-time{grid-area:time;text-align:right;font-size:var(--type-tiny)}.row-main{grid-area:main}.row-steps{grid-area:steps}.row-steps:empty{display:none}.row-who{grid-area:who;font-size:var(--type-tiny)}.row-who::before{content:'Next: '}.decide{grid-area:decide}
   .steps-track .step-seg{height:4px}
   .item-head{flex-direction:column}.steps-detail{grid-template-columns:repeat(4,minmax(0,1fr))}.item-page h1{font-size:22px}
-  .flow-step{padding:var(--space-2) 2px;align-items:center;text-align:center}.flow-step strong{font-size:var(--type-tiny)}.flow-step span,.flow-step small{display:none}.time-legend{grid-template-columns:1fr}
+  .flow-step{padding:var(--space-2) 2px;align-items:center;text-align:center}.flow-step strong{font-size:var(--type-tiny)}.flow-step .flow-median,.flow-step small{display:none}.time-legend{grid-template-columns:1fr}
   .shipped-line{flex-wrap:wrap}
 }
 .work-group>h2 .push{margin-left:auto;font-size:var(--type-small);font-weight:500;color:var(--accent)}
