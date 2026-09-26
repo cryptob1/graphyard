@@ -179,7 +179,7 @@ test('unit:loop-and-executor-dispatch-safely — the loop and an executor dispat
       launchReview: async () => ({}), launchProducer: async () => ({}), merge: async () => ({}),
       observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'not configured', deployed: [], pending: [] }) as any,
     });
-    // The executor reads Herdr through the script's launcher, which supplies no fresh reader.
+    // Without a fresh reader, as a direct dispatchWork caller: the launch marker makes it re-read Herdr.
     const dispatchWorker = (item: Work, profile: WorkerProfile, seen: HerdrAgent[], snap: { work: Work[]; now: string }) =>
       dispatchWork(fixture.root, item, profile, seen, herdr.run, snap.work, claims.prepare, claims.release, 1, snap.now).catch(refused('executor'));
     const row = { id: 'row-2', kind: 'dispatch', work: 'id-GY-2', key: 'GY-2', inputs: { kind: 'dispatch', target: 'implementation', epoch: 0, priority: 1, plannedFiles: [] } } as unknown as ActionRow;

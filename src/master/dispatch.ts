@@ -92,7 +92,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
     // again under the reservation: the snapshot this dispatcher chose from may already be stale (GY-273).
     const unreserve = await reserveDispatch(root, work, profile, observedAt);
     try {
-      if ((await currentAgents(root, profile, agents, observedAt, run, options.agents)).some(agent => agent.name === profile.agentName))
+      if ((await currentAgents(root, profile, agents, run, options.agents)).some(agent => agent.name === profile.agentName))
         throw new DispatchReservedError('profile', profile.name, `Launch profile agent name ${profile.agentName} is already visible in Herdr; pick another profile`);
       // The account is chosen before anything is claimed: a profile whose accounts are all logged out
       // or out of quota claims nothing, and the refusal names every account it skipped and why.
