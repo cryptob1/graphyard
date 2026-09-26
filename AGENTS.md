@@ -92,7 +92,10 @@ Create, release, unblock, and add requirements with your own operator-agent iden
 decision (requirement rewrites, escalation resolution, `manual:` attestation,
 rework, containment recovery, proof grants, and merge approval when automatic
 merging is off) with `graphyard master decide GY-N ACTION REASON`, then launch the
-independent approver with `graphyard master approver GY-N DECISION`. The server
+independent approver with `graphyard master approver GY-N DECISION`. The loop
+watches that session as it watches its own approvers and closes it, recording why,
+once its decision settles or its item is delivered; it closes any other approver
+session left open the same way. The server
 refuses self-approval and any approver that held an assignment on the item or produced
 its evidence. Never ask a human to run a command an agent identity may run: `master
 status` names who resolves each attention item and the next command.

@@ -339,7 +339,9 @@ export async function launchApprover(root: string, work: Work, decision: string,
   const session = selected?.account.fleet.session ?? null;
   // The record is part of the launch: without it an adopted session's spent account and registry
   // slot are unknown, so a launch whose record cannot be written is closed and fails.
-  try { await saveApproverLaunch(root, { agentName: name, account: spentOn, runtime: kind, session, launchedAt: new Date().toISOString() }); }
+  // It names the item and decision too (GY-403), so the loop watches a session `master approver`
+  // launched exactly as one of its own, and closes it once its decision settles.
+  try { await saveApproverLaunch(root, { agentName: name, account: spentOn, runtime: kind, session, launchedAt: new Date().toISOString(), work: work.key, decision }); }
   catch (error) { throw await abandonLaunch(error, pane, tabId, selected, `approver launch record for ${work.key} could not be written: ${failureText(error).slice(0, 300)}`, run); }
   return { agentName: name, work: work.key, decision, identity: config.approver!.id, pane: pane! as string | null, delivery, focusChanged: false, runtime: kind as string, session,
     account: selected ? { environment: selected.account.name, kind, reason: selected.selection.reason, skipped: selected.skipped }
@@ -354,20 +356,26 @@ export async function launchApprover(root: string, work: Work, decision: string,
  */
 export const approverLaunchSchema = z.object({ agentName: z.string().max(200), account: z.string().max(200).nullable(), runtime: z.string().max(40).nullable(),
   /** The agent registry session the launch holds, when the registry chose its account. */
-  session: z.string().max(200).nullable().default(null), launchedAt: z.string() }).strict();
+  session: z.string().max(200).nullable().default(null), launchedAt: z.string(),
+  /** The item and decision it judges (GY-403): the loop registers the session in its approval watch from these. */
+  work: z.string().max(40).nullable().default(null), decision: z.string().max(100).nullable().default(null) }).strict();
 export type ApproverLaunch = z.infer<typeof approverLaunchSchema>;
 const approverLaunchesPath = async (root: string) => resolve(await localDirectory(root), 'approvers', 'launches.json');
+/** Every approver launch recorded on this host within the last day. */
+export async function readApproverLaunches(root: string): Promise<ApproverLaunch[]> {
+  try { return z.array(approverLaunchSchema).parse(JSON.parse(await readFile(await approverLaunchesPath(root), 'utf8'))); } catch { return []; }
+}
 export async function readApproverLaunch(root: string, agentName: string): Promise<ApproverLaunch | null> {
-  try { return z.array(approverLaunchSchema).parse(JSON.parse(await readFile(await approverLaunchesPath(root), 'utf8'))).findLast(entry => entry.agentName === agentName) ?? null; } catch { return null; }
+  return (await readApproverLaunches(root)).findLast(entry => entry.agentName === agentName) ?? null;
 }
 /** Record the launch of `launch.agentName`, replacing an earlier one of that name; records past a day are dropped. */
-export async function saveApproverLaunch(root: string, launch: ApproverLaunch, now = Date.now()) {
+export async function saveApproverLaunch(root: string, launch: z.input<typeof approverLaunchSchema>, now = Date.now()) {
   const file = await approverLaunchesPath(root);
   let kept: ApproverLaunch[] = [];
   try { kept = z.array(approverLaunchSchema).parse(JSON.parse(await readFile(file, 'utf8'))); } catch { /* a missing or unreadable record starts empty */ }
   kept = kept.filter(entry => entry.agentName !== launch.agentName && now - Date.parse(entry.launchedAt) < escalationSessionMs);
   await mkdir(dirname(file), { recursive: true, mode: 0o700 });
-  await atomicPrivateWrite(file, [...kept, launch].slice(-retainedEscalationSessions));
+  await atomicPrivateWrite(file, [...kept, approverLaunchSchema.parse(launch)].slice(-retainedEscalationSessions));
 }
 
 /** The approver role's accounts as `roleCapacity` reads them: whether any is left, and each one's reset. */
