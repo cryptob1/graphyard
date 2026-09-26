@@ -251,6 +251,11 @@ export async function readProfileLaunchRecords(root: string, profiles: { name: s
   }
   return records;
 }
+/** Everything `master status` shows of worker launches (GY-417): each profile's row fields and the never-starting accounts. */
+export async function workerLaunchStatus(root: string, config: Pick<MasterConfig, 'credentialFile' | 'cliPath' | 'workers'>) {
+  const failures = await readAccountStartFailures(config);
+  return { rows: workerLaunchRows(config.workers, await readProfileLaunchRecords(root, config.workers)), items: accountStartFailureAttention(failures, config.cliPath) };
+}
 
 export function consentHold(config: Pick<MasterConfig, 'herdrWorkspace'>, key: string, epoch: number, agentName: string, pane: string, awaiting: { prompt: string; kind: ConsentHold['kind']; request?: string | null; named?: boolean }, now = Date.now()): ConsentHold {
   return { key, epoch, agentName, pane, attach: herdrAttach(pane, config.herdrWorkspace), prompt: awaiting.prompt, kind: awaiting.kind, since: new Date(now).toISOString(), releaseAt: new Date(now + consentHoldMs).toISOString(), ...(awaiting.request ? { request: awaiting.request } : {}), ...(awaiting.named === false ? { named: false } : {}) };

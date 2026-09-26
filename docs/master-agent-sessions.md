@@ -19,13 +19,13 @@ Sessions run in no-approval mode (`"approvals": "auto"`): `--permission-mode byp
 
 ### Worker sandbox
 
-Codex's sandbox gets `.git/worktrees/GY-N-E` and shared `.git` via `--add-dir`, probed first (`Worker launch failed: the codex sandbox cannot write PATH`).
+Codex's sandbox gets `.git/worktrees/GY-N-E` and `.git` via `--add-dir`, probed (`Worker launch failed: the codex sandbox cannot write PATH`).
 
 ## Accounts and failover
 
-A profile's `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`), in order, unless the [agent registry](onboarding.md#configure-the-fleet) defines the role. A launch takes the first logged-in account under `run.quotaCeilingPercent`, else **fails over** to the next (`dispatch.accounts`).
+A profile's `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`) in order unless the [agent registry](onboarding.md#configure-the-fleet) defines the role. A launch takes the first logged-in account under `run.quotaCeilingPercent`, else **fails over** (`dispatch.accounts`).
 
-A runtime that never starts falls forward; the dispatch record and `master status` name both (`opencode-a failed to start: …; launched on claude-b`), and **three consecutive failures** raise one attention item.
+A runtime that never starts fails over, both named (`opencode-a failed to start: …; launched on claude-b`); **three** raise attention.
 
 On a mid-session limit notice the loop commits worker changes as unpushed `WIP:`, records `capacity.exhausted` (not `lease-loss`) and relaunches on the next account, or waits for the first reset.
 
@@ -47,13 +47,11 @@ The typed line is bounded at **512 bytes** whatever the request is.
 
 #### The start bound reads the pane
 
-The runtime is **ready** when Herdr reports it active with no prompt, or its banner shows (`the claude runtime is on screen while Herdr reports it unknown`). Ready within **60 seconds** (`run.launchStartSeconds`) is started; one still starting gets **120 seconds** (`started.extended`). Otherwise it is refused with the case and the pane's last non-empty line, never Herdr's own `agent_not_found`: `the claude runtime never started within 60 s in pane w1V:pR6 (command still echoing)`, `… was still starting after 120 s` or `… is blocked before it is ready`; retried as `Automatic producer launch for GY-N refused 1 time(s): …`. A failed launch stops its supervisor, closes its pane and releases its claim.
-
-Banners match runtime elements, never the echoed command: OpenCode 1.18's [start screen](../tests/fixtures/opencode-1.18-start-screen.txt) has `tab agents`, `ctrl+p`.
+The runtime is **ready** when Herdr reports it active with no prompt, or its own screen, never the echoed command, shows ([OpenCode 1.18](../tests/fixtures/opencode-1.18-start-screen.txt); `the claude runtime is on screen while Herdr reports it unknown`). Ready within **60 seconds** (`run.launchStartSeconds`) is started; one still starting gets **120 seconds** (`started.extended`). Otherwise it is refused with the case and the pane's last non-empty line, never Herdr's own `agent_not_found`: `the claude runtime never started within 60 s in pane w1V:pR6 (command still echoing)`, `… was still starting after 120 s` or `… is blocked before it is ready`; retried as `Automatic producer launch for GY-N refused 1 time(s): …`. A failed launch stops its supervisor, closes its pane and releases its claim.
 
 #### First-run consent prompts
 
-A runtime stopped on a first-run prompt is **`awaiting consent`**. The launcher answers only `hooks-continue-untrusted` (**Continue without trusting**) and `telemetry-decline`, least-privilege; everything else, above all a **credential** or **payment** prompt, is escalated. A worker is held in `.graphyard/launch/NAME.consent` (attach: `herdr pane attach`); after **15 minutes** the supervisor stops renewing and stops the session; the item is dispatchable again.
+A runtime stopped on a first-run prompt is **`awaiting consent`**. The launcher answers only `hooks-continue-untrusted` (**Continue without trusting**) and `telemetry-decline`, never one that grants hook execution or a sandbox escape; everything else, above all a **credential** or **payment** prompt, is escalated. A worker is held in `.graphyard/launch/NAME.consent` (attach: `herdr pane attach`); after **15 minutes** the supervisor stops renewing and stops the session; the item is dispatchable.
 
 ### Acknowledgement, the one re-prompt, and never started
 
@@ -68,6 +66,6 @@ Once a live attempt's blocker or scope request is resolved, its inactive session
 - **The dispatcher bounds its own state where it composes it**, each cut marked with an ellipsis.
 - **A cursor that fails its schema is repaired, not fatal**; the repair is logged once with the
   path that failed.
-- **A tick failure is surfaced** in `dispatch.lastFailure`; three in a row raise one attention item: no reviewer or producer is launching.
+- **A tick failure is attributed and surfaced.** `dispatch.lastFailure` names it. Three consecutive failures raise one attention item saying no reviewer or producer session is being launched for any item.
 
-**A session that exits at launch is classified from its pane.** `herdr agent get` answers only `agent_not_found` for it, so the dispatcher uses `herdr pane read`: a **provider limit notice** fails over like mid-session exhaustion; any other cause is refused with the pane's last words and retried.
+**A session that exits at launch is classified from its pane.** `herdr agent get` answers only `agent_not_found` for a runtime that exits **at launch**, so the dispatcher uses `herdr pane read`: a **provider limit notice** fails over exactly as a mid-session exhaustion does; any other cause is refused with the pane's last words and retried.

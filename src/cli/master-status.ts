@@ -10,7 +10,7 @@ import { daemonSummary, loopAttention, readDaemonState } from '../master-daemon.
 import { readReviewLedger, reconcileReviews, reviewLedgerSpec, sessionLedgerHeadroom, summarizeReviews } from '../reviewer.js';
 import { producerLedgerSpec, readProducerLedger, reconcileProducers, sessionRetries, summarizeProducers } from '../producer.js';
 import { defaultAwaitReviewers, dispatchFailureAttention, dispatchSummary, readDispatchCursor } from '../auto-dispatch.js';
-import { accountStartFailureAttention, accountStartFailureLimit, readAccountStartFailures, readProfileLaunchRecords, workerLaunchRows, type AccountStartFailures, type ProfileLaunchRecord } from '../master/dispatch.js';
+import { workerLaunchStatus } from '../master/dispatch.js';
 import { actionlessItems, stallBoundMs } from '../model/action-account.js';
 import { approverLaunchAttention, directMergeLine, nameOrphanSupervisors } from './status-attention.js';
 import { nameUnobtainableReviews, type SettledReviewSession } from '../model/dispatch.js';
@@ -92,7 +92,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const dispatchCursor = await readDispatchCursor(root, master, () => {}).catch(error => ({ error: error instanceof Error ? error.message : 'Master dispatch cursor is unreadable' }));
   const stuck = stuckRequestReport({ reviews: reviewRecords, producers: producerRecords }, Date.now());
   const dispatch = 'error' in dispatchCursor ? { running: false, failures: [] as { requestId: string; kind: string; attempts: number; reason: string; at: string; nextAt: string }[], error: dispatchCursor.error } : withStuckRequests(dispatchSummary(dispatchCursor, Date.now(), master.run.dispatchIntervalSeconds * 1000, master.run.awaitReviewers ?? defaultAwaitReviewers.logins), stuck.stuck);
-  // A dispatcher that keeps failing its tick launches nothing for any item; it is named before the requests it is not launching.
+  // A dispatcher failing every tick launches nothing; it is named before the requests it holds.
   const dispatchItems = dispatchFailureAttention(dispatch);
   const containment = await timedStep('containment', () => assessContainment(snapshot.work, { hostId: master.hostId, observedAt: snapshot.now, clockOffset }));
   // Disk is reported from the host, not from the cursor: the loop may be stopped, and the volume
@@ -140,30 +140,27 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   // live session are accounted and raise nothing; what is left is named, with what is missing.
   const actionless = actionlessItems(snapshot.work, new Date(snapshot.now));
   const liveness = livenessStatus(snapshot); // GY-201: open items holding no obligation, with ages
-  // Requests, conflicts, stalls, executors and owed judgments come from derivedAttention, which the loop reads too.
+  // Requests, conflicts, stalls, executors and owed judgments: derivedAttention, which the loop reads too.
   const { generatedFiles, overflow, interventions, releases, decisions, throughput, resources, derived: { scopeRequests, stalledItems: derivedStalls, actorless, executors, conflicted, stalled, owed, budget, overlong } } = await reportedAttention(root, master, masterApi, coordinator, snapshot,
     { reviews: reviewRecords, producers: producerRecords, runtime, commit: cli.commit, approvals: cycling?.approvals ?? [], loop: cycling?.liveness ?? null, rows: status.work, trees,
-      // The intervention report takes the server a minute: status reads the loop's copy, or a bounded live read.
+      // The intervention report is slow: status reads the loop's copy or a bounded read.
       reports: 'bounded', reportBoundMs: dependencies.reportReadBoundMs, sections });
   // A merge pending on a head GitHub reports mergeable is named with the stalled items (GY-344).
-  // A repair-lane merge stays in front of the master until a normal merge proves the merge path healthy (GY-406).
-  // The queue head going without an observation stalls the whole queue behind it (GY-492), so its lag is raised with them.
+  // A repair-lane merge stays in front until a normal merge proves the merge path healthy (GY-406).
+  // A queue head without an observation stalls the queue (GY-492): its lag is raised with them.
   const observation = observationThroughputStatus(coordinator, snapshot);
   const stalledItems = [...derivedStalls, ...mergeStallAttention(snapshot), ...observation.attention, ...repairLaneAttention(snapshot.work)];
-  // Exactly one component merges (GY-245): the loop, where one is installed or running, else the executors.
+  // Exactly one component merges (GY-245): the loop, where installed or running, else the executors.
   const merger = installationMerger({ loop: { configured: !!setup.supervisor.installed, running: !!cycling?.running, autoMerge: master.autoMerge },
     declaration: executors.supervision.declaration, served: executors.presence.served });
-  const startFailures = await readAccountStartFailures(master); // GY-417
-  const launchRecords = await timedStep('launch records', () => readProfileLaunchRecords(root, master.workers)); // GY-417
-  const launchRows = workerLaunchRows(master.workers, launchRecords);
-  const launchItems = accountStartFailureAttention(startFailures, master.cliPath);
+  const launches = await timedStep('launches', () => workerLaunchStatus(root, master)); // GY-417
   const attentionItems = [...diskAttention, ...scopeRequests, ...unanswered, ...conflicted, ...stuck.attentionItems, ...stalledItems, ...actorless, ...stalled, ...overlong, ...budget, ...owed.items, ...(sudo ? [...status.attentionItems, { subject: 'installation', text: sudo.instruction,
     ...(Date.parse(sudo.deadline) <= Date.now() ? agentOwner('master', `graphyard master browser ${sudo.flow}`) : humanOwner('issuing credentials to people', sudo.instruction)) }] : [...status.attentionItems])];
-  // The loop's own health goes in front of all of it (see loopItems above), then the dispatcher's,
-  // then an action no live executor can claim: nothing below any of the three is moving until they are.
+  // The loop's own health goes first (see loopItems above), then the dispatcher's,
+  // then an action no live executor can claim: nothing below the three moves until they do.
   attentionItems.unshift(...loopItems, ...dispatchItems, ...executors.attention, ...merger.attention);
-  // Setup that stops every launch, or leaves the loop unsupervised, is the master's to repair.
-  attentionItems.push(...setupItems, ...launchItems);
+  // Setup stopping every launch, or leaving the loop unsupervised, is the master's to repair.
+  attentionItems.push(...setupItems, ...launches.items);
   attentionItems.push(...generatedFiles, ...overflow); attentionItems.push(...interventions.attentionItems, ...releases.attention, ...(throughput.attention ? [throughput.attention] : []));
   attentionItems.splice(loopItems.length + dispatchItems.length, 0, ...resources.attention);
   // Everything the control plane takes from the operator's own credential alone, from the
@@ -176,10 +173,9 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
       // Items with no action, split the way a reader has to read them: one waiting on another
       // item is the pipeline working, one with nothing moving it is the pipeline stopped.
       actionless: actionless.length, actorless: actorless.length, livenessViolations: liveness.violations, waitingOnAnother: actionless.filter(entry => entry.outcome === 'waiting-on').length, stalled: stalledItems.length,
-      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + conflicted.length + stuck.attentionItems.length + stalledItems.length + actorless.length + stalled.length + overlong.length + loopItems.length + dispatchItems.length + executors.attention.length + merger.attention.length + releases.attention.length + overflow.length + budget.length + (throughput.attention ? 1 : 0) + observation.attention.length + owed.counted + resources.attention.length + launchItems.length,
-      accountStartFailures: Object.keys(startFailures).length } }, snapshot.work); // GY-417
+      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + conflicted.length + stuck.attentionItems.length + stalledItems.length + actorless.length + stalled.length + overlong.length + loopItems.length + dispatchItems.length + executors.attention.length + merger.attention.length + releases.attention.length + overflow.length + budget.length + (throughput.attention ? 1 : 0) + observation.attention.length + owed.counted + resources.attention.length + launches.items.length } }, snapshot.work);
   return { ...directMergeLine(coordinator), ...status, ...attributed, ...faulted(attributeAttention(attributed.attentionItems, resources.readings)), resources: resources.report,
-    workers: status.workers.map(row => ({ ...row, ...launchRows[row.profile] })), // GY-417
+    workers: status.workers.map(row => ({ ...row, ...launches.rows[row.profile] })),
     // The board (GY-200): what the master owes first, with commands, then the rest.
     board: await timedStep('board', () => masterBoard(masterApi, snapshot, coordinator, decisions.unanswered)),
     unavailable: sections.unavailable,
@@ -244,7 +240,7 @@ export async function reportedAttention(root: string, master: MasterConfig, mast
   const derived = await timedStep('attention: derived', () => derivedAttention(root, master, masterApi, coordinator, snapshot, { ...observed, reviews: observed.reviews ?? [], producers: observed.producers ?? [], runtime: { available: observed.runtime.available, agents: observed.runtime.available ? observed.runtime.agents : [] } }));
   if (!derived.executors.presence.available && /^GET \/api\/actions failed/.test(derived.executors.presence.reason)) sections.mark('executors', 'GET /api/actions', derived.executors.presence.reason);
   const items = [...resources.attention, ...generatedFiles, ...overflow, ...interventions.attentionItems, ...releases.attention, ...(throughput.attention ? [throughput.attention] : []), ...decisions.attentionItems, ...derived.items];
-  // The report's last step over the whole list, which the loop runs too: a cause named once, in place of its symptoms.
+  // The report's last step, which the loop runs too: a cause named once, not its symptoms.
   const attribute = (status: { work: any[]; attentionItems: AttentionItem[] }) => attributeAttention(ledgerRefusalAttention(status, snapshot.work).attentionItems, resources.readings);
   return { generatedFiles, overflow, interventions, releases, decisions, throughput, resources, derived, items, attribute, unavailable: sections.unavailable };
 }
