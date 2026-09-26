@@ -1,5 +1,6 @@
 import { demand, type Principal } from '../../model.js';
-import type { Command } from '../../engine.js';
+import { flagPathRefusal, RenewalFault, type Command } from '../../engine.js';
+import { leaseCommands } from '../../store/pools.js';
 import { producerIndependenceRefusal, recordEvidenceRefusal, recordLeadViolation } from '../../delegation.js';
 import { ciRunBindingSchema, isCiProducer, observeCiCheckRun, type CiRunObservation } from '../../model/ci-proofs.js';
 import { defineRoutes, parseJson, type RouteContext } from '../routes.js';
@@ -10,6 +11,12 @@ import { readEscalationContext } from '../escalation-context.js';
 import { judgeClosedQuestion } from '../closed-question.js';
 import { closeWork } from '../close.js';
 import { answerResearch, recordResearch } from '../../research.js';
+
+/** Whether a request is a lease command (store/pools.ts `leaseCommands`), which authenticates and runs on the lease pool (GY-558). */
+export const leaseCommandRequest = (method: string | undefined, pathname: string) => {
+  const command = method === 'POST' ? /^\/api\/work\/[^/]+\/([a-z]+)$/.exec(pathname)?.[1] : undefined;
+  return !!command && leaseCommands.has(command);
+};
 
 // Every mutating work route refuses a slice lead the same way and leaves the same
 // ledger entry. Routing order decides which handler matches first; it must never
@@ -32,6 +39,11 @@ export const workRoutes = defineRoutes('work', [
     async handle(context, [id, action]) {
       await refuseLead(context, id, action);
       const data = await parseJson(context), key = context.idempotencyKey(), target = decodeURIComponent(id);
+      // A flag is never a planned path (GY-522): refused when the revision is asked, not only when
+      // its approval applies it through the engine.
+      const request = data as { action?: string; input?: { plannedFiles?: unknown } } | null;
+      const planned = action === 'decide' && request?.action === 'requirements' && Array.isArray(request.input?.plannedFiles) ? request.input.plannedFiles.filter((path): path is string => typeof path === 'string') : undefined;
+      const flag = flagPathRefusal(planned, 'plannedFiles'); demand(!flag, flag!, 422);
       return action === 'decide' ? requestDecision(context.services, context.actor, target, data, key) : approveDecision(context.services, context.actor, target, data, key);
     },
   },
@@ -122,7 +134,12 @@ export const workRoutes = defineRoutes('work', [
         // the engine then refuses the record as unobserved rather than answering a server error.
         try { ciRun = binding.success ? observeCiCheckRun(repository, await github.request(`/check-runs/${binding.data.jobId}`)) : null; } catch { ciRun = null; }
       }
-      return engine.execute(actor, attempted as Command, id ?? null, input, context.idempotencyKey(), ciRun === undefined ? {} : { ciRun });
+      try { return await engine.execute(actor, attempted as Command, id ?? null, input, context.idempotencyKey(), ciRun === undefined ? {} : { ciRun }); }
+      catch (error) {
+        // A renewal that failed server-side says what grace its recorded fault earned (GY-558), so the supervisor keeps retrying through it.
+        if (error instanceof RenewalFault) return context.send(503, { error: error.message, renewalFault: error.grace });
+        throw error;
+      }
     },
   },
 ]);

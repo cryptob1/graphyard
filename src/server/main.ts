@@ -29,6 +29,7 @@ export async function main() {
   const startedAt = Date.now(); const mark = (step: string) => console.log(`startup ${step} at ${Date.now() - startedAt} ms`);
   mark('store.init'); await store.init(); mark('store.init done');
   const engine = new Engine(store, (process.env.GITHUB_CI_APP_IDS ?? '15368').split(',').map(Number));
+  engine.reconcileBatchMs = reconcileBatchMs(process.env.GRAPHYARD_RECONCILE_BATCH_MS);
   engine.reviewerApps = parseReviewerApps(process.env.GRAPHYARD_REVIEWER_APPS);
   mark('github'); const github = await githubFromEnv();
   // GitHub answers persist across restarts, so a deploy starts warm instead of re-spending the budget.
@@ -114,8 +115,8 @@ export type ReconciliationStep = <T>(name: string, run: () => Promise<T>) => Pro
 /**
  * The observation concurrency (GY-492): `GRAPHYARD_OBSERVATION_CONCURRENCY`, four jobs at once
  * by default, bounded by the database pool's background share — a worker beyond it only queues on
- * a connection the API and the tick need. The GitHub budget reserve is enforced inside every job,
- * so extra workers spend nothing the budget has not allowed.
+ * a connection the API and the tick need. Every worker waits for the one shared pace before it
+ * claims (GY-567), so extra workers raise throughput only as far as the budget to the reset allows.
  */
 export const observationConcurrency = (poolMax = 12) => {
   const bound = Math.max(1, Math.floor(poolMax / 2));
@@ -131,13 +132,21 @@ export const observationConcurrency = (poolMax = 12) => {
  * its slowest job, so a queue thirty entries deep left the merge-queue head minutes without an
  * observation; workers that keep claiming while jobs are due are what drains a backlog and keeps
  * the head observed at its twenty-second cadence.
+ *
+ * Before each claim a worker takes a slot from the shared pace (`GitHub.paceObservation`, GY-567)
+ * and waits when there is none, so all of them together spend the budget above the merge-path
+ * reserve evenly until its reset; the slot is returned with what the job actually charged.
  */
 export async function observationWorkers(engine: Engine, github: GitHub, concurrency: number, stopped: () => boolean = () => false, idleMs = 1000): Promise<void> {
   const worker = async () => {
     while (!stopped()) {
-      let claimed = false;
-      try { claimed = await processJob(engine, github); }
+      const slot = github.paceObservation?.();
+      if (slot && !slot.settle) { await new Promise(resolve => setTimeout(resolve, Math.min(slot.wait, idleMs * 5))); continue; }
+      let claimed = false, charged: number | undefined;
+      try { claimed = await processJob(engine, github, cost => { charged = cost; }); }
       catch (error) { console.error('observation worker job failed', error instanceof Error ? error.message : 'unknown'); }
+      // An unclaimed slot charged nothing; a job that failed before its cost was known keeps its estimate.
+      finally { slot?.settle(claimed ? charged : 0, Date.now()); }
       if (!claimed) await new Promise(resolve => setTimeout(resolve, idleMs));
     }
   };
@@ -172,4 +181,14 @@ export function startReconciliation(tick: (step: ReconciliationStep) => Promise<
     finally { running = false; tickStep = 'idle'; }
   }, intervalMs);
   return { stop: () => clearInterval(timer) };
+}
+
+/**
+ * How long one reconcile batch may run before it yields (default 250 ms). Each batch re-reads the
+ * fleet (GY-392), so a large installation reads less with longer batches, at the cost of a lease
+ * renewal waiting up to one batch. Bounded to 100..5000 ms; anything else keeps the default.
+ */
+export function reconcileBatchMs(value: string | undefined, fallback = 250): number {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= 100 && parsed <= 5000 ? parsed : fallback;
 }

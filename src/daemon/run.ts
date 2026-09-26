@@ -2,16 +2,20 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import type { ConfigReload, MasterConfig } from '../master.js';
 import { acquireDaemonLock, type DaemonAction, type DaemonState, message, storeAction } from './state.js';
-import { faultClassPolicyFromEnv } from '../model/fault-classes.js';
+import { faultClassPolicyFromEnv, type FaultClassPolicy } from '../model/fault-classes.js';
 import { faultRecurrenceReport } from './faults.js';
 import { latencyBudget, silenceReport } from './metrics.js';
-import { boundedPersist, cycleCost, cycleDelay, cycleFailureCeiling, describeFailingCall, loopLiveness, namedEffects, noteCycleFailure, noteCycleSuccess, noteUnhandled, watchdogPlan } from './liveness.js';
+import { boundedPersist, cycleCost, cycleTimes, cycleDelay, cycleFailureCeiling, describeFailingCall, loopLiveness, namedEffects, noteCycleFailure, noteCycleSuccess, noteUnhandled, watchdogPlan } from './liveness.js';
 import type { DaemonEffects } from './effects.js';
-import { runCycle } from './cycle.js';
+import { Launcher, defaultLaunchConcurrency, runCycle } from './cycle.js';
 import { describeTimings } from '../master/timings.js';
 
-/** The compact daemon view `master status` joins onto Graphyard truth. */
-export function daemonSummary(state: DaemonState, now: number, intervalMs: number, hostId?: string) {
+/**
+ * The compact daemon view `master status` joins onto Graphyard truth. `faultPolicy` is the recurrence
+ * rule the faults are reported under: the loop passes the one it files by (effects.faultClassPolicy),
+ * so the reported window and threshold are the filing ones; absent, the environment's.
+ */
+export function daemonSummary(state: DaemonState, now: number, intervalMs: number, hostId?: string, faultPolicy: FaultClassPolicy = faultClassPolicyFromEnv(process.env)) {
   const lastCycleAt = state.lastCycleAt ? Date.parse(state.lastCycleAt) : Number.NaN;
   const lagMs = Number.isFinite(lastCycleAt) ? now - lastCycleAt : null;
   const recent = Object.entries(state.actions).map(([key, action]) => ({ key, ...action })).sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
@@ -35,6 +39,8 @@ export function daemonSummary(state: DaemonState, now: number, intervalMs: numbe
     // on: its own work, its child waits, and the step behind each, so a long cycle is a step to
     // shorten or a provider to look at, never a loop to restart.
     cost: cycleCost(state.metrics.at(-1) ?? null, intervalMs),
+    // The cycle's usual wall time, p50 and p95 over the last 30 minutes (GY-616).
+    cycleTime: cycleTimes(state.metrics, now),
     deployment: state.deployment,
     profiles: state.profiles,
     config: state.config,
@@ -44,8 +50,8 @@ export function daemonSummary(state: DaemonState, now: number, intervalMs: numbe
     // Every decision the loop has put to an approver and not yet seen applied and retired.
     approvals: Object.entries(state.approvals).map(([key, watch]) => ({ key, ...watch })),
     // Fault instances by class in the recurrence window, and the item each recurring class filed (GY-173).
-    faults: faultRecurrenceReport(state, faultClassPolicyFromEnv(process.env), now),
-    // The system invariants as the last cycle judged them (GY-404): one line per invariant, with its threshold and reading.
+    faults: faultRecurrenceReport(state, faultPolicy, now),
+    // The system invariants as the last observation judged them (GY-404): one line per invariant, with its threshold and reading.
     invariants: { at: state.invariants.at, violated: state.invariants.report.filter(check => !check.holds).length, lines: state.invariants.report.map(check => check.line), checks: state.invariants.report },
   };
 }
@@ -128,6 +134,9 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
   const onRejection = unhandled('unhandledRejection'), onException = unhandled('uncaughtException');
   host.on('unhandledRejection', onRejection); host.on('uncaughtException', onException);
   const cycles: { cycle: number; actions: number; durationMs: number; childWaitMs: number }[] = [], failed: { cycle: number; call: string | null; reason: string; delayMs: number }[] = [];
+  // Session launches run beside the cycles, never inside one (GY-616): a cycle hands a launch over
+  // and moves on, and the next cycle reports what it did. The launcher outlives every cycle.
+  const launcher = new Launcher(config.run.launchConcurrency ?? defaultLaunchConcurrency);
   try {
     do {
       let phase: 'reload' | 'cycle' = 'reload', wait: number;
@@ -136,7 +145,7 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
           for (const action of await noteConfigReload(state, await options.reload().then(reload => { config = reload.config; return reload; }), effects.persist)) log(`[graphyard-master] ${action.kind} ${action.state}: ${action.detail}`);
         }
         phase = 'cycle';
-        const result = await runCycle(config, state, effects, now);
+        const result = await runCycle(config, state, effects, now, launcher);
         // The end of a run of failures is written at once, so `master status` stops naming it.
         const recovered = noteCycleSuccess(state);
         if (recovered) await effects.persist(state);
@@ -163,6 +172,11 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
       try { await delay(wait, undefined, { signal: waking.signal }); } catch { /* woken to stop */ }
     } while (!stopping);
   } finally {
+    // Launches still in flight are let finish, so none is left `started` on the cursor, and what
+    // they did is logged here since no next cycle will report it.
+    if (launcher.pending) log(`[graphyard-master] waiting for ${launcher.pending} launch(es) in flight before stopping`);
+    await launcher.idle();
+    for (const action of launcher.drain()) log(`[graphyard-master] launch ${action.kind} ${action.state}: ${action.detail}`);
     for (const signal of signals) host.off(signal, stop);
     host.off('unhandledRejection', onRejection); host.off('uncaughtException', onException);
     state.lock = null;

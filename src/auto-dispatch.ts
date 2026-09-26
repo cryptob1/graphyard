@@ -16,7 +16,7 @@ import { agentOwner, assertOutsideWorktrees, inspectProducerCredentials, listHer
 import { detectExhaustion, type ExhaustionSignal } from './model/capacity.js';
 import { capacityRefusal } from './fleet.js';
 import { launchReview, reconcileReviews, reviewVerdictReminderMs, unpostedVerdict, type ReviewRecord } from './reviewer.js';
-import { independentProducerProfiles, launchProducer, reconcileProducers, requestAttemptLimit, sessionRetry, type ProducerRecord } from './producer.js';
+import { answeredByPendingSession, independentProducerProfiles, launchProducer, reconcileProducers, requestAttemptLimit, sessionRetry, type ProducerRecord } from './producer.js';
 import { currentEvidence } from './model/evidence.js';
 import { judgeHostMemory, memoryDeferral, readHostMemory, type HostMemoryReading } from './master-resources.js';
 export { hostMemoryHold } from './master-resources.js';
@@ -992,7 +992,12 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
                 delete cursor.failures[request.id]; delete cursor.capacity.producer;
                 tick.launched.push({ kind: 'producer', work: item.key, requestId: request.id, sha: request.sha, profile: launched.profile.name, group: request.group, proofs: request.proofs, ...(launched.failover.length ? { failover: launched.failover } : {}), ...(launched.relaunched ? { relaunched: true } : {}) });
               }
-            } catch (error) { if (!outOfCapacity('producer', item, request, error)) refuse('producer', item, request, error); }
+            } catch (error) {
+              // An executor's session already answering this head is waited on, not refused (GY-415).
+              const pending = answeredByPendingSession(error, request);
+              if (pending) wait('producer', item, request, `producer session ${pending.agentName} is already pending on ${request.sha.slice(0, 12)} for the ${request.group} proofs`);
+              else if (!outOfCapacity('producer', item, request, error)) refuse('producer', item, request, error);
+            }
             await persist();
           }).then(() => null, (error: unknown) => ({ error })));
         }

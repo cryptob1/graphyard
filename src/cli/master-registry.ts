@@ -16,7 +16,10 @@ export const registryHelp = [
   '  master registry model set NAME|@FILE [--provider P] [--id ID] [--input-cost USD]',
   '              [--output-cost USD] [--tier frontier|strong|fast] [--context TOKENS] --reason R',
   '  master registry account set NAME|@FILE --runtime R --model M [--home PATH] [--host HOST]',
-  '              [--max-sessions N] [--disable|--enable] [--note TEXT] --reason R',
+  '              [--max-sessions N] [--disable|--enable] [--note TEXT] [--key-file FILE --key-variable VAR|--no-key] --reason R',
+  '                                --key-file names the provider key file in the login home (mode 0600) that a',
+  '                                headless run reads into VAR at launch; the registry stores the reference only.',
+  '                                Any change re-runs the account\'s smoke test and clears its holds',
   '  master registry account quota NAME exhausted|available|unknown [--resets-at ISO] --reason R',
   '  master registry role set ROLE ACCOUNT[,ACCOUNT…] [--concurrency N] [--arg=A]… [--tool T]… [--model M]',
   '              [--clear-policy] --reason R   The role\'s accounts and its launch policy: permission-mode /',
@@ -100,15 +103,19 @@ export async function registryCommand(master: Pick<MasterConfig, 'hostId'>, args
     return api.write('agent-registry/models', { model, reason: values.reason });
   }
   if (collection === 'account') {
-    const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { reason: { type: 'string' }, runtime: { type: 'string' }, model: { type: 'string' }, home: { type: 'string' }, host: { type: 'string' }, 'max-sessions': { type: 'string' }, disable: { type: 'boolean' }, enable: { type: 'boolean' }, note: { type: 'string' } } });
+    const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { reason: { type: 'string' }, runtime: { type: 'string' }, model: { type: 'string' }, home: { type: 'string' }, host: { type: 'string' }, 'max-sessions': { type: 'string' }, disable: { type: 'boolean' }, enable: { type: 'boolean' }, note: { type: 'string' },
+      'key-file': { type: 'string' }, 'key-variable': { type: 'string' }, 'no-key': { type: 'boolean' } } });
     if (!positionals[0] || !values.reason) throw new Error('Use master registry account set NAME|@FILE --runtime R --model M [--home PATH] [--host HOST] --reason REASON');
     if (positionals[0].startsWith('@')) return api.write('agent-registry/accounts', { account: await fromFile(positionals[0]), reason: values.reason });
     const existing = current.accounts.find(account => account.name === positionals[0]);
     if (!existing && (!values.runtime || !values.model)) throw new Error(`${positionals[0]} is a new account; name its --runtime and --model (graphyard master registry lists both)`);
-    const { quota: _observed, ...kept } = existing ?? { quota: null };
+    const { quota: _observed, smoke: _smoke, unjudged: _held, ...kept } = existing ?? { quota: null };
+    if (!!values['key-file'] !== !!values['key-variable']) throw new Error('Name the key by both --key-file FILE (inside the login home) and --key-variable VAR (the variable the runtime reads it from)');
+    const existingKey = existing?.credential.key;
+    const key = values['no-key'] ? undefined : values['key-file'] ? { file: values['key-file'], variable: values['key-variable']! } : existingKey;
     const account = { ...kept, name: positionals[0], ...defined({ runtime: values.runtime, model: values.model, note: values.note, maxSessions: number(values['max-sessions'], '--max-sessions'), enabled: values.disable ? false : values.enable ? true : undefined }),
       // The credential stays where the runtime put it: the registry holds only where that is.
-      credential: { host: values.host ?? existing?.credential.host ?? master.hostId, home: values.home ?? existing?.credential.home ?? null } };
+      credential: { host: values.host ?? existing?.credential.host ?? master.hostId, home: values.home ?? existing?.credential.home ?? null, ...(key ? { key } : {}) } };
     return api.write('agent-registry/accounts', { account, reason: values.reason });
   }
   const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { reason: { type: 'string' }, concurrency: { type: 'string' },

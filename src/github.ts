@@ -221,6 +221,10 @@ export interface GitHubBudget {
     jobs: { work: string; at: string; requests: number; uncached: number; band: CadenceBand; cadenceMs: number }[] };
   /** Observations the reserve is holding back, until when and why. */
   deferrals: { work: string; until: string; reason: string }[];
+  /** The shared pace the observation workers start jobs at (GY-567): tier, requests per minute, spacing, estimate in flight. */
+  pace: ReturnType<ObservationPacer['report']>;
+  /** Every installation token's own budget, reset and projection at that reset (GY-690). */
+  tokens: TokenBudgetReport[];
 }
 
 /**
@@ -315,6 +319,189 @@ export function reserveDecision(band: CadenceBand, budget: Pick<GitHubBudget, 'r
   const until = new Date(reset + 2000).toISOString();
   return { until, reason: `GitHub budget is below the ${budget.reserve}-request merge-path reserve (${budget.remaining} remaining, reset ${budget.resetAt}); this ${band}-cadence observation is rescheduled to ${until} rather than spent, so the merge path, webhook wakes and merge verification keep the reserve` };
 }
+/**
+ * Pacing the aggregate spend (GY-567). The reserve above gates each job on what is left, but not
+ * how fast the workers together spend it: on 2026-09-26 four workers spent ~600 requests a minute,
+ * drained the hour in half of it and the queue head read stale for the other half. So every worker
+ * waits for one shared pace before it claims a job: the budget above the reserve, less what jobs
+ * in flight are expected to spend, spread evenly over the time to the reset. Jobs start at most
+ * one per `estimate / rate`, so the spend above the reserve reaches zero at the reset and never
+ * before it, whatever the concurrency; a small burst (`paceBurstShare`) lets a backlog drain first. A job the spendable budget cannot afford waits for a reset
+ * under a minute away (cheaper than the reserve); further off, it is paced from the reserve
+ * itself, where `reserveDecision` lets only the merge path and webhook wakes spend.
+ */
+export const paceResetWaitMs = 60_000;
+/**
+ * The burst the pace allows on top of its rate: up to this share of the spendable budget may be
+ * spent back to back (a backlog drained after a deploy), after which starts are spaced again. The
+ * rate is recomputed from what is left, so a burst is paid for by the spacing after it.
+ */
+export const paceBurstShare = 0.1;
+export type PaceTier = 'unpaced' | 'spendable' | 'reserve' | 'reset';
+/** The rate jobs may start at (requests per millisecond), or when the next may start if none can. */
+export function observationPace(budget: { remaining: number | null; resetAt: number | null; reserve: number; otherRate?: number }, inFlight: number, estimate: number, now: number): { tier: PaceTier; rate: number | null; until?: number; burst?: number } {
+  // An unknown budget (none read yet, or its reset has passed) is never held against: the first
+  // response after a reset is what reads the new one.
+  if (budget.remaining === null || budget.resetAt === null || budget.resetAt <= now) return { tier: 'unpaced', rate: null };
+  const toReset = Math.max(1, budget.resetAt - now), cost = Math.max(1, estimate);
+  // What everyone else will spend on this token before its reset (GY-690): review and producer
+  // launches, merges, protection reads, the submission observer. It is not the workers' to spend.
+  const others = Math.max(0, budget.otherRate ?? 0) * toReset;
+  const spendable = budget.remaining - budget.reserve - inFlight - others;
+  if (spendable > cost) return { tier: 'spendable', rate: spendable / toReset, burst: spendable * paceBurstShare };
+  const reserve = budget.remaining - inFlight - others;
+  if (toReset <= paceResetWaitMs || reserve < cost) return { tier: 'reset', rate: 0, until: budget.resetAt + 1000 };
+  return { tier: 'reserve', rate: reserve / toReset };
+}
+/**
+ * The one pace every observation worker of a process shares. `start` either takes the next slot
+ * (and counts the job's estimate in flight) or says how long to wait; `settle` returns the slot
+ * with what the job actually charged, so a deferral that spent nothing gives its time back and a
+ * costly job pushes the next start out by what it overspent.
+ */
+export class ObservationPacer {
+  private nextAt = 0;
+  inFlight = 0;
+  last: { tier: PaceTier; rate: number | null; estimate: number } = { tier: 'unpaced', rate: null, estimate: assumedObservationRequests };
+  start(budget: Parameters<typeof observationPace>[0], estimate: number, now: number): { wait: number; settle?: undefined } | { wait: 0; settle: (charged?: number, at?: number) => void } {
+    const pace = observationPace(budget, this.inFlight, estimate, now);
+    this.last = { tier: pace.tier, rate: pace.rate, estimate };
+    if (pace.until !== undefined) return { wait: Math.max(1, pace.until - now) };
+    // A token bucket: idle time banks up to the burst, and each start spends one spacing of it.
+    const credit = pace.rate && pace.burst ? pace.burst / pace.rate : 0;
+    const from = Math.max(this.nextAt, now - credit);
+    if (from > now) return { wait: from - now };
+    // An unpaced start (no reading yet) spends no credit: the bucket is full when the first reading lands.
+    if (pace.rate) this.nextAt = from + estimate / pace.rate;
+    this.inFlight += estimate;
+    let settled = false;
+    return { wait: 0, settle: (charged = estimate, at = now) => {
+      if (settled) return; settled = true;
+      this.inFlight = Math.max(0, this.inFlight - estimate);
+      if (pace.rate) this.nextAt += (charged - estimate) / pace.rate;
+    } };
+  }
+  /** The pace in force, per minute, for the status an operator reads. */
+  report() {
+    const perMinute = this.last.rate === null ? null : Math.round(this.last.rate * 60_000 * 100) / 100;
+    return { tier: this.last.tier, perMinute, intervalMs: this.last.rate ? Math.round(this.last.estimate / this.last.rate) : this.last.rate === 0 ? null : 0, inFlight: this.inFlight, estimate: this.last.estimate };
+  }
+}
+/** A token's name in the budget ledger and in `master status`: a digest, never the token itself. */
+export const tokenIdentity = (token: string) => createHash('sha256').update(token).digest('hex').slice(0, 12);
+/** One response's reading of a token's budget: what is left, the limit, and when it resets. */
+export interface TokenReading { limit: number | null; remaining: number; used: number | null; resetAt: number | null; at: number }
+/** One token's budget as `master status` reports it (GY-690). */
+export interface TokenBudgetReport {
+  token: string; current: boolean; limit: number | null; remaining: number; resetAt: string | null; observedAt: string;
+  /** What the token has been spending a minute over the window, by everyone, and the part of it made outside the observation pace. */
+  perMinute: number; otherPerMinute: number;
+  /** What is left at the reset if that spend continues, and whether that is below the merge-path reserve. */
+  projectedAtReset: number | null; belowReserveAtReset: boolean;
+  pace: ReturnType<ObservationPacer['report']>;
+}
+/**
+ * Every installation token's own budget (GY-690). On 2026-09-26 the pace held the budget one
+ * token reported while two tokens with different resets were spending, and review launches,
+ * merges, protection reads and the submission observer spent 100+ requests a minute outside it:
+ * the hour fell to 94 remaining before its reset. So every request is charged to the token that
+ * made it, each token keeps its own reading, reset and pace, and a token's spend rate is read from
+ * its own `x-ratelimit-remaining` series, which counts every caller of that budget, this process's
+ * or not. What the paced observation jobs did not spend of it is what `observationPace` holds back
+ * for the others until the reset. `githubFromEnv` shares one ledger across the process, so the
+ * engine's submission observer and the server's workers read the same account.
+ */
+export class TokenBudgets {
+  private entries = new Map<string, { reading: TokenReading | null; readings: TokenReading[]; charges: { at: number; paced: boolean }[]; pacer: ObservationPacer }>();
+  private entry(token: string) {
+    let entry = this.entries.get(token);
+    if (!entry) this.entries.set(token, entry = { reading: null, readings: [], charges: [], pacer: new ObservationPacer() });
+    return entry;
+  }
+  /** Record one response's reading. Responses to concurrent requests arrive out of order; within one reset the budget only falls. */
+  read(token: string, reading: TokenReading) {
+    const entry = this.entry(token), previous = entry.reading;
+    const same = previous && previous.resetAt === reading.resetAt;
+    entry.reading = same && previous.remaining < reading.remaining ? { ...reading, remaining: previous.remaining } : reading;
+    entry.readings = [...entry.readings.filter(entry => reading.at - entry.at <= budgetWindowMs), entry.reading].slice(-4096);
+  }
+  /** Charge one request that cost budget to the token that made it; `paced` when a paced observation job made it. */
+  charge(token: string, at: number, paced: boolean) {
+    const entry = this.entry(token);
+    entry.charges.push({ at, paced });
+    if (entry.charges.length > 8192 || entry.charges.length % 256 === 0) entry.charges = entry.charges.filter(charge => at - charge.at <= budgetWindowMs);
+  }
+  /** The token's reading while it is in force: past its reset the budget is unknown until a response reads it again. */
+  reading(token: string, now: number) {
+    const reading = this.entries.get(token)?.reading ?? null;
+    return reading && (reading.resetAt === null || reading.resetAt > now) ? reading : null;
+  }
+  pacer(token: string) { return this.entry(token).pacer; }
+  /**
+   * Requests a millisecond the token has been spending over the window: in all, and outside the
+   * paced observation jobs. From the header series when it spans a minute of one reset, since it
+   * counts every caller; from this process's own charges until then.
+   */
+  rates(token: string, now: number): { total: number; other: number } {
+    const entry = this.entries.get(token);
+    if (!entry) return { total: 0, other: 0 };
+    const charges = entry.charges.filter(charge => now - charge.at <= budgetWindowMs);
+    const latest = entry.reading;
+    const series = latest ? entry.readings.filter(reading => reading.resetAt === latest.resetAt && now - reading.at <= budgetWindowMs) : [];
+    const first = series[0], last = series[series.length - 1];
+    if (first && last && last.at - first.at >= 60_000) {
+      const span = last.at - first.at, between = charges.filter(charge => charge.at > first.at && charge.at <= last.at);
+      const drop = Math.max(0, first.remaining - last.remaining), paced = between.filter(charge => charge.paced).length;
+      return { total: drop / span, other: Math.max(drop - paced, between.length - paced) / span };
+    }
+    if (!charges.length) return { total: 0, other: 0 };
+    const span = Math.min(budgetWindowMs, Math.max(60_000, now - charges[0].at));
+    return { total: charges.length / span, other: charges.filter(charge => !charge.paced).length / span };
+  }
+  /** Take the next paced observation slot on this token, holding back what the others will spend by its reset. */
+  pace(token: string, estimate: number, now: number, reserve: number, fallback?: { remaining: number | null; resetAt: number | null }) {
+    const reading = this.reading(token, now);
+    const budget = reading ? { remaining: reading.remaining, resetAt: reading.resetAt } : fallback ?? { remaining: null, resetAt: null };
+    return this.pacer(token).start({ ...budget, reserve, otherRate: this.rates(token, now).other }, estimate, now);
+  }
+  /** Every token with a reading in force: remaining, reset, spend rate and what is projected to be left at the reset. */
+  report(now: number, reserve: number, current?: string): TokenBudgetReport[] {
+    for (const [token, entry] of this.entries)
+      if (!this.reading(token, now) && entry.pacer.inFlight === 0 && !entry.charges.some(charge => now - charge.at <= budgetWindowMs)) this.entries.delete(token);
+    return [...this.entries].flatMap(([token, entry]) => {
+      const reading = this.reading(token, now);
+      if (!reading) return [];
+      const rates = this.rates(token, now);
+      const projected = reading.resetAt === null ? null : Math.max(0, Math.round(reading.remaining - rates.total * Math.max(0, reading.resetAt - now)));
+      return [{ token, current: token === current, limit: reading.limit, remaining: reading.remaining,
+        resetAt: reading.resetAt === null ? null : new Date(reading.resetAt).toISOString(), observedAt: new Date(reading.at).toISOString(),
+        perMinute: Math.round(rates.total * 60_000 * 100) / 100, otherPerMinute: Math.round(rates.other * 60_000 * 100) / 100,
+        projectedAtReset: projected, belowReserveAtReset: projected !== null && projected < reserve, pace: entry.pacer.report() }];
+    }).sort((a, b) => Number(b.current) - Number(a.current) || a.token.localeCompare(b.token));
+  }
+}
+/** The one ledger every GitHub client of this process charges (see `TokenBudgets`). */
+export const processTokenBudgets = new TokenBudgets();
+/**
+ * Whether the budget is tight (GY-567): below the reserve, projected to run out before the reset,
+ * or paced under the steady-state share per minute. Then idle observations are left to webhooks
+ * and conditional reads, and the claim order puts sessions that are running ahead of the rest.
+ */
+export function budgetTight(budget: Pick<GitHubBudget, 'belowReserve' | 'exhaustsBeforeReset' | 'steadyStateBudget' | 'pace'> | null | undefined) {
+  if (!budget) return false;
+  const steadyPerMinute = (budget.steadyStateBudget ?? defaultHourlyLimit * steadyStateShare) / 60;
+  return budget.belowReserve || budget.exhaustsBeforeReset || budget.pace.perMinute !== null && budget.pace.perMinute < steadyPerMinute;
+}
+/**
+ * Under a tight budget an idle observation (nothing GitHub can move) that no webhook woke is not
+ * polled: it waits for the reset or its next webhook delivery, whichever comes first.
+ */
+export function tightBudgetDecision(band: CadenceBand, budget: Pick<GitHubBudget, 'belowReserve' | 'exhaustsBeforeReset' | 'steadyStateBudget' | 'pace' | 'resetAt'> | null | undefined, woken: boolean, now: Date): { until: string; reason: string } | null {
+  if (band !== 'idle' || woken || !budgetTight(budget)) return null;
+  const reset = budget!.resetAt ? Date.parse(budget!.resetAt) : NaN;
+  const until = new Date(Number.isFinite(reset) && reset > now.getTime() ? reset + 2000 : now.getTime() + observationCadenceMs.idle).toISOString();
+  return { until, reason: `GitHub budget is tight (paced at ${budget!.pace.perMinute ?? '?'}/min, reset ${budget!.resetAt ?? 'unknown'}); this idle observation is left to webhook wakes and conditional reads until ${until}` };
+}
 /** The id of every review on a pull request GitHub reports as dismissed, from its full review list. */
 export function dismissedReviewIds(reviews: readonly { id?: unknown; state?: unknown }[]): number[] {
   return reviews.flatMap(review => review.state === 'DISMISSED' && Number.isSafeInteger(review.id) && (review.id as number) > 0 ? [review.id as number] : []);
@@ -378,18 +565,19 @@ export class GitHub {
   private authentication?: Promise<void>;
   private cache = new Map<string, { etag: string; value: any }>();
   private ancestry = new Map<string, boolean>();
-  private usage = { since: Date.now(), total: 0, notModified: 0, byKind: new Map<string, number>(), remaining: null as string | null, reset: null as string | null };
-  /** Once a minute, logs what the App spent: requests, free 304s, the costliest endpoints, and GitHub's own remaining budget. */
-  private meter(method: string, path: string, response: Response) {
+  private usage = { since: Date.now(), total: 0, notModified: 0, byKind: new Map<string, number>(), remaining: null as string | null, reset: null as string | null, token: '' };
+  /** Once a minute, logs what the App spent: requests, free 304s, the costliest endpoints, and GitHub's own remaining budget of the token that last answered. */
+  private meter(method: string, path: string, response: Response, token = '') {
     const u = this.usage;
+    u.token = token || u.token;
     u.total++; if (response.status === 304) u.notModified++;
     const kind = `${method} ${path.replace(/^\/repos\/[^/]+\/[^/]+/, '').replace(/\?.*$/, '').replace(/[a-f0-9]{40}/g, ':sha').replace(/\/\d+/g, '/:n').replace(/^\/contents\/.*/, '/contents/:path').replace(/^\/compare\/.*/, '/compare/:range')}`;
     u.byKind.set(kind, (u.byKind.get(kind) ?? 0) + 1);
     u.remaining = response.headers.get('x-ratelimit-remaining') ?? u.remaining; u.reset = response.headers.get('x-ratelimit-reset') ?? u.reset;
     if (Date.now() - u.since < 60_000) return;
     const top = [...u.byKind.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([k, n]) => `${k}=${n}`).join(', ');
-    console.log(`GitHub usage ${Math.round((Date.now() - u.since) / 1000)}s: ${u.total} requests, ${u.notModified} not-modified (free); remaining ${u.remaining} until ${u.reset ? new Date(Number(u.reset) * 1000).toISOString() : '?'}; top ${top}`);
-    this.usage = { since: Date.now(), total: 0, notModified: 0, byKind: new Map(), remaining: u.remaining, reset: u.reset };
+    console.log(`GitHub usage ${Math.round((Date.now() - u.since) / 1000)}s: ${u.total} requests, ${u.notModified} not-modified (free); remaining ${u.remaining} until ${u.reset ? new Date(Number(u.reset) * 1000).toISOString() : '?'}${u.token ? ` (token ${u.token})` : ''}; top ${top}`);
+    this.usage = { since: Date.now(), total: 0, notModified: 0, byKind: new Map(), remaining: u.remaining, reset: u.reset, token: u.token };
   }
   private blobs = new Map<string, string | null>();
   private histories = new Map<string, Set<string> | null>();
@@ -438,7 +626,12 @@ export class GitHub {
   private fleet = 0;
   /** Counts the requests one measured stretch of work makes, and the ones that cost budget. */
   private readonly requestMeter = new AsyncLocalStorage<{ requests: number; uncached: number }>();
-  constructor(public config: GitHubConfig) {}
+  /**
+   * @param budgets Every token's budget and pace (GY-690): observation workers pace on the current
+   * token's, and every request is charged to the token that made it. `githubFromEnv` passes the
+   * process's one ledger.
+   */
+  constructor(public config: GitHubConfig, private readonly budgets: TokenBudgets = new TokenBudgets()) {}
   private backoff(response?: Response, context = 'a request') {
     const retry = Number(response?.headers.get('retry-after'));
     const reset = Number(response?.headers.get('x-ratelimit-reset')) * 1000;
@@ -458,19 +651,24 @@ export class GitHub {
    * Only installation requests report the budget this class is spending; App-level calls
    * (`/app`, token refresh) are counted as requests against a different allowance.
    */
-  private record(path: string, response: Response, tracked: boolean, now = Date.now(), charged = true) {
+  private record(path: string, response: Response, tracked: boolean, now = Date.now(), charged = true, token: string | null = null) {
     const resource = response.headers.get('x-ratelimit-resource');
     const number = (name: string) => { const value = Number(response.headers.get(name)); return Number.isFinite(value) ? value : null; };
     const remaining = number('x-ratelimit-remaining');
-    if (tracked && remaining !== null && (!resource || resource === 'core')) {
+    const core = tracked && remaining !== null && (!resource || resource === 'core');
+    if (core) {
       const reset = number('x-ratelimit-reset');
       this.rate = { limit: number('x-ratelimit-limit') ?? this.rate.limit, remaining, used: number('x-ratelimit-used') ?? this.rate.used,
         resetAt: reset === null ? this.rate.resetAt : reset * 1000, observedAt: now };
+      // The reading belongs to the token that made the request, not to whichever token answered last (GY-690).
+      if (token !== null) this.budgets.read(token, { limit: this.rate.limit, remaining, used: this.rate.used, resetAt: reset === null ? null : reset * 1000, at: now });
     }
     const meter = this.requestMeter.getStore();
     if (meter) { meter.requests++; if (response.status !== 304) meter.uncached++; }
     // A 304 costs nothing, and the refusal that announces an exhausted budget did not spend it.
     if (response.status === 304 || !charged || response.status === 429 || response.status === 403 && remaining === 0) return;
+    // A measured stretch is an observation job the pace started; every other request is spend the pace must leave room for.
+    if (tracked && token !== null) this.budgets.charge(token, now, !!meter);
     this.charges.push({ at: now, kind: requestKind(path) });
     if (this.charges.length > 8192) this.charges = this.charges.filter(charge => now - charge.at <= budgetLedgerMs);
   }
@@ -495,6 +693,19 @@ export class GitHub {
   recordJobDuration(ms: number, now = Date.now()) {
     this.jobDurations = [...this.jobDurations, { at: now, ms: Math.max(0, Math.floor(ms)) }].filter(entry => now - entry.at <= budgetLedgerMs);
     if (this.jobDurations.length > 512) this.jobDurations = this.jobDurations.slice(this.jobDurations.length - 512);
+  }
+  /**
+   * Wait for the shared pace before claiming an observation job (GY-567): `wait` is how long to
+   * sleep before asking again, or a started slot whose `settle` takes what the job charged.
+   */
+  paceObservation(now = Date.now()) {
+    const expired = this.rate.resetAt !== null && this.rate.resetAt <= now;
+    const charged = this.samples.filter(sample => now - sample.at <= budgetLedgerMs).map(sample => sample.uncached);
+    const estimate = charged.length ? Math.max(1, charged.reduce((total, value) => total + value, 0) / charged.length) : assumedObservationRequests;
+    // The pace is the current token's (GY-690): its own reading and reset, less what every caller
+    // outside the observation workers is spending on it. Before that token has a reading of its
+    // own, the client's last reading stands in.
+    return this.budgets.pace(tokenIdentity(this.token), estimate, now, mergePathReserve, { remaining: expired ? null : this.rate.remaining, resetAt: expired ? null : this.rate.resetAt });
   }
   /** The open candidates the steady-state bound is sized for, as the last pass counted them. */
   noteFleet(openCandidates: number) { this.fleet = Math.max(0, Math.floor(openCandidates)); }
@@ -548,6 +759,8 @@ export class GitHub {
       observations: { count: samples.length, meanRequests: mean(samples.map(sample => sample.requests)), meanUncached: mean(samples.map(sample => sample.uncached)),
         jobs: [...this.costs].map(([work, cost]) => ({ work, at: new Date(cost.at).toISOString(), requests: cost.requests, uncached: cost.uncached, band: cost.band, cadenceMs: cost.cadenceMs })) },
       deferrals: [...this.deferred].flatMap(([work, entry]) => Date.parse(entry.until) > now ? [{ work, until: entry.until, reason: entry.reason }] : []),
+      pace: this.budgets.pacer(tokenIdentity(this.token)).report(),
+      tokens: this.budgets.report(now, mergePathReserve, tokenIdentity(this.token)),
     };
   }
   /**
@@ -663,11 +876,11 @@ export class GitHub {
     await this.authenticate();
     if (method === 'GET') await this.warm();
     const cached = method === 'GET' ? this.cache.get(path) : undefined;
-    const started = Date.now();
+    const started = Date.now(), bearer = this.token, token = tokenIdentity(bearer);
     let response: Response;
     try {
       response = await fetch(`https://api.github.com${path}`, {
-        method, headers: { Authorization: `Bearer ${this.token}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28', ...(cached ? { 'If-None-Match': cached.etag } : {}) },
+        method, headers: { Authorization: `Bearer ${bearer}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28', ...(cached ? { 'If-None-Match': cached.etag } : {}) },
         body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(15_000),
       });
     } catch (error) {
@@ -676,8 +889,8 @@ export class GitHub {
     }
     // A slow request is named so a stalled observation can be traced to the call that held it.
     if (Date.now() - started > 5_000) console.error(`GitHub ${method} ${path} took ${Date.now() - started} ms (${response.status})`);
-    this.meter(method, path, response);
-    this.record(path, response, true);
+    this.meter(method, path, response, token);
+    this.record(path, response, true, Date.now(), true, token);
     // A 304 costs no rate budget. Refresh the entry's recency so a full observation round stays cached.
     if (response.status === 304 && cached) { this.rateFailures = 0; this.cache.delete(path); this.cache.set(path, cached); this.persisted?.touch('etag', path); return structuredClone(cached.value); }
     const refused = await this.refusal(response, `${method} ${path}`);
@@ -1701,7 +1914,7 @@ export async function githubFromEnv() {
   if (!process.env.GITHUB_APP_ID || !process.env.GITHUB_REPOSITORY) return null;
   const privateKey = process.env.GITHUB_PRIVATE_KEY ?? await readFile(process.env.GITHUB_PRIVATE_KEY_FILE!, 'utf8');
   const reviewerApps = parseReviewerApps(process.env.GRAPHYARD_REVIEWER_APPS);
-  return new GitHub({ repository: process.env.GITHUB_REPOSITORY, base: process.env.GITHUB_BASE_BRANCH ?? 'main', appId: Number(process.env.GITHUB_APP_ID), installationId: Number(process.env.GITHUB_INSTALLATION_ID), privateKey, reviewerApps });
+  return new GitHub({ repository: process.env.GITHUB_REPOSITORY, base: process.env.GITHUB_BASE_BRANCH ?? 'main', appId: Number(process.env.GITHUB_APP_ID), installationId: Number(process.env.GITHUB_INSTALLATION_ID), privateKey, reviewerApps }, processTokenBudgets);
 }
 /**
  * Moves one queued candidate onto the tip it is predicted to land. Entries publish head-first:
@@ -1802,33 +2015,46 @@ export function waitsOnObservation(work: Work, all: Work[], now = new Date()): b
   const kind = nextAction(work, all, now)?.kind;
   return kind === 'request-rework' || kind === 'request-review';
 }
+/** Whether a session is running on the item now: a worker, reviewer or producer whose result an observation reads. */
+export const runningSession = (work: Work) => (work.sessions ?? []).some(session => session.state === 'running' && !session.endedAt);
 /** A submitted item the control plane has never read: its first observation is what every later gate waits on. */
 export const firstObservationOwed = (work: Work) => !!work.submission && !work.observation && !work.candidate && work.stage !== 'done';
-/** How many of the claim order's leading ids are the queue-head band, which no starved job overtakes. */
+/** When the item's current submission was made: the documentation record's time for that PR, else when its stage was entered. */
+const submittedAt = (work: Work) => work.documentation?.submission?.pr === work.submission?.pr && work.documentation?.submission?.at ? work.documentation.submission.at : work.stageEnteredAt;
+/**
+ * How many of the claim order's leading ids are the merge path — the queue-head band and any merge
+ * in flight (GY-567) — which no starved job overtakes.
+ */
 export function observationHeadCount(all: Work[], batchSize: number, now = Date.now()): number {
   const band = headClaimBand(batchSize);
-  return predictQueue(all, now).filter(placement => placement.position < band).length;
+  const head = new Set(predictQueue(all, now).filter(placement => placement.position < band).map(placement => placement.id));
+  for (const work of all) if (mergeAuthorized(work)) head.add(work.id);
+  return head.size;
 }
 /**
  * The order observation jobs are claimed in (GY-492): merge-queue entries within the head band
- * first, in queue position, then submissions never observed, then items whose next action waits on
- * an observation, then the rest
- * by available_at — the order `Store.takeJob` falls back to for a job this list does not name.
+ * first, in queue position, and any merge in flight (an authorized head GitHub may merge now);
+ * then submissions never observed; then items whose next action waits on an observation, then
+ * items with a running session, then the rest by available_at — the order `Store.takeJob` falls
+ * back to for a job this list does not name. Under a `tight` budget (GY-567) running sessions come
+ * straight after the first reads, which stay behind only the merge path whatever the budget.
  * `available_at` still gates every claim: priority reorders due jobs, never makes one due.
  */
-export function observationClaimOrder(all: Work[], batchSize: number, now = Date.now()): string[] {
+export function observationClaimOrder(all: Work[], batchSize: number, now = Date.now(), tight = false): string[] {
   const band = headClaimBand(batchSize);
   const ranked: string[] = [];
   for (const placement of predictQueue(all, now)) {
     if (placement.position < band) ranked.push(placement.id);
   }
-  const rankedSet = new Set(ranked);
+  for (const work of all) if (mergeAuthorized(work) && !ranked.includes(work.id)) ranked.push(work.id);
+  const open = all.filter(work => work.stage !== 'done' && !ranked.includes(work.id));
   // A submission never observed has no candidate, so no gate, review or proof can start until it
-  // is read once. Ranked after the head band: behind the review-waiting items, which come due again
-  // every cycle, one worker never reached it (2026-09-26: eight submitted PRs unread for hours).
-  const firstReads = all.filter(work => !rankedSet.has(work.id) && firstObservationOwed(work)).map(work => work.id);
-  const firstSet = new Set(firstReads);
-  return [...ranked, ...firstReads, ...all.filter(work => !rankedSet.has(work.id) && !firstSet.has(work.id) && waitsOnObservation(work, all, new Date(now))).map(work => work.id)];
+  // is read once. Behind the review-waiting items, which come due again every cycle, one worker
+  // never reached it (2026-09-26: eight submitted PRs unread for hours).
+  const firstReads = open.filter(firstObservationOwed).map(work => work.id);
+  const waiting = open.filter(work => waitsOnObservation(work, all, new Date(now))).map(work => work.id);
+  const running = open.filter(runningSession).map(work => work.id);
+  return [...new Set([...ranked, ...firstReads, ...(tight ? [running, waiting] : [waiting, running]).flat()])];
 }
 
 /** How long a lag is, in the unit a reader reads: a minute and change, or seconds. */
@@ -1842,9 +2068,17 @@ const observationLag = (ms: number) => ms >= 60_000 ? `${Math.floor(ms / 60_000)
  * missing or older than that is raised as attention naming the head, its lag, and what the
  * workers have actually been achieving.
  */
-export function observationThroughputStatus(coordinator: { githubBudget?: { throughput?: { jobsPerMinute?: number; medianDurationMs?: number | null; p90DurationMs?: number | null } | null } | null } | null | undefined,
+export function observationThroughputStatus(coordinator: { githubBudget?: ({ throughput?: { jobsPerMinute?: number; medianDurationMs?: number | null; p90DurationMs?: number | null } | null } & Partial<Pick<GitHubBudget, 'remaining' | 'limit' | 'resetAt' | 'perMinute' | 'projectedExhaustionAt' | 'exhaustsBeforeReset' | 'reserve' | 'tokens'>> & { pace?: Partial<GitHubBudget['pace']> | null }) | null } | null | undefined,
   snapshot: { work: Work[]; now: string; jobs?: IntegrationJob[] }, now = Date.parse(snapshot.now)) {
   const throughput = coordinator?.githubBudget?.throughput ?? null;
+  const reading = coordinator?.githubBudget ?? null;
+  // The budget the workers are paced against (GY-567): what is left, when it resets, the spend
+  // rate, the pace allowed, and when the spend rate would exhaust it.
+  const budget = reading ? { remaining: reading.remaining ?? null, limit: reading.limit ?? null, resetAt: reading.resetAt ?? null, reserve: reading.reserve ?? null,
+    perMinute: reading.perMinute ?? null, pacedPerMinute: reading.pace?.perMinute ?? null, paceTier: reading.pace?.tier ?? null,
+    projectedExhaustionAt: reading.projectedExhaustionAt ?? null, exhaustsBeforeReset: !!reading.exhaustsBeforeReset,
+    // Each token's own remaining, reset and projection at that reset (GY-690).
+    tokens: (reading.tokens ?? []).map(token => ({ token: token.token, current: token.current, remaining: token.remaining, resetAt: token.resetAt, perMinute: token.perMinute, otherPerMinute: token.otherPerMinute, projectedAtReset: token.projectedAtReset, belowReserveAtReset: token.belowReserveAtReset })) } : null;
   const oldestDueJobMs = (snapshot.jobs ?? []).reduce<number | null>((oldest, job) => {
     const locked = job.locked_until !== null && Date.parse(job.locked_until) > now, held = job.held_until != null && Date.parse(job.held_until) > now;
     if (locked || held) return oldest;
@@ -1854,8 +2088,12 @@ export function observationThroughputStatus(coordinator: { githubBudget?: { thro
   const head = predictQueue(snapshot.work, now).find(placement => placement.position === 0) ?? null;
   const headObservation = head ? snapshot.work.find(work => work.id === head.id)?.observation ?? null : null;
   const headObservationAgeMs = head ? headObservation?.at ? Math.max(0, now - Date.parse(headObservation.at)) : null : null;
-  const report = { jobsPerMinute: throughput?.jobsPerMinute ?? null, medianDurationMs: throughput?.medianDurationMs ?? null,
-    p90DurationMs: throughput?.p90DurationMs ?? null, oldestDueJobMs, head: head?.key ?? null, headObservationAgeMs };
+  // The oldest submission never observed (GY-567): nothing can review or prove it until it is read once.
+  const unobserved = snapshot.work.filter(firstObservationOwed).map(work => ({ key: work.key, pr: work.submission!.pr, submittedAt: submittedAt(work) }))
+    .sort((a, b) => Date.parse(a.submittedAt) - Date.parse(b.submittedAt));
+  const oldestUnobservedSubmission = unobserved[0] ? { ...unobserved[0], ageMs: Math.max(0, now - Date.parse(unobserved[0].submittedAt)), count: unobserved.length } : null;
+  const report = { budget, jobsPerMinute: throughput?.jobsPerMinute ?? null, medianDurationMs: throughput?.medianDurationMs ?? null,
+    p90DurationMs: throughput?.p90DurationMs ?? null, oldestDueJobMs, head: head?.key ?? null, headObservationAgeMs, oldestUnobservedSubmission };
   const attention: AttentionItem[] = head && (headObservationAgeMs === null || headObservationAgeMs > observationFreshnessMs)
     ? [{ subject: 'github',
         text: `The merge-queue head ${head.key} has ${headObservationAgeMs === null ? 'no observation at all' : `gone ${observationLag(headObservationAgeMs)} without an observation`} while the merge gate refuses anything older than two minutes${oldestDueJobMs !== null ? `; the oldest due job has waited ${observationLag(oldestDueJobMs)}` : ''}${report.jobsPerMinute !== null ? `, and the server has been observing ${report.jobsPerMinute} job(s)/min (median ${report.medianDurationMs ?? '?'} ms, p90 ${report.p90DurationMs ?? '?'} ms)`: ''}: the queue stalls until its head is observed`,
@@ -1863,7 +2101,11 @@ export function observationThroughputStatus(coordinator: { githubBudget?: { thro
     : [];
   return { ...report, attention };
 }
-export async function processJob(engine: Engine, github: GitHub): Promise<boolean> {
+/**
+ * Claim and run one due observation job. `spent`, when given, is told what the job charged the
+ * budget (its non-304 requests), which is what the worker returns its paced slot with (GY-567).
+ */
+export async function processJob(engine: Engine, github: GitHub, spent?: (charged: number) => void): Promise<boolean> {
   // The batch size is the master's configuration, published to the installation ledger; a
   // restarted server reads it back here before the next evaluation it runs.
   const readAt = batchSizeRead.get(engine);
@@ -1875,7 +2117,7 @@ export async function processJob(engine: Engine, github: GitHub): Promise<boolea
   // due, the merge-queue head's job is claimed first however recently it became due, instead of
   // waiting behind every older entry for a worker to reach it.
   const all = await engine.store.list();
-  const job = await engine.store.takeJob(observationClaimOrder(all, engine.mergeBatchSize), observationHeadCount(all, engine.mergeBatchSize));
+  const job = await engine.store.takeJob(observationClaimOrder(all, engine.mergeBatchSize, Date.now(), budgetTight(github.budget?.())), observationHeadCount(all, engine.mergeBatchSize));
   if (!job) return false;
   const startedAt = Date.now();
   let work: Work | undefined;
@@ -1894,6 +2136,10 @@ export async function processJob(engine: Engine, github: GitHub): Promise<boolea
   // it only when the installation actually changed (see Store.releaseHeldJobs).
   const heldOn = () => installationFingerprint(github.permissionReport?.() ?? null);
   let held: string | null = null;
+  // Whether this run saved an observation (GY-506): every claimed job either saves one or records
+  // why it did not — in the job's error, hold or deferral — and the job's consecutive
+  // no-observation count is reset or incremented accordingly, whichever way it ends.
+  let observed = false;
   // What this job's observation cost and when the next one is due (GY-117). The reserve is decided
   // before the observation, from the state the item starts in; the cadence after it, from the
   // state it produced. The meter counts every request the job makes, the check publication and
@@ -1908,7 +2154,7 @@ export async function processJob(engine: Engine, github: GitHub): Promise<boolea
     const { value: settled, requests, uncached } = await metered(async (): Promise<boolean> => {
       if (!work?.submission || work.stage === 'done') return false;
       held = hold('observation');
-      if (held) { await engine.store.holdJob(job.work_id, job.token, held, permissionHoldMs, heldOn()); return true; }
+      if (held) { await engine.store.holdJob(job.work_id, job.token, held, permissionHoldMs, heldOn(), observed); return true; }
       const now = new Date();
       github.noteFleet?.(openCandidates(all));
       // Below the merge-path reserve, an observation that is neither a merge-gate candidate's nor
@@ -1917,10 +2163,14 @@ export async function processJob(engine: Engine, github: GitHub): Promise<boolea
       // in the ledger, and is rescheduled to the pause's end below, which is the incident's record.
       const budget = github.budget?.(now.getTime());
       const deferral = budget && !budget.paused ? reserveDecision(observationBand(work, all, now).band, budget, !!job.woken, now) : null;
-      if (deferral) { github.recordDeferral(work.id, deferral); await engine.store.deferJob(job.work_id, job.token, deferral.until); return true; }
+      if (deferral) { github.recordDeferral(work.id, deferral); await engine.store.deferJob(job.work_id, job.token, deferral.until, deferral.reason, observed); return true; }
+      // A tight budget leaves idle observations to webhook wakes and conditional reads (GY-567).
+      const idle = budget && !budget.paused ? tightBudgetDecision(observationBand(work, all, now).band, budget, !!job.woken, now) : null;
+      if (idle) { github.recordDeferral(work.id, idle); await engine.store.deferJob(job.work_id, job.token, idle.until, idle.reason, observed); return true; }
       const previous = work.observation ?? null;
       const observation = await github.observe(work, all);
       work = await engine.observe(work.id, work.revision, observation, job.token);
+      observed = true;
       schedule.cadence = observationCadence(work, all.map(item => item.id === work!.id ? work! : item), now, previous, github.steadyStateMs?.(now.getTime()));
       // A branch carrying another item's unlanded commits is restored by the control plane (GY-127):
       // on its own for a tip the queue ejected, on the coordinator's request otherwise. The restored
@@ -1929,7 +2179,7 @@ export async function processJob(engine: Engine, github: GitHub): Promise<boolea
       if (owed) {
         const restored = await restoreBranch(engine, github, work, owed, job, guard, hold);
         work = restored.work; held ??= restored.held;
-        if (restored.published) { await engine.store.finishJob(job.work_id, job.token, undefined, true); return true; }
+        if (restored.published) { await engine.store.finishJob(job.work_id, job.token, undefined, true, undefined, observed); return true; }
       }
       // A base branch that moved under this candidate is Graphyard's to absorb, not the worker's.
       // The republished head is what the review, the checks and the proofs then bind to, so the
@@ -1937,7 +2187,7 @@ export async function processJob(engine: Engine, github: GitHub): Promise<boolea
       if (baseRefreshNeeded(work)) {
         const refreshed = await refreshBase(engine, github, work, job, guard, hold);
         work = refreshed.work; held ??= refreshed.held;
-        if (refreshed.published) { await engine.store.finishJob(job.work_id, job.token, undefined, true); return true; }
+        if (refreshed.published) { await engine.store.finishJob(job.work_id, job.token, undefined, true, undefined, observed); return true; }
       }
       const provider = reviewProviderOf(work.policy);
       // A head behind the base tip is reviewed when it merges cleanly (GY-191): the queue
@@ -1981,7 +2231,7 @@ export async function processJob(engine: Engine, github: GitHub): Promise<boolea
         const advanced = await advanceQueue(engine, github, work, job, guard, hold);
         work = advanced.work; held ??= advanced.held;
         // A freshly published tip replaces the PR head; the next observation binds the gates to it.
-        if (advanced.published) { await engine.store.finishJob(job.work_id, job.token, undefined, true); return true; }
+        if (advanced.published) { await engine.store.finishJob(job.work_id, job.token, undefined, true, undefined, observed); return true; }
       }
       if (!observation.merged) {
         const unpublishable = hold('check');
@@ -1998,6 +2248,7 @@ export async function processJob(engine: Engine, github: GitHub): Promise<boolea
       }
       return false;
     });
+    spent?.(uncached);
     // The schedule: the merge-queue head every 20 s and everything else at the 300 s backstop a
     // webhook wake short-circuits; GY-117's fleet bound only ever stretches that backstop for an
     // unchanged candidate, never shortens it.
@@ -2009,14 +2260,16 @@ export async function processJob(engine: Engine, github: GitHub): Promise<boolea
     if (cadence && work) github.recordObservation?.(work.id, { requests, uncached, band: cadence.band, cadenceMs: cadence.ms });
     if (settled) return true;
     if (work?.stage === 'done') await engine.store.pool.query('DELETE FROM jobs WHERE work_id=$1 AND token=$2', [job.work_id, job.token]);
-    if (held) await engine.store.holdJob(job.work_id, job.token, held, permissionHoldMs, heldOn());
-    else await engine.store.finishJob(job.work_id, job.token, undefined, false, cadence?.ms ?? (head ? headObservationSeconds : idleObservationSeconds) * 1000);
+    if (held) await engine.store.holdJob(job.work_id, job.token, held, permissionHoldMs, heldOn(), observed);
+    // An item with no submission has nothing to observe: the job says so and is not counted as starved.
+    else if (work && !work.submission && work.stage !== 'done') await engine.store.deferJob(job.work_id, job.token, new Date(Date.now() + idleObservationSeconds * 1000).toISOString(), 'no submission to observe', null);
+    else await engine.store.finishJob(job.work_id, job.token, undefined, false, cadence?.ms ?? (head ? headObservationSeconds : idleObservationSeconds) * 1000, observed);
   } catch (error) {
     const message = error instanceof Error ? error.message : 'GitHub reconciliation failed';
     // A rate-limit pause is one incident, not a retry every 45 seconds into the same refusal:
     // the job keeps the error and comes back when the pause lifts (a webhook still wakes it).
     const paused = github.budget?.().paused;
-    if (paused && error instanceof Refusal && /requests paused/.test(message)) { await engine.store.finishJob(job.work_id, job.token, message, false, Math.max(2000, Date.parse(paused.until) - Date.now() + 1000)); return true; }
+    if (paused && error instanceof Refusal && /requests paused/.test(message)) { await engine.store.finishJob(job.work_id, job.token, message, false, Math.max(2000, Date.parse(paused.until) - Date.now() + 1000), observed); return true; }
     const current = (await engine.store.pool.query('SELECT document,clock_timestamp() AS now FROM work_items WHERE id=$1', [job.work_id])).rows[0];
     const latest = current?.document as Work | undefined;
     if (latest?.candidate && latest.stage !== 'done' && !hold('check')) try { await github.publish(latest, 'Reconciliation failed; fresh verification required', guard(latest, false)); } catch { /* Durable retry follows. */ }
@@ -2031,7 +2284,11 @@ export async function processJob(engine: Engine, github: GitHub): Promise<boolea
     // (the preflight already passes) therefore stays held for the bounded hold, one attempt
     // per hold, instead of being released into the same 403 by every passing preflight.
     if (error instanceof GitHubPermissionRefusal) { await engine.store.refuseJob(job.work_id, job.token, message, permissionRefusalLimit, permissionHoldMs, heldOn()); return true; }
-    await engine.store.finishJob(job.work_id, job.token, error instanceof ReconciliationRetry ? undefined : message, error instanceof ReconciliationRetry);
+    const retry = error instanceof ReconciliationRetry;
+    // A concurrency retry comes back within seconds and is not an operator error, but a run that
+    // saved no observation never ends silent: the reason stands on the job record (GY-506).
+    if (retry && !observed) { await engine.store.retryJob(job.work_id, job.token, message, observed); return true; }
+    await engine.store.finishJob(job.work_id, job.token, retry ? undefined : message, retry, undefined, observed);
   } finally {
     // The throughput ledger (GY-492): how long the claimed job took, however it ended, so master
     // status can report what the workers actually achieve and name the lag a queue head suffers.

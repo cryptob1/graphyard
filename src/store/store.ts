@@ -6,9 +6,10 @@ import { migration, tables } from './schema.js';
 import { releaseInfo, schemaVersion } from '../release.js';
 import { appendSave, resolvedPayloadSql } from './snapshot-delta.js';
 import { advisoryLocks } from './locks.js';
+import { lockRebuiltTriggerTables, retryDeadlocks } from './migration-locks.js';
 import { coordinationDocumentSql, coordinationRelevance, coordinationTail, coordinationTrimSql, detoasted, type CoordinationTrim } from './coordination-sql.js';
-import { namedStatements } from './statements.js';
-import { closePool, reserve, trackedPool } from './pools.js';
+import { namedPool, reportPool, type ReportPoolOptions } from './report-pool.js';
+import { closePool, leasePoolConnections, reserve, trackedPool } from './pools.js';
 
 export * from './snapshot-delta.js';
 export type { CoordinationTrim } from './coordination-sql.js';
@@ -30,11 +31,11 @@ const literal = (text: string) => `'${text.replace(/'/g, "''")}'`;
 const newerSchema = (current: number) => new Error(`Database schema generation ${current} is newer than this release supports (${schemaVersion}); deploy the release that migrated it, or restore a backup taken at generation ${schemaVersion} or earlier`);
 
 /**
- * Which connections a transaction may use (GY-274). Lease renewals run on a reserved pool, so a
- * saturated main pool never lets a live worker's lease lapse; background work (the reconciliation
+ * Which connections a transaction may use (GY-274). Lease commands run on the lease pool (pools.ts, GY-558),
+ * so a saturated main pool never lets a live worker's lease lapse; background work (the reconciliation
  * tick, whose first pass after a deploy ran 65 s) holds at most half the main pool.
  */
-export type StoreLane = 'request' | 'lease' | 'background'; export const leaseLaneConnections = 2;
+export type StoreLane = 'request' | 'lease' | 'background';
 /** A counting semaphore over the background share; a waiter inherits a released permit directly. */
 export class BackgroundLane {
   private held = 0; private waiting: (() => void)[] = []; constructor(readonly limit: number) {}
@@ -48,13 +49,13 @@ export class BackgroundLane {
 
 export class Store {
   pool: pg.Pool;
-  /** Lease renewals only; `background` bounds the tick to half the main pool. */
-  leasePool: pg.Pool; readonly background: BackgroundLane;
-  constructor(url: string, options: { max?: number } = {}) {
+  /** Lease commands only (pools.ts `leaseCommands`); `background` bounds the tick to half the main pool; `reportPool` serves report reads only (report-pool.ts). */
+  leasePool: pg.Pool; readonly background: BackgroundLane; reportPool: pg.Pool;
+  constructor(url: string, options: { max?: number; leaseMax?: number } & ReportPoolOptions = {}) {
     const max = Math.max(2, Math.floor(options.max ?? 12));
-    this.pool = trackedPool(namedStatements(new pg.Pool({ connectionString: url, max, connectionTimeoutMillis: storeConnectionTimeoutMs, statement_timeout: storeStatementTimeoutMs })));
-    this.leasePool = trackedPool(new pg.Pool({ connectionString: url, max: leaseLaneConnections, connectionTimeoutMillis: storeConnectionTimeoutMs, statement_timeout: storeStatementTimeoutMs }));
-    this.background = new BackgroundLane(Math.max(1, Math.floor(max / 2)));
+    this.pool = namedPool(url, max, storeConnectionTimeoutMs, storeStatementTimeoutMs);
+    this.leasePool = trackedPool(new pg.Pool({ connectionString: url, max: Math.max(1, Math.floor(options.leaseMax ?? leasePoolConnections)), connectionTimeoutMillis: storeConnectionTimeoutMs, statement_timeout: storeStatementTimeoutMs }));
+    this.background = new BackgroundLane(Math.max(1, Math.floor(max / 2))); this.reportPool = reportPool(url, options, storeConnectionTimeoutMs, storeStatementTimeoutMs);
   }
   /**
    * Apply the additive migration and record the schema generation it reached. Running
@@ -125,20 +126,19 @@ export class Store {
       await guard.query('SET statement_timeout = 5000');
       const pid = Number((await db.query('SELECT pg_backend_pid() AS pid')).rows[0].pid);
       poll = setTimeout(() => { polling = watch(pid); }, Math.max(0, deadline - Date.now()));
-      await db.query('BEGIN');
-      // The pool's statement timeout bounds coordination reads and writes, not the migration's own
-      // work: its lock waits share the deadline above, and a backfill or index build still completes.
-      await db.query('SET LOCAL statement_timeout = 0');
-      // The migration's own lock, never the coordination lock (GY-203): two migrations serialize,
-      // while the live replica's coordination transactions run on beside it.
-      await step(waitingOn, 'SELECT pg_advisory_xact_lock($1)', [advisoryLocks.migration]);
-      await step('a lock on the migration\'s shared function graphyard_immutable', migrationPrelude);
-      for (const table of tables) await step(`a lock on table ${table.name} (or an object its migration touches)`, table.ddl);
-      const current = Number((await step('a lock on table graphyard_schema', 'SELECT COALESCE(MAX(version),0) AS version FROM graphyard_schema')).rows[0].version);
-      if (current > schemaVersion) throw newerSchema(current);
-      if (current < schemaVersion) await step(waitingOn, 'INSERT INTO graphyard_schema(version, graphyard_version) VALUES($1,$2)', [schemaVersion, releaseInfo().version]);
-      await step(waitingOn, `COMMENT ON TABLE graphyard_schema IS ${literal(digest)}`);
-      await Promise.race([db.query('COMMIT'), abandoned]);
+      const migrate = async () => {
+        // The pool's statement timeout bounds coordination work, not the migration's: its lock waits share the deadline above.
+        await db.query('BEGIN'); await db.query('SET LOCAL statement_timeout = 0');
+        // The migration's own lock, never the coordination lock (GY-203): two migrations serialize beside live coordination.
+        await step(waitingOn, 'SELECT pg_advisory_xact_lock($1)', [advisoryLocks.migration]);
+        await step('a lock on the migration\'s shared function graphyard_immutable', migrationPrelude);
+        for (const { name, ddl } of tables) { const waiting = `a lock on table ${name} (or an object its migration touches)`; await lockRebuiltTriggerTables(step, waiting, ddl); await step(waiting, ddl); }
+        const current = Number((await step('a lock on table graphyard_schema', 'SELECT COALESCE(MAX(version),0) AS version FROM graphyard_schema')).rows[0].version);
+        if (current > schemaVersion) throw newerSchema(current);
+        if (current < schemaVersion) await step(waitingOn, 'INSERT INTO graphyard_schema(version, graphyard_version) VALUES($1,$2)', [schemaVersion, releaseInfo().version]);
+        await step(waitingOn, `COMMENT ON TABLE graphyard_schema IS ${literal(digest)}`);
+        await Promise.race([db.query('COMMIT'), abandoned]);
+      }; await retryDeadlocks(migrate, () => !aborted && Date.now() < deadline, () => db.query('ROLLBACK').catch(() => {}));
     } catch (error) {
       // An abandoned migration's connection is still busy: it is destroyed below, which rolls it back.
       if (aborted) throw aborted;
@@ -163,8 +163,8 @@ export class Store {
     return { version: Number(rows[0].version), digest: rows[0].digest };
   }
   async schema() { return Number((await this.pool.query('SELECT COALESCE(MAX(version),0) AS version FROM graphyard_schema')).rows[0].version); }
-  /** Resolves once every connection of both pools has closed (GY-483), so the database may be stopped right after. */
-  async close() { await Promise.all([closePool(this.pool, 'main'), closePool(this.leasePool, 'lease')]); }
+  /** Resolves once every connection of all three pools has closed (GY-483), so the database may be stopped right after. */
+  async close() { await Promise.all([closePool(this.pool, 'main'), closePool(this.leasePool, 'lease'), closePool(this.reportPool, 'report')]); }
   async transaction<T>(fn: (db: pg.PoolClient, now: Date) => Promise<T>, { lane = 'request' }: { lane?: StoreLane } = {}): Promise<T> {
     const permit = lane === 'background' ? await this.background.acquire() : null;
     const db = await (lane === 'lease' ? this.leasePool : this.pool).connect().catch(error => { permit?.(); throw error; });
@@ -184,7 +184,7 @@ export class Store {
     return (await this.pool.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
   }
   async workSnapshot(): Promise<{ work: Work[]; now: string; jobs: IntegrationJob[] }> {
-    const row = (await this.pool.query("SELECT COALESCE(jsonb_agg(document ORDER BY number), '[]'::jsonb) AS work, statement_timestamp() AS observed_at, (SELECT COALESCE(jsonb_agg(jsonb_build_object('work_id',work_id,'available_at',available_at,'locked_until',locked_until,'error',error,'held_until',held_until)), '[]'::jsonb) FROM jobs) AS jobs FROM work_items")).rows[0];
+    const row = (await this.pool.query("SELECT COALESCE(jsonb_agg(document ORDER BY number), '[]'::jsonb) AS work, statement_timestamp() AS observed_at, (SELECT COALESCE(jsonb_agg(jsonb_build_object('work_id',work_id,'available_at',available_at,'locked_until',locked_until,'error',error,'held_until',held_until,'deferred_reason',deferred_reason,'unobserved',unobserved)), '[]'::jsonb) FROM jobs) AS jobs FROM work_items")).rows[0];
     return { work: row.work, now: row.observed_at.toISOString(), jobs: row.jobs };
   }
   /**
@@ -206,7 +206,7 @@ export class Store {
         FROM (SELECT w.number, ${detoasted('w.document')} AS document FROM work_items w WHERE NOT EXISTS (SELECT 1 FROM work_index i WHERE i.id = w.id AND i.settled) OFFSET 0) d
         CROSS JOIN ${coordinationRelevance(coordinationTail)} CROSS JOIN LATERAL (SELECT ${coordinationDocumentSql} AS document) x`)).rows;
       const rows = [...settled, ...live].sort((a, b) => Number(a.number) - Number(b.number));
-      const meta = (await client.query("SELECT statement_timestamp() AS observed_at, (SELECT COALESCE(jsonb_agg(jsonb_build_object('work_id',work_id,'available_at',available_at,'locked_until',locked_until,'error',error,'held_until',held_until)), '[]'::jsonb) FROM jobs) AS jobs")).rows[0];
+      const meta = (await client.query("SELECT statement_timestamp() AS observed_at, (SELECT COALESCE(jsonb_agg(jsonb_build_object('work_id',work_id,'available_at',available_at,'locked_until',locked_until,'error',error,'held_until',held_until,'deferred_reason',deferred_reason,'unobserved',unobserved)), '[]'::jsonb) FROM jobs) AS jobs")).rows[0];
       await client.query('COMMIT');
       const trimmed = new Map<string, CoordinationTrim>(rows.map(row => [row.document.id, row.trimmed as CoordinationTrim]));
       return { work: rows.map(row => row.document), now: meta.observed_at.toISOString(), jobs: meta.jobs, trimmed };
@@ -234,28 +234,22 @@ export class Store {
     return result.rows[0] as { work_id: string; token: string; attempts: number; woken: boolean } | undefined;
   }
   /**
-   * Release a job with its next due time. A clean run comes back at the observation cadence its
-   * item's state earned (`availableInMs`, GY-117; twenty seconds when the caller sets none), a
-   * failed one after 45 seconds, and a concurrency retry after two. A webhook that arrived during
-   * the run has moved the generation, and the job comes back at once whatever was asked.
+   * Release a job with its next due time: a clean run at its observation cadence (`availableInMs`, GY-117), a failure after 45 seconds, a retry after two, a woken run at once.
    */
-  async finishJob(id: string, token: string, error?: string, retry = false, availableInMs?: number) {
+  async finishJob(id: string, token: string, error?: string, retry = false, availableInMs?: number, observed?: boolean) {
     const scheduled = availableInMs === undefined ? null : String(Math.max(0, Math.floor(availableInMs)));
-    await this.pool.query(`UPDATE jobs SET token=NULL,locked_until=NULL,error=$3,held_until=NULL,held_reason=NULL,held_on=NULL,refusals=CASE WHEN $3::text IS NULL THEN 0 ELSE refusals END,
-      available_at=now()+ CASE WHEN generation<>claimed_generation THEN interval '0 seconds' WHEN $4::boolean THEN interval '2 seconds' WHEN $5::text IS NOT NULL THEN ($5::text||' milliseconds')::interval WHEN $3::text IS NULL THEN interval '20 seconds' ELSE interval '45 seconds' END
-      WHERE work_id=$1 AND token=$2 AND locked_until>clock_timestamp()`, [id, token, error ?? null, retry, scheduled]);
+    await this.pool.query(`UPDATE jobs SET token=NULL,locked_until=NULL,error=$3,held_until=NULL,held_reason=NULL,held_on=NULL,deferred_reason=NULL,refusals=CASE WHEN $3::text IS NULL THEN 0 ELSE refusals END, unobserved=CASE WHEN $6::boolean IS TRUE THEN 0 WHEN $6::boolean IS FALSE THEN unobserved+1 ELSE unobserved END,
+      available_at=now()+ CASE WHEN generation<>claimed_generation THEN interval '0 seconds' WHEN $4::boolean THEN interval '2 seconds' WHEN $5::text IS NOT NULL THEN ($5::text||' milliseconds')::interval WHEN $3::text IS NULL THEN interval '20 seconds' ELSE interval '45 seconds' END WHERE work_id=$1 AND token=$2 AND locked_until>clock_timestamp()`, [id, token, error ?? null, retry, scheduled, observed ?? null]);
   }
   /**
    * Parks a job that needs a permission the App does not hold. Webhook wakeups move
    * `available_at` but never lift a hold; only a preflight that sees a different installation
    * or the hold's own bounded expiry lets the job run again, so a missing permission costs one
-   * attempt per hold. `heldOn` is the installation the hold was decided against
-   * (`installationFingerprint`), so a preflight that merely re-reads the same installation
-   * does not release it.
+   * attempt per hold. `heldOn` is the installation it was decided against (so re-reading it releases nothing); `observed` feeds the GY-506 count.
    */
-  async holdJob(id: string, token: string, reason: string, holdMs: number, heldOn: string | null = null) {
-    await this.pool.query(`UPDATE jobs SET token=NULL,locked_until=NULL,error=$3,held_reason=$3,held_on=$5,held_until=now()+($4::text||' milliseconds')::interval,available_at=now()+($4::text||' milliseconds')::interval
-      WHERE work_id=$1 AND token=$2 AND locked_until>clock_timestamp()`, [id, token, reason, String(Math.max(0, Math.floor(holdMs))), heldOn]);
+  async holdJob(id: string, token: string, reason: string, holdMs: number, heldOn: string | null = null, observed: boolean = false) {
+    await this.pool.query(`UPDATE jobs SET token=NULL,locked_until=NULL,error=$3,held_reason=$3,held_on=$5,held_until=now()+($4::text||' milliseconds')::interval,available_at=now()+($4::text||' milliseconds')::interval,deferred_reason=NULL, unobserved=CASE WHEN $6::boolean IS TRUE THEN 0 WHEN $6::boolean IS FALSE THEN unobserved+1 ELSE unobserved END
+      WHERE work_id=$1 AND token=$2 AND locked_until>clock_timestamp()`, [id, token, reason, String(Math.max(0, Math.floor(holdMs))), heldOn, observed]);
   }
   /** A permission refusal retries at the ordinary cadence a bounded number of times, then holds. */
   async refuseJob(id: string, token: string, reason: string, limit: number, holdMs: number, heldOn: string | null = null) {
@@ -282,10 +276,16 @@ export class Store {
   async heldJobs() {
     return (await this.pool.query('SELECT work_id,held_reason,held_until FROM jobs WHERE held_until>now() ORDER BY held_until')).rows as { work_id: string; held_reason: string; held_until: Date }[];
   }
-  async deferJob(id: string, token: string, until: string) {
-    await this.pool.query(`UPDATE jobs SET token=NULL,locked_until=NULL,error=NULL,
-      available_at=CASE WHEN generation<>claimed_generation THEN now() ELSE $3::timestamptz END
-      WHERE work_id=$1 AND token=$2 AND locked_until>clock_timestamp()`, [id, token, until]);
+  /** Observation jobs starved of observations three times in a row (GY-506), which `/api/status` reports and master status raises. */
+  async starvedJobs() { return (await this.pool.query(`SELECT w.document->>'key' AS key, j.unobserved, j.error, j.deferred_reason FROM jobs j JOIN work_items w ON w.id=j.work_id WHERE j.unobserved>=3 AND w.document->>'stage'<>'done' ORDER BY w.number LIMIT 50`)).rows as { key: string; unobserved: number; error: string | null; deferred_reason: string | null }[]; }
+  /** A concurrency retry: back within seconds, never an operator error, never silent (GY-506). */
+  async retryJob(id: string, token: string, reason: string, observed: boolean) {
+    await this.pool.query(`UPDATE jobs SET token=NULL,locked_until=NULL,error=NULL,held_until=NULL,held_reason=NULL,held_on=NULL,deferred_reason=$3,refusals=0, unobserved=CASE WHEN $4::boolean IS TRUE THEN 0 WHEN $4::boolean IS FALSE THEN unobserved+1 ELSE unobserved END, available_at=now()+interval '2 seconds' WHERE work_id=$1 AND token=$2 AND locked_until>clock_timestamp()`, [id, token, reason, observed]);
+  }
+  /** Reschedules past a deferral, keeping its reason on the job record (GY-506); `observed` null leaves the starvation count as it is. */
+  async deferJob(id: string, token: string, until: string, reason?: string, observed: boolean | null = false) {
+    await this.pool.query(`UPDATE jobs SET token=NULL,locked_until=NULL,error=NULL,deferred_reason=$4, unobserved=CASE WHEN $5::boolean IS TRUE THEN 0 WHEN $5::boolean IS FALSE THEN unobserved+1 ELSE unobserved END, available_at=CASE WHEN generation<>claimed_generation THEN now() ELSE $3::timestamptz END
+      WHERE work_id=$1 AND token=$2 AND locked_until>clock_timestamp()`, [id, token, until, reason ?? null, observed]);
   }
   /**
    * Whether GitHub's webhook is actually delivering: the last verified delivery recorded and the

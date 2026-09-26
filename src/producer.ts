@@ -14,9 +14,9 @@ import { assertSessionLedgerRoom, boundSessionLedger, readReviewLedger, releaseC
 import { closedQuestionFor } from './model/closed-question.js';
 import { paneAlreadyGone, withPaneGone } from './request-settlement.js';
 import { narrowRoleRuntime, piRuntimeSchema } from './runner/payloads.js';
-import { liveRun, registeredRun } from './runner/registry.js';
+import { liveRun, liveRunCheckouts, registeredRun } from './runner/registry.js';
 import { sessionVerificationEnvironment } from './master/harness.js';
-import { narrowRunner, piProducerPrompt, producerRunOptions, registryRunner, startNarrowRun, submitEvidence } from './runner/roles.js';
+import { narrowRunner, piProducerPrompt, producerRunOptions, registryRunner, runOutcome, startNarrowRun, submitEvidence } from './runner/roles.js';
 import { runRecordSchema, type RunRecord, type Runner } from './runner/types.js';
 
 /**
@@ -193,6 +193,24 @@ export class ClosedQuestionsDecided extends Error {
 }
 
 /**
+ * Thrown instead of launching when a session for the item's proof group is already pending
+ * (GY-415). The loop's own tick and the control-plane executors both launch producers for one
+ * request; whichever claims it second finds the other's session in the ledger. A session pending on
+ * the requested head is that request being answered, and the executor settles its row on it
+ * (`answeredByPendingSession`) rather than failing it for as long as the session runs — which read
+ * as a stalled dispatch. A session pending on another head is still a refusal: it must be
+ * reconciled before the group is launched again.
+ */
+export class ProducerSessionPending extends Error {
+  constructor(readonly work: string, readonly group: string, readonly pending: Pick<ProducerRecord, 'id' | 'sha' | 'requestId' | 'agentName'>) {
+    super(`A producer session for ${work} ${group} proofs is already pending on ${pending.sha.slice(0, 7)}; reconcile it with master status before launching another`);
+  }
+}
+/** The pending session a launch was refused for, when it is already producing the requested head. */
+export const answeredByPendingSession = (error: unknown, request: Pick<DispatchRequest, 'sha'>) =>
+  error instanceof ProducerSessionPending && error.pending.sha === request.sha ? error.pending : null;
+
+/**
  * `checkout` is the session directory a launch allocated under the managed worktree root; a
  * session record carries its own, so the request rebuilt from a record (the GY-93 re-prompt) names
  * the directory the session was launched into. Without either the prompt names the directory a
@@ -237,7 +255,7 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
   if (!independentProducerProfiles(work, [profile]).length) throw new Error(`Producer principal ${profile.principal} has held an assignment on ${work.key}; its evidence would not be trusted`);
   const ledger = await readProducerLedger(root);
   const pending = ledger.producers.find(record => record.state === 'pending' && record.key === work.key && record.group === binding.group);
-  if (pending) throw new Error(`A producer session for ${work.key} ${binding.group} proofs is already pending on ${pending.sha.slice(0, 7)}; reconcile it with master status before launching another`);
+  if (pending) throw new ProducerSessionPending(work.key, binding.group, pending);
   // One live session per request: a request whose sessions all failed or expired may be launched
   // again, as its next attempt, until the retry limit. A session that settled any other way while
   // the request still stands answered nothing, and the dispatcher attempts it again (GY-193), up to
@@ -378,7 +396,8 @@ async function launchHeadlessProducer(root: string, config: MasterConfig, work: 
     throw error;
   }
   // A registry session is the run: its slot is given back the moment the run ends.
-  const settled = started.settled.finally(() => registry?.release(`the headless producer run for ${binding.key} ended`)).then(run => updateProducerRecord(root, session.id, entry => ({ ...entry, run })).then(() => run));
+  const settled = started.settled.then(async run => { await registry?.release(`the headless producer run for ${binding.key} ended`, runOutcome(run)); return run; },
+    async error => { await registry?.release(`the headless producer run for ${binding.key} ended`); throw error; }).then(run => updateProducerRecord(root, session.id, entry => ({ ...entry, run })).then(() => run));
   settled.catch(() => { /* reconciliation settles the record on its expiry */ });
   return { producer: record.id, requestId: request.id, attempt: record.attempt, work: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, group: binding.group, proofs: binding.proofs,
     profile: profile.name, principal: profile.principal, agentName: session.agentName, pane: null, checkout: checkout.directory, expiresAt: record.expiresAt, runtime: 'pi' as const, delivery: 'request' as const,
@@ -509,7 +528,8 @@ export async function reconcileProducers(root: string, config: MasterConfig, wor
  */
 export async function reclaimCheckouts(root: string, config: MasterConfig, options: { now?: number; graceMs?: number; probe?: FilesystemProbe } = {}): Promise<CheckoutReclaimReport> {
   const [producers, reviews] = await Promise.all([readProducerLedger(root), readReviewLedger(root)]);
-  const live = [...producers.producers, ...reviews.reviews].filter(record => record.state === 'pending' && record.checkout).map(record => record.checkout!);
+  // A live headless approver's directory is owned by its run, not by a ledger record (GY-391).
+  const live = [...[...producers.producers, ...reviews.reviews].filter(record => record.state === 'pending' && record.checkout).map(record => record.checkout!), ...liveRunCheckouts()];
   return reclaimSessionCheckouts(root, worktreeRoot(root, config), live, { ...options, failure: writeFailure });
 }
 
