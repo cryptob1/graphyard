@@ -307,9 +307,15 @@ async function startHeadlessApprover(root: string, config: MasterConfig, work: W
 }
 
 export type SessionRegistrar = (handle: SessionHandleInput) => Promise<unknown>;
-export async function launchApprover(root: string, work: Work, decision: string, explicitKind: NonNullable<WorkerProfile['kind']> | undefined, agents: HerdrAgent[], run?: ChildRun, probe: FleetProbe = {}, register?: SessionRegistrar,
+/**
+ * `herdr` is this host's Herdr inventory and whether it could be read at all (GY-205): the role's
+ * registry sessions are judged live or gone against it, and an inventory that could not be read
+ * judges none gone — an empty list read as available would end every approver session on the host.
+ */
+export async function launchApprover(root: string, work: Work, decision: string, explicitKind: NonNullable<WorkerProfile['kind']> | undefined, herdr: { agents: HerdrAgent[]; available: boolean }, run?: ChildRun, probe: FleetProbe = {}, register?: SessionRegistrar,
   headless: { runner?: Runner; fetcher?: typeof fetch; filesystem?: FilesystemProbe } = {}) {
   const config = await loadMasterConfig(root);
+  const { agents } = herdr;
   const token = await agentToken(root, config, 'approver');
   const retry = `graphyard master approver ${work.key} ${decision} [AGENT_KIND]`;
   const name = nameForLaunch(retry, () => approverSessionName(work, decision));
@@ -321,7 +327,7 @@ export async function launchApprover(root: string, work: Work, decision: string,
   // GY-170: when the registry defines the approver role, its choice decides the runtime too — an
   // account of a `pi` runtime runs headless with that account's home, model and the role's policy,
   // and `run.runtimes`/`run.pi` configure only an approver the registry does not define.
-  const registry = explicitKind ? null : await selectFleetSession(config, 'approver', { name: approverProfile, principal: config.approver!.id }, await heldAwareProbe(config, { runtime: { agents, available: true }, ...probe, work: work.key }));
+  const registry = explicitKind ? null : await selectFleetSession(config, 'approver', { name: approverProfile, principal: config.approver!.id }, await heldAwareProbe(config, { runtime: herdr, ...probe, work: work.key }));
   if (registry && registry.account.kind === 'pi') {
     let started: Awaited<ReturnType<typeof startHeadlessApprover>>;
     try { started = await startHeadlessApprover(root, config, work, decision, name, token, headless.runner ?? registryRunner(registry.account), headless); }
@@ -347,7 +353,7 @@ export async function launchApprover(root: string, work: Work, decision: string,
   // judged its decision and exited no longer holds a slot the next one needs.
   const chosen = explicitKind ? await heldRuntimeLogin(config, 'approver', approverProfile, work.key, probe, explicitKind)
     : registry ? { fleet: registry, account: registry.account, profile: approverProfile, skipped: registry.skipped } satisfies ApproverSelection
-    : await selectApproverAccount(config, work.key, config.approver!.id, { runtime: { agents, available: true }, ...probe });
+    : await selectApproverAccount(config, work.key, config.approver!.id, { runtime: herdr, ...probe });
   const selected = chosen?.fleet ?? null;
   // Nothing here names a runtime: the role's account decides, then the operator's own argument,
   // then a runtime this installation already configured for another session.
@@ -355,6 +361,8 @@ export async function launchApprover(root: string, work: Work, decision: string,
   // A launch refused for its runtime gives the chosen session back at once (GY-184).
   const plan = () => {
     if (!kind) throw new Error('No runtime is configured for the approver: name accounts for the approver role with graphyard master registry role set approver ACCOUNT[,ACCOUNT…] --reason REASON, or pass AGENT_KIND');
+    // Without an inventory nothing shows whether this decision's session already runs.
+    if (!herdr.available) throw new Error(`Herdr's session inventory could not be read, so no approver session for ${work.key} is launched into it; the launch is made again once Herdr answers`);
     return accountLaunch({ kind, approvals: 'auto', agentArgs: [], environment: {} }, chosen?.account ?? null);
   };
   let launch: ReturnType<typeof accountLaunch>;
@@ -721,7 +729,8 @@ export async function runAutonomyCommand(root: string, config: MasterConfig, id:
   }
   if (id === 'approver') {
     const work = await item(args[0]); if (!args[1]) throw new Error('Use master approver GY-N DECISION [AGENT_KIND]');
-    const launched = await launchApprover(root, work, args[1], args[2] ? agentKindSchema.parse(args[2]) : undefined, await deps.agents(), deps.runtime, {}, registrar(work.id));
+    // `deps.agents` throws when Herdr cannot be read, so a listing it returns was read.
+    const launched = await launchApprover(root, work, args[1], args[2] ? agentKindSchema.parse(args[2]) : undefined, { agents: await deps.agents(), available: true }, deps.runtime, {}, registrar(work.id));
     // A headless approver runs in this process, so the command waits for its verdict and reports the run.
     const { settled, ...report } = launched;
     return settled ? { ...report, run: await settled } : report;
