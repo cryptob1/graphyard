@@ -18,6 +18,7 @@ import { type ReviewFinding, type SuccessionRead, readReviewFindings, basePaths,
 import { defaultAwaitReviewers, launchedSessionHandle } from '../auto-dispatch.js';
 import type { DispatchRequest } from '../model/dispatch.js';
 import { registeredLaunch } from '../model/session-state.js';
+import { readApproverLaunches } from '../master/autonomy.js';
 import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type ContainmentAssessment, type EscalationSession, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, type MergeExecutor, agentToken, approverRoleHealth, decisionInput, escalationRoleHealth, launchApprover, launchEscalationHandler, readApproverLaunch, readEscalationSessions, saveEscalationSession, verifiedContext, listHerdrAgents, readEnvironmentLog, selectionKey, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, mergeExecutor, reclaimWorktrees, removeReclaimableWorktrees, writeWorktreeInventoryCache, reclaimIdleMs, writeFailure, assessContainment, herdrJson } from '../master.js';
 import { annotatePaneShell } from '../quarantine.js';
 import { probeSupervisorAbsence } from '../containment-probe.js';
@@ -131,6 +132,8 @@ export interface DaemonEffects {
   approver?: (work: Work, decision: string) => Promise<{ agentName: string; pane: string | null; account?: string | null; runtime?: string | null; session?: string | null; run?: RunRecord | null; settled?: Promise<RunRecord> }>;
   /** The account and runtime a listed approver session was launched on, so an adopted session's exhaustion holds the account it spent. */
   approverLaunch?: (agentName: string) => Promise<{ account: string | null; runtime: string | null; session?: string | null } | null>;
+  /** Every approver launch recorded on this host, with the item and decision each judges (GY-403). */
+  approverLaunches?: () => Promise<{ agentName: string; account: string | null; runtime: string | null; session: string | null; launchedAt: string; work: string | null; decision: string | null }[]>;
   /**
    * Ends an agent registry session whose runtime ran out of quota, so the role's slot is free for
    * the replacement launched in the same cycle (GY-182). The registry would otherwise count it live
@@ -513,6 +516,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     }),
     escalationSessions: () => readEscalationSessions(root),
     approverLaunch: agentName => readApproverLaunch(root, agentName),
+    approverLaunches: () => readApproverLaunches(root),
     endRegistrySession,
     endEscalation: async (session, resolution, waiting) => {
       if (session.session) await endRegistrySession(session.session, resolution.slice(0, 500));
