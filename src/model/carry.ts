@@ -41,7 +41,8 @@ export interface TipMerge {
    * The candidate's own diff on each side of the merge, as patch-ids (GY-330): `reviewed` from
    * GitHub's compare of the replaced head against its merge base with the bound base, `tip` from
    * the compare of the tip against its merge base with the predicted base. A side is null when
-   * GitHub could not list it completely (a truncated list, or a file with no textual patch);
+   * GitHub could not list it completely (a truncated list, or a file with neither a textual patch
+   * nor a blob SHA);
    * absent on records that predate the rule.
    */
   diff?: { reviewed: string | null; tip: string | null } | null;
