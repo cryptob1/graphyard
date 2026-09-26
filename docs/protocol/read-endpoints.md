@@ -3,7 +3,7 @@
 
 - `GET /healthz`: unauthenticated health.
 - `GET /api/status`: principal, integrations, `appPermissions`, held/failed jobs, `githubBudget`, server time.
-- `GET /api/work-snapshot`: `{work, now}`; age leases against `now`. Open items whole; settled deliveries `summary: true`, without prose or histories (last day's sessions, speed-only `pipeline`). `view=coordination` trims open items; `view=full` exports everything.
+- `GET /api/work-snapshot`: `{work, now}` with `autoDispatch` requests; age leases against `now`. Open items whole; settled deliveries `summary: true`, without prose or histories. `view=coordination` trims open items; `view=full` exports everything.
 - `GET /api/work/ID|KEY`: one whole document. `GET /api/work`: every aggregate.
 - `GET /api/interventions?window=7|30|90`: the window's ledger rows only (`ledger.since`).
 - `GET /api/events?work=UUID`: one item's events, newest first; `graphyard events GY-N --all` walks them.
