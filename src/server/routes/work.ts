@@ -1,5 +1,6 @@
 import { demand, type Principal } from '../../model.js';
-import { flagPathRefusal, type Command } from '../../engine.js';
+import { flagPathRefusal, RenewalFault, type Command } from '../../engine.js';
+import { leaseCommands } from '../../store/pools.js';
 import { producerIndependenceRefusal, recordEvidenceRefusal, recordLeadViolation } from '../../delegation.js';
 import { ciRunBindingSchema, isCiProducer, observeCiCheckRun, type CiRunObservation } from '../../model/ci-proofs.js';
 import { defineRoutes, parseJson, type RouteContext } from '../routes.js';
@@ -10,6 +11,12 @@ import { readEscalationContext } from '../escalation-context.js';
 import { judgeClosedQuestion } from '../closed-question.js';
 import { closeWork } from '../close.js';
 import { answerResearch, recordResearch } from '../../research.js';
+
+/** Whether a request is a lease command (store/pools.ts `leaseCommands`), which authenticates and runs on the lease pool (GY-558). */
+export const leaseCommandRequest = (method: string | undefined, pathname: string) => {
+  const command = method === 'POST' ? /^\/api\/work\/[^/]+\/([a-z]+)$/.exec(pathname)?.[1] : undefined;
+  return !!command && leaseCommands.has(command);
+};
 
 // Every mutating work route refuses a slice lead the same way and leaves the same
 // ledger entry. Routing order decides which handler matches first; it must never
@@ -127,7 +134,12 @@ export const workRoutes = defineRoutes('work', [
         // the engine then refuses the record as unobserved rather than answering a server error.
         try { ciRun = binding.success ? observeCiCheckRun(repository, await github.request(`/check-runs/${binding.data.jobId}`)) : null; } catch { ciRun = null; }
       }
-      return engine.execute(actor, attempted as Command, id ?? null, input, context.idempotencyKey(), ciRun === undefined ? {} : { ciRun });
+      try { return await engine.execute(actor, attempted as Command, id ?? null, input, context.idempotencyKey(), ciRun === undefined ? {} : { ciRun }); }
+      catch (error) {
+        // A renewal that failed server-side says what grace its recorded fault earned (GY-558), so the supervisor keeps retrying through it.
+        if (error instanceof RenewalFault) return context.send(503, { error: error.message, renewalFault: error.grace });
+        throw error;
+      }
     },
   },
 ]);

@@ -1,3 +1,4 @@
+import { leaseHealthStatus } from './lease-health-attention.js';
 import { probeCandidateConflicts } from '../conflicts.js';
 import { mergeBatchSize } from '../master.js';
 import { humanOnlyStatusRow, type HumanRequestRow } from '../model/human-request.js';
@@ -147,9 +148,9 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
       reports: 'bounded', reportBoundMs: dependencies.reportReadBoundMs, sections });
   const lag = await timedStep('release lag', () => releaseLagStatus(root, master.baseBranch, snapshot.work, { cliCommit: cli.commit, loop: cycling, executors: releases.executors }));
   // Named with the stalls: a pending merge GitHub reports mergeable (GY-344), a repair-lane merge until a
-  // normal merge proves the path (GY-406), an unobserved queue head (GY-492).
-  const observation = observationThroughputStatus(coordinator, snapshot);
-  const stalledItems = [...derivedStalls, ...mergeStallAttention(snapshot), ...observation.attention, ...repairLaneAttention(snapshot.work)];
+  // normal merge proves the path (GY-406), an unobserved queue head (GY-492), slow renewals (GY-558).
+  const observation = observationThroughputStatus(coordinator, snapshot), health = leaseHealthStatus(coordinator);
+  const stalledItems = [...derivedStalls, ...mergeStallAttention(snapshot), ...observation.attention, ...repairLaneAttention(snapshot.work), ...health.attention];
   // Exactly one component merges (GY-245): the loop, where one is installed or running, else the executors.
   const merger = installationMerger({ loop: { configured: !!setup.supervisor.installed, running: !!cycling?.running, autoMerge: master.autoMerge },
     declaration: executors.supervision.declaration, served: executors.presence.served });
@@ -188,7 +189,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     unobtainableReviews: unobtainable.map(item => ({ work: item.subject, ...item.review })),
     merger: { merger: merger.merger, detail: merger.detail }, autoMerge: master.autoMerge, mergeQueue: { batchSize: mergeBatchSize(master) }, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'each merge needs an approved merge decision: graphyard master decide GY-N merge REASON, approved by the approver agent',
     // What the observation workers achieve and how far the queue head has drifted (GY-492).
-    observationThroughput: observation,
+    observationThroughput: observation, leaseHealth: health.report,
     versionSkew: mergeProtocolSkew(coordinator, cli), cli,
     reviewer: master.reviewer ? { identity: `${master.reviewer.slug}[bot]`, appId: master.reviewer.appId, profiles: master.reviewers.map(profile => profile.name), automatic: master.run.reviewerProfile ?? (master.reviewers.length === 1 ? master.reviewers[0].name : null),
       concurrency: master.reviewers.map(profile => ({ name: profile.name, agentName: profile.agentName, concurrency: profileConcurrency(profile) })) } : null,
