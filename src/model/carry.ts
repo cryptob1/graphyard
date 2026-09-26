@@ -84,6 +84,8 @@ export interface CarryInput {
 }
 
 const short = (sha: string) => sha.slice(0, 12);
+/** The identity a carried approval names, in the reason every status view shows: who, which review, and the commit it was given on. */
+const approvedBy = (approval: ApprovalIdentity) => `approval of ${short(approval.sha)} by ${approval.reviewer}${approval.reviewId !== undefined ? ` (review ${approval.reviewId})` : ''}`;
 /** The candidate's diff is shown unchanged across the merge: both patch-ids known and equal. */
 export function diffUnchanged(merge: Pick<TipMerge, 'diff'> | null | undefined): boolean {
   const diff = merge?.diff;
@@ -129,7 +131,7 @@ export function decideCarry(input: CarryInput): QueueCarry {
     const id = short(diff!.reviewed!);
     const ground: CarryGround = { rule: 'diff unchanged', patchId: diff!.reviewed, tipPatchId: diff!.tip };
     const approval: CarriedApproval | RequiredApproval = !input.approval ? { carried: false, reason: `no approval was bound to the replaced head ${short(from.sha)}` }
-      : { ...input.approval, carried: true, originalSha: input.approval.sha, reason: `approval of ${short(from.sha)} by ${input.approval.reviewer} carried to Graphyard-authored tip ${short(to.sha)}: diff unchanged (patch-id ${id}) across ${who}'s changes` };
+      : { ...input.approval, carried: true, originalSha: input.approval.sha, reason: `${approvedBy(input.approval)} carried to Graphyard-authored tip ${short(to.sha)}: diff unchanged (patch-id ${id}) across ${who}'s changes` };
     const evidence = input.proofs.map(({ proof, evidence }): CarriedProof => !evidence ? { proof, carried: false, reason: `no trusted evidence was bound to the replaced head ${short(from.sha)}` }
       : { proof, carried: true, evidenceId: evidence.id, producer: evidence.producer, reason: `evidence ${evidence.id} from ${evidence.producer} carried to ${short(to.sha)}: diff unchanged (patch-id ${id}) across ${who}'s changes` });
     return { ...base, approval, evidence, ground };
@@ -139,7 +141,7 @@ export function decideCarry(input: CarryInput): QueueCarry {
   const reviewedTouched = input.reviewedFiles.filter(path => changed.includes(path));
   const approval: CarriedApproval | RequiredApproval = !input.approval ? { carried: false, reason: `no approval was bound to the replaced head ${short(from.sha)}` }
     : reviewedTouched.length ? { carried: false, reason: `${who} changed reviewed files ${list(reviewedTouched)}; a fresh independent approval of ${short(to.sha)} is required` }
-    : { ...input.approval, carried: true, originalSha: input.approval.sha, reason: `approval of ${short(from.sha)} by ${input.approval.reviewer} carried to Graphyard-authored tip ${short(to.sha)}: ${who} changed none of the ${input.reviewedFiles.length} reviewed files` };
+    : { ...input.approval, carried: true, originalSha: input.approval.sha, reason: `${approvedBy(input.approval)} carried to Graphyard-authored tip ${short(to.sha)}: ${who} changed none of the ${input.reviewedFiles.length} reviewed files` };
   const evidence = input.proofs.map(({ proof, evidence }): CarriedProof => {
     if (!evidence) return { proof, carried: false, reason: `no trusted evidence was bound to the replaced head ${short(from.sha)}` };
     // A predicted base that changed nothing relative to the bound base leaves the tested tree
