@@ -13,7 +13,7 @@ A criterion states an outcome and its proofs:
 
 ## Revise requirements explicitly
 
-`graphyard master requirements GY-N revision.json "REASON"` adds; rewriting, removing or narrowing is a two-party `master decide GY-N requirements @revision.json "REASON"`. A revision replaces the whole document against `expectedPolicyRevision`; stop the worker first, since prior evidence, review and authorization lapse.
+`graphyard master requirements GY-N revision.json "REASON"` adds; rewriting, removing or narrowing is a two-party `master decide GY-N requirements @revision.json "REASON"`. A revision replaces the whole document against `expectedPolicyRevision`; stop the worker first: prior evidence, review and authorization lapse.
 
 ## Dispatch optimistically, smallest scope first
 
@@ -37,7 +37,7 @@ The gate is the reviewer's approval of the exact head plus required CI. Threads 
 
 ## Ship in under thirty minutes
 
-The [routine target](master-agent-reference.md#pipeline-speed) comes from `sync`, automatic dispatch, [proofs in CI](github.md#proofs-in-ci) and conflict avoidance, never by weakening a gate.
+The [routine target](master-agent-reference.md#pipeline-speed) comes from `sync`, automatic dispatch, [proofs in CI](github.md#proofs-in-ci) and conflict avoidance.
 
 ## Explain stalls
 

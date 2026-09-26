@@ -85,7 +85,7 @@ Each candidate needs one review and one producer session per proof group; a prof
 "reviewers":[{"name":"claude-reviewer","agentName":"review-claude","kind":"claude","accounts":["claude-a","claude-b"],"concurrency":3}]
 ```
 
-Adding workers? For worker count `W` and `G` proof groups: `⌈W / 2⌉` review slots and `G × ⌈W / 2⌉` producer slots over two or more producer principals. Watch `longestWaitMs`.
+For `W` workers and `G` proof groups: `⌈W / 2⌉` review slots and `G × ⌈W / 2⌉` producer slots over 2+ producer principals. Watch `longestWaitMs`.
 
 ## 3. Start the master
 

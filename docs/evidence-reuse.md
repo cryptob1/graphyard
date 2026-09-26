@@ -16,7 +16,7 @@ Reuse is off until the operator defines a `reuse` policy with `graphyard validat
  "ignorable":["docs/**","*.md"]}
 ```
 
-Every environment service must be named under `relevant.services`. A changed relevant path forbids reuse, and a path matching neither list is **unknown, and unknown refuses**. `identical` requires the same artifact manifest; `scoped` allows another when build inputs are unchanged and every change is ignorable.
+Every environment service must be named under `relevant.services`. A changed relevant or **unknown** path (matching neither list) forbids reuse. `identical` requires the same artifact manifest; `scoped` allows another when build inputs are unchanged and every change is ignorable.
 
 ## Reuse decisions
 

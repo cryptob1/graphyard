@@ -55,7 +55,7 @@ Without a queue, mergeable `CLEAN`, `UNSTABLE` (optional checks failing) and `HA
 
 ### Proofs in CI
 
-A protected `pull_request_target` workflow (the default branch's, with its secrets) runs on every `graphyard/*` PR push: **plan** finds the item's `unit:*` and `integration:*` proofs, **exercise** runs one secret-free job each against the candidate merged with its base, **publish** submits reports via the [CI producer](deployment.md#ci-producer) bound by `ciRun`. Queue tips too; dependencies are cached. Manual proofs stay producer sessions.
+A protected `pull_request_target` workflow (the default branch's, with its secrets) runs on every `graphyard/*` PR push: **plan** finds the item's `unit:*` and `integration:*` proofs, **exercise** runs one secret-free job each against the candidate merged with its base, **publish** submits reports via the [CI producer](deployment.md#ci-producer) bound by `ciRun`. Queue tips too; manual proofs stay producer sessions.
 
 ## Post-deployment smoke proof
 

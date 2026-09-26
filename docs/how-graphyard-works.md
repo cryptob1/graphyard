@@ -20,13 +20,13 @@ Text equivalent: in bootstrap the human operator supervises one worker while the
 
 ## Who holds which authority
 
-![Who holds which authority: the operator, Graphyard, Herdr-hosted sessions, reviewer and producer.](diagrams/roles-and-authority.svg)
+![Authority: operator, Graphyard, Herdr sessions, reviewer and producer.](diagrams/roles-and-authority.svg)
 
 Text equivalent: the human operator sends human-only decisions to Graphyard. Herdr hosts the master (`coordinator`), slice lead and worker (epoch, worktree); the reviewer is a GitHub identity and the producer holds a grant. Each session commands Graphyard under its own credential; Graphyard merges only through the guarded path. Colours follow the [legend](glossary.md#diagram-legend).
 
 ## Correctness rules
 
-![Control-plane components: callers, engine, Postgres, reconciliation worker and GitHub.](diagrams/control-plane-components.svg)
+![Control-plane components: callers, engine, Postgres, reconciler, GitHub.](diagrams/control-plane-components.svg)
 
 Text equivalent: sessions, the dashboard and producers call the API; the coordination engine applies each mutation in one locked Postgres transaction and appends an event; the reconciliation worker syncs GitHub, publishes the required check and runs the guarded merge; the webhook only wakes a job.
 

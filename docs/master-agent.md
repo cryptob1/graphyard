@@ -9,7 +9,7 @@ Only three decisions are human-only: goals and priorities, spending money or ope
 
 ## Operate
 
-Keep cycling: status, dispatch, review, merge, deployment verification. Stop only when every in-scope item is Done or has a genuinely external blocker recorded in Graphyard, and every merged change is verified against the exact deployed release or has a recorded deployment blocker.
+Keep cycling: status, dispatch, review, merge, deployment verification. Stop only when every in-scope item is Done or has a genuinely external blocker recorded in Graphyard, and every merged change is verified against the exact deployed release or has a deployment blocker.
 
 1. `master status`.
 2. `master run` dispatches ready work in `schedule.order`.
@@ -49,7 +49,7 @@ another session's handle finished to free a slot.
 
 ## Research before build
 
-With `run.research` set (`model`, `timeoutMinutes` 15, `tokenBudget`), a feature (or `"research": true`) gets one read-only Pi session per requirements revision, briefing worker and reviewer: reusable code, prior art, risks, approach. Product questions go under Needs you with recommendation and deadline; build proceeds on it, a differing answer requests rework, failure never blocks. `master status` `research` counts `live`, `waiting`, `failed` runs.
+With `run.research` set (`model`, `timeoutMinutes` 15, `tokenBudget`), a feature (or `"research": true`) gets one read-only Pi session per requirements revision, briefing worker and reviewer: reusable code, prior art, risks, approach. Product questions reach Needs you with recommendation and deadline; build proceeds on it, a differing answer requests rework, failure never blocks. `master status` `research` counts `live`, `waiting`, `failed` runs. The loop publishes `run.research` via `POST /api/research-settings` (coordinator, `{"configured": boolean}`), returned as `research.configured` by `/api/status`, `/api/board`.
 
 ## Automatic dispatch at submit
 
@@ -79,6 +79,6 @@ A pass is trusted only when that stripped run failed with a case executed; other
 
 ### Repair lane
 
-The one sanctioned exception to "never use an administrative merge bypass": once a `"repair": "merge-path"` item (`mergePath` files only) stalls 15 minutes with checks passed and an approver agent's `master decide GY-N repair-merge REASON` naming the fault, the App's ruleset bypass merges its head, audited (`repair.merged`) and flagged until a normal merge.
+The one exception to "never use an administrative merge bypass": a `"repair": "merge-path"` item (`mergePath` files only) stalled 15 minutes with checks passed is merged by the App's ruleset bypass on an approver agent's `master decide GY-N repair-merge REASON`, audited (`repair.merged`).
 
 Unresolved review threads are the reviewer's inputs, not merge blockers (`reviewThreads`); its approval names each on `Resolved threads:`, `Follow-up threads:` or `Overridden threads:` ([rules](coordination.md#review-gate-verdicts-not-threads)).
