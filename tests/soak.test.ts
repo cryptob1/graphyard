@@ -32,7 +32,9 @@ import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } f
  * `runDaemon` does, so session launches run beside the cycle — outliving it, holding their profile
  * from hand-off, and reported by the next cycle — and the invariants hold on that detached path. A
  * change to the loop that breaks an invariant fails here, in CI, before
- * it merges; a new behaviour that repeats per cycle, head or item belongs in this world.
+ * it merges; a new behaviour that repeats per cycle, head or item belongs in this world. That
+ * includes the loop's own post-deploy throughput measurement (GY-393): every release the simulated
+ * day observes serving is measured exactly once, on the loop's per-release action.
  */
 const repository = 'owner/project';
 const PROOF = 'unit:soak-behaves';
@@ -173,6 +175,12 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
 
   // ---- Production: two deploys, each a new control-plane build serving the base tip it was cut from. ----
   const production = { build: sha('build', 0), sha: github.tip, deploys: [] as { at: number; build: string; sha: string }[] };
+  // GY-393: the loop takes the post-deploy throughput measurement itself, once per release it
+  // observes serving. The simulated effect records per release what the real one records as a
+  // report file, so a loop that skips a release, measures one it never observed, or re-measures
+  // a release it has already measured fails the assertions below instead of passing silently.
+  const baseTip = production.sha;
+  const measurements = new Map<string, number>();
   const snapshot = async () => { const read = await store.coordinationSnapshot(); return { work: read.work, now: read.now, jobs: read.jobs }; };
   const transport = async (path: string, data: any, key: string = id()) => {
     const match = /^work\/([^/]+)\/merge-acquire$/.exec(path);
@@ -198,6 +206,10 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     observeDeployment: async delivered => {
       const serving = delivered.filter(item => github.contains(production.sha, item.delivery!.mergeSha));
       return { source: 'endpoint', sha: production.sha, at: new Date(clock.now()).toISOString(), reason: null, deployed: serving.map(item => item.key), pending: delivered.filter(item => !serving.includes(item)).map(item => item.key) };
+    },
+    measureThroughput: async ({ sha }) => {
+      measurements.set(sha, (measurements.get(sha) ?? 0) + 1);
+      return { revision: sha, verdict: 'verified' as const, file: `.graphyard/measurements/throughput/${sha.slice(0, 12)}.json`, reason: `The soak's throughput claim holds against ${sha.slice(0, 12)}` };
     },
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
   };
@@ -251,12 +263,12 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   }
 
   const final = (await store.list()).filter(item => items.some(entry => entry.id === item.id));
-  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart };
+  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, baseTip, measurements };
 }
 
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 180_000 }, async () => {
   const began = performance.now();
-  const { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
+  const { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, baseTip, measurements } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
   const undelivered = final.filter(item => item.stage !== 'done' || !item.delivery);
   assert.deepEqual(undelivered.map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
@@ -277,6 +289,13 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   // per session, none lost between the hand-off and the drain.
   assert.equal(reportedDispatches, sessions.length, 'each settled dispatch launch was reported to a cycle');
   assert.equal(production.deploys.length, plan.deploys.length, 'two production deploys');
+  // The loop's own measurement (GY-393): every release observed serving — the base tip the day
+  // starts on, then each deploy — was measured exactly once, and the last measurement stands
+  // against the release now serving. A loop that re-measures, skips a release, or measures a
+  // release the observation never saw fails here.
+  assert.deepEqual([...measurements.keys()].sort(), [...new Set([baseTip, ...production.deploys.map(deploy => deploy.sha)])].sort(), 'one throughput measurement per release observed serving');
+  assert.ok([...measurements.values()].every(count => count === 1), `each release is measured exactly once: ${JSON.stringify([...measurements])}`);
+  assert.equal(state.throughput?.revision, production.sha, 'the last measurement is against the release now serving');
   assert.ok(final.find(item => item.key === items[plan.split.item - 1].key)!.plannedFiles.includes(`src/soak/item-${plan.split.item}-a.ts`), 'the split file re-planned its item onto the successors');
   const reviewed = final.find(item => item.key === items[plan.exhaustedReviewer - 1].key)!;
   assert.ok(reviewed.reviewFailovers?.some(failover => failover.profile === 'claude-reviewer' && failover.exhaustion === 'usage-limit' && failover.nextProfile === 'cursor-reviewer'), `the exhausted reviewer bot failed over to the next profile: ${JSON.stringify(reviewed.reviewFailovers)}`);

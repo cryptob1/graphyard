@@ -37,7 +37,7 @@ Stop the worker, then `graphyard rework GY-N --previous-worker-stopped "reason"`
 | --- | --- | --- |
 | `merge` | within two of the queue head, gates passing | 20 seconds |
 | `active` | waiting on a check, review, base refresh or rework | 1 minute |
-| `steady` | unchanged since last observed | 5 minutes, stretched by the fleet bound |
+| `steady` | unchanged since last observed | 5 minutes, fleet-stretched |
 | `idle` | next action is dispatch or escalation | 5 minutes, stretched when unchanged |
 
 Unchanged non-merge candidates spend **at most 40%** (`steadyStateShare`) of the limit.
@@ -50,7 +50,7 @@ Budgets are per token (`githubBudget.tokens`); one projected below the reserve a
 
 ### What an observation costs
 
-About ten requests uncached; unchanged, none.
+About ten uncached; unchanged, none.
 
 ### What a pause means for gates
 
@@ -58,7 +58,7 @@ A rate-limit `403`/`429` pauses requests; gates read stale until it lifts.
 
 ### Reading the budget
 
-`graphyard status` (or `GET /api/status`) → `githubBudget`; `master status` attention items with subject `github`.
+`graphyard status` (or `GET /api/status`) → `githubBudget`; `master status` attention subject `github`.
 
 ### Webhook liveness
 

@@ -176,6 +176,8 @@ export function productionSummary(report: Partial<ProductionReport>) {
   const ahead = report.ahead ?? null;
   const summary = ahead ? ahead.by === 0 ? 'production serves the base branch tip' : `main is ${ahead.by} commit${ahead.by === 1 ? '' : 's'} ahead of production` : report.aheadError ?? 'production lag is unknown';
   return { provider: report.provider ?? null, observedAt: report.observedAt ?? null, serving: report.serving ?? null, running: report.running ?? null, aheadBy: ahead?.by ?? null, aheadCommits: ahead?.commits ?? [], summary,
+    /** The watch's own recovery of the drift (GY-393): what it asked the provider to deploy, and when. */
+    redeploy: report.redeploy ?? null, redeployError: report.redeployError ?? null,
     latestDeployment: report.latest ? { id: report.latest.id, status: report.latest.providerStatus, commit: report.latest.commit, createdAt: report.latest.createdAt, url: report.latest.url ?? null } : null,
     deployed: report.deployed ?? [], pending: report.pending ?? [], incidents, error: report.error ?? null,
     attention: attentionLines({ ahead, aheadError: report.aheadError ?? null, serving: report.serving ?? null, incidents: (report.incidents ?? []), error: report.error ?? null, latest: report.latest ?? null, provider: report.provider ?? null }) };
