@@ -74,6 +74,8 @@ export const statusRoutes = defineRoutes('status', [
         fleet: ['admin', 'coordinator', 'reader', 'slice-lead'].includes(actor.role) ? await services.agentRegistry.snapshot(executorHost(url, req)) : null,
         // Direct-merge mode (direct-merge.ts): the open windows and the one line master status shows while any is.
         directMerge: await directMergeStatus(engine.store.pool, engine.directMergeEnvironment, observedAt),
+        // Heartbeat latency and the renewals refused or failed server-side, this process, last 10 minutes (GY-558).
+        leaseHealth: engine.leaseHealth.report(),
         now: observedAt.toISOString(), release: releaseInfo(), schema: schemaVersion };
     },
   },
