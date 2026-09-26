@@ -11,6 +11,7 @@ import { nextActionLlmRoles, type NextAction, type NextActionInputs, type NextAc
 import type { ActionAccount, ActionWait } from './action-account.js';
 import { carriedAction, type OpenAction } from './concerns.js';
 import { livenessCarry } from './liveness.js';
+import { baseBreakWait } from '../master/base-break-refresh.js';
 
 // The vocabulary lives in `action-kinds.ts`, the classification in `refusal-mapping.ts`, the
 // declared refusals in `refusal-catalogue.ts` and the accounting vocabulary in
@@ -55,9 +56,7 @@ export type { CarriedConcern, HumanNeeded, HumanNeededRow, OpenAction } from './
  * silence it replaces — a state nobody wrote a rule for is reported, not answered.
  */
 
-
 const short = (sha: string | null | undefined) => sha ? sha.slice(0, 12) : 'none';
-
 const canonical = (value: unknown) => JSON.stringify(value, (_key, entry) =>
   entry && typeof entry === 'object' && !Array.isArray(entry) ? Object.fromEntries(Object.keys(entry).sort().map(key => [key, entry[key]])) : entry);
 /**
@@ -117,7 +116,6 @@ function proofStep(work: Work, all: Work[], now: Date): ProofStep | null {
 }
 
 const resyncInputs = (work: Work): NextActionInputs => ({ kind: 'resync', pr: work.candidate?.pr ?? work.submission?.pr ?? null, sha: work.candidate?.sha ?? null, baseSha: work.candidate?.baseSha ?? null, baseTip: work.observation?.baseTip ?? null, observedAt: work.observation?.at ?? null });
-
 type Computed = Pick<ActionAccount, 'gate' | 'refusal' | 'action' | 'wait' | 'defect'>;
 
 /**
@@ -288,6 +286,8 @@ function computeAccount(work: Work, all: Work[], now: Date): Computed {
         { kind: 'request-review', provider: work.policy.reviewProvider ?? 'github', requestId: request?.id ?? null, pr: work.candidate!.pr, sha: work.candidate!.sha, baseSha: work.candidate!.baseSha, policyRevision: work.policyRevision },
         binding, failing.name, refusal);
     }
+    const broken = kind === 'request-rework' ? baseBreakWait(work, failing.name) : null; // GY-793: refreshed onto the tip that fixed it, never reworked
+    if (broken) return waits(broken, failing.name, refusal);
     if (kind === 'request-rework') return make('request-rework', `${key} needs a new head: ${detail}`,
       { kind: 'request-rework', pr: work.candidate?.pr ?? null, sha: work.candidate?.sha ?? null, detail }, binding, failing.name, refusal);
     if (kind === 'resync') return make('resync', `${key} is waiting on a fresh reading of its pull request: ${detail}`, resyncInputs(work), binding, failing.name, refusal);

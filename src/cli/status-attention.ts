@@ -3,6 +3,7 @@ import type { Work } from '../model.js';
 import { mergeStalls } from '../merge-queue.js';
 import { stallBoundMs, stalledItems, type ActionlessItem } from '../model/action-account.js';
 import { elapsed } from '../model/sessions.js';
+import { baseBreakHold, describeBaseBreak } from '../master/base-break-refresh.js';
 
 // The orphaned-supervisor builders live in their own module (GY-138); they are read from here too.
 export { nameOrphanSupervisors, orphanSupervisorAttention, supervisorReclaimCommand } from './orphan-supervisors.js';
@@ -88,3 +89,31 @@ export function routedScopeRequests(approvals: readonly { work: string; action: 
 /** A merge pending past five minutes on a head GitHub reports mergeable, with no refusal (GY-344). */
 export const mergeStallAttention = (snapshot: { work: Work[]; now: string }): AttentionItem[] =>
   mergeStalls(snapshot.work, Date.parse(snapshot.now)).map(stall => ({ subject: stall.key, text: stall.text, ...agentOwner('master', stall.next) }));
+
+/** The unqualified line a failed required check gives a row, or the rework it was once named as. */
+const failedCheckLine = (text: string | null | undefined) => !!text && (/^Required CI check .+ has not passed on the current candidate$/.test(text) || /needs a new head/.test(text));
+/**
+ * Name every open candidate held only by a base-branch breakage as such (GY-793): the failing
+ * tests, the base commit that broke them and the tip that fixed them, in place of the unqualified
+ * `Required CI check test has not passed` or a `needs a new head` nobody should be asked for. The
+ * row's refusal and attention, and any attention item raised from them, carry the line, owned by
+ * the control plane whose observation job is refreshing the candidate. It reports and never
+ * decides: the gate stays refused until the refreshed head's checks pass.
+ */
+export function nameBaseBreaks<S extends { work: { key: string; refusal: { gate: string; reason: string } | null; attention: string | null }[]; attentionItems: AttentionItem[] }>(status: S, work: Work[]): S {
+  const named = new Map<string, { text: string; tip: string }>();
+  for (const item of work) {
+    const found = item.stage === 'done' ? null : baseBreakHold(item);
+    if (found) named.set(item.key, { text: describeBaseBreak(item.key, found), tip: found.fixedBy });
+  }
+  if (!named.size) return status;
+  const owner = (key: string) => agentOwner('control plane', `nothing to run: the observation job brings ${key} onto ${named.get(key)!.tip.slice(0, 12)} and CI runs again; graphyard diagnose ${key} names anything holding the refresh`);
+  const rows = status.work.map(row => {
+    const entry = named.get(row.key);
+    if (!entry) return row;
+    const refusal = row.refusal && failedCheckLine(row.refusal.reason) ? { ...row.refusal, reason: entry.text } : row.refusal;
+    return { ...row, refusal, ...(failedCheckLine(row.attention) ? { attention: entry.text, attentionOwner: owner(row.key) } : {}) };
+  });
+  const attentionItems = status.attentionItems.map(item => named.has(item.subject) && failedCheckLine(item.text) ? { ...item, ...owner(item.subject), text: named.get(item.subject)!.text } : item);
+  return { ...status, work: rows, attentionItems };
+}

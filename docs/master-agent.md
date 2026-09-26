@@ -25,6 +25,10 @@ Ordinary review findings, rework, idle workers, and proof setup are not stopping
 
 Unless created `"systemDriven": false`, an item refuses hand `dispatch`, `merge`, `review` and `decide attest|merge`, except stopped-loop recovery, unproduced `manual:` attestations, and `decide merge` of unauthorized merges or with no operator agent. Hand `dispatch` waits out live or just-released ones.
 
+### Base-branch breakages and fresh observations
+
+CI's `test` step annotates each run with its failed tests (`graphyard-failed-tests:`). When every test failing on a head also fails on its built-against base and passes on the base tip, the observation records `baseBreak`, no rework is requested, and the observation job merges the tip in (refresh trigger `base breakage`, carry as any refresh). `master status` names the test, the base that broke it and the tip that fixed it. A rework decision needing a fresh observation wakes the item's own (`resync`) and re-decides when it lands (15 s per cycle; re-woken after a minute).
+
 ### Session liveness is reconciled, not trusted
 
 **The control plane reconciles session liveness; closing finished sessions is not the master's

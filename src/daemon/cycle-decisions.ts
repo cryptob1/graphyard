@@ -1,4 +1,5 @@
 // Concern: cycle step 4c — request and supervise the routine decisions and their approver sessions.
+import { decisionObservationWaitMs, decisionRewakeMs } from '../master/base-break-refresh.js';
 import { decisionSituation, uncitedRefusals } from '../model/approval.js';
 import type { Work } from '../model.js';
 import { type ContainmentAssessment, type HerdrAgent, type RoleCapacity, approverProfile, ownLoginAccounts, approverSessionId, approverSessionName, approvedMerge, decisionInput } from '../master.js';
@@ -20,6 +21,8 @@ export const handWatchPrefix = 'hand:';
 const approverPrefixes = (key: string) => ['graphyard-approver', 'gy-approver'].map(prefix => `${sessionName(prefix, key)}-`);
 
 /** Step 4c: request and supervise the routine decisions. */
+/** When the decision step last woke each item's observation (GY-793), so a job that does not answer is not woken every cycle. */
+const lastWake = new Map<string, number>();
 export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, assessments: Record<string, ContainmentAssessment>, { capacities, approversSpent }: { capacities: RoleCapacity[]; approversSpent: boolean }) {
   const { config, state, effects, now, snapshot, clock, performed, isolate, agents, open } = cycle;
   // 4c. The routine decisions. A standing verdict, a base the control plane could not merge in, and
@@ -408,11 +411,13 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     const judged = state.actions[`${scopeKey(item, request)}:finding:${item.policyRevision}`];
     return judged?.state === 'done' && !/^Widened /.test(judged.detail);
   };
-  for (const item of snapshot.work) await isolate('decision', item, item.key, async () => {
+  let observationBudget = decisionObservationWaitMs;
+  for (const read of snapshot.work) await isolate('decision', read, read.key, async () => {
+    let item = read;
     const assessment = assessments[item.id];
     // A request step 2 refused this cycle is read as it was decided, not as the snapshot saw it.
     const scoped = settled.get(item.id) ?? item;
-    const decision = scopeRoutineDecision(scoped, clock, findingsJudged(scoped)) ?? routineDecision(item, config, clock, assessment);
+    let decision = scopeRoutineDecision(scoped, clock, findingsJudged(scoped)) ?? routineDecision(item, config, clock, assessment);
     if (!decision) {
       // Still called for, only not attestable this cycle: its request is not one the item moved past.
       const called = neededDecision(item, config);
@@ -425,13 +430,33 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       if (withheld && !(item.stage !== 'done' && assessment) && detailChanged(state.actions[escalationKey], detail)) await note(escalationKey, item, 'escalation', 'done', detail);
       return;
     }
-    const key = decisionKey(item, decision);
+    let key = decisionKey(item, decision);
     needed.add(key);
-    const watch = state.approvals[key];
     // Rework waits for an observation that still describes the item (GY-144). A request already
     // standing is left as it is — neither supervised into a second request nor withdrawn — until
     // GitHub is observed again and the item says whether it still needs the round.
-    const wait = decision.action === 'rework' ? reworkObservationWait(item, clock, pause) : null;
+    let wait = decision.action === 'rework' ? reworkObservationWait(item, clock, pause) : null;
+    // The step asks for that observation itself (GY-793): it wakes the item's own observation job
+    // and re-decides from the reading as soon as it lands, rather than finding every later reading
+    // already past the bound on some unrelated cycle. A paused GitHub client can observe nothing.
+    if (wait && !pause && effects.observe && !state.approvals[key] && !(clock - (lastWake.get(item.id) ?? -Infinity) < decisionRewakeMs)) {
+      lastWake.set(item.id, clock);
+      const started = Date.now(), fresh = await effects.observe(item, Math.max(0, observationBudget)).catch(() => null);
+      observationBudget -= Date.now() - started;
+      if (fresh) {
+        const again = routineDecision(fresh, config, now(), assessment);
+        // The fresh reading may say the item needs no rework after all: a new head, a rerun that
+        // passed, or a failure the base branch caused, which the observation job refreshes instead.
+        if (!again || again.action !== 'rework') {
+          const waitKey = `wait:rework:${item.id}`, detail = `${item.key}: woke its observation for a rework decision; the reading at ${fresh.observation?.at ?? 'unknown'} no longer calls for one`;
+          if (detailChanged(state.actions[waitKey], detail)) await note(waitKey, item, 'decision', 'done', detail);
+          return;
+        }
+        item = fresh; decision = again; key = decisionKey(item, decision); needed.add(key);
+        wait = reworkObservationWait(item, now(), pause);
+      }
+    }
+    const watch = state.approvals[key];
     if (wait) {
       const waitKey = `wait:rework:${item.id}`;
       if (detailChanged(state.actions[waitKey], wait)) await note(waitKey, item, 'decision', 'done', wait);
