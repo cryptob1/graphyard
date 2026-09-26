@@ -1,4 +1,5 @@
 import { readFile } from 'node:fs/promises';
+import { wholeDocument } from '../model/work-summary.js';
 import { randomUUID } from 'node:crypto';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { decisionInput, type MasterConfig } from '../master.js';
@@ -32,7 +33,9 @@ export async function derivedIntent(root: string, config: Pick<MasterConfig, 'ba
   if (!file || id === 'requirements' && !args[0]) throw new Error(id === 'create' ? 'Use master create FILE REASON' : 'Use master requirements GY-N FILE REASON');
   if (!reason) throw new Error(`master ${id} needs a REASON; every agent decision is attributable`);
   const input = JSON.parse(await readFile(file, 'utf8'));
-  const work: Work | undefined = id === 'requirements' ? (await deps.coordinator('work-snapshot')).work.find((item: Work) => item.id === args[0] || item.key === args[0]) : undefined;
+  const listed: Work | undefined = id === 'requirements' ? (await deps.coordinator('work-snapshot')).work.find((item: Work) => item.id === args[0] || item.key === args[0]) : undefined;
+  // A settled delivery is a summary in the snapshot (GY-422); its requirements are read whole.
+  const work = listed && await wholeDocument(listed, deps.coordinator);
   if (id === 'requirements' && !work) throw new Error(`Unknown work item ${args[0]}`);
   const intent = work ? decisionInput('requirements', work, input) : input;
   const tree = await (deps.tree ?? baseTree)(root, config.baseBranch);

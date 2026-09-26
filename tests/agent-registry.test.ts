@@ -195,6 +195,8 @@ test('integration:agent-registry-model — the control plane stores runtimes wit
   const served = apiRoutes.flatMap(module => module.routes).filter(route => route.method !== 'GET').map(route => route.path);
   const posted = [...page.matchAll(/=> [`']agent-registry\/([^`']+)[`']/g)].map(match => `/api/agent-registry/${match[1].replace(/\$\{field\(form, 'collection'\)\}/, 'accounts').replace(/\$\{[^}]+\}/g, 'name')}`);
   assert.ok(posted.length >= 6, 'runtime, model, account, role, quota and remove forms');
+  // GY-397: the browser's credential check reads the launch data only; the audit reason is prose that may name a token prefix.
+  assert.match(page, /form\.entries\(\)\]\.some\(\(\[name, value\]\) => name !== 'reason' && typeof value === 'string' && value\.split\([^)]*\)\.some\(looksLikeSecret\)/);
   for (const path of posted) assert.ok(served.some(route => typeof route === 'string' ? route === path : route.test(path)), `${path} is served`);
   assert.ok(visibleViews({ status: { actor: { role: 'admin' } }, features: {} } as any).some(view => view.id === 'agents') && !visibleViews({ status: { actor: { role: 'worker' } }, features: {} } as any).some(view => view.id === 'agents'));
   assert.ok(views.some(view => view.id === 'agents'));
