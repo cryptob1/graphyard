@@ -4,7 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
-import { GitHub, headClaimBand, observationClaimOrder, observationFreshnessMs, observationThroughput, processJob, waitsOnObservation } from '../src/github.js';
+import { GitHub, firstObservationOwed, headClaimBand, observationClaimOrder, observationFreshnessMs, observationThroughput, processJob, waitsOnObservation } from '../src/github.js';
 import { evaluate, type Principal, type Work } from '../src/model.js';
 import { nextAction } from '../src/model/next-action.js';
 import { observationConcurrency, observationWorkers } from '../src/server/main.js';
@@ -126,7 +126,7 @@ const insert = async (works: Work[]) => {
 /** When each job became due: the head last, its queue behind it, the waiting item and the backlog before it. */
 const dueAt = (position: number) => new Date(Date.now() - (position === 0 ? 1_000 : (120 - position) * 60_000));
 
-test('unit:job-claim-priority — thirty due jobs with the head due last are claimed head first: the queue head and its band, then the item a review waits on, then the backlog by availability, which is what availability alone still claims', async () => {
+test('unit:job-claim-priority — thirty due jobs with the head due last are claimed head first: the queue head and its band, then a submission never observed, then the item a review waits on, then the backlog by availability, which is what availability alone still claims', async () => {
   await freshStore();
   const base = sha('main-priority');
   const queue = queued(30, base);
@@ -135,15 +135,17 @@ test('unit:job-claim-priority — thirty due jobs with the head due last are cla
   const waitingWork = item('GY-WAIT', 500, sha(`head-wait-${base}`), base, { criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['manual:budget'] }] });
   const waitingObservation = observed(waitingWork, new Date(Date.now() - 30_000).toISOString(), false) as Work['observation'];
   const waiting = { ...waitingWork, observation: waitingObservation, ...evaluate({ ...waitingWork, observation: waitingObservation }, queue, new Date(), [CI]) } as Work;
-  // A submitted item with no candidate observed yet: its next action is a resync, which no
-  // observation serves, so it is backlog however old its job is.
+  // A submitted item with no candidate observed yet: its next action is a resync, and only its first
+  // observation serves it. It is ranked after the head band, ahead of the review-waiting items that come
+  // due again every cycle (2026-09-26: behind them, one worker never reached eight such submissions).
   const ordinaryWork = item('GY-BACK', 501, sha(`head-back-${base}`), base, { candidate: null, observation: null, stage: 'build' });
   const ordinary = { ...ordinaryWork, ...evaluate(ordinaryWork, queue, new Date(), [CI]) } as Work;
   const all = [...queue, waiting, ordinary];
   assert.equal(nextAction(waiting, all, new Date())?.kind, 'request-review', 'the waiting item is built for the review request the loop owes');
   assert.ok(waitsOnObservation(waiting, all));
-  assert.equal(nextAction(ordinary, all, new Date())?.kind, 'resync', 'the backlog item waits on a fresh reading, not on one the queue owes first');
+  assert.equal(nextAction(ordinary, all, new Date())?.kind, 'resync', 'the unread submission waits on its first reading');
   assert.ok(!waitsOnObservation(ordinary, all));
+  assert.ok(firstObservationOwed(ordinary) && !firstObservationOwed(waiting) && !firstObservationOwed(queue[0]), 'only a submission never observed owes a first reading');
   assert.ok(!waitsOnObservation(queue[10], all), 'a queued entry behind the band is backlog for claiming');
   await insert(all);
   for (const [position, work] of [...queue.entries(), [30, waiting] as [number, Work], [31, ordinary] as [number, Work]]) {
@@ -153,19 +155,19 @@ test('unit:job-claim-priority — thirty due jobs with the head due last are cla
   // The band the claim order reaches: two entries at least, the batch size when it is larger.
   assert.equal(headClaimBand(0), 2); assert.equal(headClaimBand(1), 2); assert.equal(headClaimBand(5), 5);
   const order = observationClaimOrder(all, 5);
-  assert.deepEqual(order.slice(0, 6), [queue[0].id, queue[1].id, queue[2].id, queue[3].id, queue[4].id, waiting.id], 'head and band first, then the item a review waits on');
-  assert.ok(!order.includes(ordinary.id), 'the backlog is not named; it falls back to availability');
+  assert.deepEqual(order.slice(0, 7), [queue[0].id, queue[1].id, queue[2].id, queue[3].id, queue[4].id, ordinary.id, waiting.id], 'head and band first, then the unread submission, then the item a review waits on');
+  assert.ok(!order.includes(queue[10].id), 'a queued entry behind the band is not named; it falls back to availability');
   // Availability alone claims the oldest job: the head is due last, so the backlog wins.
   const unprioritised = await store.takeJob();
   assert.equal(unprioritised?.work_id, ordinary.id, 'without the order the head waits behind every older job');
   await store.pool.query('UPDATE jobs SET token=NULL,locked_until=NULL WHERE work_id=$1', [ordinary.id]);
-  // With the claim order the head wins although it became due last, then its band, then the
-  // review-waiting item, then the unnamed backlog and the rest of the queue by availability.
+  // With the claim order the head wins although it became due last, then its band, then the unread
+  // submission, then the review-waiting item, then the rest of the queue by availability.
   const claims: string[] = [];
   for (let index = 0; index < 8; index++) claims.push((await store.takeJob(observationClaimOrder(all, 5)))!.work_id);
   const byId = new Map(all.map(work => [work.id, work.key]));
   assert.deepEqual(claims.map(id => byId.get(id)),
-    ['GY-Q00', 'GY-Q01', 'GY-Q02', 'GY-Q03', 'GY-Q04', 'GY-WAIT', 'GY-BACK', 'GY-Q05'],
+    ['GY-Q00', 'GY-Q01', 'GY-Q02', 'GY-Q03', 'GY-Q04', 'GY-BACK', 'GY-WAIT', 'GY-Q05'],
     'priority reorders the due jobs; availability orders what the priority does not name');
 });
 
