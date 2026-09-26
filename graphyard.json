@@ -1,6 +1,7 @@
 {
   "documentation": {
     "paths": ["docs/", "README.md", "AGENTS.md"],
-    "changelog": null
+    "changelog": null,
+    "wordBudget": { "total": 13000, "perPage": 1200, "paths": ["README.md", "docs/"] }
   }
 }

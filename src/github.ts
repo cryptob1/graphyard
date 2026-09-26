@@ -17,7 +17,7 @@ export { CHECK_NAME };
 import { alreadyMergeableRefusal, approvalOfHead, baseRefreshNeeded, failedConclusions as failedCheckConclusions, dismissedVerdict, enqueueRequestCurrent, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, pendingRestore, predictQueue, queuePlacement, queueRef, mergeCheckBranch, treeIdenticalPrediction, type GitHubMergeQueueState, type HeadForcePush, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type ObservedApproval, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread } from './merge-queue.js';
 import { blockedFeatures, controlPlanePermissions, describeShortfall, permissionShortfalls, requiredPermissions, type PermissionFeature, type PermissionLevel, type PermissionShortfall } from './github-permissions.js';
 import { agentOwner, type AttentionItem } from './master/attention.js';
-import { budgetedPage, docsWords, type DocsWordCount, type TipDocs } from './model/documentation.js';
+import { budgetedPage, docsWords, repositoryConfigFile, repositoryDocsBudget, type DocsWordBudget, type DocsWordCount, type TipDocs } from './model/documentation.js';
 import type { IntegrationJob } from './coordination.js';
 
 /** Out-of-scope paths compared against the base tip per observation; the rest are refused as uncompared. */
@@ -1189,6 +1189,8 @@ export class GitHub {
    * published tip is counted, and a page's words are read once per blob, so a passing queue costs
    * nothing and a failing tip costs its two trees and the pages it changed. `onlyFailure` is set when
    * no other required check failed; whether the suite's failure is the budget is read from the counts.
+   * The budget and the pages it counts are the ones the tip's own graphyard.json configures; a tip
+   * whose project keeps no budget carries no record, and its failure is bisected as before.
    */
   async tipDocs(work: Work, head: string, base: string, checks: { id?: number; name: string; status: string; conclusion: string | null }[]): Promise<TipDocs | undefined> {
     const required = new Set(work.policy.checks ?? []);
@@ -1198,24 +1200,50 @@ export class GitHub {
     if (!failed) return undefined;
     // The counts only sharpen an ejection: a tip they cannot be read for is bisected as before, never left unobserved.
     try {
-      const [pages, before] = await Promise.all([this.docsWordCount(head), this.docsWordCount(base)]);
-      return pages && before ? { sha: head, base: before, pages, onlyFailure: failed === 1 } : undefined;
+      const budget = await this.docsBudgetAt(head);
+      if (!budget) return undefined;
+      const [pages, before] = await Promise.all([this.docsWordCount(head, budget), this.docsWordCount(base, budget)]);
+      return pages && before ? { sha: head, base: before, pages, onlyFailure: failed === 1, budget } : undefined;
     } catch (error) {
       console.error(`GitHub docs word counts for ${work.key} tip ${head.slice(0, 12)} were unreadable; its failure is bisected: ${error instanceof Error ? error.message : String(error)}`);
       return undefined;
     }
   }
-  /** Words per budgeted page (README.md and docs/**\/*.md) at a commit, as tests/docs-budget.test.ts counts them; null when GitHub truncates the tree. */
-  async docsWordCount(ref: string): Promise<DocsWordCount | null> {
-    const counted = this.docsCounts.get(ref);
-    if (counted) return counted;
+  /** The files of a commit's tree, read once per commit; null when GitHub truncates the tree. */
+  private async docsTree(ref: string): Promise<{ path: string; type: string; sha: string }[] | null> {
+    const known = this.docsTrees.get(ref);
+    if (known !== undefined) return known;
     const tree = await this.request(`/git/trees/${encodeURIComponent(ref)}?recursive=1`);
-    if (tree?.truncated || !Array.isArray(tree?.tree)) return null;
-    const pages = (tree.tree as { path: string; type: string; sha: string }[]).filter(entry => entry.type === 'blob' && budgetedPage(entry.path));
+    const files = tree?.truncated || !Array.isArray(tree?.tree) ? null : (tree.tree as { path: string; type: string; sha: string }[]).filter(entry => entry.type === 'blob');
+    if (/^[a-f0-9]{40}$/.test(ref)) { this.docsTrees.set(ref, files); if (this.docsTrees.size > 64) this.docsTrees.delete(this.docsTrees.keys().next().value!); }
+    return files;
+  }
+  private docsTrees = new Map<string, { path: string; type: string; sha: string }[] | null>();
+  private async blobText(sha: string) {
+    const blob = await this.request(`/git/blobs/${sha}`);
+    return Buffer.from(String(blob?.content ?? ''), blob?.encoding === 'base64' ? 'base64' : 'utf8').toString('utf8');
+  }
+  /** The documentation word budget a commit's committed graphyard.json configures; null when it keeps none. */
+  async docsBudgetAt(ref: string): Promise<DocsWordBudget | null> {
+    const config = (await this.docsTree(ref))?.find(entry => entry.path === repositoryConfigFile);
+    if (!config) return null;
+    // One configuration version is read once, however many tips carry it.
+    if (!this.docsBudgets.has(config.sha)) { this.docsBudgets.set(config.sha, repositoryDocsBudget(await this.blobText(config.sha))); if (this.docsBudgets.size > 64) this.docsBudgets.delete(this.docsBudgets.keys().next().value!); }
+    return this.docsBudgets.get(config.sha)!;
+  }
+  private docsBudgets = new Map<string, DocsWordBudget | null>();
+  /** Words per page `budget` counts at a commit, as tests/docs-budget.test.ts counts them; null when GitHub truncates the tree. */
+  async docsWordCount(ref: string, budget: DocsWordBudget): Promise<DocsWordCount | null> {
+    const key = `${ref}:${JSON.stringify(budget)}`;
+    const counted = this.docsCounts.get(key);
+    if (counted) return counted;
+    const files = await this.docsTree(ref);
+    if (!files) return null;
+    const pages = files.filter(entry => budgetedPage(entry.path, budget));
     const words = await boundedMap(pages, peerContainmentConcurrency, page => {
       const known = this.docsBlobWords.get(page.sha);
       if (known) return known;
-      const reading = this.request(`/git/blobs/${page.sha}`).then(blob => docsWords(Buffer.from(String(blob?.content ?? ''), blob?.encoding === 'base64' ? 'base64' : 'utf8').toString('utf8')));
+      const reading = this.blobText(page.sha).then(docsWords);
       this.docsBlobWords.set(page.sha, reading);
       reading.catch(() => { if (this.docsBlobWords.get(page.sha) === reading) this.docsBlobWords.delete(page.sha); });
       if (this.docsBlobWords.size > ancestryEntries) this.docsBlobWords.delete(this.docsBlobWords.keys().next().value!);
@@ -1223,7 +1251,7 @@ export class GitHub {
     });
     const count: DocsWordCount = Object.fromEntries(pages.map((page, index) => [page.path, words[index]]));
     // A commit's pages never change: a tip observed again while it waits is counted once.
-    if (/^[a-f0-9]{40}$/.test(ref)) { this.docsCounts.set(ref, count); if (this.docsCounts.size > 64) this.docsCounts.delete(this.docsCounts.keys().next().value!); }
+    if (/^[a-f0-9]{40}$/.test(ref)) { this.docsCounts.set(key, count); if (this.docsCounts.size > 64) this.docsCounts.delete(this.docsCounts.keys().next().value!); }
     return count;
   }
   private docsCounts = new Map<string, DocsWordCount>();

@@ -29,6 +29,17 @@ export const documentationPolicySchema = z.object({
   paths: z.array(documentationPath).min(1).max(50),
   /** The changelog a user-visible change adds an entry to, when the repository keeps one. */
   changelog: documentationPath.nullable().default(null),
+  /**
+   * The project's documentation word budget (GY-574), when it keeps one: a total for the set and a
+   * per-page cap, counted as `wc -w` counts them over the Markdown pages in the documentation paths
+   * (narrowed by `paths`, globs within them, when only some of those pages are budgeted). Absent, no
+   * budget is checked: headroom is not monitored, no trim item is filed and no overflow is attributed.
+   */
+  wordBudget: z.object({
+    total: z.number().int().positive(),
+    perPage: z.number().int().positive(),
+    paths: z.array(documentationPath).min(1).max(50).optional(),
+  }).strict().optional(),
 }).strict();
 export type DocumentationPolicy = z.infer<typeof documentationPolicySchema>;
 export const repositoryConfigSchema = z.object({ documentation: documentationPolicySchema }).strict();
@@ -177,16 +188,29 @@ export function documentationReviewSection(obligation: Pick<DocumentationObligat
 }
 
 // ---------------------------------------------------------------------------
-// The documentation word budget (GY-574). README.md and docs/ stay within a total and a per-page
-// budget (tests/docs-budget.test.ts). Every item documents its change and each passes the budget
+// The documentation word budget (GY-574). A project that configures `documentation.wordBudget` in
+// its graphyard.json keeps its documentation within a total and a per-page budget (Graphyard's own
+// is enforced by tests/docs-budget.test.ts); one that configures none is never counted. Every item documents its change and each passes the budget
 // against its own base, so a set left at its cap overflows on the first merge-queue tip that
 // combines two of them. Two rules keep that from ejecting queue heads: headroom is kept (master
 // status names a set within 3% of the budget and the loop files one trim item), and an overflow
 // on a tip is attributed to the entry whose docs change crossed the budget, never to the head.
 // ---------------------------------------------------------------------------
 
-/** The budget tests/docs-budget.test.ts enforces, and the proof that enforces it. */
-export const docsWordBudget = { total: 12_000, page: 1_200, proof: 'unit:docs-word-budget' } as const;
+/** The proof a tip's docs-budget overflow is judged as, and the trim item's criterion names. */
+export const docsBudgetProof = 'unit:docs-word-budget';
+/** A project's configured budget, resolved: the pages it counts are Markdown pages inside both `documentation` and `paths`. */
+export interface DocsWordBudget { total: number; perPage: number; paths: string[]; documentation: string[] }
+/** The budget a documentation policy configures, or null when it keeps none. */
+export function docsWordBudgetOf(policy: Pick<DocumentationPolicy, 'paths' | 'wordBudget'> | null | undefined): DocsWordBudget | null {
+  const budget = policy?.wordBudget;
+  return budget ? { total: budget.total, perPage: budget.perPage, paths: [...(budget.paths ?? policy!.paths)], documentation: [...policy!.paths] } : null;
+}
+/** The budget a committed `graphyard.json` configures; null when the file is missing, unreadable or keeps none. */
+export function repositoryDocsBudget(text: string | null | undefined): DocsWordBudget | null {
+  if (text == null) return null;
+  try { return docsWordBudgetOf(parseRepositoryConfig(text).documentation); } catch { return null; }
+}
 /** A set within this fraction of the total raises attention and files the trim item. */
 export const docsHeadroomWarning = 0.03;
 /** The headroom the trim item restores. */
@@ -196,14 +220,17 @@ export const docsTrimTitle = 'Restore documentation word-budget headroom';
 
 /** Words as `wc -w` counts them: maximal runs of non-whitespace, markup and code included. */
 export const docsWords = (text: string) => text.split(/\s+/).filter(Boolean).length;
-/** Is `path` one of the pages the budget counts: README.md and every Markdown page under docs/. */
-export const budgetedPage = (path: string) => path === 'README.md' || (path.startsWith('docs/') && path.endsWith('.md'));
+/** Is `path` one of the pages `budget` counts: a Markdown page inside its paths and the documentation paths. */
+export const budgetedPage = (path: string, budget: Pick<DocsWordBudget, 'paths' | 'documentation'>) =>
+  /\.(md|mdx|markdown)$/i.test(path) && isDocumentation(path, budget.paths) && isDocumentation(path, budget.documentation);
 /** Words per budgeted page at one commit. */
 export type DocsWordCount = Record<string, number>;
 export const docsTotal = (count: DocsWordCount) => Object.values(count).reduce((sum, words) => sum + words, 0);
 
 export interface DocsHeadroom {
   total: number; budget: number; remaining: number;
+  /** The budgeted paths, as the project configures them. */
+  paths: string[];
   /** True when the set is within docsHeadroomWarning of the budget (or over it). */
   saturated: boolean;
   /** The total the trim item must reach: docsHeadroomTarget below the budget. */
@@ -212,16 +239,16 @@ export interface DocsHeadroom {
   largest: { page: string; words: number }[];
 }
 /** The headroom of one count against the budget. */
-export function docsHeadroom(count: DocsWordCount, budget = docsWordBudget.total): DocsHeadroom {
-  const total = docsTotal(count);
+export function docsHeadroom(count: DocsWordCount, configured: Pick<DocsWordBudget, 'total' | 'paths'>): DocsHeadroom {
+  const total = docsTotal(count), budget = configured.total;
   const largest = Object.entries(count).map(([page, words]) => ({ page, words })).sort((a, b) => b.words - a.words || a.page.localeCompare(b.page)).slice(0, 5);
-  return { total, budget, remaining: budget - total, saturated: total >= Math.floor(budget * (1 - docsHeadroomWarning)), target: Math.floor(budget * (1 - docsHeadroomTarget)), largest };
+  return { total, budget, paths: [...configured.paths], remaining: budget - total, saturated: total >= Math.floor(budget * (1 - docsHeadroomWarning)), target: Math.floor(budget * (1 - docsHeadroomTarget)), largest };
 }
 const pageList = (pages: { page: string; words: number }[]) => pages.map(entry => `${entry.page} (${entry.words})`).join(', ');
 /** The attention line `master status` shows for a saturated set, or null. */
 export function docsHeadroomText(headroom: DocsHeadroom, base: string): string | null {
   if (!headroom.saturated) return null;
-  return `The documentation on ${base} is ${headroom.total} of its ${headroom.budget}-word budget (${headroom.remaining} left, within ${Math.round(docsHeadroomWarning * 100)}% of it): two queued items that each add a few words will overflow it together on a merge-queue tip. Trim to ${headroom.target} or fewer; largest pages: ${pageList(headroom.largest)}`;
+  return `The documentation (${listed(headroom.paths)}) on ${base} is ${headroom.total} of its ${headroom.budget}-word budget (${headroom.remaining} left, within ${Math.round(docsHeadroomWarning * 100)}% of it): two queued items that each add a few words will overflow it together on a merge-queue tip. Trim to ${headroom.target} or fewer; largest pages: ${pageList(headroom.largest)}`;
 }
 /** The open trim item the loop filed, if any. */
 export const openDocsTrimItem = <W extends { title: string; stage: string; closed?: unknown }>(work: readonly W[]) =>
@@ -231,16 +258,16 @@ export function docsTrimItem(headroom: DocsHeadroom, base: string) {
   return {
     title: `${docsTrimTitle}: ${headroom.total} of ${headroom.budget} words on ${base}`.slice(0, 200), type: 'bug' as const, priority: 1,
     description: [
-      `The master loop filed this item itself: README.md and docs/ total ${headroom.total} words on ${base} against the ${headroom.budget}-word budget (${docsWordBudget.proof}), within ${Math.round(docsHeadroomWarning * 100)}% of it. Every item documents its change, so two queued items that each pass the budget alone overflow it together on a merge-queue tip.`,
+      `The master loop filed this item itself: the budgeted documentation (${listed(headroom.paths)}) totals ${headroom.total} words on ${base} against the ${headroom.budget}-word budget ${repositoryConfigFile} configures (${docsBudgetProof}), within ${Math.round(docsHeadroomWarning * 100)}% of it. Every item documents its change, so two queued items that each pass the budget alone overflow it together on a merge-queue tip.`,
       `Trim the set to ${headroom.target} words or fewer (${Math.round(docsHeadroomTarget * 100)}% headroom) by tightening prose and linking instead of restating; do not remove any documented behaviour, command, configuration or API. Start with the largest pages: ${pageList(headroom.largest)}.`,
     ].join('\n\n'),
-    criteria: [{ id: 'AC-1', text: `README.md and docs/ total at most ${headroom.target} words (at least ${Math.round(docsHeadroomTarget * 100)}% under the ${headroom.budget}-word budget) and every behaviour, command, configuration and API documented before the change is still documented after it`, proofs: [docsWordBudget.proof] }],
+    criteria: [{ id: 'AC-1', text: `The budgeted documentation (${listed(headroom.paths)}) totals at most ${headroom.target} words (at least ${Math.round(docsHeadroomTarget * 100)}% under the ${headroom.budget}-word budget) and every behaviour, command, configuration and API documented before the change is still documented after it`, proofs: [docsBudgetProof] }],
     reason: `The documentation is ${headroom.total} of ${headroom.budget} words on ${base} and no open item restores its headroom`,
   };
 }
 
 /** The entry an over-budget tip is attributed to: the words over, and the pages its change grew. */
-export interface DocsOverflow { member: string; total: number; budget: number; over: number; grew: { page: string; from: number; to: number }[] }
+export interface DocsOverflow { member: string; total: number; budget: number; paths: string[]; over: number; grew: { page: string; from: number; to: number }[] }
 /**
  * Attribute an overflow on a chain of tips: `base` is the count the first entry sits on, and each
  * entry's count is its own tip's, which holds every entry ahead of it. The overflow belongs to the
@@ -248,7 +275,8 @@ export interface DocsOverflow { member: string; total: number; budget: number; o
  * to it (or the count just before it, which names the pages it grew) is missing. The entries ahead of
  * it fit, so ejecting it alone leaves them to merge.
  */
-export function attributeDocsOverflow(base: DocsWordCount | undefined, entries: { key: string; count: DocsWordCount | undefined }[], budget = docsWordBudget.total): DocsOverflow | null {
+export function attributeDocsOverflow(base: DocsWordCount | undefined, entries: { key: string; count: DocsWordCount | undefined }[], configured: Pick<DocsWordBudget, 'total' | 'paths'>): DocsOverflow | null {
+  const budget = configured.total;
   let before = base;
   for (const entry of entries) {
     if (!entry.count) return null;
@@ -257,7 +285,7 @@ export function attributeDocsOverflow(base: DocsWordCount | undefined, entries: 
       if (!before) return null;
       const prior = before;
       const grew = Object.entries(entry.count).filter(([page, words]) => words > (prior[page] ?? 0)).map(([page, to]) => ({ page, from: prior[page] ?? 0, to }));
-      return { member: entry.key, total, budget, over: total - budget, grew };
+      return { member: entry.key, total, budget, paths: [...configured.paths], over: total - budget, grew };
     }
     before = entry.count;
   }
@@ -265,7 +293,7 @@ export function attributeDocsOverflow(base: DocsWordCount | undefined, entries: 
 }
 /** The refusal an attributed overflow ejects its entry with. */
 export const docsOverflowReason = (overflow: DocsOverflow) =>
-  `${docsWordBudget.proof} failed: its docs change takes README.md and docs/ to ${overflow.total} words, ${overflow.over} over the ${overflow.budget}-word budget; pages that grew: ${overflow.grew.map(entry => `${entry.page} (${entry.from} → ${entry.to})`).join(', ') || 'none'}`;
+  `${docsBudgetProof} failed: its docs change takes the budgeted documentation (${listed(overflow.paths)}) to ${overflow.total} words, ${overflow.over} over the ${overflow.budget}-word budget; pages that grew: ${overflow.grew.map(entry => `${entry.page} (${entry.from} → ${entry.to})`).join(', ') || 'none'}`;
 
 /**
  * The docs word counts the GitHub observer records for a queued entry's published tip whose required
@@ -273,5 +301,7 @@ export const docsOverflowReason = (overflow: DocsOverflow) =>
  * (the tip of the entry ahead, or the base branch), and whether no other required check failed. The
  * planner attributes an overflow only from these records; a tip without one is bisected as before.
  */
-export interface TipDocs { sha: string; base: DocsWordCount; pages: DocsWordCount; onlyFailure: boolean }
+export interface TipDocs { sha: string; base: DocsWordCount; pages: DocsWordCount; onlyFailure: boolean;
+  /** The budget the tip's own committed graphyard.json configures; a tip whose project keeps none carries no record. */
+  budget: DocsWordBudget }
 declare module './work.js' { interface Observation { docsBudget?: TipDocs } }

@@ -1,6 +1,7 @@
 import { agentOwner, humanOwner, installationOwner, type AttentionItem } from '../master.js';
 import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable, generatedManifestScript } from '../install/generated-files.js';
 import type { Work } from '../model.js';
+import { mergeStalls } from '../merge-queue.js';
 import { stallBoundMs, stalledItems, type ActionlessItem } from '../model/action-account.js';
 import { elapsed } from '../model/sessions.js';
 
@@ -97,3 +98,7 @@ export function generatedFilesAttention(root: string, coordinator: any): Attenti
   }
   return generatedFiles;
 }
+
+/** A merge pending past five minutes on a head GitHub reports mergeable, with no refusal (GY-344). */
+export const mergeStallAttention = (snapshot: { work: Work[]; now: string }): AttentionItem[] =>
+  mergeStalls(snapshot.work, Date.parse(snapshot.now)).map(stall => ({ subject: stall.key, text: stall.text, ...agentOwner('master', stall.next) }));

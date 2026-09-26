@@ -17,7 +17,7 @@ Commit `AGENTS.md`, `.gitignore`, `graphyard.json`; never `.graphyard/`. Without
 
 ### Documentation policy
 
-`init --scan --apply` writes found documentation paths (`docs/`, `site/`, `README*`, package READMEs, `CHANGELOG*`) to `graphyard.json` (`{"documentation":{"paths":["site/"],"changelog":"CHANGELOG.md"}}`). Deploy the printed `GRAPHYARD_DOCUMENTATION` (default `docs/`, `README.md`, `AGENTS.md`); `doctor` reports `documentation.drift` when it differs from the committed file. Features and bugs carry *Documentation reflects this change*, met by a diff there or `complete --no-docs "WHY"`, judged by the reviewer.
+`init --scan --apply` writes found documentation paths (`docs/`, `site/`, `README*`, package READMEs, `CHANGELOG*`) to `graphyard.json` (`{"documentation":{"paths":["site/"],"changelog":"CHANGELOG.md"}}`). Deploy the printed `GRAPHYARD_DOCUMENTATION` (default `docs/`, `README.md`, `AGENTS.md`); `doctor` reports `documentation.drift` when it differs from the committed file. Features and bugs carry *Documentation reflects this change*, met by a diff there or `complete --no-docs "WHY"`, judged by the reviewer. An optional `"wordBudget":{"total":N,"perPage":N}` (`paths` narrows the counted Markdown pages) is checked against those paths: near the total, `master status` raises `docs` and the loop files a trim item; a queue overflow ejects the entry that crossed it. Without one, nothing is counted.
 
 ### What the generated instructions authorize
 

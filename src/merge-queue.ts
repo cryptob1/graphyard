@@ -4,7 +4,7 @@ import { reviewProviderOf } from './model/review.js';
 import { pathScopesOverlap } from './model/scope.js';
 import { queuedRegressions } from './regression-guard.js';
 import { missingAncestryReason, missingBaseAncestry } from './merge-base-ancestry.js';
-import { attributeDocsOverflow, docsOverflowReason, docsTotal, docsWordBudget, type DocsWordCount } from './model/documentation.js';
+import { attributeDocsOverflow, docsBudgetProof, docsOverflowReason, docsTotal, type DocsWordBudget, type DocsWordCount } from './model/documentation.js';
 
 // Graphyard publishes speculative tips outside refs/heads and refs/tags: the namespace is
 // owned by the App, is never a branch a worker can push, and never appears as a PR head.
@@ -1250,9 +1250,10 @@ export type BatchStep =
   | { kind: 'eject'; member: string; check: string; reason?: string };
 /**
  * The docs word counts a batch's overflow is attributed from (GY-574): the count of the batch's base
- * and of each prefix's combined tip, undefined where none was observed.
+ * and of each prefix's combined tip, undefined where none was observed, and the budget the project
+ * configures (undefined when its tips carry none, so nothing is attributed).
  */
-export interface BatchDocs { base: DocsWordCount | undefined; count: (prefix: string[]) => DocsWordCount | undefined }
+export interface BatchDocs { base: DocsWordCount | undefined; count: (prefix: string[]) => DocsWordCount | undefined; budget: DocsWordBudget | undefined }
 /**
  * The next step for a batch, from the verdicts on record. `verdict(prefix)` answers for the combined
  * tip of the batch's base and exactly that prefix, or undefined when it has not run; `before` is the
@@ -1270,9 +1271,9 @@ export function batchStep(members: string[], verdict: (prefix: string[]) => TipV
   // A tip that failed only the docs word budget needs no bisection (GY-574): the counts name the
   // entry whose docs change crossed the budget — the first prefix whose total exceeds it — and only
   // that entry is ejected; the entries ahead of it fit, and merge once their own tip passes.
-  if (failing !== -1 && (results[failing] as { check: string }).check === docsWordBudget.proof && before?.result === 'pass' && docs) {
-    const overflow = attributeDocsOverflow(docs.base, members.slice(0, failing + 1).map((key, index) => ({ key, count: docs.count(members.slice(0, index + 1)) })));
-    if (overflow) return { kind: 'eject', member: overflow.member, check: docsWordBudget.proof, reason: docsOverflowReason(overflow) };
+  if (failing !== -1 && (results[failing] as { check: string }).check === docsBudgetProof && before?.result === 'pass' && docs?.budget) {
+    const overflow = attributeDocsOverflow(docs.base, members.slice(0, failing + 1).map((key, index) => ({ key, count: docs.count(members.slice(0, index + 1)) })), docs.budget);
+    if (overflow) return { kind: 'eject', member: overflow.member, check: docsBudgetProof, reason: docsOverflowReason(overflow) };
   }
   // A member whose tip fails where the prefix before it passed (or on a base known to pass) is
   // isolated: it is ejected at once, before the passing prefix merges, so the entries behind
@@ -1298,7 +1299,7 @@ export function planMergeBatch(queue: string[], batchSize: number, verdict: (pre
  * step. `runTip(merged, prefix)` runs CI on the combined tip of the base, the entries merged so far
  * and `prefix`; every run is recorded, and a combination already judged is never run again.
  */
-export function runMergeBatches(queue: string[], batchSize: number, runTip: (merged: string[], prefix: string[]) => TipVerdict, docsCount?: (holds: string[]) => DocsWordCount) {
+export function runMergeBatches(queue: string[], batchSize: number, runTip: (merged: string[], prefix: string[]) => TipVerdict, docsCount?: (holds: string[]) => DocsWordCount, budget?: DocsWordBudget) {
   const pending = [...queue], merged: string[] = [], ejected: { member: string; check: string; reason?: string }[] = [], runs: string[][] = [];
   // A combined tip is named by everything it holds past the base: merging a prefix leaves the
   // tips of what stays pending exactly as they were, so their verdicts stand.
@@ -1306,7 +1307,7 @@ export function runMergeBatches(queue: string[], batchSize: number, runTip: (mer
   const holds = (prefix: string[]) => [...merged, ...prefix].join(',');
   while (pending.length) {
     // A docs count is a property of the commit: every prefix's tip has one, run or not.
-    const docs = docsCount && { base: docsCount([...merged]), count: (prefix: string[]) => docsCount([...merged, ...prefix]) };
+    const docs = docsCount && { base: docsCount([...merged]), count: (prefix: string[]) => docsCount([...merged, ...prefix]), budget };
     const step = planMergeBatch(pending, batchSize, prefix => judged.get(holds(prefix)), docs)!.step;
     if (step.kind === 'test') {
       judged.set(holds(step.combination), runTip([...merged], step.combination));
@@ -1328,7 +1329,7 @@ export function tipVerdict(work: Work, ciAppIds: readonly number[] | null = null
   const failed = runs.find(entry => !!entry.run && failedConclusions.has(entry.run.result));
   // A tip whose only failure is the docs word budget is judged as that proof (GY-574), so the batch plan attributes it.
   const docs = observation.docsBudget;
-  if (failed && docs?.sha === candidate.sha && docs.onlyFailure && docsTotal(docs.pages) > docsWordBudget.total) return { result: 'fail', check: docsWordBudget.proof };
+  if (failed && docs?.sha === candidate.sha && docs.onlyFailure && docs.budget && docsTotal(docs.pages) > docs.budget.total) return { result: 'fail', check: docsBudgetProof };
   if (failed) return { result: 'fail', check: failed.name };
   return runs.every(entry => entry.run?.result === 'success') ? { result: 'pass' } : undefined;
 }
@@ -1380,7 +1381,9 @@ export function describeMergeBatches(all: Work[], placements: QueuePlacement[], 
     // Only a failing tip is counted, so a prefix's count is its last member's record, or the base the member behind it recorded.
     const tipDocs = (key: string) => { const entry = byKey.get(key), docs = entry?.observation?.docsBudget; return docs && tipOf(key) && docs.sha === tipOf(key) ? docs : undefined; };
     const counted = (prefix: string[]) => tipDocs(prefix.at(-1)!)?.pages ?? (prefix.length < members.length ? tipDocs(members[prefix.length])?.base : undefined);
-    const step = batchStep(members, verdict, before, { base: tipDocs(members[0])?.base, count: counted });
+    // The budget is the one the members' tips were counted against, as their project's graphyard.json configures it.
+    const budget = members.map(tipDocs).find(docs => docs?.budget)?.budget;
+    const step = batchStep(members, verdict, before, { base: tipDocs(members[0])?.base, count: counted, budget });
     const head = batch === 1;
     const state: MergeBatchView['state'] = !head ? 'waiting' : step.kind === 'merge' ? 'merging' : step.kind === 'eject' ? 'ejecting' : step.combination.length === members.length ? 'testing' : 'bisecting';
     const underTest = step.kind === 'test' ? { members: step.combination, tip: tipOf(step.combination.at(-1)!) } : null;

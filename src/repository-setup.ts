@@ -455,7 +455,9 @@ export async function writeDocumentationConfig(root: string, proposed: Documenta
   try { existing = await readFile(file, 'utf8'); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
   if (existing !== null) {
     const policy = parseRepositoryConfig(existing).documentation;
-    return { state: canonicalJson(policy) === canonicalJson(proposed) ? 'unchanged' : 'drift', policy };
+    // A scan never proposes a word budget (GY-574), so a committed one is the repository's own and no drift.
+    const { wordBudget: _budget, ...scanned } = policy;
+    return { state: canonicalJson(scanned) === canonicalJson(proposed) ? 'unchanged' : 'drift', policy };
   }
   await atomicWrite(file, `${JSON.stringify({ documentation: proposed }, null, 2)}\n`, 0o644);
   return { state: 'written', policy: proposed };

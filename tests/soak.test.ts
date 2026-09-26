@@ -219,7 +219,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     },
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
     ...(options.docsTrim === undefined ? {} : {
-      reportedAttention: async () => ({ items: [], docs: { base: 'origin/main', headroom: docsHeadroom({ 'README.md': options.docsTrim! }) } }) as ReportedAttention,
+      reportedAttention: async () => ({ items: [], docs: { base: 'origin/main', headroom: docsHeadroom({ 'README.md': options.docsTrim! }, { total: 12_000, paths: ['docs/', 'README.md'] }) } }) as ReportedAttention,
       fileFaultClass: async (input: LoopFiledItem, key: string) => { if (input.title.startsWith(docsTrimTitle)) docsFilings.push(key); return await api(principals.operatorAgent, 'POST', 'work', input, key) as Work; },
     }),
   };

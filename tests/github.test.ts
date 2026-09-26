@@ -269,24 +269,29 @@ test('a published queue tip whose required check failed is observed with its doc
   const f = boundToSpeculativeTip(fixture()), request = f.github.request.bind(f.github);
   const pages: Record<string, Record<string, string>> = { [head]: { 'README.md': '9'.repeat(40), 'docs/a.md': '1'.repeat(40) }, [predictedBase]: { 'README.md': '9'.repeat(40), 'docs/a.md': '0'.repeat(40) } };
   const words: Record<string, number> = { ['9'.repeat(40)]: 5, ['1'.repeat(40)]: 9, ['0'.repeat(40)]: 3 };
+  // The project's graphyard.json at the tip configures the budget and the paths it counts (AC-3); AGENTS.md is documentation it does not budget.
+  const config = { documentation: { paths: ['docs/', 'README.md', 'AGENTS.md'], changelog: null, wordBudget: { total: 12_000, perPage: 1_200, paths: ['docs/', 'README.md'] } } };
+  const configSha = 'd'.repeat(40);
   let testResult = 'failure';
   f.github.request = async (path, method, body) => {
     if (path.startsWith('/git/')) f.calls.push({ path, method: method ?? 'GET', body });
     const tree = path.match(/^\/git\/trees\/([a-f0-9]{40})\?recursive=1$/), blob = path.match(/^\/git\/blobs\/([a-f0-9]{40})$/);
-    if (tree) return { truncated: false, tree: [{ path: 'src/claims.ts', type: 'blob', sha: 'c'.repeat(40) }, ...Object.entries(pages[tree[1]]).map(([page, sha]) => ({ path: page, type: 'blob', sha }))] };
+    if (tree) return { truncated: false, tree: [{ path: 'src/claims.ts', type: 'blob', sha: 'c'.repeat(40) }, { path: 'AGENTS.md', type: 'blob', sha: '1'.repeat(40) }, { path: 'graphyard.json', type: 'blob', sha: configSha }, ...Object.entries(pages[tree[1]]).map(([page, sha]) => ({ path: page, type: 'blob', sha }))] };
+    if (blob?.[1] === configSha) return { encoding: 'base64', content: Buffer.from(JSON.stringify(config)).toString('base64') };
     if (blob) return { encoding: 'base64', content: Buffer.from(Array(words[blob[1]]).fill('word').join(' ')).toString('base64') };
     if (path.includes('/check-runs') && !path.includes('check_name=')) return { check_runs: [{ id: 9, name: 'test', status: 'completed', conclusion: testResult, app: { id: 15368 } }] };
     return request(path, method, body);
   };
   const observed = await f.github.observe(f.work);
-  assert.deepEqual(observed.docsBudget, { sha: head, base: { 'README.md': 5, 'docs/a.md': 3 }, pages: { 'README.md': 5, 'docs/a.md': 9 }, onlyFailure: true });
+  assert.deepEqual(observed.docsBudget, { sha: head, base: { 'README.md': 5, 'docs/a.md': 3 }, pages: { 'README.md': 5, 'docs/a.md': 9 }, onlyFailure: true,
+    budget: { total: 12_000, perPage: 1_200, paths: ['docs/', 'README.md'], documentation: ['docs/', 'README.md', 'AGENTS.md'] } });
   const blobReads = f.calls.filter(call => call.path.startsWith('/git/blobs/')).length;
-  assert.equal(blobReads, 3, 'each page version is read once');
+  assert.equal(blobReads, 4, 'each page version, and the configuration, is read once');
   testResult = 'success';
   const trees = f.calls.filter(call => call.path.startsWith('/git/trees/')).length;
   assert.equal((await f.github.observe(f.work)).docsBudget, undefined, 'a passing tip carries no counts');
   assert.equal(f.calls.filter(call => call.path.startsWith('/git/trees/')).length, trees, 'and costs no tree read');
-  testResult = 'failure'; pages[head] = {}; (f.github as any).docsCounts.clear();
+  testResult = 'failure'; pages[head] = {}; (f.github as any).docsCounts.clear(); (f.github as any).docsTrees.clear();
   const unreadable = f.github.request;
   f.github.request = async (path, method, body) => path.startsWith('/git/trees/') ? Promise.reject(new Error('tree unavailable')) : unreadable(path, method, body);
   const bisected = await f.github.observe(f.work);

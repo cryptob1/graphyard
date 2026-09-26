@@ -12,7 +12,7 @@ import { type DaemonEffects, record } from './effects.js';
 import { loopAttention } from './liveness.js';
 import { daemonSummary } from './run.js';
 import type { Cycle } from './cycle.js';
-import { budgetedPage, docsHeadroom, docsHeadroomText, docsTrimItem, docsWords, openDocsTrimItem, type DocsHeadroom, type DocsWordCount } from '../model/documentation.js';
+import { budgetedPage, docsHeadroom, docsHeadroomText, docsTrimItem, docsWords, openDocsTrimItem, repositoryConfigFile, repositoryDocsBudget, type DocsHeadroom, type DocsWordBudget, type DocsWordCount } from '../model/documentation.js';
 import { agentOwner } from '../master/attention.js';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { candidateKey } from './reconcile.js';
@@ -156,41 +156,51 @@ export async function fileRecurringFaultClasses(state: DaemonState, effects: Dae
     }
   }
 }
+/** The budget a commit configures and its pages' words. */
+export interface DocsBudgetCount { budget: DocsWordBudget; pages: DocsWordCount }
 /** The last count per tree: the base branch moves far less often than the loop cycles. */
-const docsCounts = new Map<string, DocsWordCount>();
+const docsCounts = new Map<string, DocsBudgetCount | null>();
 /**
- * Words per budgeted page (README.md and docs/**\/*.md) at `ref` in the checkout at `root`, read
- * from Git so the count is the base branch's whatever the checkout has out; null when unreadable.
+ * The documentation word budget the project's graphyard.json configures at `ref` in the checkout at
+ * `root`, and the words per page it counts there, read from Git so the count is the base branch's
+ * whatever the checkout has out. Null when the project keeps no budget there, or when unreadable.
  */
-export async function docsWordCountAt(root: string, ref: string, run: ChildRun = defaultChildRun): Promise<DocsWordCount | null> {
+export async function docsWordCountAt(root: string, ref: string, run: ChildRun = defaultChildRun): Promise<DocsBudgetCount | null> {
   const git = async (...args: string[]) => await run('git', args, { cwd: root, timeoutMs: 30_000 });
   try {
     const tree = (await git('rev-parse', '--verify', '--quiet', `${ref}^{tree}`)).trim();
-    const known = docsCounts.get(tree);
-    if (known) return known;
-    // `<mode> blob <sha> <size>\t<path>` per page, then every blob in one `git show`, split by those sizes.
-    const pages = (await git('ls-tree', '-r', '-l', tree, '--', 'README.md', 'docs')).split('\n').map(line => line.match(/^\S+ blob \S+\s+(\d+)\t(.+)$/)).filter(match => !!match && budgetedPage(match[2])).map(match => ({ path: match![2], size: Number(match![1]) }));
+    if (docsCounts.has(tree)) return docsCounts.get(tree)!;
+    const remember = (count: DocsBudgetCount | null) => {
+      if (docsCounts.size >= 8) docsCounts.delete(docsCounts.keys().next().value!);
+      docsCounts.set(tree, count);
+      return count;
+    };
+    // `<mode> <type> <sha> <size>\t<path>` per file; the budget comes from the committed configuration beside the pages.
+    const files = (await git('ls-tree', '-r', '-l', tree)).split('\n').map(line => line.match(/^\S+ blob \S+\s+(\d+)\t(.+)$/)).filter(match => !!match).map(match => ({ path: match![2], size: Number(match![1]) }));
+    const budget = files.some(file => file.path === repositoryConfigFile) ? repositoryDocsBudget(await git('show', `${tree}:${repositoryConfigFile}`)) : null;
+    if (!budget) return remember(null);
+    const pages = files.filter(file => budgetedPage(file.path, budget));
     if (!pages.length) return null;
+    // Every page in one `git show`, split by those sizes.
     const blobs = Buffer.from(await git('show', ...pages.map(page => `${tree}:${page.path}`)), 'utf8'), count: DocsWordCount = {};
     let at = 0;
     for (const page of pages) { count[page.path] = docsWords(blobs.subarray(at, at + page.size).toString('utf8')); at += page.size; }
     if (at !== blobs.length) return null;
-    if (docsCounts.size >= 8) docsCounts.delete(docsCounts.keys().next().value!);
-    docsCounts.set(tree, count);
-    return count;
+    return remember({ budget, pages: count });
   } catch { return null; }
 }
 /**
- * The documentation word budget's headroom on the base branch (GY-574): its origin copy when the
- * checkout has one, else the local branch. A set within 3% of the budget is an attention line for the
- * master (`master status` and the loop read it through reportedAttention), and the loop files the one
- * trim item for it (fileDocsTrim).
+ * The documentation word budget's headroom on the base branch (GY-574), against the budget the
+ * project's graphyard.json configures there: its origin copy when the checkout has one, else the
+ * local branch. A project that configures no budget is not monitored. A set within 3% of the budget
+ * is an attention line for the master (`master status` and the loop read it through
+ * reportedAttention), and the loop files the one trim item for it (fileDocsTrim).
  */
-export async function docsHeadroomStatus(root: string, baseBranch: string, count: (root: string, ref: string) => Promise<DocsWordCount | null> | DocsWordCount | null = docsWordCountAt): Promise<{ docs: { base: string; headroom: DocsHeadroom } | null; attention: AttentionItem[] }> {
+export async function docsHeadroomStatus(root: string, baseBranch: string, count: (root: string, ref: string) => Promise<DocsBudgetCount | null> | DocsBudgetCount | null = docsWordCountAt): Promise<{ docs: { base: string; headroom: DocsHeadroom } | null; attention: AttentionItem[] }> {
   for (const ref of [`origin/${baseBranch}`, baseBranch]) {
-    const pages = await count(root, ref);
-    if (!pages) continue;
-    const headroom = docsHeadroom(pages), text = docsHeadroomText(headroom, ref);
+    const counted = await count(root, ref);
+    if (!counted) continue;
+    const headroom = docsHeadroom(counted.pages, counted.budget), text = docsHeadroomText(headroom, ref);
     return { docs: { base: ref, headroom }, attention: text ? [{ subject: 'docs', text, kind: 'resource-bound', faultClass: 'resources', ...agentOwner('master', 'The loop files one trim item for it (a docs-trim bug naming the largest pages); dispatch it ahead of items that add documentation') }] : [] };
   }
   return { docs: null, attention: [] };
@@ -241,7 +251,16 @@ export function faultRecurrenceReport(state: Pick<DaemonState, 'faults'>, policy
 }
 
 /**
+ * How often the loop reads the sources standing faults are observed from: the control plane's status, the attention
+ * `master status` adds and Herdr's inventory. They cost API and filesystem reads, and a fault that stands is one instance
+ * however often it is seen, so a cycle inside this interval of the last observation reads none of them. A fault that
+ * stood and cleared between two observations goes unseen, which counts nothing early toward a class.
+ */
+export const faultObservationIntervalMs = 60_000;
+/**
  * Step 7b: classify what this cycle saw standing wrong and file one item per recurring class.
+ * Standing faults are observed at most once per faultObservationIntervalMs; failed actions are noted as
+ * they happen, so every cycle still ends silent failing runs and files a class that reached its threshold.
  * A read that fails makes the cycle partial: faults its source would have shown were not
  * observed, so none standing ends this cycle (and none reopens as a new instance next cycle).
  * A Herdr that cannot be read lists no sessions, which would make every live lease a missing
@@ -249,19 +268,26 @@ export function faultRecurrenceReport(state: Pick<DaemonState, 'faults'>, policy
  */
 export async function faultStep(cycle: Cycle, assessments: Record<string, ContainmentAssessment>) {
   const { config, state, effects, now, snapshot, clock, performed, agents, credentials } = cycle;
+  // The cadence is the loop's own time, as the reads it spaces out are: the snapshot's clock need not move between cycles.
+  const policy = effects.faultClassPolicy ?? faultClassPolicyFromEnv(process.env), last = state.faults.observedAt ? Date.parse(state.faults.observedAt) : Number.NaN, local = now();
+  if (local >= last && local - last < faultObservationIntervalMs) { // a local clock that went back observes again
+    endFailingRuns(state, policy, clock);
+    return fileRecurringFaultClasses(state, effects, snapshot.work, clock, now, performed);
+  }
+  state.faults.observedAt = new Date(local).toISOString();
   let partial = false, reported: ReportedAttention | undefined;
   const herdrRead = effects.herdr ? await Promise.resolve(effects.herdr()).catch(() => ({ agents: [] as HerdrAgent[], available: false })) : { agents, available: true };
   const seen = herdrRead.available ? herdrRead.agents : [];
   const controlPlane = effects.controlPlane ? await effects.controlPlane().catch(() => { partial = true; return null; }) : null;
-  const summary = daemonSummary(state, clock, config.run.intervalSeconds * 1000, config.hostId);
+  const summary = daemonSummary(state, clock, config.run.intervalSeconds * 1000, config.hostId, policy);
   if (controlPlane && effects.reportedAttention) reported = await effects.reportedAttention(snapshot.work, controlPlane, { agents: seen, available: herdrRead.available, approvals: summary.approvals, loop: summary.liveness, now: new Date(clock).toISOString() })
     .catch(error => { partial = true; return { items: [{ subject: 'loop', text: `The loop could not read the attention master status adds to classify it: ${message(error)}`, kind: 'loop-failures' } as AttentionItem] }; });
   // The loop's own health lines, as master status puts them first: its cost, silence and delivery budget. The loop reading
   // them is cycling, so its liveness is not in question here, and a failed cycle is noted once as it happens (noteCycleFailure).
   const loop = loopAttention({ liveness: { ...summary.liveness, state: 'running' }, silence: summary.silence, budget: summary.budget, cost: summary.cost });
-  endFailingRuns(state, effects.faultClassPolicy ?? faultClassPolicyFromEnv(process.env), clock);
+  endFailingRuns(state, policy, clock);
   // The system invariants (GY-404): properties of the running pipeline no per-item gate can see,
-  // judged every cycle over the same snapshot; each violation is one fault of its class below.
+  // judged on each observation over the same snapshot; each violation is one fault of its class below.
   const invariants = checkInvariants(state.invariants, { work: snapshot.work, now: clock, thresholds: config.invariants, metrics: state.metrics, approvals: state.approvals,
     agents: herdrRead.available ? seen : null, build: controlPlane?.build?.commit ?? null,
     refusedMerges: new Set(snapshot.work.filter(item => item.candidate && state.actions[candidateKey('merge', item)]?.state === 'failed').map(item => item.id)) });
