@@ -61,4 +61,4 @@ A reviewer or producer is `awaiting acknowledgement` until 30 s of activity (`co
 - **A cursor that fails its schema is repaired, not fatal**, logged once with the path that failed.
 - **A tick failure is attributed and surfaced.** `dispatch.lastFailure` names it. Three consecutive failures raise one attention item saying no reviewer or producer session is being launched for any item. `graphyard master restart` repairs the cursor.
 
-**A session that exits at launch is classified from its pane** (`herdr pane read`; `herdr agent get` answers only `agent_not_found`): a **provider limit notice** fails over like a mid-session exhaustion; anything else is refused with the pane's last words and retried.
+**A session that exits at launch is classified from its pane.** `herdr agent get` answers only `agent_not_found` for a runtime that exits **at launch**, so the dispatcher uses `herdr pane read`: a **provider limit notice** fails over exactly as a mid-session exhaustion does; any other cause is refused with the pane's last words and retried.
