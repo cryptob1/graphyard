@@ -945,7 +945,7 @@ test('GY-161 review: a refusing ready gate keeps handed-in work at Build, in the
   assert.notEqual(prSteps(handedIn, NOW).current, 'build', 'handed in, it has moved past Build');
   const refuse = (reasons: string[]) => ({ ...handedIn, stage: 'build', gates: handedIn.gates.map(gate => gate.name === 'ready' ? { ...gate, passed: false, reasons } : gate) }) as Work;
   const blocked = prSteps(refuse(['Staging credentials expired']), NOW);
-  assert.equal(blocked.current, 'build'); assert.ok(blocked.steps.slice(1).every(step => step.state === 'pending'));
+  assert.equal(blocked.current, 'build'); assert.ok(blocked.steps.slice(stepIds.indexOf('build') + 1).every(step => step.state === 'pending'));
   assert.equal(blocked.label, 'Building · blocked: Staging credentials expired'); assert.equal(blocked.who, 'Master agent');
   const waiting = prSteps(refuse(['Dependency GY-7 is unfinished']), NOW);
   assert.equal(waiting.current, 'build'); assert.equal(waiting.label, 'Building · waiting for GY-7 to ship first'); assert.equal(waiting.who, 'Graphyard (automatic)');
