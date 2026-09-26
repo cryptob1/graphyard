@@ -169,8 +169,8 @@ export function workFaults(work: Work, now: number): FaultObservation[] {
   return found;
 }
 
-// The tracking half (the loop's record, one cycle's observations) lives in fault-tracking.ts (GY-374);
-// its names re-export here so every import of this module keeps working, on this code path and on the base's.
+// The tracking half (the loop's record, one cycle's observations) lives in fault-record.ts (GY-368), with the
+// record's baseline (GY-374) layered over it in fault-tracking.ts; its names re-export here so every import of this module keeps working, on this code path and on the base's.
 export { noteActionOutcome, noteFault, retainedFaultInstances, trackFaults, type FaultRecord } from './fault-tracking.js';
 
 // ---------------------------------------------------------------------------
