@@ -12,6 +12,8 @@ import { capacityRefusal } from '../fleet.js';
 import { sessionName } from '../session-name.js';
 import type { Cycle } from './cycle.js';
 
+/** The launcher key of the approver launch for a decision (GY-616). */
+const approverLaunchKey = (decision: string) => `launch:approver:${decision}`;
 /** The approval-watch key of an approver session no request of the loop's launched (GY-403). */
 export const handWatchPrefix = 'hand:';
 /** The name prefixes every approver session for `key` starts with (see `approverSessionName`). */
@@ -90,6 +92,20 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     await effects.persist(state);
     if (listed) return `adopted approver session ${name}${adopted?.account ? ` on ${adopted.account}` : ''}, already judging it`;
     inventory = null;
+    // The launch itself — a pane and a registered session — runs on the launcher beside the cycle
+    // (GY-616), so this cycle's merges and closes do not wait on it. The watch is not supervised
+    // while it is in flight, and what the launch did is reported on the next cycle. A cycle run on
+    // its own, with no loop beside it, launches in place.
+    if (!cycle.detached) return start(item, watch);
+    const key = approverLaunchKey(watch.decision), count = watch.launches;
+    cycle.launch('decision', item, key, [], async sink => {
+      const detail = await start(item, watch);
+      sink.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${item.key}'s ${watch.action} decision ${watch.decision}: ${detail}`, attempts: (state.actions[key]?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+    });
+    return `handed approver session ${name} to the launcher (launch ${count} of ${maxApproverLaunches})`;
+  };
+  /** The approver launch the launcher runs, and what it did with the watch. */
+  const start = async (item: Work, watch: ApprovalWatch) => {
     let launched: Awaited<ReturnType<NonNullable<DaemonEffects['approver']>>>;
     try { launched = await effects.approver!(item, watch.decision); }
     catch (error) {
@@ -323,6 +339,8 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   };
   /** Look again at a decision already requested: its state on the control plane, and its session. */
   const supervise = async (item: Work, decision: RoutineDecision, key: string, watch: ApprovalWatch) => {
+    // Its approver is still being launched (GY-616): there is no session to judge yet.
+    if (cycle.launcher.busy(approverLaunchKey(watch.decision))) return;
     const history = effects.decisions ? await effects.decisions(item).then(result => result.decisions, () => undefined) : undefined;
     const judged = history === undefined ? undefined : history.find(entry => entry.id === watch.decision) ?? null;
     if ((!judged || judged.state === 'requested') && await approverExhausted(item, watch)) return;

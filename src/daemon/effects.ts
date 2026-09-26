@@ -16,7 +16,7 @@ import { mergeBatchSize } from '../master/profiles.js';
 import type { CapacityRole, PartialWork } from '../model/capacity.js';
 import { readProducerLedger, saveProducerLedger, independentProducerProfiles, launchProducer, reclaimCheckouts } from '../producer.js';
 import { followUpThreadIds, readReviewLedger, updateReviewLedger, launchReview } from '../reviewer.js';
-import { type ReviewFinding, type SuccessionRead, readReviewFindings, basePaths, baseText, successionReader } from '../review-scope.js';
+import { type ReviewFinding, type SuccessionRead, readReviewFindings, basePaths, baseText, baseMentions, successionReader } from '../review-scope.js';
 import { defaultAwaitReviewers, launchedSessionHandle } from '../auto-dispatch.js';
 import type { DispatchRequest } from '../model/dispatch.js';
 import { registeredLaunch } from '../model/session-state.js';
@@ -38,6 +38,7 @@ import { observeDeployment } from './deployment.js';
 import { serverCallName, timedCall, timedFetch, timedRun } from '../master/timings.js';
 import type { RunRecord, Runner } from '../runner/types.js';
 import { type ResearchCheckout, type ResearchEvent } from '../research.js';
+import type { TriageJudgement } from '../model/machine-backlog.js';
 
 /** A reviewer or producer session a launch ledger holds as pending, as the failover step reads it. */
 export interface LaunchedSession { role: 'reviewer' | 'producer'; record: string; profile: string; agentName: string; pane: string | null; work: string; requestId: string | null }
@@ -68,6 +69,8 @@ export interface DaemonEffects {
   basePaths?: (paths: readonly string[]) => Promise<Set<string>>;
   /** A file's text on the base branch as `basePaths` fetched it, or null when it has none: what the pinning-test rule reads (GY-199). */
   baseText?: (path: string) => Promise<string | null>;
+  /** How many files on the base branch mention an identifier: the base-tree search the criteria-implied rule weighs a call by (GY-438). */
+  baseMentions?: (identifier: string) => Promise<number>;
   /**
    * The master's own additive scope widening — the revision `master scope` applies — with its
    * audited reason, bound to the scope request it answers (`answeringWidening`).
@@ -185,11 +188,16 @@ export interface DaemonEffects {
    * Research before build (GY-259): records a research run's start, brief or failure on the item as
    * the coordinator, and names the checkout the research session reads (and, in a test, its runner).
    * A loop wired without it, or whose config turns research off (`run.research.enabled: false`),
-   * researches nothing and dispatches as before. The session never reads this checkout itself:
-   * `checkout` gives each run a detached throwaway worktree of it (GY-401); a test may pass `cwd`.
+   * researches nothing and dispatches as before. A research session never reads `cwd` itself:
+   * `checkout` gives each run a detached throwaway worktree of it (GY-401); a test may pass `cwd`
+   * alone. The triage step (GY-402) reads `cwd`, the loop's own checkout, and runs on `runner`.
    */
   recordResearch?: (work: Work, event: ResearchEvent) => Promise<unknown>;
   research?: { cwd?: string; checkout?: (work: Work) => Promise<ResearchCheckout>; runner?: Runner };
+  /** Records a triage judgement on a machine-filed item as the coordinator (GY-402, POST work/ID/triage). */
+  recordTriage?: (work: Work, body: { judgement: TriageJudgement; runtime?: string }) => Promise<unknown>;
+  /** Asks the control plane for the one-time follow-up migration (GY-402, POST followups/migrate) as the operator agent. */
+  migrateFollowUps?: () => Promise<{ merged: number; already?: boolean }>;
   /** The reviewer and producer sessions the launch ledgers hold as pending. */
   launchedSessions?: () => Promise<LaunchedSession[]>;
   /** The account the profile's current session was launched on, as its launcher recorded it. */
@@ -499,6 +507,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // checkout and removed when the run settles — the prompt's read-only instruction is no
     // longer the only guard, and a run the loop died under is reclaimed as any other orphan.
     research: {
+      cwd: root,
       checkout: async work => {
         const base = worktreeRoot(root, current());
         const head = (await run('git', ['-C', root, 'rev-parse', 'HEAD'])).trim();
@@ -510,6 +519,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
         return { cwd: checkout.worktree, directory: checkout.directory, dispose };
       },
     },
+    recordTriage: (work, body) => mutate(`work/${work.id}/triage`, body),
+    migrateFollowUps: () => asOperatorAgent('POST', 'followups/migrate', {}, 'graphyard-followups-migration'),
     launchedSessions: async () => [
       ...(await readReviewLedger(root)).reviews.filter(entry => entry.state === 'pending' && !entry.launching).map(entry => ({ role: 'reviewer' as const, record: entry.id, profile: entry.profile, agentName: entry.agentName, pane: entry.pane, work: entry.key, requestId: entry.requestId ?? null })),
       ...(await readProducerLedger(root)).producers.filter(entry => entry.state === 'pending').map(entry => ({ role: 'producer' as const, record: entry.id, profile: entry.profile, agentName: entry.agentName, pane: entry.pane, work: entry.key, requestId: entry.requestId })),
@@ -584,6 +595,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       trusted: current().run.awaitReviewers ?? defaultAwaitReviewers.logins }, run) : [],
     basePaths: paths => basePaths(root, current().baseBranch, paths, run),
     baseText: path => baseText(root, current().baseBranch, path, run),
+    baseMentions: identifier => baseMentions(root, current().baseBranch, identifier, run),
     baseSuccessions: (() => { let reader: ReturnType<typeof successionReader> | null = null, branch = ''; return (since: string) => {
       if (!reader || branch !== current().baseBranch) { branch = current().baseBranch; reader = successionReader(root, branch, run); }
       return reader(since);
