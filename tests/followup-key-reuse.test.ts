@@ -8,8 +8,8 @@ import { generateKeyPairSync } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { loadMasterConfig, setupMaster } from '../src/master.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
-import { existingFollowUpItem, followUpBodyKey, followUpCreateKey, followUpItem } from '../src/review-threads.js';
-import { bindReviewer, followUpExhaustedRetryMs, launchReview, reconcileReviews, saveReviewerProfile, stoppedFollowUpAttention } from '../src/reviewer.js';
+import { followUpCreateKey, followUpItem } from '../src/review-threads.js';
+import { bindReviewer, existingFollowUpItem, followUpBodyKey, followUpExhaustedRetryMs, launchReview, reconcileReviews, saveReviewerProfile, stoppedFollowUpAttention } from '../src/reviewer.js';
 import { clientErrorStatus, nextClientErrorRun, repeatedClientErrorLimit, retryStopped } from '../src/retry-stop.js';
 import type { Observation, Work } from '../src/model.js';
 
