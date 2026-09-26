@@ -109,20 +109,28 @@ export function decisionInput(action: string, work: Work, input: Record<string, 
  * confirms it by running the proof there before approving; without it the control plane records
  * the attested pass as not exercising its criterion (GY-135), and no remedy but a second,
  * hand-built attestation would move the item.
+ *
+ * GY-535. The record is a claim for the approver to confirm, not a measurement: an approval
+ * carries only its reason, so it states no more than that confirmation establishes. The behaviour
+ * removed is the candidate's diff against its base, named by both commits, and `executed: 1` is
+ * the floor the approver's one confirming run guarantees; what the approver actually ran and saw
+ * is recorded in its approval reason (see attestConfirmation). A requester that measured more
+ * names its own `exercise`.
  */
 export function attestationExercise(work: Pick<Work, 'criteria' | 'candidate'>, proof: unknown) {
   const criterion = work.criteria.find(entry => typeof proof === 'string' && entry.proofs.includes(proof));
   if (!criterion || !work.candidate) return {};
-  return { exercise: { criterion: criterion.id, behaviour: `the whole change: ${proof} run against the candidate base ${work.candidate.baseSha.slice(0, 12)}, the tree without it`, result: 'fail' as const, executed: 1 } };
+  return { exercise: { criterion: criterion.id, behaviour: `the diff of candidate ${work.candidate.sha.slice(0, 12)} against its base ${work.candidate.baseSha.slice(0, 12)}; the proof fails on that base, as the approver confirms by running it and records in its approval reason`, result: 'fail' as const, executed: 1 } };
 }
 /**
  * GY-523. What an approver confirms before approving an attestation: the exercise record it carries
  * says the proof fails against the candidate base, so the approver runs it there, and against the
  * candidate, and approves only on both outcomes. An approved attestation is then recorded as
- * exercising its criterion rather than as an unexercised pass.
+ * exercising its criterion rather than as an unexercised pass. The approval reason records what the
+ * approver observed, since the approval carries no fields of its own (GY-535).
  */
 export const attestConfirmation = (baseSha?: string) =>
-  `An attest decision carries an exercise record (criterion, behaviour removed, executed, result fail) that is yours to confirm: before approving it, run its proof against the candidate base${baseSha ? ` ${baseSha}` : ''} — the tree without the change — and see it fail, and against the candidate and see it pass; refuse it otherwise. `;
+  `An attest decision carries an exercise record (criterion, behaviour removed, executed, result fail) that is yours to confirm: before approving it, run its proof against the candidate base${baseSha ? ` ${baseSha}` : ''} — the tree without the change — and see it fail, and against the candidate and see it pass; refuse it otherwise. The record states only that the proof fails there with at least one case executed, so say in your approval reason what you ran on each tree, how many cases executed, and the failure you saw. `;
 /** The Pi approver's prompt, with the attestation confirmation before its call to decide. */
 export const piApproverWithAttestation = (config: MasterConfig, work: Work, decision: string, repository?: string) =>
   piApproverPrompt(config, work.key, decision, config.approver!.id, repository).replace('Then call the graphyard_decide tool', `${attestConfirmation(work.candidate?.baseSha)}Then call the graphyard_decide tool`);

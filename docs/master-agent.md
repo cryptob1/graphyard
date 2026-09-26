@@ -79,7 +79,7 @@ With a pass, the producer records `"exercise"`: the same proof run with the crit
 "exercise":{"criterion":"AC-1","behaviour":"the lease expiry check in claim()","result":"fail","executed":4}
 ```
 
-A pass is trusted only when that stripped run failed with a case executed; otherwise it is recorded as not exercising its criterion rather than as passing (`unexercised`, `evidence.exercise.refused`); the loop requests rework quoting it. `decide attest` adds `exercise` (fails on base), approver-confirmed; unexercised `manual:` proofs: re-attest, never rework.
+A pass is trusted only when that stripped run failed with a case executed; otherwise it is recorded as not exercising its criterion rather than as passing (`unexercised`, `evidence.exercise.refused`); for an automated proof, the loop requests rework quoting it. An unexercised `manual:` proof is never sent back for rework: the loop requests a fresh `decide attest`, which carries an `exercise` record (the proof fails on the candidate base) that the approver confirms by running it and describes in its approval reason.
 
 ## Guarded merges
 
