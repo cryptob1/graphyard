@@ -26,7 +26,7 @@ npm ci && npm run build && npm test
 
 ### Documentation that rarely conflicts
 
-Add a self-contained paragraph or section; reword shared sentences only when wrong. A base conflict only in `docs/**/*.md` gets a docs-sync session, not rework: it merges the base keeping both meanings in budget, touching only conflicted paragraphs; the approval stays if the diff outside `docs/` is unchanged. `master status` and Insights rank 24-hour conflict hotspots; 5 on one path is raised.
+Add a self-contained paragraph or section; reword shared sentences only when wrong. GitHub's conflict reading waits for the control plane's test merge; a confirmed conflict only in `docs/**/*.md` gets a docs-sync session, not rework: it merges the base keeping both meanings in budget, touching only conflicted paragraphs; the approval stays if the diff outside `docs/` is unchanged. `master status` and Insights rank 24-hour conflict hotspots; 5 on one path is raised.
 
 ## Trusted contracts
 

@@ -112,7 +112,7 @@ export const docsSyncWatchSchema = z.object({
   launchedAt: z.string(),
   /** Why the docs-sync gave the conflict up to rework, or null while it runs or once it moved the head. */
   failed: z.string().max(1000).nullable().default(null),
-  /** When the loop first found the session gone while the head had not moved. */
+  /** When the loop first found the session gone, or past its bound, while the head had not moved. */
   goneAt: z.string().optional(),
   settledAt: z.string().nullable().default(null),
 }).strict();

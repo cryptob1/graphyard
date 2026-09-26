@@ -27,7 +27,7 @@ function observation(extra: Partial<Observation> = {}): Observation {
 }
 /** One commit behind base: the tip moved from B to B2, and the head's bound base is still B. */
 const behind = (extra: Partial<Observation> = {}) => observation({ baseTip: B2, baseTipContained: false, ...extra });
-const conflicting = () => behind({ mergeable: false, conflicting: true });
+const conflicting = (extra: Partial<Observation> = {}) => behind({ mergeable: false, conflicting: true, ...extra });
 
 function item(overrides: Partial<Work> = {}): Work {
   const candidate = { sha: H, baseSha: B, pr: 191, branch: 'graphyard/gy-191-1', author: 'implementer' };
@@ -86,7 +86,11 @@ function loopEffects(work: Work, decided: { action: string; reason: string }[], 
 }
 
 test('unit:conflicting-candidate-reworked — a behind-base candidate GitHub reports conflicting, with no lease, is sent back through a rework decision and an approver', async () => {
-  const work = item({ evidence: proven(), observation: conflicting() });
+  // While the control plane's own test merge onto that tip is pending, it decides (GY-566): a
+  // confirmed conflict is reworked on its record, or docs-synced when confined to docs pages.
+  assert.equal(routineDecision(item({ evidence: proven(), observation: conflicting() }), { autoMerge: true }, clock), null);
+  // GitHub's reading alone, with no test merge the control plane can run: containment is unknown.
+  const work = item({ evidence: proven(), observation: conflicting({ baseTipContained: undefined }) });
   const decision = routineDecision(work, { autoMerge: true }, clock);
   assert.equal(decision?.action, 'rework');
   assert.equal(decision?.binding, `${H}:sync:${B2}`);
@@ -94,7 +98,7 @@ test('unit:conflicting-candidate-reworked — a behind-base candidate GitHub rep
   // Merely behind, and mergeable, is not a rework: it is reviewed as it stands.
   assert.equal(routineDecision(item({ evidence: proven() }), { autoMerge: true }, clock), null);
   // A live worker still holds it: the round is not asked for over its head.
-  assert.equal(routineDecision(item({ observation: conflicting(), lease: { owner: 'implementer', epoch: 1, expiresAt: iso(60_000) } } as Partial<Work>), { autoMerge: true }, clock), null);
+  assert.equal(routineDecision(item({ observation: conflicting({ baseTipContained: undefined }), lease: { owner: 'implementer', epoch: 1, expiresAt: iso(60_000) } } as Partial<Work>), { autoMerge: true }, clock), null);
 
   const decided: { action: string; reason: string }[] = [], approvers: string[] = [];
   const state = emptyDaemonState(config());

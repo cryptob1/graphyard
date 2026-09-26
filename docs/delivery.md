@@ -63,7 +63,7 @@ The observer submits what it measured through `POST /api/delivery/observe`:
    "instances":[{"instance":"web-1","digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222","measurement":"host-attestation","healthy":true}]}]}
 ```
 
-Only complete listings measured by `provider` or `host-attestation` can verify; a repeated `snapshotId` returns the original receipt; `POST /api/delivery/notify` only hints. A two-second sweep (`graphyard delivery sweep` drains sooner) verifies a generation once every service shares a common interval within the freshness bound, adding `releaseDeliveries` to each included item. Otherwise `graphyard delivery` reads `unobserved`, `mismatched`, `unknown`, `unhealthy`, `incomplete`, `no-common-interval`, `stale` or `degraded`.
+Only complete listings measured by `provider` or `host-attestation` can verify; a repeated `snapshotId` returns the original receipt, and `POST /api/delivery/notify` is a hint only. A sweep every two seconds (`graphyard delivery sweep` drains sooner) verifies a generation once every service shares a common interval within the freshness bound, adding a `releaseDeliveries` entry to each included item. Otherwise status reads `unobserved`, `mismatched`, `unknown`, `unhealthy`, `incomplete`, `no-common-interval`, `stale` or `degraded`. `graphyard delivery` shows the state.
 
 ## Attribution
 

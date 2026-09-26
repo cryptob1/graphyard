@@ -421,10 +421,10 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     const seen = await sessions(), listed = watch.agentName ? seen.agents.find(agent => agent.name === watch.agentName) : undefined;
     const overdue = clock - Date.parse(watch.launchedAt) >= docsSyncMaxMs;
     if (!overdue && (listed || !seen.available)) return true;
-    // Gone: the push may not have been observed yet. Only an observation taken after the loop saw
-    // the session gone, still on the reviewed head, shows the docs-sync gave up.
+    // Gone, or past its bound: the push may not have been observed yet. Only an observation taken
+    // after the loop found that, still on the reviewed head, shows the docs-sync gave up.
     watch.goneAt ??= stamp;
-    if (!overdue && !(item.observation && Date.parse(item.observation.at) > Date.parse(watch.goneAt))) { await effects.persist(state); return true; }
+    if (!(item.observation && Date.parse(item.observation.at) > Date.parse(watch.goneAt))) { await effects.persist(state); return true; }
     watch.failed = (overdue ? `the docs-sync session ran past ${docsSyncMaxMs / 60_000} minutes without moving ${head.slice(0, 12)}` : `docs-sync session ${watch.agentName} ended without moving ${head.slice(0, 12)}`).slice(0, 1000);
     watch.settledAt = stamp;
     await settleDocsSync(item, watch, watch.failed);
