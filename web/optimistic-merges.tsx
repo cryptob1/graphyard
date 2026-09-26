@@ -1,4 +1,4 @@
-import { formatDuration } from './duration';
+import { formatDuration } from '../src/model/duration';
 import { optimisticMetrics, type LaneTiming } from '../src/optimistic-merge';
 import type { Work } from '../src/model';
 
