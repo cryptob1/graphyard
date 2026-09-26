@@ -293,7 +293,7 @@ export function scopeOutcomeMessage(key: string, epoch: number, outcome: { state
 
 export type ScopeRequestOutcome = { state: 'pending' | 'ended'; text: string } | { state: 'approved' | 'refused'; text: string };
 /**
- * The outcome of one ask (its epoch and the instant it was recorded), read from the item as the
+ * The outcome of one ask (its epoch and instant, or the later ask of its attempt it merged into: GY-549), read from the item as the
  * control plane holds it now. A refusal by the widening rule (`decidedBy` graphyard) is not the
  * answer: the loop puts it to the independent approver, so it is still pending. An approval by
  * any path — the rule, a finding, the approver or a master — shows as the paths now planned.
@@ -303,7 +303,7 @@ export type ScopeRequestOutcome = { state: 'pending' | 'ended'; text: string } |
  */
 export function scopeRequestOutcome(item: { key: string; plannedFiles?: readonly string[]; lease?: { epoch: number; expiresAt: string } | null; scopeRequest?: ScopeRequestState | null; scopeDecision?: ScopeDecision | null },
   ask: { epoch: number; at: string; paths: readonly string[] }, now: number, cli = 'graphyard'): ScopeRequestOutcome {
-  const own = item.scopeRequest?.epoch === ask.epoch && item.scopeRequest.at === ask.at ? item.scopeRequest : null;
+  const own = item.scopeRequest?.epoch === ask.epoch && (item.scopeRequest.at === ask.at || unplannedPaths(item.plannedFiles, ask.paths).every(path => item.scopeRequest!.paths.includes(path))) ? item.scopeRequest : null;
   const decided = item.scopeDecision?.requestedAt === ask.at ? item.scopeDecision : null;
   const outside = unplannedPaths(item.plannedFiles, ask.paths), covered = !outside.length;
   // Liveness comes first: an outcome, even one decided before the deadline, is not this attempt's

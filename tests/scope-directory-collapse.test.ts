@@ -10,7 +10,7 @@ import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import { answeringWidening, emptyDaemonState, runCycle, scopeRoutineDecision, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { approverSessionName, decisionInput, masterConfigSchema, type HerdrAgent, type MasterConfig } from '../src/master.js';
-import { liveScopeWidening, type ScopeRequestState } from '../src/model/scope.js';
+import { liveScopeWidening, scopeRequestOutcome, type ScopeRequestState } from '../src/model/scope.js';
 import { collapseArea, collapsePlannedFiles, mergedScopeRequest, plannedFilesMax } from '../src/model/scope-collapse.js';
 import type { Principal, Work } from '../src/model.js';
 
@@ -149,10 +149,12 @@ test('unit:scope-collapses-to-directory — 158 test files plus 10 planned paths
 test('unit:scope-requests-merged — two consecutive scope requests of one attempt become one requirements decision covering both', async () => {
   const first = testFiles(2), second = testFiles(2, 'tests/fixtures/');
   let work = await claimed('merged asks');
-  await ask(work, first, 'The first tests to migrate onto the helper');
+  const asked = await ask(work, first, 'The first tests to migrate onto the helper');
   const merged = await ask(work, second, 'The fixture tests use the helper too');
   assert.deepEqual(merged.scopeRequest!.paths, [...first, ...second], 'the second ask is merged into the pending first');
   assert.match(merged.scopeRequest!.reason, /first tests.*fixture tests/);
+  const waiting = scopeRequestOutcome(merged, { epoch: asked.epoch, at: asked.scopeRequest!.at, paths: first }, Date.now());
+  assert.equal(waiting.state, 'pending', 'a worker waiting on its first ask reads it as still open, merged');
 
   const loop = harness(), state = emptyDaemonState(loopConfig());
   await loop.cycle(state);
