@@ -29,6 +29,8 @@ function fixture() {
     if (method !== 'GET') return path in mutations ? mutations[path]() : { id: 12 };
     if (/^\/commits\/[a-f0-9]{40}$/.test(path)) return { sha: path.slice(9), commit: { tree: { sha: `f${path.slice(10)}` } }, ...(commits[path.slice(9)] ?? {}) };
     if (path === '/git/ref/heads/main') return { ref: 'refs/heads/main', object: { type: 'commit', sha: branchTip } };
+    // A refused merge reads the branch it would resolve onto (GY-444); these fakes model an unresolvable conflict.
+    if (path.startsWith('/git/ref/heads/')) return { ref: path.slice(5), object: { type: 'commit', sha: '0'.repeat(40) } };
     // GitHub paginates a comparison's commits only: the files come on the first page alone, at most compareFileCap of them.
     if (path.startsWith('/compare/')) { const page = Number(path.match(/[?&]page=(\d+)/)?.[1] ?? 1); return { status: comparison, files: page === 1 ? baseChanges.slice(0, compareFileCap) : [] }; }
     if (path === '/pulls/10') return structuredClone(pr);
