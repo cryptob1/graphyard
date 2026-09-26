@@ -3,7 +3,7 @@ import { namedPaths } from './model/scope.js';
 import { behindBaseHold } from './model/behind-base.js';
 import { baseRefreshConflict, currentBaseRefreshCarry, pendingBaseRefresh } from './merge-queue.js';
 
-export interface IntegrationJob { work_id: string; available_at: string; locked_until: string | null; error: string | null; held_until?: string | null }
+export interface IntegrationJob { work_id: string; available_at: string; locked_until: string | null; error: string | null; held_until?: string | null; deferred_reason?: string | null; unobserved?: number }
 export interface Diagnostic { kind: string; message: string; next: string }
 export function resourceConflicts(work: Work, all: Work[], now: number) {
   return all.filter(w => w.id !== work.id && (w.containmentQuarantine || w.lease && Date.parse(w.lease.expiresAt) > now))
@@ -126,7 +126,12 @@ export function diagnose(work: Work, all: Work[], now: number, jobs: Integration
   for (const r of resourceConflicts(work, all, now)) add('resource-busy', `${r.resource} is reserved by ${r.key}`, 'Wait for the owner to release its lease; do not use the resource concurrently.');
   const job = jobs.find(j => j.work_id === work.id);
   const held = !!job?.held_until && Date.parse(job.held_until) > now;
-  if (held) add('integration-held', job!.error ?? 'Integration work is held on a GitHub App permission', `Held rather than retried: accept the App permission and the preflight that sees the installation change releases it, or it re-checks once at ${job!.held_until}.`);
+  // A job rescheduled three times in a row without saving an observation is the GY-506 deadlock
+  // shape: the record says what each reschedule answered and where the queue is stuck because of it.
+  const unobserved = job?.unobserved ?? 0;
+  if (work.submission && unobserved >= 3) add('observation-starved', `${work.key}'s observation job has finished ${unobserved} times in a row without saving an observation${job!.error ? `; last refusal: ${job!.error}` : ''}${job!.deferred_reason ? `; last reschedule: ${job!.deferred_reason}` : ''}`,
+    'The merge queue cannot advance behind an item nothing observes. Read the recorded reasons: a task-changed retry names what keeps rewriting the item, a budget deferral names its reset; if no reason is recorded the job loop is failing before the observation.');
+  else if (held) add('integration-held', job!.error ?? 'Integration work is held on a GitHub App permission', `Held rather than retried: accept the App permission and the preflight that sees the installation change releases it, or it re-checks once at ${job!.held_until}.`);
   else if (job?.error) add('integration-error', job.error, `Automatic retry is scheduled at ${job.available_at}; inspect integration configuration if failures persist.`);
   if (work.submission && !work.observation) add('unobserved', 'Submitted PR has not been observed for the current requirements', 'Check the GitHub connection and reconciliation job; missing observation is not success.');
   if (work.submission && work.observation && now - Date.parse(work.observation.at) >= 120000) add('stale-observation', 'GitHub observation is older than two minutes', 'Restore provider connectivity; the merge gate requires a fresh observation.');
