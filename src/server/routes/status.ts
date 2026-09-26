@@ -122,12 +122,14 @@ export const statusRoutes = defineRoutes('status', [
       demand(batchSize === undefined || Number.isSafeInteger(batchSize) && batchSize >= 1 && batchSize <= maxMergeBatchSize, `batchSize must be an integer from 1 to ${maxMergeBatchSize}`, 400);
       demand(parallelTips === undefined || Number.isSafeInteger(parallelTips) && parallelTips >= 1 && parallelTips <= maxParallelTips, `parallelTips must be an integer from 1 to ${maxParallelTips}`, 400);
       // One setting, one ledger kind: recorded only when it differs from what the ledger holds.
+      // Applied only once the ledger holds it (GY-384): a failed INSERT leaves the evaluation on
+      // the recorded size and the master unpublished, so its next cycle retries.
       const record = async (kind: string, field: string, value: number, load: () => Promise<number>, apply: (value: number) => void) => {
         const previous = await load();
         const latest = (await engine.store.pool.query('SELECT 1 FROM events WHERE work_id IS NULL AND kind=$1 LIMIT 1', [kind])).rowCount;
-        apply(value);
         if (latest && previous === value) return false;
         await engine.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, kind, JSON.stringify({ [field]: value, previous: latest ? previous : null })]);
+        apply(value);
         return true;
       };
       const recorded = [
