@@ -7,4 +7,4 @@
 
 ## Automatic dispatch records
 
-At the build gate `autoDispatch` records one `producers` request per proof group and, once unit and integration proofs pass, a `review` request, each with `id`, `kind`, `sha`, `baseSha`, `policyRevision`, `pr`, `requestedAt`, `reason` and `state`. A request is `satisfied` by an approval or trusted evidence, `cancelled` when the head, base or policy changes, rework is requested or the PR closes; transitions append `dispatch.requested`, `dispatch.satisfied` or `dispatch.cancelled`, and resolved requests move to `autoDispatch.history`. Nothing here moves a gate.
+`autoDispatch` records each [automatic dispatch](../master-agent.md#automatic-dispatch-at-submit) as a `producers` or `review` request with `id`, `kind`, `sha`, `baseSha`, `policyRevision`, `pr`, `requestedAt`, `reason` and `state`. A request is `satisfied` by an approval or trusted evidence, `cancelled` when the head, base or policy changes, rework is requested or the PR closes; transitions append `dispatch.requested`, `dispatch.satisfied` or `dispatch.cancelled`, and resolved requests move to `autoDispatch.history`. Nothing here moves a gate.
