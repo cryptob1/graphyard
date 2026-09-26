@@ -215,14 +215,17 @@ export function heldDetail(verification: Pick<ContainmentVerification, 'held'>, 
 /** How systemd reports a scope whose supervisor and every process it held have ended. */
 export const endedScopeStates = ['not-found', 'inactive', 'failed', 'dead'];
 const interactiveShells = ['bash', 'sh', 'zsh', 'fish', 'dash', 'ksh'];
+/** Long options that only make a shell interactive or skip its startup files; none takes a value. */
+const interactiveLongFlags = ['--login', '--interactive', '--noprofile', '--norc'];
 /**
  * An interactive shell by its command line: a shell binary (a login shell's `-bash` too) given
- * only option flags, none of them `-c` or `-s`, so it runs no command, script or stdin script of its own.
+ * only allowlisted flags — short `-i`/`-l` in any cluster, or a long flag above — so it runs no
+ * command, script, stdin script or chosen startup file (`--rcfile x`, `--init-file=x`) of its own.
  */
 export function isInteractiveShell(command: string) {
   const [binary, ...args] = command.trim().split(/\s+/);
   const name = (binary ?? '').split('/').pop()!.replace(/^-/, '');
-  return interactiveShells.includes(name) && args.every(arg => /^-/.test(arg) && !/^-[A-Za-z]*[cs]/.test(arg) && arg !== '--' && arg !== '-');
+  return interactiveShells.includes(name) && args.every(arg => /^-[il]+$/.test(arg) || interactiveLongFlags.includes(arg));
 }
 /** The Herdr pane of the quarantined epoch's implementation session, as the session ledger recorded it. */
 export function recordedPane(work: Pick<Work, 'containmentQuarantine' | 'sessions'>) {
