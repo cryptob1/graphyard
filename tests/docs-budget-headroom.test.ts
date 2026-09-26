@@ -49,12 +49,32 @@ test('unit:docs-headroom-kept — at 11,700 of 12,000 words master status raises
   await fileDocsTrim(emptyDaemonState(config()), effects, work, docs, () => Date.now(), []);
   assert.equal(filed.length, 1, 'the open item, not the loop cursor, is what keeps it to one');
 
+  // The filed item closes (or merges) while the set stays saturated: the episode, not the open item,
+  // is what keeps it to one filing (review finding 1 on 2639e4d6).
+  work.length = 0;
+  for (let cycle = 0; cycle < 3; cycle++) await fileDocsTrim(state, effects, work, docs, () => Date.parse('2026-09-26T11:00:00Z'), []);
+  assert.equal(filed.length, 1, 'a closed trim item files nothing more while the set stays saturated');
+  assert.deepEqual(state.docsTrim, { base: 'origin/main', total: 11_700 });
+  // A total that drifts within the same saturation is still that episode.
+  const drifted = await docsHeadroomStatus('/repository', 'main', () => ({ ...main, 'docs/master-agent.md': 750 }));
+  assert.equal(drifted.docs!.headroom.total, 11_750);
+  await fileDocsTrim(state, effects, work, drifted.docs, () => Date.now(), []);
+  assert.equal(filed.length, 1, 'a drifting total files nothing more until headroom is restored');
+  // Restored headroom clears the episode, so a later saturation files once more.
+  const restored = await docsHeadroomStatus('/repository', 'main', () => pages(11_000));
+  await fileDocsTrim(state, effects, work, restored.docs, () => Date.now(), []);
+  assert.equal(state.docsTrim, null, 'a set with its headroom clears the episode');
+  await fileDocsTrim(state, effects, work, docs, () => Date.now(), []);
+  assert.equal(filed.length, 2, 'a saturation after restored headroom files once more');
+  assert.deepEqual(state.docsTrim, { base: 'origin/main', total: 11_700 });
+
   // A set with its headroom raises nothing and files nothing.
   const roomy = await docsHeadroomStatus('/repository', 'main', () => pages(11_400));
   assert.deepEqual(roomy.attention, []);
   assert.equal(roomy.docs!.headroom.saturated, false);
+  const filings = filed.length;
   await fileDocsTrim(emptyDaemonState(config()), effects, [], roomy.docs, () => Date.now(), []);
-  assert.equal(filed.length, 1);
+  assert.equal(filed.length, filings, 'a set with its headroom files nothing');
   assert.equal(docsHeadroom(pages(11_640)).saturated, true, 'the warning starts at 97% of the budget');
   assert.equal(docsHeadroom(pages(11_639)).saturated, false);
 });

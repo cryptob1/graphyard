@@ -14,6 +14,9 @@ import { processJob } from '../src/github.js';
 import { Refusal, type Principal, type Work } from '../src/model.js';
 import { approverSessionName, decisionInput, masterConfigSchema, mergeExecutor, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { type LoopFiledItem } from '../src/daemon/effects.js';
+import { docsTrimActionKey, type ReportedAttention } from '../src/daemon/faults.js';
+import { docsHeadroom, docsTrimTitle } from '../src/model/documentation.js';
 import { successorWidening } from '../src/model/successors.js';
 import { systemInvariants, type InvariantCheck } from '../src/model/invariants.js';
 import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } from './helpers/soak-world.js';
@@ -83,8 +86,8 @@ before(async () => {
 after(async () => { clock.uninstall(); if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (pgServer) await pgServer.stop(); });
 
 const id = () => randomUUID();
-async function api(principal: Principal, method: 'GET' | 'POST', path: string, body?: unknown) {
-  const response = await fetch(`${url}/api/${path}`, { method, headers: { Authorization: `Bearer ${token(principal)}`, 'Content-Type': 'application/json', 'Idempotency-Key': id() }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+async function api(principal: Principal, method: 'GET' | 'POST', path: string, body?: unknown, key: string = id()) {
+  const response = await fetch(`${url}/api/${path}`, { method, headers: { Authorization: `Bearer ${token(principal)}`, 'Content-Type': 'application/json', 'Idempotency-Key': key }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   const result = await response.json() as any;
   if (!response.ok) throw new Error(`Graphyard refused ${path} (${response.status}): ${result?.error ?? JSON.stringify(result)}`);
   return result;
@@ -93,9 +96,11 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
 /**
  * One simulated day of the loop against this world. `regression` injects a fault into the loop's own
  * effects, standing for a change that breaks an invariant, so the soak shows it would fail.
+ * `docsTrim` keeps the base's documentation saturated at that many words (GY-574), so the loop's
+ * trim-item filing runs each cycle and its once-only episode is what the day observes.
  */
 let days = 0;
-async function simulateDay(options: { hours: number; regression?: 'approvers-left-open' }) {
+async function simulateDay(options: { hours: number; regression?: 'approvers-left-open'; docsTrim?: number }) {
   const dayStart = clock.now();
   const github = new SimulatedGitHub({ repository, baseBranch: 'main', appId: 1234, ciAppId: 15368, reviewerApps, ciMs: 5 * minute, reviewMs: 3 * minute, firstPullRequest: 100 * ++days },
     [...Array.from({ length: plan.items }, (_, index) => file(index + 1)), 'README.md']);
@@ -103,6 +108,16 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   const adapter = github.adapter();
   const moveClock = async (ms: number) => { clock.advance(ms); await store.pool.query('UPDATE simulated_clock SET offset_ms=$1', [clock.offsetMs]); };
   await moveClock(0);
+  // Days share one store, and this scenario's day is judged on its own behaviour: earlier days'
+  // undelivered items carry submissions and sessions bound to those days' simulated PR numbering,
+  // which this day's sim cannot reproduce, so the operator closes them before the day begins.
+  if (options.docsTrim !== undefined) {
+    await moveClock(5 * minute);
+    for (const leftover of await store.list()) {
+      if (leftover.stage === 'done') continue;
+      await api(principals.operator, 'POST', `work/${leftover.key}/close`, { kind: 'obsolete', reason: 'soak: an earlier simulated day left this item; this day runs its own scenario' });
+    }
+  }
 
   // ---- The fifteen items, created in the backlog and released one every fifteen minutes. ----
   const items: Work[] = [];
@@ -144,10 +159,12 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
         catch (error) { if (!(error instanceof Refusal)) throw error; herdr.kill(session.pane); session.state = 'dead'; lost.push(`${session.key} epoch ${session.epoch}: ${error.message}`); }
         continue;
       }
-      const pr = github.push(session.key, session.branch, principal.id, sha('head', session.key, session.epoch), [file(numberOf(session))]);
-      await engine.execute(principal, 'submit', session.work, { epoch: session.epoch, pr: pr.number, documentation: 'A simulated item: it changes no documented behaviour' }, id());
-      session.state = 'submitted';
-      herdr.status(session.pane, 'done');
+      try {
+        const pr = github.push(session.key, session.branch, principal.id, sha('head', session.key, session.epoch), [file(numberOf(session))]);
+        await engine.execute(principal, 'submit', session.work, { epoch: session.epoch, pr: pr.number, documentation: 'A simulated item: it changes no documented behaviour' }, id());
+        session.state = 'submitted';
+        herdr.status(session.pane, 'done');
+      } catch (error) { if (!(error instanceof Refusal)) throw error; herdr.kill(session.pane); session.state = 'dead'; }
     }
   };
 
@@ -179,6 +196,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   // One executor instance for the loop's process, and a fresh request per merge the loop asks for, as `master run` wires it.
   const executor = { principal: principals.coordinator.id, instance: `soak-${randomUUID()}` };
   const merge: DaemonEffects['merge'] = work => mergeExecutor(config, snapshot, transport, executor, randomUUID(), github.gh(repository))(work);
+  const docsFilings: string[] = [], docsActions: { state: string; detail: string }[] = [];
   const effects: DaemonEffects = {
     agents: () => herdr.list(),
     herdr: () => ({ agents: herdr.list(), available: true }),
@@ -196,17 +214,27 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       return { source: 'endpoint', sha: production.sha, at: new Date(clock.now()).toISOString(), reason: null, deployed: serving.map(item => item.key), pending: delivered.filter(item => !serving.includes(item)).map(item => item.key) };
     },
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    ...(options.docsTrim === undefined ? {} : {
+      reportedAttention: async () => ({ items: [], docs: { base: 'origin/main', headroom: docsHeadroom({ 'README.md': options.docsTrim! }) } }) as ReportedAttention,
+      fileFaultClass: async (input: LoopFiledItem, key: string) => { if (input.title.startsWith(docsTrimTitle)) docsFilings.push(key); return await api(principals.operatorAgent, 'POST', 'work', input, key) as Work; },
+    }),
   };
 
   // ---- The day. ----
   const state = emptyDaemonState(config);
   const violations: string[] = [], observed = new Set<string>(), failures: string[] = [];
-  let released = 0, split = false, deploys = 0, cycles = 0;
+  let released = 0, split = false, deploys = 0, cycles = 0, closedTrim = false;
   const jobsDue = async () => Number((await store.pool.query('SELECT count(*) AS due FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now())')).rows[0].due);
   for (let elapsed = 0; elapsed <= options.hours * hour;) {
     const now = clock.now();
     // Scheduled events: releases, the file split on main, the deploys.
     while (released < plan.items && elapsed >= released * plan.releaseEveryMs) await engine.execute(principals.operator, 'ready', items[released++].id, {}, id());
+    // GY-574: once the loop has filed the trim item, close it half an hour in with the docs still
+    // saturated — the episode, not the open item, must be what keeps the filing to one.
+    if (options.docsTrim !== undefined && !closedTrim && elapsed >= 30 * minute) {
+      const trim = (await store.list()).find(item => item.title.startsWith(docsTrimTitle));
+      if (trim) { closedTrim = true; await api(principals.operator, 'POST', `work/${trim.key}/close`, { kind: 'obsolete', reason: 'soak: the trim item closed with the documentation still saturated' }); }
+    }
     if (!split && elapsed >= plan.split.at) {
       split = true;
       const from = file(plan.split.item), successors = [`src/soak/item-${plan.split.item}-a.ts`, `src/soak/item-${plan.split.item}-b.ts`];
@@ -225,6 +253,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       for (let guard = 0; guard < 200 && await jobsDue(); guard++) await processJob(engine, adapter);
       try {
         const result = await runCycle(config, state, effects, clock.now); cycles++;
+        if (options.docsTrim !== undefined) for (const action of result.actions) if (action.kind === 'fault' && /documentation headroom/.test(action.detail)) docsActions.push({ state: action.state, detail: action.detail });
         if (process.env.SOAK_TRACE) for (const action of result.actions) console.error(`+${Math.round(elapsed / minute)} ${action.kind} ${action.state} ${action.work ?? ''}: ${action.detail.slice(0, 300)}`);
       }
       catch (error) { failures.push(`${new Date(now).toISOString()}: ${error instanceof Error ? error.message : String(error)}`); }
@@ -239,7 +268,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   }
 
   const final = (await store.list()).filter(item => items.some(entry => entry.id === item.id));
-  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, state, dayStart };
+  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, state, dayStart, docsFilings, docsActions, closedTrim };
 }
 
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 180_000 }, async () => {
@@ -278,4 +307,22 @@ test('unit:soak-invariants-hold — a loop change that breaks an invariant fails
   assert.ok(violations.every(line => /lingering-sessions/.test(line)), `nothing else is violated: ${violations.filter(line => !/lingering-sessions/.test(line)).slice(0, 3).join('\n')}`);
   // The violation is a fault of its class on the loop's record, which files one item when it recurs.
   assert.equal(state.faults.instances.filter(instance => instance.kind === 'invariant:lingering-sessions' && instance.faultClass === 'session-liveness').length, 1);
+});
+
+test('unit:soak-docs-trim-once — a saturated base files the docs-trim item once: closing it without restoring headroom files nothing more, and the loop records a bounded number of actions', { timeout: 120_000 }, async () => {
+  // The regression the reviewer named on 2639e4d6: fileDocsTrim keyed its once on the open item
+  // alone, so a trim item that closed (or merged) with the docs still saturated was refiled every
+  // cycle — hundreds of filings and actions over a day for one standing condition.
+  const { docsFilings, docsActions, closedTrim, state, violations } = await simulateDay({ hours: 3, docsTrim: 11_700 });
+  assert.ok(closedTrim, 'the trim item was filed and then closed with the docs still saturated');
+  assert.equal(docsFilings.length, 1, `exactly one filing across the day: ${JSON.stringify(docsFilings)}`);
+  assert.ok(docsActions.length <= 4, `a bounded number of loop actions for ${docsTrimActionKey} (${docsActions.length}): ${JSON.stringify(docsActions)}`);
+  assert.equal(docsActions.filter(action => action.state === 'done').length, 1, 'the one filing is the one done action');
+  assert.equal(state.actions[docsTrimActionKey]?.state, 'done', 'the filing stands done on the loop cursor');
+  assert.ok(state.docsTrim, 'the episode the filing opened stays open while the set is saturated');
+  const trim = (await store.list()).find(item => item.title.startsWith(docsTrimTitle));
+  assert.equal(trim?.closure?.kind, 'obsolete', 'the trim item is the one the day closed');
+  // Days run against one store, so this day inherits the regression day's lingering approver
+  // sessions; what it must add is no violation of any other invariant.
+  assert.ok(violations.every(line => /lingering-sessions/.test(line)), `no invariant but the inherited lingering sessions is violated: ${violations.filter(line => !/lingering-sessions/.test(line)).slice(0, 3).join('\n')}`);
 });

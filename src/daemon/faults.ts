@@ -199,11 +199,16 @@ export async function docsHeadroomStatus(root: string, baseBranch: string, count
 export const docsTrimActionKey = 'fault:docs-headroom';
 /**
  * The documentation within 3% of its word budget on the base branch files one trim item (GY-574),
- * as the operator-agent, naming the largest pages; while that item is open nothing more is filed.
- * A set with its headroom files nothing, and neither does a loop without the operator-agent identity.
+ * as the operator-agent, naming the largest pages. One saturation episode files once: the filing is
+ * remembered in state.docsTrim until a counted set with its headroom clears it, so a trim item that
+ * closed or merged and a total that drifted file nothing more — only restored headroom lets a later
+ * saturation file again. A set with its headroom files nothing, and neither does a loop without the
+ * operator-agent identity.
  */
 export async function fileDocsTrim(state: DaemonState, effects: Pick<DaemonEffects, 'fileFaultClass' | 'persist'>, work: Work[], docs: ReportedAttention['docs'], now: () => number, performed: DaemonAction[]) {
-  if (!docs?.headroom.saturated || !effects.fileFaultClass || openDocsTrimItem(work)) return;
+  if (!docs) return;
+  if (!docs.headroom.saturated) { state.docsTrim = null; return; }
+  if (!effects.fileFaultClass || openDocsTrimItem(work) || state.docsTrim) return;
   const previous = state.actions[docsTrimActionKey];
   if (previous && previous.state !== 'done' && !readyToRetry(previous, state.cycle)) return;
   const attempts = previous?.state === 'done' ? 1 : (previous?.attempts ?? 0) + 1;
@@ -214,7 +219,8 @@ export async function fileDocsTrim(state: DaemonState, effects: Pick<DaemonEffec
     // The trim item goes through the same operator-agent intent route as a fault-class item; it names no class.
     const filed = await effects.fileFaultClass(docsTrimItem(docs.headroom, docs.base), idempotency);
     work.push(filed);
-    performed.push(await record(state, docsTrimActionKey, { kind: 'fault', work: filed.key, principal: null, state: 'done', detail: `Filed ${filed.key} to restore documentation headroom (${docs.headroom.total} of ${docs.headroom.budget} words on ${docs.base}); nothing more is filed while it is open`, attempts, cycle: state.cycle }, now(), effects.persist));
+    state.docsTrim = { base: docs.base, total: docs.headroom.total };
+    performed.push(await record(state, docsTrimActionKey, { kind: 'fault', work: filed.key, principal: null, state: 'done', detail: `Filed ${filed.key} to restore documentation headroom (${docs.headroom.total} of ${docs.headroom.budget} words on ${docs.base}); nothing more is filed this saturation episode`, attempts, cycle: state.cycle }, now(), effects.persist));
   } catch (error) {
     performed.push(await record(state, docsTrimActionKey, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `Could not file the documentation trim item: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist));
   }
