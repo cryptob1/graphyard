@@ -248,10 +248,14 @@ export function measure(work, now, options, summarize, context = {}) {
   const untilMs = options.until ? Date.parse(options.until) : null;
   // Without ledger rows in hand there is nothing to classify: the claim's window and verdict are
   // still reported, and the classification is absent rather than empty.
+  // The before side covers exactly the ledger range read for it (`ledger.readSince`), named, so
+  // an unread stretch is never reported as a stretch without rework.
+  const beforeSince = ledger?.readSince ?? options.since ?? null;
+  const rounds = ledger && { ...ledger, rework: (ledger.rework ?? []).filter(event => event.work_id !== claim.itemId) };
   const findings = sinceMs === null || !ledger ? null : {
-    basis: claim.window.basis, since: claim.window.since, until: options.until ?? null,
-    before: classifyRounds(work, ledger, { since: options.since ? Date.parse(options.since) : null, until: sinceMs }),
-    after: classifyRounds(work, ledger, { since: sinceMs, until: untilMs }),
+    basis: claim.window.basis, since: claim.window.since, until: options.until ?? null, beforeSince,
+    before: classifyRounds(withoutClaim(work, claim.item), rounds, { since: beforeSince ? Date.parse(beforeSince) : null, until: sinceMs }),
+    after: classifyRounds(withoutClaim(work, claim.item), rounds, { since: sinceMs, until: untilMs }),
     reconciliation: null,
   };
   if (findings) findings.reconciliation = reconcile(claim.after, findings.after);
@@ -275,9 +279,16 @@ function reconcile(summary, classification) {
   return { summaryRounds, ledgerRounds, residual, statement };
 }
 
+/**
+ * The claim item itself is the change, not a delivery after it: its own merge instant bounds the
+ * window, so it is left out of both sides and named as excluded, whatever it would do to a figure.
+ */
+const withoutClaim = (work, key) => work.filter(item => item.key !== key);
+
 /** The claim measurement: window, before/after summaries, verdict, and the follow-up a miss names. */
 export function claimMeasurement(work, now, options, summarize, context = {}) {
   const claim = work.find(item => item.key === options.claim) ?? null;
+  const population = withoutClaim(work, options.claim);
   const window = claimWindow(claim);
   const baseline = { median: options.baselineMedian, source: options.baselineMedian === reworkClaim.baselineMedian
     ? `the pre-merge median of ${reworkClaim.baselineMedian} recorded in GY-136's description; fixed, never re-measured to pass`
@@ -285,8 +296,8 @@ export function claimMeasurement(work, now, options, summarize, context = {}) {
   const minimumItems = reworkClaim.minimumItems;
   if (!window.since) return { item: options.claim, statement: claimStatement(options.claim), baseline, minimumItems, delivered: false,
     mergeSha: null, window, containment: null, deployed: null, before: null, after: null, judged: false, verdict: 'not judged', reason: window.reason, followUp: null };
-  const before = summarize(work, now, { since: options.since, until: window.since });
-  const after = summarize(work, now, { since: window.since, until: options.until });
+  const before = summarize(population, now, { since: options.since, until: window.since });
+  const after = summarize(population, now, { since: window.since, until: options.until });
   const judged = after.measured >= minimumItems;
   const met = judged && after.reworkRounds.median < baseline.median;
   const verdict = met ? 'verified' : judged ? 'unverified' : 'not judged';
@@ -300,7 +311,8 @@ export function claimMeasurement(work, now, options, summarize, context = {}) {
       context.containment ? `Containment of merge ${String(context.containment.mergeSha ?? '').slice(0, 12)} in the deployed revision: ${context.containment.contains === null ? `unknown (${context.containment.reason})` : context.containment.contains} (informational).` : '',
       `Re-run: node scripts/measure-pipeline-speed.mjs --claim ${options.claim} --record .graphyard/measurements/rework-claim`].filter(Boolean).join('\n'),
   };
-  return { item: options.claim, statement: claimStatement(options.claim), baseline, minimumItems, delivered: true,
+  return { item: options.claim, itemId: claim.id ?? null, statement: claimStatement(options.claim), baseline, minimumItems, delivered: true,
+    excluded: [{ key: options.claim, reason: `${options.claim} is the change measured: its merge bounds the window, so it is not a delivery after its own merge` }],
     mergeSha: claim.delivery?.mergeSha ?? null, window, containment: context.containment ?? null, deployed: context.deployed ?? null,
     before, after, judged, verdict, reason, followUp };
 }
@@ -319,6 +331,7 @@ export function render(report) {
     lines.push(`  Window ${claim.window.since ?? 'unknown'} → ${report.window.until ?? report.measuredAt} (${claim.window.basis}) — ${claim.window.reason}`);
     if (claim.delivered) {
       lines.push(`  Verdict: ${claim.reason}`);
+      for (const excluded of claim.excluded ?? []) lines.push(`  Excluded: ${excluded.key} — ${excluded.reason}`);
       lines.push(`  Coverage: ${claim.after.coverage.statement}`);
       if (claim.deployed) lines.push(`  Deployed revision ${claim.deployed.revision ?? 'unknown'}${claim.deployed.revisionSource ? ` (from ${claim.deployed.revisionSource})` : ''}; contains ${claim.item}'s merge: ${claim.containment?.contains === null || claim.containment?.contains === undefined ? `unknown (${claim.containment?.reason ?? 'not checked'})` : claim.containment.contains} (informational)`);
       const findings = report.findings;
@@ -326,7 +339,8 @@ export function render(report) {
         for (const side of ['before', 'after']) {
           const rounds = findings[side].rounds;
           const named = reworkCauses.filter(cause => rounds.causes[cause]).map(cause => `${cause} ${rounds.causes[cause]}`).join(', ') || 'none';
-          lines.push(`  Rework rounds ${side} ${findings.since}: ${rounds.total} counted (${named}); mechanical share ${rounds.mechanicalShare === null ? 'n/a (no classified finding rounds)' : `${Math.round(rounds.mechanicalShare * 100)}% of ${rounds.findingRounds} finding round(s)`}; ${findings[side].skipped.noCandidate} rework(s) of items with no candidate named are not rounds`);
+          const range = side === 'before' ? `${findings.beforeSince ?? 'the ledger start'} → ${findings.since}` : `${findings.since} → ${findings.until ?? report.measuredAt}`;
+          lines.push(`  Rework rounds ${side} the merge (${range}): ${rounds.total} counted (${named}); mechanical share ${rounds.mechanicalShare === null ? 'n/a (no classified finding rounds)' : `${Math.round(rounds.mechanicalShare * 100)}% of ${rounds.findingRounds} finding round(s)`}; ${findings[side].skipped.noCandidate} rework(s) of items with no candidate named are not rounds`);
         }
         if (findings.after.unclassifiedTotal) lines.push(`  Unclassified rounds since the merge: ${findings.after.unclassifiedTotal}, quoted in the recorded JSON for audit`);
         lines.push(`  Reconciliation: ${findings.reconciliation.statement}`);
@@ -389,7 +403,11 @@ export async function main(argv = process.argv.slice(2), env = process.env, deps
     const containment = claimContainment({ revision, mergeSha: claim?.delivery?.mergeSha ?? null, claim: options.claim, repository: deps.repository ?? process.cwd() }, deps.run);
     context.deployed = { revision, revisionSource: source, version: status.release?.version ?? null };
     context.containment = { ...containment, mergeSha: claim?.delivery?.mergeSha ?? null, revision };
-    context.ledger = deps.ledger ?? (await readReworkLedger(read, window.since, options.until ?? null));
+    // The before side is read over a window of the same length as the after side (or from --since),
+    // so the mechanical share on each side of the merge is measured, not left empty.
+    const afterEnd = options.until ? Date.parse(options.until) : now;
+    const readSince = options.since ?? new Date(Math.max(0, Date.parse(window.since) - Math.max(0, afterEnd - Date.parse(window.since)))).toISOString();
+    context.ledger = deps.ledger ?? { ...(await readReworkLedger(read, readSince, options.until ?? null)), readSince };
     context.eventsRead = context.ledger.eventsRead;
   }
   const report = measure(snapshot.work, now, options, deps.summarize ?? await summarizer(), context);

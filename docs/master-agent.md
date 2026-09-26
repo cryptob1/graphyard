@@ -75,15 +75,15 @@ A pass is trusted only when that stripped run failed with a case executed; other
 
 ### Measuring the prereview-proof claim (GY-136)
 
-GY-115 moves a candidate's mechanical proofs ahead of the review request on the claim that this removes rework rounds; the claim is measured from the ledger, never asserted by the change that causes it:
+GY-115's claim that prereview mechanical proofs remove rework rounds is measured from the ledger, never asserted:
 
 ```
-GRAPHYARD_URL=… GRAPHYARD_TOKEN_FILE=… node scripts/measure-pipeline-speed.mjs --claim GY-115 --record .graphyard/measurements/rework-claim
+node scripts/measure-pipeline-speed.mjs --claim GY-115 --record .graphyard/measurements/rework-claim
 ```
 
-- **Window**: deliveries merged after GY-115's merge commit. The start is the deployment observation that a release carrying it was serving; without one it is the merge instant, named in the report as the weaker basis — a merge is not a deployment. Whether the deployed revision contains the merge (git ancestry) is reported beside it, informational only.
-- **Counted**: the median of `speed.reworkRounds` over the window's measured deliveries — timelines replayed from the events ledger, so incomplete coverage is named, never hidden — against the fixed pre-merge median of 2 recorded in GY-136, judged only once at least ten deliveries are measured. A miss is the finding, with the measured values and a named follow-up and exit code 2: the window, the population and the baseline are never narrowed or relaxed to pass.
-- **Causes**: ledger `rework` events of items with a submission, deduplicated per head and cause, classified by the decision binding (`:proof:` and `:ci:` → mechanical; `:threads:` and `:verdict:` → review; `:conflict:` and `:sync:` → integration), with the loop's verbatim reason templates as fallback for direct reworks. The mechanical share (mechanical ÷ mechanical + review finding rounds) is reported for the same window so a reduction that came from somewhere else is not credited to the change; the classification is reconciled against the speed summary's round count with any residual named.
+- **Window**: deliveries merged after GY-115's merge commit (named), GY-115 excluded. It starts at the deployment observation of a release carrying it, else at the merge instant, named as the weaker basis. Deployed-revision ancestry is informational.
+- **Counted**: the median of `speed.reworkRounds` (ledger-replayed timelines, coverage named) against the fixed pre-merge median of 2, judged over at least ten deliveries. A miss is the finding: measured values, a named follow-up, exit code 2; window, population and baseline are never narrowed.
+- **Causes**: `rework` events of submitted items, per head and cause, over the window and an equal-length window before the merge (or `--since`), classified by decision binding (`:proof:`, `:ci:` mechanical; `:threads:`, `:verdict:` review; `:conflict:`, `:sync:` integration), else the loop's reason templates. The mechanical share of finding rounds is reported for both, reconciled against the summary's count.
 
 ## Guarded merges
 
