@@ -11,8 +11,7 @@ import { defaultParallelTips, describeTipWindow, maxParallelTips, mergeParallelT
 import { server } from '../src/server.js';
 import { daemonEffects } from '../src/master-daemon.js';
 import { buildMasterStatus, masterConfigSchema } from '../src/master.js';
-import { mergeParallelTips } from '../src/master/profiles.js';
-import { mergeQueueStatus } from '../src/cli/master-status.js';
+import { mergeParallelTips, mergeQueueStatus } from '../src/master/profiles.js';
 import { computeFlow, queueWait, type FlowDataset, type FlowFact } from '../src/flow-analytics.js';
 import { evaluate, type Work } from '../src/model.js';
 import { prSteps } from '../web/pr-steps.js';

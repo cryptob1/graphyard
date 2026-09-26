@@ -39,7 +39,7 @@ The gate also requires CI from `GITHUB_CI_APP_IDS` Apps, current-head approval, 
 
 ## Merge queue
 
-A candidate enters once its gates pass. Its speculative tip (predicted base merged in), pushed onto the candidate branch and `refs/graphyard/queue/KEY`, binds checks, review and proof. A failed check, requested changes, revoked proof, conflict or rework ejects it to re-enter, repaired, at the back. One conflicting only with entries ahead re-enters unchanged once one lands or leaves; one leaving validation is skipped until revalidated. The App passes the check for an authorized head and its merge group, then asks GitHub to merge (queue, auto-merge or [direct](#direct-merges)); protection decides; withdrawal fails and dequeues it. `master status` names refusals `merge.enqueue.refused`.
+A candidate enters once its gates pass. Its speculative tip (predicted base merged in), pushed onto the candidate branch and `refs/graphyard/queue/KEY`, binds checks, review and proof. A failed check, requested changes, revoked proof, conflict or rework ejects it to re-enter, repaired, at the back. One conflicting only with entries ahead of it re-enters unchanged once one lands or leaves; one leaving validation is skipped until revalidated. The App passes the check for an authorized head and its merge group, then asks GitHub to merge (queue, auto-merge or [direct](#direct-merges)); protection decides; withdrawal fails and dequeues it. `master status` names refusals `merge.enqueue.refused`.
 
 ### Bindings and carry
 
@@ -47,7 +47,7 @@ Reviews and proofs bind one head, base and policy revision. The queue head's tip
 
 ### Parallel tips
 
-`mergeQueue.parallelTips` (master config, default 4; published via `POST /api/merge-queue` like `batchSize`, now only the observed band) tips, each on the last, run CI together; one merges once it and all ahead passed; failing tip k ejects its entry, rebuilding later tips. `master status` `mergeQueue` and [Insights](dashboard.md#insights) show tips, merges/hour, queue wait.
+`mergeQueue.parallelTips` (master config, default 4; published via `POST /api/merge-queue` like `batchSize`, now only the observed band) tips, each on the last, run CI together; one merges once it and all ahead passed; failing tip k ejects its entry, rebuilding later tips. `mergeQueue` (`master status`) and [Insights](dashboard.md#insights) show tips, merges/hour, wait.
 
 ### Direct merges
 
