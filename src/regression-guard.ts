@@ -71,6 +71,22 @@ export function describeRefusal(finding: ScopeFinding, all: Work[]) {
  * delivery claims came from that item, not from this change, so it is attributed to it by name
  * and never read as the candidate reverting it: the control plane restores such a branch.
  */
+/**
+ * GY-744. An open candidate in the head's history that git shows already landed: its head, or its
+ * pull request's merge commit, is an ancestor of the base branch tip. The owning item's recorded
+ * state lags a merge made outside the queue, so the landing check (merge-queue.ts LandingCheck)
+ * asks git before naming any candidate unlanded; such a peer is neither `foreign` nor `carried`,
+ * none of its files is read as a revert, and its merge is reconciled at once (engine.ts).
+ */
+export interface LandedCandidate { key: string; pr: number; head: string; mergeSha: string | null }
+declare module './merge-queue.js' {
+  interface LandingCheck {
+    /** The open candidates in this head's history that git shows already on the base branch tip (GY-744). */
+    landed?: LandedCandidate[];
+  }
+}
+/** Items git showed already on the base branch tip (GY-744), whatever their records say: never unlanded. */
+const landedKeys = (observation: Pick<Observation, 'landing'>) => new Set((observation.landing?.landed ?? []).map(entry => entry.key));
 export type CarriedSubject = { id?: string; candidate?: Work['candidate']; queueHistory?: Work['queueHistory'] };
 export function carriedItems(work: CarriedSubject, observation: Pick<Observation, 'landing'>, all: Work[]): Work[] {
   const candidate = work.candidate;
@@ -80,7 +96,8 @@ export function carriedItems(work: CarriedSubject, observation: Pick<Observation
     return !item?.queue || item.queue.sequence > predicted!.sequence;
   });
   const keys = new Set([...departed, ...(observation.landing?.foreign ?? []).map(entry => entry.key)]);
-  return all.filter(item => keys.has(item.key) && item.id !== work.id && item.stage !== 'done' && !item.observation?.merged);
+  const landed = landedKeys(observation);
+  return all.filter(item => keys.has(item.key) && !landed.has(item.key) && item.id !== work.id && item.stage !== 'done' && !item.observation?.merged);
 }
 /** How many carried files a refusal names; the count covers every one. */
 const carriedNamed = 10;
@@ -97,7 +114,7 @@ export interface LandingRegression { base: string; path: string; owners: string[
 export function landingRegressions(work: Pick<Work, 'id' | 'plannedFiles'> & CarriedSubject, observation: Pick<Observation, 'scopeFiles' | 'landing'>, all: Work[], generated: readonly string[] = generatedFiles): LandingRegression[] {
   const landing = observation.landing;
   if (!landing) return [];
-  const planned = work.plannedFiles ?? [], found: LandingRegression[] = [], carried = carriedItems(work, observation, all);
+  const planned = work.plannedFiles ?? [], found: LandingRegression[] = [], carried = carriedItems(work, observation, all), landed = landedKeys(observation);
   // A file the bound-base comparison already refuses is reported there, once.
   const reported = new Set(classifyScope(planned, observation.scopeFiles ?? [], generated).filter(finding => finding.refused).map(finding => finding.path));
   for (const finding of classifyScope(planned, landing.files ?? [], generated)) {
@@ -110,13 +127,14 @@ export function landingRegressions(work: Pick<Work, 'id' | 'plannedFiles'> & Car
     }
     // A predicted base holds entries that have not landed: the file belongs to the unlanded
     // candidate whose planned scope or observed diff covers it, when no delivery does.
-    const shipped = shippedBy(finding.path, all);
-    const ahead = shipped.length ? [] : all.filter(item => item.id !== work.id && item.stage !== 'done' && !!item.candidate
+    const shipped = shippedBy(finding.path, all.map(item => landed.has(item.key) && item.observation ? { ...item, observation: { ...item.observation, merged: true } } : item));
+    const ahead = shipped.length ? [] : all.filter(item => item.id !== work.id && item.stage !== 'done' && !landed.has(item.key) && !!item.candidate
       && (inPlannedScope(item.plannedFiles ?? [], finding.path) || (item.observation?.files ?? []).includes(finding.path))).map(item => item.key);
     found.push({ base: landing.base, path: finding.path, owners: [...shipped, ...ahead], adverse: finding.kind !== 'unverified',
       text: `${finding.path}: ${finding.detail.replaceAll('the base branch tip', 'that commit').replaceAll('the base branch', 'that commit')} (${shipped.length ? `shipped by ${shipped.join(', ')}` : ahead.length ? `owned by ${ahead.join(', ')}, ahead of it and not yet landed` : 'no delivered work item claims this path'})` });
   }
   for (const carried of landing.carried ?? []) {
+    if (landed.has(carried.key)) continue;
     const owner = `${carried.key}, unlanded pull request #${carried.pr} at ${carried.head.slice(0, 12)}`;
     for (const file of carried.dropped) found.push({ base: landing.base, path: file.path, owners: [carried.key], adverse: true,
       text: `${file.path}: this head carries ${carried.key}'s commits but not this change — ${file.detail}; merging it would record ${carried.key} merged without it (owned by ${owner})` });

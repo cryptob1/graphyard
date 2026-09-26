@@ -61,7 +61,7 @@ export async function closeWork(services: Services, caller: Principal, id: strin
 }
 
 /** Cancel the item's open dispatch requests, withdraw its human-only request and resolve its agent requests. */
-function settleOpenRequests(work: Work, closure: Closure, now: Date) {
+export function settleOpenRequests(work: Work, closure: Closure, now: Date) {
   const at = now.toISOString(), resolution = `item closed as ${closure.kind}: ${closure.reason}`.slice(0, 2000);
   const cancelled: DispatchRequest[] = [];
   if (work.autoDispatch) {
