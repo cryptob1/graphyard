@@ -4,7 +4,15 @@ import type { Principal } from './work.js';
 // callers that the same command may succeed once the current state is re-read.
 
 export class Refusal extends Error {
-  constructor(message: string, public status = 409) { super(message); }
+  /** `details` travel beside `error` in the response body, so a caller reads them without parsing the prose. */
+  constructor(message: string, public status = 409, public details?: Record<string, unknown>) { super(message); }
+}
+/**
+ * A control-plane response a client was refused, keeping the response body: a caller reads its
+ * structured fields (such as `standingRefusal`) rather than matching the message's wording (GY-265).
+ */
+export class RefusedResponse extends Error {
+  constructor(message: string, public status: number, public body: unknown) { super(message); }
 }
 export class ReconciliationRetry extends Refusal {}
 export class SpeculativeConflict extends Refusal {}

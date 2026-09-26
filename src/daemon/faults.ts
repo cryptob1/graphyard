@@ -12,6 +12,8 @@ import { type DaemonEffects, record } from './effects.js';
 import { loopAttention } from './liveness.js';
 import { daemonSummary } from './run.js';
 import type { Cycle } from './cycle.js';
+import { candidateKey } from './reconcile.js';
+import { checkInvariants, invariantFaultKind, invariantFaults } from '../model/invariants.js';
 
 /** The attention `master status` adds after buildMasterStatus, and its final attribution over the whole list. */
 export interface ReportedAttention { items: AttentionItem[]; attribute?: (status: { work: any[]; attentionItems: AttentionItem[] }) => AttentionItem[] }
@@ -180,7 +182,12 @@ export async function faultStep(cycle: Cycle, assessments: Record<string, Contai
   // them is cycling, so its liveness is not in question here, and a failed cycle is noted once as it happens (noteCycleFailure).
   const loop = loopAttention({ liveness: { ...summary.liveness, state: 'running' }, silence: summary.silence, budget: summary.budget, cost: summary.cost });
   endFailingRuns(state, effects.faultClassPolicy ?? faultClassPolicyFromEnv(process.env), clock);
-  trackFaults(state.faults, cycleFaults(state, snapshot.work, clock, { config, agents: seen, credentials, containment: assessments, status: controlPlane, jobs: snapshot.jobs, reported: reported?.items, attribute: reported?.attribute, loop, herdrUnavailable: !herdrRead.available }),
-    new Date(clock).toISOString(), partial || (herdrRead.available ? false : herdrFaultKinds));
+  // The system invariants (GY-404): properties of the running pipeline no per-item gate can see,
+  // judged every cycle over the same snapshot; each violation is one fault of its class below.
+  const invariants = checkInvariants(state.invariants, { work: snapshot.work, now: clock, thresholds: config.invariants, metrics: state.metrics, approvals: state.approvals,
+    agents: herdrRead.available ? seen : null, build: controlPlane?.build?.commit ?? null,
+    refusedMerges: new Set(snapshot.work.filter(item => item.candidate && state.actions[candidateKey('merge', item)]?.state === 'failed').map(item => item.id)) });
+  trackFaults(state.faults, [...cycleFaults(state, snapshot.work, clock, { config, agents: seen, credentials, containment: assessments, status: controlPlane, jobs: snapshot.jobs, reported: reported?.items, attribute: reported?.attribute, loop, herdrUnavailable: !herdrRead.available }), ...invariantFaults(invariants)],
+    new Date(clock).toISOString(), partial || (herdrRead.available ? false : new Set<string>([...herdrFaultKinds, invariantFaultKind('lingering-sessions')])));
   await fileRecurringFaultClasses(state, effects, snapshot.work, clock, now, performed);
 }
