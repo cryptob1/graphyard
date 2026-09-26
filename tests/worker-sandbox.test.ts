@@ -8,8 +8,7 @@ import { delimiter, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { nonInteractiveLaunch } from '../src/harness.js';
-import { accountLaunch, dispatchWork, launchCommandLimit, loadMasterConfig, setupMaster, workAttentionOwner, type WorkerProfile } from '../src/master.js';
-import { sessionSlotsGrant } from '../src/master/harness.js';
+import { accountLaunch, dispatchWork, launchCommandLimit, setupMaster, workAttentionOwner, type WorkerProfile } from '../src/master.js';
 import { environmentBlocked, environmentBlocker, environmentFailure, grantWorkerPaths, runtimeSandboxes, verifyWorkerSandbox, WorkerSandboxError, workerPaths, writablePaths, type SandboxExec } from '../src/worker-sandbox.js';
 import type { Work } from '../src/model.js';
 import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
@@ -130,9 +129,7 @@ test('integration:unwritable-workspace-fails-launch — a sandbox that denies th
     // The same launch in a sandbox that honours the grant starts, and the typed line carries it.
     sandboxCalls.length = 0;
     const started = await dispatchWork(fixture.main, fixture.item, fixture.profile, [], herdr, [fixture.item], prepare, release, 1, new Date().toISOString(), { sandbox: codexLikeSandbox(sandboxCalls) });
-    // The host verification lock directory rides with them when the managed root exists (GY-612).
-    const slots = sessionSlotsGrant(fixture.main, await loadMasterConfig(fixture.main));
-    assert.deepEqual(started.sandbox?.verified, [fixture.worktree, fixture.gitDir, fixture.commonDir, ...slots]);
+    assert.deepEqual(started.sandbox?.verified, [fixture.worktree, fixture.gitDir, fixture.commonDir]);
     const typed = herdrCalls.find(args => args[0] === 'pane' && args[1] === 'run')![3];
     assert.ok(Buffer.byteLength(typed) <= launchCommandLimit);
     const launched = expandTypedCommand(typed);
