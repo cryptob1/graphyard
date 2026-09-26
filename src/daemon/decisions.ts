@@ -1,5 +1,5 @@
 // Concern: routine decisions — standing verdicts, decision reasons and the approver step.
-import { type Work, type AgentReview, reviewProviderOf, standingEscalations, leaseLossEpoch } from '../model.js';
+import { type Work, type AgentReview, reviewProviderOf, standingEscalations, leaseLossEpoch, RefusedResponse } from '../model.js';
 import { routableScopeRequest, scopeDecisionBinding, scopeDecisionReason } from '../model/scope.js';
 import { baseRefreshConflict, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, speculativeConflictReason, type ReviewThread, describeThread } from '../merge-queue.js';
 import { mechanicalFailure, mechanicalVerdicts } from '../model/mechanical-proofs.js';
@@ -401,18 +401,28 @@ export const reworkGroundsMin = 160;
  * both the bound and the server's check, and this is null: the loop escalates rather than sending a
  * request the server refuses on every retry.
  */
-export function reworkDecisionReason(prefix: string, grounds: string, refused: string[]): string | null {
+export function reworkDecisionReason(prefix: string, grounds: string, refused: string[], action: 'rework' | 'recover' = 'rework'): string | null {
   if (!refused.length) return fitDecisionReason(prefix, grounds, '');
-  const prose = ` This rests on different grounds from refused rework decision${refused.length === 1 ? '' : 's'} ${refused.join(', ')}, which ${refused.length === 1 ? 'was' : 'were'} judged on earlier grounds.`;
-  const bare = ` Answers refused rework decisions ${refused.join(' ')}.`;
+  const prose = ` This rests on different grounds from refused ${action} decision${refused.length === 1 ? '' : 's'} ${refused.join(', ')}, which ${refused.length === 1 ? 'was' : 'were'} judged on earlier grounds.`;
+  const bare = ` Answers refused ${action} decisions ${refused.join(' ')}.`;
   const suffix = [prose, bare].find(text => decisionReasonMax - prefix.length - text.length >= Math.min(reworkGroundsMin, grounds.length));
   return suffix === undefined ? null : fitDecisionReason(prefix, grounds, suffix);
 }
-/** How many standing refusals the server names that a rework request answers by citing them before it gives up. */
+/** How many standing refusals the server names that a rework or recover request answers by citing them before it gives up. */
 export const maxRefusalAnswers = 3;
-/** The refused rework decision the server's refusal of a request names as standing against it, or null. */
-export const refusalNamedIn = (error: string): string | null =>
-  /Decision ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}) \(rework\) with this input\b/.exec(error)?.[1] ?? null;
+const decisionId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/**
+ * The refused decision of `action` the server's refusal of a request names as standing against it,
+ * or null. The server returns it as a field of the 409 body (`standingRefusal`, GY-265), so the
+ * loop's retry does not depend on how the message is worded. Only a server that predates the field
+ * is read from its message, and a rewording there fails closed: the refusal is recorded, not retried.
+ */
+export function refusalNamedIn(error: unknown, action: 'rework' | 'recover' = 'rework'): string | null {
+  const field = error instanceof RefusedResponse ? (error.body as any)?.standingRefusal : undefined;
+  if (field && typeof field === 'object') return field.action === action && typeof field.decision === 'string' && decisionId.test(field.decision) ? field.decision : null;
+  const text = error instanceof Error ? error.message : String(error);
+  return new RegExp(`Decision ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}) \\(${action}\\) with this input\\b`).exec(text)?.[1] ?? null;
+}
 /**
  * Whether the loop may attest that the item's previous worker is stopped. `rework` and `recover`
  * carry that attestation and the engine lowers the containment fence on it, so it rests only on
