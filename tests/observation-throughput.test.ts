@@ -306,3 +306,16 @@ test('unit:observation-lag-visible — master status reports what the workers ac
   assert.deepEqual(observationThroughput(durations, now), { windowMs: 600_000, count: 4, jobsPerMinute: 0.4, medianDurationMs: 12_000, p90DurationMs: 16_000 });
   assert.deepEqual(observationThroughput([{ at: now - 700_000, ms: 5_000 }], now), { windowMs: 600_000, count: 0, jobsPerMinute: 0, medianDurationMs: null, p90DurationMs: null }, 'durations past the window are not throughput');
 });
+
+test('unit:stale-reading-named — an item whose next step is a resync of a stale reading is named in the claim order, so its job is not left behind every named one', async () => {
+  const base = sha('main-stale');
+  const work = item('GY-STALE', 530, sha(`head-stale-${base}`), base);
+  // An approved, green candidate whose only reading is three hours old: its gate refuses only the stale
+  // reading (2026-09-26: GY-615, GY-646, GY-710 sat in merge for hours; GY-393, GY-430 in test for three).
+  const stale = { ...work, observation: observed(work, new Date(Date.now() - 3 * 3_600_000).toISOString()) as Work['observation'] } as Work;
+  const evaluated = { ...stale, ...evaluate(stale, [stale], new Date(), [CI]) } as Work;
+  assert.equal(nextAction(evaluated, [evaluated], new Date())?.kind, 'resync', 'its next step is a fresh reading');
+  assert.ok(!firstObservationOwed(evaluated));
+  assert.ok(waitsOnObservation(evaluated, [evaluated]));
+  assert.ok(observationClaimOrder([evaluated], 1).includes(evaluated.id), 'its job is named for claiming');
+});
