@@ -51,6 +51,8 @@ A harness classifier refuses routine administration; `master harness claude --ap
 
 Each item has one typed action (`nextAction`): `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment` or `escalate`. Executors claim rows under their own credential; `escalate` and `request-rework` are judgements (`actions.needsHuman`). `graphyard init` starts `graphyard-executor@N` user units; `master executors restart` moves them to the current release.
 
+A `resync` completes only on a fresh observation (GY-607). The executor calls `POST /api/work/:id/resync` with `{ since }`, the time of its claim. The server wakes the item's observation job and answers with `observed`, `observedAt` and `job`, the job's `availableAt`, `lockedUntil`, `attempts`, `error`, `heldUntil` and `heldReason`. With `wake: false` the call only reads. The executor waits up to 90 seconds for an observation newer than its claim. If none arrives, the attempt fails with `no observation newer than the claim was saved` and the job's condition. Three such claims in a row stall the row, and `master status` names the item and that condition. Claiming, renewing or settling a row changes only action bookkeeping, so an observation read before that write is still saved; any other change since the read still refuses it.
+
 Three failures with an unchanged reason mark a row stalled rather than retrying (a fleet that looks idle): once in no count and no list, it shows in `actions.stalled` and on the item's own card; backoff, doubling from one minute, never outlives it. Eight escalate it (half-hourly); ticks requeue ownerless items (`liveness.violations`).
 
 ### Loop failure recovery
