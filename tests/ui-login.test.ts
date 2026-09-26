@@ -83,6 +83,10 @@ test('unit:login-single-column the brand, heading, tagline, status or form and h
   assert.ok(rule('.login>*').includes('margin-left:0') && rule('.login>*').includes('max-width:100%'), 'every child of .login shares its left edge and width');
   assert.ok(rule('.login .brand').includes('padding:0'), 'the brand has no inset of its own');
   assert.ok(rule('.login-help').includes('display:block'), 'the helper text is a block');
+  // GY-260: no older descendant rule outranks .login-form's margin (0,1,1 beats 0,1,0) or styles a helper the page no longer renders.
+  assert.doesNotMatch(css, /\.login form\{/, 'no .login form rule overrides .login-form');
+  assert.doesNotMatch(css, /\.login small\{/, 'no dead .login small rule');
+  assert.ok(rule('.login-form').includes('margin:35px 0 0'), 'the form sits flush above the helper like every other state');
 });
 
 test('unit:login-verify-states verifying shows progress and resolves as pending, timeout, rejected or accepted', async () => {
@@ -199,4 +203,11 @@ test('unit:login-screenshots-present the browser suite captures the sign-in page
     assert.deepEqual([...image.subarray(0, 8)], [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], `${state}-${width}.png is a PNG`);
     assert.equal(image.readUInt32BE(16), width, `${state}-${width}.png is ${width} px wide`);
   }
+});
+
+test('unit:login-polling-rejects-403 the dashboard polling read returns to the sign-in form on 403 as well as 401, like verifyToken and firstLoad', () => {
+  const main = readFileSync(new URL('web/main.tsx', root), 'utf8');
+  const checks = [...main.matchAll(/if \(response\.status === 401[^)]*\) throw Object\.assign\(new Error\(REJECTED_NOTICE\)/g)].map(match => match[0]);
+  assert.equal(checks.length, 2, 'firstLoad and the polling read each reject the token');
+  for (const check of checks) assert.match(check, /response\.status === 401 \|\| response\.status === 403/, 'a 403 is a rejected token too');
 });
