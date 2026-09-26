@@ -179,3 +179,74 @@ test('unit:launch-warns-destructive-globs — worker and producer requests tell 
     assert.match(request, /outside a directory you created yourself with mktemp -d/, name);
   }
 });
+
+const menu = (...question: string[]) => [...question, ' ❯ 1. Yes', '   2. No'].join('\n');
+
+test('unit:destructive-prompt-classifies-command — the command a prompt would run, not a word in its prose, makes it destructive (GY-223)', () => {
+  // Benign yes/no prompts that only mention a broad word are unknown: failed after 5 minutes, not declined.
+  for (const screen of [
+    menu(' Remove the trailing whitespace from 3 files?'),
+    menu(' Force a refresh of the model list before continuing?'),
+    menu(' Delete key bindings are not configured. Configure them now?'),
+    menu(' Run npm run format to overwrite nothing but formatting?'),
+  ]) assert.equal(classifyRuntimePrompt(screen)!.kind, 'unknown', screen);
+  // A destructive command, at a command position and inside a box border, is declined.
+  for (const screen of [
+    dangerousRm,
+    dangerousRm.replaceAll('   rm -rf', '│  rm -rf').replace('Dangerous rm operation on statically-unresolvable target:', 'Permission required:'),
+    menu('● Bash(cd /srv/app && git reset --hard origin/main)', ' Do you want to proceed?'),
+    menu('   find build -name "*.o" | xargs -0 rm -f', ' Do you want to proceed?'),
+    menu('   git push -f origin HEAD', ' Do you want to proceed?'),
+    menu('   mv generated/ "$OUT"', ' Do you want to proceed?'),
+    menu(' This action cannot be undone. Continue?'),
+  ]) assert.equal(classifyRuntimePrompt(screen)!.kind, 'destructive-command', screen);
+  // A command's own inline confirmation is declined with `n`.
+  const inline = classifyRuntimePrompt("$ rm -i notes.txt\nrm: remove regular file 'notes.txt'? [y/N]")!;
+  assert.equal(inline.kind, 'destructive-command');
+  assert.deepEqual(inline.keys, ['n', 'Enter']);
+  assert.equal(classifyRuntimePrompt('Remove unused imports? [y/N]')!.kind, 'unknown', 'prose alone is not a destructive command');
+});
+
+test('unit:launched-session-prompt-on-handle — a reviewer blocked at a prompt carries it on its own session handle, as a worker does (GY-223)', async () => {
+  const { directory, master } = await setup();
+  try {
+    const reviewer: NonNullable<Work['sessions']>[number] = { id: 'review-request-1', kind: 'review', principal: 'coordinator', epoch: null, runtime: 'claude', host: 'machine-a', agentName: 'graphyard-reviewer-1',
+      role: 'review', head: 'a'.repeat(40), workspace: 'w1', tab: null, pane: 'w1:p7', attach: 'herdr pane attach w1:p7', transcript: null, subject: 'GY-174: review aaaaaaaaaaaa (PR #7)',
+      startedAt: iso(-60_000), updatedAt: iso(-60_000), endedAt: null, state: 'running', outcome: null };
+    // No worker holds the item; its reviewer session is the one blocked.
+    const run = async (screen: string) => {
+      const item = { current: held({ lease: null, sessions: [reviewer] } as Partial<Work>) };
+      const { log, effects } = harness(screen, item);
+      const agent: HerdrAgent = { name: 'graphyard-reviewer-1', pane_id: 'w1:p7', agent_status: 'blocked' };
+      const order: string[] = [];
+      Object.assign(effects, {
+        agents: () => [agent],
+        launchedSessions: async () => [{ role: 'reviewer', record: 'review-1', profile: 'reviewer-a', agentName: 'graphyard-reviewer-1', pane: 'w1:p7', work: 'GY-174', requestId: 'review-request-1' }],
+        endSession: async () => { order.push('ended'); },
+        relaunch: async () => { order.push('relaunched'); return { profile: 'reviewer-b' }; },
+        // Only the reviewer's handle is followed; the dispatch step may register a worker's in the same cycle.
+        recordSession: async (_work: Work, handle: { id: string; state?: string; outcome?: string }) => { if (handle.id !== 'review-request-1') return; order.push(`handle:${handle.state}`); log.sessions.push(handle); },
+      } satisfies Partial<DaemonEffects>);
+      return { log, effects, order, state: emptyDaemonState(master) };
+    };
+
+    const answered = await run(dangerousRm);
+    await runCycle(master, answered.state, answered.effects, () => clock + 20_000);
+    assert.deepEqual(answered.log.keys, [['2']], 'the reviewer\'s destructive prompt is declined');
+    const handle = answered.log.sessions.at(-1) as { id: string; kind: string; state: string; outcome: string };
+    assert.equal(handle.id, 'review-request-1', 'on the handle its launcher registered');
+    assert.equal(handle.kind, 'review');
+    assert.equal(handle.state, 'running');
+    assert.match(handle.outcome, /Dangerous rm operation/);
+    assert.match(handle.outcome, /with "2\. No"/);
+
+    const unknown = await run(unknownPrompt);
+    await runCycle(master, unknown.state, unknown.effects, () => clock);
+    assert.match(unknown.log.sessions.at(-1)!.outcome!, /waiting on input.*A new version of the runtime is available/);
+    await runCycle(master, unknown.state, unknown.effects, () => clock + blockedPromptFailMs);
+    const closed = unknown.log.sessions.at(-1)!;
+    assert.equal(closed.state, 'finished');
+    assert.match(closed.outcome!, /closed as failed: blocked for 5 minutes on a runtime prompt \(the loop cannot classify it\)/);
+    assert.deepEqual(unknown.order.slice(-3), ['ended', 'handle:finished', 'relaunched'], 'the handle ends before the relaunch reopens it');
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});

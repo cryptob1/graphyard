@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { stages, type Stage } from './work.js';
 import { faultClassOriginSchema } from './fault-classes.js';
+import { reviewFollowUpsOriginSchema } from './machine-backlog.js';
 
 // work.ts spreads the origin schema into createSchema, so both modules reference each other; the
 // stage enum is resolved at parse time to keep that cycle free of evaluation order.
@@ -109,7 +110,7 @@ export function interventionPolicyFromEnv(env: NodeJS.ProcessEnv = process.env):
 /**
  * Where a work item came from when Graphyard opened it from feedback rather than an operator's
  * intent: a recurring intervention pattern, with the instances it links as evidence, or an
- * operator's judgement about delivered work. Recorded on the item at creation and never edited.
+ * operator's judgement about delivered work. Recorded on the item at creation and never edited, but for a review follow-up item's findings, which a later approval of its parent appends to.
  */
 export interface InterventionPattern {
   kind: InterventionKind; stage: Stage | null;
@@ -131,6 +132,9 @@ export const workOriginSchema = z.object({
   judgement: z.object({ id: z.string().uuid(), verdict: z.enum(judgementVerdicts), work: z.string().nullable(), page: z.string().nullable(), by: z.string(), at: z.string() }).strict().optional(),
   // A recurring fault class the master loop filed the item for (GY-173): the class the item closes.
   faultClass: faultClassOriginSchema.optional(),
+  // The parent a review follow-up item collects findings for (GY-402), and their union: the one
+  // origin that grows, as a later approval of the parent appends to it (model/machine-backlog.ts).
+  reviewFollowUps: reviewFollowUpsOriginSchema.optional(),
 }).strict();
 export type WorkOrigin = z.infer<typeof workOriginSchema>;
 
