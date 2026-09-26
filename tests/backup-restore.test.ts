@@ -320,7 +320,7 @@ test('db fence ends every open writer and leaves the database read-only for new 
   // An abandoned migration lifts the fence.
   const released = JSON.parse((await run(process.execPath, [launcher, 'db', 'fence', '--release'], { env, cwd: scratch })).stdout);
   assert.deepEqual({ fenced: released.fenced, readOnly: released.readOnlyForNewSessions }, { fenced: false, readOnly: false });
-  const after = new Store(url('fenced'));
-  await write(after.pool);
-  await after.close();
+  const writable = new Store(url('fenced'));
+  await write(writable.pool);
+  await writable.close();
 });
