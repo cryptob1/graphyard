@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { baseRefreshNeeded, pendingBaseRefresh, predictQueue, queuePlacement, queueRef, queueSequencingReason } from '../src/merge-queue.js';
 import { evaluate, type Evidence, type Observation, type Work } from '../src/model.js';
 import { refusalAction } from '../src/model/next-action.js';
-import { checkStates, prSteps } from '../web/pr-steps.js';
+import { checkStates, prSteps } from '../src/model/pr-steps.js';
 
 // GY-292: a merge moves main under every open candidate. Only the merge-queue head (through its
 // speculative tip) and a candidate that conflicts with the new base are brought onto it; the rest

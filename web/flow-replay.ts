@@ -1,4 +1,6 @@
-import { stepIds, type StepId } from './pr-steps';
+import { stepIds, type StepId, type StepTransition } from '../src/model/pr-steps';
+
+export type { StepTransition };
 
 /**
  * The Insights Flow replay (GY-161), built only from recorded history. The control plane records
@@ -16,7 +18,6 @@ import { stepIds, type StepId } from './pr-steps';
 export const replaySeconds = 20;
 export const replayWindowMs = 24 * 60 * 60 * 1000;
 
-export interface StepTransition { key: string; from: StepId | null; to: StepId | null; at: string }
 export interface ReplayFrame {
   key: string; step: StepId | null; rework: boolean;
   /** When it happened, and where that falls in the replay, from 0 (24 hours ago) to 1 (now). */
