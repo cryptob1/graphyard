@@ -1,6 +1,6 @@
 /**
  * A fault's wording less the figures that move while it stands: ages, counts, times and commit
- * hashes. trackFaults (fault-record.ts) keys a standing fault by it, so a line restating the same
+ * hashes. trackFaults (fault-classes.ts) keys a standing fault by it, so a line restating the same
  * fault with new figures — a base branch tip advancing under a standing merge-base dismissal — is
  * the same instance, not a new one (GY-486). Browser-safe.
  */
