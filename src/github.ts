@@ -1759,8 +1759,13 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
   /**
    * Whether `head` merges cleanly onto `base`, without writing to any branch a person or a check
    * reads (GY-375): the merge is tried on a scratch branch created at `head` for this one check and
-   * deleted afterwards. Returns the conflict, or null when the merge is clean. GitHub has no
-   * read-only merge check; `[skip ci]` keeps the scratch merge commit from starting a workflow.
+   * deleted afterwards. Returns the conflict, or null when the merge is clean.
+   *
+   * GitHub has no read-only merge check. The compare API reports ancestry, never a conflict, and
+   * the merges API merges only into a branch, so the scratch ref must live under refs/heads.
+   * `[skip ci]` keeps the scratch merge commit from starting a workflow; the branch creation itself
+   * is a push that `on: push` workflows and branch rulesets see. A ruleset refusal fails the job
+   * with GitHub's refusal, and a failed delete is logged, not hidden (GY-390).
    */
   async testMerge(key: string, head: string, base: string): Promise<string | null> {
     const branch = mergeCheckBranch(key);
@@ -1772,8 +1777,9 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
       if (!(error instanceof SpeculativeConflict)) throw error;
       return error.message;
     } finally {
-      // A scratch branch left behind by a failed delete is overwritten by the next check.
-      await this.request(`/git/refs/heads/${branch}`, 'DELETE').catch(() => {});
+      // A scratch branch left behind by a failed delete is overwritten by the next check, but it
+      // is visible in the repository until then, so the failure is named.
+      await this.request(`/git/refs/heads/${branch}`, 'DELETE').catch(error => console.error(`Graphyard could not delete merge-check branch ${branch}: ${error instanceof Error ? error.message : String(error)}`));
     }
   }
   /**
@@ -1956,12 +1962,13 @@ async function advanceQueue(engine: Engine, github: GitHub, work: Work, job: { w
   }
 }
 /**
- * Brings one in-flight candidate onto the base branch tip it no longer contains. The queue owns
- * its own entries, so this is every other submitted candidate: the merge, the record of what it
- * produced, and the binding carry are all the control plane's, and no worker is asked for a round.
+ * Answers one in-flight candidate that GitHub reports conflicting with the base branch tip. The
+ * queue owns its own entries, so this is every other submitted candidate. Since GY-375 nothing is
+ * written to the candidate's branch: a test merge on a scratch branch either disproves GitHub's
+ * reading, which is recorded, or confirms the conflict, which goes back to the worker.
  */
 async function refreshBase(engine: Engine, github: GitHub, work: Work, job: { work_id: string; token: string }, guard: (snapshot: Work, success: boolean) => () => Promise<void>, hold: (feature: PermissionFeature) => string | null) {
-  // The refresh writes a merge commit onto the candidate's branch; without Contents: write the
+  // The refresh's test merge creates and writes a scratch branch; without Contents: write the
   // call can only 403. The candidate keeps its held base and waits for the permission instead.
   const held = hold('merge-queue');
   if (held) return { work, published: false, held };
