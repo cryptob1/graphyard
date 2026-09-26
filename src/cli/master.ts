@@ -64,6 +64,8 @@ export const masterCommands = defineCommands([
       '                                while the attempt keeps its lease',
       '  master decide GY-N ACTION [JSON|@FILE] [--precedent ID[,ID]] [--context FINGERPRINT] REASON',
       '                                Request a two-party decision, citing precedent and context',
+      '                                A refused rework or recover recorded before refusals kept their',
+      '                                candidate stands against every candidate: cite it by id',
       '  master context GY-N [TRIGGER] [--budget N]  The assembled escalation context a handler sees',
       '  master escalation GY-N [TRIGGER] [--budget N] [precedent|KIND]',
       '                                Spawn a fresh handler on that context alone: precedent follows',

@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { isClosed } from './closure.js';
 import { standingCapacity } from './capacity.js';
 import { scopeRefusalBlocker } from './scope.js';
+import { wording } from './fault-wording.js';
 // Types only from work.ts: work.ts reaches this module through the origin schema (interventions.ts),
 // so a value import back would read work.ts before it has evaluated.
 import type { EscalationTrigger, Work } from './work.js';
@@ -254,12 +255,10 @@ function retain(record: FaultRecord) { // drops the oldest past the bound: first
     if (excess > 0) record.instances.splice(0, record.instances.length, ...record.instances.filter(entry => excess <= 0 || spare.has(entry.id) || excess-- <= 0)); }
   const kept = new Set(record.instances.map(entry => entry.id)); for (const refs of [record.open, record.failing]) for (const key of Object.keys(refs)) if (!kept.has(refs[key])) delete refs[key];
 }
-const wording = (text: string) => (text.toLowerCase().replace(/[0-9a-f]*\d[0-9a-f]*/g, '#').match(/[a-z]+|#/g) ?? []).map(word => word.replace(/s$/, ''))
-  .filter(word => !/^(|i|are|wa|were|ha|have|m|h|d|w|second|minute|hour|day|week)$/.test(word)).join(' ').replace(/#( #)+/g, '#').slice(0, 300);
 /**
  * One cycle's observations against the record. A fault that stood last cycle and still stands is
  * the same instance (its `lastSeenAt` moves); one not seen before, or seen again after it cleared,
- * is a new instance (n of one kind on one subject are n); one no longer observed has ended — unless the cycle's reads were `partial` (wholly or by kind), when an unread source ends nothing. Returns what opened. A fault is its kind, subject and wording less the figures that move while it stands (ages, counts, times): one fixed while another of its kind appears on the subject ends, and the other opens.
+ * is a new instance (n of one kind on one subject are n); one no longer observed has ended — unless the cycle's reads were `partial` (all of them, or a set of kinds), when an unread source ends nothing. Returns what opened. A fault is its kind, subject and wording less the figures that move while it stands (ages, counts, times): one fixed while another of its kind appears on the subject ends, and the other opens.
  */
 export function trackFaults(record: FaultRecord, observations: readonly FaultObservation[], at: string, partial: boolean | ReadonlySet<string> = false): FaultInstance[] {
   const opened: FaultInstance[] = [], seen = new Set<string>(), repeats = new Map<string, number>();

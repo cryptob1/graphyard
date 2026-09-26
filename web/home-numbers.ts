@@ -1,5 +1,5 @@
 import { isDelivered, type Work } from '../src/model';
-import { phaseOf, phases, plainStatus, type Phase } from './plain-status';
+import { phaseOf, phases, plainStatus, type Phase } from '../src/model/plain-status';
 
 const week = 7 * 24 * 60 * 60 * 1000;
 
