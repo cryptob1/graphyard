@@ -18,9 +18,10 @@ import { assertOutsideWorktrees, atomicPrivateText, atomicPrivateWrite, external
 import { type AccountSkip, accountLaunch, agentLaunchPlan, describeObservedExhaustion, type EnvironmentProbe, heldAwareProbe, inspectProfileAccounts, type LaunchRole, NoHealthyAccountError, observedExhaustions, ownLoginHold, type ProfileAccountHealth, recordEnvironmentLog, selectAccount, setupAgentEnvironments } from './environments.js';
 import { closeFailedLaunch, launchStartMs, type RequestDelivery, startAgentSession, withLaunchClose } from './launch.js';
 import { createdHerdrTab, type HerdrAgent, herdrJson } from './herdr.js';
-import { failureText } from './worktrees.js';
+import { allocateManagedCheckout, failureText, settleCheckout } from './worktrees.js';
 import { herdrAttach } from './dispatch.js';
 import type { SessionHandleInput } from '../model/sessions.js';
+import type { FilesystemProbe } from '../install/worktree-root.js';
 import { registeredLaunch } from '../model/session-state.js';
 import { liveReviewRequest } from '../model/dispatch.js';
 import { narrowRoleRuntime, piRuntimeSchema } from '../runner/payloads.js';
@@ -263,9 +264,27 @@ async function abandonLaunch(error: unknown, pane: string | undefined, tabId: st
  * ended when it closes the pane of a decision that settled.
  */
 export const approverSessionId = (decision: string) => `approver:${decision}`;
+/**
+ * A headless approver's run (GY-169), in a directory of its own under the managed worktree root
+ * (GY-391) — never the operator's repository, which the destructive-command guard would otherwise
+ * treat as the run's worktree and let it remove files in. The directory goes when the run ends,
+ * and a reclaim pass takes back one a dead master left behind.
+ */
+async function startHeadlessApprover(root: string, config: MasterConfig, work: Work, decision: string, name: string, token: string, runner: Runner, headless: { fetcher?: typeof fetch; filesystem?: FilesystemProbe }) {
+  const checkout = await allocateManagedCheckout(root, config, 'approval', work.key, work.candidate?.sha ?? '0'.repeat(40), randomUUID(), headless.filesystem);
+  let started: ReturnType<typeof startNarrowRun>;
+  try {
+    started = startNarrowRun({ runner, name, role: 'approver', work: work.key, subject: decision, checkout: checkout.directory,
+      prompt: piApproverPrompt(config, work.key, decision, config.approver!.id, root),
+      options: approverRunOptions(checkout.directory, decision, { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: config.approver!.credentialFile, GRAPHYARD_HOST_ID: config.hostId }, piRuntimeSchema.parse(config.run.pi ?? {}).approverTimeoutMinutes * 60_000),
+      apply: async result => result.ok ? [await applyDecision(config.url, token, work, result.payload, headless.fetcher)] : [] });
+  } catch (error) { await settleCheckout(root, checkout.directory); throw error; }
+  return { ...started, settled: started.settled.finally(() => settleCheckout(root, checkout.directory)) };
+}
+
 export type SessionRegistrar = (handle: SessionHandleInput) => Promise<unknown>;
 export async function launchApprover(root: string, work: Work, decision: string, explicitKind: NonNullable<WorkerProfile['kind']> | undefined, agents: HerdrAgent[], run?: ChildRun, probe: FleetProbe = {}, register?: SessionRegistrar,
-  headless: { runner?: Runner; fetcher?: typeof fetch } = {}) {
+  headless: { runner?: Runner; fetcher?: typeof fetch; filesystem?: FilesystemProbe } = {}) {
   const config = await loadMasterConfig(root);
   const token = await agentToken(root, config, 'approver');
   const retry = `graphyard master approver ${work.key} ${decision} [AGENT_KIND]`;
@@ -280,13 +299,9 @@ export async function launchApprover(root: string, work: Work, decision: string,
   // and `run.runtimes`/`run.pi` configure only an approver the registry does not define.
   const registry = explicitKind ? null : await selectFleetSession(config, 'approver', { name: approverProfile, principal: config.approver!.id }, await heldAwareProbe(config, { runtime: { agents, available: true }, ...probe, work: work.key }));
   if (registry && registry.account.kind === 'pi') {
-    let started: ReturnType<typeof startNarrowRun>;
-    try {
-      started = startNarrowRun({ runner: headless.runner ?? registryRunner(registry.account), name, role: 'approver', work: work.key, subject: decision,
-        prompt: piApproverPrompt(config, work.key, decision, config.approver!.id),
-        options: approverRunOptions(root, decision, { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: config.approver!.credentialFile, GRAPHYARD_HOST_ID: config.hostId }, piRuntimeSchema.parse(config.run.pi ?? {}).approverTimeoutMinutes * 60_000),
-        apply: async result => result.ok ? [await applyDecision(config.url, token, work, result.payload, headless.fetcher)] : [] });
-    } catch (error) { await registry.release(`approver run for ${work.key} failed to start: ${failureText(error).slice(0, 300)}`); throw error; }
+    let started: Awaited<ReturnType<typeof startHeadlessApprover>>;
+    try { started = await startHeadlessApprover(root, config, work, decision, name, token, headless.runner ?? registryRunner(registry.account), headless); }
+    catch (error) { await registry.release(`approver run for ${work.key} failed to start: ${failureText(error).slice(0, 300)}`); throw error; }
     // The run is the session: the registry's slot is given back the moment it ends.
     const settled = started.settled.finally(() => registry.release(`the headless approver run for ${work.key} ended`));
     settled.catch(() => { /* the run's own record carries its failure */ });
@@ -295,11 +310,7 @@ export async function launchApprover(root: string, work: Work, decision: string,
       run: started.record, settled: settled as Promise<RunRecord> | undefined };
   }
   if (!registry && !explicitKind && narrowRoleRuntime(config.run, 'approver') === 'pi') {
-    const pi = piRuntimeSchema.parse(config.run.pi ?? {});
-    const started = startNarrowRun({ runner: headless.runner ?? narrowRunner(pi), name, role: 'approver', work: work.key, subject: decision,
-      prompt: piApproverPrompt(config, work.key, decision, config.approver!.id),
-      options: approverRunOptions(root, decision, { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: config.approver!.credentialFile, GRAPHYARD_HOST_ID: config.hostId }, pi.approverTimeoutMinutes * 60_000),
-      apply: async result => result.ok ? [await applyDecision(config.url, token, work, result.payload, headless.fetcher)] : [] });
+    const started = await startHeadlessApprover(root, config, work, decision, name, token, headless.runner ?? narrowRunner(config.run.pi), headless);
     return { agentName: name, work: work.key, decision, identity: config.approver!.id, pane: null as string | null, runtime: 'pi' as const, delivery: 'request' as RequestDelivery, focusChanged: false, session: null, account: null,
       run: started.record, settled: started.settled as Promise<RunRecord> | undefined };
   }

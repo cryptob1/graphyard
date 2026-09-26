@@ -159,7 +159,7 @@ test('integration:registry-drives-launch — a registry role on a pi account run
   const path = process.env.PATH; process.env.PATH = `${bin}${delimiter}${path}`;
   try {
     const probe = { registry: registry.client, quota: false as const, cacheMs: 0 };
-    const first = await launchApprover(root, item('GY-711'), decision, undefined, [], herdr([]), probe);
+    const first = await launchApprover(root, item('GY-711'), decision, undefined, [], herdr([]), probe, undefined, { filesystem: durable });
     assert.equal(first.runtime, 'pi'); assert.equal(first.pane, null);
     assert.equal(first.account?.environment, 'pi-a');
     await first.settled;
@@ -173,7 +173,7 @@ test('integration:registry-drives-launch — a registry role on a pi account run
     assert.ok(registry.current().sessions.at(-1)!.endedAt, 'the run\'s registry session ends with the run');
 
     registry.mutate('role.set', { role: { name: 'approver', accounts: ['pi-a'], concurrency: 4, policy: { args: [], tools: ['read'], model: 'glm-flash' } }, reason: 'Read-only approvers on the flash model' });
-    await (await launchApprover(root, item('GY-712'), decision.replace('0170', '0173'), undefined, [], herdr([]), probe)).settled;
+    await (await launchApprover(root, item('GY-712'), decision.replace('0170', '0173'), undefined, [], herdr([]), probe, undefined, { filesystem: durable })).settled;
     const [, two] = await runs();
     assert.equal(valueOf(two.args, '--model'), 'zai/glm-5.3-flash');
     assert.equal(valueOf(two.args, '--tools'), 'read');

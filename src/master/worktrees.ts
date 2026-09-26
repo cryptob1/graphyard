@@ -4,7 +4,7 @@ import { statfs, readdir, lstat, rm, mkdir, symlink, writeFile, readFile, rename
 import { resolve, dirname, basename } from 'node:path';
 import type { ChildRun } from '../child-runner.js';
 import type { Work } from '../model.js';
-import { reclaimCommand, type CheckoutReclaimReport, type WorktreeRootHealth, worktreeRootConcerns, type FilesystemProbe, type SessionCheckout, worktreeRoot, verifyWorktreeRoot, worktreeRootMinFreeBytes, allocateSessionCheckout, removeSessionCheckout, inspectWorktreeRoot, worktreeRootBudgetBytes } from '../install/worktree-root.js';
+import { reclaimCommand, type CheckoutReclaimReport, type WorktreeRootHealth, worktreeRootConcerns, type FilesystemProbe, type SessionCheckout, type CheckoutKind, worktreeRoot, verifyWorktreeRoot, worktreeRootMinFreeBytes, allocateSessionCheckout, removeSessionCheckout, inspectWorktreeRoot, worktreeRootBudgetBytes } from '../install/worktree-root.js';
 import type { MasterConfig, MasterRun } from './profiles.js';
 import { assertOutsideWorktrees } from './config.js';
 import { agentOwner, type AttentionItem } from './attention.js';
@@ -353,7 +353,7 @@ export function worktreeRootAttention(health: WorktreeRootHealth): AttentionItem
  * launch, not only at setup — a volume fills, and a configuration is edited — and the allocated
  * directory is held to the same rule as every other path Graphyard owns: outside every worktree.
  */
-export async function allocateManagedCheckout(root: string, config: MasterConfig, kind: 'proof' | 'review', key: string, sha: string, id: string, probe?: FilesystemProbe): Promise<SessionCheckout> {
+export async function allocateManagedCheckout(root: string, config: MasterConfig, kind: CheckoutKind, key: string, sha: string, id: string, probe?: FilesystemProbe): Promise<SessionCheckout> {
   const base = worktreeRoot(root, config);
   await assertOutsideWorktrees(root, base, 'The managed worktree root', { create: true });
   await verifyWorktreeRoot(base, { minFreeBytes: worktreeRootMinFreeBytes(config), probe });
