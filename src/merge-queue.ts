@@ -1,8 +1,5 @@
 import type { Evidence, Observation, ScopeFile, Work } from './model.js';
 import { evidenceBindsCandidate, type ApprovalIdentity, type CarriedApproval, type CarriedProof, type QueueCarry, type RequiredApproval, type TipMerge } from './model/carry.js';
-import { escalationRefusals } from './model/escalation.js';
-import { leadHoldRefusal } from './model/delegation.js';
-import { placeInQueue } from './model/queue.js';
 import { reviewProviderOf } from './model/review.js';
 import { pathScopesOverlap } from './model/scope.js';
 import { queuedRegressions } from './regression-guard.js';
@@ -1248,36 +1245,31 @@ function tipCi(work: Work, ciAppIds: readonly number[] | null): { ci: TipView['c
  */
 export function describeTipWindow(all: Work[], placements: QueuePlacement[], parallelTips: number, ciAppIds: readonly number[] | null = null): Map<string, TipWindowView> {
   const size = Math.max(1, Math.floor(parallelTips));
-  const chain = placements.filter(placement => !placement.passedOver).sort((a, b) => a.position - b.position || a.sequence - b.sequence);
-  const byKey = new Map(all.map(work => [work.key, work]));
-  const tips: TipView[] = [];
-  for (let index = 0; index < Math.min(size, chain.length); index++) {
-    const placement = chain[index], work = byKey.get(placement.key);
-    const published = !!placement.tip && !!work?.candidate && work.candidate.sha === placement.tip;
-    tips.push({ position: index + 1, entries: chain.slice(0, index + 1).map(entry => entry.key), tip: published ? placement.tip : null,
-      ...(published && work ? tipCi(work, ciAppIds) : { ci: 'none' as const }) });
-  }
+  const tips = tipWindowStatus(all, placements, size, ciAppIds);
   const views = new Map<string, TipWindowView>();
-  for (const [index, placement] of chain.entries()) {
+  for (const [index, placement] of validatedChain(placements).entries()) {
     if (index >= size) { views.set(placement.key, { position: index, tips: [], firstFailure: null, validated: false, own: null }); continue; }
     const mine = tips.slice(0, index + 1);
     views.set(placement.key, { position: index, tips: mine, firstFailure: mine.find(tip => tip.ci === 'fail') ?? null, validated: mine.every(tip => tip.ci === 'pass'), own: mine.at(-1) ?? null });
   }
   return views;
 }
-/** The in-flight tips master status shows (GY-498): the window's tips with what they hold and what CI said. */
+/** The placements the window validates, in queue order: every entry not passed over. */
+const validatedChain = (placements: QueuePlacement[]) => placements.filter(placement => !placement.passedOver).sort((a, b) => a.position - b.position || a.sequence - b.sequence);
+/**
+ * The in-flight tips (GY-498): the window's tips with what they hold and what CI said. Master
+ * status reports exactly these, and `describeTipWindow` slices them per entry for the gates, so
+ * the two never diverge.
+ */
 export function tipWindowStatus(all: Work[], placements: QueuePlacement[], parallelTips: number, ciAppIds: readonly number[] | null = null): TipView[] {
-  const size = Math.max(1, Math.floor(parallelTips));
-  const chain = placements.filter(placement => !placement.passedOver).sort((a, b) => a.position - b.position || a.sequence - b.sequence);
+  const size = Math.max(1, Math.floor(parallelTips)), chain = validatedChain(placements);
   const byKey = new Map(all.map(work => [work.key, work]));
-  const tips: TipView[] = [];
-  for (let index = 0; index < Math.min(size, chain.length); index++) {
-    const placement = chain[index], work = byKey.get(placement.key);
+  return chain.slice(0, size).map((placement, index) => {
+    const work = byKey.get(placement.key);
     const published = !!placement.tip && !!work?.candidate && work.candidate.sha === placement.tip;
-    tips.push({ position: index + 1, entries: chain.slice(0, index + 1).map(entry => entry.key), tip: published ? placement.tip : null,
-      ...(published && work ? tipCi(work, ciAppIds) : { ci: 'none' as const }) });
-  }
-  return tips;
+    return { position: index + 1, entries: chain.slice(0, index + 1).map(entry => entry.key), tip: published ? placement.tip : null,
+      ...(published && work ? tipCi(work, ciAppIds) : { ci: 'none' as const }) };
+  });
 }
 /**
  * The window as a batch view (GY-330 shape), recorded on the queue entry so the gates' existing
@@ -1298,12 +1290,16 @@ export function windowBatchView(key: string, view: TipWindowView, parallelTips: 
     : `${view.tips.map(tip => `tip ${tip.position} (${tip.entries.join(', ')}) ${said(tip)}`).join('; ')}`;
   return { batch: 1, size: view.tips.length || 1, members: view.tips.at(-1)?.entries ?? [], tip: view.tips.at(-1)?.tip ?? null, underTest, state, step, summary };
 }
-/** Merges and queue waits, for Insights (GY-498): merges observed in the trailing hour, and the median wait of the entries queued now. */
+/**
+ * Merges and queue waits as master status reports them (GY-498): merges in the trailing hour, by
+ * GitHub's merge time (the delivery's, else the observation's), and the median wait so far of the
+ * entries queued now. Insights reports the same two figures over its window from the flow facts.
+ */
 export interface MergeThroughput { mergesPerHour: number; medianQueueWaitMs: number | null }
 export function mergeThroughput(all: Work[], now: number): MergeThroughput {
   const hourAgo = now - 3_600_000;
-  const mergesPerHour = all.filter(work => work.observation?.merged && (work.observation as { mergedAt?: string }).mergedAt
-    && Date.parse((work.observation as { mergedAt?: string }).mergedAt!) <= now && Date.parse((work.observation as { mergedAt?: string }).mergedAt!) >= hourAgo).length;
+  const mergedAt = (work: Work) => Date.parse(work.delivery?.mergedAt ?? (work.observation?.merged ? work.observation.mergedAt ?? '' : ''));
+  const mergesPerHour = all.filter(work => { const at = mergedAt(work); return at >= hourAgo && at <= now; }).length;
   const waits = predictQueue(all, now).map(placement => placement.waitMs).sort((a, b) => a - b);
   const median = waits.length ? waits.length % 2 ? waits[(waits.length - 1) / 2] : (waits[waits.length / 2 - 1] + waits[waits.length / 2]) / 2 : null;
   return { mergesPerHour, medianQueueWaitMs: median };
@@ -1373,41 +1369,3 @@ export function nextQueueEntries<W extends { id: string; stage: string; queue?: 
   return all.filter(other => other.id !== exclude && other.stage !== 'done' && other.queue).sort((a, b) => a.queue!.sequence - b.queue!.sequence).slice(0, depth);
 }
 
-/**
- * Reconciles one evaluation's queue layer with a parallel-tip window (GY-498). The gate evaluation
- * (`evaluate`) batches by `mergeBatchSize` when `parallelTips` names no window; with one, the
- * queue is re-derived so every entry carries the window of tips it merges behind, its ejection is
- * decided by prefix attribution, and the test and merge gates read the window's validation instead
- * of the batch's combined tip. Everything else about the evaluation — ready, build, review,
- * acceptance — stands. The engine runs this on every observation, so the live queue and every
- * reader of it see one judgement; the mirrors of the merged gate's assembly here and in
- * `evaluate` are kept beside the wording they share.
- */
-export function reconcileWindow<E extends { stage: Work['stage']; gates: { name: string; passed: boolean; reasons: string[] }[]; violations: string[]; queue: QueueEntry | null; queueSequence: number; queueEjection: QueueEjection | null; queueHistory: QueueHistoryEntry[] }>(
-  result: E, work: Work, all: Work[], now: Date, ciAppIds: number[], batchSize: number, parallelTips: number | undefined,
-): E {
-  if (!parallelTips || parallelTips < 1 || (!work.queue && !work.queueEjection && !result.queue)) return result;
-  const candidate = work.candidate, obs = work.observation;
-  const current = !!candidate && !!obs && obs.candidate.sha === candidate.sha && obs.candidate.baseSha === candidate.baseSha;
-  const fresh = current && now.getTime() - Date.parse(obs!.at) < 120_000;
-  const threads = current ? conversationProtectionRefusal(work) : null;
-  const delivery = [...escalationRefusals(work), ...(leadHoldRefusal(work) ? [leadHoldRefusal(work)!] : [])];
-  const eligible = result.gates.filter(gate => gate.name !== 'merge').every(gate => gate.passed) && !result.violations.length && !delivery.length && !threads && !!candidate && !obs?.merged;
-  const windowed = placeInQueue(work, all, now, ciAppIds, eligible, batchSize, parallelTips);
-  const rawTestReasons = work.policy.checks.filter(name => {
-    const checks = current ? obs!.checks.filter(c => c.name === name && ciAppIds.includes(c.appId)) : [];
-    return latestCheck(checks)?.result !== 'success';
-  }).map(name => `Required CI check ${name} has not passed on the current candidate`);
-  const validating = tipValidation(work, windowed.queue, rawTestReasons);
-  const gates = result.gates.map(gate => {
-    if (gate.name === 'test') return validating ? { ...gate, passed: true, reasons: [] } : { ...gate, passed: rawTestReasons.length === 0, reasons: rawTestReasons };
-    if (gate.name !== 'merge') return gate;
-    const reasons = [...(!fresh ? ['GitHub observation missing or older than two minutes'] : []), ...(!obs?.protected ? ['Required Graphyard check and merge-queue branch protection have not been verified'] : []),
-      ...(!obs?.mergeable && !obs?.merged ? ['Pull request is not mergeable against the current base'] : []), ...(threads ? [threads] : []), ...delivery, ...windowed.reasons, ...(validating ?? [])];
-    return { ...gate, passed: reasons.length === 0, reasons };
-  });
-  const first = gates.find(gate => !gate.passed);
-  let stage: Work['stage'] = !work.ready ? 'backlog' : !work.submission ? (work.lease && Date.parse(work.lease.expiresAt) > now.getTime() ? 'build' : 'ready') : (first?.name === 'ready' ? 'build' : first?.name as Work['stage'] ?? 'merge');
-  if (work.stage === 'done') stage = 'done';
-  return { ...result, stage, gates, queue: windowed.queue, queueSequence: windowed.queueSequence, queueEjection: windowed.ejection, queueHistory: windowed.history };
-}

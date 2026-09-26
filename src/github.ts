@@ -1791,7 +1791,8 @@ export async function processJob(engine: Engine, github: GitHub): Promise<boolea
   // due, the merge-queue head's job is claimed first however recently it became due, instead of
   // waiting behind every older entry for a worker to reach it.
   const all = await engine.store.list();
-  const job = await engine.store.takeJob(observationClaimOrder(all, engine.mergeBatchSize));
+  // The band spans the parallel-tip window too (GY-498): every entry validated at once is claimed first.
+  const job = await engine.store.takeJob(observationClaimOrder(all, Math.max(engine.mergeBatchSize, engine.parallelTips)));
   if (!job) return false;
   const startedAt = Date.now();
   let work: Work | undefined;

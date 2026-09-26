@@ -47,9 +47,20 @@ export { approveScopeRequest } from './master-scope.js';
 export const mergeStallAttention = (snapshot: { work: Work[]; now: string }): AttentionItem[] =>
   mergeStalls(snapshot.work, Date.parse(snapshot.now)).map(stall => ({ subject: stall.key, text: stall.text, ...agentOwner('master', stall.next) }));
 
-/** The merge queue as the master runs it (GY-330, GY-498): configuration, in-flight tips, throughput Insights. */
+/**
+ * The merge queue as the control plane runs it (GY-330, GY-498): the batch size and parallel-tip
+ * window the server reports it evaluates by (`/api/status` mergeQueue), else this master's own
+ * configuration before the server reports one; the in-flight tips; throughput Insights.
+ */
+export function mergeQueueWindow(master: MasterConfig, coordinator?: any) {
+  const running = coordinator?.mergeQueue;
+  return { batchSize: Number.isSafeInteger(running?.batchSize) ? running.batchSize as number : mergeBatchSize(master),
+    parallelTips: Number.isSafeInteger(running?.parallelTips) ? running.parallelTips as number : mergeParallelTips(master) };
+}
 export function mergeQueueStatus(master: MasterConfig, snapshot: { work: Work[]; now: string }, coordinator?: any) {
-  return { batchSize: mergeBatchSize(master), parallelTips: mergeParallelTips(master), ...mergeQueueInsights(snapshot.work, Date.parse(snapshot.now), mergeParallelTips(master), Array.isArray(coordinator?.ciAppIds) ? coordinator.ciAppIds : null) };
+  const window = mergeQueueWindow(master, coordinator);
+  return { ...window, configured: { batchSize: mergeBatchSize(master), parallelTips: mergeParallelTips(master) },
+    ...mergeQueueInsights(snapshot.work, Date.parse(snapshot.now), window.parallelTips, Array.isArray(coordinator?.ciAppIds) ? coordinator.ciAppIds : null) };
 }
 // Observation throughput and the queue head's lag live beside the observation schedule they read
 // (src/github.ts); the report reads them from here, as do the tests.
@@ -128,7 +139,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   // an orphaned supervisor rather than a session that finished; it is named with what reclaims it.
   // Reviewer and producer profiles go in with their concurrency (GY-107): status reports, per
   // role, the sessions running against the declared limit and the longest wait for a slot.
-  const queueWindow = { batchSize: mergeBatchSize(master), parallelTips: mergeParallelTips(master) };
+  const queueWindow = mergeQueueWindow(master, coordinator);
   const sessions = await timedStep('build status', () => nameOrphanSupervisors(nameUnresolvedThreads(buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews, master.baseBranch, coordinator, { producers, failures: dispatch.failures, retries }, probeCandidateConflicts(root, snapshot.work), { reviewers: master.reviewers, producers: master.producers }, master.cliPath, queueWindow), snapshot.work, agentOwner),
     snapshot.work, master.workers, runtime, Date.parse(snapshot.now)));
   // A check failed on the clock says so, against its budget; a routed scope request, its approver.

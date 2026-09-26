@@ -7,12 +7,18 @@ import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
-import { defaultParallelTips, describeTipWindow, maxParallelTips, mergeParallelTipsEvent, mergeQueueInsights, predictQueue, queueRef, reconcileWindow, tipValidationPrefix, windowBatchView } from '../src/merge-queue.js';
-import { masterConfigSchema } from '../src/master.js';
+import { defaultParallelTips, describeTipWindow, maxParallelTips, mergeParallelTipsEvent, mergeQueueInsights, predictQueue, queueRef, tipValidationPrefix, windowBatchView } from '../src/merge-queue.js';
+import { server } from '../src/server.js';
+import { daemonEffects } from '../src/master-daemon.js';
+import { buildMasterStatus, masterConfigSchema } from '../src/master.js';
 import { mergeParallelTips } from '../src/master/profiles.js';
 import { mergeQueueStatus } from '../src/cli/master-status.js';
+import { computeFlow, queueWait, type FlowDataset, type FlowFact } from '../src/flow-analytics.js';
 import { evaluate, type Work } from '../src/model.js';
 import { prSteps } from '../web/pr-steps.js';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import { LandedPerDay } from '../web/pages/insights-flow.js';
 
 // GY-498: the merge queue validates speculative tips for the first `mergeQueue.parallelTips`
 // positions at once instead of one combined tip at a time. Each test is named for the proof it
@@ -22,8 +28,8 @@ const keys = ['GY-1', 'GY-2', 'GY-3', 'GY-4', 'GY-5', 'GY-6'];
 const CI_APP = 15368;
 
 /**
- * The live queue driven through the control plane's own gate evaluation — `evaluate` reconciled
- * with the parallel-tip window exactly as the engine runs it — against a fake CI of a fixed
+ * The live queue driven through the control plane's own gate evaluation — `evaluate` under the
+ * parallel-tip window exactly as the engine runs it — against a fake CI of a fixed
  * virtual duration. Every round publishes the tips the queue asks for (publishing never waits for
  * CI), evaluates every entry, lands the entries whose gates all pass in queue order, starts CI on
  * every tip the merge gates name, and advances the virtual clock to the next completion. A tip's
@@ -49,7 +55,7 @@ function driveParallelTips(parallelTips: number, failing: string | null, count =
   const observe = (item: Work, checks: Work['observation'] extends infer O ? O extends { checks: infer C } ? C : never : never) => {
     item.observation = { ...item.observation!, candidate: item.candidate!, baseTip: base.sha, baseTree: trees.get(base.sha)!, checks, at: new Date(clock).toISOString() };
   };
-  const windowed = (item: Work) => reconcileWindow(evaluate(item, items, new Date(clock), [CI_APP], 1), item, items, new Date(clock), [CI_APP], 1, parallelTips);
+  const windowed = (item: Work) => evaluate(item, items, new Date(clock), [CI_APP], 1, parallelTips);
   // The control plane publishing each tip the queue asks for: the entry's own head merged onto its
   // predicted base. Publishing never waits for CI, so the whole chain builds at once.
   const publish = () => {
@@ -171,7 +177,7 @@ function entry(index: number, checks: object[], overrides: Partial<Work> = {}): 
     gates: [{ name: 'merge', passed: false, reasons: [`Merge queue is validating speculative tip ${sha.slice(0, 12)}: Required CI check test has not passed on the current candidate`] }], ...overrides } as unknown as Work;
 }
 
-test('unit:parallel-tips-visible — status shows each in-flight tip (position, entries, CI state), the dashboard names the window, and Insights reports merges per hour and median queue wait', () => {
+test('unit:parallel-tips-visible — status shows each in-flight tip (position, entries, CI state), the dashboard names the window, and status reports merges per hour and median queue wait', () => {
   const all = [entry(0, [pass]), entry(1, [pass]), entry(2, [failing]), entry(3, [running])];
   const placements = predictQueue(all, now), window = 4;
   // The in-flight tips as master status reports them: position, entries, tip, CI state.
@@ -203,7 +209,15 @@ test('unit:parallel-tips-visible — status shows each in-flight tip (position, 
   // The status fields the report carries, through the CLI helper the report is assembled with.
   const master = masterConfigSchema.parse({ version: 1, url: 'http://x', credentialFile: '/c', cliPath: '/cli', repository: 'o/r', baseBranch: 'main', githubAppId: 1, hostId: 'h', masterAgentName: 'graphyard-master', mergeQueue: { parallelTips: 6 } });
   const reported = mergeQueueStatus(master, { work: busy, now: new Date(now).toISOString() }, { ciAppIds: [CI_APP] });
-  assert.deepEqual([reported.batchSize, reported.parallelTips, reported.mergesPerHour, reported.tips.length], [4, 6, 2, 4]);
+  assert.deepEqual([reported.batchSize, reported.parallelTips, reported.mergesPerHour, reported.tips.length], [4, 6, 2, 4], 'before the control plane reports a window, the master\'s own configuration');
+  // Once the control plane reports the window it runs (`/api/status` mergeQueue), status reports that one.
+  const effective = mergeQueueStatus(master, { work: busy, now: new Date(now).toISOString() }, { ciAppIds: [CI_APP], mergeQueue: { batchSize: 2, parallelTips: 2 } });
+  assert.deepEqual([effective.batchSize, effective.parallelTips, effective.tips.length, effective.configured], [2, 2, 2, { batchSize: 4, parallelTips: 6 }], 'the effective window, beside what master.json configures');
+  // Each queue row of master status carries the tips its entry merges behind, and its batch view is the window's.
+  const status = buildMasterStatus({ work: all, now: new Date(now).toISOString() }, [], [], {}, {}, undefined, 'main', { ciAppIds: [CI_APP] } as any, undefined, undefined, undefined, 'graphyard', { batchSize: 4, parallelTips: window });
+  const row = (key: string) => status.queue.find((entry: { key: string }) => entry.key === key) as { tips?: { position: number; entries: string[]; ci: string }[]; batch: { state: string } | null };
+  assert.deepEqual(row('GY-4').tips!.map(tip => [tip.position, tip.entries.length, tip.ci]), [[1, 1, 'pass'], [2, 2, 'pass'], [3, 3, 'fail'], [4, 4, 'running']]);
+  assert.deepEqual([row('GY-3').batch!.state, row('GY-4').batch!.state], ['ejecting', 'waiting']);
   // Master config: `mergeQueue.parallelTips`, default 4, bounded like the batch size.
   const base = { version: 1, url: 'http://x', credentialFile: '/c', cliPath: '/cli', repository: 'o/r', baseBranch: 'main', githubAppId: 1, hostId: 'h', masterAgentName: 'graphyard-master' };
   assert.equal(defaultParallelTips, 4);
@@ -213,12 +227,43 @@ test('unit:parallel-tips-visible — status shows each in-flight tip (position, 
   assert.throws(() => masterConfigSchema.parse({ ...base, mergeQueue: { parallelTips: maxParallelTips + 1 } }));
 });
 
-test('the control plane validates by the published parallel-tip window, read back from the installation ledger', async () => {
+test('unit:parallel-tips-visible — the flow report behind Insights counts merges per hour and the median queue wait, and Insights shows both', () => {
+  const to = '2026-09-25T12:00:00.000Z', hour = 3_600_000, at = (hoursAgo: number) => new Date(Date.parse(to) - hoursAgo * hour).toISOString();
+  const items = ['GY-11', 'GY-12', 'GY-13'].map((key, index) => ({ id: `3111111${index}-2222-4333-8444-555555555555`, key, title: key, type: 'feature', stage: 'done', plannedFiles: ['src/'], criteria: [], evidence: [], gates: [], violations: [], observation: null }) as unknown as Work);
+  let id = 0;
+  const fact = (item: Work, kind: string, observedAt: string, details: Record<string, unknown> = {}): FlowFact => ({ id: ++id, workId: item.id, workKey: item.key, kind: kind as FlowFact['kind'], observedAt, recordedAt: observedAt,
+    source: 'graphyard', sourceEvent: id, stage: 'merge', workType: 'feature', slices: ['src'], details, dedupe: `${kind}:${id}` });
+  // GY-11 queued 3h ago and merged 1h ago (2h wait); GY-12 was ejected, re-queued 2h ago and merged
+  // 1h ago (1h wait from its last entry); GY-13 queued 5h ago and merged 1h ago (4h wait).
+  const facts = [
+    fact(items[0], 'gates.changed', at(3), { queued: true }), fact(items[0], 'merged', at(1)),
+    fact(items[1], 'gates.changed', at(4), { queued: true }), fact(items[1], 'gates.changed', at(3), { queued: false }), fact(items[1], 'gates.changed', at(2), { queued: true }), fact(items[1], 'gates.changed', at(1.5), { queued: true }), fact(items[1], 'merged', at(1)),
+    fact(items[2], 'gates.changed', at(5), { queued: true }), fact(items[2], 'merged', at(1)),
+  ].sort((a, b) => Date.parse(a.observedAt) - Date.parse(b.observedAt));
+  assert.equal(queueWait(facts.filter(entry => entry.workId === items[1].id && entry.kind === 'gates.changed'), Date.parse(at(1))), hour, 'an ejected entry waits from its last entry to the queue');
+  assert.equal(queueWait([], Date.parse(at(1))), null, 'no queued gate fact, no wait');
+  const created = items.map(item => fact(item, 'work.created', at(24 * 10)));
+  const dataset: FlowDataset = { observedAt: to, from: at(24 * 7), to, days: 7, work: items, included: items, facts, latest: [...created, ...facts.filter(entry => entry.kind === 'merged')], carryIn: [], deployments: [], mergedForDeployments: [],
+    scanned: facts.length, truncated: false, workTruncated: false, deploymentsTruncated: false, deploymentMergesTruncated: false, projection: { lastEvent: 10, updatedAt: to, pendingEvents: 0, pendingCapped: false } } as FlowDataset;
+  const report = computeFlow(dataset, { days: 7 });
+  assert.deepEqual([report.mergeQueue.merges, report.mergeQueue.mergesPerHour, report.mergeQueue.queueWait.n, report.mergeQueue.queueWait.medianMs], [3, 0.018, 3, 2 * hour], 'three merges over seven days, median wait two hours');
+  assert.ok(report.definitions.mergeQueue, 'the metric is defined with the report');
+  // Insights renders both figures beside what landed; an unmeasured figure reads Unavailable, never zero.
+  const page = renderToStaticMarkup(createElement(LandedPerDay, { report }));
+  assert.match(page, /data-pace="merges-per-hour"[^>]*><dt[^>]*>Merges per hour<\/dt><dd[^>]*>0.018<\/dd>/);
+  assert.match(page, /data-pace="median-queue-wait"[^>]*><dt[^>]*>Median queue wait<\/dt><dd[^>]*>2h/);
+  const empty = renderToStaticMarkup(createElement(LandedPerDay, { report: { ...report, mergeQueue: { merges: 0, mergesPerHour: null, queueWait: { n: 0, medianMs: null } } } }));
+  assert.match(empty, /Merges per hour<\/dt><dd[^>]*>Unavailable/);
+  assert.match(empty, /Median queue wait<\/dt><dd[^>]*>Unavailable/);
+});
+
+test('unit:parallel-speculative-tips — the master publishes mergeQueue.parallelTips from master.json, and the control plane validates by it and reads it back from the installation ledger', async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 498;
   const database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-parallel-tips-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_parallel_tips');
   const store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_parallel_tips`);
-  let http: ReturnType<typeof import('../src/server.js').server> | undefined;
+  const tokens = { coordinator: 'm'.repeat(32), worker: 'w'.repeat(32) };
+  let http: ReturnType<typeof server> | undefined;
   try {
     await store.init();
     const engine = new Engine(store, [CI_APP], 120, 'owner/project');
@@ -228,13 +273,43 @@ test('the control plane validates by the published parallel-tip window, read bac
     try { assert.equal(await engine.loadParallelTips(), 3, 'the deployment environment sets the window before any publication'); }
     finally { delete process.env.GRAPHYARD_MERGE_PARALLEL_TIPS; }
     assert.equal(await engine.loadParallelTips(), 4, 'and the default stands with neither');
-    // The master publishes `mergeQueue.parallelTips` (POST /api/merge-queue), which records the
-    // value in the installation ledger the same way the batch size is recorded.
-    await store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', ['graphyard-master', mergeParallelTipsEvent, JSON.stringify({ parallelTips: 2, previous: null })]);
-    assert.equal(await engine.loadParallelTips(), 2, 'the published window applies at once');
+    http = server(engine, [{ id: 'master', role: 'coordinator', token: tokens.coordinator }, { id: 'worker-a', role: 'worker', token: tokens.worker }]);
+    await new Promise<void>(resolve => http!.listen(0, '127.0.0.1', resolve));
+    const url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
+    const api = async (path: string, token: string, init: RequestInit = {}) => {
+      const response = await fetch(`${url}${path}`, { ...init, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() } });
+      return { status: response.status, body: await response.json() };
+    };
+    assert.deepEqual((await api('/api/status', tokens.coordinator)).body.mergeQueue, { batchSize: 4, parallelTips: 4 }, 'status reports the window the control plane runs');
+    const post = (token: string, body: object) => api('/api/merge-queue', token, { method: 'POST', body: JSON.stringify(body) });
+    assert.equal((await post(tokens.worker, { parallelTips: 2 })).status, 403, 'only the master (or an operator) sets it');
+    assert.equal((await post(tokens.coordinator, { parallelTips: 0 })).status, 400);
+    assert.equal((await post(tokens.coordinator, { parallelTips: maxParallelTips + 1 })).status, 400);
+    assert.equal((await post(tokens.coordinator, {})).status, 400, 'a publication names at least one setting');
+    // The loop publishes the values in its own master config, once per change, through the route.
+    const posted: unknown[] = [];
+    const mutate = async (path: string, data: unknown) => { posted.push(data); const response = await api(`/api/${path}`, tokens.coordinator, { method: 'POST', body: JSON.stringify(data) }); assert.equal(response.status, 200, JSON.stringify(response.body)); return response.body; };
+    let configured: { batchSize?: number; parallelTips?: number } | undefined = { parallelTips: 2 };
+    const effects = daemonEffects(process.cwd(), () => ({ url, run: {}, mergeQueue: configured }) as any, { snapshot: async () => ({ work: [], now: new Date().toISOString() }), mutate, executor: {} as any });
+    await effects.publishMergeBatchSize!();
+    await effects.publishMergeBatchSize!();
+    assert.deepEqual(posted, [{ batchSize: 4, parallelTips: 2 }], 'published once, not every cycle');
+    assert.equal(engine.parallelTips, 2, 'the control plane validates by the master\'s window at once');
+    assert.deepEqual((await api('/api/status', tokens.coordinator)).body.mergeQueue, { batchSize: 4, parallelTips: 2 });
+    const ledger = async (kind: string) => (await store.pool.query('SELECT payload FROM events WHERE work_id IS NULL AND kind=$1 ORDER BY seq', [kind])).rows.map(row => row.payload);
+    assert.deepEqual(await ledger(mergeParallelTipsEvent), [{ parallelTips: 2, previous: null }], 'recorded in the installation ledger');
     // A restarted control plane reads the published value back from the installation ledger.
     const restarted = new Engine(store, [CI_APP], 120, 'owner/project');
     assert.equal(await restarted.loadParallelTips(), 2);
+    // Changing only the window records only the window; removing it publishes the default.
+    configured = { parallelTips: 8 };
+    await effects.publishMergeBatchSize!();
+    configured = undefined;
+    await effects.publishMergeBatchSize!();
+    assert.equal(posted.length, 3);
+    assert.equal(await restarted.loadParallelTips(), 4, 'removing the setting publishes the default');
+    assert.deepEqual((await ledger(mergeParallelTipsEvent)).map(payload => payload.parallelTips), [2, 8, 4], 'one ledger entry per change');
+    assert.deepEqual((await ledger('merge-queue.batch-size')).map(payload => payload.batchSize), [4], 'the unchanged batch size is recorded once');
   } finally {
     if (http) await new Promise<void>(resolve => http!.close(() => resolve()));
     await store.close();

@@ -11,7 +11,7 @@ import { Refusal } from './model/refusal.js';
 import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
 import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
-import { branchContamination, nextQueueEntries, disprovedConflict, currentRestore, decideIdentityCarry, defaultMergeBatchSize, defaultParallelTips, mergeBatchSizeEvent, mergeParallelTipsEvent, reconcileWindow, dismissedApproval, keptTipCarry, onto, pendingRestore, reviewedFilesOf, queueHistoryLimit, queueSequencingReason, reconciliationRefusalPrefix, tipReplacesHead, type BaseRefresh, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type QueueSpeculation, type RestoredApproval } from './merge-queue.js';
+import { branchContamination, nextQueueEntries, disprovedConflict, currentRestore, decideIdentityCarry, defaultMergeBatchSize, defaultParallelTips, mergeBatchSizeEvent, mergeParallelTipsEvent, dismissedApproval, keptTipCarry, onto, pendingRestore, reviewedFilesOf, queueHistoryLimit, queueSequencingReason, reconciliationRefusalPrefix, tipReplacesHead, type BaseRefresh, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type QueueSpeculation, type RestoredApproval } from './merge-queue.js';
 import { queueEjectionRecord } from './model/queue.js';
 import { githubFromEnv, mergeBandQueueDepth } from './github.js';
 import { regressionRefusals } from './regression-guard.js';
@@ -1523,13 +1523,12 @@ export class Engine {
     // One request, one verdict (GY-124): two verdicts from one identity on one head for one request
     // are recorded as a conflict and withheld from the observation before any gate reads it.
     this.conflictTransitions.set(work, [...(this.conflictTransitions.get(work) ?? []), ...reconcileReviewConflict(work, now)]);
-    const result = evaluate(work, all, now, this.ciAppIds, this.mergeBatchSize);
-    // The queue layer is re-derived under the parallel-tip window (GY-498): entries carry the tips
-    // they merge behind, ejection is decided by prefix attribution, and the test and merge gates
-    // read the window's validation instead of the batch's combined tip.
-    const windowed = reconcileWindow(result, work, all, now, this.ciAppIds, this.mergeBatchSize, this.parallelTips);
-    if (work.stage !== windowed.stage) work.stageEnteredAt = now.toISOString();
-    Object.assign(work, windowed);
+    // The queue is validated by the parallel-tip window (GY-498): entries carry the tips they merge
+    // behind, ejection is decided by prefix attribution, and the test and merge gates read the
+    // window's validation instead of the batch's combined tip.
+    const result = evaluate(work, all, now, this.ciAppIds, this.mergeBatchSize, this.parallelTips);
+    if (work.stage !== result.stage) work.stageEnteredAt = now.toISOString();
+    Object.assign(work, result);
     if (work.gates.some(g => !g.passed) || work.violations.length) work.mergeAuthorization = null;
     else if (work.candidate && !work.observation?.merged && (!work.mergeAuthorization || work.mergeAuthorization.sha !== work.candidate.sha || work.mergeAuthorization.baseSha !== work.candidate.baseSha)) {
       work.mergeAuthorization = { sha: work.candidate.sha, baseSha: work.candidate.baseSha, policyRevision: work.policyRevision, at: now.toISOString() };

@@ -89,7 +89,25 @@ export function LandedPerDay({ report }: { report: any }) {
       : <div key={entry.bucket} className="landed-day uncovered" data-bucket={entry.bucket} data-uncovered="true" title={`${entry.bucket.slice(0, 10)} was not read`}>
         <span>—</span><small>{new Date(entry.bucket).toISOString().slice(5, 10)} not read</small>
       </div>)}</div> : <p className="muted">{report ? coverage ? 'No day of this window was read.' : 'Nothing landed in this window.' : 'Reading the recorded deliveries…'}</p>}
+    <MergeQueuePace report={report}/>
   </section>;
+}
+
+/**
+ * The merge queue's pace (GY-498), from the flow report's `mergeQueue`: merges per hour over the
+ * window the merges were read for, and the median time a merged entry waited in the queue. An
+ * unmeasured figure reads Unavailable, never zero.
+ */
+export function MergeQueuePace({ report }: { report: any }) {
+  const pace = report?.mergeQueue;
+  if (!report) return null;
+  const perHour = typeof pace?.mergesPerHour === 'number' ? String(pace.mergesPerHour) : 'Unavailable';
+  const wait = typeof pace?.queueWait?.medianMs === 'number' ? minutes(pace.queueWait.medianMs) : 'Unavailable';
+  const figure = { display: 'flex', flexDirection: 'column', gap: '2px' } as const, value = { margin: 0, fontWeight: 600 } as const;
+  return <dl className="merge-pace" data-flow="merge-queue" aria-label="Merge queue pace" style={{ display: 'flex', gap: '24px', margin: '12px 0 0' }}>
+    <div data-pace="merges-per-hour" style={figure}><dt className="muted">Merges per hour</dt><dd style={value}>{perHour}</dd></div>
+    <div data-pace="median-queue-wait" style={figure}><dt className="muted">Median queue wait</dt><dd style={value}>{wait}{typeof pace?.queueWait?.n === 'number' && pace.queueWait.n > 0 && <small> of {pace.queueWait.n} merged</small>}</dd></div>
+  </dl>;
 }
 
 /** Fewer samples than this make a step's median sparse (src/flow-analytics.ts `sparseSampleSize`). */
