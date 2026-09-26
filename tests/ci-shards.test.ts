@@ -46,7 +46,8 @@ test('unit:ci-sharded — the required test check aggregates a matrix of four du
   assert.ok(shardImbalance(shards) <= 0.2, `shards finish within 20% of each other: ${shards.map(entry => Math.round(entry.durationMs / 1000)).join('s, ')}s`);
 
   // Longest first onto the lightest shard; an unrecorded file weighs the median. Each shard lists its
-  // files longest first, the order node:test starts them in, so no long file starts last.
+  // files longest first, and runs through ordered-tests.mjs, which starts them in that order
+  // (`node --test` would sort them by path), so no long file starts last.
   const split = shardFiles(['a', 'b', 'c', 'd', 'e', 'new'], { a: 50, b: 40, c: 30, d: 20, e: 10 }, 2);
   assert.deepEqual(split.map(entry => entry.files), [['a', 'new', 'e'], ['b', 'c', 'd']]);
   assert.deepEqual(split.map(entry => entry.durationMs), [90, 90]);
@@ -57,6 +58,8 @@ test('unit:ci-sharded — the required test check aggregates a matrix of four du
     await writeFile(join(cwd, 'list.txt'), 'tests/one.test.ts\ntests/two.test.ts\n'); await writeFile(join(cwd, 'none.txt'), '');
     const first = nodeTestArgs(cwd, ['--shard', '1/2', '--files-from', 'list.txt']), second = nodeTestArgs(cwd, ['--shard=2/2', '--files-from', 'list.txt']);
     assert.deepEqual([...first.args, ...second.args].filter(arg => !arg.startsWith('-')).sort(), ['tests/one.test.ts', 'tests/two.test.ts']);
+    assert.deepEqual([first.ordered, second.ordered, nodeTestArgs(cwd, ['--shard', '1/2', '--test-only', 'tests/one.test.ts']).ordered], [true, true, false]);
+    assert.deepEqual(nodeTestArgs(cwd, ['--shard', '1/1', '--durations', 'd.jsonl', '--files-from', 'list.txt']).args.slice(0, 2), ['--durations', join(cwd, 'd.jsonl')]);
     assert.equal(nodeTestArgs(cwd, ['--shard', '3/3', '--files-from', 'list.txt']).empty, true);
     assert.equal(nodeTestArgs(cwd, ['--files-from', 'none.txt']).empty, true);
     assert.ok(nodeTestArgs(cwd, ['--durations', 'd.jsonl', 'tests/one.test.ts']).args.some(arg => arg.endsWith('file-durations.mjs')));

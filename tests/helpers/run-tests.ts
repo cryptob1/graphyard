@@ -13,7 +13,8 @@ import { isolatedTestEnvironment, reserveTestPorts, testPortEnvironment, type Re
 //
 // Three runner options select and measure the Node suite's files (GY-499), as CI's shard jobs do:
 //   --files-from LIST   run the files LIST names, one per line (an empty list runs nothing)
-//   --shard I/N         run only shard I of N, balanced by tests/helpers/timing-baseline.json
+//   --shard I/N         run only shard I of N, balanced by tests/helpers/timing-baseline.json,
+//                       longest file first (tests/helpers/ordered-tests.mjs)
 //   --durations FILE    also write each file's wall time to FILE (tests/helpers/file-durations.mjs)
 //
 // Every GRAPHYARD_* and HERDR_* variable the caller carries is withheld from the tests except the
@@ -59,12 +60,18 @@ export function nodeTestArgs(cwd: string, args: string[]) {
   const { rest, filesFrom, shard, durations } = runnerOptions(args);
   const reporters = durations ? ['--test-reporter=spec', '--test-reporter-destination=stdout', `--test-reporter=${fileURLToPath(new URL('./file-durations.mjs', import.meta.url))}`, `--test-reporter-destination=${resolve(cwd, durations)}`] : [];
   const all = () => readdirSync(resolve(cwd, 'tests')).filter(name => name.endsWith('.test.ts')).sort().map(name => `tests/${name}`);
-  if (!filesFrom && !shard) return { args: [...reporters, ...rest, ...(rest.some(arg => !arg.startsWith('-')) ? [] : all())], empty: false };
+  if (!filesFrom && !shard) return { args: [...reporters, ...rest, ...(rest.some(arg => !arg.startsWith('-')) ? [] : all())], empty: false, ordered: false };
   const listed = filesFrom ? readFileSync(resolve(cwd, filesFrom), 'utf8').split(/\r?\n/).map(line => line.trim()).filter(Boolean) : [];
   const named = [...rest.filter(arg => !arg.startsWith('-')), ...listed];
   let files = named.length || filesFrom ? named : all();
-  if (shard) { const { index, count } = parseShard(shard); files = shardFiles(files, readDurations(cwd), count)[index - 1].files; }
-  return { args: [...reporters, ...rest.filter(arg => arg.startsWith('-')), ...files], empty: !files.length };
+  const flags = rest.filter(arg => arg.startsWith('-'));
+  if (shard) {
+    const { index, count } = parseShard(shard); files = shardFiles(files, readDurations(cwd), count)[index - 1].files;
+    // `node --test` sorts its files by path; a shard runs through ordered-tests.mjs so its longest
+    // files start first, unless the caller passes `node --test` flags of its own.
+    if (!flags.length) return { args: [...(durations ? ['--durations', resolve(cwd, durations)] : []), ...files], empty: !files.length, ordered: true };
+  }
+  return { args: [...reporters, ...flags, ...files], empty: !files.length, ordered: false };
 }
 
 export async function runTests(options: RunOptions = {}): Promise<RunResult> {
@@ -83,7 +90,7 @@ export async function runTests(options: RunOptions = {}): Promise<RunResult> {
     const environment = isolatedTestEnvironment(options.environment ?? process.env, set);
     const [command, commandArgs] = options.browser || !selection
       ? [process.execPath, [fileURLToPath(import.meta.resolve('@playwright/test/cli')), 'test', ...args]]
-      : [process.execPath, ['--import', import.meta.resolve('tsx'), '--test', ...selection.args]];
+      : [process.execPath, ['--import', import.meta.resolve('tsx'), ...(selection.ordered ? [fileURLToPath(new URL('./ordered-tests.mjs', import.meta.url))] : ['--test']), ...selection.args]];
     const child = spawn(command, commandArgs, { cwd, env: environment, stdio: options.stdio === 'pipe' ? ['ignore', 'pipe', 'pipe'] : 'inherit' });
     let stdout = '', stderr = '';
     child.stdout?.on('data', chunk => { stdout += chunk; });
