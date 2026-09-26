@@ -37,7 +37,7 @@ Observation spends the hourly limit, webhook-first.
 
 | Band | State | Cadence |
 | --- | --- | --- |
-| `merge` | heads the queue or passes every other gate | 20 seconds |
+| `merge` | within two of the queue head, all other gates passing | 20 seconds |
 | `active` | waiting on a check, review, base refresh or rework | 1 minute |
 | `steady` | unchanged since last observed | 5 minutes, stretched by the fleet bound |
 | `idle` | next action is dispatch or escalation | 5 minutes, stretched when unchanged |
