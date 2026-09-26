@@ -1,4 +1,3 @@
-import { leaseHealthStatus } from './lease-health-attention.js';
 import { probeCandidateConflicts } from '../conflicts.js';
 import { mergeBatchSize } from '../master.js';
 import { humanOnlyStatusRow, type HumanRequestRow } from '../model/human-request.js';
@@ -20,8 +19,7 @@ import { livenessStatus } from './liveness-report.js';
 import { ghCheckAnnotations, qualifyTimingFailures } from './timing-failures.js';
 import { setupHealth } from './master-setup.js';
 import { stuckRequestReport, withStuckRequests } from './stuck-requests.js';
-import { mergeStalls, nameUnresolvedThreads } from '../merge-queue.js';
-import { observationThroughputStatus } from '../github.js';
+import { nameUnresolvedThreads } from '../merge-queue.js';
 import type { LoopSupervisorHost } from '../supervisor.js';
 import { attributeAttention, derivedAttention, faulted, ledgerRefusalAttention, resourceStatus } from '../master-status.js';
 import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable, generatedManifestScript } from '../install/generated-files.js';
@@ -34,8 +32,8 @@ import { executorFleetReport, readCommit, readExecutorRegistrations } from '../e
 import { throughputStatus } from '../throughput.js';
 import { Timings, timedApi, timedStep, withTimings } from '../master/timings.js';
 import { slowReportReader } from '../master/report-cache.js';
-import { repairLaneAttention } from '../master/repair-lane.js';
 import { hotspots } from './hotspots.js';
+import { stallAttention } from './stall-attention.js';
 
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
 // The cycle-budget measure is a daemon metric (src/daemon/metrics.ts); it is read from here,
@@ -44,12 +42,9 @@ export { cycleBudget } from '../daemon/metrics.js';
 // `master scope` lives in its own module; it is read from here as it always was.
 export { approveScopeRequest } from './master-scope.js';
 
-/** A merge pending past five minutes on a head GitHub reports mergeable, with no refusal (GY-344). */
-export const mergeStallAttention = (snapshot: { work: Work[]; now: string }): AttentionItem[] =>
-  mergeStalls(snapshot.work, Date.parse(snapshot.now)).map(stall => ({ subject: stall.key, text: stall.text, ...agentOwner('master', stall.next) }));
-// Observation throughput and the queue head's lag live beside the observation schedule they read
-// (src/github.ts); the report reads them from here, as do the tests.
-export { observationThroughputStatus };
+// The queue-head observation lag, lease health and stall composition live in `stall-attention.ts`;
+// the report and the tests read them from here, as they always have.
+export { mergeStallAttention, observationThroughputStatus } from './stall-attention.js';
 // The attention builders live beside each other in `status-attention.ts`; the report reads them
 // from here, as does everything that was reading them from here before the split.
 export { approverLaunchAttention, nameOrphanSupervisors, orphanSupervisorAttention, stalledItemAttention, supervisorReclaimCommand } from './status-attention.js';
@@ -149,10 +144,8 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
       reports: 'bounded', reportBoundMs: dependencies.reportReadBoundMs, sections });
   // A merge pending on a head GitHub reports mergeable is named with the stalled items (GY-344).
   // A repair-lane merge stays in front of the master until a normal merge proves the merge path healthy (GY-406).
-  // Queue-head observation lag (GY-492) and slow renewals (GY-558) stall what waits; a path
-  // sending work back does the same to the items behind it (GY-566), so its hotspots are raised with them.
-  const observation = observationThroughputStatus(coordinator, snapshot), health = leaseHealthStatus(coordinator);
-  const stalledItems = [...derivedStalls, ...mergeStallAttention(snapshot), ...observation.attention, ...repairLaneAttention(snapshot.work), ...health.attention, ...hs.attention];
+  // Observation lag (GY-492), slow renewals (GY-558) and conflict hotspots (GY-566) stall what waits.
+  const { observation, health, stalledItems } = stallAttention(snapshot, coordinator, derivedStalls, hs.attention);
   // Exactly one component merges (GY-245): the loop, where one is installed or running, else the executors.
   const merger = installationMerger({ loop: { configured: !!setup.supervisor.installed, running: !!cycling?.running, autoMerge: master.autoMerge },
     declaration: executors.supervision.declaration, served: executors.presence.served });
