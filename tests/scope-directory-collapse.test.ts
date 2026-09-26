@@ -10,8 +10,8 @@ import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import { answeringWidening, emptyDaemonState, runCycle, scopeRoutineDecision, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { approverSessionName, decisionInput, masterConfigSchema, type HerdrAgent, type MasterConfig } from '../src/master.js';
-import { liveScopeWidening, scopeRequestOutcome, type ScopeRequestState } from '../src/model/scope.js';
-import { collapseArea, collapsePlannedFiles, mergedScopeRequest, plannedFilesMax } from '../src/model/scope-collapse.js';
+import { liveScopeWidening, plannedFilesMax, scopeRequestOutcome, type ScopeRequestState } from '../src/model/scope.js';
+import { collapseArea, collapsePlannedFiles, mergedScopeRequest } from '../src/model/scope-collapse.js';
 import type { Principal, Work } from '../src/model.js';
 
 // GY-549: a change that legitimately touches more than 100 files (GY-421 migrated 158 test files)
@@ -226,4 +226,31 @@ test('unit:widening-applies-under-lease — an approved plannedFiles-only fold a
   assert.equal(liveScopeWidening(current, { ...current, plannedFiles: [layout, 'tests/helpers/'] }), true);
   assert.equal(liveScopeWidening({ ...current, plannedFiles: [layout, 'tests/'] }, { ...current, plannedFiles: [layout, 'tests/', 'tests/a.test.ts'] }), false, 'a path already covered widens nothing');
   assert.equal(liveScopeWidening(current, { ...current, criteria: [{ ...criteria[0], text: 'Changed' }], plannedFiles: [layout, 'tests/'] }), false);
+});
+
+test('unit:direct-widening-folds-over-cap — a wide ask the rule or a review finding approves directly is folded as a routed one is, never applied past the cap', async () => {
+  // One cap: the work schema refuses exactly what the fold keeps under.
+  const within = { title: 'cap', criteria, plannedFiles: testFiles(plannedFilesMax) };
+  assert.equal((await call(master.token, 'POST', 'work', { ...within, plannedFiles: testFiles(plannedFilesMax + 1), reason: 'Over the cap' })).status, 400, 'one entry past plannedFilesMax is refused');
+
+  // The implication rule approves a criterion's directory outright: 60 planned plus 50 asked is over the cap.
+  const wide = [{ id: 'AC-1', text: `Every file under tests/ creates its temporary directories through ${helper}`, proofs: ['unit:temp-dirs'] }];
+  const planned = [layout, helper, ...testFiles(58, 'tests/legacy/')];
+  let work = await ok(master.token, 'POST', 'work', { title: 'direct fold', plannedFiles: planned, criteria: wide, reason: 'Operator goal: a wide ask the rule approves fits the cap' }) as Work;
+  work = await ok(master.token, 'POST', `work/${work.id}/ready`, { expectedRevision: work.revision, reason: 'Ready for the attempt' }) as Work;
+  work = await reload((await engine.execute(implementer, 'claim', work.id, {}, randomUUID())).id);
+  const migrated = testFiles(50);
+  await ask(work, migrated, 'Every test file moves onto the shared temp-dir helper');
+  work = await reload(work.id);
+  if (work.scopeRequest) work = await ok(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.scopeRequest.epoch }) as Work;
+  work = await reload(work.id);
+  assert.equal(work.scopeDecision!.state, 'approved', work.scopeDecision!.reason);
+  assert.ok(work.plannedFiles.length <= plannedFilesMax, `the applied widening fits the cap (${work.plannedFiles.length} entries)`);
+  assert.deepEqual(work.plannedFiles, [layout, 'tests/'], 'the planned and asked test files fold into one tests/ entry');
+
+  // A review finding's widening is posted by the loop as a requirements revision: folded the same way, and within the cap it is the plain union.
+  const item = { key: 'GY-9', policyRevision: 3, criteria: wide, dependencies: [], plannedFiles: planned } as unknown as Work;
+  const request: ScopeRequestState = { epoch: 2, paths: migrated, reason: 'finding', requestedBy: 'implementer', at: 't1' };
+  assert.deepEqual(answeringWidening(item, request, migrated, 'a review finding names them').plannedFiles, [layout, 'tests/']);
+  assert.deepEqual(answeringWidening(item, request, migrated.slice(0, 2), 'a review finding names them').plannedFiles, [...planned, ...migrated.slice(0, 2)]);
 });

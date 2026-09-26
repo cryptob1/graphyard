@@ -1,6 +1,7 @@
 // Concern: cursor action keys, and reconciling pending actions against Graphyard after a restart.
 import type { Work } from '../model.js';
 import { type ScopeRequestState, unplannedPaths } from '../model/scope.js';
+import { widenedPlannedFiles } from '../model/scope-collapse.js';
 import type { WorkerProfile } from '../master.js';
 import { faultActionKey, storeAction, type DaemonAction, type DaemonActionKind, type DaemonState } from './state.js';
 import { openFaultClassItem, type FaultClass } from '../model/fault-classes.js';
@@ -124,5 +125,5 @@ export function scopeOutcomeAnswered(work: Work, request: { epoch: number; at: s
 
 export const answeringWidening = (work: Work, request: ScopeRequestState, paths: string[], reason: string) => ({
   expectedPolicyRevision: work.policyRevision, criteria: work.criteria, dependencies: work.dependencies,
-  plannedFiles: [...new Set([...(work.plannedFiles ?? []), ...paths])], exclusiveResources: work.exclusiveResources ?? [], producerProofs: work.producerProofs ?? [],
+  plannedFiles: widenedPlannedFiles(work, paths), exclusiveResources: work.exclusiveResources ?? [], producerProofs: work.producerProofs ?? [],
   reason, answers: { epoch: request.epoch, at: request.at, sha: work.candidate?.sha ?? null } });

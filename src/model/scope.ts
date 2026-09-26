@@ -141,7 +141,6 @@ export function scopeImplication(path: string, implied: readonly ScopeImplicatio
 
 /** True when the item's planned scope covers the entire `docs/` tree, not one guide in it. */
 export const plansDocumentationTree = (plannedFiles: readonly string[] = []) => plannedFiles.some(planned => pathScopeContains(planned, 'docs/'));
-
 /** The blocker a refused scope request writes, and the prefix a later decision clears it by. */
 export const scopeRefusalBlocker = 'Scope request refused';
 /** GY-85 AC-3: the loop decides a request within five minutes at p90, over at least ten requests… */
@@ -149,7 +148,8 @@ export const scopeDecisionBudgetMs = 300_000;
 /** …and no request is left undecided — no item blocked on scope — for longer than fifteen minutes. */
 export const scopeBlockedBudgetMs = 900_000;
 export const scopeDecisionSample = 10;
-
+/** The most entries plannedFiles holds: the one bound the work schema, the follow-up planner and every widening share (GY-630). */
+export const plannedFilesMax = 100;
 export interface ScopeVerdict { state: ScopeDecision['state']; reason: string; paths: string[] }
 /**
  * The decision itself, computed from the item's own record: never from what the requester claims.

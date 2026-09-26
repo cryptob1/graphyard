@@ -1,5 +1,5 @@
 // Concern: folding a wide plannedFiles widening into directory entries, and merging an attempt's pending scope asks (GY-549).
-import { type ScopeCriterion, type ScopeRequestState, namedPaths, pathScope, pathScopeContains, unplannedPaths } from './scope.js';
+import { type ScopeCriterion, type ScopeRequestState, namedPaths, pathScope, pathScopeContains, plannedFilesMax, unplannedPaths } from './scope.js';
 
 // ---------------------------------------------------------------------------
 // Collapsing a wide widening into directory entries (GY-549).
@@ -13,8 +13,6 @@ import { type ScopeCriterion, type ScopeRequestState, namedPaths, pathScope, pat
 // name or its plannedFiles already carry. The decision names each directory and the files it covers.
 // ---------------------------------------------------------------------------
 
-/** The most entries plannedFiles holds (model/work.ts). */
-export const plannedFilesMax = 100;
 /** More requested files than this under one directory are proposed as that directory. */
 export const collapseDirectoryFiles = 20;
 /** A directory entry a widening proposes in place of the requested files it covers. */
@@ -59,6 +57,17 @@ export function collapsePlannedFiles(plannedFiles: readonly string[], paths: rea
   const collapsed = entries.filter(entry => !plannedFiles.includes(entry) && !adding.includes(entry))
     .map(scope => ({ scope, files: adding.filter(path => pathScopeContains(scope, path)) }));
   return { plannedFiles: entries, collapsed };
+}
+
+/**
+ * The plannedFiles an approved widening by `paths` applies (GY-630). The rule and a review finding
+ * approve directly, never through the approver, so their paths are unioned as asked while that
+ * fits; a union over `plannedFilesMax` is folded exactly as a routed ask is, so a wide ask a
+ * criterion's directory implies is applied as directory entries instead of stalling at the cap.
+ */
+export function widenedPlannedFiles(item: { criteria?: readonly ScopeCriterion[]; plannedFiles?: readonly string[] }, paths: readonly string[]) {
+  const union = [...new Set([...(item.plannedFiles ?? []), ...paths])];
+  return union.length <= plannedFilesMax ? union : collapsePlannedFiles(item.plannedFiles ?? [], paths, collapseArea(item)).plannedFiles;
 }
 
 /**
