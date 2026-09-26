@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import type { Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
+import type { NextActionKind } from '../src/model/next-action.js';
 import { classifyAttention } from '../src/model/fault-classes.js';
 import { masterConfigSchema, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
@@ -166,10 +167,10 @@ test('unit:dispatch-defers-on-host-memory — below the memory floor the loop de
     persist: async () => {}, hostMemory: async () => memory,
   };
   const tick = await runDispatchTick(config, emptyDispatchCursor(config), dispatchEffects, () => at);
-  assert.deepEqual(launched, []);
+  assert.equal(launched.length, 0, 'no reviewer or producer is launched');
   assert.ok(tick.waiting.length > 0 && tick.waiting.every(wait => /below its 6\.2 GB floor, so new session launches on it are deferred/.test(wait.reason)));
   // The executor claims no launching row meanwhile: the rows wait in the queue without failing.
-  const claims: string[][] = [];
+  const claims: NextActionKind[][] = [];
   const idle = await runExecutorTick({ id: 'executor-a', host: 'machine-a' }, { claim: async request => { claims.push(request.kinds); return { action: null }; }, settle: async () => {},
     handlers: { dispatch: async () => 'launched', 'request-review': async () => 'launched', resync: async () => 'resynced' }, launchHold: () => hostMemoryHold('machine-a', async () => memory, () => at) });
   assert.deepEqual(claims, [['resync']]);
