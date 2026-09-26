@@ -85,6 +85,6 @@ export function routedScopeRequests(approvals: readonly { work: string; action: 
   return (work: { key: string; scopeRequest?: { epoch: number; at: string } | null }) => !!work.scopeRequest && routed.has(`${work.key}:${work.scopeRequest.epoch}:${work.scopeRequest.at}`);
 }
 
-/** A merge pending 5 min on a mergeable head (GY-344), or 10 on a BLOCKED auto-merge (GY-430). */
+/** A merge pending past five minutes on a head GitHub reports mergeable, with no refusal (GY-344). */
 export const mergeStallAttention = (snapshot: { work: Work[]; now: string }): AttentionItem[] =>
   mergeStalls(snapshot.work, Date.parse(snapshot.now)).map(stall => ({ subject: stall.key, text: stall.text, ...agentOwner('master', stall.next) }));
