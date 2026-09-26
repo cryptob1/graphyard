@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { access } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { setTimeout as delay } from 'node:timers/promises';
 import type { Work } from './model.js';
 import type { ActionRow } from './model/actions.js';
 import type { DispatchRequest } from './model/dispatch.js';
@@ -52,12 +51,39 @@ export interface ControlPlaneEffects {
   observeDeployment: (delivered: Work[]) => Promise<DeploymentObservation>;
   /** Records a launched session's durable handle on the item (AC-8). */
   recordSession?: (work: Work, handle: SessionHandleInput) => Promise<unknown>;
-  /** How a handler waits between reads; a timer unless a test drives the clock. */
-  wait?: (ms: number) => Promise<unknown>;
 }
 
-/** How long a `resync` attempt waits for the observation it woke, and how often it reads again. */
-export const resyncObservationWaitMs = 90_000, resyncPollMs = 5_000;
+/**
+ * The instant a `resync` claim's observation must beat: the claim that first woke the item's
+ * observation job in the row's current run of unobserved claims (GY-646). Each claim wakes the job
+ * and returns, so an observation saved between two claims is newer than the first and satisfies
+ * the next one; only a completion, a reopening or a different failure starts a new run.
+ */
+export function resyncWaitingSince(row: Pick<ActionRow, 'claim' | 'history'>): string | null {
+  let since = row.claim?.claimedAt ?? null;
+  for (const entry of [...row.history].reverse()) {
+    if (entry.event === 'claimed') { since = entry.at; continue; }
+    if (entry.event === 'reclaimed' || (entry.event === 'failed' && (entry.reason ?? '').includes(resyncUnobservedPrefix))) continue;
+    break;
+  }
+  return since;
+}
+
+/**
+ * The same effects, answering the supervisor's watchdog before every claim, settlement and claim
+ * renewal (GY-646). It sits outside every guard, so an executor that claims nothing — an empty
+ * queue, a restart fence, a stand-down — still says it is alive at every step; only a process whose
+ * event loop wedged goes quiet. With no handler inside one request longer than the renewal
+ * interval, the notifications are never further apart than `actionRenewIntervalMs` plus a poll.
+ */
+export function watchdogEffects<E extends ExecutorEffects>(effects: E, alive: () => void): E {
+  return {
+    ...effects,
+    claim: request => { alive(); return effects.claim(request); },
+    settle: (action, result, reason) => { alive(); return effects.settle(action, result, reason); },
+    ...(effects.renew ? { renew: (action: ActionRow) => { alive(); return effects.renew!(action); } } : {}),
+  };
+}
 
 /**
  * The executor instance one executor process names on its merge requests.
@@ -188,19 +214,19 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
     resync: async action => {
       const { work } = await find(action);
       // Satisfied by a fresh observation of the item, never by a re-read that saves nothing
-      // (GY-607): the control plane wakes the observation job, and the attempt completes only once
-      // an observation newer than this claim is saved. One that does not arrive in time fails the
-      // attempt naming the job's state; the row backs off and `master status` names a run of them.
-      const since = action.claim?.claimedAt ?? new Date().toISOString();
-      let result = await effects.mutate(`work/${work.id}/resync`, { since }, randomUUID());
-      for (let polls = Math.ceil(resyncObservationWaitMs / resyncPollMs); result?.observed === false && polls > 0; polls--) {
-        await (effects.wait ?? delay)(resyncPollMs);
-        result = await effects.mutate(`work/${work.id}/resync`, { since, wake: false }, randomUUID());
-      }
+      // (GY-607), and never by waiting for one inside the claim (GY-646): the claim wakes the
+      // item's observation job and returns. The row is left waiting — settled failed with a reason
+      // naming the job's condition, so it backs off — and a later claim completes it once an
+      // observation newer than the claim that first woke the job is saved. The same condition
+      // gives the same reason on every claim, so the bounded run of them (`actionStallThreshold`)
+      // stalls the row and `master status` names it. An executor holding a resync is therefore
+      // never inside a handler longer than one request, and answers its watchdog between steps.
+      const since = resyncWaitingSince(action) ?? new Date().toISOString();
+      const result = await effects.mutate(`work/${work.id}/resync`, { since }, randomUUID());
       // A control plane from before GY-607 cannot say whether it observed; its answer is taken as
       // the re-read it always was, and the executor reports that it could not tell.
       if (result && typeof result.observed !== 'boolean') return `re-read ${work.key} from the provider and reconciled it; the control plane does not report observations, so none was awaited`;
-      if (!result?.observed) throw new Error(`${work.key}: ${resyncUnobservedPrefix} within ${Math.round(resyncObservationWaitMs / 1000)}s; ${describeObservationJob(result?.job, Date.now())}`);
+      if (!result?.observed) throw new Error(`${work.key}: ${resyncUnobservedPrefix}; ${describeObservationJob(result?.job, Date.now())}; the claim woke it and leaves the row waiting for the observation`);
       return `observed ${work.key} at ${result.observedAt}, after the claim at ${since}`;
     },
     reclaim: async action => {

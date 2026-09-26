@@ -111,6 +111,12 @@ export const executorRegistrationSchema = z.object({
   inFlight: actionRef.extend({ since: z.string() }).strict().nullable(),
   /** Set from just before the executor looks for a restart fence until its claim is recorded or abandoned: the half of the restart exclusion the executor holds. */
   claiming: z.string().nullable().default(null),
+  /**
+   * The action the previous process under this name was running when it ended without settling
+   * it or recording itself stopped (GY-646): killed by its watchdog, or otherwise. Recorded by the
+   * next process at start, and kept until that process stops.
+   */
+  interrupted: actionRef.extend({ since: z.string(), pid: z.number().int().positive(), lastSeen: z.string(), recordedAt: z.string() }).strict().nullable().default(null),
 }).strict();
 export type ExecutorRegistration = z.infer<typeof executorRegistrationSchema>;
 
@@ -129,6 +135,10 @@ export async function writeExecutorRegistration(config: Pick<MasterConfig, 'cred
   return file;
 }
 export const removeExecutorRegistration = (config: Pick<MasterConfig, 'credentialFile'>, name: string) => rm(registrationFile(config, name), { force: true });
+/** One executor's registration, or null when it has none or it cannot be read. */
+export async function readExecutorRegistration(config: Pick<MasterConfig, 'credentialFile'>, name: string): Promise<ExecutorRegistration | null> {
+  try { return executorRegistrationSchema.parse(JSON.parse(await readFile(registrationFile(config, name), 'utf8'))); } catch { return null; }
+}
 /** Every registration on the host, unreadable files skipped: a report never fails on one broken record. */
 export async function readExecutorRegistrations(config: Pick<MasterConfig, 'credentialFile'>): Promise<ExecutorRegistration[]> {
   const directory = executorsDirectory(config);
@@ -149,19 +159,29 @@ export interface ExecutorRegistrarInput { name: string; host: string; pid: numbe
  * why; `stopped` is the last write on the way out, so a restart's wait can tell the old process
  * from the new one.
  */
-export function executorRegistrar(config: Pick<MasterConfig, 'credentialFile'>, input: ExecutorRegistrarInput, now: () => number = Date.now) {
+export function executorRegistrar(config: Pick<MasterConfig, 'credentialFile'>, input: ExecutorRegistrarInput, now: () => number = Date.now, alive: (pid: number) => boolean = processAlive) {
   if (input.supervisor && !isExecutorUnit(input.supervisor)) throw new Error(`${input.supervisor} is not a ${executorUnitPrefix} service; an executor registers only a unit master executors restart may restart`);
   const at = () => new Date(now()).toISOString();
   const registration: ExecutorRegistration = {
     version: 1, name: input.name, host: input.host, pid: input.pid, principal: input.principal, kinds: input.kinds, intervalSeconds: input.intervalSeconds,
     root: input.root, release: input.release, supervisor: input.supervisor ? { unit: input.supervisor, restart: unitRestart(input.supervisor) } : null,
-    state: 'running', standDown: null, startedAt: at(), updatedAt: at(), stoppedAt: null, claims: 0, lastClaim: null, inFlight: null, claiming: null,
+    state: 'running', standDown: null, startedAt: at(), updatedAt: at(), stoppedAt: null, claims: 0, lastClaim: null, inFlight: null, claiming: null, interrupted: null,
   };
   const write = async () => { registration.updatedAt = at(); return writeExecutorRegistration(config, registration); };
   return {
     registration,
     file: registrationFile(config, input.name),
-    started: () => write(),
+    /**
+     * The first write. A previous process under this name that left a claimed action in flight,
+     * never recorded itself stopped and is gone was killed mid-action — under systemd, most often
+     * by its watchdog — and this process records which action and item it was running (GY-646).
+     */
+    started: async () => {
+      const previous = await readExecutorRegistration(config, input.name);
+      if (previous?.inFlight && previous.state !== 'stopped' && (previous.pid === input.pid || !alive(previous.pid)))
+        registration.interrupted = { ...previous.inFlight, pid: previous.pid, lastSeen: previous.updatedAt, recordedAt: at() };
+      return write();
+    },
     /** Written before the fence is read: from here until `claimed` or `abandoned`, a restart waits. */
     claiming: () => { registration.claiming = at(); return write(); },
     abandoned: () => { registration.claiming = null; return write(); },
@@ -179,7 +199,7 @@ export function executorRegistrar(config: Pick<MasterConfig, 'credentialFile'>, 
       return write();
     },
     resumed: () => { registration.state = 'running'; registration.standDown = null; return write(); },
-    stopped: () => { registration.state = 'stopped'; registration.stoppedAt = at(); registration.inFlight = null; registration.claiming = null; return write(); },
+    stopped: () => { registration.state = 'stopped'; registration.stoppedAt = at(); registration.inFlight = null; registration.claiming = null; registration.interrupted = null; return write(); },
   };
 }
 
@@ -203,6 +223,8 @@ export interface ExecutorFleetRow {
   supervisor: ExecutorRegistration['supervisor']; restart: string;
   standDown: ExecutorRegistration['standDown'];
   claims: number; lastClaim: ExecutorRegistration['lastClaim']; inFlight: ExecutorRegistration['inFlight'];
+  /** The action its previous process was killed running, as this process recorded at start. */
+  interrupted: ExecutorRegistration['interrupted'];
   startedAt: string; updatedAt: string; stoppedAt: string | null;
   /** The one line: this executor's commit beside the coordinator's. */
   line: string;
@@ -228,7 +250,7 @@ export function executorFleetReport(registrations: ExecutorRegistration[], coord
     return { name: registration.name, host: registration.host, pid: registration.pid, principal: registration.principal, kinds: registration.kinds, alive: running, state,
       release: registration.release, coordinator: coordinator.commit, split, needsRestart, supervisor: registration.supervisor, restart: registration.supervisor?.restart ?? executorRestartCommand,
       standDown: registration.standDown, claims: registration.claims, lastClaim: registration.lastClaim, inFlight: registration.inFlight,
-      startedAt: registration.startedAt, updatedAt: registration.updatedAt, stoppedAt: registration.stoppedAt, line };
+      interrupted: registration.state === 'stopped' ? null : registration.interrupted, startedAt: registration.startedAt, updatedAt: registration.updatedAt, stoppedAt: registration.stoppedAt, line };
   });
   const needing = executors.filter(row => row.needsRestart);
   const attention: AttentionItem[] = [];
@@ -236,6 +258,15 @@ export function executorFleetReport(registrations: ExecutorRegistration[], coord
     const named = needing.map(row => `${row.name} on ${row.host} (loaded ${describeRelease(row.release)}${row.state === 'standing-down' ? `, standing down since ${row.standDown?.at ?? 'its last check'}` : ', stands down at its next check'}${row.supervisor ? '' : '; no supervisor unit, so it must be stopped and started by hand'})`).join('; ');
     attention.push({ subject: 'executors', text: `${needing.length} executor${needing.length === 1 ? '' : 's'} run${needing.length === 1 ? 's' : ''} a release other than the coordinator's ${shortCommit(coordinator.commit)} and claim${needing.length === 1 ? 's' : ''} nothing until restarted: ${named}`,
       ...agentOwner('master', executorRestartCommand) });
+  }
+  // One item per executor whose previous process died mid-action (GY-646): the watchdog's abort,
+  // or any other kill, is otherwise only a line in the journal, and the action it held is simply
+  // re-claimed once its lease lapses.
+  for (const row of executors.filter(entry => entry.interrupted)) {
+    const lost = row.interrupted!;
+    const unit = row.supervisor?.unit ?? null;
+    attention.push({ subject: 'executors', text: `${row.name} on ${row.host} was killed while running ${lost.kind} for ${lost.key} (action ${lost.id}, claimed ${lost.since}): its previous process, pid ${lost.pid}, last recorded at ${lost.lastSeen}, ended without settling it or recording itself stopped${unit ? `; under ${unit} that is its watchdog's abort (SIGABRT) or another kill` : ''}. The claim lapses and the action is offered again; recorded by the process that started at ${row.startedAt}`,
+      ...agentOwner('master', unit ? `journalctl --user -u ${unit}` : `graphyard master executors`) });
   }
   return { coordinator: { commit: coordinator.commit }, executors, split: executors.some(row => row.split), needingRestart: needing.map(row => row.name), attention };
 }

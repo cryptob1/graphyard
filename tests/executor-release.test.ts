@@ -57,7 +57,7 @@ const deadPid = 2_147_483_646;
 const registered = (master: MasterConfig, name: string, commit: string, overrides: Partial<ExecutorRegistration> = {}): ExecutorRegistration => ({
   version: 1, name, host: master.hostId, pid: process.pid, principal: 'graphyard-master', kinds: ['resync', 'merge'], intervalSeconds: 5, root: '/srv/graphyard',
   release: { commit, dirty: false }, supervisor: { unit: `graphyard-executor@${name}.service`, restart: `systemctl --user restart graphyard-executor@${name}.service` },
-  state: 'running', standDown: null, startedAt: new Date(Date.now() - 60_000).toISOString(), updatedAt: new Date().toISOString(), stoppedAt: null, claims: 3, lastClaim: null, inFlight: null, claiming: null, ...overrides });
+  state: 'running', standDown: null, startedAt: new Date(Date.now() - 60_000).toISOString(), updatedAt: new Date().toISOString(), stoppedAt: null, claims: 3, lastClaim: null, inFlight: null, claiming: null, interrupted: null, ...overrides });
 
 test('unit:executor-release-reported — an executor records the commit it loaded, dirty or not, on each claim and in its registration, and master status lists each executor\'s commit beside the coordinator\'s', async () => {
   const { root, master, dispose } = await fixture();
