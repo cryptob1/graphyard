@@ -3,7 +3,7 @@
 
 ## Master coordination loop
 
-Restart `graphyard master run` freely; it never dispatches twice. `master status` → `daemon` gives health; `journalctl --user -u graphyard-master`, the log. `daemon.metrics.timings` and status `timings` time steps and calls over 1s; status reads a cached intervention report. Failed server requests log their route and SQL statement.
+Restart `graphyard master run` freely; it never dispatches twice. `master status` → `daemon` gives health; `journalctl --user -u graphyard-master`, the log. `daemon.metrics.timings` and status `timings` time steps and calls over 1s; status reads a cached intervention report. Failed server requests log route and SQL.
 
 ### Perpetual master loop
 
@@ -72,7 +72,7 @@ A `policy:bootstrap` holder adds `"bootstrap": {"reason": "…", "contractPaths"
 
 ## Delivered with a failed smoke proof
 
-It stays Done, marked **delivered with failure**; revert through a new item, never backfill evidence.
+It stays Done as **delivered with failure**; revert through a new item, never backfill evidence.
 
 ## Merged but not deployed
 
@@ -80,7 +80,7 @@ A merge production never served is a `delivery.deployment-incident` ([observatio
 
 ## Merge bypass
 
-An ungated merge is a permanent violation: repair access, open a follow-up item, never backfill evidence. An admin opens a direct-merge window with `graphyard operator direct-merges on --since ISO REASON`.
+An ungated merge is a permanent violation: repair access, open a follow-up item, never backfill evidence. Admins open direct-merge windows: `graphyard operator direct-merges on --since ISO REASON`.
 
 ## Credentials
 
@@ -94,11 +94,11 @@ graphyard grants grant ci "integration:*,unit:*" "CI proofs"
 graphyard grants revoke ci "integration:claim-safety" "Runner decommissioned"
 ```
 
-Only an `admin` grants, only to `producer` principals. Patterns: an exact name, `kind:*`, or a prefix (`manual:gy-43/*`).
+Only admins grant, only to `producer` principals. Patterns: an exact name, `kind:*`, or a prefix (`manual:gy-43/*`).
 
 ## Setup proposals and drift
 
-`graphyard init --scan` writes `.graphyard/setup-proposal.json`, `--apply` applies it. Later scans and `doctor --profile through-merge|preview-validation|production-verification` report drift without repairing it.
+`graphyard init --scan` writes `.graphyard/setup-proposal.json`, `--apply` applies it. Later scans and `doctor --profile through-merge|preview-validation|production-verification` report drift, never repairing it.
 
 ## Scale limits
 
