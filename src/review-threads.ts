@@ -5,6 +5,7 @@
 // approval of the current candidate, and with them every thread on an outdated line.
 // The reviewer's minted token never touches GraphQL: on 2026-09-23 its thread read failed, the
 // failure was swallowed, and the reviewer approved without judging or resolving any thread.
+import { createHash } from 'node:crypto';
 import type { ChildRun } from './child-runner.js';
 
 /** An unresolved review thread as the reviewer's launch prompt names it: an input to the verdict, not a merge blocker. */
@@ -239,7 +240,9 @@ export async function resolveNamedThreads(input: { repository: string; pr: numbe
  * `classified`: the approval's body was read and its Follow-up lines parsed, so `named` is what it
  * judged FOLLOW-UP; until then every thread listed to the review may be one (followUpThreadIds).
  */
-export interface FollowUpFiling { at: string; reviewId: number; named: string[]; threads: LaunchThread[]; findings?: FollowUpFinding[]; item?: string; replied: string[]; resolved: string[]; refused: string[]; failure?: string; attempts: number; classified?: boolean }
+export interface FollowUpFiling { at: string; reviewId: number; named: string[]; threads: LaunchThread[]; findings?: FollowUpFinding[]; item?: string; replied: string[]; resolved: string[]; refused: string[]; failure?: string; attempts: number; classified?: boolean;
+  /** How a create refused as a key reuse was resolved (GY-598): linked to the item the approval already filed, or filed under the body-derived key. */
+  keyReuse?: 'linked' | 'rekeyed' }
 /** The backlog item the follow-ups become: the loop's create payload for the control plane. */
 export interface FollowUpItem { title: string; description: string; type: 'chore'; priority: 2; dependencies: string[]; criteria: { id: string; text: string; proofs: string[] }[]; producerProofs: string[]; plannedFiles: string[]; reason: string }
 /** The follow-up item's one proof: a manual review of the triage that a producer session may run. */
@@ -248,6 +251,24 @@ export const followUpTriageProof = 'manual:review-followups-triaged';
 export type CreateFollowUpItem = (item: FollowUpItem, key: string) => Promise<{ key: string }>;
 /** The idempotency key of an approval's follow-up create: one item per approval. */
 export const followUpCreateKey = (repository: string, pr: number, reviewId: number) => `graphyard-followups:${repository}#${pr}:${reviewId}`.slice(0, 200);
+/** The control plane's refusal of a key sent again with a different body (`idempotencyMismatch`, src/engine.ts). */
+const keyReuseRefusal = 'Idempotency key reused with different input';
+/**
+ * The key a follow-up create is sent under once its approval's key was refused as reused with a
+ * different body: the approval's key and the hash of the body sent, so a retry of this very body
+ * returns the item it made, and no two bodies share a key (GY-598).
+ */
+export const followUpBodyKey = (createKey: string, item: FollowUpItem) =>
+  `${createKey.slice(0, 183)}:${createHash('sha256').update(JSON.stringify(item)).digest('hex').slice(0, 16)}`;
+/**
+ * The follow-up item an approval already filed, found by its parent and the approval's id: it
+ * depends on the parent, and its title and description name the parent and the review, as
+ * `followUpItem` writes them. Undefined when no such item exists.
+ */
+export function existingFollowUpItem(work: readonly { key: string; title: string; description?: string; dependencies?: string[] }[], parent: { id: string; key: string }, reviewId: number): string | undefined {
+  return work.find(entry => !!entry.dependencies?.includes(parent.id) && entry.title.startsWith(`Follow-ups from the approved review of ${parent.key} (`)
+    && !!entry.description?.includes(`(review ${reviewId})`))?.key;
+}
 /**
  * The create an attempt is about to send, with the threads and findings it files and the named
  * threads it refused. It is kept before the create is sent: a create the server accepted whose
@@ -386,11 +407,13 @@ export function followUpItem(input: { key: string; workId: string; pr: number; s
  * is read for a reply already naming the item, so a reply whose record was lost is not posted again. Runs outside every
  * coordination transaction.
  */
-export async function fileFollowUpThreads(input: { repository: string; key: string; workId: string; pr: number; sha: string; reviewId: number; reviewer: string; previous?: FollowUpFiling; listed?: string[]; store?: FollowUpCreateStore }, run: ChildRun, create: CreateFollowUpItem, now: Date): Promise<FollowUpFiling> {
+export async function fileFollowUpThreads(input: { repository: string; key: string; workId: string; pr: number; sha: string; reviewId: number; reviewer: string; previous?: FollowUpFiling; listed?: string[]; store?: FollowUpCreateStore;
+  /** The item this approval already filed, looked up by parent and approval id (`existingFollowUpItem`), for a create refused as a key reuse. */
+  existing?: () => string | undefined }, run: ChildRun, create: CreateFollowUpItem, now: Date): Promise<FollowUpFiling> {
   const previous = input.previous;
   const createKey = followUpCreateKey(input.repository, input.pr, input.reviewId);
   const base = { at: now.toISOString(), reviewId: input.reviewId, attempts: (previous?.attempts ?? 0) + 1 };
-  const carried = { named: previous?.named ?? [], threads: previous?.threads ?? [], findings: previous?.findings ?? [], replied: previous?.replied ?? [], resolved: previous?.resolved ?? [], refused: previous?.refused ?? [], ...(previous?.item ? { item: previous.item } : {}), ...(previous?.classified ? { classified: true } : {}) };
+  const carried = { named: previous?.named ?? [], threads: previous?.threads ?? [], findings: previous?.findings ?? [], replied: previous?.replied ?? [], resolved: previous?.resolved ?? [], refused: previous?.refused ?? [], ...(previous?.item ? { item: previous.item } : {}), ...(previous?.classified ? { classified: true } : {}), ...(previous?.keyReuse ? { keyReuse: previous.keyReuse } : {}) };
   let review: any;
   try { review = JSON.parse(String(await run('gh', ['api', `repos/${input.repository}/pulls/${input.pr}/reviews/${input.reviewId}`]))); }
   catch (error) { return { ...base, ...carried, failure: `the review ${input.reviewId} could not be read: ${firstLine(error)}` }; }
@@ -435,7 +458,7 @@ export async function fileFollowUpThreads(input: { repository: string; key: stri
     }
   }
   if (!threads.length && !findings.length) return { ...base, named, threads, findings, replied: [], resolved: [], refused, classified: true };
-  let item = carried.item;
+  let item = carried.item, carriedKeyReuse = previous?.keyReuse;
   if (!item) {
     const payload = pending?.item ?? followUpItem(input, threads, findings);
     // Kept before it is sent: a create whose response is lost must be retried with this very payload.
@@ -443,8 +466,22 @@ export async function fileFollowUpThreads(input: { repository: string; key: stri
       try { await input.store.write({ key: createKey, item: payload, threads, findings, refused }); }
       catch (error) { return { ...base, named, threads, findings, replied: [], resolved: [], refused, classified: true, failure: `the follow-up create could not be recorded before it was sent: ${firstLine(error)}` }; }
     }
+    let keyReuse: FollowUpFiling['keyReuse'];
     try { item = (await create(payload, createKey)).key; }
-    catch (error) { return { ...base, named, threads, findings, replied: [], resolved: [], refused, classified: true, failure: `the follow-up item could not be created: ${firstLine(error)}` }; }
+    catch (error) {
+      const refusal = { ...base, named, threads, findings, replied: [], resolved: [], refused, classified: true };
+      // The key was used before with a different body (GY-598): asking again with this one is refused on
+      // every retry. The item that key made is this approval's follow-up, and is linked; with none, the
+      // body is filed under a key of its own, which a retry of the same body repeats.
+      if (!firstLine(error).includes(keyReuseRefusal)) return { ...refusal, failure: `the follow-up item could not be created: ${firstLine(error)}` };
+      item = input.existing?.();
+      if (item) keyReuse = 'linked';
+      else {
+        try { item = (await create(payload, followUpBodyKey(createKey, payload))).key; keyReuse = 'rekeyed'; }
+        catch (retry) { return { ...refusal, failure: `the follow-up item could not be created under its body key after its approval key was refused as reused: ${firstLine(retry)}` }; }
+      }
+    }
+    if (keyReuse) carriedKeyReuse = keyReuse;
   }
   const replied = [...carried.replied], resolved = [...carried.resolved], failed: string[] = [];
   for (const thread of threads) {
@@ -465,5 +502,5 @@ export async function fileFollowUpThreads(input: { repository: string; key: stri
       resolved.push(thread.id);
     } catch (error) { failed.push(`${thread.id}: ${firstLine(error)}`.slice(0, 300)); }
   }
-  return { ...base, named, threads, findings, item, replied, resolved, refused, classified: true, ...(failed.length ? { failure: `${failed.length} follow-up thread(s) could not be answered and resolved: ${failed[0]}` } : {}) };
+  return { ...base, named, threads, findings, item, replied, resolved, refused, classified: true, ...(carriedKeyReuse ? { keyReuse: carriedKeyReuse } : {}), ...(failed.length ? { failure: `${failed.length} follow-up thread(s) could not be answered and resolved: ${failed[0]}` } : {}) };
 }
