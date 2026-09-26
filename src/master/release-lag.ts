@@ -115,5 +115,7 @@ export async function releaseLagStatus(root: string, baseBranch: string, work: r
     ...inputs.executors.filter(row => row.state === 'running' || row.state === 'standing-down')
       .map(row => ({ name: row.name, label: `Executor ${row.name}`, release: row.release, startedAt: row.startedAt, restart: row.restart })),
   ], { root, now: Date.now() });
-  return { lag, refusal: upgradeRefusalAttention(inputs.loop?.upgrade?.refused, root, baseBranch) };
+  // The lag and a checkout the loop's upgrade refused are attention; the report is what status prints.
+  return { attention: [...lag.attention, ...upgradeRefusalAttention(inputs.loop?.upgrade?.refused, root, baseBranch)],
+    report: { baseTip: lag.baseTip, graceMs: releaseLagGraceMs, components: lag.components } };
 }

@@ -30,7 +30,7 @@ import { ReportSections } from '../master/sections.js';
 import { terminalDecisions } from './decision-report.js';
 import { masterBoard } from '../model/board.js';
 import { executorFleetReport, readCommit, readExecutorRegistrations } from '../executor-fleet.js';
-import { releaseLagGraceMs, releaseLagStatus } from '../master/release-lag.js';
+import { releaseLagStatus } from '../master/release-lag.js';
 import { throughputStatus } from '../throughput.js';
 import { Timings, timedApi, timedStep, withTimings } from '../master/timings.js';
 import { slowReportReader } from '../master/report-cache.js';
@@ -92,7 +92,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const dispatchCursor = await readDispatchCursor(root, master, () => {}).catch(error => ({ error: error instanceof Error ? error.message : 'Master dispatch cursor is unreadable' }));
   const stuck = stuckRequestReport({ reviews: reviewRecords, producers: producerRecords }, Date.now());
   const dispatch = 'error' in dispatchCursor ? { running: false, failures: [] as { requestId: string; kind: string; attempts: number; reason: string; at: string; nextAt: string }[], error: dispatchCursor.error } : withStuckRequests(dispatchSummary(dispatchCursor, Date.now(), master.run.dispatchIntervalSeconds * 1000, master.run.awaitReviewers ?? defaultAwaitReviewers.logins), stuck.stuck);
-  // A dispatcher that keeps failing its tick launches nothing for any item; it is named before the requests it is not launching.
+  // A dispatcher failing its tick launches nothing; it is named before the requests it is not launching.
   const dispatchItems = dispatchFailureAttention(dispatch);
   const containment = await timedStep('containment', () => assessContainment(snapshot.work, { hostId: master.hostId, observedAt: snapshot.now, clockOffset }));
   // Disk is reported from the host, not from the cursor: the loop may be stopped, and the volume
@@ -145,13 +145,9 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     { reviews: reviewRecords, producers: producerRecords, runtime, commit: cli.commit, approvals: cycling?.approvals ?? [], loop: cycling?.liveness ?? null, rows: status.work, trees,
       // The intervention report takes the server a minute: status reads the loop's copy, or a bounded live read.
       reports: 'bounded', reportBoundMs: dependencies.reportReadBoundMs, sections });
-  // What the loop and each executor loaded against the base tip, and a checkout the loop's own
-  // upgrade refused to touch — read the way the loop records them (GY-437).
-  const { lag, refusal: upgradeAttention } = await timedStep('release lag', () => releaseLagStatus(root, master.baseBranch, snapshot.work as Work[],
-    { cliCommit: cli.commit, loop: cycling, executors: releases.executors }));
-  // A merge pending on a head GitHub reports mergeable is named with the stalled items (GY-344).
-  // A repair-lane merge stays in front of the master until a normal merge proves the merge path healthy (GY-406).
-  // The queue head going without an observation stalls the whole queue behind it (GY-492), so its lag is raised with them.
+  const lag = await timedStep('release lag', () => releaseLagStatus(root, master.baseBranch, snapshot.work, { cliCommit: cli.commit, loop: cycling, executors: releases.executors }));
+  // Named with the stalls: a pending merge GitHub reports mergeable (GY-344), a repair-lane merge until a
+  // normal merge proves the path (GY-406), an unobserved queue head (GY-492).
   const observation = observationThroughputStatus(coordinator, snapshot);
   const stalledItems = [...derivedStalls, ...mergeStallAttention(snapshot), ...observation.attention, ...repairLaneAttention(snapshot.work)];
   // Exactly one component merges (GY-245): the loop, where one is installed or running, else the executors.
@@ -159,9 +155,9 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     declaration: executors.supervision.declaration, served: executors.presence.served });
   const attentionItems = [...diskAttention, ...scopeRequests, ...unanswered, ...conflicted, ...stuck.attentionItems, ...stalledItems, ...actorless, ...stalled, ...overlong, ...budget, ...owed.items, ...(sudo ? [...status.attentionItems, { subject: 'installation', text: sudo.instruction,
     ...(Date.parse(sudo.deadline) <= Date.now() ? agentOwner('master', `graphyard master browser ${sudo.flow}`) : humanOwner('issuing credentials to people', sudo.instruction)) }] : [...status.attentionItems])];
-  // The loop's own health goes in front of all of it (see loopItems above), then the dispatcher's,
-  // then an action no live executor can claim: nothing below any of the three is moving until they are.
-  attentionItems.unshift(...loopItems, ...dispatchItems, ...executors.attention, ...merger.attention, ...lag.attention, ...upgradeAttention);
+  // In front of all of it: the loop's health (loopItems above), the dispatcher's, an action no live executor
+  // can claim, the merger, a release lag (GY-437): nothing below moves until they do.
+  attentionItems.unshift(...loopItems, ...dispatchItems, ...executors.attention, ...merger.attention, ...lag.attention);
   // Setup that stops every launch, or leaves the loop unsupervised, is the master's to repair.
   attentionItems.push(...setupItems);
   attentionItems.push(...generatedFiles, ...overflow); attentionItems.push(...interventions.attentionItems, ...releases.attention, ...(throughput.attention ? [throughput.attention] : []));
@@ -176,7 +172,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
       // Items with no action, split the way a reader has to read them: one waiting on another
       // item is the pipeline working, one with nothing moving it is the pipeline stopped.
       actionless: actionless.length, actorless: actorless.length, livenessViolations: liveness.violations, waitingOnAnother: actionless.filter(entry => entry.outcome === 'waiting-on').length, stalled: stalledItems.length,
-      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + conflicted.length + stuck.attentionItems.length + stalledItems.length + actorless.length + stalled.length + overlong.length + loopItems.length + dispatchItems.length + executors.attention.length + merger.attention.length + releases.attention.length + lag.attention.length + upgradeAttention.length + overflow.length + budget.length + (throughput.attention ? 1 : 0) + observation.attention.length + owed.counted + resources.attention.length } }, snapshot.work);
+      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + conflicted.length + stuck.attentionItems.length + stalledItems.length + actorless.length + stalled.length + overlong.length + loopItems.length + dispatchItems.length + executors.attention.length + merger.attention.length + releases.attention.length + lag.attention.length + overflow.length + budget.length + (throughput.attention ? 1 : 0) + observation.attention.length + owed.counted + resources.attention.length } }, snapshot.work);
   return { ...directMergeLine(coordinator), ...status, ...attributed, ...faulted(attributeAttention(attributed.attentionItems, resources.readings)), resources: resources.report,
     // The board (GY-200): what the master owes first, with commands, then the rest.
     board: await timedStep('board', () => masterBoard(masterApi, snapshot, coordinator, decisions.unanswered)),
@@ -203,10 +199,9 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     // The inverted loop: what the control plane says each item needs, who is running it, and
     // every session it can be watched through.
     actions: needsHumanActions(actionReport(snapshot), owed.rows),
-    // Presence and supervision (GY-105), the release each registered executor runs (GY-126), and
-    // what the loop and each executor loaded against the base tip (GY-437).
+    // Presence and supervision (GY-105) and the release each registered executor runs (GY-126).
     executors: { ...executors, ...releases, attention: [...executors.attention, ...releases.attention] }, sessions: sessionReport(snapshot),
-    releaseLag: { baseTip: lag.baseTip, graceMs: releaseLagGraceMs, components: lag.components },
+    releaseLag: lag.report,
     // Branches the queue's own pushes contaminated and the approvals its pushes cost (GY-127).
     branches: branchReport(status.work),
     requests: agentRequestReport(snapshot), impliedScopeRequests: impliedScopeRequests(snapshot.work),
@@ -244,7 +239,7 @@ export async function reportedAttention(root: string, master: MasterConfig, mast
   const derived = await timedStep('attention: derived', () => derivedAttention(root, master, masterApi, coordinator, snapshot, { ...observed, reviews: observed.reviews ?? [], producers: observed.producers ?? [], runtime: { available: observed.runtime.available, agents: observed.runtime.available ? observed.runtime.agents : [] } }));
   if (!derived.executors.presence.available && /^GET \/api\/actions failed/.test(derived.executors.presence.reason)) sections.mark('executors', 'GET /api/actions', derived.executors.presence.reason);
   const items = [...resources.attention, ...generatedFiles, ...overflow, ...interventions.attentionItems, ...releases.attention, ...(throughput.attention ? [throughput.attention] : []), ...decisions.attentionItems, ...derived.items];
-  // The report's last step over the whole list, which the loop runs too: a cause named once, in place of its symptoms.
+  // The last step over the whole list, as the loop runs it: a cause named once, not its symptoms.
   const attribute = (status: { work: any[]; attentionItems: AttentionItem[] }) => attributeAttention(ledgerRefusalAttention(status, snapshot.work).attentionItems, resources.readings);
   return { generatedFiles, overflow, interventions, releases, decisions, throughput, resources, derived, items, attribute, unavailable: sections.unavailable };
 }
