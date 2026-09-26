@@ -10,7 +10,8 @@ import { detachedLaunch, piRunner, processIdentity, readRunMeta, runAlive, runCo
 import { adoptRuns, applyOnce, clearRuns, detachRuns, liveRun, runsDirectory, type Applied } from '../src/runner/registry.js';
 import { approverRunOptions, startNarrowRun } from '../src/runner/roles.js';
 import { lostRun, lostRunReason, sessionRetry } from '../src/producer.js';
-import { approvalStep, approvalWatchSchema, emptyDaemonState, maxApproverLaunches, maxLostApproverRuns, runDaemon, type DaemonEffects } from '../src/master-daemon.js';
+import { approvalStep, approvalWatchSchema, emptyDaemonState, maxApproverLaunches, runDaemon, type DaemonEffects } from '../src/master-daemon.js';
+import { maxLostApproverRuns } from '../src/daemon/decisions.js';
 import { EventEmitter } from 'node:events';
 import type { RunResult } from '../src/runner/types.js';
 
