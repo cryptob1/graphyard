@@ -7,7 +7,7 @@ An `e2e:` proof passes only from a pinned candidate and bundle, published by a s
 
 Define a test case in **Settings → Test cases** or `graphyard scenario scenario.json` (`admin`): `id`, `title`, `purpose`, `setup`, `steps`, `expected`, `environment`, `runner`, `testPath`. Revisions are immutable; `e2e:ID` criteria pin the latest at creation; newer ones need a follow-up item.
 
-Trusted `e2e:ID` results append runs, bound to commit and CI run, to **Tests**; workers' never do.
+Trusted `e2e:ID` results append runs, bound to commit and CI run, to **Tests**; workers cannot.
 
 ## Identities
 
