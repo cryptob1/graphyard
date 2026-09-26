@@ -140,6 +140,21 @@ export function unexercisedFindings(work: Work, sha: string | undefined = work.c
 export const unexercisedDetail = (entry: UnexercisedFinding, sha: string) =>
   `${entry.proof} was recorded as not exercising ${entry.criteria.length ? entry.criteria.join(', ') : 'its criterion'} on ${short(sha)}: ${entry.behaviour ? `the mutation removing "${entry.behaviour}" survived` : 'no surviving-mutation run was recorded'} — ${entry.finding.length > 400 ? `${entry.finding.slice(0, 399)}…` : entry.finding}`;
 
+/**
+ * The rework detail for a head one of whose unit or integration groups has nothing left but proofs
+ * the producer recorded as not exercising their criterion, or null (GY-817). Such a group's request
+ * is never launched again for the head (auto-dispatch.ts); on 2026-09-26 GY-421 was named a proof
+ * dispatch nobody would run for 51 minutes, until a master requested the rework by hand.
+ */
+export function unexercisedRework(work: Work, decisions: ProducerGroupDecision[]): string | null {
+  if (!work.candidate) return null;
+  const findings = unexercisedFindings(work).filter(entry => mechanicalProof(entry.proof));
+  const groups = decisions.filter(decision => decision.state === 'request' && decision.group !== 'manual' && decision.unproven.length
+    && decision.unproven.every(proof => findings.some(entry => entry.proof === proof)));
+  if (!groups.length) return null;
+  return findings.filter(entry => groups.some(decision => decision.unproven.includes(entry.proof))).map(entry => unexercisedDetail(entry, work.candidate!.sha)).join('; ');
+}
+
 /** The live producer request bound to the current head for one group, or null. */
 export function openProducerRequest(work: Work, group: ProducerGroup): DispatchRequest | null {
   return (work.autoDispatch?.producers ?? []).find(request => request.group === group && request.state === 'requested' && !!work.candidate
