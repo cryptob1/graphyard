@@ -73,7 +73,7 @@ An unexplained lapsed lease raises `lease-loss` (`blocked-awaiting-operator` and
 
 ## Fault classes
 
-Faults carry `faultClass` (`master status` `faults`); recurring classes file one item (`GRAPHYARD_FAULT_CLASS_*`); moving hashes never reopen a standing fault. A failed section is listed only in `unavailable`.
+Faults carry `faultClass` (`master status` `faults`); recurring classes file one item (`GRAPHYARD_FAULT_CLASS_*`); moving hashes never reopen a standing fault. Designed outcomes count toward no class: a refresh whose conflict is confirmed (the item's `base-conflict` holds it), a paced budget projection above the reserve, the one-hour dwell line. A failed section is listed only in `unavailable`.
 
 ## Pipeline speed
 

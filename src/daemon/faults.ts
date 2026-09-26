@@ -44,8 +44,8 @@ export interface FaultSources {
  * cause (a full ledger, a resource at its bound) is tracked as that cause alone. A derived line that
  * restates a fault the item's own record shows (the same kind, or a kind in `restatements`) is that
  * fault, so it is not counted twice; a different fault of the same class on the item is its own
- * instance. Nor is the one-hour dwell line (`gate`) counted, which is the ordinary pace of work — a
- * gate nothing moves is `stalled-item`. Failed actions are not read here: the action history
+ * instance. Nor is a line in `uncountedAttentionKinds` counted: the one-hour dwell line and a paced
+ * budget projection are the ordinary pace of work. Failed actions are not read here: the action history
  * retains failures long after they stopped mattering, so each is noted once, as it happens, by storeAction.
  */
 export function cycleFaults(state: DaemonState, work: Work[], now: number, sources: FaultSources = {}): FaultObservation[] {
@@ -61,7 +61,7 @@ export function cycleFaults(state: DaemonState, work: Work[], now: number, sourc
     }
     const listed = { work: status.work, attentionItems: [...(sources.loop ?? []), ...status.attentionItems, ...(sources.reported ?? [])] };
     for (const item of classifyAttention(sources.attribute ? sources.attribute(listed) : listed.attentionItems))
-      if (item.kind !== 'gate' && !(sources.herdrUnavailable && herdrFaultKinds.has(item.kind))) derived.push({ kind: item.kind, faultClass: item.faultClass, subject: item.subject, text: item.text.slice(0, 500) });
+      if (!uncountedAttentionKinds.has(item.kind) && !(sources.herdrUnavailable && herdrFaultKinds.has(item.kind))) derived.push({ kind: item.kind, faultClass: item.faultClass, subject: item.subject, text: item.text.slice(0, 500) });
     const reclaim = state.reclaim, below = (free: number | null | undefined, bound: number) => free !== null && free !== undefined && free < bound;
     if (reclaim && (below(reclaim.freeBytes, diskThresholdBytes(config)) || below(reclaim.rootFreeBytes, worktreeRootMinFreeBytes(config))))
       derived.push({ ...classified('disk-pressure'), subject: 'disk', text: `Free space below its configured bound at the last reclaim (${reclaim.at})` });
@@ -102,6 +102,12 @@ export function onceAnnotations(read: CheckAnnotations, bound = 200): CheckAnnot
 }
 /** The kinds read from Herdr's session inventory: an unreadable Herdr lists none, so they go unobserved rather than read as missing sessions. */
 export const herdrFaultKinds: ReadonlySet<FaultKind> = new Set<FaultKind>(['session', 'overlong-session', 'concurrency-starved']);
+/**
+ * Attention lines that name the ordinary pace of work rather than a fault, so they are shown but never counted toward a
+ * class: the one-hour dwell line (`gate`; a gate nothing moves is `stalled-item`) and a GitHub budget projected to run out
+ * while it is still above the reserve and paced (GY-537; a pause or a budget below the reserve is `github-budget`).
+ */
+export const uncountedAttentionKinds: ReadonlySet<FaultKind> = new Set<FaultKind>(['gate', 'github-budget-projection']);
 /**
  * The derived lines that restate a fault the item's own record holds under another kind: a fence's settle or grace line
  * is the fence, an exhausted reviewer is the item's spent account, a missing session is its lost lease, and a gate with

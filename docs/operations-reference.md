@@ -31,6 +31,8 @@ Stop the worker, then `graphyard rework GY-N --previous-worker-stopped "reason"`
 
 `x-ratelimit-remaining`, `-limit` and `-reset` project exhaustion (`projectedExhaustionAt`).
 
+A projected exhaustion above the reserve is shown as `github-budget-projection` and counts toward no fault class; below the reserve, or paused, it is the `github-budget` observation fault.
+
 ### Observation cadence by state
 
 | Band | State | Cadence |

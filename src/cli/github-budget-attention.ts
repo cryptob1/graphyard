@@ -51,11 +51,16 @@ export function pauseAttention(status: BudgetStatus): AttentionItem[] {
     ...agentOwner('control plane', `Nothing to run: observation resumes at ${budget.paused.until}; graphyard status (githubBudget.lastHour) shows what spent it, and the merge-path reserve (${budget.reserve} requests) keeps merge-gate candidates observed before the next pause`) }];
 }
 
-/** The budget is going to run out before it resets: named with the projected time, while there is still budget to keep. */
+/**
+ * The budget is going to run out before it resets: named with the projected time, while there is still budget to keep.
+ * Above the reserve it is a projection the pace is already answering, not a read that is paused, stale or silent, so it
+ * carries the `github-budget-projection` kind the loop does not count toward the observation class (GY-537); once the
+ * budget is below the reserve, non-merge observations are yielding, and it is the `github-budget` fault it names.
+ */
 export function exhaustionAttention(status: BudgetStatus): AttentionItem[] {
   const budget = status.githubBudget;
   if (!budget || budget.paused || !budget.exhaustsBeforeReset || !budget.projectedExhaustionAt) return [];
-  return [{ subject: 'github',
+  return [{ subject: 'github', kind: budget.belowReserve ? 'github-budget' : 'github-budget-projection',
     text: `GitHub budget: ${budget.remaining ?? '?'}${budget.limit !== null ? ` of ${budget.limit}` : ''} requests remain and the spend rate is ${budget.perMinute}/min over the last ten minutes; at that rate the budget is exhausted at ${budget.projectedExhaustionAt}, before it resets at ${budget.resetAt ?? 'an unknown time'}${budget.pace?.perMinute != null ? `; observation workers are paced to ${budget.pace.perMinute}/min (${budget.pace.tier}) so the spend above the reserve lasts until the reset` : ''}${budget.belowReserve ? `; it is already below the ${budget.reserve}-request merge-path reserve, so only merge-gate candidates and webhook wakes are observed` : ''}`,
     ...agentOwner('master', `graphyard status (githubBudget) names the spend by kind; below the ${budget.reserve}-request reserve non-merge observations yield on their own, so nothing needs stopping — reduce open candidates or wait for the reset if the spend is not observation`) }];
 }
