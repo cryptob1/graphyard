@@ -5,6 +5,7 @@ import type { Observation, Work } from '../../src/model.js';
 import type { AgentReview, ReviewRequest } from '../../src/model/review.js';
 import { mergeableNow, queueRef, type BaseRefresh, type GitHubMergeQueueState, type QueuePlacement, type QueueSpeculation } from '../../src/merge-queue.js';
 import type { Succession } from '../../src/model/successors.js';
+import { SpeculativeConflict } from '../../src/model/refusal.js';
 
 // The outside world of the soak test (GY-404), simulated deterministically: one clock that both the
 // test process and the test Postgres read, a GitHub repository with pull requests, CI, a reviewer and
@@ -89,6 +90,11 @@ export class SimulatedGitHub {
   exhaustedProfiles = new Set<string>();
   /** Items whose GitHub merge state settles as UNSTABLE (a failing optional check), and those GitHub is slow to recompute after their required check passes. */
   unstable = new Set<string>(); slowRecompute = new Set<string>();
+  /**
+   * Items whose head conflicts with the base branch in a docs page once the base changed that page
+   * after the head was pushed (GY-566), until a docs-sync merges the base in: the page each conflicts in.
+   */
+  docsConflicts = new Map<string, string>();
   /** Successions (renames and splits) recorded on the base branch. */
   successions: Succession[] = [];
   private serial = 0;
@@ -125,6 +131,22 @@ export class SimulatedGitHub {
     Object.assign(pr, { head, base: this.tip, files, autoMerge: false, mergeRequestedAt: null });
     pr.pushed.set(head, clock.now());
     return pr;
+  }
+  /** Whether this pull request's head conflicts with the base tip: a docs conflict the base has moved past. */
+  conflicting(pr: PullRequest) { return pr.open && this.docsConflicts.has(pr.key) && !this.contains(pr.head, this.tip); }
+  /**
+   * A docs-sync session merges base tip `base` into the reviewed head, resolving the docs page both
+   * changed, and pushes the merge to the item's branch (a plain push: it refuses a branch that moved).
+   */
+  docsSync(key: string, head: string, base: string) {
+    const pr = [...this.prs.values()].find(entry => entry.key === key && entry.open);
+    if (!pr || pr.head !== head) return null;
+    const onto = this.commits.get(base)!, merged = this.record({ sha: sha('docs-sync', head, base), tree: sha('tree', 'docs-sync', head, base), parents: [head, base],
+      files: [...new Set([...this.commits.get(head)!.files, ...onto.files])], at: clock.now(), message: `Graphyard docs-sync of ${key} onto ${base.slice(0, 12)}` });
+    Object.assign(pr, { head: merged.sha, base, autoMerge: false, mergeRequestedAt: null });
+    pr.pushed.set(merged.sha, clock.now());
+    this.docsConflicts.delete(key);
+    return merged;
   }
   pr(work: Pick<Work, 'submission' | 'candidate'>) { const number = work.candidate?.pr ?? work.submission?.pr; const pr = number ? this.prs.get(number) : undefined; if (!pr) throw new Error(`No pull request #${number}`); return pr; }
 
@@ -185,12 +207,14 @@ export class SimulatedGitHub {
           // A reviewer App's verdict is read for the request the item is bound to, never for another.
           ...(pr.agentReview && work.reviewRequest?.commentId === pr.agentReview.requestId ? { agentReview: { ...pr.agentReview } } : {}),
           merged: !!pr.merged, mergeSha: pr.merged?.sha ?? null, mergedAt: pr.merged ? new Date(pr.merged.at).toISOString() : null,
-          mergeable: pr.open, conflicting: false, baseTip: world.tip, baseTree: world.tree, baseTipContained: world.contains(pr.head, world.tip),
+          mergeable: pr.open && !world.conflicting(pr), conflicting: world.conflicting(pr), baseTip: world.tip, baseTree: world.tree, baseTipContained: world.contains(pr.head, world.tip),
           protected: true, files: pr.files, scopeFiles: [], at: new Date(now).toISOString(),
         };
       },
       async publishSpeculativeTip(work: Work, placement: QueuePlacement): Promise<QueueSpeculation> {
         const pr = world.pr(work), predicted = placement.predictedBase!;
+        // A docs conflict stops the speculative merge as GitHub's /merges does (409), and the entry is ejected.
+        if (world.docsConflicts.has(pr.key) && !world.contains(pr.head, predicted)) throw new SpeculativeConflict(`Speculative merge of ${pr.head.slice(0, 12)} into ${queueRef(work.key)} conflicts and cannot be resolved by Graphyard`);
         const base = { ref: queueRef(work.key), base: predicted, baseTree: world.commits.get(predicted)!.tree, predecessors: placement.predecessors, policyRevision: work.policyRevision, publishedAt: new Date(clock.now()).toISOString(), trigger: 'queue-head' as const };
         // A head that already contains its predicted base is its own tip; otherwise the base is merged in, as GitHub's /merges does.
         if (world.contains(pr.head, predicted)) return { ...base, tip: pr.head, tipTree: world.commits.get(pr.head)!.tree, reviewedHead: pr.head };
@@ -202,10 +226,21 @@ export class SimulatedGitHub {
           merge: { from, parents: [from, predicted], author: 'graphyard[bot]', authoredByApp: true, conflicts: false, baseChanges: changed, diff: { reviewed: sha('patch', from), tip: sha('patch', from) } } };
       },
       async refreshCandidateBase(work: Work): Promise<BaseRefresh> {
-        // No candidate in this world conflicts: a GitHub reading that says so is stale, as GY-375 found.
+        // Only a docs conflict is real in this world; any other GitHub reading of one is stale, as GY-375 found.
         const pr = world.pr(work), at = new Date(clock.now()).toISOString();
+        if (world.conflicting(pr)) return { from: { sha: pr.head, baseSha: pr.base }, base: world.tip, baseTree: world.tree, policyRevision: work.policyRevision, at, head: null, merge: null, carry: null, trigger: 'conflict confirmed',
+          conflict: `Candidate ${pr.head.slice(0, 12)} cannot be brought onto base branch tip ${world.tip.slice(0, 12)} without resolving a conflict in ${world.docsConflicts.get(pr.key)}`, conflictPaths: [world.docsConflicts.get(pr.key)!] };
         return { from: { sha: pr.head, baseSha: pr.base }, base: world.tip, baseTree: world.tree, policyRevision: work.policyRevision, at, head: pr.head, conflict: null, merge: null, carry: null,
           stale: { head: pr.head, base: world.tip, policyRevision: work.policyRevision, at, reading: `GitHub reported ${pr.head.slice(0, 12)} conflicting, but a test merge is clean` } } as BaseRefresh;
+      },
+      // A docs-sync head, as the real adapter describes it: a two-parent merge of the reviewed head and
+      // the base tip, whose change outside docs/ keeps its patch-id (the session resolved prose only).
+      async docsSyncRefresh(work: Work, adoption: { from: { sha: string; baseSha: string }; base: string; head: string; to: { sha: string; baseSha: string }; paths: string[] | null }): Promise<BaseRefresh> {
+        const { from, base, head, to } = adoption, commit = world.commits.get(head)!;
+        const baseChanges = world.commits.get(base)!.files.filter(file => !world.commits.get(from.baseSha)!.files.includes(file));
+        return { from, base, baseTree: world.commits.get(base)!.tree, policyRevision: work.policyRevision, at: new Date(clock.now()).toISOString(), head, conflict: null, carry: null, trigger: 'docs sync',
+          merge: { from: from.sha, parents: commit.parents, author: 'docs-sync-account', authoredByApp: false, conflicts: true, baseChanges },
+          docsSync: { paths: adoption.paths, to, reviewed: sha('patch', from.sha), synced: sha('patch', from.sha) } };
       },
       async restoreBranch(): Promise<BaseRefresh> { throw new Error('No branch in this world carries another item\'s commits'); },
       async requestAgentReview(work: Work, profile: { name: string; reviewerApp: string; runtime: string }): Promise<ReviewRequest> {

@@ -71,9 +71,13 @@ test('unit:system-invariants-checked — each invariant driven over its threshol
       at: [{ work: [parent, followUp('GY-2', parent), followUp('GY-3', { ...parent, id: 'work-GY-9', key: 'GY-9' } as Work)], now: clock }] },
     'lingering-sessions': {
       over: [{ work: [delivered('GY-5', 31 * minute, [session('reviewer-5')]), delivered('GY-6', 45 * minute, [session('reviewer-6')])], now: clock,
-        approvals: { 'decision:GY-7': { work: 'GY-7', agentName: 'approver-7', pane: null, settledAt: iso(-40 * minute) } }, agents: [{ name: 'reviewer-5' }, { name: 'reviewer-6' }, { name: 'approver-7' }] }],
+        approvals: { 'decision:GY-7': { work: 'GY-7', agentName: 'approver-7', pane: null, settledAt: iso(-40 * minute) } },
+        docsSyncs: { 'work-GY-14:head:base': { work: 'GY-14', agentName: 'gy-docs-sync-gy-14-1a2b3c4', pane: null, settledAt: iso(-40 * minute) } },
+        agents: [{ name: 'reviewer-5' }, { name: 'reviewer-6' }, { name: 'approver-7' }, { name: 'gy-docs-sync-gy-14-1a2b3c4' }] }],
       at: [{ work: [delivered('GY-5', 29 * minute, [session('reviewer-5')]), delivered('GY-6', 45 * minute, [session('reviewer-6')])], now: clock,
-        approvals: { 'decision:GY-7': { work: 'GY-7', agentName: 'approver-7', pane: null, settledAt: iso(-40 * minute) } }, agents: [{ name: 'reviewer-5' }] }] },
+        approvals: { 'decision:GY-7': { work: 'GY-7', agentName: 'approver-7', pane: null, settledAt: iso(-40 * minute) } },
+        docsSyncs: { 'work-GY-14:head:base': { work: 'GY-14', agentName: 'gy-docs-sync-gy-14-1a2b3c4', pane: null, settledAt: iso(-20 * minute) } },
+        agents: [{ name: 'reviewer-5' }, { name: 'gy-docs-sync-gy-14-1a2b3c4' }] }] },
     'refresh-churn': {
       over: [0, 1, 2, 3, 4].map(n => ({ work: [refreshed('GY-8', n)], now: clock + n * minute })),
       at: [0, 1, 2, 3].map(n => ({ work: [refreshed('GY-8', n)], now: clock + n * minute })) },

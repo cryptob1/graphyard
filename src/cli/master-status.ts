@@ -1,4 +1,3 @@
-import { leaseHealthStatus } from './lease-health-attention.js';
 import { probeCandidateConflicts } from '../conflicts.js';
 import { mergeBatchSize } from '../master.js';
 import { humanOnlyStatusRow, type HumanRequestRow } from '../model/human-request.js';
@@ -22,7 +21,6 @@ import { ghCheckAnnotations, qualifyTimingFailures } from './timing-failures.js'
 import { setupHealth } from './master-setup.js';
 import { stuckRequestReport, withStuckRequests } from './stuck-requests.js';
 import { nameUnresolvedThreads } from '../merge-queue.js';
-import { observationThroughputStatus } from '../github.js';
 import type { LoopSupervisorHost } from '../supervisor.js';
 import { attributeAttention, derivedAttention, faulted, ledgerRefusalAttention, resourceStatus } from '../master-status.js';
 import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable, generatedManifestScript } from '../install/generated-files.js';
@@ -35,7 +33,8 @@ import { executorFleetReport, readCommit, readExecutorRegistrations } from '../e
 import { throughputStatus } from '../throughput.js';
 import { Timings, timedApi, timedStep, withTimings } from '../master/timings.js';
 import { slowReportReader } from '../master/report-cache.js';
-import { repairLaneAttention } from '../master/repair-lane.js';
+import { hotspots } from './hotspots.js';
+import { stallAttention } from './stall-attention.js';
 
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
 // The cycle-budget measure is a daemon metric (src/daemon/metrics.ts); it is read from here,
@@ -44,12 +43,11 @@ export { cycleBudget } from '../daemon/metrics.js';
 // `master scope` lives in its own module; it is read from here as it always was.
 export { approveScopeRequest } from './master-scope.js';
 
-// Observation throughput and the queue head's lag live beside the observation schedule they read
-// (src/github.ts); the report reads them from here, as do the tests.
-export { observationThroughputStatus };
+// The queue-head observation lag, lease health and stall composition live in `stall-attention.ts`;
+// the report and the tests read them from here, as they always have.
+export { observationThroughputStatus } from './stall-attention.js';
 // The attention builders live beside each other in `status-attention.ts`; the report reads them
 // from here, as does everything that was reading them from here before the split.
-import { mergeStallAttention } from './status-attention.js';
 export { approverLaunchAttention, mergeStallAttention, nameOrphanSupervisors, orphanSupervisorAttention, stalledItemAttention, supervisorReclaimCommand } from './status-attention.js';
 export { humanNeededAttention, needsHumanActions, scopeRequestAttention } from './owed-report.js';
 export { stalledActionAttention } from './stalled-actions.js';
@@ -106,6 +104,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const managedRoot = await timedStep('managed root', () => managedRootStatus(root, master, [...reviewRecords, ...producerRecords]));
   const diskAttention = [...diskPressureAttention(disk), ...managedRoot.attention];
   const daemonState = await readDaemonState(root, master).catch(error => ({ error: error instanceof Error ? error.message : 'Master daemon state is unreadable' }));
+  const hs = hotspots(daemonState);
   const intervalMs = master.run.intervalSeconds * 1000;
   const cycling = 'error' in daemonState ? null : daemonSummary(daemonState, Date.now(), intervalMs, master.hostId);
   const daemon = cycling ?? { running: false, error: (daemonState as { error: string }).error };
@@ -146,9 +145,8 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
       reports: 'bounded', reportBoundMs: dependencies.reportReadBoundMs, sections });
   // A merge pending on a head GitHub reports mergeable is named with the stalled items (GY-344).
   // A repair-lane merge stays in front of the master until a normal merge proves the merge path healthy (GY-406).
-  // Queue-head observation lag (GY-492) and slow renewals (GY-558) stall what waits.
-  const observation = observationThroughputStatus(coordinator, snapshot), health = leaseHealthStatus(coordinator);
-  const stalledItems = [...derivedStalls, ...mergeStallAttention(snapshot), ...observation.attention, ...repairLaneAttention(snapshot.work), ...health.attention];
+  // Observation lag (GY-492), slow renewals (GY-558) and conflict hotspots (GY-566) stall what waits.
+  const { observation, health, stalledItems } = stallAttention(snapshot, coordinator, derivedStalls, hs.attention);
   // Exactly one component merges (GY-245): the loop, where one is installed or running, else the executors.
   const merger = installationMerger({ loop: { configured: !!setup.supervisor.installed, running: !!cycling?.running, autoMerge: master.autoMerge },
     declaration: executors.supervision.declaration, served: executors.presence.served });
@@ -185,7 +183,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     terminalDecisions: decisions.listed, throughput, unansweredDecisions: decisions.unanswered,
     // The commits no reviewer session has ever obtained a verdict on, with the dismissed review.
     unobtainableReviews: unobtainable.map(item => ({ work: item.subject, ...item.review })),
-    merger: { merger: merger.merger, detail: merger.detail }, autoMerge: master.autoMerge, mergeQueue: { batchSize: mergeBatchSize(master) }, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'each merge needs an approved merge decision: graphyard master decide GY-N merge REASON, approved by the approver agent',
+    conflictHotspots: hs.report, merger: { merger: merger.merger, detail: merger.detail }, autoMerge: master.autoMerge, mergeQueue: { batchSize: mergeBatchSize(master) }, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'each merge needs an approved merge decision: graphyard master decide GY-N merge REASON, approved by the approver agent',
     // What the observation workers achieve and how far the queue head has drifted (GY-492).
     observationThroughput: observation, leaseHealth: health.report,
     versionSkew: mergeProtocolSkew(coordinator, cli), cli,

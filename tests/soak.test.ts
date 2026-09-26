@@ -17,6 +17,7 @@ import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-da
 import { Launcher } from '../src/daemon/cycle.js';
 import { successorWidening } from '../src/model/successors.js';
 import { systemInvariants, type InvariantCheck } from '../src/model/invariants.js';
+import { docsSyncSessionName, type DocsSyncPlan } from '../src/docs-sync.js';
 import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } from './helpers/soak-world.js';
 
 /**
@@ -27,7 +28,8 @@ import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } f
  * (src/model/invariants.ts) holds. Fifteen items pass through it: released every fifteen minutes so
  * a merge lands about every fifteen, three sent back by their reviewer, two whose worker dies, two
  * production deploys, a file split on main that re-plans an item, one pull request GitHub reports
- * CLEAN at once and one UNSTABLE, and a reviewer bot out of quota that fails over. Every one of the
+ * CLEAN at once and one UNSTABLE, a reviewer bot out of quota that fails over, and one whose docs page
+ * main rewrites under it, a conflict a docs-sync session resolves without a rework round (GY-566). Every one of the
  * fifteen must be delivered. The loop carries one `Launcher` across its cycles (GY-616), as
  * `runDaemon` does, so session launches run beside the cycle — outliving it, holding their profile
  * from hand-off, and reported by the next cycle — and the invariants hold on that detached path. A
@@ -60,6 +62,7 @@ const plan = {
   items: 15, releaseEveryMs: 15 * minute, workMs: 20 * minute,
   rework: new Set([3, 7, 11]), deaths: new Set([5, 9]), deathAfterMs: 8 * minute,
   deploys: [2 * hour + 30 * minute, 5 * hour], split: { at: 45 * minute, item: 12 }, clean: 2, unstable: 4, slowRecompute: 8, exhaustedReviewer: 6,
+  docsConflict: { item: 10, page: 'docs/master-agent.md', syncMs: 4 * minute },
 };
 const file = (n: number) => `src/soak/item-${n}.ts`;
 
@@ -99,10 +102,10 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
  * effects, standing for a change that breaks an invariant, so the soak shows it would fail.
  */
 let days = 0;
-async function simulateDay(options: { hours: number; regression?: 'approvers-left-open' }) {
+async function simulateDay(options: { hours: number; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[] }) {
   const dayStart = clock.now();
   const github = new SimulatedGitHub({ repository, baseBranch: 'main', appId: 1234, ciAppId: 15368, reviewerApps, ciMs: 5 * minute, reviewMs: 3 * minute, firstPullRequest: 100 * ++days },
-    [...Array.from({ length: plan.items }, (_, index) => file(index + 1)), 'README.md']);
+    [...Array.from({ length: plan.items }, (_, index) => file(index + 1)), 'README.md', plan.docsConflict.page]);
   const herdr = new SimulatedHerdr();
   const adapter = github.adapter();
   const moveClock = async (ms: number) => { clock.advance(ms); await store.pool.query('UPDATE simulated_clock SET offset_ms=$1', [clock.offsetMs]); };
@@ -154,6 +157,32 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       herdr.status(session.pane, 'done');
     }
   };
+  // Main rewrites the docs page an item documented itself in just as its reviewer approves it: the
+  // approved head now conflicts with the base there, and only there (GY-566).
+  let docsRewritten = false;
+  const docsTick = () => {
+    const pr = [...github.prs.values()].find(entry => entry.key === items[plan.docsConflict.item - 1].key && entry.open);
+    if (docsRewritten || !pr?.reviews.some(review => review.sha === pr.head && review.state === 'APPROVED')) return;
+    docsRewritten = true;
+    github.docsConflicts.set(pr.key, plan.docsConflict.page);
+    github.commit(`Reword ${plan.docsConflict.page}`, github.files);
+  };
+
+  // ---- Docs-sync sessions (GY-566): launched by the loop for a docs-only conflict, each merges the base in and pushes. ----
+  const docsSyncRuns: { plan: DocsSyncPlan; agentName: string; pane: string; pushAt: number; outcome: 'working' | 'pushed' | 'gave up' }[] = [];
+  const docsSync: DaemonEffects['docsSync'] = async (_work, docsPlan) => {
+    const agentName = docsSyncSessionName(docsPlan);
+    if (herdr.byName(agentName)) throw new Error(`Docs-sync session ${agentName} is already visible in Herdr; let it finish first`);
+    const pane = herdr.open(agentName);
+    docsSyncRuns.push({ plan: docsPlan, agentName, pane, pushAt: clock.now() + plan.docsConflict.syncMs, outcome: 'working' });
+    return { agentName, pane, account: 'claude-reviewer', runtime: 'claude', session: null };
+  };
+  const docsSyncTick = (now: number) => {
+    for (const run of docsSyncRuns.filter(entry => entry.outcome === 'working' && now >= entry.pushAt)) {
+      run.outcome = github.docsSync(run.plan.key, run.plan.head, run.plan.base) ? 'pushed' : 'gave up';
+      herdr.status(run.pane, 'done');
+    }
+  };
 
   // ---- Approvers and producers: sessions the loop launches, each acting on the minute after. ----
   const pending: (() => Promise<void>)[] = [];
@@ -187,8 +216,12 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     agents: () => herdr.list(),
     herdr: () => ({ agents: herdr.list(), available: true }),
     credentials: async profiles => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])),
-    snapshot, dispatch, requestProof, approver, merge,
-    closeSession: pane => { if (options.regression === 'approvers-left-open' && /approver/.test(herdr.agents.get(pane)?.name ?? '')) return; herdr.close(pane); },
+    snapshot, dispatch, requestProof, approver, merge, docsSync,
+    closeSession: pane => {
+      const name = herdr.agents.get(pane)?.name ?? '';
+      if ((options.regression?.includes('approvers-left-open') && /approver/.test(name)) || (options.regression?.includes('docs-syncs-left-open') && /docs-sync/.test(name))) return;
+      herdr.close(pane);
+    },
     decide: (work, action, reason, input = {}) => api(principals.operatorAgent, 'POST', `work/${work.id}/decide`, { action, input: decisionInput(action, work, input), reason }),
     decisions: work => api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(work.id)}/decisions`),
     withdraw: (work, decision, reason) => api(principals.operatorAgent, 'POST', `work/${work.id}/decide`, { action: 'withdraw', decision, reason }),
@@ -208,7 +241,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   // cycles, the way `runDaemon` does, and a launch settles in the interval after the cycle that
   // handed it over — here, before the simulated clock moves on.
   const launcher = new Launcher();
-  const violations: string[] = [], observed = new Set<string>(), failures: string[] = [];
+  const violations: string[] = [], observed = new Set<string>(), faulted = new Set<string>(), failures: string[] = [];
   let released = 0, split = false, deploys = 0, cycles = 0, reportedDispatches = 0;
   const jobsDue = async () => Number((await store.pool.query('SELECT count(*) AS due FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now())')).rows[0].due);
   for (let elapsed = 0; elapsed <= options.hours * hour;) {
@@ -226,7 +259,9 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     // The world moves: GitHub, then the sessions. A deploy restarts the control plane once the
     // sessions have renewed: for the rest of that minute nothing reaches it, the loop included.
     github.tick(now);
+    docsTick();
     await workersTick(now);
+    docsSyncTick(now);
     if (!deploying) {
       for (const act of pending.splice(0)) await act();
       await engine.reconcile();
@@ -242,7 +277,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       await launcher.idle();
       for (const check of state.invariants.report as InvariantCheck[]) {
         if (check.observed) observed.add(check.invariant);
-        if (!check.holds) violations.push(`${new Date(now).toISOString()} (+${Math.round(elapsed / minute)} min) ${check.line}`);
+        if (!check.holds) { violations.push(`${new Date(now).toISOString()} (+${Math.round(elapsed / minute)} min) ${check.line}`); for (const subject of check.subjects) faulted.add(`${check.invariant}:${subject}`); }
       }
     }
     const open = (await store.list()).filter(item => item.stage !== 'done').length;
@@ -251,12 +286,12 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   }
 
   const final = (await store.list()).filter(item => items.some(entry => entry.id === item.id));
-  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart };
+  return { items, final, github, herdr, sessions, docsSyncRuns, lost, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart };
 }
 
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 180_000 }, async () => {
   const began = performance.now();
-  const { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
+  const { items, final, github, herdr, sessions, docsSyncRuns, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
   const undelivered = final.filter(item => item.stage !== 'done' || !item.delivery);
   assert.deepEqual(undelivered.map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
@@ -280,16 +315,30 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.ok(final.find(item => item.key === items[plan.split.item - 1].key)!.plannedFiles.includes(`src/soak/item-${plan.split.item}-a.ts`), 'the split file re-planned its item onto the successors');
   const reviewed = final.find(item => item.key === items[plan.exhaustedReviewer - 1].key)!;
   assert.ok(reviewed.reviewFailovers?.some(failover => failover.profile === 'claude-reviewer' && failover.exhaustion === 'usage-limit' && failover.nextProfile === 'cursor-reviewer'), `the exhausted reviewer bot failed over to the next profile: ${JSON.stringify(reviewed.reviewFailovers)}`);
+  // The docs-only conflict went to one docs-sync session, not a worker: its push was adopted as the
+  // refresh's outcome with the approval kept, the session was closed, and the loop's records of it are bounded.
+  const conflicted = items[plan.docsConflict.item - 1].key;
+  assert.deepEqual(docsSyncRuns.map(run => [run.plan.key, run.plan.paths, run.outcome]), [[conflicted, [plan.docsConflict.page], 'pushed']], 'one docs-sync session resolved the conflict');
+  assert.deepEqual(state.conflicts.map(entry => [entry.work, entry.route, entry.paths]), [[conflicted, 'docs-sync', [plan.docsConflict.page]]], 'the conflict is logged for the hotspot report as docs-synced');
+  const adopted = Object.entries(state.actions).filter(([key]) => key.endsWith(':docs-sync')).map(([, action]) => action);
+  assert.ok(adopted.length === 1 && /a docs-sync session brought .* with no rework round; kept [^;]*approval/.test(adopted[0].detail), `the synced head was adopted with the approval kept: ${JSON.stringify(adopted)}`);
+  assert.equal(final.find(item => item.key === conflicted)!.pipeline?.reworkRounds ?? 0, 0, 'the docs conflict cost no rework round');
+  assert.deepEqual(herdr.list().filter(agent => /docs-sync/.test(agent.name ?? '')), [], 'no docs-sync session is left open');
+  assert.ok(docsSyncRuns.every(run => herdr.closed.includes(run.pane)), 'the loop closed the docs-sync session it launched');
+  assert.ok(Object.values(state.docsSyncs).every(watch => watch.settledAt) && Object.keys(state.docsSyncs).length <= docsSyncRuns.length, `every docs-sync record settled, and none accumulate: ${JSON.stringify(state.docsSyncs)}`);
   assert.ok(cycles > 24 * 6, `the loop cycled through the day (${cycles} cycles)`);
   const seconds = (performance.now() - began) / 1000;
   assert.ok(seconds < 120, `the day runs well inside the three minutes the CI test job allows it (${seconds.toFixed(1)} s)`);
 });
 
-test('unit:soak-invariants-hold — a loop change that breaks an invariant fails the soak: approver sessions the loop no longer closes are named within the hour', { timeout: 120_000 }, async () => {
+test('unit:soak-invariants-hold — a loop change that breaks an invariant fails the soak: approver and docs-sync sessions the loop no longer closes are named within the hour', { timeout: 120_000 }, async () => {
   // The regression GY-403 was: approvers finished, nobody closed them. Here the loop's close reports
-  // success and closes nothing, which no per-item gate of any change would notice.
-  const { violations, state } = await simulateDay({ hours: 3, regression: 'approvers-left-open' });
+  // success and closes nothing, which no per-item gate of any change would notice; the same for the
+  // docs-sync session of the day's docs-only conflict (GY-566).
+  const { violations, faulted, state, docsSyncRuns } = await simulateDay({ hours: 4, regression: ['approvers-left-open', 'docs-syncs-left-open'] });
   assert.ok(violations.some(line => /lingering-sessions: VIOLATED — .*approver session graphyard-approver-gy-\d+-/.test(line)), `the soak names the lingering approver: ${violations.slice(0, 3).join('\n')}`);
+  assert.equal(docsSyncRuns.length, 1, 'the day holds its docs-only conflict');
+  assert.ok(faulted.has(`lingering-sessions:${docsSyncRuns[0].plan.key}`), `the soak names the item whose docs-sync session lingers: ${[...faulted].join(', ')}`);
   assert.ok(violations.every(line => /lingering-sessions/.test(line)), `nothing else is violated: ${violations.filter(line => !/lingering-sessions/.test(line)).slice(0, 3).join('\n')}`);
   // The violation is a fault of its class on the loop's record, which files one item when it recurs.
   assert.equal(state.faults.instances.filter(instance => instance.kind === 'invariant:lingering-sessions' && instance.faultClass === 'session-liveness').length, 1);

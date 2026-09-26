@@ -310,7 +310,10 @@ export function syncConflict(work: Work): { reason: string; binding: string } | 
   if (!work.submission || work.reworkRequested || !candidate || !observation || work.stage === 'done') return null;
   if (observation.candidate.sha !== candidate.sha || observation.merged || observation.prState === 'closed') return null;
   const tip = observation.baseTip ?? candidate.baseSha;
-  if (observation.conflicting && !work.queue)
+  // While the control plane's own test merge of the head onto that tip is pending, it decides: a
+  // confirmed conflict is `baseRefreshConflict`'s, routed to a docs-sync session when it is confined
+  // to docs pages (GY-566), and a clean one costs no round at all.
+  if (observation.conflicting && !work.queue && !pendingBaseRefresh(work))
     return { reason: `GitHub reports that candidate ${candidate.sha.slice(0, 12)} conflicts with base branch tip ${tip.slice(0, 12)}`, binding: `${candidate.sha}:sync:${tip}` };
   const ejection = work.queueEjection;
   if (ejection && !work.queue && ejection.sha === candidate.sha && ejection.policyRevision === work.policyRevision && speculativeConflictReason.test(ejection.reason) && !ejection.predecessors?.length && !pendingBaseRefresh(work))

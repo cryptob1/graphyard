@@ -13,6 +13,7 @@ import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
 import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
 import { branchContamination, nextQueueEntries, disprovedConflict, currentRestore, decideIdentityCarry, defaultMergeBatchSize, mergeBatchSizeEvent, dismissedApproval, keptTipCarry, onto, pendingRestore, reviewedFilesOf, queueHistoryLimit, queueSequencingReason, reconciliationRefusalPrefix, tipReplacesHead, type BaseRefresh, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type QueueSpeculation, type RestoredApproval } from './merge-queue.js';
+import { docsSyncCarry } from './model/docs-sync.js';
 import { queueEjectionRecord } from './model/queue.js';
 import { githubFromEnv, mergeBandQueueDepth } from './github.js';
 import { regressionRefusals } from './regression-guard.js';
@@ -1601,13 +1602,18 @@ export class Engine {
         await wakeJob(db, work.id);
         return work;
       }
-      const carry = refresh.head && refresh.head !== refresh.from.sha ? this.decideBaseRefreshCarry(work, all, refresh, now) : null;
+      // A docs-sync head (GY-566) resolved a conflict, which the refresh rule never carries across;
+      // its own rule keeps the approval when the diff outside docs/ is unchanged.
+      const carry = refresh.docsSync && refresh.head ? docsSyncCarry({ from: refresh.from, base: refresh.base, at: now.toISOString(), policyRevision: work.policyRevision, merge: refresh.merge ?? null, docsSync: refresh.docsSync,
+        reviewedFiles: work.observation?.candidate.sha === refresh.from.sha ? work.observation.files : [], approval: bindingApproval(work), proofs: requiredProofs(work, all).map(proof => ({ proof, evidence: currentEvidence(work, proof, now) })) })
+        : refresh.head && refresh.head !== refresh.from.sha ? this.decideBaseRefreshCarry(work, all, refresh, now) : null;
       work.baseRefresh = { ...refresh, carry };
       this.evaluate(work, all, now);
       if (carry) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'base.carry', JSON.stringify({ details: { ...carry, merge: refresh.merge ?? null } })]);
       await this.recordDispatch(db, work, now);
       await save(db, work, 'graphyard', refresh.conflict ? 'base.conflict' : 'base.refreshed', now, { from: refresh.from, base: refresh.base, head: refresh.head, trigger: refresh.trigger ?? null,
-        ...(refresh.conflict ? { conflict: refresh.conflict } : {}),
+        ...(refresh.conflict ? { conflict: refresh.conflict, conflictPaths: refresh.conflictPaths ?? null } : {}),
+        ...(refresh.docsSync ? { docsSync: { paths: refresh.docsSync.paths, reviewed: refresh.docsSync.reviewed, synced: refresh.docsSync.synced } } : {}),
         ...(carry ? { carry: { approval: carry.approval.carried ? 'carried' : 'required', evidence: Object.fromEntries(carry.evidence.map(entry => [entry.proof, entry.carried ? 'carried' : 'required'])) } } : {}) });
       await wakeJob(db, work.id);
       return work;
