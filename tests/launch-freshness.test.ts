@@ -9,7 +9,7 @@ import type { DispatchRequest } from '../src/model/dispatch.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { assertMergeCandidate } from '../src/master/merge.js';
 import { assertReviewCandidate } from '../src/reviewer.js';
-import { emptyDispatchCursor, launchWaitAttention, launchWaits, reviewLaunchWaitAttentionMs, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
+import { dispatchFailureAttention, dispatchSummary, emptyDispatchCursor, launchWaitAttention, launchWaits, reviewLaunchWaitAttentionMs, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { emptyDaemonState, observationWakeRetryMs, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 
 /**
@@ -177,6 +177,11 @@ test('unit:launch-wait-reported — master status reports each waiting launch wi
     assert.match(attention[0].text, /has waited 20 min/);
     assert.match(attention[0].text, /no reviewer profile/);
     assert.ok(20 * minute > reviewLaunchWaitAttentionMs && 5 * minute < reviewLaunchWaitAttentionMs);
+
+    // What `master status` reports: the dispatcher summary carries the waits, and its attention raises the long one.
+    const summary = dispatchSummary(cursor, clock, 10_000, [], [waiting, fresh]);
+    assert.deepEqual(summary.waiting, rows);
+    assert.deepEqual(dispatchFailureAttention(summary), attention);
 
     // A refusal still standing is reported as the wait's reason too, with its next attempt.
     const refused = emptyDispatchCursor(config);
