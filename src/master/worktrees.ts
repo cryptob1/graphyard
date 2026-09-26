@@ -1,6 +1,6 @@
 // Concern: disk pressure, worktree dependency reclamation, managed checkouts and shared installs.
 import { createHash } from 'node:crypto';
-import { statfs, readdir, lstat, realpath, rm, mkdir, symlink, writeFile, readFile, rename, appendFile, unlink } from 'node:fs/promises';
+import { statfs, readdir, lstat, realpath, rm, mkdir, symlink, writeFile, readFile, rename, appendFile, unlink, rmdir } from 'node:fs/promises';
 import { resolve, dirname, basename } from 'node:path';
 import type { ChildRun } from '../child-runner.js';
 import type { Work } from '../model.js';
@@ -193,8 +193,8 @@ export const worktreeInventoryFile = (root: string) => resolve(root, '.graphyard
 export const worktreeReclaimAuditFile = (root: string) => resolve(root, '.graphyard/worktree-reclaim.jsonl');
 /**
  * A tree the removal pass found dirty or holding unpushed commits, kept until its working tree
- * changes again or the refs that could hold its commits move: `refs` fingerprints the remote refs,
- * the base branch and the item's candidate head as that pass saw them, so a push re-examines it.
+ * changes again or the refs that could hold its commits move: `refs` fingerprints the remote copies
+ * of its branch, the base branch and the item's candidate head as that pass saw them, so a push re-examines it.
  */
 export interface HeldWorktree { path: string; activityAt: number; reason: string; refs?: string }
 /** The inventory the reclaim step last took, so `master status` never walks every tree itself. */
@@ -274,12 +274,53 @@ async function registeredWorktrees(root: string, run: ChildRun): Promise<Set<str
 }
 
 /**
+ * The ref lines a tree's hold depends on: the remote copies of its own branch and the base branch,
+ * local or remote. A fetch that moves an unrelated remote branch then leaves the hold standing
+ * instead of re-running git status and log on every held tree. A commit pushed only under another
+ * branch name is not seen until the tree itself changes, which errs toward keeping the tree. A
+ * tree with no recorded branch depends on every ref.
+ */
+export function relevantRefs(listing: string, branch: string | null, baseBranch?: string): string {
+  if (!branch) return listing;
+  const names = [branch, ...(baseBranch ? [baseBranch] : [])];
+  return listing.split('\n').filter(line => {
+    const ref = line.slice(line.indexOf(' ') + 1);
+    return (baseBranch && ref === `refs/heads/${baseBranch}`) || (ref.startsWith('refs/remotes/') && names.some(name => ref.endsWith(`/${name}`) && ref.split('/').length === 3 + name.split('/').length));
+  }).join('\n');
+}
+/** What an unregistered directory holds beyond dependency trees and a `.git` pointer file: the work a removal would lose. */
+async function orphanContents(path: string): Promise<string[]> {
+  const holding: string[] = [];
+  for (const name of await readdir(path)) {
+    if ((dependencyDirectories as readonly string[]).includes(name)) continue;
+    if (name === '.git' && (await lstat(resolve(path, name))).isFile()) continue;
+    holding.push(name);
+  }
+  return holding;
+}
+/** Remove an orphaned directory that holds nothing but dependency trees and a `.git` pointer; `rmdir` refuses anything left. */
+async function removeOrphan(root: string, path: string) {
+  const base = worktreesDirectory(root);
+  if (dirname(path) !== base) throw new Error(`Refusing to remove ${path}: it is not directly inside ${base}`);
+  for (const name of dependencyDirectories) {
+    const target = resolve(path, name), info = await lstat(target).catch(() => null);
+    if (!info) continue;
+    assertDisposable(base, target);
+    if (info.isSymbolicLink()) await unlink(target); else await rm(target, { recursive: true, force: true });
+  }
+  if ((await lstat(resolve(path, '.git')).catch(() => null))?.isFile()) await unlink(resolve(path, '.git'));
+  await rmdir(path);
+}
+
+/**
  * Remove up to `limit` reclaimable worktrees, oldest first. Each is checked before it goes: a tree
  * with uncommitted changes, or whose HEAD holds commits no remote ref and no base branch has, is
  * reported and kept, and not looked at again until its working tree changes. Git itself refuses a
  * dirty tree without --force, which is never passed. Every removal is appended to the audit log
  * with its path, item, reason and head; `git worktree prune` then drops what the registry still
- * lists for directories that are gone.
+ * lists for directories that are gone. A delivered or closed item's directory that Git no longer
+ * registers is an orphan: it goes when it holds nothing but dependency trees and a `.git` pointer,
+ * and is reported with what it holds otherwise.
  */
 export async function removeReclaimableWorktrees(root: string, work: Work[], options: { idleMs: number; run: ChildRun; baseBranch?: string; now?: number; limit?: number; livePaths?: Iterable<string>; entries?: WorktreeEntry[] }): Promise<WorktreeRemovalReport> {
   const now = options.now ?? Date.now(), limit = options.limit ?? defaultWorktreeRemovalLimit, at = new Date(now).toISOString();
@@ -303,19 +344,42 @@ export async function removeReclaimableWorktrees(root: string, work: Work[], opt
       remoteRefs = String(await git(root, ['for-each-ref', '--format=%(objectname) %(refname)', 'refs/remotes', ...(options.baseBranch ? [`refs/heads/${options.baseBranch}`] : [])]));
     } catch (error) { errors.push(`Listing registered worktrees and remote refs: ${failureText(error).slice(0, 400)}`); }
   }
-  const fingerprint = (key: string | null) => createHash('sha256').update(remoteRefs).update(`\n${(key && work.find(item => item.key === key)?.candidate?.sha) ?? ''}`).digest('hex');
+  const fingerprint = (candidate: WorktreeReclaimCandidate) => createHash('sha256').update(relevantRefs(remoteRefs, candidate.branch, options.baseBranch))
+    .update(`\n${(candidate.key && work.find(item => item.key === candidate.key)?.candidate?.sha) ?? ''}`).digest('hex');
   let examined = 0, backlog = 0;
   for (const { candidate, reason } of reclaimable) {
-    const activityAt = byPath.get(candidate.path)!.activityAt, refs = fingerprint(candidate.key);
+    const activityAt = byPath.get(candidate.path)!.activityAt, refs = fingerprint(candidate);
     const before = previous.find(entry => entry.path === candidate.path && entry.activityAt === activityAt && entry.refs === refs);
     if (before) { held.push(before); kept.push({ path: candidate.path, key: candidate.key, reason: before.reason }); continue; }
     if (!registered) { kept.push({ path: candidate.path, key: candidate.key, reason: 'Git refused: the registered worktrees could not be listed' }); continue; }
-    if (!registered.has(await realpath(candidate.path).catch(() => candidate.path))) {
+    const unregistered = !registered.has(await realpath(candidate.path).catch(() => candidate.path));
+    const finished = unregistered && work.find(item => item.key === candidate.key)?.stage === 'done';
+    if (unregistered && !finished) {
       kept.push({ path: candidate.path, key: candidate.key, reason: 'Not a registered Git worktree: its clean state cannot be judged apart from an enclosing repository' });
       continue;
     }
     if (examined >= limit) { backlog += 1; continue; }
     examined += 1;
+    if (finished) {
+      // A delivered or closed item's directory Git no longer registers: removed only when nothing
+      // in it is work — dependency trees and a stale `.git` pointer — and kept, with what it holds, otherwise.
+      try {
+        const holding = await orphanContents(candidate.path);
+        if (holding.length) {
+          kept.push({ path: candidate.path, key: candidate.key, reason: `Not a registered Git worktree, and it holds ${holding.length} path(s) that are not dependency trees (${holding.slice(0, 3).join(', ')}); left for an operator to inspect, since Git cannot judge them` });
+          continue;
+        }
+        await removeOrphan(root, candidate.path);
+        const removal = { path: candidate.path, key: candidate.key, reason: `${reason}; the directory was no longer a registered Git worktree and held nothing but dependency trees`, head: null };
+        removed.push(removal); gone.add(candidate.path);
+        await appendFile(worktreeReclaimAuditFile(root), `${JSON.stringify({ at, action: 'orphan-remove', ...removal })}\n`)
+          .catch(error => errors.push(`${candidate.path}: removed, but the audit entry could not be written: ${failureText(error)}`));
+      } catch (error) {
+        kept.push({ path: candidate.path, key: candidate.key, reason: `Orphan removal refused: ${failureText(error).slice(0, 300)}` });
+        errors.push(`${candidate.path}: ${writeFailure(error, 'Removing an orphaned worktree directory').message.slice(0, 400)}`);
+      }
+      continue;
+    }
     const keep = (why: string) => { held.push({ path: candidate.path, activityAt, reason: why, refs }); kept.push({ path: candidate.path, key: candidate.key, reason: why }); };
     try {
       // A shared install linked into the tree is untracked to Git (an ignore rule `node_modules/`
