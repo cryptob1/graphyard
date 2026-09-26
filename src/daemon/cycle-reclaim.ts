@@ -32,15 +32,20 @@ export async function closeEndedWorkerPanes(state: DaemonState, effects: DaemonE
   const closed: Work[] = [];
   for (const item of open) {
     const assessment = assessments[item.id], quarantine = item.containmentQuarantine, recorded = assessment?.verification?.recordedScope;
-    if (!quarantine?.scope || !recorded || recorded.unit !== quarantine.scope.unit || recorded.pid !== quarantine.scope.pid || !endedScopeStates.includes(recorded.activeState)) continue;
-    const pane = closablePane(item, assessment.verification!);
+    if (!quarantine || !assessment?.verification) continue;
+    // A launch that recorded a scope has its pane closed only once that scope ended (GY-189); one
+    // whose runtime never started may have recorded none, and its pane's idle shell is proven by
+    // Herdr and the process table instead (GY-413, closablePane).
+    const scopeEnded = !!quarantine.scope && !!recorded && recorded.unit === quarantine.scope.unit && recorded.pid === quarantine.scope.pid && endedScopeStates.includes(recorded.activeState);
+    if (quarantine.scope && !scopeEnded) continue;
+    const pane = closablePane(item, assessment.verification);
     if (!pane) continue;
     const epoch = quarantine.epoch, key = `close:ended-scope:${item.id}:${epoch}:${pane}`, previous = state.actions[key];
     if (previous?.state === 'done') continue;
     delete assessments[item.id];
     const interrupted = previous?.state === 'started' || previous?.state === 'indeterminate';
     if (!interrupted && !readyToRetry(previous, state.cycle)) continue;
-    const attempts = (previous?.attempts ?? 0) + 1, why = `its supervisor scope ${recorded.unit} is ${recorded.activeState}`;
+    const attempts = (previous?.attempts ?? 0) + 1, why = scopeEnded ? `its supervisor scope ${recorded!.unit} is ${recorded!.activeState}` : 'its launch recorded no supervisor scope and its pane shell runs nothing';
     const entry = (outcome: 'started' | 'done' | 'failed', detail: string) => record(state, key, { kind: 'close', work: item.key, principal: quarantine.owner, epoch, state: outcome, detail, attempts, cycle: state.cycle }, now(), effects.persist);
     try {
       await entry('started', `Closing pane ${pane} of ${item.key} epoch ${epoch}: ${why}`);
