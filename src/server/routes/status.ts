@@ -77,6 +77,8 @@ export const statusRoutes = defineRoutes('status', [
         // Whether the master loop researches before build (GY-434), as it last published it: the
         // dashboard's Research step is pending for a released feature only where a run will start.
         research: { configured: await publishedResearchConfigured(engine.store.pool) },
+        // Heartbeat latency and the renewals refused or failed server-side, this process, last 10 minutes (GY-558).
+        leaseHealth: engine.leaseHealth.report(),
         now: observedAt.toISOString(), release: releaseInfo(), schema: schemaVersion };
     },
   },
