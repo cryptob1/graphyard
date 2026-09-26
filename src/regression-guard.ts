@@ -1,4 +1,5 @@
 import { configuredGeneratedFiles, isGeneratedFile } from './generated-files.js';
+import { unrepairableRestore } from './merge-queue.js';
 import { pathScopeContains, type Observation, type ScopeFile, type Work } from './model.js';
 
 /**
@@ -87,7 +88,7 @@ declare module './merge-queue.js' {
 }
 /** Items git showed already on the base branch tip (GY-744), whatever their records say: never unlanded. */
 const landedKeys = (observation: Pick<Observation, 'landing'>) => new Set((observation.landing?.landed ?? []).map(entry => entry.key));
-export type CarriedSubject = { id?: string; candidate?: Work['candidate']; queueHistory?: Work['queueHistory'] };
+export type CarriedSubject = { id?: string; candidate?: Work['candidate']; queueHistory?: Work['queueHistory']; baseRefresh?: Work['baseRefresh']; policyRevision?: number };
 export function carriedItems(work: CarriedSubject, observation: Pick<Observation, 'landing'>, all: Work[]): Work[] {
   const candidate = work.candidate;
   const predicted = candidate ? [...(work.queueHistory ?? [])].reverse().find(entry => entry.event === 'predicted' && entry.tip === candidate.sha) : undefined;
@@ -158,19 +159,37 @@ export function queuedRegressions(work: Pick<Work, 'id' | 'plannedFiles'>, obser
 /**
  * Build-gate reasons for the observed candidate. An observation that never compared the diff
  * against the base branch tip proves nothing about scope and is refused until a fresh one does.
+ *
+ * Files another item's unlanded commits put on this head are named with that item and answered by
+ * the control plane's restore of the branch (GY-568). A restore that already ran and found no own
+ * reviewed head under the foreign commits (`unrepairableRestore`, GY-638) leaves no restore to
+ * promise, so the carried files are judged as any out-of-scope change instead: the refusals route
+ * the item to rework rather than to the resync whose fresh observation would repeat them forever.
  */
 export function regressionRefusals(work: Pick<Work, 'key' | 'plannedFiles'> & CarriedSubject, observation: Pick<Observation, 'scopeFiles' | 'landing'>, all: Work[], generated: readonly string[] = generatedFiles): string[] {
   if (!observation.scopeFiles) return ['Candidate diff has not been compared against the base branch tip; a fresh GitHub observation is required'];
-  const carried = carriedItems(work, observation, all);
+  const unrepairable = unrepairableRestore(work);
+  const carried = unrepairable ? [] : carriedItems(work, observation, all);
   const findings = classifyScope(work.plannedFiles ?? [], observation.scopeFiles, generated).filter(finding => finding.refused);
-  const refused = findings.filter(finding => !carriedBy(finding.path, carried, all).length);
+  // `carriedBy` scans every delivered item per call, so each finding's attribution is computed
+  // once here and shared by the refused filter and the carried naming (GY-638).
+  const attributed = new Map<string, string[]>();
+  const carriedByPath = (path: string) => {
+    let owners = attributed.get(path);
+    if (!owners) attributed.set(path, owners = carriedBy(path, carried, all));
+    return owners;
+  };
+  const refused = findings.filter(finding => !carriedByPath(finding.path).length);
   // The same judgement where the candidate would land: the base it is bound to is held while its
   // head is unchanged, so what the base gained since is only visible against the landing commit.
   const landings = landingRegressions({ id: work.id ?? '', plannedFiles: work.plannedFiles, candidate: work.candidate, queueHistory: work.queueHistory }, observation, all, generated);
-  const landing = landings.filter(entry => !entry.carried?.length);
+  const landing = landings.filter(entry => unrepairable || !entry.carried?.length);
   // Files another item's unlanded commits put on this head (GY-568) are named with that item and
   // sent to no worker: one refusal, which waits for the control plane's restore of the branch.
-  const foreign = [...findings.filter(finding => carriedBy(finding.path, carried, all).length).map(finding => ({ owners: carriedBy(finding.path, carried, all), text: `${finding.path}: ${finding.detail} (carried from ${carriedBy(finding.path, carried, all).join(', ')})` })),
+  const foreign = unrepairable ? [] : [...findings.filter(finding => carriedByPath(finding.path).length).map(finding => {
+    const from = carriedByPath(finding.path);
+    return { owners: from, text: `${finding.path}: ${finding.detail} (carried from ${from.join(', ')})` };
+  }),
     ...landings.filter(entry => entry.carried?.length).map(entry => ({ owners: entry.carried!, text: entry.text }))];
   const owners = [...new Set(foreign.flatMap(entry => entry.owners))];
   return [...(foreign.length ? [`Carried from another item's tip: ${foreign.length} file${foreign.length === 1 ? '' : 's'} the candidate would change belong${foreign.length === 1 ? 's' : ''} to ${owners.join(', ')}, whose unlanded commits this head carries (${foreign.slice(0, carriedNamed).map(entry => entry.text).join('; ')}${foreign.length > carriedNamed ? `; and ${foreign.length - carriedNamed} more` : ''}); they are not this change's, so no worker is asked to revert them: the control plane restores the branch to the item's own reviewed head`] : []),

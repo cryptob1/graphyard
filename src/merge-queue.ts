@@ -910,7 +910,9 @@ export function ejectionReason(work: Work, ciAppIds: number[], all: Work[] = [],
   // file and the item that owns it; a file the observation could not compare ejects nothing.
   const regressions = queuedRegressions(work, observation, all);
   // A tip still built behind an entry that left without landing (GY-568) is not reverting anything
-  // of its own: it leaves the queue so the control plane restores it, and the reason says so.
+  // of its own: it leaves the queue so the control plane restores it, and the reason says so. With
+  // no landing regression the staleness is not an adverse conclusion about the tip: the queue
+  // re-speculates it from the item's own head, and ejecting would only preempt that rebuild.
   const stale = regressions.length ? staleSpeculativeTip(work, all) : null;
   if (stale) return `Speculative tip ${tip} was built behind ${stale.departed.join(', ')}, which left the merge queue without landing; landing it on ${regressions[0].base.slice(0, 12)} would carry their unlanded work (${regressions.map(entry => entry.text).join('; ')}), so the branch is restored to its own reviewed head`;
   if (regressions.length) return `Landing speculative tip ${tip} on ${regressions[0].base.slice(0, 12)} would revert work outside its planned files: ${regressions.map(entry => entry.text).join('; ')}`;
@@ -956,6 +958,16 @@ export function currentRestore(work: Pick<Work, 'candidate' | 'baseRefresh' | 'p
   if (!refresh?.restore || !candidate || refresh.policyRevision !== work.policyRevision) return null;
   // Pending: the contaminated head is still the candidate. Performed: the candidate is what the restore produced.
   return refresh.restore.contaminated === candidate.sha || refresh.head === candidate.sha ? refresh : null;
+}
+/**
+ * GY-638. Whether the restore recorded for exactly the current head found no own reviewed head
+ * under the foreign commits: no restore is left to promise this head, so its gates route it to
+ * rework instead of the resync whose fresh observation would only repeat the same refusal.
+ */
+export function unrepairableRestore(work: { candidate?: Work['candidate']; baseRefresh?: Work['baseRefresh']; policyRevision?: number }): boolean {
+  const refresh = work.baseRefresh, candidate = work.candidate, restore = refresh?.restore;
+  if (!restore || !candidate || refresh!.policyRevision !== work.policyRevision) return false;
+  return restore.outcome === 'unrepairable' && (restore.contaminated === candidate.sha || refresh!.head === candidate.sha);
 }
 /** A repair the coordinator requested for the current head that has not run yet. */
 export function pendingRestore(work: Work): BranchRestore | null {
