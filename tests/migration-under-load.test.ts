@@ -112,9 +112,16 @@ test('integration:migration-under-continuous-writes a migration that adds a colu
   // its writers are never disturbed at all.
   await store.pool.query('ALTER TABLE receipts DROP COLUMN created_at');
   await markStale(store, 'receipts');
-  const budgetMs = 10_000;
-  const [receiptsClient, eventsClient] = [new pg.Client({ connectionString: url('load') }), new pg.Client({ connectionString: url('load') })];
-  await receiptsClient.connect(); await eventsClient.connect();
+  // Each attempt may wait for its locks this long; the migration's retries share the whole budget.
+  const attemptMs = 500, budgetMs = 15_000;
+  // A live batch on receipts stays open well past one attempt's budget when the migration starts:
+  // the first attempts must time out, roll back and retry, and only a retry after it commits succeeds.
+  const batchMs = 2_500;
+  // A writer never waits behind the migration past one attempt's lock budget, plus scheduling slack.
+  const writerBoundMs = attemptMs + 1_000;
+  const clients = [0, 1, 2].map(() => new pg.Client({ connectionString: url('load') }));
+  const [receiptsClient, eventsClient, batchClient] = clients;
+  for (const client of clients) await client.connect();
   let stopped = false;
   const failures: unknown[] = [];
   const writes = { receipts: [] as number[], events: [] as number[] };
@@ -125,25 +132,32 @@ test('integration:migration-under-continuous-writes a migration that adds a colu
       await pause(5);
     }
   };
+  await batchClient.query('BEGIN');
+  await batchClient.query("INSERT INTO receipts(actor, key, fingerprint, result) VALUES('live', 'batch', 'fp', '{}'::jsonb)");
+  const batch = pause(batchMs).then(() => batchClient.query('COMMIT'));
   const running = Promise.all([
     write(receiptsClient, i => `INSERT INTO receipts(actor, key, fingerprint, result) VALUES('live', 'k${i}', 'fp', '{}'::jsonb)`, writes.receipts),
     write(eventsClient, () => "INSERT INTO events(actor, kind, payload) VALUES('live', 'probe', '{}'::jsonb)", writes.events),
   ]);
   const next = new Store(url('load'));
   try {
-    const boot = await timed(() => next.init({ lockTimeoutMs: budgetMs }));
-    stopped = true; await running;
+    const boot = await timed(() => next.init({ lockTimeoutMs: budgetMs, attemptLockTimeoutMs: attemptMs }));
+    stopped = true; await running; await batch;
     assert.deepEqual(failures, []);
     assert.equal(boot.error, null, `init failed: ${boot.error?.message}`);
+    assert.ok(boot.ms >= batchMs - 200, `the migration completed after ${boot.ms} ms, before the live batch released receipts: it was not held up`);
+    assert.ok(boot.ms < budgetMs, `the migration took ${boot.ms} ms, past its ${budgetMs} ms lock budget`);
     assert.equal(await next.schema(), schemaVersion);
     const { rows } = await next.pool.query("SELECT 1 FROM information_schema.columns WHERE table_name='receipts' AND column_name='created_at'");
     assert.equal(rows.length, 1, "the hot table's new column was added under live writes");
+    const batched = await next.pool.query("SELECT count(*)::int AS n FROM receipts WHERE key='batch'");
+    assert.equal(batched.rows[0].n, 1, 'the live batch committed: the migration waited it out instead of failing the deploy');
     assert.ok(writes.receipts.length > 0 && writes.events.length > 0, 'both writers kept writing throughout');
     for (const [table, latencies] of [['receipts', writes.receipts], ['events', writes.events]] as const)
-      assert.ok(Math.max(...latencies) < budgetMs, `an ${table} write waited ${Math.max(...latencies)} ms, past the ${budgetMs} ms lock budget`);
+      assert.ok(Math.max(...latencies) < writerBoundMs, `an ${table} write waited ${Math.max(...latencies)} ms, past the ${attemptMs} ms lock budget of one attempt`);
   } finally {
     stopped = true;
-    await receiptsClient.end().catch(() => {}); await eventsClient.end().catch(() => {});
+    for (const client of clients) await client.end().catch(() => {});
     await next.close(); await store.close();
   }
 });

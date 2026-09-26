@@ -20,6 +20,13 @@ type Step = (waiting: string, sql: string, values?: unknown[]) => Promise<{ rows
 
 /** How long a migrating release may wait for locks in total: well inside Railway's 120-second health check. */
 export const migrationLockTimeoutMs = 30_000;
+/**
+ * How long one attempt of the migration may wait for its locks before it rolls back and retries
+ * (GY-773). A migration queued for an exclusive lock queues every live writer of that table behind
+ * it, so each attempt gives up its place after this long: a writer never waits behind the migration
+ * for more than one attempt's budget, while the retries still share `migrationLockTimeoutMs`.
+ */
+export const migrationAttemptLockTimeoutMs = 3_000;
 /** The migration's statements ahead of the first table's DDL: the shared trigger function. */
 const migrationPrelude = migration.slice(0, migration.indexOf(tables[0].ddl));
 
@@ -116,9 +123,10 @@ export async function retryLockFailures(
  * runs. A table whose recorded DDL digest matches this release's is left alone entirely (GY-773):
  * no statement of its DDL runs, so no lock — not even briefly — is asked for it.
  */
-export async function runStartupMigration(pool: Pool, options: { lockTimeoutMs?: number } = {}) {
+export async function runStartupMigration(pool: Pool, options: { lockTimeoutMs?: number; attemptLockTimeoutMs?: number } = {}) {
   const digests = migrationDigests();
   const timeout = Math.max(1, Math.floor(options.lockTimeoutMs ?? migrationLockTimeoutMs));
+  const attemptTimeout = Math.max(1, Math.floor(options.attemptLockTimeoutMs ?? migrationAttemptLockTimeoutMs));
   const upToDate = (recorded: RecordedMigration | null) => {
     const perTable = recorded?.version === schemaVersion ? recorded.tables : null;
     return recorded?.version === schemaVersion && recorded.prelude === digests.prelude && perTable !== null
@@ -137,6 +145,8 @@ export async function runStartupMigration(pool: Pool, options: { lockTimeoutMs?:
     break;
   }
   const deadline = Date.now() + timeout;
+  // Each attempt's lock waits end at its own deadline, never past the migration's.
+  let attemptDeadline = deadline;
   const db = await pool.connect();
   // The watchdog's connection is reserved before the migration begins: at the database's
   // connection limit, startup fails here, boundedly, rather than migrating without a deadline.
@@ -155,22 +165,23 @@ export async function runStartupMigration(pool: Pool, options: { lockTimeoutMs?:
   let abort!: (error: Error) => void, aborted: Error | undefined;
   const abandoned = new Promise<never>((_, reject) => { abort = error => { aborted ??= error; reject(error); }; });
   abandoned.catch(() => {});
-  // Each step may wait for a lock only for what is left of the migration's single deadline.
+  // Each step may wait for a lock only for what is left of the attempt's deadline.
   const step = async (waiting: string, sql: string, values?: unknown[]) => {
     waitingOn = waiting;
-    await Promise.race([db.query(`SET LOCAL lock_timeout = ${Math.max(1, deadline - Date.now())}`), abandoned]);
+    await Promise.race([db.query(`SET LOCAL lock_timeout = ${Math.max(1, attemptDeadline - Date.now())}`), abandoned]);
     return Promise.race([db.query(sql, values), abandoned]);
   };
-  // lock_timeout restarts for every lock one step's statements wait on; past the deadline
-  // the watchdog cancels whichever lock wait is still running.
-  let cancelledWaiting = false, watching = true, poll: NodeJS.Timeout | undefined, polling = Promise.resolve();
-  const watch = async (pid: number) => {
-    if (!watching) return;
+  // lock_timeout restarts for every lock one step's statements wait on; past the attempt's
+  // deadline the watchdog cancels whichever lock wait is still running. Each attempt arms it
+  // afresh (`armed` names the attempt), and a failed attempt disarms it before rolling back.
+  let cancelledWaiting = false, watching = true, armed = 0, poll: NodeJS.Timeout | undefined, polling = Promise.resolve();
+  const watch = async (pid: number, attempt: number) => {
+    if (!watching || attempt !== armed) return;
     try {
       if (lost) throw lost;
       const { rows } = await guard.query("SELECT pg_cancel_backend(pid) AS cancelled FROM pg_stat_activity WHERE pid=$1 AND wait_event_type='Lock'", [pid]);
       if (rows[0]?.cancelled) cancelledWaiting = true;
-      else if (watching) poll = setTimeout(() => { polling = watch(pid); }, 100);
+      else if (watching && attempt === armed) poll = setTimeout(() => { polling = watch(pid, attempt); }, 100);
     } catch (error) {
       if (watching) abort(new Error(`Schema migration to generation ${schemaVersion} lost the connection its lock-wait watchdog needs (${(error as Error).message}) past its ${timeout} ms deadline, while waiting for ${waitingOn}; startup fails instead of outlasting the health check — retry the deploy`, { cause: error }));
     }
@@ -179,10 +190,18 @@ export async function runStartupMigration(pool: Pool, options: { lockTimeoutMs?:
     await guard.query('SET application_name = \'graphyard migration watchdog\'');
     await guard.query('SET statement_timeout = 5000');
     const pid = Number((await db.query('SELECT pg_backend_pid() AS pid')).rows[0].pid);
-    poll = setTimeout(() => { polling = watch(pid); }, Math.max(0, deadline - Date.now()));
+    const arm = () => {
+      const attempt = ++armed;
+      attemptDeadline = Math.min(deadline, Date.now() + attemptTimeout);
+      poll = setTimeout(() => { polling = watch(pid, attempt); }, Math.max(0, attemptDeadline - Date.now()));
+    };
+    const disarm = async () => { armed++; clearTimeout(poll); await polling.catch(() => {}); };
     const unchangedPrelude = recorded?.prelude === digests.prelude;
     const unchangedTable = (name: string) => recorded?.tables?.[name] === digests.tables[name];
-    const migrate = async () => {
+    // A failed attempt is judged once the watchdog's cancel, if one is in flight, has recorded what it did.
+    const migrate = () => migrateOnce().catch(async error => { await polling.catch(() => {}); throw error; });
+    const migrateOnce = async () => {
+      arm();
       // The pool's statement timeout bounds coordination work, not the migration's: its lock waits share the deadline above.
       await db.query('BEGIN'); await db.query('SET LOCAL statement_timeout = 0');
       // The migration's own lock, never the coordination lock (GY-203): two migrations serialize beside live coordination.
@@ -198,7 +217,7 @@ export async function runStartupMigration(pool: Pool, options: { lockTimeoutMs?:
       if (current < schemaVersion) await step(waitingOn, 'INSERT INTO graphyard_schema(version, graphyard_version) VALUES($1,$2)', [schemaVersion, releaseInfo().version]);
       await step(waitingOn, `COMMENT ON TABLE graphyard_schema IS ${migrationDigestComment(digests)}`);
       await Promise.race([db.query('COMMIT'), abandoned]);
-    }; await retryLockFailures(migrate, () => !aborted && Date.now() < deadline, () => db.query('ROLLBACK').catch(() => {}), undefined, error => transientLockError(error, cancelledWaiting));
+    }; await retryLockFailures(migrate, () => !aborted && Date.now() < deadline, async () => { await disarm(); await db.query('ROLLBACK').catch(() => {}); }, undefined, error => transientLockError(error, cancelledWaiting));
   } catch (error) {
     // An abandoned migration's connection is still busy: it is destroyed below, which rolls it back.
     if (aborted) throw aborted;

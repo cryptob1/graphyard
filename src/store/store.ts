@@ -7,7 +7,7 @@ import { advisoryLocks } from './locks.js';
 import { runStartupMigration } from './migration-locks.js';
 // The startup migration's engine lives beside its locks and its recorded state (migration-locks.ts);
 // the lock budget stays exported here with the store that applies it.
-export { migrationLockTimeoutMs } from './migration-locks.js';
+export { migrationAttemptLockTimeoutMs, migrationLockTimeoutMs } from './migration-locks.js';
 import { coordinationDocumentSql, coordinationRelevance, coordinationTail, coordinationTrimSql, detoasted, type CoordinationTrim } from './coordination-sql.js';
 import { namedPool, reportPool, type ReportPoolOptions } from './report-pool.js';
 import { closePool, leasePoolConnections, trackedPool } from './pools.js';
@@ -77,11 +77,13 @@ export class Store {
    * A deadlock or an expired lock wait under live traffic (40P01, 55P03, the watchdog's 57014) is
    * transient: the attempt rolls back — releasing every lock at once, so live requests queue
    * behind a failed attempt no longer — and retries with backoff while the deadline allows, all
-   * inside the health-check window. Startup then fails naming the lock, well inside the platform's
+   * inside the health-check window. Each attempt waits for its locks at most
+   * `attemptLockTimeoutMs` (3 s by default) before it gives up its place, so a live writer queued
+   * behind the migration's exclusive lock request waits no longer than one attempt's budget. Startup then fails naming the lock, well inside the platform's
    * health window. The migration's own work is not timed: a backfill or index build that takes
    * longer than the lock budget (the offline `graphyard db migrate` Job) still completes.
    */
-  async init(options: { lockTimeoutMs?: number } = {}) { return runStartupMigration(this.pool, options); }
+  async init(options: { lockTimeoutMs?: number; attemptLockTimeoutMs?: number } = {}) { return runStartupMigration(this.pool, options); }
   async schema() { return Number((await this.pool.query('SELECT COALESCE(MAX(version),0) AS version FROM graphyard_schema')).rows[0].version); }
   /** Resolves once every connection of all three pools has closed (GY-483), so the database may be stopped right after. */
   async close() { await Promise.all([closePool(this.pool, 'main'), closePool(this.leasePool, 'lease'), closePool(this.reportPool, 'report')]); }

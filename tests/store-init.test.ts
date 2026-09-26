@@ -249,4 +249,5 @@ test('unit:startup-lock-documented operations.md states how a release migrates u
   assert.match(page, /unchanged tables are skipped without any lock/);
   assert.match(page, /30-second lock budget/);
   assert.match(page, /retries a deadlock or expired lock wait with backoff/);
+  assert.match(page, /each attempt waits at most 3 seconds for a lock, so live writes never queue behind it longer/);
 });
