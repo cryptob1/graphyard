@@ -6,7 +6,8 @@ import { z } from 'zod';
 import { runRecordSchema } from '../runner/types.js';
 import { type MasterConfig, assertOutsideWorktrees, writeFailure, diskExhaustionMessage, reclaimAdvice } from '../master.js';
 import { boundDetail } from './decisions.js';
-import { classified, faultClasses, faultInstanceSchema, noteActionOutcome, type FaultKind } from '../model/fault-classes.js';
+import { classified, faultClasses, faultInstanceSchema, type FaultKind } from '../model/fault-classes.js';
+import { noteActionOutcome } from '../model/fault-tracking.js';
 import { timingsSchema } from '../master/timings.js';
 import { emptyInvariantRecord, invariantRecordSchema } from '../model/invariants.js';
 
@@ -319,7 +320,9 @@ export const daemonStateSchema = z.object({
    * read the sources standing faults are observed from, which it reads on a slower cadence than it cycles.
    * The default is a factory: zod 4 hands a literal default out by reference, which would share one record between states.
    */
-  faults: z.object({ instances: z.array(faultInstanceSchema).default([]), open: z.record(z.string(), z.string()).default({}), failing: z.record(z.string(), z.string()).default({}), observedAt: z.string().optional() }).strict()
+  faults: z.object({ instances: z.array(faultInstanceSchema).default([]), open: z.record(z.string(), z.string()).default({}), failing: z.record(z.string(), z.string()).default({}), observedAt: z.string().optional(),
+    /** The first cycle that read every source (GY-374): what stood before it is `baseline`, not a recurrence. */
+    since: z.string().nullable().optional() }).strict()
     .default(() => ({ instances: [], open: {}, failing: {} })),
   /**
    * The system invariants (GY-404): what the loop carries between cycles to judge them — base

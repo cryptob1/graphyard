@@ -73,7 +73,7 @@ An unexplained lapsed lease raises `lease-loss` (`blocked-awaiting-operator` and
 
 ## Fault classes
 
-Faults carry `faultClass` (`master status` `faults`); recurring classes file one item (`GRAPHYARD_FAULT_CLASS_*`); moving hashes never reopen a standing fault. A failed section is only listed in `unavailable`.
+Faults carry `faultClass` (`master status` `faults`); non-`baseline` recurrences file one item (`GRAPHYARD_FAULT_CLASS_*`); `daemon.faults.since` dates the first full cycle; moving hashes never reopen a standing fault. A failed section is only listed in `unavailable`.
 
 ## Pipeline speed
 

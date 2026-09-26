@@ -161,6 +161,8 @@ test('unit:system-invariants-checked — the loop checks every invariant each cy
   };
   const filed: { title: string; origin: any }[] = [], standing: Work[] = [];
   const state = emptyDaemonState(config());
+  // The record has tracked a complete cycle already, so what the invariants find is an occurrence, not the baseline (GY-374).
+  state.faults.since = iso(-3 * minute);
   state.metrics = metrics(31).map((metric, index) => ({ cycle: index, at: metric.at, durationMs: metric.durationMs, open: 0, actions: 0, stages: {}, lead: { count: 0, p50Ms: 0, p90Ms: 0 },
     production: { count: 0, p50Ms: 0, p90Ms: 0 }, postDeploy: { count: 0, p50Ms: 0, p90Ms: 0 }, postDeployFailures: 0 }));
   const loop = (index: number, merge: DaemonEffects['merge'] = async () => ({ result: 'GitHub has not merged it yet', pending: true })) => effects({

@@ -240,6 +240,19 @@ export function executorFleetReport(registrations: ExecutorRegistration[], coord
   return { coordinator: { commit: coordinator.commit }, executors, split: executors.some(row => row.split), needingRestart: needing.map(row => row.name), attention };
 }
 
+/**
+ * The unserved-kind lines (describeUnserved) whose kind an executor waiting on a restart serves: nothing
+ * runs that kind because the executors that would are split or standing down, which the fleet's own
+ * attention line already names (GY-374). Each is marked as restating it, so the loop counts one fault,
+ * not one more per item that reaches that kind while the executors wait for their restart.
+ */
+export function attributeUnserved(items: AttentionItem[], unserved: { kind: string; text: string }[], report: Pick<ExecutorFleetReport, 'executors' | 'attention'>): AttentionItem[] {
+  if (!report.attention.length) return items;
+  const held = new Set(report.executors.filter(row => row.needsRestart).flatMap(row => row.kinds));
+  const symptoms = new Set(unserved.filter(entry => held.has(entry.kind)).map(entry => entry.text));
+  return items.map(item => symptoms.has(item.text) ? { ...item, restates: report.attention[0].subject } : item);
+}
+
 // ---------------------------------------------------------------------------
 // The one restart.
 // ---------------------------------------------------------------------------
