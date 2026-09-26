@@ -397,7 +397,7 @@ test('integration:registry-live-capacity — capacity is a registry change with 
   // One run: the executor's configuration is loaded once and never again, and its file is never written.
   const { root, config } = await master([{ name: 'worker-a', principal: 'implementer', kind: 'claude' }]);
   const file = join(root, '.graphyard/master.json'), bytes = await readFile(file, 'utf8');
-  const next = async () => { const calls: string[][] = []; const result = await dispatch(root, config, 'worker-a', probe, calls); return { account: result.account!.environment, kind: result.account!.kind, skipped: result.account!.skipped, tab: tabEnvironment(calls[0]) }; };
+  const next = async () => { const calls: string[][] = []; const result = await dispatch(root, config, 'worker-a', probe, calls); return { account: result.account!.environment, kind: result.account!.kind, skipped: result.account!.skipped, tab: tabEnvironment(calls.find(call => call[0] === 'tab')!) }; };
   assert.equal((await next()).account, 'claude-a');
 
   // Add an account mid-run, ahead of the one in use: the very next action runs on it.

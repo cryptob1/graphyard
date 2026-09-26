@@ -102,7 +102,7 @@ Only an `admin` grants, only to `producer` principals. Patterns: an exact name, 
 
 ## Scale limits
 
-Observation claims `GRAPHYARD_OBSERVATION_CONCURRENCY` jobs at once (default 4, capped at half the pool), each `SKIP LOCKED`: queue head and `max(2, batchSize)` band first, then never-observed submissions, then any job due over five minutes, then review/rework waits, then `available_at`; `master status` raises `github` once the head's observation passes two minutes. Watch `observationThroughput` lag, budget.
+`GRAPHYARD_OBSERVATION_CONCURRENCY` workers (default 4, ≤ half the pool) share one pace: budget above reserve, spread to reset. Claims: head band, in-flight merges, never-observed submissions, jobs due over five minutes, review/rework waits, running sessions (before waits when tight), `available_at`; tight, idle items await webhooks. `observationThroughput` reports budget, pace, head lag, oldest unobserved submission; `master status` raises `github` past two minutes.
 
 ### Concurrent reconciliation
 
