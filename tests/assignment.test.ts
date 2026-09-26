@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { assignment } from '../web/assignment.js';
+import { assignment } from '../src/model/assignment.js';
 import { principalSchema } from '../src/server.js';
 const now = Date.parse('2030-01-01T00:00:00Z');
 const lastAssignment = { owner: 'worker-1', epoch: 1, displayName: 'Atlas', runtime: 'Codex', claimedAt: '2029-12-31T23:00:00Z' };

@@ -16,6 +16,7 @@ import { paneAlreadyGone, withPaneGone } from './request-settlement.js';
 import { narrowRoleRuntime, piRuntimeSchema } from './runner/payloads.js';
 import { liveRun, registeredRun } from './runner/registry.js';
 import { narrowRunner, piProducerPrompt, producerRunOptions, registryRunner, startNarrowRun, submitEvidence } from './runner/roles.js';
+import { liveRunCheckouts } from './runner/registry.js';
 import { runRecordSchema, type RunRecord, type Runner } from './runner/types.js';
 
 /**
@@ -526,7 +527,8 @@ export async function reconcileProducers(root: string, config: MasterConfig, wor
  */
 export async function reclaimCheckouts(root: string, config: MasterConfig, options: { now?: number; graceMs?: number; probe?: FilesystemProbe } = {}): Promise<CheckoutReclaimReport> {
   const [producers, reviews] = await Promise.all([readProducerLedger(root), readReviewLedger(root)]);
-  const live = [...producers.producers, ...reviews.reviews].filter(record => record.state === 'pending' && record.checkout).map(record => record.checkout!);
+  // A live headless approver's directory is owned by its run, not by a ledger record (GY-391).
+  const live = [...[...producers.producers, ...reviews.reviews].filter(record => record.state === 'pending' && record.checkout).map(record => record.checkout!), ...liveRunCheckouts()];
   return reclaimSessionCheckouts(root, worktreeRoot(root, config), live, { ...options, failure: writeFailure });
 }
 

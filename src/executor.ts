@@ -1,10 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { access } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import type { Work } from './model.js';
 import type { ActionRow } from './model/actions.js';
 import type { DispatchRequest } from './model/dispatch.js';
 import { actionJudgment, type NextActionKind } from './model/next-action.js';
+import { describeObservationJob, resyncUnobservedPrefix } from './model/action-kinds.js';
 import type { SessionHandleInput } from './model/sessions.js';
 import { registeredLaunch } from './model/session-state.js';
 import { answeredByPendingSession, independentProducerProfiles } from './producer.js';
@@ -50,7 +52,12 @@ export interface ControlPlaneEffects {
   observeDeployment: (delivered: Work[]) => Promise<DeploymentObservation>;
   /** Records a launched session's durable handle on the item (AC-8). */
   recordSession?: (work: Work, handle: SessionHandleInput) => Promise<unknown>;
+  /** How a handler waits between reads; a timer unless a test drives the clock. */
+  wait?: (ms: number) => Promise<unknown>;
 }
+
+/** How long a `resync` attempt waits for the observation it woke, and how often it reads again. */
+export const resyncObservationWaitMs = 90_000, resyncPollMs = 5_000;
 
 /**
  * The executor instance one executor process names on its merge requests.
@@ -180,8 +187,21 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
     },
     resync: async action => {
       const { work } = await find(action);
-      const result = await effects.mutate(`work/${work.id}/resync`, {}, randomUUID());
-      return `re-read ${work.key} from the provider and reconciled it${result?.changed ? '' : ' (nothing moved)'}`;
+      // Satisfied by a fresh observation of the item, never by a re-read that saves nothing
+      // (GY-607): the control plane wakes the observation job, and the attempt completes only once
+      // an observation newer than this claim is saved. One that does not arrive in time fails the
+      // attempt naming the job's state; the row backs off and `master status` names a run of them.
+      const since = action.claim?.claimedAt ?? new Date().toISOString();
+      let result = await effects.mutate(`work/${work.id}/resync`, { since }, randomUUID());
+      for (let polls = Math.ceil(resyncObservationWaitMs / resyncPollMs); result?.observed === false && polls > 0; polls--) {
+        await (effects.wait ?? delay)(resyncPollMs);
+        result = await effects.mutate(`work/${work.id}/resync`, { since, wake: false }, randomUUID());
+      }
+      // A control plane from before GY-607 cannot say whether it observed; its answer is taken as
+      // the re-read it always was, and the executor reports that it could not tell.
+      if (result && typeof result.observed !== 'boolean') return `re-read ${work.key} from the provider and reconciled it; the control plane does not report observations, so none was awaited`;
+      if (!result?.observed) throw new Error(`${work.key}: ${resyncUnobservedPrefix} within ${Math.round(resyncObservationWaitMs / 1000)}s; ${describeObservationJob(result?.job, Date.now())}`);
+      return `observed ${work.key} at ${result.observedAt}, after the claim at ${since}`;
     },
     reclaim: async action => {
       const { work } = await find(action);
