@@ -8,7 +8,7 @@ Start with the numbered path; the other pages are references to open when a task
 1. [Install Graphyard](install.md) — the one command and upgrades.
 2. [How Graphyard works](how-graphyard-works.md) — lifecycle and authority.
 3. [Glossary](glossary.md) — terms, roles, who decides.
-4. [Onboard a repository](onboarding.md) — machines, accounts, the master, the first PR.
+4. [Onboard a repository](onboarding.md) — machines, accounts, master, first PR.
 
 ## Operate Graphyard
 

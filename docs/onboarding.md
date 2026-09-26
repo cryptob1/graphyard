@@ -1,4 +1,4 @@
-<!-- page: Start here | 3 | machines, accounts, the master, the first PR. -->
+<!-- page: Start here | 3 | machines, accounts, master, first PR. -->
 # Onboard a repository
 
 ## 1. Install the control plane
@@ -23,11 +23,11 @@ Commit `AGENTS.md`, `.gitignore`, `graphyard.json`; never `.graphyard/`. Without
 
 The managed `AGENTS.md` section states that **every session Graphyard launches receives its instruction as the session's own first request, on the runtime's command line, never as pasted text**; the only later paste (the loop's single re-prompt, or the reviewer's reminder) comes from the same launcher and is acted on without confirmation.
 
-Agents treat Herdr's bracketed paste as untrusted (prompt injection), so with the request on the command line sessions start without anybody sending `go`; Claude Code gets the statement through `--append-system-prompt-file`. The role files under `.graphyard/harness/` hold permissions, not instructions.
+Agents treat Herdr's bracketed paste as untrusted data (prompt injection), so with the request on the command line sessions start without anybody sending `go`; Claude Code gets the statement through `--append-system-prompt-file`. The role files under `.graphyard/harness/` hold permissions, not instructions.
 
 ### Agent environments
 
-Each agent account has a login home under `~/.coding_agents`, selected by `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_DATA_HOME` (OpenCode) or `CURSOR_CONFIG_DIR`. Tokens go in `~/.config/graphyard/workers/` and `producers/` (mode 0600). Then:
+Each agent account has a login home under `~/.coding_agents`, selected by `CLAUDE_CONFIG_DIR` (Claude Code), `CODEX_HOME` (Codex), `XDG_DATA_HOME` (OpenCode) or `CURSOR_CONFIG_DIR` (Cursor). Tokens go in `~/.config/graphyard/workers/` and `producers/` (mode 0600). Then:
 
 ```sh
 node "$GRAPHYARD_CLI" master environments --create claude,codex --apply  # new login homes
@@ -35,11 +35,11 @@ CLAUDE_CONFIG_DIR=~/.coding_agents/claude-a claude                       # /logi
 node "$GRAPHYARD_CLI" master environments --apply                        # report quota, write profiles
 ```
 
-Profiles default to `"approvals": "auto"` so sessions never block on a prompt (unattended by design); `"prompt"` is refused at launch ([approval modes](master-agent-sessions.md#approval-modes)).
+Profiles default to `"approvals": "auto"` so sessions never block on a prompt (trade-off: unattended sessions); `"prompt"` is refused at launch ([modes](master-agent-sessions.md#approval-modes)).
 
 ### Configure the fleet
 
-The **agent registry** (Settings › **Agents**) records the fleet, proposed from `~/.coding_agents`:
+The **agent registry** (Settings › **Agents**) records runtimes, accounts, roles and policies, proposed from `~/.coding_agents`:
 
 ```sh
 node "$GRAPHYARD_CLI" master registry propose
@@ -48,7 +48,7 @@ node "$GRAPHYARD_CLI" master registry propose --apply
 
 ### Add a runtime
 
-Join dash-led values with `=`:
+Join a dash-led value to its flag with `=`:
 
 ```sh
 node "$GRAPHYARD_CLI" master registry runtime set aider --kind aider --arg=--yes-always \
@@ -62,10 +62,10 @@ One login, held by reference:
 
 ```sh
 node "$GRAPHYARD_CLI" master registry model set opus --provider Anthropic --id claude-opus-5 \
-  --input-cost 15 --output-cost 75 --tier frontier --context 1000000 --reason "Price"
+  --input-cost 15 --output-cost 75 --tier frontier --context 1000000 --reason "Model pricing"
 node "$GRAPHYARD_CLI" master registry account set claude-b --runtime claude --model opus \
-  --home ~/.coding_agents/claude-b --max-sessions 2 --reason "Second login"
-node "$GRAPHYARD_CLI" master registry account quota opencode-a exhausted --resets-at 2026-09-22T00:00:00Z --reason "Cut off"
+  --home ~/.coding_agents/claude-b --max-sessions 2 --reason "Second subscription"
+node "$GRAPHYARD_CLI" master registry account quota opencode-a exhausted --resets-at 2026-09-22T00:00:00Z --reason "Plan exhausted"
 ```
 
 `--key-file zai.key --key-variable ZAI_API_KEY` names a 0600 home key file by reference, read into that variable per headless run. New or changed Pi accounts are smoke-tested: failing (Pi's error) bars one, two unjudged runs of a role bar it an hour.
@@ -75,7 +75,7 @@ node "$GRAPHYARD_CLI" master registry account quota opencode-a exhausted --reset
 Preferred account first; applies next launch:
 
 ```sh
-node "$GRAPHYARD_CLI" master registry role set worker claude-b,claude-c,codex-a --concurrency 4 --reason "Overflow"
+node "$GRAPHYARD_CLI" master registry role set worker claude-b,claude-c,codex-a --concurrency 4 --reason "Codex overflow"
 node "$GRAPHYARD_CLI" master registry role set reviewer codex-a,claude-c --concurrency 2 --tool Read --model opus --reason "Read-only"
 ```
 
@@ -87,7 +87,7 @@ Each candidate needs one review and one producer session per proof group; a prof
 "reviewers":[{"name":"claude-reviewer","agentName":"review-claude","kind":"claude","accounts":["claude-a","claude-b"],"concurrency":3}]
 ```
 
-For worker count `W` and `G` proof groups: `⌈W/2⌉` review slots and `G×⌈W/2⌉` producer slots over two or more producer principals. Watch `longestWaitMs`.
+Adding workers? For worker count `W` and `G` proof groups: `⌈W / 2⌉` review slots and `G × ⌈W / 2⌉` producer slots over two or more producer principals. Watch `longestWaitMs`.
 
 ## 3. Start the master
 
@@ -108,7 +108,7 @@ Run it under an OS identity whose GitHub credentials workers cannot read. `--bro
 
 `graphyard doctor --profile through-merge` names every missing piece. Create a small item: `master run` dispatches it; the loop merges once branch protection requires `Graphyard / merge`. `"systemDriven": false` allows [hand actions](master-agent.md#system-driven-items).
 
-Cancel superseded pull-request CI runs: group each by `${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}` with `cancel-in-progress: ${{ github.event_name == 'pull_request' }}`; main runs are never cancelled. `graphyard master protection` lists required checks whose workflow lacks cancel-in-progress under `advisories`.
+CI workflows should cancel superseded pull-request runs: group each by `${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}` with `cancel-in-progress: ${{ github.event_name == 'pull_request' }}`; runs on main are never cancelled. `graphyard master protection` lists each required check whose workflow lacks cancel-in-progress under `advisories`.
 
 ## What stays manual
 
