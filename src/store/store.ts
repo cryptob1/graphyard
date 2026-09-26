@@ -30,10 +30,9 @@ const literal = (text: string) => `'${text.replace(/'/g, "''")}'`;
 const newerSchema = (current: number) => new Error(`Database schema generation ${current} is newer than this release supports (${schemaVersion}); deploy the release that migrated it, or restore a backup taken at generation ${schemaVersion} or earlier`);
 
 /**
- * Which connections a transaction may use (GY-274). Lease commands run on the lease pool
- * (`leasePoolConnections`, pools.ts; GY-558), so a saturated main pool never lets a live worker's
- * lease lapse; background work (the reconciliation tick, whose first pass after a deploy ran 65 s)
- * holds at most half the main pool.
+ * Which connections a transaction may use (GY-274). Lease commands run on the lease pool (pools.ts, GY-558),
+ * so a saturated main pool never lets a live worker's lease lapse; background work (the reconciliation
+ * tick, whose first pass after a deploy ran 65 s) holds at most half the main pool.
  */
 export type StoreLane = 'request' | 'lease' | 'background';
 /** A counting semaphore over the background share; a waiter inherits a released permit directly. */
