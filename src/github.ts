@@ -15,7 +15,7 @@ import { foldDecisions } from './model/approval.js';
 import { normalMergeState, repairAudit, repairAuditEvent, repairLaneVerdict, type RepairAudit, type RepairLaneVerdict } from './master/repair-lane.js';
 import { currentOptimisticMerge, describeGuard, mainGuard, postMergeVerdict, retestAfterRevert, revertRefusal, verdictCommit, type GuardState, type OptimisticMerge, type OptimisticRevert } from './optimistic-merge.js';
 export { CHECK_NAME };
-import { alreadyMergeableRefusal, baseRefreshNeeded, dismissedVerdict, enqueueRequestCurrent, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, pendingRestore, predictQueue, queuePlacement, queueRef, mergeCheckBranch, treeIdenticalPrediction, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread } from './merge-queue.js';
+import { alreadyMergeableRefusal, approvalOfHead, baseRefreshNeeded, dismissedVerdict, enqueueRequestCurrent, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, pendingRestore, predictQueue, queuePlacement, queueRef, mergeCheckBranch, treeIdenticalPrediction, type GitHubMergeQueueState, type HeadForcePush, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type ObservedApproval, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread } from './merge-queue.js';
 import { blockedFeatures, controlPlanePermissions, describeShortfall, permissionShortfalls, requiredPermissions, type PermissionFeature, type PermissionLevel, type PermissionShortfall } from './github-permissions.js';
 import { agentOwner, type AttentionItem } from './master/attention.js';
 import type { IntegrationJob } from './coordination.js';
@@ -315,6 +315,10 @@ export function reserveDecision(band: CadenceBand, budget: Pick<GitHubBudget, 'r
   if (!Number.isFinite(reset) || reset <= now.getTime()) return null;
   const until = new Date(reset + 2000).toISOString();
   return { until, reason: `GitHub budget is below the ${budget.reserve}-request merge-path reserve (${budget.remaining} remaining, reset ${budget.resetAt}); this ${band}-cadence observation is rescheduled to ${until} rather than spent, so the merge path, webhook wakes and merge verification keep the reserve` };
+}
+/** The id of every review on a pull request GitHub reports as dismissed, from its full review list. */
+export function dismissedReviewIds(reviews: readonly { id?: unknown; state?: unknown }[]): number[] {
+  return reviews.flatMap(review => review.state === 'DISMISSED' && Number.isSafeInteger(review.id) && (review.id as number) > 0 ? [review.id as number] : []);
 }
 export interface GitHubConfig { repository: string; base: string; appId: number; installationId: number; privateKey: string; reviewerApps?: ReviewerApp[] }
 /**
@@ -904,7 +908,7 @@ export class GitHub {
     // A dismissed review is recorded with GitHub's reason for dismissing it and the head it was
     // given on (GY-127): the review list alone cannot tell a reviewer withdrawing a verdict from
     // GitHub withdrawing an approval because the merge base moved under an unchanged head.
-    const dismissals = [...latest.values()].some(r => r.state === 'DISMISSED') ? await this.reviewDismissals(pr.number) : { read: new Map<number, ReviewDismissal>(), unread: null };
+    const dismissals = [...latest.values()].some(r => r.state === 'DISMISSED') ? await this.reviewDismissals(pr.number) : { read: new Map<number, ReviewDismissal>(), unread: null as string | null, forcePushes: [] as HeadForcePush[] };
     const dismissalOf = (id: number): ReviewDismissal | undefined => dismissals.read.get(id) ?? (dismissals.unread ? { reason: null, mergeBase: false, verdict: null, commit: null, at: null, by: null, unread: dismissals.unread } : undefined);
     // A published speculative tip carries its own validated base. The candidate stays bound to
     // that exact commit while the managed branch advances underneath it through queue merges. A
@@ -953,6 +957,10 @@ export class GitHub {
         ...(Number.isSafeInteger(c.id) ? { id: c.id } : {}), ...(Number.isSafeInteger(c.run_attempt) ? { attempt: c.run_attempt } : {}) })),
       ...(agentReview ? { agentReview } : {}),
       reviewIds: reviews.every(r => Number.isSafeInteger(r.id) && r.id > 0) ? reviews.map(r => r.id) : undefined,
+      // Every review GitHub now reports dismissed, not only each identity's latest (GY-486): an
+      // approval dismissed and then re-posted by the same identity is hidden behind the re-post in
+      // `reviews`, and review-conflict.ts must still read it as withdrawn rather than standing.
+      dismissedReviewIds: dismissedReviewIds(reviews),
       reviews: [...latest.values()].map(r => ({ id: r.id, reviewer: r.user.login, sha: r.commit_id, state: r.state, submittedAt: r.submitted_at,
         ...(r.state === 'DISMISSED' && dismissalOf(r.id) ? { dismissal: dismissalOf(r.id)! } : {}) })),
       prState: pr.state, draft: pr.draft, prCreatedAt: pr.created_at, merged: pr.merged, mergeSha: pr.merge_commit_sha, mergedAt: pr.merged_at, mergeable: pr.mergeable === true && !pr.draft && pr.state === 'open', conflicting: pr.mergeable === false && pr.state === 'open',
@@ -960,6 +968,7 @@ export class GitHub {
       protected: protection.protected, conversations, files: files.map(f => f.filename), at: startedAt,
       baseTip: branch.tip, baseTree: branch.tree, baseTipContained, baseTipAncestor: contained, scopeFiles,
       ...(landing ? { landing } : {}), ...(revertedDelivery ? { revertedDelivery } : {}), ...(baseChanges !== undefined ? { baseChanges } : {}),
+      ...(dismissals.forcePushes.length ? { headForcePushes: dismissals.forcePushes } : {}),
     };
   }
   /**
@@ -1211,24 +1220,36 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
    * `review_dismissed` events, keyed by review id. The verdict the dismissed review carried is
    * read from the event too (`dismissed_review.state`): the review list reports a dismissed
    * change request and a dismissed approval with the same `DISMISSED` state, and only the latter
-   * is an approval anyone can restore. A timeline that cannot be read leaves the dismissal
-   * recorded as unread rather than failing the observation: the review gate already refuses a
-   * dismissed approval, and nothing is inferred from a reason nobody could read.
+   * is an approval anyone can restore. The timeline's `head_ref_force_pushed` events are read in
+   * the same pass (GY-519): with the dismissal's own actor they show whether the control plane's
+   * App dismissed its own republication, which is the one dismissal a replaced tip's approval may
+   * be restored from. A timeline that cannot be read leaves the dismissal recorded as unread
+   * rather than failing the observation: the review gate already refuses a dismissed approval, and
+   * nothing is inferred from a reason nobody could read.
    */
-  async reviewDismissals(pr: number): Promise<{ read: Map<number, ReviewDismissal>; unread: string | null }> {
+  async reviewDismissals(pr: number): Promise<{ read: Map<number, ReviewDismissal>; unread: string | null; forcePushes: HeadForcePush[] }> {
     const read = new Map<number, ReviewDismissal>();
+    const forcePushes: HeadForcePush[] = [];
+    let login: string | null = null;
+    try { login = await this.controlPlaneLogin(); } catch { login = null; }
+    const byApp = (actor: unknown) => typeof actor === 'string' && !!login && actor.toLowerCase() === login.toLowerCase();
     try {
       for (const event of await this.pages(`/issues/${pr}/timeline`)) {
-        if (event?.event !== 'review_dismissed' || !Number.isSafeInteger(event?.dismissed_review?.review_id)) continue;
-        const reason = typeof event.dismissed_review.dismissal_message === 'string' ? event.dismissed_review.dismissal_message : null;
-        read.set(event.dismissed_review.review_id, { reason, mergeBase: !!reason && mergeBaseDismissalPattern.test(reason), verdict: dismissedVerdict(event.dismissed_review.state),
-          commit: typeof event.dismissed_review.dismissal_commit_id === 'string' ? event.dismissed_review.dismissal_commit_id : null,
-          at: typeof event.created_at === 'string' ? event.created_at : null, by: typeof event.actor?.login === 'string' ? event.actor.login : null });
+        if (event?.event === 'review_dismissed' && Number.isSafeInteger(event?.dismissed_review?.review_id)) {
+          const reason = typeof event.dismissed_review.dismissal_message === 'string' ? event.dismissed_review.dismissal_message : null;
+          const by = typeof event.actor?.login === 'string' ? event.actor.login : null;
+          read.set(event.dismissed_review.review_id, { reason, mergeBase: !!reason && mergeBaseDismissalPattern.test(reason), verdict: dismissedVerdict(event.dismissed_review.state),
+            commit: typeof event.dismissed_review.dismissal_commit_id === 'string' ? event.dismissed_review.dismissal_commit_id : null,
+            at: typeof event.created_at === 'string' ? event.created_at : null, by, ...(by ? { byApp: byApp(by) } : {}) });
+        }
+        if (event?.event === 'head_ref_force_pushed') forcePushes.push({ at: typeof event.created_at === 'string' ? event.created_at : null,
+          by: typeof event.actor?.login === 'string' ? event.actor.login : null, byApp: byApp(event.actor?.login),
+          before: typeof event.before === 'string' ? event.before : null, after: typeof event.after === 'string' ? event.after : null });
       }
     } catch (error) {
-      return { read, unread: error instanceof Error ? error.message : 'the pull request timeline could not be read' };
+      return { read, unread: error instanceof Error ? error.message : 'the pull request timeline could not be read', forcePushes };
     }
-    return { read, unread: null };
+    return { read, unread: null, forcePushes };
   }
   /**
    * The item's own reviewed head under a branch head (GY-127): the last commit a worker pushed or
@@ -1402,6 +1423,13 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     if (rebound) return { ...rebound, ...(rebound.tipTree ? {} : { tipTree: await this.tipTree(rebound.tip) }), predecessors: placement.predecessors,
       carriedBase: { sha: placement.predictedBase!, tree: baseTree, at: new Date().toISOString() }, trigger: 'queue-head' };
     const reviewedHead = await this.ownReviewedHead(work, pr.head.sha);
+    // The approval of the tip being replaced is read now, before anything is written and outside
+    // any coordination transaction (GY-519): the item's stored observation can predate the
+    // approval, and republishing without reading it would dismiss a review of the very patch the
+    // new tip re-shows. The carry decided at publication carries it exactly as an observed
+    // approval, so a head ejection costs the entries behind it no review round.
+    const observedApproval = work.policy.review && reviewProviderOf(work.policy) === 'github'
+      ? await this.approvalOnHead(work, pr) : null;
     await beforeWrite();
     // The branch is moved by a forced ref update after the head was read above, not compared and
     // swapped in one request. A worker push landing in that window is overwritten; the window is
@@ -1420,7 +1448,18 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     // between the replaced tip's bound base and the predicted base, listed here from GitHub.
     const baseChanges = merged || tip === work.candidate!.sha ? undefined : await this.changedFiles(work.candidate!.baseSha, placement.predictedBase!);
     return { ref, tip, tipTree: await this.tipTree(tip), base: placement.predictedBase!, baseTree, predecessors: placement.predecessors, policyRevision: work.policyRevision, publishedAt: new Date().toISOString(), merge, reviewedHead, trigger: 'queue-head',
+      ...(observedApproval ? { observedApproval } : {}),
       ...(baseChanges !== undefined ? { baseChanges } : {}) };
+  }
+  /**
+   * The approval of the pull request's current head from its reviews as GitHub holds them right
+   * now (GY-519): the record's last observation can be older than the approval, and this read is
+   * what lets the republication carry it instead of dismissing it. See `approvalOfHead` for the
+   * identity rule.
+   */
+  private async approvalOnHead(work: Work, pr: { number: number; head: { sha: string }; user: { login: string } }): Promise<ObservedApproval | null> {
+    try { return approvalOfHead(await this.pages(`/pulls/${pr.number}/reviews`), pr.head.sha, pr.user.login, pr.number, work); }
+    catch { return null; }
   }
   /**
    * Restores a pull-request branch that carries another item's unlanded commits (GY-127): moves it
