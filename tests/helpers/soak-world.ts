@@ -5,6 +5,7 @@ import type { Observation, Work } from '../../src/model.js';
 import type { AgentReview, ReviewRequest } from '../../src/model/review.js';
 import { mergeableNow, queueRef, type BaseRefresh, type GitHubMergeQueueState, type QueuePlacement, type QueueSpeculation } from '../../src/merge-queue.js';
 import type { Succession } from '../../src/model/successors.js';
+import { revertRefusal, type OptimisticMerge, type OptimisticRevert } from '../../src/optimistic-merge.js';
 
 // The outside world of the soak test (GY-404), simulated deterministically: one clock that both the
 // test process and the test Postgres read, a GitHub repository with pull requests, CI, a reviewer and
@@ -51,8 +52,12 @@ export const clockSql = [
 // ---------------------------------------------------------------------------
 // GitHub.
 // ---------------------------------------------------------------------------
-/** A commit: on the base branch, a worker's head, or a queue tip Graphyard published; `files` is its whole tree's file list. */
-export interface Commit { sha: string; tree: string; parents: string[]; files: string[]; at: number; message: string }
+/**
+ * A commit: on the base branch, a worker's head, or a queue tip Graphyard published; `files` is its
+ * whole tree's file list. A base-branch commit also names the files it `changed` against its first
+ * parent, and whether the required suite fails on it (`broken`: it holds a head that breaks main).
+ */
+export interface Commit { sha: string; tree: string; parents: string[]; files: string[]; at: number; message: string; changed?: string[]; broken?: boolean }
 export interface PullRequest {
   number: number; key: string; branch: string; author: string; head: string;
   /** The base-branch commit the head contains (its merge base with the base branch). */
@@ -91,6 +96,12 @@ export class SimulatedGitHub {
   unstable = new Set<string>(); slowRecompute = new Set<string>();
   /** Successions (renames and splits) recorded on the base branch. */
   successions: Succession[] = [];
+  /** Heads that break the required suite on the base branch once merged (GY-500): every base commit holding one fails until it is reverted. */
+  breaking = new Set<string>();
+  /** The revert pull requests the main guard opened, and the base commit each landed as. */
+  reverts: { pr: number; key: string; head: string; files: string[]; merged: string | null; openedAt: number; mergedAt: number | null }[] = [];
+  /** GitHub reads the main guard and the observation make for optimistic merges, per simulated minute. */
+  reads = { commitChecks: new Map<number, number>(), baseChanges: 0 };
   private serial = 0;
   constructor(readonly options: WorldOptions, files: string[]) {
     const root: Commit = { sha: sha('root'), tree: sha('tree', 'root'), parents: [], files, at: clock.now(), message: 'root' };
@@ -106,9 +117,15 @@ export class SimulatedGitHub {
   }
   /** A commit off the base branch: a worker's head or a published tip. */
   record(commit: Commit) { this.commits.set(commit.sha, commit); return commit; }
-  /** A commit onto the base branch: a merged pull request, or a change landed outside Graphyard (a file split). */
-  commit(message: string, files: string[], at = clock.now(), parents = [this.tip], tree?: string) {
-    const commit = this.record({ sha: sha('commit', ...parents, message), tree: tree ?? sha('tree', ...parents, message), parents, files, at, message });
+  /**
+   * A commit onto the base branch: a merged pull request, or a change landed outside Graphyard (a file
+   * split). It changed `changed` (default: the files added or removed) and fails the required suite
+   * when `broken` (default: as its first parent does).
+   */
+  commit(message: string, files: string[], at = clock.now(), parents = [this.tip], tree?: string, change: { changed?: string[]; broken?: boolean } = {}) {
+    const parent = this.commits.get(parents[0]), before = new Set(parent?.files ?? []), after = new Set(files);
+    const changed = change.changed ?? [...files.filter(path => !before.has(path)), ...[...before].filter(path => !after.has(path))];
+    const commit = this.record({ sha: sha('commit', ...parents, message), tree: tree ?? sha('tree', ...parents, message), parents, files, at, message, changed, broken: change.broken ?? !!parent?.broken });
     this.tip = commit.sha;
     return commit;
   }
@@ -162,9 +179,30 @@ export class SimulatedGitHub {
     const state = this.mergeState(pr, now);
     // A head that already contains the base tip lands its own tree, as GitHub's merge commit does.
     const head = this.commits.get(pr.head)!, landsTree = this.contains(pr.head, this.tip);
-    const commit = this.commit(`Merge pull request #${pr.number} from ${pr.branch}`, [...new Set([...this.files, ...head.files])], now, [this.tip, pr.head], landsTree ? head.tree : undefined);
+    // The merge breaks main when it lands a breaking head, itself or inside a speculative tip built on it; a revert restores what it broke.
+    const broken = !!this.commits.get(this.tip)!.broken || this.breaking.has(pr.head) || head.parents.some(parent => this.breaking.has(parent));
+    const commit = this.commit(`Merge pull request #${pr.number} from ${pr.branch}`, [...new Set([...this.files, ...head.files])], now, [this.tip, pr.head], landsTree ? head.tree : undefined, { changed: pr.files, broken });
     pr.merged = { sha: commit.sha, at: now }; pr.open = false; pr.autoMerge = false;
     this.merges.push({ key: pr.key, pr: pr.number, sha: commit.sha, at: now, state, mode });
+  }
+
+  /** The files the base branch changed from `base` to `tip`, along first parents; null when `base` is not on that line (the real adapter's incomplete compare). */
+  baseChangesSince(base: string, tip = this.tip): string[] | null {
+    this.reads.baseChanges++;
+    const changed = new Set<string>();
+    for (let at: string | undefined = tip; at; at = this.commits.get(at)?.parents[0]) {
+      if (at === base) return [...changed].sort();
+      for (const path of this.commits.get(at)?.changed ?? []) changed.add(path);
+    }
+    return null;
+  }
+  /** The required suite on a base-branch commit, as CI's push run reports it `ciMs` after the commit landed. */
+  commitChecks(commit: string, now: number) {
+    const minuteOf = Math.floor(now / minute);
+    this.reads.commitChecks.set(minuteOf, (this.reads.commitChecks.get(minuteOf) ?? 0) + 1);
+    const found = this.commits.get(commit);
+    if (!found || now - found.at < this.options.ciMs) return [];
+    return ['test', 'typecheck'].map((name, index) => ({ name, result: name === 'test' && found.broken ? 'failure' : 'success', appId: this.options.ciAppId, id: Number.parseInt(commit.slice(0, 8), 16) * 2 + index }));
   }
 
   /** The adapter `processJob` drives, answering exactly what the real one reads from GitHub. */
@@ -187,7 +225,31 @@ export class SimulatedGitHub {
           merged: !!pr.merged, mergeSha: pr.merged?.sha ?? null, mergedAt: pr.merged ? new Date(pr.merged.at).toISOString() : null,
           mergeable: pr.open, conflicting: false, baseTip: world.tip, baseTree: world.tree, baseTipContained: world.contains(pr.head, world.tip),
           protected: true, files: pr.files, scopeFiles: [], at: new Date(now).toISOString(),
+          // What the base changed since the bound base, which an optimistic merge (GY-500) needs disjoint from the head's files.
+          ...(pr.open ? { baseChanges: world.baseChangesSince(pr.base) } : {}),
         };
+      },
+      // The main guard (GY-500): CI's verdict on base-branch commits, and the revert pull requests it opens and lands head-bound.
+      async baseBranch() { return { tip: world.tip, tree: world.tree }; },
+      async commitChecks(commit: string) { return world.commitChecks(commit, clock.now()); },
+      async openRevert(work: Work, merge: OptimisticMerge): Promise<{ pr: number; head: string } | { refusal: string }> {
+        const refusal = revertRefusal(merge, world.baseChangesSince(merge.mergeSha));
+        if (refusal) return { refusal };
+        const open = world.reverts.find(entry => entry.key === work.key && !entry.merged);
+        if (open) return { pr: open.pr, head: open.head };
+        const head = world.record({ sha: sha('revert', merge.mergeSha), tree: sha('tree', 'revert', merge.mergeSha), parents: [world.tip], files: world.files, at: clock.now(), message: `Revert optimistic merge of ${work.key}` });
+        const pr = 90_000 + options.firstPullRequest + world.reverts.length;
+        world.reverts.push({ pr, key: work.key, head: head.sha, files: merge.lane.files, merged: null, openedAt: clock.now(), mergedAt: null });
+        return { pr, head: head.sha };
+      },
+      async mergeRevert(_work: Work, revert: Pick<OptimisticRevert, 'pr' | 'head'>): Promise<string | null> {
+        const entry = world.reverts.find(candidate => candidate.pr === revert.pr && candidate.head === revert.head);
+        if (!entry) throw new Error(`No revert pull request #${revert.pr} at ${revert.head}`);
+        if (entry.merged) return entry.merged;
+        // The revert restores the culprit's files: the base branch holds no breaking change after it.
+        entry.merged = world.commit(`Merge pull request #${entry.pr} from graphyard-revert/${entry.key.toLowerCase()}`, world.files, clock.now(), [world.tip, entry.head], undefined, { changed: entry.files, broken: false }).sha;
+        entry.mergedAt = clock.now();
+        return entry.merged;
       },
       async publishSpeculativeTip(work: Work, placement: QueuePlacement): Promise<QueueSpeculation> {
         const pr = world.pr(work), predicted = placement.predictedBase!;

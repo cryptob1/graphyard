@@ -1809,7 +1809,9 @@ export async function guardMain(engine: Pick<Engine, 'store' | 'ciAppIds' | 'rec
   const recorded = (await engine.store.pool.query("SELECT payload->'details' AS details FROM events WHERE work_id IS NULL AND kind='optimistic.guard' ORDER BY seq DESC LIMIT 1")).rows[0]?.details;
   const summary = { state: guard.state, detail: describeGuard(guard), window: guard.window.map(merge => ({ key: merge.key, mergeSha: merge.mergeSha, verdict: merge.verdict })),
     ...('culprit' in guard ? { culprit: guard.culprit.key, mergeSha: guard.culprit.mergeSha } : {}), ...('probe' in guard ? { probe: guard.probe.mergeSha } : {}), ...('probes' in guard ? { probes: guard.probes } : {}) };
-  const identity = (value: any) => JSON.stringify({ state: value?.state, culprit: value?.culprit, probe: value?.probe, window: value?.window });
+  // Postgres returns jsonb objects with their keys reordered, so the identity is built from values, never serialized objects.
+  const identity = (value: any) => JSON.stringify([value?.state ?? null, value?.culprit ?? null, value?.probe ?? null,
+    (Array.isArray(value?.window) ? value.window : []).map((merge: any) => [merge?.key, merge?.mergeSha, merge?.verdict])]);
   if (identity(recorded) !== identity(summary) && !(guard.state === 'green' && !recorded)) await engine.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', ['graphyard', 'optimistic.guard', JSON.stringify({ details: { ...summary, at: now.toISOString() } })]);
   // Writing a revert needs Contents: write; without it the guard keeps reading and waits for the permission.
   if (github.permissionShortfall?.('merge-queue')) return guard;

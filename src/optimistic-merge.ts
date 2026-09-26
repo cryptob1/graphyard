@@ -47,12 +47,12 @@ const lockfiles = new Set(['package-lock.json', 'npm-shrinkwrap.json', 'yarn.loc
  * says nothing about them. A change to one never merges optimistically, and neither does anything
  * whose base changed one since its own run.
  */
-export const optimisticInfrastructure = ['package.json', 'lockfiles', '.github/', 'tests/helpers/', 'src/model/work.ts', 'schema and migration files'] as const;
+export const optimisticInfrastructure = ['package.json', 'lockfiles', '.github/', 'tests/helpers/', 'src/model/work.ts', 'schema, store table and migration files'] as const;
 export function sharedInfrastructure(path: string): boolean {
   const name = path.slice(path.lastIndexOf('/') + 1);
   return name === 'package.json' || lockfiles.has(name) || path.startsWith('.github/') || path.startsWith('tests/helpers/') || path === 'src/model/work.ts'
     || /(^|\/)migrations?\//i.test(path) || /(^|\/)[^/]*migration[^/]*$/i.test(name) || /^schema([.-][^/]*)?$/i.test(name) || /(^|\/)schemas?\//i.test(path)
-    || path.startsWith('src/store/tables/');
+    || path === 'src/store/tables.ts' || path.startsWith('src/store/tables/');
 }
 
 /** What made an entry eligible, recorded on the item while it holds the optimistic lane and kept on its merge. */

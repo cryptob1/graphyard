@@ -102,7 +102,7 @@ test('unit:optimistic-eligibility an entry whose files overlap a change merged s
 });
 
 test('unit:optimistic-eligibility an entry touching shared infrastructure, or whose base changed it, takes the queue', () => {
-  for (const path of ['package.json', 'web/package.json', 'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', '.github/workflows/ci.yml', 'tests/helpers/run-tests.ts', 'src/model/work.ts', 'src/store/schema.ts', 'db/migrations/0001_init.sql', 'src/store/tables/flow.ts'])
+  for (const path of ['package.json', 'web/package.json', 'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', '.github/workflows/ci.yml', 'tests/helpers/run-tests.ts', 'src/model/work.ts', 'src/store/schema.ts', 'db/migrations/0001_init.sql', 'src/store/tables.ts', 'src/store/tables/flow.ts'])
     assert.equal(sharedInfrastructure(path), true, path);
   for (const path of ['src/model/queue.ts', 'tests/optimistic-merge.test.ts', 'docs/github.md', 'src/github.ts'])
     assert.equal(sharedInfrastructure(path), false, path);

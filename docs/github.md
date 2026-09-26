@@ -48,7 +48,7 @@ Reviews and proofs bind one head, base and policy revision. The queue head's tip
 
 ### Optimistic merges
 
-`mergeQueue.optimistic` (default on): a green entry disjoint from changes since its base merges head-bound past the queue, unless either touches `package.json`, lockfiles, `.github/`, `tests/helpers/`, `src/model/work.ts`, schemas, migrations. A main guard reverts and reopens culprits via the [repair lane](master-agent.md#repair-lane) (`master status`: `optimisticMerge`).
+`mergeQueue.optimistic` (default on): a green entry disjoint from changes since its base merges head-bound past the queue, unless either touches `package.json`, lockfiles, `.github/`, `tests/helpers/`, `src/model/work.ts`, schemas, store tables, migrations. A main guard reverts and reopens culprits via the [repair lane](master-agent.md#repair-lane) (`master status`: `optimisticMerge`).
 
 ### Direct merges
 
