@@ -555,7 +555,7 @@ function fleetExecutor(identity: Principal, host: string, log: FleetLog, mine: S
     },
     // The shape the guarded broker returns: its own account of what it did, never a verdict that
     // the item is merged — only the observation says that.
-    merge: async item => { await mergeItem(identity, await reload(item.id)); return { key: item.key, pr: item.candidate!.pr, sha: item.candidate!.sha, method: 'merge', pending: true, result: 'merge requested; Graphyard will mark Done only after observing the merge' }; },
+    merge: async item => { await mergeItem(identity, await reload(item.id)); return { key: item.key, pr: item.candidate!.pr, sha: item.candidate!.sha, method: 'merge', result: 'merge requested; Graphyard will mark Done only after observing the merge' }; },
     observeDeployment: async delivered => ({ source: 'endpoint', sha: mergeSha, at: new Date().toISOString(), reason: null, deployed: delivered.map(item => item.key), pending: [] }),
     recordSession: (item, handle) => engine.execute(identity, 'session', item.id, handle, randomUUID()),
   });

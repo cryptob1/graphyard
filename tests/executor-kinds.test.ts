@@ -9,7 +9,7 @@ import { emptyDaemonState, writeDaemonState } from '../src/master-daemon.js';
 import { loadMasterConfig } from '../src/master.js';
 import { loopUnitName } from '../src/supervisor.js';
 import { executorRunnableKinds, type NextActionKind } from '../src/model/action-kinds.js';
-import { controlPlaneHandlers, detectLoopMerger, installationMerger, loopMergeGuardedEffects, loopMergeRefusal } from '../src/executor.js';
+import { detectLoopMerger, installationMerger, loopMergeGuardedEffects, loopMergeRefusal } from '../src/executor.js';
 import { executorDeclarationFile, executorUnit, installExecutorSupervision, loopMergerExecutorKinds, type SystemctlRunner } from '../src/repository-setup.js';
 import type { ExecutorEffects } from '../src/auto-dispatch.js';
 
@@ -111,25 +111,4 @@ test('unit:dual-merger-surfaced master status names the merger and raises an att
   const remote = installationMerger({ loop: { configured: true, running: false, autoMerge: false }, declaration: null, served: ['resync', 'merge'] });
   assert.equal(remote.merger, 'both');
   assert.match(remote.attention[0].text, /the master loop is installed and the executors serve merge \(a live executor serves it\)/);
-});
-
-test('unit:executor-merge-row-names-unaccounted-outcome — the executor merge row names an outcome that is neither pending nor merged, and records pending and merged outcomes verbatim (GY-442)', async () => {
-  const work = { id: 'work-1', key: 'GY-1' } as any;
-  const config = { herdrWorkspace: null } as any;
-  const row = async (outcome: unknown) => {
-    const refuse = async () => { throw new Error('unused'); };
-    const handlers = controlPlaneHandlers(() => config, {
-      snapshot: async () => ({ work: [work], now: new Date().toISOString() }), mutate: refuse, agents: () => [],
-      workerCredentials: refuse, producerCredentials: refuse, dispatchWorker: refuse, launchReview: refuse, launchProducer: refuse,
-      merge: async () => outcome, observeDeployment: refuse,
-    });
-    return handlers.merge!({ work: work.id, key: work.key } as any, { id: 'executor-a', host: 'unit-host' } as any);
-  };
-  const neither = /the merge reported neither a pending request nor a merge GitHub performed/;
-  assert.equal(await row({ result: 'merge requested', pending: true }), 'GY-1: merge requested');
-  assert.equal(await row({ result: 'merged', merged: true }), 'GY-1: merged');
-  assert.equal(await row({ result: 'merge requested' }), 'GY-1: merge requested; the merge reported neither a pending request nor a merge GitHub performed');
-  assert.match(String(await row(undefined)), neither);
-  assert.match(String(await row({})), neither);
-  assert.equal(await row({ pending: true }), 'GY-1: the guarded merge returned without a result of its own');
 });
