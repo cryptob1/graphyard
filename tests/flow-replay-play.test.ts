@@ -109,7 +109,7 @@ test('unit:replay-plays-on-press — pressing play runs the replay once over rep
   // Under prefers-reduced-motion the overlay is replaced by the step-through slider and nothing animates.
   const source = await read('web/pages/insights-flow.tsx');
   assert.match(source, /\{!reducedMotion\(\) && <button type="button" className="replay-overlay"/);
-  assert.match(source, /\{reducedMotion\(\) \? <input type="range"[^>]*aria-label="Replay position"/);
+  assert.match(source, /<input type="range"[^>]*aria-label="Replay position"/);
   assert.match(source, /if \(!playing \|\| reducedMotion\(\)\) return;/);
   const original = (globalThis as any).window;
   (globalThis as any).window = { matchMedia: (query: string) => ({ matches: query === '(prefers-reduced-motion: reduce)' }) };
@@ -146,4 +146,26 @@ test('unit:replay-overlay-screenshot — the overlay spans the replay under a tr
   assert.match(spec, /replayOverlayWidths = \[\{ name: 'laptop', width: 1280[^\]]*\{ name: 'small-phone', width: 375/);
   assert.match(spec, /getByRole\('button', \{ name: 'Play the last 24 hours' \}\)/);
   assert.match(spec, /page\.screenshot\(\{ path: `\$\{out\}\/insights-replay-overlay-\$\{viewport\.width\}\.png`/);
+});
+
+test('unit:replay-scrub — outside reduced motion the replay position is a draggable slider that follows playback, and dragging it pauses the replay at the chosen point (GY-288)', async () => {
+  const p = player();
+  p.press();
+  p.advance(replaySeconds * 1000 / 4);
+  const html = p.render();
+  const slider = /<input type="range" min="0" max="1000" aria-label="Replay position" value="(\d+)"\/>/.exec(html);
+  assert.ok(slider, 'a range input, not a read-only progress bar');
+  assert.ok(Math.abs(Number(slider![1]) - 250) <= 10, `it follows playback, at ${slider![1]}`);
+  assert.doesNotMatch(html, /role="progressbar"/);
+  // The slider's change handler, as the page wires it: it pauses, then moves to the dragged point.
+  const source = await read('web/pages/insights-flow.tsx');
+  assert.match(source, /aria-label="Replay position" onChange=\{e => \{ setPlaying\(false\); setT\(Number\(e\.target\.value\) \/ 1000\); \}\}/);
+  p.state.playing = false; p.state.t = 0.7; p.pause();
+  p.advance(replaySeconds * 1000);
+  assert.deepEqual(p.state, { t: 0.7, playing: false }, 'the scrubbed point holds');
+  assert.match(overlay(p.render())![1], /aria-label="Play the last 24 hours"/);
+  // Play resumes from the scrubbed point, not the start.
+  p.press();
+  p.advance(replaySeconds * 1000 * 0.1);
+  assert.ok(Math.abs(p.state.t - 0.8) < 0.01, `resumed from the scrubbed point, at ${p.state.t}`);
 });
