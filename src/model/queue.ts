@@ -1,4 +1,4 @@
-import { baseRefreshConflict, defaultMergeBatchSize, ejectedTipRestore, ejectionReason, nextQueueSequence, pendingBaseRefresh, pendingRestore, predecessorWait, predecessorWaitText, queueHistoryLimit, queueBatch, queuePlacement, sameMergeBatch, speculativeConflictReason, stuckBatchMs } from '../merge-queue.js';
+import { baseRefreshConflict, defaultMergeBatchSize, ejectedTipRestore, ejectionReason, nextQueueSequence, pendingBaseRefresh, pendingRestore, predecessorWait, predecessorWaitText, queueHistoryLimit, queueBatch, queuePlacement, sameMergeBatch, stuckBatchMs } from '../merge-queue.js';
 import type { QueueEjection, QueueHistoryEntry, QueuePlacement } from '../merge-queue.js';
 import type { Work } from './work.js';
 import { behindBaseHold } from './behind-base.js';
@@ -26,7 +26,7 @@ export function placeInQueue(work: Work, all: Work[], now: Date, ciAppIds: numbe
   const batchOf = (subject: Work) => queueBatch(subject, all.map(item => item.id === subject.id ? subject : item), now.getTime(), batchSize, ciAppIds);
   const reason = queue ? ejectionReason(probe, ciAppIds, all, batchOf(probe)) : null;
   if (queue && reason) {
-    ejection = { at: now.toISOString(), sequence: queue.sequence, reason, sha: candidate?.sha ?? null, policyRevision: work.policyRevision };
+    ejection = { at: now.toISOString(), sequence: queue.sequence, reason, sha: candidate?.sha ?? null, policyRevision: work.policyRevision, conflict: null };
     record('ejected', reason, queue.speculation?.tip ?? candidate?.sha);
     queue = null;
   } else if (!queue && eligible && (!(ejection && candidate && ejection.sha === candidate.sha && ejection.policyRevision === work.policyRevision) || predecessorReentry(work, all))) {
@@ -91,14 +91,18 @@ export function placeInQueue(work: Work, all: Work[], now: Date, ciAppIds: numbe
 
 /**
  * The record of a queued entry leaving the queue for `reason`: the ejection and the history entry.
- * A speculative-merge conflict also records the prediction it was found on (GY-321): the entries
- * ahead of it, or [] when the merge was onto the base branch tip itself. Only the latter is a
- * conflict with the base, which a sync can resolve; the former waits for those entries instead.
+ * A speculative-merge conflict (`conflict`, the caller's typed knowledge, never read from the
+ * reason: GY-252) records that it was one and the base it was attempted onto, and the prediction
+ * it was found on (GY-321): the entries ahead of it, or [] when the merge was onto the base branch
+ * tip itself. Only the latter is a conflict with the base, which a sync can resolve; the former
+ * waits for those entries instead.
  */
-export function queueEjectionRecord(work: Work, all: Work[], reason: string, now: Date): { ejection: QueueEjection; history: QueueHistoryEntry[] } {
+export function queueEjectionRecord(work: Work, all: Work[], reason: string, now: Date, conflict = false): { ejection: QueueEjection; history: QueueHistoryEntry[] } {
   const sequence = work.queue!.sequence, at = now.toISOString();
-  const predecessors = speculativeConflictReason.test(reason) ? queuePlacement(work, all, now.getTime())?.predecessors ?? [] : null;
-  const ejection: QueueEjection = { at, sequence, reason, sha: work.candidate?.sha ?? null, policyRevision: work.policyRevision, ...(predecessors ? { predecessors } : {}) };
+  const placement = conflict ? queuePlacement(work, all, now.getTime()) : null;
+  const predecessors = conflict ? placement?.predecessors ?? [] : null;
+  const ejection: QueueEjection = { at, sequence, reason, sha: work.candidate?.sha ?? null, policyRevision: work.policyRevision,
+    conflict: conflict ? { base: placement?.predictedBase ?? null } : null, ...(predecessors ? { predecessors } : {}) };
   const history = [...(work.queueHistory ?? []), { at, event: 'ejected' as const, sequence, reason, ...(work.queue!.speculation ? { tip: work.queue!.speculation.tip } : {}), ...(predecessors ? { predecessors } : {}) }].slice(-queueHistoryLimit);
   return { ejection, history };
 }

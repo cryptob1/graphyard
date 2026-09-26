@@ -1508,6 +1508,7 @@ test('a failed speculative validation ejects the entry with a reason and re-pred
   third = await reload(third);
   assert.equal(third.queue, null);
   assert.match(third.queueEjection!.reason, /conflicts and cannot be resolved by Graphyard/);
+  assert.ok(third.queueEjection!.conflict, 'the engine records the conflict as a typed flag (GY-252)');
   assert.equal((await store.events(third.id)).filter(event => event.kind === 'queue.ejected').length, 1);
   assert.equal(thirdTip.length, 40);
 });

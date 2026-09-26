@@ -285,6 +285,14 @@ export interface QueueEjection {
    * branch tip itself. Absent on other ejections and on records that predate the rule.
    */
   predecessors?: string[];
+  /**
+   * GY-252. Whether the ejection was a speculative-merge conflict (github.ts SpeculativeConflict),
+   * recorded as a typed fact rather than read back from `reason`: `{ base }` names the tip the
+   * conflicting merge was attempted onto (the predicted base, null when no prediction was held),
+   * null marks any other ejection. Absent only on records that predate the field, which
+   * `speculativeConflict` still reads from their reason.
+   */
+  conflict?: { base: string | null } | null;
 }
 export interface QueueHistoryEntry {
   at: string; event: 'enqueued' | 'predicted' | 'ejected' | 'dissolved'; sequence: number; reason?: string; tip?: string;
@@ -1040,8 +1048,19 @@ export function restoringAfterEjection(work: Work, all: Work[]): string | null {
     : `Graphyard restores the branch to ${own} brought onto the base before its tree is judged`}, and no worker is asked to change it`;
 }
 
-/** The reason `advanceQueue` ejects an entry whose speculative merge conflicts (github.ts SpeculativeConflict). */
+/**
+ * The reason `advanceQueue` ejected an entry whose speculative merge conflicts, as it was worded
+ * before ejections recorded `conflict` (GY-252). Read only for those legacy records.
+ */
 export const speculativeConflictReason = /^Speculative merge of [0-9a-f]+ into .+ conflicts/;
+/**
+ * Whether an ejection was a speculative-merge conflict. The typed `conflict` field decides; the
+ * reason text is consulted only for a record written before the field existed, so rewording the
+ * conflict message can never stop a conflict from being recognised.
+ */
+export function speculativeConflict(ejection: Pick<QueueEjection, 'reason' | 'conflict'>): boolean {
+  return ejection.conflict === undefined ? speculativeConflictReason.test(ejection.reason) : !!ejection.conflict;
+}
 /**
  * GY-321. The predecessors a speculative-merge conflict of exactly the current head was found
  * behind, or null when the ejection is anything else: another reason, another head or policy, or a
@@ -1052,7 +1071,7 @@ export const speculativeConflictReason = /^Speculative merge of [0-9a-f]+ into .
 export function predecessorConflict(work: Pick<Work, 'candidate' | 'queue' | 'queueEjection' | 'policyRevision'>): string[] | null {
   const ejection = work.queueEjection, candidate = work.candidate;
   if (work.queue || !ejection || !candidate || ejection.sha !== candidate.sha || ejection.policyRevision !== work.policyRevision) return null;
-  if (!speculativeConflictReason.test(ejection.reason) || !ejection.predecessors?.length) return null;
+  if (!speculativeConflict(ejection) || !ejection.predecessors?.length) return null;
   return ejection.predecessors;
 }
 /**
