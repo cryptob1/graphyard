@@ -9,7 +9,7 @@ One sidebar: **Work**, **Workers**, **Shipped**, **Tests** (planned, GY-162), **
 
 Each open item is in one group: **Needs you** (only you may decide), **Blocked**, **Moving**, **Up next** or **Backlog**; a tile counts and filters one.
 
-`GET /api/board` (`src/model/board.ts`) serves these groups, not the page. Items carry `group`, `stage`, `owner`, `actor` (`worker`, `reviewer`, `producer`, `approver`, `master`, `executor` or `human-only`), `command` (or null), `since` and `overdue` (past `overdueAfterMs`). `master status` lists the master's items as `board.owed`.
+`GET /api/board` (`src/model/board.ts`) serves these groups, not the page. Items carry `group`, `stage`, `owner`, `actor` (`worker`, `reviewer`, `producer`, `approver`, `master`, `executor`, `human-only`, `held`), `command` (or null), `since` and `overdue` (past `overdueAfterMs`). `master status` lists the master's items as `board.owed`.
 
 ## Workers
 
@@ -26,7 +26,7 @@ Running rows offer:
 
 ## The status sentence
 
-Rows show **Research, Build, Validate, Test, Review, Prove, Merge, Deploy** (`web/pr-steps.ts`). Research: **current** while live, **done** with a brief, else **skipped** (failed, bug, `"research": false`, built briefless, no `run.research`). Merged items read *Merged*, then *Live* in production. Moving or Blocked over 30 minutes reads `1h 12m overdue`.
+Rows show **Research, Build, Validate, Test, Review, Prove, Merge, Deploy** (`src/model/pr-steps.ts`). Research: **current** while live, **done** with a brief, else **skipped** (failed, bug, `"research": false`, built briefless, no `run.research`). Merged items read *Merged*, then *Live* in production. Moving or Blocked over 30 minutes reads `1h 12m overdue`.
 
 ## An item page
 

@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Work } from '../../src/model';
 import { sessionStaleThresholdMs, workersView, type PrincipalSummary, type SessionRoleKind, type WorkerRow } from '../workers-view';
-import { prSteps, researchStepState } from '../pr-steps';
-import { releaseView, type ReleaseView } from '../release';
+import { prSteps, researchStepState } from '../../src/model/pr-steps';
+import { releaseView, type ReleaseView } from '../../src/model/release';
 import type { Dashboard } from './dashboard';
 import DeliverySlices from '../components/delivery-slices';
 import { shortShas } from '../candidate';

@@ -5,14 +5,14 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import type { Work } from '../src/model.js';
 import { researchStatus, requirementsRevision, type ResearchRecord } from '../src/research.js';
 import { classifyWait, computeFlow, deriveFacts, flowDrilldown, gateFactStep, stepMoves, type FlowDataset, type FlowFact, type LedgerEvent } from '../src/flow-analytics.js';
-import { prSteps, researchStepState, stepIds, stepSince } from '../web/pr-steps.js';
+import { prSteps, researchStepState, stepIds, stepSince } from '../src/model/pr-steps.js';
 import StepsBar, { StepsDetail } from '../web/components/steps-bar.js';
 import WorkCard from '../web/components/work-card.js';
 import WorkDetails from '../web/pages/work-details.js';
 import WorkersPage from '../web/pages/workers.js';
 import { LandedPerDay, ResearchEffect, WhereTimeGoes } from '../web/pages/insights-flow.js';
 import { groupOf, nextActor } from '../web/groups.js';
-import { noRelease, releaseView } from '../web/release.js';
+import { noRelease, releaseView } from '../src/model/release.js';
 
 // GY-434: research is a first-class step. The step model leads with it — before Build — and every
 // step display shows it in order with its state: done once a brief is recorded, current while a
@@ -35,7 +35,7 @@ function item(overrides: Partial<Work> = {}): Work {
   return {
     id: overrides.id ?? '11111111-1111-4111-8111-111111111111', key: 'GY-1', title: 'Research as a step', description: 'Research before build', type: 'feature', priority: 1,
     dependencies: [], criteria: [{ id: 'AC-1', text: 'The research step renders everywhere steps do.', proofs: ['unit:research-step-rendered'] }],
-    policy: { checks: ['test'], review: true }, plannedFiles: ['web/pr-steps.ts'], stage: 'ready', revision: 3, policyRevision: 1,
+    policy: { checks: ['test'], review: true }, plannedFiles: ['src/model/pr-steps.ts'], stage: 'ready', revision: 3, policyRevision: 1,
     createdAt: at(-2 * day), updatedAt: at(0), stageEnteredAt: at(-hour), ready: true,
     epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: building, violations: [],
     ...overrides,
@@ -52,7 +52,7 @@ function brief(state: ResearchRecord['state'], startedAgo: number, endedAgo: num
     failure: state === 'failed' ? { reason: 'timeout', detail: 'No research run finished within 15 minutes; build proceeds without a brief' } : null,
     recordedBy: 'graphyard-master',
     brief: state === 'recorded' ? {
-      existingCode: [{ path: 'web/pr-steps.ts', note: 'the step model every display reads' }, { path: 'src/flow-analytics.ts', note: 'the flow facts the report aggregates' }],
+      existingCode: [{ path: 'src/model/pr-steps.ts', note: 'the step model every display reads' }, { path: 'src/flow-analytics.ts', note: 'the flow facts the report aggregates' }],
       patterns: [{ pattern: 'Design doc before implementation', source: 'https://rfc.example' }],
       risks: ['a run that never ends must not hold dispatch', 'a stale brief must not read as current'],
       approach: 'Lead the step model with research and derive its state from the item record.',
@@ -165,7 +165,7 @@ test('unit:research-brief-visible — the item page shows the brief itself, its 
   // Every brief section is there: approach, existing code paths, patterns, risks, questions with state.
   assert.match(panel, /<h3>Approach<\/h3><p>Lead the step model with research/);
   assert.match(panel, /<h3>Existing code<\/h3>/);
-  assert.match(panel, /<code>web\/pr-steps\.ts<\/code> — the step model every display reads/);
+  assert.match(panel, /<code>src\/model\/pr-steps\.ts<\/code> — the step model every display reads/);
   assert.match(panel, /<h3>Patterns and prior art<\/h3>/);
   assert.match(panel, /Design doc before implementation <small>\(https:\/\/rfc\.example\)<\/small>/);
   assert.match(panel, /<h3>Risks and edge cases<\/h3>/);
@@ -211,7 +211,7 @@ test('unit:research-in-flow-analytics — flow analytics record time in research
     event(unresearched, 'ready', -day + minute),
     event({ ...unresearched, lease: { owner: 'worker-2', epoch: 1, expiresAt: at(hour) }, stage: 'build', stageEnteredAt: at(-3 * hour) }, 'claim', -3 * hour),
     event({ ...unresearched, candidate: { pr: 501, sha: head, baseSha: base, branch: 'graphyard/gy-2-1', author: 'worker-2', createdAt: at(-2 * hour) }, stage: 'review', stageEnteredAt: at(-2 * hour),
-      observation: { candidate: { pr: 501, sha: head, baseSha: base, branch: 'graphyard/gy-2-1', author: 'worker-2', createdAt: at(-2 * hour) }, reviews: [{ id: 1, reviewer: 'reviewer-1', state: 'CHANGES_REQUESTED', sha: head, submittedAt: at(-hour) }], checks: [], files: ['web/pr-steps.ts'] } as any }, 'github.observed', -hour),
+      observation: { candidate: { pr: 501, sha: head, baseSha: base, branch: 'graphyard/gy-2-1', author: 'worker-2', createdAt: at(-2 * hour) }, reviews: [{ id: 1, reviewer: 'reviewer-1', state: 'CHANGES_REQUESTED', sha: head, submittedAt: at(-hour) }], checks: [], files: ['src/model/pr-steps.ts'] } as any }, 'github.observed', -hour),
     event({ ...unresearched, candidate: { pr: 501, sha: head, baseSha: base, branch: 'graphyard/gy-2-1', author: 'worker-2', createdAt: at(-2 * hour) }, reworkRequested: true, stage: 'build', stageEnteredAt: at(-30 * minute) }, 'rework', -30 * minute),
   ];
   const facts: FlowFact[] = [];

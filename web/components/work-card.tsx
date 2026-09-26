@@ -1,12 +1,12 @@
 import type { Work } from '../../src/model';
 import { CandidatePr } from '../candidate';
-import { formatDuration } from '../duration';
+import { formatDuration } from '../../src/model/duration';
 import { groupOf, nextActor, timedGroups, type Group } from '../groups';
-import { phaseLabel, phaseOf, plainStatus } from '../plain-status';
-import { prSteps, stepHeld } from '../pr-steps';
+import { phaseLabel, phaseOf, plainStatus } from '../../src/model/plain-status';
+import { prSteps, stepHeld } from '../../src/model/pr-steps';
 import type { StepTransition } from '../flow-replay';
-import type { ActionlessCard } from '../pages/actionless';
-import type { ReleaseView } from '../release';
+import type { ActionlessCard } from '../../src/model/actionless';
+import type { ReleaseView } from '../../src/model/release';
 import StatusAge from './status-age';
 import StepsBar from './steps-bar';
 import { Explained } from './term';

@@ -1,4 +1,4 @@
-import type { Work } from '../src/model';
+import type { Work } from '../model.js';
 
 /** Use the control plane observation time, never the worker machine clock. */
 export function assignment(work: Pick<Work, 'lease' | 'lastAssignment' | 'workspaces'>, now: number) {

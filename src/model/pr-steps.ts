@@ -1,28 +1,24 @@
-import { carriedBindings, deliveryState, isClosed, type Gate, type Work } from '../src/model';
-import { latestCheck, tipValidationPrefix } from '../src/merge-queue';
-import { leftFlowAt, noRelease, servedFor, type ReleaseView } from './release';
-import type { PipelineTimeline } from '../src/pipeline-speed';
-import { assignment } from './assignment';
-import { statusDuration, type StatusDuration } from './duration';
-import type { StepTransition } from './flow-replay';
-import { plainReason, statusSince } from './plain-status';
+import { carriedBindings, deliveryState, isClosed, type Gate, type Work } from '../model.js';
+import { latestCheck, tipValidationPrefix } from '../merge-queue.js';
+import { leftFlowAt, noRelease, servedFor, type ReleaseView } from './release.js';
+import type { PipelineTimeline } from '../pipeline-speed.js';
+import { assignment } from './assignment.js';
+import { statusDuration, type StatusDuration } from './duration.js';
+import { plainReason, statusSince } from './plain-status.js';
 
 /**
  * The eight pull-request steps every moving item shows (GY-161, GY-434): Research, Build, Validate,
- * Test, Review, Prove, Merge, Deploy. Research is first: before a builder starts, a cheap research
- * session writes the brief the build begins from, and its run is a step like the gates are. Each
- * step after Build reads one gate the control plane evaluates (ready, build, review, test,
- * acceptance, merge): Validate is the build gate once the work is handed in, Test the CI checks,
- * Review the approval, Prove the acceptance criteria and Merge the merge gate; Deploy is the
- * delivery after the merge. A step whose gate passed is done, the first step (in the order a pull
- * request travels) whose gate refuses is current, and the rest are pending. Research is done once
- * its brief is recorded and skipped — never missing, never failed — where no brief will exist: a
- * bug without `"research": true`, an item opted out, research not configured, or a run that failed.
- * The dashboard adds nothing the gates do not say; it only names the step in plain words and says
+ * Test, Review, Prove, Merge, Deploy. Research (the brief a build begins from) reads the item's
+ * research record; each step after Build reads one gate: Validate the build gate once handed in,
+ * Test the CI checks, Review the approval, Prove the acceptance criteria, Merge the merge gate;
+ * Deploy is the delivery after the merge. A passed gate's step is done, the first refusing one is
+ * current, the rest pending. The dashboard adds nothing the gates do not say: it names the step,
  * what it waits on and who acts next — as a role, never a worker's code name.
  */
 export const stepIds = ['research', 'build', 'validate', 'test', 'review', 'prove', 'merge', 'deploy'] as const;
 export type StepId = typeof stepIds[number];
+/** One recorded move of an item between steps, as the Insights Flow replay (web/flow-replay.ts) plays it. */
+export interface StepTransition { key: string; from: StepId | null; to: StepId | null; at: string }
 export type StepState = 'done' | 'current' | 'pending' | 'skipped';
 export const stepLabel: Record<StepId, string> = { research: 'Research', build: 'Build', validate: 'Validate', test: 'Test', review: 'Review', prove: 'Prove', merge: 'Merge', deploy: 'Deploy' };
 /** The verb the live label starts with: "Testing · 3 of 5 checks done". */
@@ -55,16 +51,12 @@ const ordinal = (n: number) => `${n}${n % 100 >= 11 && n % 100 <= 13 ? 'th' : ['
 const pendingCheck = new Set(['', 'pending', 'queued', 'in_progress', 'waiting', 'requested', 'expected']);
 
 /**
- * The research step's state, read from the item's own record (GY-434). A run recorded as running
- * is current while it is live or awaited — within its time limit plus the grace the loop records
- * its end in (src/research.ts `researchHold`); past that bound nobody is researching and the step
- * waits pending until the loop records the failure. A recorded brief is done. A failed run is
- * skipped — build proceeds without a brief, so the step reads skipped, never failed. Where no run
- * exists at all, research is skipped for anything that will not be researched: a bug without
- * `"research": true`, an item opted out with `"research": false`, any item on a loop that does not
- * research (`configured`: the loop's published `run.research`, web/release.ts), and any item
- * already building or handed in without a brief. Only on a loop that researches is a feature
- * released and not yet researched pending: its run has still to start.
+ * The research step's state, from the item's own record (GY-434). A running run is current within
+ * its time limit plus the loop's grace (src/research.ts `researchHold`), pending past it until the
+ * failure is recorded. A recorded brief is done; a failed run is skipped, never failed. With no run,
+ * research is skipped — never missing — for a bug without `"research": true`, an item opted out, a
+ * loop that does not research (`configured`: its published `run.research`, src/model/release.ts),
+ * and an item already building or handed in; only a released feature on a researching loop is pending.
  */
 export function researchStepState(work: Pick<Work, 'type' | 'research' | 'researchBrief' | 'submission' | 'candidate' | 'lease'>, now: number, configured = false): StepState {
   const record = work.researchBrief ?? null;
@@ -230,15 +222,12 @@ export function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: n
 }
 
 /**
- * The eight steps for one item. Research comes first: while its run is live or awaited it is the
- * current step, whatever the gates say; once its brief is recorded — or research is skipped — it
- * reads done or skipped and the gates take over. Before the work is handed in only Build (or a
- * live research run) can be current. After it, each step's own gate decides done, and the first
- * step whose gate refuses is current; when every gate passes the item is merging. A merged item
- * has every gate step done — reading "Live" where production was observed serving it — unless its
- * policy asks for a post-deployment check that has not passed, or the production watch observes
- * production not serving it yet (web/release.ts), which keeps it at Deploy. Work closed without
- * merging has no step at all.
+ * The eight steps for one item. A live or awaited research run is current whatever the gates say;
+ * once researched or skipped, the gates take over. Before hand-in only Build can be current; after
+ * it the first step whose gate refuses is current, and when every gate passes the item is merging.
+ * A merged item has every step done (research skipped without a brief) — "Live" where production
+ * serves it — unless a post-deployment check has not passed or the production watch sees it not
+ * served yet (src/model/release.ts), which keeps it at Deploy. Work closed unmerged has no step.
  */
 export function prSteps(work: Work, now: number, release: ReleaseView = noRelease): PrSteps {
   const research = researchStepState(work, now, release.researchConfigured);
@@ -322,7 +311,7 @@ export function stepSince(work: Work, now: number, moves?: readonly StepTransiti
 
 /**
  * How long the item has held its current step, and whether that is past the one threshold
- * (web/duration.ts). Only work that has left the flow (no current step, `leftFlowAt`) has arrived
+ * (src/model/duration.ts). Only work that has left the flow (no current step, `leftFlowAt`) has arrived
  * and is never overdue; merged work still held at Deploy keeps a running clock.
  */
 export function stepHeld(work: Work, now: number, moves?: readonly StepTransition[] | null, release: ReleaseView = noRelease): StatusDuration {
