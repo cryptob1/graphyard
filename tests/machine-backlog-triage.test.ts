@@ -114,3 +114,16 @@ test('unit:machine-backlog-triaged — a failed triage run backs off on the loop
   assert.deepEqual(step(seen + triageRetryMs).map(action => action.work), ['GY-396'], 'judged again once the back-off has passed on the loop clock');
   assert.equal(starts.length, 2);
 });
+
+test('unit:triage-concurrency-setting — run.research.triageConcurrency sets how many machine-filed items are triaged at once, defaulting to two', async t => {
+  t.after(clearTriageRuns);
+  const backlog = Array.from({ length: 6 }, (_, index) => item(`GY-5${index}0`, `Follow-ups from the approved review of GY-4${index} (PR #${index})`, hours(30 + index)));
+  const release = () => ({ outcome: 'release' as const, priority: 2, reason: 'real work' });
+  const step = (research: unknown) => triageStep({ work: backlog, clock: NOW, settings: researchSettings({ research }), config: { repository: 'owner/project' }, cwd: process.cwd(), runner: fakeRunner(release).runner, record: async () => {} });
+  assert.equal(researchSettings({ research: {} }).triageConcurrency, 2);
+  assert.equal(step({}).length, 2, 'two at once by default');
+  await triageSettled(); clearTriageRuns();
+  assert.equal(step({ triageConcurrency: 5 }).length, 5, 'the setting raises it');
+  await triageSettled();
+  assert.throws(() => researchSettings({ research: { triageConcurrency: 0 } }));
+});
