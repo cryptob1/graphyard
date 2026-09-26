@@ -5,8 +5,8 @@ import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { needsSmoke, selectFleetSession, type FleetClient, type FleetSelection } from '../src/fleet.js';
-import { launchApprover, loadMasterConfig, masterConfigSchema, setupMaster } from '../src/master.js';
+import { fleetRoleHealth, needsSmoke, selectFleetSession, type FleetClient, type FleetProbe, type FleetSelection } from '../src/fleet.js';
+import { inspectProfileAccounts, launchApprover, loadMasterConfig, masterConfigSchema, setupMaster } from '../src/master.js';
 import type { Work } from '../src/model.js';
 import { RegistryError, applyRegistryMutation, chooseSession, emptyRegistry, endRegistrySession, fleetView, foldObservations, proposedRuntimes, recordRunOutcome, smokeRetestMs, supersededByRequest, unjudgedHoldMs,
   type AgentRegistry, type FleetSession, type RegistryMutation } from '../src/model/registry.js';
@@ -321,6 +321,55 @@ test('unit:account-smoke-gate — a failed smoke test is retested once its delay
   assert.equal(needsSmoke(failed, pi, at + smokeRetestMs), true);
   assert.equal(needsSmoke({ ...failed, smoke: { ...failed.smoke, result: 'pass' } }, pi, at + 10 * smokeRetestMs), false, 'a pass is not retested until the account changes');
   assert.equal(needsSmoke(failed, { ...pi, launch: { ...pi.launch, kind: 'claude' } }, at + smokeRetestMs), false, 'an interactive runtime has no smoke test');
+});
+
+test('unit:account-smoke-gate — the producer preflight reads an expired smoke failure as retestable, so the hourly retest can run (GY-515)', async () => {
+  const { config } = await installation(), registry = memoryRegistry(config.hostId);
+  registry.mutate('apply', {
+    runtimes: proposedRuntimes.filter(runtime => runtime.name === 'pi'),
+    models: [{ name: 'glm-flash', id: 'zai/glm-5.3-flash' }],
+    accounts: [{ name: 'pi-p', runtime: 'pi', model: 'glm-flash', credential: { host: config.hostId, home: await piHome('pi-p', null) } }],
+    roles: [{ name: 'producer', accounts: ['pi-p'], concurrency: 1 }],
+    reason: 'Pi producer',
+  });
+  let outage = true;
+  const smoke = async () => (outage ? { ok: false, error: '503 provider unavailable' } : { ok: true, error: null });
+  // The first launch fails the smoke test, and the failure folds into the registry.
+  await assert.rejects(selectFleetSession(config, 'producer', { name: 'producer' }, { registry: registry.client, quota: false, cacheMs: 0, smoke }),
+    /pi-p failed its smoke test: 503 provider unavailable; it is tested again after 60 minutes/);
+  assert.equal(registry.current().accounts[0].smoke?.result, 'fail');
+  // The dispatch's preflight is what kept the role shut: inspectProfileAccounts reads
+  // fleetRoleHealth before any launch, so with the failure fresh every profile of the role reads
+  // unavailable — no launch, and the retest selectFleetSession runs never fires.
+  const health: Record<string, { available: boolean; reason: string | null }> = {};
+  const preflight = (now?: () => number): FleetProbe => ({ registry: registry.client, quota: false, cacheMs: 0, ...(now ? { now } : {}) });
+  const fresh = await inspectProfileAccounts(config, 'producer', [{ name: 'producer-profile' }], health, preflight());
+  assert.equal(fresh['producer-profile'].available, false);
+  assert.match(fresh['producer-profile'].reason!, /pi-p failed its smoke test: 503 provider unavailable/);
+  assert.match((chooseSession(registry.current(), { role: 'producer', host: config.hostId }, Date.now()) as { reason: string }).reason, /failed its smoke test/);
+  // Once the failure has aged past the delay the preflight admits a launch again — the launch is
+  // what runs the retest — while the choice itself still refuses until a fresh pass is folded.
+  const later = Date.now() + smokeRetestMs + 1_000;
+  const due = await inspectProfileAccounts(config, 'producer', [{ name: 'producer-profile' }], health, preflight(() => later));
+  assert.equal(due['producer-profile'].available, true, 'the expired failure no longer bars the role: the next launch retests it');
+  assert.equal(due['producer-profile'].accounts?.[0].healthy, true);
+  assert.equal(due['producer-profile'].accounts?.[0].reason, null);
+  assert.match((chooseSession(registry.current(), { role: 'producer', host: config.hostId }, later) as { reason: string }).reason,
+    /failed its smoke test/, 'the choice still refuses until a fresh pass is folded');
+  // The launch the preflight admitted runs the retest, and its pass clears the failure.
+  outage = false;
+  const chosen = await selectFleetSession(config, 'producer', { name: 'producer' }, { registry: registry.client, quota: false, cacheMs: 0, smoke, now: () => later });
+  assert.equal(chosen?.account.name, 'pi-p');
+  assert.equal(registry.current().accounts[0].smoke?.result, 'pass');
+  await registry.client.end(registry.current().sessions.at(-1)!.id, 'the producer run ended', 'result');
+  // The rule itself, on the clock: a retest that fails again folds a fresh failure, which shuts
+  // the preflight for another delay before it is due for its own retest.
+  registry.current().accounts[0].smoke = { result: 'fail', reason: '503 again', at: new Date(later).toISOString(), by: 'executor' };
+  const refailed = await inspectProfileAccounts(config, 'producer', [{ name: 'producer-profile' }], health, preflight(() => later + 1));
+  assert.equal(refailed['producer-profile'].available, false, 'a retest that failed again is a fresh failure, not a due one');
+  assert.match((chooseSession(registry.current(), { role: 'producer', host: config.hostId }, later + 1) as { reason: string }).reason, /503 again/);
+  const dueAgain = await inspectProfileAccounts(config, 'producer', [{ name: 'producer-profile' }], health, preflight(() => later + smokeRetestMs));
+  assert.equal(dueAgain['producer-profile'].available, true, 'the second failure is due for its own retest an hour later');
 });
 
 test('unit:account-smoke-gate — a headless run whose settlement rejects is released as a run without a result, so it counts toward the hold (GY-515)', async () => {
