@@ -63,6 +63,8 @@ A candidate passing the build gate gets, in `autoDispatch`, one producer request
 
 **Every role, approvers too, fails over on spent quota** or waits as one `capacity` line.
 
+**An approver that ends without judging is relaunched**, whether the loop or `master approver` launched it (one gone before any cycle saw it is known by its launch record): on the next eligible account, at most 3 sessions per decision. A launch the registry or server refused (a timeout) ran no session, so it is retried next cycle and not counted. Past the bound the decision is escalated as unanswered with each session's end reason (`session N: …`); putting it to `master approver` again starts a fresh bound.
+
 The master never launches reviews or producers by hand, except `master review GY-N [PROFILE]` once the loop stops relaunching it.
 
 ### Proofs must exercise their criterion

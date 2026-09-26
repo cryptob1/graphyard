@@ -35,7 +35,7 @@ function item(key: string, stage: string): Work {
 }
 
 function effects(work: Work[], agents: () => HerdrAgent[], decisions: Record<string, { id: string; action: string; state: string; requestedAt: string }[]>,
-  closed: string[], launches: { calls: number }, sessionName: string, tick: { at: number }, extra: Partial<DaemonEffects> = {}): DaemonEffects {
+  closed: string[], launches: { calls: number }, tick: { at: number }, extra: Partial<DaemonEffects> = {}): DaemonEffects {
   return {
     agents: agents,
     credentials: async () => ({}),
@@ -51,10 +51,11 @@ function effects(work: Work[], agents: () => HerdrAgent[], decisions: Record<str
     decisions: async entry => ({ decisions: (decisions[entry.key] ?? []).map(decision => ({ ...decision, input: {}, approvedBy: decision.state === 'applied' ? 'graphyard-approver-project' : null })) }),
     // The loop's own launch, as production builds it: the next eligible approver account is the
     // launcher's choice, and each relaunch spends the next one.
-    approver: async () => {
+    approver: async (entry, decision) => {
       launches.calls += 1;
-      if (launches.calls === 1) throw new Error('the agent registry for the approver role is unreachable: timeout');
-      return { agentName: sessionName, pane: `pane-relaunch-${launches.calls}`, account: `approver-account-${launches.calls}`, runtime: 'claude', session: null };
+      // The first relaunch and the last launch of the bound are both refused by a registry timeout.
+      if (launches.calls === 1 || launches.calls === 3) throw new Error('the agent registry for the approver role is unreachable: timeout');
+      return { agentName: approverSessionName(entry, decision), pane: `pane-relaunch-${launches.calls}`, account: `approver-account-${launches.calls}`, runtime: 'claude', session: null };
     },
     ...extra,
   };
@@ -97,7 +98,7 @@ test('unit:hand-approver-relaunched — a hand-launched approver that vanished i
     const closed: string[] = [], launches = { calls: 0 }, tick = { at: clock };
     const history: Record<string, { id: string; action: string; state: string; requestedAt: string }[]> = { 'GY-551': [{ id: decision, action: 'release', state: 'requested', requestedAt: iso(0) }] };
     const state = emptyDaemonState(config);
-    const loop = effects([work], () => agents, history, closed, launches, name, tick, { approverLaunches: () => readApproverLaunches(root) });
+    const loop = effects([work], () => agents, history, closed, launches, tick, { approverLaunches: () => readApproverLaunches(root) });
     const cycle = (at: number) => { tick.at = at; return runCycle(config, state, loop, () => tick.at); };
     const notes = (result: { actions: { kind: string; state: string; detail: string }[] }, fragment: RegExp) =>
       result.actions.filter(action => action.kind === 'decision' && fragment.test(action.detail));
@@ -111,51 +112,107 @@ test('unit:hand-approver-relaunched — a hand-launched approver that vanished i
     assert.equal(launches.calls, 0, 'a live session is not replaced');
 
     // Cycle 2: the session vanished without judging. The relaunch is refused by the registry
-    // (timeout) — recorded, not final: the watch stays and the next cycle makes the launch again.
+    // (timeout) — recorded, not final: the launch ran no session, so it is taken back, the watch
+    // stays and the next cycle makes the launch again.
     agents.length = 0;
+    const gone = (session: number) => `session ${session}: release decision ${decision} on GY-551: approver session ${name} is gone without judging it`;
     const second = await cycle(clock + 30_000);
     watch = Object.values(state.approvals).find(entry => entry.decision === decision)!;
     assert.equal(launches.calls, 1, 'the replacement launch was attempted');
-    assert.equal(watch.launches, 2, 'the refused relaunch is counted, like any launch of the loop\'s own');
-    assert.ok(notes(second, /could not be launched: .*timeout/).every(entry => entry.state === 'failed'), 'the registry timeout is recorded');
+    assert.equal(watch.launches, 1, 'a refused relaunch ran no session, so it does not spend the bound');
+    assert.equal(watch.agentName, null);
+    assert.ok(notes(second, /could not be launched: .*timeout/).length === 1 && notes(second, /could not be launched: .*timeout/).every(entry => entry.state === 'failed'), 'the registry timeout is recorded');
     assert.ok(!watch.exhaustedAt, 'a refused relaunch does not end the decision');
-    assert.deepEqual(watch.ended, [`release decision ${decision} on GY-551: approver session ${name} is gone without judging it`]);
+    assert.deepEqual(watch.ended, [gone(1)]);
 
     // Cycle 3: the same step retried — the replacement is launched on the next eligible account.
     const third = await cycle(clock + 60_000);
     watch = Object.values(state.approvals).find(entry => entry.decision === decision)!;
-    assert.equal(watch.launches, 3, 'the retry is the third and last launch of the bound');
+    assert.equal(launches.calls, 2);
+    assert.equal(watch.launches, 2, 'the retry is the second launch of the bound');
     assert.equal(watch.account, 'approver-account-2', 'the replacement runs on the next eligible approver account');
     assert.equal(watch.pane, 'pane-relaunch-2');
-    assert.ok(notes(third, /launched independent approver session .* on approver-account-2 \(launch 3 of 3\)/).length === 1);
+    assert.ok(notes(third, /launched independent approver session .* on approver-account-2 \(launch 2 of 3\)/).length === 1);
+    assert.deepEqual(watch.ended, [gone(1)], 'a refused launch is not an ended session');
 
-    // Cycle 4: that session ends `done` without approving. The bound is spent, so no third
-    // replacement: the session is closed and the decision escalated as unanswered, with reasons.
-    agents.push({ name, pane_id: 'pane-relaunch-2', agent_status: 'done' });
-    const fourth = await cycle(clock + 180_000);
+    // Cycle 4: that session vanishes too, and the last launch of the bound hits a registry timeout.
+    // The timeout is not final: the decision is not escalated and the launch is not spent.
+    const fourth = await cycle(clock + 90_000);
     watch = Object.values(state.approvals).find(entry => entry.decision === decision)!;
-    assert.equal(launches.calls, 2, 'no session is launched past the bound');
-    assert.deepEqual(closed, ['pane-relaunch-2'], 'the ended session is closed');
+    assert.equal(launches.calls, 3, 'the last launch of the bound was attempted');
+    assert.equal(watch.launches, 2, 'the refused last launch is taken back');
+    assert.ok(!watch.exhaustedAt, 'a timeout on the last launch does not escalate the decision');
+    assert.ok(!fourth.actions.some(action => action.kind === 'escalation'), 'nothing is escalated on a refused launch');
+    assert.deepEqual(watch.ended, [gone(1), gone(2)], 'two sessions that ended alike keep two reasons');
+
+    // Cycle 5: retried again, the third and last session runs.
+    const fifth = await cycle(clock + 120_000);
+    watch = Object.values(state.approvals).find(entry => entry.decision === decision)!;
+    assert.equal(launches.calls, 4);
+    assert.equal(watch.launches, 3, 'the retry is the third and last launch of the bound');
+    assert.equal(watch.account, 'approver-account-4');
+    assert.ok(notes(fifth, /had its last approver launch refused; launched independent approver session .* \(launch 3 of 3\)/).length === 1);
+    assert.ok(!watch.exhaustedAt);
+
+    // Cycle 6: that session ends `done` without approving. The bound is spent, so no fourth
+    // session: it is closed and the decision escalated as unanswered, with each end reason.
+    agents.push({ name, pane_id: 'pane-relaunch-4', agent_status: 'done' });
+    const sixth = await cycle(clock + 240_000);
+    watch = Object.values(state.approvals).find(entry => entry.decision === decision)!;
+    assert.equal(launches.calls, 4, 'no session is launched past the bound');
+    assert.deepEqual(closed, ['pane-relaunch-4'], 'the ended session is closed');
     assert.ok(watch.exhaustedAt, 'the decision is marked spent');
     assert.equal(history['GY-551'][0].state, 'requested', 'the decision itself is untouched');
-    assert.deepEqual(watch.ended, [`release decision ${decision} on GY-551: approver session ${name} is gone without judging it`, `release decision ${decision} on GY-551: approver session ${name} ended done without approving it — declined, or its prompt was dropped`],
-      'each session\'s end reason is kept');
-    const escalation = fourth.actions.find(action => action.kind === 'escalation' && action.detail.includes('have not produced a judgement'));
+    const declined = `session 3: release decision ${decision} on GY-551: approver session ${name} ended done without approving it — declined, or its prompt was dropped`;
+    assert.deepEqual(watch.ended, [gone(1), gone(2), declined], 'each session\'s end reason is kept');
+    const escalation = sixth.actions.find(action => action.kind === 'escalation' && action.detail.includes('have not produced a judgement'));
     assert.ok(escalation, 'the unanswered decision is escalated');
-    assert.match(escalation.detail, /3 approver session\(s\)/);
-    assert.match(escalation.detail, new RegExp(`${name} is gone without judging it; release decision ${decision} on GY-551: approver session ${name} ended done without approving it`));
+    assert.match(escalation.detail, /3 approver session\(s\)/, 'the escalation counts the three sessions that ran, not the refused launches');
+    assert.ok(escalation.detail.includes(`(${gone(1)}; ${gone(2)}; ${declined})`), 'the escalation names each session\'s end reason');
     assert.match(escalation.detail, new RegExp(`graphyard master approver ${work.key} ${decision}`));
 
-    // Cycle 5: nothing further is launched or closed for the spent decision.
+    // Cycle 7: nothing further is launched or closed for the spent decision.
     agents.length = 0;
-    await cycle(clock + 210_000);
-    assert.deepEqual(closed, ['pane-relaunch-2']);
-    assert.equal(launches.calls, 2);
+    await cycle(clock + 270_000);
+    assert.deepEqual(closed, ['pane-relaunch-4']);
+    assert.equal(launches.calls, 4);
     // Master status surfaces the unanswered decision from the watch the loop keeps: the daemon
     // summary carries the watch with each session's end reason, and the escalation above names
     // the decision with them and the command that answers it.
     assert.equal(watch.settledAt, null);
-    assert.equal(watch.ended.length, 2);
+    assert.equal(watch.ended.length, 3);
+
+    // Cycle 8: the operator answers the escalation with `master approver` again. The new session has
+    // the same name; launched after the escalation, it re-arms the watch as a fresh hand launch.
+    await saveApproverLaunch(root, { ...record!, launchedAt: iso(300_000) });
+    agents.push({ name, pane_id: 'pane-again', agent_status: 'working' });
+    await cycle(clock + 300_000);
+    watch = Object.values(state.approvals).find(entry => entry.decision === decision)!;
+    assert.equal(watch.exhaustedAt, null, 'the fresh session is supervised again');
+    assert.equal(watch.launches, 1, 'the operator\'s launch starts a fresh bound');
+    assert.equal(watch.pane, 'pane-again');
+    assert.equal(launches.calls, 4, 'a live session is not replaced');
+
+    // Cycle 9: it too vanishes without judging, so it is relaunched rather than left behind.
+    agents.length = 0;
+    await cycle(clock + 330_000);
+    watch = Object.values(state.approvals).find(entry => entry.decision === decision)!;
+    assert.equal(launches.calls, 5, 'the re-armed watch relaunches its ended session');
+    assert.equal(watch.launches, 2);
+
+    // Cycle 10: a second decision put to `master approver`, whose session ended before any cycle
+    // listed it. Its launch record alone registers it, and the loop relaunches it.
+    const other = decisionId('7a2b5c1d'), otherName = approverSessionName(work, other);
+    agents.push({ name, pane_id: 'pane-relaunch-5', agent_status: 'working' });
+    history['GY-551'].push({ id: other, action: 'release', state: 'requested', requestedAt: iso(340_000) });
+    await saveApproverLaunch(root, { ...record!, agentName: otherName, decision: other, launchedAt: iso(340_000) });
+    const tenth = await cycle(clock + 360_000);
+    const unseen = Object.values(state.approvals).find(entry => entry.decision === other)!;
+    assert.ok(unseen, 'the unseen hand-launched approver is watched from its launch record');
+    assert.equal(launches.calls, 6, 'and relaunched in the same cycle');
+    assert.equal(unseen.launches, 2);
+    assert.deepEqual(unseen.ended, [`session 1: release decision ${other} on GY-551: approver session ${otherName} is gone without judging it`]);
+    assert.ok(notes(tenth, /gone before the loop saw it/).length === 1);
   } finally {
     await rm(root, { recursive: true, force: true });
     await rm(credentials, { recursive: true, force: true });
