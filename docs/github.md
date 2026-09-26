@@ -39,7 +39,7 @@ The gate also requires CI checks from `GITHUB_CI_APP_IDS` Apps, current-head app
 
 ## Merge queue
 
-A candidate enters once its gates pass. Its speculative tip (predicted base merged in), pushed onto the candidate branch and `refs/graphyard/queue/KEY`, binds every check, review and proof. A failed check, requested changes, a revoked proof, a conflict or rework ejects it to re-enter, repaired, at the back. One conflicting only with entries ahead of it re-enters unchanged once one lands or leaves; one leaving validation is skipped until revalidated. The App passes the check for an authorized head and its merge group, then asks GitHub to merge (queue, auto-merge or [direct](#direct-merges)); branch protection decides; withdrawal fails and dequeues it. `master status` shows refusals (`merge.enqueue.refused`).
+A candidate enters once its gates pass. Its speculative tip (predicted base merged in), pushed onto the candidate branch and `refs/graphyard/queue/KEY`, binds every check, review and proof. A failed check, requested changes, a revoked proof, a conflict or rework ejects it to re-enter, repaired, at the back. One conflicting only with entries ahead of it re-enters unchanged once one lands or leaves; one leaving validation is skipped until revalidated. The App passes the check for an authorized head and its merge group, then asks GitHub to merge (queue, auto-merge or [direct](#direct-merges)); branch protection decides; withdrawal fails and dequeues it. `master status` names refusals `merge.enqueue.refused`.
 
 ### Bindings and carry
 
@@ -63,7 +63,7 @@ With `"deploySmoke": true`, the master dispatches `master init --smoke-workflow 
 
 ## Enforcement boundary
 
-GitHub merges only heads whose required check passed; Graphyard has no merge route. Restrict other merge identities: a worker that lost its lease can still push.
+GitHub merges only heads whose required check passed; Graphyard has no merge route. Restrict other merge identities; a worker losing its lease can still push.
 
 ## Identity-bound agent review
 
