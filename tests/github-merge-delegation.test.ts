@@ -11,7 +11,7 @@ import { Store } from '../src/store.js';
 import { Engine, unauthorizedMergeViolation } from '../src/engine.js';
 import { CHECK_NAME, GitHub, gateMerge } from '../src/github.js';
 import { masterConfigSchema, mergeExecutor, type MasterConfig } from '../src/master.js';
-import { mergeQueueRuleset, mergeQueueRulesetName, protectionPlan, applyProtection } from '../src/protection.js';
+import { MERGE_METHOD, mergeQueueRuleset, mergeQueueRulesetName, protectionPlan, applyProtection } from '../src/protection.js';
 import { queueRef, type MergeEnqueueRequest, type QueueSpeculation } from '../src/merge-queue.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 
@@ -40,7 +40,7 @@ const requested = (item: Work): MergeEnqueueRequest => ({ sha: item.candidate!.s
  * The control-plane App against a fake GitHub: every REST call and GraphQL operation is recorded,
  * and the pull request's queue state is what the fake says it is.
  */
-function fakeGitHub(options: { queue?: boolean; mode?: 'queued' | 'auto-merge' | 'none'; prHead?: string; groupHead?: string | null } = {}) {
+function fakeGitHub(options: { queue?: boolean; mode?: 'queued' | 'auto-merge' | 'none'; prHead?: string; groupHead?: string | null; groupParents?: string[]; trees?: Record<string, string> } = {}) {
   const calls: { path: string; method: string; body?: any }[] = [];
   const operations: { operation: string; variables: Record<string, unknown> }[] = [];
   const github = new GitHub({ repository: 'owner/project', base: 'main', appId: 1234, installationId: 1, privateKey: 'not-used' });
@@ -50,7 +50,7 @@ function fakeGitHub(options: { queue?: boolean; mode?: 'queued' | 'auto-merge' |
     if (method !== 'GET') return { id: 77 };
     if (path === '/pulls/42') return { number: 42, state: 'open', draft: false, head: { sha: prHead }, base: { ref: 'main', sha: base } };
     if (path === '/git/ref/heads/main') return { ref: 'refs/heads/main', object: { type: 'commit', sha: base } };
-    if (/^\/commits\/[a-f0-9]{40}$/.test(path)) return { sha: path.slice(9), commit: { tree: { sha: 'e'.repeat(40) } } };
+    if (/^\/commits\/[a-f0-9]{40}$/.test(path)) return { sha: path.slice(9), parents: (path.slice(9) === groupHead ? options.groupParents ?? [base, head] : []).map(sha => ({ sha })), commit: { tree: { sha: options.trees?.[path.slice(9)] ?? 'e'.repeat(40) } } };
     if (path.includes('/check-runs')) return { check_runs: [] };
     throw new Error(`Unexpected GitHub request ${method} ${path}`);
   };
@@ -136,6 +136,46 @@ test('unit:withdrawal-dequeues — a head change, a failing gate and a policy ch
   const fake = fakeGitHub({ mode: 'queued' });
   await gateMerge(fake.github, withdrawals[1].item, withdrawals[1].request);
   assert.equal(fake.checks().some(body => body.head_sha === groupHead), false);
+});
+
+test('unit:merge-group-bound-to-base — the head\'s verdict reaches a merge group only when the group merges that head onto its authorized base (or a commit with that base\'s tree) and lands the head\'s own tree (GY-303)', async () => {
+  const item = work();
+  const groupChecks = (fake: ReturnType<typeof fakeGitHub>) => fake.checks().filter(body => body.head_sha === groupHead).map(body => body.conclusion);
+  // On the authorized base itself, and on a commit GitHub landed with that base's tree (a carried speculative tip, GY-100).
+  for (const parents of [[base, head], [moved, head]]) {
+    const fake = fakeGitHub({ mode: 'queued', groupParents: parents });
+    assert.equal((await gateMerge(fake.github, item, requested(item))).action.kind, 'hold');
+    assert.deepEqual(groupChecks(fake), ['success'], `group on ${parents[0].slice(0, 1)} gets the verdict`);
+  }
+  const refusals: { kind: string; options: Parameters<typeof fakeGitHub>[0]; reason: RegExp }[] = [
+    { kind: 'another base', options: { groupParents: [moved, head], trees: { [moved]: 'f'.repeat(40) } }, reason: /neither its authorized base/ },
+    { kind: 'other content', options: { trees: { [groupHead]: 'f'.repeat(40) } }, reason: /not the verified tree/ },
+    { kind: 'another head', options: { groupParents: [base, moved] }, reason: /does not merge authorized head/ },
+    { kind: 'a group of two entries', options: { groupParents: [base, moved, head] }, reason: /does not merge authorized head/ },
+  ];
+  for (const refusal of refusals) {
+    const fake = fakeGitHub({ mode: 'queued', ...refusal.options });
+    const gated = await gateMerge(fake.github, item, requested(item));
+    assert.equal(gated.action.kind, 'hold', refusal.kind);
+    assert.match(gated.action.reason, refusal.reason, refusal.kind);
+    assert.deepEqual(groupChecks(fake), [], `${refusal.kind}: the group check is withheld`);
+    assert.deepEqual(fake.checks().map(body => [body.head_sha, body.conclusion]), [[head, 'success']], `${refusal.kind}: the head keeps its own verdict`);
+  }
+});
+
+test('unit:single-merge-method — the queue ruleset and auto-merge both merge with a merge commit; no environment variable changes it (GY-303)', async () => {
+  assert.equal(MERGE_METHOD, 'MERGE');
+  assert.equal(mergeQueueRuleset({ baseBranch: 'main', githubAppId: 1234 }).rules.find(rule => rule.type === 'merge_queue')!.parameters.merge_method, MERGE_METHOD);
+  const previous = process.env.GITHUB_MERGE_METHOD;
+  process.env.GITHUB_MERGE_METHOD = 'SQUASH';
+  try {
+    const item = work();
+    const unqueued = fakeGitHub({ queue: false });
+    await gateMerge(unqueued.github, item, requested(item));
+    assert.deepEqual(unqueued.named('enablePullRequestAutoMerge').map(entry => entry.variables), [{ id: pullRequestId, head, method: MERGE_METHOD }]);
+  } finally {
+    if (previous === undefined) delete process.env.GITHUB_MERGE_METHOD; else process.env.GITHUB_MERGE_METHOD = previous;
+  }
 });
 
 /** Every source file Graphyard ships: the ones that could call GitHub's merge endpoint. */
