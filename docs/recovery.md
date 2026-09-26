@@ -19,7 +19,7 @@ A rollback completes only when the target [verifies](delivery.md#observe-and-ver
  "services":["api","web"],"rollback":{"fencing":"provider","automatic":true}}
 ```
 
-Fencing `provider` conditions the write on the expected running release; `serialized` freezes the environment until the operation settles; `none` is never automatic. The human operator, or a promoter's `delegate` lease, requests `POST /api/delivery/rollback` to a release previously verified here:
+Fencing `provider` conditions the write on the expected running release; `serialized` freezes the environment until the operation settles; `none` is never automatic. The operator, or a promoter's `delegate` lease, requests `POST /api/delivery/rollback` to a previously verified release:
 
 ```json
 {"environment":{"id":"production","revision":1},"target":{"id":"2026.09.17-4","revision":1},"expectedGeneration":7,
