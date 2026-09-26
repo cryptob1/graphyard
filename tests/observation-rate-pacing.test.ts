@@ -85,16 +85,18 @@ test('unit:observation-rate-paced — the pace is the budget above the reserve, 
   assert.equal(spendable.rate, 4400 / 3_600_000);
   assert.deepEqual(observationPace({ remaining: 505, resetAt: now + 30_000, reserve: 500 }, 0, 12, now), { tier: 'reset', rate: 0, until: now + 31_000 }, 'a reset under a minute away is waited for');
   assert.deepEqual(observationPace({ remaining: 505, resetAt: now + 600_000, reserve: 500 }, 0, 12, now), { tier: 'reserve', rate: 505 / 600_000 }, 'further off, the merge path is paced from the reserve');
-  // The shared pacer: one slot per estimate / rate, a deferral gives its time back.
+  // The shared pacer: a burst of about a tenth of the spendable budget, then one slot per
+  // estimate / rate; a deferral gives its time back.
   const pacer = new ObservationPacer();
   const budget = { remaining: 4100, resetAt: now + 3_600_000, reserve: 500 };
-  const first = pacer.start(budget, 12, now);
-  assert.ok(first.settle);
-  assert.equal(pacer.inFlight, 12);
-  const second = pacer.start(budget, 12, now);
-  assert.ok(!second.settle && second.wait === 12 / (3600 / 3_600_000), 'a second worker waits one spacing (12 s at 1 request/s)');
-  first.settle(0, now);
-  assert.equal(pacer.inFlight, 0);
+  const slots: NonNullable<ReturnType<ObservationPacer['start']>['settle']>[] = [];
+  let refused: ReturnType<ObservationPacer['start']> | null = null;
+  while (!refused && slots.length < 1000) { const slot = pacer.start(budget, 12, now); if (slot.settle) slots.push(slot.settle); else refused = slot; }
+  assert.ok(slots.length >= 20 && slots.length <= 31, `a burst of about 360 requests starts at once (${slots.length} jobs of 12)`);
+  assert.equal(pacer.inFlight, slots.length * 12);
+  assert.ok(refused && refused.wait > 0 && refused.wait <= 20_000, `past the burst a worker waits about one spacing (${refused?.wait} ms)`);
+  slots[0](0, now);
+  assert.equal(pacer.inFlight, (slots.length - 1) * 12);
   assert.ok(pacer.start(budget, 12, now).settle, 'a job that charged nothing returns its slot at once');
   assert.deepEqual(pacer.report().tier, 'spendable');
 });
@@ -105,12 +107,13 @@ test('unit:observation-rate-paced — the GitHub client paces its workers from t
   Object.assign(github, { rate: { limit: 5000, remaining: 2300, used: 2700, resetAt: now + 1_800_000, observedAt: now } });
   const slot = github.paceObservation(now);
   assert.ok(slot.settle, 'the first worker starts');
-  const waiting = github.paceObservation(now);
-  assert.ok(!waiting.settle && waiting.wait > 0, 'the next waits for the pace');
+  let waiting = github.paceObservation(now), started = 1;
+  while (waiting.settle && started < 1000) { started++; waiting = github.paceObservation(now); }
+  assert.ok(!waiting.settle && waiting.wait > 0 && started < 30, `past a burst of ${started} jobs the next waits for the pace`);
   const pace = github.budget(now).pace;
   assert.equal(pace.tier, 'spendable');
-  assert.equal(pace.perMinute, Math.round((2300 - mergePathReserve - 10) / 30 * 100) / 100, 'the spendable budget less the estimate in flight, spread over the 30 minutes to the reset');
-  slot.settle(12, now);
+  assert.ok(pace.perMinute! > 0 && pace.perMinute! <= (2300 - mergePathReserve) / 30, 'the spendable budget less the estimate in flight, spread over the 30 minutes to the reset');
+  assert.equal(pace.inFlight, started * 10);
 });
 
 // ---- Work items, as observation-throughput.test.ts builds them ----

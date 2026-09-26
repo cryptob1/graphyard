@@ -318,20 +318,26 @@ export function reserveDecision(band: CadenceBand, budget: Pick<GitHubBudget, 'r
  * waits for one shared pace before it claims a job: the budget above the reserve, less what jobs
  * in flight are expected to spend, spread evenly over the time to the reset. Jobs start at most
  * one per `estimate / rate`, so the spend above the reserve reaches zero at the reset and never
- * before it, whatever the concurrency. A job the spendable budget cannot afford waits for a reset
+ * before it, whatever the concurrency; a small burst (`paceBurstShare`) lets a backlog drain first. A job the spendable budget cannot afford waits for a reset
  * under a minute away (cheaper than the reserve); further off, it is paced from the reserve
  * itself, where `reserveDecision` lets only the merge path and webhook wakes spend.
  */
 export const paceResetWaitMs = 60_000;
+/**
+ * The burst the pace allows on top of its rate: up to this share of the spendable budget may be
+ * spent back to back (a backlog drained after a deploy), after which starts are spaced again. The
+ * rate is recomputed from what is left, so a burst is paid for by the spacing after it.
+ */
+export const paceBurstShare = 0.1;
 export type PaceTier = 'unpaced' | 'spendable' | 'reserve' | 'reset';
 /** The rate jobs may start at (requests per millisecond), or when the next may start if none can. */
-export function observationPace(budget: { remaining: number | null; resetAt: number | null; reserve: number }, inFlight: number, estimate: number, now: number): { tier: PaceTier; rate: number | null; until?: number } {
+export function observationPace(budget: { remaining: number | null; resetAt: number | null; reserve: number }, inFlight: number, estimate: number, now: number): { tier: PaceTier; rate: number | null; until?: number; burst?: number } {
   // An unknown budget (none read yet, or its reset has passed) is never held against: the first
   // response after a reset is what reads the new one.
   if (budget.remaining === null || budget.resetAt === null || budget.resetAt <= now) return { tier: 'unpaced', rate: null };
   const toReset = Math.max(1, budget.resetAt - now), cost = Math.max(1, estimate);
   const spendable = budget.remaining - budget.reserve - inFlight;
-  if (spendable > cost) return { tier: 'spendable', rate: spendable / toReset };
+  if (spendable > cost) return { tier: 'spendable', rate: spendable / toReset, burst: spendable * paceBurstShare };
   const reserve = budget.remaining - inFlight;
   if (toReset <= paceResetWaitMs || reserve < cost) return { tier: 'reset', rate: 0, until: budget.resetAt + 1000 };
   return { tier: 'reserve', rate: reserve / toReset };
@@ -350,15 +356,18 @@ export class ObservationPacer {
     const pace = observationPace(budget, this.inFlight, estimate, now);
     this.last = { tier: pace.tier, rate: pace.rate, estimate };
     if (pace.until !== undefined) return { wait: Math.max(1, pace.until - now) };
-    if (this.nextAt > now) return { wait: this.nextAt - now };
-    const spacing = pace.rate ? estimate / pace.rate : 0;
-    this.nextAt = now + spacing;
+    // A token bucket: idle time banks up to the burst, and each start spends one spacing of it.
+    const credit = pace.rate && pace.burst ? pace.burst / pace.rate : 0;
+    const from = Math.max(this.nextAt, now - credit);
+    if (from > now) return { wait: from - now };
+    // An unpaced start (no reading yet) spends no credit: the bucket is full when the first reading lands.
+    if (pace.rate) this.nextAt = from + estimate / pace.rate;
     this.inFlight += estimate;
     let settled = false;
     return { wait: 0, settle: (charged = estimate, at = now) => {
       if (settled) return; settled = true;
       this.inFlight = Math.max(0, this.inFlight - estimate);
-      if (pace.rate) this.nextAt = Math.max(at, this.nextAt + (charged - estimate) / pace.rate);
+      if (pace.rate) this.nextAt += (charged - estimate) / pace.rate;
     } };
   }
   /** The pace in force, per minute, for the status an operator reads. */
