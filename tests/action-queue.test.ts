@@ -803,9 +803,9 @@ test('integration:multi-executor-throughput — the poll every executor runs on 
   assert.equal(pipelineBackfillState().lastRun, null, 'no executor poll walked a ledger');
   assert.equal(pipelineBackfillState().backfilled, 0);
   assert.equal((await reload(item)).pipeline?.backfill, undefined, 'and none of them wrote a reconstruction');
-  // The read the reconstruction is for still runs it, so the speed reports converge as before.
+  // The read the reconstruction is for — the default, bounded snapshot (GY-422) — still runs it, so the speed reports converge as before.
   const full = await fetch(`${url}/api/work-snapshot`, { headers: executorToken }).then(response => response.json());
-  assert.equal(full.view, undefined);
+  assert.equal(full.view, 'bounded');
   assert.ok(pipelineBackfillState().lastRun!.backfilled > 0, 'the full read still reconstructs what is pending');
 });
 
