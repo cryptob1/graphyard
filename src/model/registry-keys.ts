@@ -9,9 +9,24 @@ import { z } from 'zod';
 
 // What a pasted credential looks like: provider key prefixes, a bearer header, a PEM block, a JWT.
 const secretValue = /^(sk-|ghp_|gho_|ghs_|github_pat_|xox[abp]-|Bearer\s)|-----BEGIN|^eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\./;
-export const notSecret = (value: string) => !secretValue.test(value);
+// A z.ai key has no prefix: 32 hex digits, a dot, and a 16-character id — anywhere in the text (GY-463).
+const zaiKey = /(^|[^A-Za-z0-9])[0-9a-f]{32}\.[A-Za-z0-9]{16}($|[^A-Za-z0-9])/;
+/**
+ * A prefixless key of another provider: one token of at least 32 key characters mixing letters and
+ * digits, random enough that it is no word, identifier or hash. Hex digests and UUIDs stay below the
+ * bar (at most 17 distinct characters), and so do names made of words, which repeat their letters.
+ */
+const randomToken = (token: string) => {
+  if (token.length < 32 || !/^[A-Za-z0-9_\-+=.]+$/.test(token) || !/[0-9]/.test(token) || !/[A-Za-z]/.test(token)) return false;
+  const counts = new Map<string, number>();
+  for (const character of token) counts.set(character, (counts.get(character) ?? 0) + 1);
+  const entropy = [...counts.values()].reduce((sum, count) => sum - (count / token.length) * Math.log2(count / token.length), 0);
+  return entropy >= 4.2;
+};
+const secretLike = (value: string) => secretValue.test(value) || zaiKey.test(value) || value.split(/[\s,;:'"`()<>[\]{}]+/).some(randomToken);
+export const notSecret = (value: string) => !secretLike(value);
 /** Whether a value looks like a pasted credential: the dashboard refuses to send one, and the registry to store one. */
-export const looksLikeSecret = (value: string) => secretValue.test(value.trim());
+export const looksLikeSecret = (value: string) => secretLike(value.trim());
 /** The paths of every string in `value` that looks like a pasted credential. */
 export function secretPaths(value: unknown, path = 'input'): string[] {
   if (typeof value === 'string') return looksLikeSecret(value) ? [path] : [];
