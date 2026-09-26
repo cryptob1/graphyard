@@ -1,6 +1,5 @@
 import { predecessorWaitReason, queueSequencingReason } from '../merge-queue.js';
-import { dispatchIneligibility, openProducerRequest, producerGroupDecisions, reviewNeed, type ProducerGroupDecision } from './dispatch.js';
-import { mechanicalProof } from './mechanical-proofs.js';
+import { dispatchIneligibility, mechanicalProof, openProducerRequest, producerGroupDecisions, reviewNeed, type ProducerGroupDecision } from './dispatch.js';
 import { attestationWait } from './unproduced-attestation.js';
 import { producerLaunchStop } from './action-progress.js';
 import { standingEscalations } from './escalation.js';
