@@ -20,6 +20,7 @@ import { unansweredRequestAttention, unobtainableReviewAttention } from './cli/u
 import { consentHoldItems } from './cli/consent-holds.js';
 import { setupHealth } from './cli/master-setup.js';
 import { attributionFor, describeReading, loadedRevision, readDisk, readPlaneResources, readReclaimReports, readResources, resourceAttention, type ResourceReading } from './master-resources.js';
+export { hostMemoryAttention } from './master-resources.js';
 
 /**
  * A launch refused by a full session ledger is attributed to that ledger (GY-131).
