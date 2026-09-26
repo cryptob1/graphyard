@@ -17,7 +17,7 @@
 - **Wrong accepted evidence**: [revoke it](operations-reference.md#accepted-evidence-turns-out-to-be-wrong).
 - **GitHub paused or webhook silent**: [request budget](operations-reference.md#github-request-budget).
 - **Smoke proof failed**: [delivered with failure](operations-reference.md#delivered-with-a-failed-smoke-proof).
-- **Main ahead of production**: [merged but not deployed](operations-reference.md#merged-but-not-deployed). An up-to-date release starts without taking coordination locks; a migrating release fails fast within the health check. The first `work_index` rebuild briefly locks `work_items`.
+- **Main ahead of production**: deployment incident: [merged but not deployed](operations-reference.md#merged-but-not-deployed). An up-to-date release starts without taking coordination locks; a migrating release fails fast within the health check; migrations and backups lock separately. The first `work_index` rebuild briefly locks `work_items` (SHARE ROW EXCLUSIVE).
 - **Loop down**: [master coordination loop](operations-reference.md#master-coordination-loop).
 - **A change must prove itself**: [bootstrap mode](operations-reference.md#bootstrap-mode-for-a-self-proving-change).
 
@@ -38,7 +38,7 @@ Never attest a stop you have not confirmed. Merged work changes only through a f
 - Workers never hold `admin`, `coordinator` or `producer` tokens. No AI principal can hold `admin`.
 - Proof authority is a live [grant](operations-reference.md#proof-authority-grants); `admin` attests only `manual:` proofs.
 - Operator agents add requirements, never remove them.
-- Only the guarded merge or the audited [repair lane](master-agent.md#repair-lane) merges: no bypass, no lifecycle-state endpoint.
+- Only guarded or audited [repair-lane](master-agent.md#repair-lane) merges: no bypass, no lifecycle-state endpoint.
 - History is append-only.
 
 ## Deeper references
