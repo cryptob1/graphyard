@@ -24,8 +24,9 @@ import { interventionLedgerKinds, interventionLedgerLimit, readInterventionLedge
  * This file seeds a ledger the way the store writes it — 200,000 events over 120 days across 3,000
  * items, each save a delta on the item's last full snapshot unless the stage changed or fifty rows
  * passed — and holds the report to its budget over it, with the rows it folds identical to the
- * per-row rebuild it replaces. It then saturates the report pool and holds a lease renewal and an
- * observation write to theirs.
+ * per-row rebuild it replaces. It then holds every report route to the report pool — each reads
+ * through it and takes no coordination connection — saturates that pool, and holds a lease renewal
+ * and an observation write to their bounds.
  */
 
 const EVENTS = 200_000, ITEMS = 3_000;
@@ -167,6 +168,27 @@ function counted(pool: pg.Pool) {
   return { statements, db: { query: ((text: string, values?: unknown[]) => { statements.push(text); return pool.query(text, values); }) as pg.Pool['query'] } };
 }
 
+/** The report routes: the interventions ledger, the flow analytics (Insights) and the shipping pulse. */
+const reportRoutes = ['interventions?window=7', 'analytics/flow?window=30', 'analytics/flow/drilldown?window=30', 'shipping-pulse'];
+/**
+ * Records every statement and checkout on the report pool and on the coordination pools until
+ * restored. The request's own authentication (the operator-agent credential check) is not the
+ * report and is left out.
+ */
+function poolTraffic() {
+  const report: string[] = [], coordination: string[] = [];
+  const restores: (() => void)[] = [];
+  const watch = (pool: pg.Pool, name: string, into: string[]) => {
+    const { query, connect } = pool;
+    pool.query = ((...args: unknown[]) => { const text = String(typeof args[0] === 'string' ? args[0] : (args[0] as { text?: string })?.text); if (!/FROM operator_agents/.test(text)) into.push(`${name} query ${text.slice(0, 80)}`); return (query as (...a: unknown[]) => unknown).apply(pool, args); }) as pg.Pool['query'];
+    // pg's own query checks a client out through connect(callback); only a caller's checkout counts.
+    pool.connect = ((...args: unknown[]) => { if (typeof args[0] !== 'function') into.push(`${name} connect`); return (connect as (...a: unknown[]) => unknown).apply(pool, args); }) as pg.Pool['connect'];
+    restores.push(() => { pool.query = query; pool.connect = connect; });
+  };
+  watch(store.reportPool, 'report', report); watch(store.pool, 'coordination', coordination); watch(store.leasePool, 'lease', coordination);
+  return { report, coordination, restore: () => restores.forEach(restore => restore()) };
+}
+
 async function read(path: string, token = tokens.coordinator) {
   const started = performance.now();
   const response = await fetch(`${url}/api/${path}`, { headers: { Authorization: `Bearer ${token}` } });
@@ -211,6 +233,17 @@ test('unit:interventions-no-per-row-rebuild — the interventions ledger read re
 });
 
 test('unit:report-pool-isolated — the report routes run on their own small pool under a shorter statement timeout; with that pool saturated by slow queries, a lease renewal and an observation write still complete within their bounds, and the report waits for its own connections', async () => {
+  // Every report route reads through the report pool and takes no coordination connection at all.
+  for (const path of reportRoutes) {
+    const { report, coordination, restore } = poolTraffic();
+    try {
+      const answered = await read(path, tokens.operator);
+      assert.equal(answered.status, 200, `${path}: ${JSON.stringify(answered.body)}`);
+    } finally { restore(); }
+    assert.ok(report.length > 0, `GET /api/${path} reads through the report pool`);
+    assert.deepEqual(coordination, [], `GET /api/${path} took no coordination connection`);
+  }
+
   // The report pool is smaller than the coordination pool and times out sooner.
   assert.equal(store.reportPool.options.max, reportPoolConnections);
   assert.ok(reportPoolConnections < (store.pool.options.max ?? 0), `${reportPoolConnections} report connections beside ${store.pool.options.max}`);
