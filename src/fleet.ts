@@ -58,7 +58,7 @@ export const capacityRefusal = (error: unknown): string | null => { const tag = 
  */
 export const runtimeGraceMs = 60_000;
 /** The Herdr name prefixes every approver session for `key` starts with (see `approverSessionName`). */
-const approverPrefixes = (key: string) => ['graphyard-approver', 'gy-approver'].map(prefix => `${sessionName(prefix, key)}-`);
+export const approverPrefixes = (key: string) => ['graphyard-approver', 'gy-approver'].map(prefix => `${sessionName(prefix, key)}-`);
 /**
  * Why a live registry session no longer has a runtime session behind it, or null while it may. A
  * registry session records a launch, not a process: nothing reports a session's end, so a session

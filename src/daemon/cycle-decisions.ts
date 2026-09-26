@@ -8,8 +8,11 @@ import { readyToRetry } from './sessions.js';
 import { approvalStep, boundDetail, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, maxApproverCloses, maxRefusalAnswers, maxApproverLaunches, maxDecisionRequests, namePaths, neededDecision, observedFrom, resolveCovers, reworkDecisionReason, refusalNamedIn, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, standingVerdict, withheldDecision } from './decisions.js';
 import { type DaemonEffects, failoverKey, record, stoppedStates } from './effects.js';
 import { detectExhaustion } from '../model/capacity.js';
-import { capacityRefusal } from '../fleet.js';
+import { approverPrefixes, capacityRefusal } from '../fleet.js';
 import type { Cycle } from './cycle.js';
+
+/** The approval-watch key of an approver session no request of the loop's launched (GY-403). */
+export const handWatchPrefix = 'hand:';
 
 /** Step 4c: request and supervise the routine decisions. */
 export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, assessments: Record<string, ContainmentAssessment>, { capacities, approversSpent }: { capacities: RoleCapacity[]; approversSpent: boolean }) {
@@ -425,7 +428,8 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   // head — has nothing left to judge. Its session is closed rather than left holding a provider
   // seat, and the watch goes with it; one Herdr cannot be read for stays until it can.
   for (const [key, watch] of Object.entries(state.approvals)) await isolate('decision', snapshot.work.find(candidate => candidate.key === watch.work) ?? null, watch.work, async () => {
-    if (needed.has(key)) return;
+    // A watch the loop made for a session it did not launch has no request of the loop's to take back (below).
+    if (needed.has(key) || key.startsWith(handWatchPrefix)) return;
     if (!(await sessions()).available) return;
     const item = snapshot.work.find(candidate => candidate.key === watch.work);
     // A request the item moved past is taken back by the identity that made it, whatever its
@@ -464,6 +468,63 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     // A registry session is not: its id is the only way to end it, and while it lives it holds the
     // role's slot, so the watch stays, past any bound, until the registry is told.
     if ((closed && withdrawn) || (watch.closeAttempts >= maxApproverCloses && !watch.session)) delete state.approvals[key];
+  });
+
+  // 4c'. Approver sessions no request of the loop's launched (GY-403). `master approver` records the
+  //      item and decision with its launch, and the loop registers such a session in its approval
+  //      watch; one with no record is known by its name, which `approverSessionName` derives from the
+  //      item and decision. Either way the session is closed, with why, once its decision is applied,
+  //      refused or otherwise settled, or its item is delivered — exactly as the loop's own approvers
+  //      are. One the loop still needs is adopted by the request path, which retires this watch.
+  await isolate('decision', null, 'hand-approvers', async () => {
+    const seen = await sessions();
+    if (!seen.available) return;
+    const records = await effects.approverLaunches?.().catch(() => []) ?? [];
+    const watched = Object.values(state.approvals);
+    for (const agent of seen.agents) {
+      if (!agent.name || !agent.pane_id || watched.some(watch => watch.agentName === agent.name)) continue;
+      const record = records.findLast(entry => entry.agentName === agent.name && entry.work && entry.decision);
+      const item = snapshot.work.find(candidate => record ? candidate.key === record.work : approverPrefixes(candidate.key).some(prefix => agent.name!.startsWith(prefix)));
+      if (!item) continue;
+      let decision = record?.decision ?? null;
+      if (!decision) {
+        const history = effects.decisions ? await effects.decisions(item).then(result => result.decisions, () => null) : null;
+        decision = history?.find(entry => approverSessionName(item, entry.id) === agent.name)?.id ?? null;
+        // A delivered item's approver is closed whatever it judges; it is named for its session.
+        if (!decision && item.stage === 'done') decision = agent.name;
+      }
+      // Another watch holds this decision: the loop's own supervision decides its approver.
+      if (!decision || watched.some(watch => watch.decision === decision)) continue;
+      const watch = state.approvals[`${handWatchPrefix}${decision}`] = approvalWatchSchema.parse({ work: item.key, action: 'unknown', decision, requestedAt: stamp, agentName: agent.name, pane: agent.pane_id,
+        launchedAt: record?.launchedAt ?? null, launches: 1, account: record?.account ?? null, runtime: record?.runtime ?? null, session: record?.session ?? null });
+      watched.push(watch);
+      await note(`approver:${decision}:watched`, item, 'decision', 'done', `Watching approver session ${agent.name}, which no request of the loop's launched, for ${item.key} decision ${decision}${record ? ' (launched with graphyard master approver)' : ''}`);
+    }
+    await effects.persist(state);
+    for (const [key, watch] of Object.entries(state.approvals)) {
+      if (!key.startsWith(handWatchPrefix)) continue;
+      const item = snapshot.work.find(candidate => candidate.key === watch.work);
+      const listed = seen.agents.some(agent => agent.name === watch.agentName);
+      let why: string | null = null;
+      if (!item) why = `${watch.work} is no longer open`;
+      else if (item.stage === 'done') why = `${item.key} is delivered`;
+      else if (effects.decisions) {
+        const judged = await effects.decisions(item).then(result => result.decisions.find(entry => entry.id === watch.decision) ?? null, () => undefined);
+        if (judged === null) why = `${item.key} holds no decision ${watch.decision}`;
+        else if (judged && !['requested', 'approved'].includes(judged.state)) why = `its decision is ${judged.state}`;
+        if (judged) watch.action = judged.action;
+      }
+      if (listed && !why) continue;
+      // A session gone on its own has no pane to close, only a registry session to end.
+      if (!item) {
+        if (watch.session && effects.endRegistrySession) await effects.endRegistrySession(watch.session, why!).then(() => { watch.session = null; }, () => { watch.closeAttempts += 1; });
+        if (!watch.session || !effects.endRegistrySession) delete state.approvals[key];
+        continue;
+      }
+      if (!listed) why ??= `approver session ${watch.agentName} is gone`;
+      if (await closeApprover(item, watch, why!) || (watch.closeAttempts >= maxApproverCloses && !watch.session)) delete state.approvals[key];
+    }
+    await effects.persist(state);
   });
 
   // 4d. Registry sessions end with the sessions they record (GY-190). A registry session is a
