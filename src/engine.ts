@@ -319,7 +319,6 @@ export class Engine {
   // by the transaction that persists it. Keyed by the object, so a probe clone records nothing.
   private dispatchTransitions = new WeakMap<Work, DispatchTransition[]>();
   private conflictTransitions = new WeakMap<Work, ReviewConflictTransition[]>();
-  // The launch fence is a deployment-independent safety default; only tests shorten it.
   /** This repository's documentation policy (GY-215): the deployed GRAPHYARD_DOCUMENTATION, or the default. */
   documentation: DocumentationPolicy = configuredDocumentation();
   /**
@@ -349,6 +348,7 @@ export class Engine {
       : Number.isSafeInteger(configured) && configured >= 1 ? configured : defaultParallelTips;
     return this.parallelTips;
   }
+  // The launch fence is a deployment-independent safety default; only tests shorten it.
   constructor(public store: Store, public ciAppIds: number[] = [15368], public leaseSeconds = 120, public repository = process.env.GITHUB_REPOSITORY ?? '', public launchFence = launchFenceMs) {}
   private async observeSubmission(actor: Principal, id: string | null, data: { epoch: number; pr: number }, key: string): Promise<Observation | null> {
     if (this.submissionObserver === undefined) { const github = await githubFromEnv(); this.submissionObserver = github ? (probe, peers) => github.observe(probe, peers) : null; }
@@ -1813,6 +1813,12 @@ export class Engine {
       // all GitHub's `mergeable: false` withheld from an open, non-draft pull request — so nothing
       // refreshes, holds or reworks it for that reading again.
       work.observation = observation.conflicting && disprovedConflict(work, observation) ? { ...observation, conflicting: false, mergeable: true } : observation;
+      // A submission recorded without an observation has no files (GY-293): the first observation
+      // of that pull request records what its diff changes inside the documentation paths, so a
+      // docs diff reads as satisfied rather than waiting for the reviewer to judge it.
+      const recorded = work.documentation?.submission;
+      if (recorded && recorded.files === null && work.submission?.pr === recorded.pr && observation.candidate.pr === recorded.pr && Array.isArray(observation.files))
+        work.documentation = { ...work.documentation!, submission: recordDocumentationSubmission(work.documentation!, recorded, observation.files, recorded.statement, new Date(recorded.at)) };
       // Snapshot all provider review identities after the revision. Approvals in this
       // first observation never count, regardless of clock skew or future reevaluation.
       if (work.formalReviewResetRequired && reviewProviderOf(work.policy) === 'github' && !work.formalReviewBaseline && observation.reviewIds
