@@ -175,6 +175,9 @@ export async function observeAccount(account: FleetAccount, runtime: FleetRuntim
   return { health: null, quota: { loggedIn, state: 'unknown', usage: [], resetsAt: null, reason: loggedIn ? null : `${account.name} is not logged in${runtime.launch.login ? `; log in with: ${runtime.launch.login.replaceAll('{home}', home)}` : ''}` } };
 }
 
+/** The smoke test running for each account in this process, keyed by control plane, host, account and registry revision. */
+const smokesInFlight = new Map<string, Promise<SmokeResult>>();
+
 /**
  * Whether an account is smoke-tested before a session is chosen on it: an account of a headless
  * runtime (Pi, the narrow roles' runner) with no result since it last changed. An interactive
@@ -208,9 +211,18 @@ export async function selectFleetSession(config: FleetConfig, role: FleetRoleNam
     if (!runtime || !model || !needsSmoke(account, runtime) || observation?.quota.loggedIn === false) return;
     const target: FleetLaunchAccount = { name: account.name, kind: runtime.launch.kind, home: account.credential.home, key: account.credential.key ?? null,
       fleet: { runtime: runtime.name, contract: runtime.launch, model: model.name, modelId: model.id, session: 'smoke', reason: 'smoke test', role, revision: registry.revision } };
-    let result: SmokeResult;
-    try { result = await (probe.smoke ?? (target => smokeRegistryAccount(target, { timeoutMs: probe.smokeTimeoutMs })))(target); }
-    catch (error) { result = { ok: false, error: error instanceof Error ? error.message : String(error) }; }
+    // Concurrent launches that read the registry before the first result is folded share one smoke
+    // test of the account, and report the same result, rather than each prompting it (GY-463).
+    const flight = `${config.url ?? ''}\u0000${host}\u0000${account.name}\u0000${registry.revision}`;
+    let running = smokesInFlight.get(flight);
+    if (!running) {
+      running = (async (): Promise<SmokeResult> => {
+        try { return await (probe.smoke ?? (target => smokeRegistryAccount(target, { timeoutMs: probe.smokeTimeoutMs })))(target); }
+        catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) }; }
+      })().finally(() => smokesInFlight.delete(flight));
+      smokesInFlight.set(flight, running);
+    }
+    const result = await running;
     const smoke: SmokeObservation = { result: result.ok ? 'pass' : 'fail', reason: result.ok ? null : (result.error?.replace(/[\u0000-\u001f\u007f\s]+/g, ' ').trim() || 'the smoke test failed without an error').slice(0, 500) };
     if (observation) observation.smoke = smoke;
     else observations.push({ account: account.name, quota: { loggedIn: null, state: 'unknown', usage: [], resetsAt: null, reason: null }, health: null, smoke });

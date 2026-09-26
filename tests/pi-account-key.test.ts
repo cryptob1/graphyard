@@ -10,6 +10,7 @@ import { launchApprover, loadMasterConfig, masterConfigSchema, setupMaster } fro
 import type { Work } from '../src/model.js';
 import { RegistryError, applyRegistryMutation, chooseSession, emptyRegistry, endRegistrySession, fleetView, foldObservations, proposedRuntimes, recordRunOutcome, supersededByRequest, unjudgedHoldMs,
   type AgentRegistry, type FleetSession, type RegistryMutation } from '../src/model/registry.js';
+import { looksLikeSecret } from '../src/model/registry-keys.js';
 import { accountKeyEnvironment } from '../src/runner/roles.js';
 import { clearRuns } from '../src/runner/registry.js';
 import type { FilesystemProbe } from '../src/install/worktree-root.js';
@@ -189,6 +190,11 @@ test('unit:pi-account-key-by-reference — a registry write that carries a key-l
   refuses(account({ key: { file: 'sk-ant-api03-abcdefghijklmnop', variable: 'ZAI_API_KEY' } }), /never the key/);
   refuses(account({ key: zaiKey }, { note: 'sk-zai-0123456789abcdef' }), error => error instanceof RegistryError && /input\.account\.note looks like a credential/.test(error.message));
   refuses({ ...account({ key: zaiKey }), reason: 'Bearer abcdefghijklmnop' }, /input\.reason looks like a credential/);
+  // A key with no prefix (GY-463): a raw z.ai key, or another provider's random token, anywhere in the text.
+  refuses(account({ key: zaiKey }, { note: 'the key is 0123456789abcdef0123456789abcdef.AbCdEfGh12345678 for now' }), /input\.account\.note looks like a credential/);
+  refuses({ ...account({ key: zaiKey }), reason: 'rotated to Zq8vK2mN4pR7tX1wB5yC9dF3gH6jL0sA' }, /input\.reason looks like a credential/);
+  for (const plain of ['1d8fe666b4dade5e263cddb19c70e7e95b772a68', '7f9551b6-3f4f-48d2-a30d-74aa1e423752', 'claude-haiku-4-5-20251001', '/home/vish/.graphyard/agents/pi-a', 'coordinator-token-'.padEnd(40, 'x'), 'ClaudeQuaternaryReviewerAccountNumber2', 'ZAI_API_KEY'])
+    assert.equal(looksLikeSecret(plain), false, plain);
   // A reference outside the login home, or on a variable the launcher owns, is not a reference.
   refuses(account({ key: { file: '/etc/zai.key', variable: 'ZAI_API_KEY' } }), /inside the account home/);
   refuses(account({ key: { file: '../zai.key', variable: 'ZAI_API_KEY' } }), /inside the account home/);
@@ -238,6 +244,16 @@ test('unit:account-smoke-gate — an account is smoke-tested before it is first 
   assert.deepEqual(tested.sort(), ['pi-x', 'pi-y']);
   assert.equal(chosen?.account.name, 'pi-y', 'the account that failed is passed over for the next');
   assert.match(chosen!.skipped[0].reason, /pi-x failed its smoke test: 401 invalid api key/);
+
+  // Concurrent launches that each read the registry before the first result is folded share one
+  // smoke test of the untested account and report the same result (GY-463).
+  const shared = memoryRegistry(config.hostId), prompted: string[] = [];
+  piFleet(shared, config.hostId, [{ name: 'pi-z', home: await piHome('pi-z', null) }]);
+  const slowSmoke = async (account: { name: string }) => { prompted.push(account.name); await new Promise(resolve => setTimeout(resolve, 50)); return { ok: true, error: null }; };
+  const both = await Promise.all([1, 2].map(() => selectFleetSession(config, 'approver', { name: 'approver' }, { registry: shared.client, quota: false, cacheMs: 0, smoke: slowSmoke }).catch(error => error as Error)));
+  assert.deepEqual(prompted, ['pi-z'], 'one smoke prompt for two concurrent launches');
+  assert.equal(shared.current().accounts[0].smoke?.result, 'pass');
+  assert.ok(both.some(entry => !(entry instanceof Error) && entry?.account.name === 'pi-z'));
 });
 
 test('unit:account-smoke-gate — two consecutive approver runs on one account that end without a result hold it from the role for an hour, and the loop falls through to the next account', async () => {
