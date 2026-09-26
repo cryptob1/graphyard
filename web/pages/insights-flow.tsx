@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react';
 import { classify, shippedThisWeek } from '../groups';
-import { releaseView } from '../release';
-import { prSteps, stepIds, stepLabel, type StepId } from '../pr-steps';
+import { releaseView } from '../../src/model/release';
+import { prSteps, stepIds, stepLabel, type StepId } from '../../src/model/pr-steps';
 import { positionsAt, replayFrames, replaySeconds, replayWindowMs, transitionsFromRows, type ReplayFrame } from '../flow-replay';
-import { formatDuration } from '../duration';
+import { formatDuration } from '../../src/model/duration';
 import { readStepRows } from '../step-moves';
 import { ShippingPulse, usePulse, type PulseRead } from '../shipping-pulse';
 import FlowAnalytics from '../flow-analytics';
