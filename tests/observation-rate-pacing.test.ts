@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { GitHub, ObservationPacer, budgetTight, firstObservationOwed, mergePathReserve, observationClaimOrder, observationPace, observationThroughputStatus, tightBudgetDecision, type GitHubBudget } from '../src/github.js';
+import { GitHub, ObservationPacer, budgetTight, firstObservationOwed, mergePathReserve, observationClaimOrder, observationHeadCount, observationPace, observationThroughputStatus, tightBudgetDecision, type GitHubBudget } from '../src/github.js';
 import { githubBudgetAttention } from '../src/cli/github-budget-attention.js';
 import { evaluate, type Work } from '../src/model.js';
 
@@ -158,6 +158,7 @@ test('unit:observation-priority-under-budget — under a tight budget the queue 
   assert.ok(mergePath.includes('GY-FLIGHT') && mergePath.includes('GY-Q0') && mergePath.every(key => key === 'GY-FLIGHT' || key.startsWith('GY-Q')), `the head band and the in-flight merge come first: ${tight.join(', ')}`);
   assert.equal(tight.indexOf('GY-WAIT'), tight.indexOf('GY-RUN') + 1, `then the running session, then everything else: ${tight.join(', ')}`);
   assert.ok(!tight.includes('GY-IDLE'), 'an idle item is left to availability order');
+  assert.equal(observationHeadCount(all, 1), mergePath.length, 'the in-flight merge counts with the head band, so no starved job overtakes it');
   const relaxed = keys(observationClaimOrder(all, 1, Date.now(), false));
   assert.ok(relaxed.indexOf('GY-WAIT') < relaxed.indexOf('GY-RUN'), 'with budget to spare, the observation a review waits on stays ahead of running sessions');
 
