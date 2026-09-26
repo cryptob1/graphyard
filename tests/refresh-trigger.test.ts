@@ -138,9 +138,11 @@ test('unit:clean-candidate-not-refreshed — GitHub reporting a clean unqueued c
   assert.match(stale.reading, /test merge of the two is clean; the reading is stale and nothing was refreshed/);
   assert.deepEqual([work.baseRefresh!.head, work.baseRefresh!.conflict, work.baseRefresh!.trigger], [head, null, undefined], 'the record names the unchanged head: no refresh, no conflict');
   assert.deepEqual([work.observation!.conflicting, work.observation!.mergeable], [false, true], 'the stored observation has the stale conflict disproved');
+  assert.deepEqual(work.observation!.disproved, { mergeable: false, conflicting: true, reading: stale.reading }, 'GitHub\'s raw reading is kept beside the disproved one (GY-390)');
   // GitHub keeps repeating the stale reading: every later observation of the same pair is stored disproved.
   work = await engine.observe(work.id, work.revision, conflicting(work));
   assert.equal(work.observation!.conflicting, false);
+  assert.deepEqual(work.observation!.disproved, { mergeable: false, conflicting: true, reading: stale.reading }, 'a repeated stale reading keeps GitHub\'s raw fields too');
   assert.equal((await events(work, 'base.stale-mergeability')).length, 1);
   assert.deepEqual([(await events(work, 'base.refreshed')).length, (await events(work, 'base.conflict')).length], [0, 0]);
   // Nothing downstream acts on the stale reading either: no second refresh, no sync, no review hold.

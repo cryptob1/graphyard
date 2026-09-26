@@ -10,7 +10,7 @@ import { Refusal } from './model/refusal.js';
 import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
 import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
-import { branchContamination, disprovedConflict, currentRestore, decideIdentityCarry, defaultMergeBatchSize, mergeBatchSizeEvent, dismissedApproval, keptTipCarry, onto, pendingRestore, reviewedFilesOf, queueHistoryLimit, queueSequencingReason, reconciliationRefusalPrefix, tipReplacesHead, type BaseRefresh, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type QueueSpeculation, type RestoredApproval } from './merge-queue.js';
+import { branchContamination, disprovedConflict, withDisprovedConflict, currentRestore, decideIdentityCarry, defaultMergeBatchSize, mergeBatchSizeEvent, dismissedApproval, keptTipCarry, onto, pendingRestore, reviewedFilesOf, queueHistoryLimit, queueSequencingReason, reconciliationRefusalPrefix, tipReplacesHead, type BaseRefresh, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type QueueSpeculation, type RestoredApproval } from './merge-queue.js';
 import { queueEjectionRecord } from './model/queue.js';
 import { githubFromEnv } from './github.js';
 import { regressionRefusals } from './regression-guard.js';
@@ -1347,7 +1347,8 @@ export class Engine {
         // onto the head, and the stored observation has its conflict disproved.
         const kept = work.baseRefresh?.head === refresh.from.sha ? work.baseRefresh : null;
         work.baseRefresh = { ...(kept ?? {}), ...refresh, merge: kept?.merge ?? null, carry: kept?.carry ?? null, ...(kept?.restoredApproval ? { restoredApproval: kept.restoredApproval } : {}) };
-        if (work.observation?.conflicting && disprovedConflict(work, work.observation)) work.observation = { ...work.observation, conflicting: false, mergeable: true };
+        const disproved = work.observation?.conflicting ? disprovedConflict(work, work.observation) : null;
+        if (disproved) work.observation = withDisprovedConflict(work.observation!, disproved);
         this.evaluate(work, all, now);
         await this.recordDispatch(db, work, now);
         await save(db, work, 'graphyard', 'base.stale-mergeability', now, { head: refresh.from.sha, base: refresh.base, reading: refresh.stale.reading });
@@ -1791,8 +1792,10 @@ export class Engine {
       // A conflict the control plane's own test merge of this head onto this tip found clean is
       // GitHub's stale reading (GY-375): it is stored disproved — the head merges cleanly, which is
       // all GitHub's `mergeable: false` withheld from an open, non-draft pull request — so nothing
-      // refreshes, holds or reworks it for that reading again.
-      work.observation = observation.conflicting && disprovedConflict(work, observation) ? { ...observation, conflicting: false, mergeable: true } : observation;
+      // refreshes, holds or reworks it for that reading again. GitHub's raw reading is kept beside
+      // it under `disproved` (GY-390), so status and diagnose still show what GitHub reported.
+      const disproved = observation.conflicting ? disprovedConflict(work, observation) : null;
+      work.observation = disproved ? withDisprovedConflict(observation, disproved) : observation;
       // Snapshot all provider review identities after the revision. Approvals in this
       // first observation never count, regardless of clock skew or future reevaluation.
       if (work.formalReviewResetRequired && reviewProviderOf(work.policy) === 'github' && !work.formalReviewBaseline && observation.reviewIds
