@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
-import { GitHub, firstObservationOwed, headClaimBand, observationClaimOrder, observationFreshnessMs, observationThroughput, processJob, waitsOnObservation } from '../src/github.js';
+import { GitHub, firstObservationOwed, headClaimBand, observationClaimOrder, observationHeadCount, observationFreshnessMs, observationThroughput, processJob, waitsOnObservation } from '../src/github.js';
 import { evaluate, type Principal, type Work } from '../src/model.js';
 import { nextAction } from '../src/model/next-action.js';
 import { observationConcurrency, observationWorkers } from '../src/server/main.js';
@@ -166,11 +166,37 @@ test('unit:job-claim-priority — thirty due jobs with the head due last are cla
   // With the claim order the head wins although it became due last, then its band, then the unread
   // submission, then the review-waiting item, then the rest of the queue by availability.
   const claims: string[] = [];
-  for (let index = 0; index < 8; index++) claims.push((await store.takeJob(observationClaimOrder(all, 5)))!.work_id);
+  for (let index = 0; index < 8; index++) claims.push((await store.takeJob(observationClaimOrder(all, 5), observationHeadCount(all, 5)))!.work_id);
   const byId = new Map(all.map(work => [work.id, work.key]));
   assert.deepEqual(claims.map(id => byId.get(id)),
     ['GY-Q00', 'GY-Q01', 'GY-Q02', 'GY-Q03', 'GY-Q04', 'GY-BACK', 'GY-WAIT', 'GY-Q05'],
     'priority reorders the due jobs; availability orders what the priority does not name');
+});
+
+test('unit:starved-job-claimed — a job due longer than the starvation bound is claimed right after the queue-head band, ahead of named jobs that just came due', async () => {
+  await freshStore();
+  const base = sha('main-starved');
+  // The claim query itself: a head the order names first, a named job that just came due (a review
+  // waiting on a reading), and a job no list names that has been due ten minutes (2026-09-26: an item
+  // whose only refusal was a stale observation waited 40 minutes behind named jobs due every cycle).
+  const head = item('GY-HEAD', 520, sha(`head-h-${base}`), base);
+  const named = item('GY-NAMED', 521, sha(`head-n-${base}`), base);
+  const starved = item('GY-STARVED', 522, sha(`head-s-${base}`), base);
+  await insert([head, named, starved]);
+  for (const [work, ageMs] of [[head, 1_000], [named, 2_000], [starved, 10 * 60_000]] as [Work, number][])
+    await store.pool.query('INSERT INTO jobs(work_id,available_at) VALUES($1,$2)', [work.id, new Date(Date.now() - ageMs)]);
+  const byId = new Map([head, named, starved].map(work => [work.id, work.key]));
+  const claims: string[] = [];
+  for (let index = 0; index < 3; index++) claims.push(byId.get((await store.takeJob([head.id, named.id], 1))!.work_id)!);
+  assert.deepEqual(claims, ['GY-HEAD', 'GY-STARVED', 'GY-NAMED'], 'the head band first, then the job due ten minutes, then the named job that just came due');
+  // Inside the bound the named list still wins: a job due one minute waits behind it.
+  await freshStore();
+  await insert([head, named, starved]);
+  for (const [work, ageMs] of [[head, 1_000], [named, 2_000], [starved, 60_000]] as [Work, number][])
+    await store.pool.query('INSERT INTO jobs(work_id,available_at) VALUES($1,$2)', [work.id, new Date(Date.now() - ageMs)]);
+  const early: string[] = [];
+  for (let index = 0; index < 3; index++) early.push(byId.get((await store.takeJob([head.id, named.id], 1))!.work_id)!);
+  assert.deepEqual(early, ['GY-HEAD', 'GY-NAMED', 'GY-STARVED'], 'within the bound the claim order is unchanged');
 });
 
 test('unit:parallel-observation-jobs — twenty due jobs whose observations each take a second are processed in about five seconds at concurrency four, and no item is ever observed twice at once', async t => {

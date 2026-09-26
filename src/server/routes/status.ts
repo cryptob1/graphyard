@@ -123,15 +123,16 @@ export const statusRoutes = defineRoutes('status', [
       const previous = await engine.loadMergeBatchSize(), previousOptimistic = engine.optimisticMerge;
       const latest = (await engine.store.pool.query('SELECT 1 FROM events WHERE work_id IS NULL AND kind=$1 LIMIT 1', [mergeBatchSizeEvent])).rowCount;
       const latestOptimistic = (await engine.store.pool.query('SELECT 1 FROM events WHERE work_id IS NULL AND kind=$1 LIMIT 1', [optimisticMergeEvent])).rowCount;
-      engine.mergeBatchSize = batchSize;
-      // `mergeQueue.optimistic` (GY-500) is recorded the same way, once per change; a master that
-      // publishes only the batch size leaves it as it stands.
-      if (typeof optimistic === 'boolean') engine.optimisticMerge = optimistic;
-      const mergeQueue = { batchSize, optimistic: engine.optimisticMerge };
       const batchChanged = !latest || previous !== batchSize, optimisticChanged = typeof optimistic === 'boolean' && (!latestOptimistic || previousOptimistic !== optimistic);
       if (batchChanged) await engine.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, mergeBatchSizeEvent, JSON.stringify({ batchSize, previous: latest ? previous : null })]);
+      // `mergeQueue.optimistic` (GY-500) is recorded the same way, once per change; a master that
+      // publishes only the batch size leaves it as it stands.
       if (optimisticChanged) await engine.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, optimisticMergeEvent, JSON.stringify({ optimistic, previous: latestOptimistic ? previousOptimistic : null })]);
-      return { mergeQueue, recorded: batchChanged || optimisticChanged };
+      // Applied only once the ledger holds it (GY-384): a failed INSERT leaves the evaluation on
+      // the recorded settings and the master unpublished, so its next cycle retries.
+      engine.mergeBatchSize = batchSize;
+      if (typeof optimistic === 'boolean') engine.optimisticMerge = optimistic;
+      return { mergeQueue: { batchSize, optimistic: engine.optimisticMerge }, recorded: batchChanged || optimisticChanged };
     },
   },
   {
