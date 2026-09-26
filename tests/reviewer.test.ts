@@ -120,8 +120,8 @@ test('a reviewer launch is bound to the exact observed candidate and its prompt 
   assert.throws(() => assertReviewCandidate(work({ candidate: null, submission: null }), now), /no independently observed pull-request candidate/);
   assert.throws(() => assertReviewCandidate(work({ reworkRequested: true }), now), /awaiting rework/);
   assert.throws(() => assertReviewCandidate(work({ observation: { ...work().observation!, candidate: { ...work().candidate!, sha: 'c'.repeat(40) } } }), now), /does not match the current candidate/);
-  // The launch binds the head, not the observation's age (GY-710): a five-minute-old observation of the same head launches.
-  assert.equal(assertReviewCandidate(work({ observation: { ...work().observation!, at: new Date(Date.now() - 300_000).toISOString() } }), now).sha, 'a'.repeat(40));
+  // The launch binds the head, not the observation's age (GY-710): a 20- or 45-minute-old observation of the same head launches.
+  for (const minutes of [20, 45]) assert.equal(assertReviewCandidate(work({ observation: { ...work().observation!, at: new Date(Date.now() - minutes * 60_000).toISOString() } }), now).sha, 'a'.repeat(40), `a ${minutes}-minute-old observation of the requested head launches`);
   assert.throws(() => assertReviewCandidate(work({ observation: { ...work().observation!, draft: true } }), now), /still a draft/);
   assert.throws(() => assertReviewCandidate(work({ observation: { ...work().observation!, prState: 'closed' } }), now), /is closed/);
   assert.throws(() => assertReviewCandidate(work(), 'not-a-time'), /valid Graphyard snapshot clock/);
