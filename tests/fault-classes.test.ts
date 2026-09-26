@@ -875,6 +875,36 @@ test('unit:recurring-class-item — standing faults are observed on a slower cad
   assert.equal(state.faults.instances.filter(entry => entry.kind === 'held-jobs').length, 1, 'the fault standing across the interval is still one instance');
 });
 
+test('unit:recurring-class-item — the loop observes its own health lines on every cycle between observations', async () => {
+  let reads = 0;
+  const effects = {
+    agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [], now: iso(0) }),
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
+    faultClassPolicy: policy, persist: async () => {},
+    controlPlane: async () => { reads++; return { github: true, heldJobs: 1, jobs: [] }; },
+    reportedAttention: async () => { reads++; return { items: [] }; },
+  } as unknown as DaemonEffects;
+  const state = emptyDaemonState(config());
+  const interval = config().run.intervalSeconds * 1000;
+  await runCycle(config(), state, effects, () => clock);
+  assert.equal(reads, 2);
+  // A cycle inside the interval whose previous cycle overran: its cost line is observed without reading the external sources.
+  state.metrics.push({ cycle: state.cycle, at: iso(interval / 2), durationMs: 10 * interval, childWaitMs: 0, open: 0, actions: 0 } as never);
+  await runCycle(config(), state, effects, () => clock + interval);
+  assert.equal(reads, 2, 'the external sources are still read once per interval');
+  const cost = state.faults.instances.filter(entry => entry.kind === 'loop-cost');
+  assert.equal(cost.length, 1, JSON.stringify(state.faults.instances));
+  assert.ok(Object.values(state.faults.open).includes(cost[0].id), 'the cost line stands');
+  const held = state.faults.instances.find(entry => entry.kind === 'held-jobs')!;
+  assert.ok(Object.values(state.faults.open).includes(held.id), 'a fault read from the control plane is not ended by a cycle that did not read it');
+  // The next cycle's previous cycle fit its interval: the cost line ends there, and the held jobs still stand.
+  await runCycle(config(), state, effects, () => clock + 2 * interval);
+  assert.equal(reads, 2);
+  assert.ok(!Object.values(state.faults.open).includes(cost[0].id), 'a cleared loop line ends between observations');
+  assert.ok(Object.values(state.faults.open).includes(held.id));
+  assert.equal(state.faults.instances.filter(entry => entry.kind === 'held-jobs').length, 1);
+});
+
 test('unit:recurring-class-item — daemonSummary reports faults under the policy the loop files by', () => {
   const state = emptyDaemonState(config());
   const injected = { threshold: 7, windowHours: 2 };
