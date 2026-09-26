@@ -32,6 +32,11 @@ export const refusalRules: { gate: string | null; match: RegExp; kind: NextActio
   { gate: 'build', match: /^No workspace registered$/, kind: 'dispatch' },
   { gate: 'build', match: /^Pull request has not been independently observed$/, kind: 'resync' },
   { gate: 'build', match: /has not been compared against the base branch tip/, kind: 'resync' },
+  // A stale speculative tip, or files another item's unlanded tip put on this branch (GY-568): the
+  // control plane restores the branch, and the observation job that a fresh reading wakes runs it.
+  // Nothing in either is the worker's, so neither is rework. Before `conflict` below, which the
+  // attributed files' own detail may mention.
+  { gate: 'build', match: /^(Restoring after predecessor ejection|Carried from another item's tip): /, kind: 'resync' },
   { gate: 'build', match: /^(Candidate changes|Out-of-scope regression)/, kind: 'request-rework' },
   // A mechanical proof that failed on the head returns it to its worker before review (GY-115).
   { gate: 'build', match: /the head returns to its worker before review$/, kind: 'request-rework' },
