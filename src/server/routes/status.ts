@@ -121,9 +121,11 @@ export const statusRoutes = defineRoutes('status', [
       demand(Number.isSafeInteger(batchSize) && batchSize >= 1 && batchSize <= maxMergeBatchSize, `batchSize must be an integer from 1 to ${maxMergeBatchSize}`, 400);
       const previous = await engine.loadMergeBatchSize();
       const latest = (await engine.store.pool.query('SELECT 1 FROM events WHERE work_id IS NULL AND kind=$1 LIMIT 1', [mergeBatchSizeEvent])).rowCount;
-      engine.mergeBatchSize = batchSize;
       if (latest && previous === batchSize) return { mergeQueue: { batchSize }, recorded: false };
       await engine.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, mergeBatchSizeEvent, JSON.stringify({ batchSize, previous: latest ? previous : null })]);
+      // Applied only once the ledger holds it (GY-384): a failed INSERT leaves the evaluation on
+      // the recorded size and the master unpublished, so its next cycle retries.
+      engine.mergeBatchSize = batchSize;
       return { mergeQueue: { batchSize }, recorded: true };
     },
   },
