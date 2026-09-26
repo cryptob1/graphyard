@@ -24,7 +24,7 @@ export const scopeLookupBudget = 200;
  */
 export const compareFileCap = 300;
 /** One file of a GitHub compare, as far as a patch-id reads it. */
-export interface CompareFile { filename?: unknown; previous_filename?: unknown; status?: unknown; patch?: unknown; changes?: unknown }
+export interface CompareFile { filename?: unknown; previous_filename?: unknown; status?: unknown; patch?: unknown; changes?: unknown; sha?: unknown }
 /**
  * The patch-id of a change as GitHub's compare lists it (GY-330): a hash of every file's path,
  * rename source, status and textual patch, with hunk line numbers removed as `git patch-id`
@@ -33,8 +33,13 @@ export interface CompareFile { filename?: unknown; previous_filename?: unknown; 
  * carriage return and trailing whitespace are ignored. The same change applied to a base that
  * moved elsewhere — even in another hunk of the same file — has the same patch-id; any edit to the
  * change itself gives another.
- * Null when the list is not the whole change: truncated at compareFileCap, or a file GitHub gives
- * no textual patch for (binary, or too large), apart from a pure rename, which has none to give.
+ * A file GitHub gives no textual patch for (binary, or too large) is compared by the blob it
+ * leaves (GY-384): the same path, status and resulting blob SHA is the same change to that file.
+ * That is stricter than a patch — a base that edited another part of an oversized file changes
+ * its blob — but never looser, and a binary file the base also changed conflicts, which is never
+ * carried. Null when the list is not the whole change: truncated at compareFileCap (the files past
+ * the cap are unknown, so no partial comparison can show them unchanged), or a patchless file with
+ * no blob SHA, apart from a pure rename, which has nothing to give.
  */
 export function patchId(files: CompareFile[] | null | undefined): string | null {
   if (!Array.isArray(files) || files.length >= compareFileCap) return null;
@@ -42,8 +47,9 @@ export function patchId(files: CompareFile[] | null | undefined): string | null 
   for (const file of files) {
     if (typeof file?.filename !== 'string') return null;
     const renamed = file.status === 'renamed' && (file.changes ?? 0) === 0;
-    if (typeof file.patch !== 'string' && !renamed) return null;
-    const body = typeof file.patch === 'string' ? file.patch.split('\n').map(line => line.startsWith('@@') ? '@@' : line.replace(/\s+$/, '')).join('\n') : '';
+    const blob = typeof file.sha === 'string' && /^[0-9a-f]{40,64}$/.test(file.sha) ? file.sha : null;
+    if (typeof file.patch !== 'string' && !renamed && !blob) return null;
+    const body = typeof file.patch === 'string' ? file.patch.split('\n').map(line => line.startsWith('@@') ? '@@' : line.replace(/\s+$/, '')).join('\n') : blob ? `\u0002blob ${blob}` : '';
     parts.push(`${typeof file.previous_filename === 'string' ? file.previous_filename : file.filename}\u0000${file.filename}\u0000${String(file.status ?? '')}\u0000${body}`);
   }
   return createHash('sha1').update(parts.sort().join('\u0001')).digest('hex');
