@@ -1,4 +1,4 @@
-<!-- page: Operate Graphyard | 2 | the App, protection, the merge queue, CI proofs. -->
+<!-- page: Operate Graphyard | 2 | App, protection, merge queue, CI proofs. -->
 # GitHub enforcement
 
 ## App permissions
@@ -32,7 +32,7 @@ Grants are rechecked every five minutes and on a 403; a shortfall (`appPermissio
 
 On the base branch require `Graphyard / merge` bound to this App, `strict` **off**, admin-enforced, force pushes and deletion forbidden, workers without bypass (the App's [repair lane](master-agent.md#repair-lane)); `master browser protection` reconciles it. `master protection --apply`, `install --apply`, `init --scan --apply` give organization repositories a merge queue requiring it (CI on `merge_group`), user-owned ones, a 422 `allow_auto_merge`.
 
-The gate requires CI checks from `GITHUB_CI_APP_IDS` Apps, current-head approval, trusted passing evidence, a mergeable non-draft PR and the queue head.
+The gate requires CI checks from `GITHUB_CI_APP_IDS` Apps, current-head approval, trusted passing evidence, a mergeable non-draft PR and the queue head. Unknown mergeability (`null`) is re-read 3 times in 10 s, then refused as computing; queued tips decide.
 
 ## Merge queue
 
@@ -48,7 +48,7 @@ Reviews and proofs bind one head, base and policy revision. The queue head's tip
 
 ### Direct merges
 
-`CLEAN`, `UNSTABLE` and `HAS_HOOKS` PRs merge at once, head-bound; five minutes pending is `merge-stalled`.
+Without a queue, `CLEAN`, `UNSTABLE` and `HAS_HOOKS` PRs merge at once, head-bound; five minutes pending is `merge-stalled`.
 
 ### Proofs in CI
 
