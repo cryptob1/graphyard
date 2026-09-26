@@ -3,11 +3,11 @@
 
 ## Master coordination loop
 
-Restart `graphyard master run` freely; it never dispatches twice. Health: `master status` → `daemon`; log: `journalctl --user -u graphyard-master`. `daemon.metrics.timings` and status `timings` time steps and calls over 1s; status reads cached interventions; failed server requests log route and SQL.
+Restart `graphyard master run` freely; it never dispatches twice. Health: `master status` → `daemon`; log: `journalctl --user -u graphyard-master`. `daemon.metrics.timings` and status `timings` time steps and calls over 1s; failed server requests log route and SQL.
 
 ### Perpetual master loop
 
-`master verify-deployment GY-N` refuses a release *unobserved* (set `--deployment-url`), *stale* (rerun), not serving the merge (keep cycling), or *already recording deployment* (follow up).
+`master verify-deployment GY-N` refuses a release *unobserved*, *stale* (rerun), not serving the merge (keep cycling), or *already recording deployment* (use a follow-up item).
 
 ## Lost worker before submission
 
@@ -15,7 +15,7 @@ Leases expire 120 seconds after the last heartbeat; the next claim (higher epoch
 
 ## Supervisor died leaving a containment quarantine
 
-On the worker's machine `graphyard master settle-containment GY-N "reason"` verifies no process survives (`containment.held` lists them); only the loop excuses an idle pane shell (childless, parent `herdr server`), closing it. If refused, confirm the stop, then `graphyard rework GY-N --previous-worker-stopped "reason"`, or `graphyard recover-containment GY-N --previous-worker-stopped "reason"` once delivered.
+On the worker's machine `graphyard master settle-containment GY-N "reason"` verifies no process survives; only the loop excuses an idle pane shell (childless, parent `herdr server`). If refused, confirm the stop, then `graphyard rework GY-N --previous-worker-stopped "reason"`, or `graphyard recover-containment GY-N --previous-worker-stopped "reason"` once delivered.
 
 ## Submitted implementation needs rework
 
@@ -23,7 +23,7 @@ Stop the worker, then `graphyard rework GY-N --previous-worker-stopped "reason"`
 
 ## Flaky CI check
 
-A required check failing on a tip or head reruns once per sha (*rerun failed jobs*, Actions: write), holding position, approval, proofs; a second failure or refusal ejects (`check.rerun.*` events). Master config `mergeQueue.rerunFailedChecks`: default 1, 0 disables; published like `batchSize`.
+A required check failing on a tip or head reruns once per sha (*rerun failed jobs*, Actions:write), holding position, approval, proofs; a second failure or refusal ejects (`check.rerun.*`). `mergeQueue.rerunFailedChecks`: default 1, 0 disables, published like `batchSize`.
 
 ## Accepted evidence turns out to be wrong
 
@@ -56,7 +56,7 @@ About ten requests uncached; unchanged, none.
 
 ### What a pause means for gates
 
-A rate-limit `403`/`429` pauses requests; gates read stale until it lifts; nothing merges on observations over two minutes old.
+A rate-limit `403`/`429` pauses requests; gates read stale until it lifts.
 
 ### Reading the budget
 
@@ -64,7 +64,7 @@ A rate-limit `403`/`429` pauses requests; gates read stale until it lifts; nothi
 
 ### Webhook liveness
 
-Deliveries silent an hour: `master status` points to `https://github.com/settings/apps/APP-SLUG`.
+Deliveries silent an hour, `master status` points to `https://github.com/settings/apps/APP-SLUG`.
 
 ## Control-plane resources
 
@@ -72,7 +72,7 @@ Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROF
 
 ## Bootstrap mode for a self-proving change
 
-For a change shipping its own proof harness a `policy:bootstrap` holder adds `"bootstrap": {"reason": "…", "contractPaths": ["src/herdr/recovery.ts"]}` to that criterion. Other gates apply; `e2e:` proofs are never deferred; the next item touching those paths owes it (`graphyard obligations`).
+A `policy:bootstrap` holder adds `"bootstrap": {"reason": "…", "contractPaths": ["src/herdr/recovery.ts"]}` to that criterion. Other gates apply; `e2e:` proofs cannot be deferred; the next item touching those paths owes it (`graphyard obligations`).
 
 ## Delivered with a failed smoke proof
 
@@ -84,7 +84,7 @@ An unserved merge is a `delivery.deployment-incident` ([observation](deployment.
 
 ## Merge bypass
 
-An ungated merge is a permanent violation: repair access, open a follow-up, never backfill evidence. Admins open direct-merge windows: `graphyard operator direct-merges on --since ISO REASON`.
+An ungated merge is a permanent violation: repair access and open a follow-up item, never backfilling evidence. An admin opens a direct-merge window with `graphyard operator direct-merges on --since ISO REASON`.
 
 ## Credentials
 
@@ -93,7 +93,6 @@ Rotate `GRAPHYARD_PRINCIPALS`, redeploy. Operator agents hold listed capabilitie
 ## Proof authority grants
 
 ```sh
-graphyard grants
 graphyard grants grant ci "integration:*,unit:*" "CI proves both"
 graphyard grants revoke ci "integration:claim-safety" "Runner decommissioned"
 ```
