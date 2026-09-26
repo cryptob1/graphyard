@@ -31,4 +31,4 @@ npm ci && npm run build && npm test
 
 ## Trusted contracts
 
-A trusted CI run executes only protected source, refusing a candidate whose base lacks the contract: land the harness and its `scripts/contracts.mjs` entry first, then require later work's proof.
+Trusted CI runs only protected source, refusing candidates whose base lacks the contract: land the harness and its `scripts/contracts.mjs` entry first, then require later work's proof.
