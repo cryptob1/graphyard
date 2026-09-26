@@ -555,6 +555,8 @@ export class Engine {
           demand(!leaseLive, 'Stop and release the active worker before revising requirements');
         }
         demand(data.expectedPolicyRevision === work.policyRevision, 'Policy revision changed; reload before revising');
+        // A merge-path repair (GY-406) keeps its plannedFiles within the merge path on every revision, not only at creation (GY-428).
+        const repairScope = repairScopeRefusal({ plannedFiles: data.plannedFiles, repair: work.repair, key: work.key }); demand(!repairScope, repairScope!, 422);
         // A widening that answers one attempt's scope request (the loop's, on a review finding)
         // holds only while that request is open, its attempt holds a live lease and the head the
         // findings were read for is still the candidate: a claim, a lease end or a push changes
