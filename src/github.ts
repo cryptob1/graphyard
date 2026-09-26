@@ -213,6 +213,14 @@ export function observationFingerprint(observation: Observation | null | undefin
   });
 }
 
+/** Entries within this many places of the merge-queue head are observed on the merge band. */
+export const mergeBandQueueDepth = 2;
+/** How many live merge-queue entries are ahead of this one (0 at the head, or when it is not queued). */
+export function queuedAhead(work: Pick<Work, 'id' | 'queue'>, all: readonly Pick<Work, 'id' | 'queue' | 'stage'>[]) {
+  const sequence = work.queue?.sequence;
+  if (sequence === undefined || sequence === null) return 0;
+  return all.filter(other => other.id !== work.id && other.stage !== 'done' && other.queue && other.queue.sequence < sequence).length;
+}
 /**
  * What an observation of this item could still change, from the item's state alone. `nextAction`
  * is the classification the whole control plane already uses for what an item needs next, so the
@@ -220,8 +228,17 @@ export function observationFingerprint(observation: Observation | null | undefin
  */
 export function observationBand(work: Work, all: Work[], now: Date, next = nextAction(work, all, now)): { band: Exclude<CadenceBand, 'steady'>; reason: string; fresh?: true } {
   const open = !!work.candidate && !!work.observation && !work.observation.merged && work.observation.prState === 'open';
-  if (next?.kind === 'merge' || open && work.gates.every(gate => gate.name === 'merge' || gate.passed))
+  if (next?.kind === 'merge' || open && work.gates.every(gate => gate.name === 'merge' || gate.passed)) {
+    // Only the entries that can merge next need the merge band's 20-second freshness. On
+    // 2026-09-25 25 queued items all took it; each observation cost the server 10-13 s, the
+    // observations fell behind, and every entry's merge gate read 'GitHub observation missing or
+    // older than two minutes', so nothing merged and the queue only grew. An entry further back
+    // cannot land before those ahead of it, so it is observed on the idle band until it nears the head.
+    const ahead = queuedAhead(work, all);
+    if (ahead >= mergeBandQueueDepth)
+      return { band: 'idle', reason: `${work.key} is queued behind ${ahead} entries; it cannot land before them, so it is observed on the idle band until it is within ${mergeBandQueueDepth} of the head` };
     return { band: 'merge', reason: `${work.key} is at the merge gate with every other gate passing; the merge executor spends its observation's freshness` };
+  }
   // The loop requests a rework only from an observation under two minutes old (master-daemon.ts
   // reworkObservationWait, GY-144). Polled on the idle or steady band — never less than two
   // minutes apart — the decision nearly always met a stale one: on 2026-09-25 GY-173, GY-177 and

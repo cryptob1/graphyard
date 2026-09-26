@@ -317,7 +317,7 @@ test('integration:live-throughput-population — the population rule reads the r
     response.setHeader('Content-Type', 'application/json');
     if (request.headers.authorization !== 'Bearer reader-token') { response.statusCode = 401; return response.end('{}'); }
     if (request.url === '/api/status') return response.end(JSON.stringify({ actor: { id: 'reader' }, now: new Date(now).toISOString(), ...statusRelease }));
-    if (request.url === '/api/work-snapshot') return response.end(JSON.stringify({ now: new Date(now).toISOString(), work: ledger }));
+    if (request.url === '/api/work-snapshot?view=full') return response.end(JSON.stringify({ now: new Date(now).toISOString(), work: ledger }));
     response.statusCode = 404; response.end('{}');
   });
   await new Promise<void>(resolve => served.listen(0, '127.0.0.1', resolve));
