@@ -43,11 +43,11 @@ export async function baseFailureStep(cycle: Cycle): Promise<Map<string, Set<str
   for (const { item, failed } of failing) await isolate('refresh', item, item.key, async () => {
     for (const { name, check } of failed) {
       const hold = () => { if (!setAside.has(item.id)) setAside.set(item.id, new Set()); setAside.get(item.id)!.add(name); };
-      // A run already judged a base failure, or already rerun, is that failure still: it reads failed
-      // until the rerun or the refreshed head is observed, even once the base passes again, and is
-      // never mistaken then for a failure of the candidate's own.
-      if (check.id !== undefined && (state.actions[`base-failure:rerun:${check.id}`]?.state === 'done'
-        || standing.some(failure => failure.check === name && failure.blocks.some(block => block.id === item.id && block.jobId === check.id)))) { hold(); continue; }
+      // A head already judged to carry a base failure carries it still: its run reads failed until the
+      // refreshed head is observed, even once the base passes again, and a rerun — a new job on the
+      // same merge commit — is never mistaken then for a failure of the candidate's own. So is a head
+      // whose requested refresh onto the repaired base has not run yet: the refresh replaces it.
+      if (item.baseRefreshRequest?.head === item.candidate!.sha || standing.some(failure => failure.check === name && failure.blocks.some(block => block.id === item.id && block.sha === item.candidate!.sha))) { hold(); continue; }
       const base = bases.get(name);
       const tests = check.id !== undefined ? await effects.failedTests!(check.id).catch(() => null) : null;
       const judged = judgeFailedCheck(tests, base);

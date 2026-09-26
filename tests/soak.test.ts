@@ -26,7 +26,9 @@ import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } f
  * (src/model/invariants.ts) holds. Fifteen items pass through it: released every fifteen minutes so
  * a merge lands about every fifteen, three sent back by their reviewer, two whose worker dies, two
  * production deploys, a file split on main that re-plans an item, one pull request GitHub reports
- * CLEAN at once and one UNSTABLE, and a reviewer bot out of quota that fails over. Every one of the
+ * CLEAN at once and one UNSTABLE, a reviewer bot out of quota that fails over, and a test that breaks
+ * on main for forty minutes (GY-528) — the candidates it fails are held without rework, one P0 item
+ * is filed, and once main is repaired each is rerun and refreshed onto it. Every one of the
  * fifteen must be delivered. A change to the loop that breaks an invariant fails here, in CI, before
  * it merges; a new behaviour that repeats per cycle, head or item belongs in this world.
  */
@@ -56,6 +58,7 @@ const plan = {
   items: 15, releaseEveryMs: 15 * minute, workMs: 20 * minute,
   rework: new Set([3, 7, 11]), deaths: new Set([5, 9]), deathAfterMs: 8 * minute,
   deploys: [2 * hour + 30 * minute, 5 * hour], split: { at: 45 * minute, item: 12 }, clean: 2, unstable: 4, slowRecompute: 8, exhaustedReviewer: 6,
+  baseFailure: { breaks: 3 * hour + 10 * minute, repaired: 3 * hour + 50 * minute },
 };
 const file = (n: number) => `src/soak/item-${n}.ts`;
 
@@ -83,8 +86,8 @@ before(async () => {
 after(async () => { clock.uninstall(); if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (pgServer) await pgServer.stop(); });
 
 const id = () => randomUUID();
-async function api(principal: Principal, method: 'GET' | 'POST', path: string, body?: unknown) {
-  const response = await fetch(`${url}/api/${path}`, { method, headers: { Authorization: `Bearer ${token(principal)}`, 'Content-Type': 'application/json', 'Idempotency-Key': id() }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+async function api(principal: Principal, method: 'GET' | 'POST', path: string, body?: unknown, key: string = id()) {
+  const response = await fetch(`${url}/api/${path}`, { method, headers: { Authorization: `Bearer ${token(principal)}`, 'Content-Type': 'application/json', 'Idempotency-Key': key }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   const result = await response.json() as any;
   if (!response.ok) throw new Error(`Graphyard refused ${path} (${response.status}): ${result?.error ?? JSON.stringify(result)}`);
   return result;
@@ -185,7 +188,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     credentials: async profiles => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])),
     snapshot, dispatch, requestProof, approver, merge,
     closeSession: pane => { if (options.regression === 'approvers-left-open' && /approver/.test(herdr.agents.get(pane)?.name ?? '')) return; herdr.close(pane); },
-    decide: (work, action, reason, input = {}) => api(principals.operatorAgent, 'POST', `work/${work.id}/decide`, { action, input: decisionInput(action, work, input), reason }),
+    decide: (work, action, reason, input = {}) => (decided.push({ key: work.key, action }), api(principals.operatorAgent, 'POST', `work/${work.id}/decide`, { action, input: decisionInput(action, work, input), reason })),
     decisions: work => api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(work.id)}/decisions`),
     withdraw: (work, decision, reason) => api(principals.operatorAgent, 'POST', `work/${work.id}/decide`, { action: 'withdraw', decision, reason }),
     baseSuccessions: async since => ({ tip: github.tip, successions: github.successions.filter(entry => github.commits.get(entry.commit)!.at >= Date.parse(since)), files: new Set(github.files) }),
@@ -196,12 +199,19 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       return { source: 'endpoint', sha: production.sha, at: new Date(clock.now()).toISOString(), reason: null, deployed: serving.map(item => item.key), pending: delivered.filter(item => !serving.includes(item)).map(item => item.key) };
     },
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    // The base failure (GY-528): CI logs and the base head's run read from GitHub, reruns, and what the operator-agent files and asks for.
+    failedTests: async job => github.failedTests(job),
+    baseCheck: async check => github.baseCheck(check),
+    rerunJob: async job => github.rerun(job),
+    fileBaseFailure: async (input, key) => { const filed = await api(principals.operatorAgent, 'POST', 'work', input, key); baseFailure.filed.push(filed); return filed; },
+    refreshCandidate: async (work, reason, key) => { baseFailure.refreshes.push(work.key); return api(principals.operatorAgent, 'POST', `work/${work.id}/refresh`, { reason, base: work.observation?.baseTip }, key); },
   };
+  const baseFailure = { filed: [] as Work[], refreshes: [] as string[] }, decided: { key: string; action: string }[] = [];
 
   // ---- The day. ----
   const state = emptyDaemonState(config);
   const violations: string[] = [], observed = new Set<string>(), failures: string[] = [];
-  let released = 0, split = false, deploys = 0, cycles = 0;
+  let released = 0, split = false, deploys = 0, cycles = 0, broken = false, repaired = false;
   const jobsDue = async () => Number((await store.pool.query('SELECT count(*) AS due FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now())')).rows[0].due);
   for (let elapsed = 0; elapsed <= options.hours * hour;) {
     const now = clock.now();
@@ -213,6 +223,9 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       const commit = github.commit(`Split ${from}\n\nGraphyard-Successor: ${from} -> ${successors.join(', ')}`, [...github.files.filter(path => path !== from), ...successors]);
       github.successions.push(...successors.map(to => ({ from, to, commit: commit.sha, similarity: 70 })));
     }
+    // A test breaks on main outside Graphyard, and is repaired forty minutes later.
+    if (!broken && elapsed >= plan.baseFailure.breaks) { broken = true; github.baseFailure.broken = github.commit('Add a test holding a fixed date against the clock', github.files).sha; }
+    if (!repaired && elapsed >= plan.baseFailure.repaired) { repaired = true; github.baseFailure.repaired = github.commit('Repair the fixed-date test', github.files).sha; }
     const deploying = deploys < plan.deploys.length && elapsed >= plan.deploys[deploys];
     if (deploying) { production.build = sha('build', ++deploys); production.sha = github.tip; production.deploys.push({ at: now, build: production.build, sha: production.sha }); }
     // The world moves: GitHub, then the sessions. A deploy restarts the control plane once the
@@ -239,12 +252,12 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   }
 
   const final = (await store.list()).filter(item => items.some(entry => entry.id === item.id));
-  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, state, dayStart };
+  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, state, dayStart, decided, baseFailure };
 }
 
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 180_000 }, async () => {
   const began = performance.now();
-  const { items, final, github, sessions, lost, violations, observed, failures, production, cycles, dayStart } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
+  const { items, final, github, sessions, lost, violations, observed, failures, production, cycles, state, dayStart, decided, baseFailure } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
   const undelivered = final.filter(item => item.stage !== 'done' || !item.delivery);
   assert.deepEqual(undelivered.map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
@@ -265,6 +278,18 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.ok(final.find(item => item.key === items[plan.split.item - 1].key)!.plannedFiles.includes(`src/soak/item-${plan.split.item}-a.ts`), 'the split file re-planned its item onto the successors');
   const reviewed = final.find(item => item.key === items[plan.exhaustedReviewer - 1].key)!;
   assert.ok(reviewed.reviewFailovers?.some(failover => failover.profile === 'claude-reviewer' && failover.exhaustion === 'usage-limit' && failover.nextProfile === 'cursor-reviewer'), `the exhausted reviewer bot failed over to the next profile: ${JSON.stringify(reviewed.reviewFailovers)}`);
+  // The base failure (GY-528): the candidates it failed were held without rework — the three rework
+  // rounds above are the reviewers' — one P0 item names them, and once main was repaired each blocked
+  // job was rerun once and each candidate refreshed onto the repaired base once, then delivered.
+  const [filed, ...more] = baseFailure.filed;
+  assert.ok(filed && !more.length, `one P0 item for the failing test: ${baseFailure.filed.map(item => item.key).join(', ')}`);
+  assert.equal(filed.priority, 0);
+  const blocked = final.filter(item => item.baseRefresh?.trigger === 'base failure repaired').map(item => item.key).sort();
+  assert.ok(blocked.length >= 2 && blocked.some(key => filed.description.includes(`${key} (`)), `the base failure blocked several candidates, which its item names: ${blocked.join(', ')}; ${filed.description}`);
+  assert.deepEqual([...baseFailure.refreshes].sort(), blocked, 'each blocked candidate was refreshed onto the repaired base, once, by a Graphyard-authored merge');
+  assert.ok(github.reruns.length === blocked.length && new Set(github.reruns).size === github.reruns.length, `each blocked job rerun once: ${github.reruns.join(', ')}`);
+  assert.deepEqual(decided.filter(entry => entry.action === 'rework').map(entry => entry.key).sort(), items.filter((_, index) => plan.rework.has(index + 1)).map(item => item.key).sort(), 'the only rework decisions, and so the only approvers launched for rework, are the reviewers\' three');
+  assert.deepEqual(Object.keys(state.baseFailures), [], 'the base failure retired once its candidates were refreshed');
   assert.ok(cycles > 24 * 6, `the loop cycled through the day (${cycles} cycles)`);
   const seconds = (performance.now() - began) / 1000;
   assert.ok(seconds < 120, `the day runs well inside the three minutes the CI test job allows it (${seconds.toFixed(1)} s)`);

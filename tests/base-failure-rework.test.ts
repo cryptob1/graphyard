@@ -158,6 +158,17 @@ test('unit:base-failure-raised-once — a base failure blocking three candidates
   assert.deepEqual(w.reruns.sort(), [101, 102, 103], 'each blocked candidate has its failed job rerun, once');
   assert.deepEqual([w.decided, w.approvers], [[], []], 'no rework and no approver at any point');
   assert.deepEqual(state.baseFailures, {}, 'the record retires once every candidate was rerun and refreshed');
+
+  // Each rerun — a new job on the same merge commit — fails again. While the refresh requested for
+  // that head has not run, the failure is still the base's, not the candidate's: nothing is sent back.
+  w.work = w.work.map((item, index) => {
+    const job = 201 + index; w.logs[job] = [timeBomb];
+    const observation = { ...item.observation!, checks: [{ ...item.observation!.checks[0], id: job, attempt: 2 }, item.observation!.checks[1]] };
+    return { ...item, observation, baseRefreshRequest: { head: item.candidate!.sha, base: repaired, policyRevision: 1, by: 'master', at: iso(6 * minute), reason: 'main passes again' } } as Work;
+  });
+  w.now += minute;
+  await runCycle(config(), state, effects(w), () => w.now);
+  assert.deepEqual([w.decided, w.approvers], [[], []], 'a failed rerun on a head awaiting its refresh is not reworked');
 });
 
 test('unit:base-failure-refresh-blocked — once main is green each blocked candidate is refreshed onto the repaired base once, and the approval binding survives the refresh', async () => {
