@@ -174,8 +174,11 @@ export const installCommands = defineCommands([
       // The committed documentation policy against the deployed one (GY-293): the control plane
       // reads only GRAPHYARD_DOCUMENTATION, so an unredeployed graphyard.json edit is drift.
       const committedDocumentation = await readDocumentationConfig(root).catch((error: any) => ({ error: error.message as string }));
-      const documentation = committedDocumentation && 'error' in committedDocumentation ? { committed: null, deployed: live?.documentation ?? null, drift: null, error: committedDocumentation.error }
-        : { committed: committedDocumentation, deployed: live?.documentation ?? null, drift: live?.documentation ? documentationDrift(committedDocumentation, live.documentation)?.attention ?? null : null };
+      // A reachable control plane that does not report its policy predates GY-293: drift is then
+      // unknown, not absent, and doctor says so rather than printing a null that reads as agreement.
+      const documentationUnknown = live && !live.documentation ? 'The control plane does not report its documentation policy (it predates GY-293); redeploy it to compare against graphyard.json' : null;
+      const documentation = committedDocumentation && 'error' in committedDocumentation ? { committed: null, deployed: live?.documentation ?? null, drift: null, unknown: null, error: committedDocumentation.error }
+        : { committed: committedDocumentation, deployed: live?.documentation ?? null, drift: live?.documentation ? documentationDrift(committedDocumentation, live.documentation)?.attention ?? null : null, unknown: committedDocumentation ? documentationUnknown : null };
       // Capacity drift and production lag are the two installation facts a deploy can break
       // silently; the server reports both and doctor repeats them beside the App preflight.
       const delegationLimits = live?.delegationLimits ?? null, production = live?.production ?? null;

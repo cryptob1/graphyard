@@ -664,6 +664,69 @@ test('unit:approver-exhaustion-fails-over — an approver session stopped on its
   assert.equal((await reload(work.id)).capacity!.exhaustions.length, 1);
 });
 
+/** Spend the approver the loop launched on its provider limit, as the weekly-limit menu leaves it. */
+const spendApprover = (herdr: Herdr, name: string) => {
+  herdr.agents.find(agent => agent.name === name)!.agent_status = 'idle';
+  herdr.output[name] = "  ⎿ You've hit your weekly limit · resets Sep 26, 10pm\n";
+};
+/** Count the loop's hold and capacity-report writes, passing each to the real one. */
+const countWrites = (effects: DaemonEffects) => {
+  const writes = { held: [] as string[], reported: 0 };
+  const hold = effects.holdAccount!, report = effects.reportCapacity!;
+  effects.holdAccount = async (account, observed) => { writes.held.push(account); return hold(account, observed); };
+  effects.reportCapacity = async (work, event) => { writes.reported += 1; return report(work, event); };
+  return writes;
+};
+
+test('a retried approver failover whose session could not be closed holds the account and reports the exhaustion once (GY-489)', async () => {
+  const { config, herdr, decisions, launches, work, cycle, calls, effects } = await approverLoop('close-retry');
+  const writes = countWrites(effects);
+  const close = effects.closeSession;
+  let refuse = true;
+  effects.closeSession = pane => { if (refuse && pane === 'pane-approver-0') throw new Error('the pane did not answer'); return close(pane); };
+  const state = emptyDaemonState(config);
+  await cycle(state);
+  const name = approverSessionName(work, decisions[0].id);
+  spendApprover(herdr, name);
+  const failed = (await cycle(state)).actions.find(action => action.kind === 'failover');
+  assert.equal(failed?.state, 'failed', JSON.stringify(failed));
+  assert.match(failed!.detail, /could not be closed/);
+  assert.deepEqual([writes.held, writes.reported, launches], [['env-a'], 1, ['env-a']], 'the hold and the report are written before the close fails, and nothing is relaunched');
+
+  refuse = false;
+  const retried = (await cycle(state)).actions.find(action => action.kind === 'failover');
+  assert.equal(retried?.state, 'done', JSON.stringify(retried));
+  assert.deepEqual(calls.closed, ['pane-approver-0']);
+  assert.deepEqual(launches, ['env-a', 'env-b'], 'the retry fails the decision over to the other account');
+  assert.deepEqual([writes.held, writes.reported], [['env-a'], 1], 'the retry writes neither the hold nor the report again');
+  assert.equal((await events(work)).filter(event => event.kind === 'capacity.exhausted').length, 1, 'one spent session leaves one exhaustion record');
+  assert.equal((await reload(work.id)).capacity!.exhaustions.length, 1);
+});
+
+test('an approver failover whose capacity report fails after the hold retries the report without holding the account again (GY-489)', async () => {
+  const { config, herdr, decisions, launches, work, cycle, effects } = await approverLoop('report-retry');
+  const writes = countWrites(effects);
+  const report = effects.reportCapacity!;
+  let refuse = true;
+  effects.reportCapacity = async (item, event) => { if (refuse) { writes.reported += 1; throw new Error('the control plane answered 503'); } return report(item, event); };
+  const state = emptyDaemonState(config);
+  await cycle(state);
+  spendApprover(herdr, approverSessionName(work, decisions[0].id));
+  const failed = (await cycle(state)).actions.find(action => action.kind === 'failover');
+  assert.equal(failed?.state, 'failed', JSON.stringify(failed));
+  assert.match(failed!.detail, /503/);
+  assert.deepEqual([writes.held, writes.reported, launches], [['env-a'], 1, ['env-a']]);
+  assert.equal((await events(work)).filter(event => event.kind === 'capacity.exhausted').length, 0, 'the failed report recorded nothing');
+
+  refuse = false;
+  const retried = (await cycle(state)).actions.find(action => action.kind === 'failover');
+  assert.equal(retried?.state, 'done', JSON.stringify(retried));
+  assert.deepEqual(writes.held, ['env-a'], 'the account held before the report failed is not held again');
+  assert.equal(writes.reported, 2, 'the report that failed is retried');
+  assert.equal((await events(work)).filter(event => event.kind === 'capacity.exhausted').length, 1, 'one spent session leaves one exhaustion record');
+  assert.deepEqual(launches, ['env-a', 'env-b']);
+});
+
 test('unit:exhaustion-shared-across-roles — an account a worker session exhausted is skipped by the approver, reviewer, producer and registry-chosen launches until its reset, and is eligible again after it', async () => {
   await fresh();
   const sharedHome = await mkdtemp(join(tmpdir(), 'graphyard-capacity-shared-'));
