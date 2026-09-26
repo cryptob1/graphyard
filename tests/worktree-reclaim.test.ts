@@ -60,6 +60,11 @@ function work(key: string, overrides: Partial<Work> = {}): Work {
     ready: false, epoch: 1, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false,
     scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [], violations: [], ...overrides } as Work;
 }
+/** A finished attempt session on epoch 1 that ended `ago` milliseconds before now. */
+function endedSession(ago: number) {
+  const endedAt = new Date(Date.now() - ago).toISOString();
+  return { id: 'graphyard-worker-1:1', kind: 'implementation', principal: 'graphyard-worker-1', epoch: 1, runtime: 'claude', host: 'vishrog', workspace: null, tab: null, pane: null, agentName: null, role: null, head: null, attach: null, transcript: null, subject: 'attempt', startedAt: endedAt, updatedAt: endedAt, endedAt, state: 'finished', outcome: 'submitted' };
+}
 const workspace = (path: string, branch: string, epoch: number) => ({ host: 'vishrog', path, branch, epoch, owner: 'graphyard-worker-1' });
 function config(credentialFile: string, run: Partial<MasterRun> = {}): MasterConfig {
   return masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile, cliPath: launcher,
@@ -332,13 +337,13 @@ test('unit:worktree-reclaim-executes — the reclaim step removes delivered and 
     // A shared install linked in is untracked to Git, and still no reason to keep the tree.
     await symlink(join(root, 'node_modules'), join(ended.path, 'node_modules'));
     for (const tree of [ended, live, dirty, unpushed, session]) await idleFor(tree.path, 4 * hour);
-    const finished = { id: 'graphyard-worker-1:1', kind: 'implementation', principal: 'graphyard-worker-1', epoch: 1, runtime: 'claude', host: 'vishrog', workspace: null, tab: null, pane: null, agentName: null, role: null, state: 'finished', outcome: 'submitted' };
+    const finished = endedSession(4 * hour);
     const snapshot = [
       work('GY-90', { stage: 'done', workspaces: [workspace(delivered.path, delivered.branch, 1)] }),
       work('GY-91', { workspaces: [workspace(ended.path, ended.branch, 1)], sessions: [finished] } as Partial<Work>),
       work('GY-92', { lease: { epoch: 1, owner: 'graphyard-worker-1', expiresAt: new Date(Date.now() + hour).toISOString() }, workspaces: [workspace(live.path, live.branch, 1)] }),
-      work('GY-93', { workspaces: [workspace(dirty.path, dirty.branch, 1)] }),
-      work('GY-94', { workspaces: [workspace(unpushed.path, unpushed.branch, 1)] }),
+      work('GY-93', { workspaces: [workspace(dirty.path, dirty.branch, 1)], sessions: [finished] } as Partial<Work>),
+      work('GY-94', { workspaces: [workspace(unpushed.path, unpushed.branch, 1)], sessions: [finished] } as Partial<Work>),
       work('GY-95', { workspaces: [workspace(session.path, session.branch, 1)], sessions: [{ ...finished, state: 'running', outcome: null }] } as Partial<Work>),
     ];
     const heads = Object.fromEntries([delivered, ended].map(tree => [tree.path, git(tree.path, 'rev-parse', 'HEAD')]));
@@ -378,7 +383,7 @@ test('unit:worktree-reclaim-executes — the reclaim step removes delivered and 
       assert.equal(entry.action, 'worktree-remove');
       assert.equal(entry.head, heads[entry.path]);
       assert.ok(['GY-90', 'GY-91'].includes(entry.key));
-      assert.match(entry.reason, entry.key === 'GY-90' ? /GY-90 is delivered/ : /Untouched for \d+ minutes/);
+      assert.match(entry.reason, entry.key === 'GY-90' ? /GY-90 is delivered/ : /last session ended \d+ minutes ago.*Untouched for \d+ minutes/);
     }
   } finally { await rm(root, { recursive: true, force: true }); }
 });
@@ -441,4 +446,78 @@ test('unit:worktree-reclaim-bounded — removal is bounded per cycle and drains 
     assert.match(source, /statusWorktreeInventory\(root\)/);
     assert.doesNotMatch(source, /inventoryWorktrees\(/);
   } finally { await rm(root, { recursive: true, force: true }); await rm(credentials, { recursive: true, force: true }); await rm(scratch, { recursive: true, force: true }); }
+});
+
+// GY-382: the follow-ups from GY-360's review. The idle rule is judged by when the tree's last
+// session ended, not only by the tree's mtime; a held tree is re-examined once the refs that could
+// hold its commits move; and a directory Git does not register is never judged through `git -C`.
+test('unit:worktree-removal-follows-session-end — only a tree whose session ended past the idle bound goes; unregistered, sessionless, recently ended and parked trees stay', async () => {
+  const root = await host(false);
+  try {
+    const idleMs = 3 * hour;
+    const ended = assignment(root, 'GY-120', 1), stray = assignment(root, 'GY-121', 1), none = assignment(root, 'GY-122', 1);
+    const recent = assignment(root, 'GY-123', 1), parked = assignment(root, 'GY-124', 1);
+    for (const tree of [ended, stray, none, recent, parked]) await idleFor(tree.path, 4 * hour);
+    const snapshot = [
+      work('GY-120', { workspaces: [workspace(ended.path, ended.branch, 1)], sessions: [endedSession(4 * hour)] } as Partial<Work>),
+      // GY-121 is registered by no item at all.
+      work('GY-122', { workspaces: [workspace(none.path, none.branch, 1)] }),
+      work('GY-123', { workspaces: [workspace(recent.path, recent.branch, 1)], sessions: [endedSession(hour)] } as Partial<Work>),
+      work('GY-124', { workspaces: [workspace(parked.path, parked.branch, 1)], sessions: [endedSession(4 * hour)], humanRequest: { kind: 'goals-and-priorities' } } as unknown as Partial<Work>),
+    ];
+    const report = await removeReclaimableWorktrees(root, snapshot, { idleMs, run: runChild, baseBranch: 'main' });
+    assert.deepEqual(report.removed.map(entry => entry.key), ['GY-120']);
+    assert.match(report.removed[0].reason, /GY-120 epoch 1's last session ended \d+ minutes ago, past the 180-minute idle bound/);
+    for (const tree of [stray, none, recent, parked]) assert.equal(await exists(join(tree.path, 'source.ts')), true, `${tree.path} was removed`);
+    assert.deepEqual(report.errors, []);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('unit:worktree-held-reexamined-after-push — a tree kept for unpushed commits is judged again once those commits reach a remote or the base branch', async () => {
+  const root = await host(false);
+  try {
+    const idleMs = 3 * hour;
+    const tree = assignment(root, 'GY-130', 1);
+    await writeFile(join(tree.path, 'source.ts'), 'export const value = 5;\n');
+    execFileSync('git', ['commit', '-qam', 'unpushed'], { cwd: tree.path });
+    await idleFor(tree.path, 4 * hour);
+    const snapshot = [work('GY-130', { workspaces: [workspace(tree.path, tree.branch, 1)], sessions: [endedSession(4 * hour)] } as Partial<Work>)];
+    const pass = async () => {
+      const report = await removeReclaimableWorktrees(root, snapshot, { idleMs, run: runChild, baseBranch: 'main' });
+      await writeWorktreeInventoryCache(root, { at: report.at, entries: report.entries, held: report.held });
+      return report;
+    };
+    const first = await pass();
+    assert.match(first.kept[0].reason, /Unpushed commits/);
+    assert.equal(first.held.length, 1);
+    // Nothing moved: the hold is reused and git is not asked about the tree again.
+    const calls: string[][] = [];
+    const second = await removeReclaimableWorktrees(root, snapshot, { idleMs, run: (command, args) => { calls.push(args); return runChild(command, args); }, baseBranch: 'main' });
+    assert.match(second.kept[0].reason, /Unpushed commits/);
+    assert.ok(!calls.some(args => args.includes(tree.path)), 'a held tree was examined again with nothing changed');
+    // The commit reaches the base branch without the working tree changing: the tree is judged again, and goes.
+    execFileSync('git', ['merge', '-q', '--ff-only', tree.branch], { cwd: root });
+    const third = await pass();
+    assert.deepEqual(third.removed.map(entry => entry.key), ['GY-130']);
+    assert.equal(await exists(tree.path), false);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('unit:worktree-removal-registered-only — a directory under the worktree root that Git does not register is kept, never judged clean through an enclosing repository', async () => {
+  const root = await host(false);
+  try {
+    const idleMs = 3 * hour;
+    const path = join(worktreesDirectory(root), 'GY-140-1');
+    await mkdir(path, { recursive: true });
+    await writeFile(join(path, 'notes.txt'), 'not a worktree\n');
+    const when = new Date(Date.now() - 4 * hour);
+    await utimes(join(path, 'notes.txt'), when, when); await utimes(path, when, when);
+    const snapshot = [work('GY-140', { workspaces: [workspace(path, 'graphyard/gy-140-1', 1)], sessions: [endedSession(4 * hour)] } as Partial<Work>)];
+    const calls: string[][] = [];
+    const report = await removeReclaimableWorktrees(root, snapshot, { idleMs, run: (command, args) => { calls.push(args); return runChild(command, args); }, baseBranch: 'main' });
+    assert.deepEqual(report.removed, []);
+    assert.match(report.kept[0].reason, /Not a registered Git worktree/);
+    assert.ok(!calls.some(args => args[1] === path), 'git ran inside a directory it does not register');
+    assert.equal(await readFile(join(path, 'notes.txt'), 'utf8'), 'not a worktree\n');
+  } finally { await rm(root, { recursive: true, force: true }); }
 });

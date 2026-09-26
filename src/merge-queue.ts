@@ -1336,3 +1336,13 @@ export function describeMergeBatches(all: Work[], placements: QueuePlacement[], 
 export function queueBatch(work: Pick<Work, 'key'>, all: Work[], now: number, batchSize: number, ciAppIds: readonly number[] | null): MergeBatchView | null {
   return describeMergeBatches(all, predictQueue(all, now), batchSize, ciAppIds).get(work.key) ?? null;
 }
+
+/**
+ * The queue entries a delivery or an ejection wakes: the next `depth` live entries in queue order,
+ * not all of them. On 2026-09-25 each delivery woke all 30 queued entries at once; the server
+ * observes one job at a time at 10-13 s each, so the new head waited behind a five-minute flood of
+ * entries that could not land yet. The rest keep their own schedule (github.ts observationBand).
+ */
+export function nextQueueEntries<W extends { id: string; stage: string; queue?: { sequence: number } | null }>(all: readonly W[], exclude: string, depth: number): W[] {
+  return all.filter(other => other.id !== exclude && other.stage !== 'done' && other.queue).sort((a, b) => a.queue!.sequence - b.queue!.sequence).slice(0, depth);
+}
