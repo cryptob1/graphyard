@@ -18,6 +18,7 @@ import { maxMergeBatchSize, mergeBatchSizeEvent } from '../../merge-queue.js';
 import { eventStats } from '../../store/snapshot-delta.js';
 import { productionEnvironmentEvent, productionEnvironmentName, resolvedProductionEnvironment } from '../../flow-analytics.js';
 import { boardFromStatus } from '../../model/board.js';
+import { boundedSnapshot, workDocument } from '../../store/bounded-snapshot.js';
 
 /** Control-plane status and the work reads every client polls. */
 export const statusRoutes = defineRoutes('status', [
@@ -126,25 +127,29 @@ export const statusRoutes = defineRoutes('status', [
   {
     method: 'GET', path: '/api/work-snapshot',
     async handle({ actor, req, url, services, operatorVisible }) {
-      // The coordination view is the bounded read the master loop and dispatcher poll
-      // (work-view.ts); without it the snapshot carries every document whole.
+      // Three views. The default (GY-422) is what every reader uses: open items whole, and each
+      // settled delivery as its summary (key, stage, delivery; store/summary-sql.ts), whose history
+      // `GET /api/work/:id` answers per item. The coordination view is the bounded read the master
+      // loop and dispatcher poll (work-view.ts). `view=full` carries every document whole, for an
+      // export; no product reader asks for it, as it grows with the ledger.
       const requested = url.searchParams.get('view') ?? req.headers[coordinationViewHeader.toLowerCase()];
-      const view = z.enum(['full', 'coordination']).parse(Array.isArray(requested) ? requested[0] : requested ?? 'full');
+      const view = z.enum(['bounded', 'full', 'coordination']).parse(Array.isArray(requested) ? requested[0] : requested ?? 'bounded');
       // Bounded catch-up: items that predate the per-item timeline gain one from their own
       // ledger before the snapshot every speed report is derived from is read. The ledger is read
       // outside the coordination lock, one run at a time; it converges and then costs one small
       // query per settle window; a failure is reported through /api/status, never here.
       //
-      // It rides the full read alone, which is the read its output is for: master status derives
-      // every speed report from whole documents. The coordination view is the inverted loop's
+      // It rides the default and full reads, which are the reads its output is for: master status
+      // derives every speed report from their timelines. The coordination view is the inverted loop's
       // poll — the cycle, the dispatcher and every stateless executor ask for it every few
       // seconds — and a ledger reconstruction in front of those reads would sit in the path of
       // every claim, so a fleet that polls harder would pay reconstruction latency to act.
-      if (view === 'full') await catchUpPipelineTimelines(services.engine.store);
+      if (view !== 'coordination') await catchUpPipelineTimelines(services.engine.store);
       const scope = <T extends { work: Work[]; jobs: IntegrationJob[] }>(snapshot: T) => {
         const visibleWork = operatorVisible(snapshot.work);
         return { ...snapshot, work: visibleWork, jobs: actor.role === 'operator-agent' ? snapshot.jobs.filter(job => visibleWork.some(work => work.id === job.work_id)) : snapshot.jobs };
       };
+      if (view === 'bounded') return { ...scope(await boundedSnapshot(services.engine.store.pool)), view };
       if (view === 'full') return scope(await services.engine.store.workSnapshot());
       // The coordination view is trimmed in the database (GY-185): the histories it bounds never
       // leave it whole, and what the SQL cut is added to what the view says it left out.
@@ -158,6 +163,16 @@ export const statusRoutes = defineRoutes('status', [
     },
   },
   { method: 'GET', path: '/api/work', handle: async ({ services, operatorVisible }) => operatorVisible(await services.engine.store.list()) },
+  {
+    // One item's whole document, history included, by id or display key (GY-422): what a reader
+    // asks for when the snapshot's summary of a settled delivery is not enough.
+    method: 'GET', path: /^\/api\/work\/([^/]+)$/,
+    async handle({ services, operatorVisible }, [id]) {
+      const work = await workDocument(services.engine.store.pool, decodeURIComponent(id));
+      demand(work && operatorVisible([work]).length, 'Work item not found', 404);
+      return work;
+    },
+  },
   {
     // The history read: filtered by kind and time, paged by ledger sequence, with the routine
     // rows the control plane writes continuously summarised instead of paged through. `rows`
