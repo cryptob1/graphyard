@@ -2,7 +2,7 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import type { ConfigReload, MasterConfig } from '../master.js';
 import { acquireDaemonLock, type DaemonAction, type DaemonState, message, storeAction } from './state.js';
-import { faultClassPolicyFromEnv } from '../model/fault-classes.js';
+import { faultClassPolicyFromEnv, type FaultClassPolicy } from '../model/fault-classes.js';
 import { faultRecurrenceReport } from './faults.js';
 import { latencyBudget, silenceReport } from './metrics.js';
 import { boundedPersist, cycleCost, cycleTimes, cycleDelay, cycleFailureCeiling, describeFailingCall, loopLiveness, namedEffects, noteCycleFailure, noteCycleSuccess, noteUnhandled, watchdogPlan } from './liveness.js';
@@ -10,8 +10,12 @@ import type { DaemonEffects } from './effects.js';
 import { Launcher, defaultLaunchConcurrency, runCycle } from './cycle.js';
 import { describeTimings } from '../master/timings.js';
 
-/** The compact daemon view `master status` joins onto Graphyard truth. */
-export function daemonSummary(state: DaemonState, now: number, intervalMs: number, hostId?: string) {
+/**
+ * The compact daemon view `master status` joins onto Graphyard truth. `faultPolicy` is the recurrence
+ * rule the faults are reported under: the loop passes the one it files by (effects.faultClassPolicy),
+ * so the reported window and threshold are the filing ones; absent, the environment's.
+ */
+export function daemonSummary(state: DaemonState, now: number, intervalMs: number, hostId?: string, faultPolicy: FaultClassPolicy = faultClassPolicyFromEnv(process.env)) {
   const lastCycleAt = state.lastCycleAt ? Date.parse(state.lastCycleAt) : Number.NaN;
   const lagMs = Number.isFinite(lastCycleAt) ? now - lastCycleAt : null;
   const recent = Object.entries(state.actions).map(([key, action]) => ({ key, ...action })).sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
@@ -44,10 +48,10 @@ export function daemonSummary(state: DaemonState, now: number, intervalMs: numbe
     // Every decision the loop has put to an approver and not yet seen applied and retired.
     approvals: Object.entries(state.approvals).map(([key, watch]) => ({ key, ...watch })),
     // Fault instances by class in the recurrence window, and the item each recurring class filed (GY-173).
-    faults: faultRecurrenceReport(state, faultClassPolicyFromEnv(process.env), now),
+    faults: faultRecurrenceReport(state, faultPolicy, now),
     // Required checks failing on the base head as well as on the candidates they hold (GY-528).
     baseFailures: Object.values(state.baseFailures),
-    // The system invariants as the last cycle judged them (GY-404): one line per invariant, with its threshold and reading.
+    // The system invariants as the last observation judged them (GY-404): one line per invariant, with its threshold and reading.
     invariants: { at: state.invariants.at, violated: state.invariants.report.filter(check => !check.holds).length, lines: state.invariants.report.map(check => check.line), checks: state.invariants.report },
   };
 }

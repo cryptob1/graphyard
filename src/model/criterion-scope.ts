@@ -66,9 +66,9 @@ export function criterionSymbols(criteria: readonly ScopeCriterion[]): Criterion
   return [...found.values()];
 }
 
-/** The identifiers a file declares or exports (`declared`; `exported` those it only lists in an export), and the members its objects, classes and types define (`members`). */
+/** The identifiers a file declares or exports (`declared`; `exported` those it only lists in an export; `api` every one it exports, either way), and the members its objects, classes and types define (`members`). */
 function definedIdentifiers(source: string) {
-  const declared = new Set<string>(), members = new Set<string>(), exported = new Set<string>();
+  const declared = new Set<string>(), members = new Set<string>(), exported = new Set<string>(), api = new Set<string>();
   // An import names a symbol another file defines: it is neither a declaration nor a member here.
   const text = source.replace(/^\s*import\s[\s\S]*?\bfrom\s*['"][^'"]+['"]\s*;?/gm, '');
   for (const match of text.matchAll(/\bexport\s*(?:type\s*)?\{([^}]*)\}/g)) for (const entry of match[1].split(',')) {
@@ -78,10 +78,12 @@ function definedIdentifiers(source: string) {
   // Export lists read, they are cut away: `type X` inside one names a symbol, not a declaration here.
   const code = text.replace(/\bexport\s*(?:type\s*)?\{[^}]*\}/g, '');
   for (const match of code.matchAll(/\b(?:function\*?|class|interface|type|enum|const|let|var)\s+([A-Za-z_$][\w$]*)/g)) declared.add(match[1]);
+  for (const match of code.matchAll(/\bexport\s+(?:default\s+)?(?:declare\s+)?(?:abstract\s+)?(?:async\s+)?(?:function\*?|class|interface|type|enum|const|let|var)\s+([A-Za-z_$][\w$]*)/g)) api.add(match[1]);
+  for (const name of exported) api.add(name);
   for (const name of exported) if (!declared.has(name)) declared.add(name); else exported.delete(name);
   // A property (`name:`), a field (`name =`) or a method (`name(…) {`) — never a call statement (`name(…);`).
   for (const match of text.matchAll(/^\s*(?:(?:public|private|protected|readonly|static|async|get|set)\s+)*([A-Za-z_$][\w$]*)\??\s*(?::(?!:)|=(?![=>])|\([^()]*\)\s*(?::[^{;=]*)?\{)/gm)) members.add(match[1]);
-  return { declared, members, exported };
+  return { declared, members, exported, api };
 }
 /** The identifiers a file calls directly: `name(`, never a declaration of it. */
 function calledIdentifiers(text: string) {
@@ -95,17 +97,19 @@ const spells = (identifier: string, phrase: string) => {
 };
 const literal = (text: string, value: string) => new RegExp(`['"\`]${escapeRegExp(value)}(?:['"\`/?]|\\$\\{)`).test(text);
 
-/** The most files on the base that may mention an identifier a phrase spells for a call of it to ground a file: more, and it is shared plumbing, not the criterion's behaviour. */
+/** The most files on the base that may mention an identifier a phrase spells for a call or an unexported declaration of it to ground a file: more, and it is shared plumbing or a common local name, not the criterion's behaviour. */
 export const criterionCallersMax = 10;
 /**
- * The identifiers `text` calls that spell a phrase of the criteria: the ones whose spread over the
- * base tree the caller searches for (`criterionSymbolGround`'s `mentions`) before a call of one
- * can ground the file.
+ * The identifiers `text` calls or declares without exporting that spell a phrase of the criteria:
+ * the ones whose spread over the base tree the caller searches for (`criterionSymbolGround`'s
+ * `mentions`) before one can ground the file.
  */
 export function phraseCallees(text: string | null, symbols: readonly CriterionSymbol[]) {
   if (!text) return [];
   const phrases = symbols.filter(entry => entry.kind === 'phrase');
-  return [...calledIdentifiers(text)].filter(name => phrases.some(entry => spells(name, entry.symbol)));
+  const { declared, api } = definedIdentifiers(text);
+  const bounded = new Set([...calledIdentifiers(text), ...[...declared].filter(name => !api.has(name))]);
+  return [...bounded].filter(name => phrases.some(entry => spells(name, entry.symbol)));
 }
 
 /**
@@ -113,13 +117,16 @@ export function phraseCallees(text: string | null, symbols: readonly CriterionSy
  * or null. An identifier counts where the file declares, defines or calls it; a config key where
  * it declares or reads it; a route where it holds it as a string; a CLI command where the file is
  * named for it or dispatches on its word. A phrase spells an identifier less exactly than code
- * names one, so it grounds the file that declares that identifier, or a file that calls it when
- * the base-tree search (`mentions`, files per identifier) finds it in at most criterionCallersMax
- * files. A mere mention — an import, a comment, prose — grounds nothing.
+ * names one, so it grounds the file that exports that identifier, or a file that declares it
+ * without exporting it or calls it when the base-tree search (`mentions`, files per identifier)
+ * finds it in at most criterionCallersMax files: a common phrase (`decision id`) spells locals
+ * (`decisionId`) in files that do not hold the criterion's behaviour. A mere mention — an import,
+ * a comment, prose — grounds nothing.
  */
 export function criterionSymbolGround(path: string, text: string | null, symbols: readonly CriterionSymbol[], mentions: ReadonlyMap<string, number> = new Map()): string | null {
   if (!text || pathScope(path).prefix) return null;
-  const { declared, members, exported } = definedIdentifiers(text), called = calledIdentifiers(text);
+  const { declared, members, exported, api } = definedIdentifiers(text), called = calledIdentifiers(text);
+  const few = (name: string) => (mentions.get(name) ?? Infinity) <= criterionCallersMax;
   const defines = (name: string) => exported.has(name) ? 'exports' : 'defines';
   const base = path.split('/').at(-1)!.replace(/\.[^.]+$/, '');
   for (const entry of symbols) {
@@ -143,11 +150,11 @@ export function criterionSymbolGround(path: string, text: string | null, symbols
   }
   const phrases = symbols.filter(entry => entry.kind === 'phrase');
   for (const { criterion, symbol } of phrases) {
-    const definer = [...declared].find(name => spells(name, symbol));
+    const definer = [...declared].find(name => spells(name, symbol) && (api.has(name) || few(name)));
     if (definer) return `${path} ${defines(definer)} ${definer}, the "${symbol}" ${criterion} names`;
   }
   for (const { criterion, symbol } of phrases) {
-    const caller = [...called].find(name => spells(name, symbol) && (mentions.get(name) ?? Infinity) <= criterionCallersMax);
+    const caller = [...called].find(name => spells(name, symbol) && few(name));
     if (caller) return `${path} calls ${caller}, the "${symbol}" ${criterion} names`;
   }
   return null;
