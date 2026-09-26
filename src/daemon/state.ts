@@ -9,7 +9,7 @@ import { boundDetail } from './decisions.js';
 import { classified, faultClasses, faultInstanceSchema, noteActionOutcome, type FaultKind } from '../model/fault-classes.js';
 import { timingsSchema } from '../master/timings.js';
 
-export const daemonActionKinds = ['close', 'dispatch', 'review', 'refresh', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session', 'reclaim', 'decision', 'scope', 'settle', 'failover', 'capacity', 'human', 'preserve', 'fault', 'upgrade'] as const;
+export const daemonActionKinds = ['close', 'dispatch', 'review', 'refresh', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session', 'reclaim', 'decision', 'scope', 'settle', 'failover', 'capacity', 'human', 'preserve', 'fault'] as const;
 export type DaemonActionKind = typeof daemonActionKinds[number];
 /** A failed action is a pipeline fault; its kind in the fault catalogue (GY-173) follows the action's kind. */
 export const daemonActionFaultKind = (kind: DaemonActionKind) => `action:${kind}` as FaultKind;

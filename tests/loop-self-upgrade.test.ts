@@ -7,7 +7,8 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import type { Work } from '../src/model.js';
-import { deploymentObservationSchema, describeSelfUpgrade, emptyDaemonState, runDaemon, performSelfUpgrade, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
+import { deploymentObservationSchema, emptyDaemonState, runDaemon, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
+import { describeSelfUpgrade, performSelfUpgrade } from '../src/daemon/upgrade.js';
 import { releaseLag, readBaseTip, releaseLagGraceMs, upgradeRefusalAttention } from '../src/master/release-lag.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
 import { writeExecutorRegistration, type ExecutorRegistration } from '../src/executor-fleet.js';
@@ -84,12 +85,12 @@ const verified = (sha: string): DaemonState['deployment'] =>
 const restarted = (to: string) => ({ result: 'restarted' as const, reason: null, coordinator: { commit: to }, held: [], restarted: [], unsupervised: [], forgotten: [] });
 
 interface UpgradeRecording { executors: (string | null)[]; self: number; persisted: number }
-const recording = (fake: FakeGit, behaviour: 'restart' | 'refuse' = 'restart'): { deps: () => Parameters<typeof performSelfUpgrade>[2]; calls: UpgradeRecording } => {
+const recording = (fake: FakeGit, root: string, behaviour: 'restart' | 'refuse' = 'restart'): { deps: () => Parameters<typeof performSelfUpgrade>[2]; calls: UpgradeRecording } => {
   const calls: UpgradeRecording = { executors: [], self: 0, persisted: 0 };
   return {
     calls,
     deps: () => ({
-      root: '/srv/graphyard',
+      root,
       run: fake.run,
       restartExecutors: async to => {
         calls.executors.push(to);
@@ -104,6 +105,8 @@ const recording = (fake: FakeGit, behaviour: 'restart' | 'refuse' = 'restart'): 
 
 test('unit:loop-self-upgrade — between cycles the loop checks out the verified deployed release: a src/ delivery restarts the executors and then itself, a docs-only delivery restarts nothing, and a dirty or non-detached checkout is never touched and is named instead', async () => {
   const { master, dispose } = await fixture();
+  // A real checkout as deps.root: the loaded release is read from it with the shipped git.
+  const checkout = await repository();
   try {
     const loaded = hex('a'), tip = hex('b'), newer = hex('c');
     const fake = new FakeGit(loaded, tip);
@@ -114,8 +117,7 @@ test('unit:loop-self-upgrade — between cycles the loop checks out the verified
     fake.diffPaths = ['src/daemon/run.ts'];
     const src = emptyDaemonState(master);
     src.deployment = verified(tip);
-    src.release = { commit: loaded, dirty: false };
-    const code = recording(fake);
+    const code = recording(fake, checkout);
     const upgraded = await performSelfUpgrade(master, src, code.deps());
     assert.deepEqual({ outcome: upgraded.outcome, from: 'from' in upgraded && upgraded.from, to: 'to' in upgraded && upgraded.to, code: 'code' in upgraded && upgraded.code, self: 'self' in upgraded && upgraded.self },
       { outcome: 'upgraded', from: loaded, to: tip, code: true, self: true });
@@ -125,12 +127,13 @@ test('unit:loop-self-upgrade — between cycles the loop checks out the verified
     assert.deepEqual(code.calls.executors, [tip], 'the executors were restarted against exactly the checked-out tip, after it');
     assert.equal(code.calls.self, 1, 'and the loop re-executed itself last');
     assert.deepEqual(src.upgrade, { alignedRelease: tip, pending: null, last: { at: iso(0), from: loaded, to: tip, code: true, executors: 'restarted', self: true }, refused: null });
-    const done = Object.values(src.actions).find(action => action.kind === 'upgrade' && action.state === 'done');
+    assert.deepEqual(src.release, { commit: git(checkout, 'rev-parse', 'HEAD'), dirty: false }, 'the loaded release was read from this checkout the first time the loop looked at it');
+    const done = Object.values(src.actions).find(action => action.kind === 'config' && action.state === 'done');
     assert.match(done!.detail, /loaded code moved, the executors were restarted/);
     assert.ok(code.calls.persisted >= 3, 'the cursor was written as the upgrade progressed');
 
     // The same release is never aligned twice: the next between-cycles pass skips without a fetch.
-    const again = recording(fake);
+    const again = recording(fake, checkout);
     const repeat = await performSelfUpgrade(master, src, again.deps());
     assert.equal(repeat.outcome, 'skipped');
     assert.equal(fake.fetches, 1, 'no second fetch');
@@ -143,7 +146,7 @@ test('unit:loop-self-upgrade — between cycles the loop checks out the verified
     const docs = emptyDaemonState(master);
     docs.deployment = verified(newer);
     docs.release = { commit: tip, dirty: false };
-    const quiet = recording(fake);
+    const quiet = recording(fake, checkout);
     const docsOnly = await performSelfUpgrade(master, docs, quiet.deps());
     assert.equal(docsOnly.outcome, 'upgraded');
     assert.equal(docsOnly.outcome === 'upgraded' && docsOnly.code, false, 'a docs-only diff touches no loaded code');
@@ -160,7 +163,7 @@ test('unit:loop-self-upgrade — between cycles the loop checks out the verified
     fake.dirty = ' M src/daemon/run.ts\n';
     dirtyState.deployment = verified(dirtyTip);
     dirtyState.release = { commit: newer, dirty: false };
-    const held = recording(fake);
+    const held = recording(fake, checkout);
     const refusedDirty = await performSelfUpgrade(master, dirtyState, held.deps());
     assert.deepEqual({ outcome: refusedDirty.outcome, commit: refusedDirty.outcome === 'refused' ? refusedDirty.commit : null }, { outcome: 'refused', commit: newer });
     assert.equal(fake.checkoutTo, newer, 'the checkout was not moved');
@@ -175,7 +178,7 @@ test('unit:loop-self-upgrade — between cycles the loop checks out the verified
     fake.branch = 'refs/heads/main';
     const branched = emptyDaemonState(master);
     branched.deployment = verified(dirtyTip);
-    const heldBranch = recording(fake);
+    const heldBranch = recording(fake, checkout);
     const refusedBranch = await performSelfUpgrade(master, branched, heldBranch.deps());
     assert.equal(refusedBranch.outcome, 'refused');
     assert.match(refusedBranch.outcome === 'refused' ? refusedBranch.reason : '', /HEAD holds refs\/heads\/main instead of standing detached/);
@@ -185,7 +188,7 @@ test('unit:loop-self-upgrade — between cycles the loop checks out the verified
     // No verified deployment, no upgrade: not even a fetch.
     const unverified = emptyDaemonState(master);
     unverified.deployment = deploymentObservationSchema.parse({ source: 'unavailable', sha: null, at: iso(0), reason: 'no deployment endpoint', deployed: [], pending: [] });
-    const idle = recording(fake);
+    const idle = recording(fake, checkout);
     assert.equal((await performSelfUpgrade(master, unverified, idle.deps())).outcome, 'skipped');
     assert.equal(fake.fetches, 4, 'the skip fetched nothing: one alignment each for src, docs, dirty and branch');
 
@@ -197,14 +200,14 @@ test('unit:loop-self-upgrade — between cycles the loop checks out the verified
     busy.deployment = verified(busyTip);
     busy.release = { commit: dirtyTip, dirty: false };
     fake.diffPaths = ['src/daemon/run.ts'];
-    const refusedFleet = recording(fake, 'refuse');
+    const refusedFleet = recording(fake, checkout, 'refuse');
     const blocked = await performSelfUpgrade(master, busy, refusedFleet.deps());
     assert.equal(blocked.outcome, 'failed');
     assert.match(blocked.outcome === 'failed' ? blocked.reason : '', /the executors were not restarted: .*exec-1 holds merge for GY-7/);
     assert.equal(fake.checkoutTo, busyTip, 'the checkout moved before the refused restart');
     assert.deepEqual(busy.upgrade.pending, { from: newer, to: busyTip, code: true }, 'the restarts stay owed on the cursor');
     assert.equal(busy.upgrade.alignedRelease, null, 'and the release is not marked aligned');
-    const settled = recording(fake);
+    const settled = recording(fake, checkout);
     const finished = await performSelfUpgrade(master, busy, settled.deps());
     assert.equal(finished.outcome, 'upgraded');
     assert.deepEqual(settled.calls.executors, [busyTip], 'the retry restarts the fleet first');
@@ -232,8 +235,8 @@ test('unit:loop-self-upgrade — between cycles the loop checks out the verified
     assert.equal(selfThrew, 1);
     assert.match([...Object.values(alone.actions)].at(-1)!.detail, /keeps running [0-9a-f]{12} until its supervisor restarts it/);
 
-    // The wiring: runDaemon performs the upgrade between the cycle and its wait, never mid-cycle,
-    // and records the release it loaded at startup like an executor does.
+    // The wiring: runDaemon performs the upgrade between the cycle and its wait, never mid-cycle —
+    // through the shipped performSelfUpgrade here, which records the loaded release on the cursor.
     const repo = await repository();
     try {
       const state = emptyDaemonState(master);
@@ -246,13 +249,16 @@ test('unit:loop-self-upgrade — between cycles the loop checks out the verified
         requestSmoke: async () => {}, merge: async () => {}, recordDeployment: async () => {}, requestProof: async () => {},
         dispatch: async () => {}, recordSession: async () => {}, closeSession: () => {},
         persist: async () => {},
-        selfUpgrade: async () => { upgradedBetweenCycles += 1; return { outcome: 'skipped' as const, reason: 'nothing verified deployed in this test' }; },
+        selfUpgrade: async () => {
+          upgradedBetweenCycles += 1;
+          return performSelfUpgrade(master, state, { root: repo, run: async (command, args) => execFileSync(command, args, { encoding: 'utf8' }), now: () => clock });
+        },
       } as unknown as DaemonEffects;
-      await runDaemon(master, state, effects, { once: true, intervalMs: 20_000, identity: { pid: process.pid, host: master.hostId }, root: repo });
+      await runDaemon(master, state, effects, { once: true, intervalMs: 20_000, identity: { pid: process.pid, host: master.hostId } });
       assert.equal(upgradedBetweenCycles, 1, 'the upgrade ran once, after the cycle completed');
-      assert.deepEqual(state.release, { commit: git(repo, 'rev-parse', 'HEAD'), dirty: false }, 'the loaded release was recorded at startup');
+      assert.deepEqual(state.release, { commit: git(repo, 'rev-parse', 'HEAD'), dirty: false }, 'the loaded release was recorded from this checkout');
     } finally { await rm(repo, { recursive: true, force: true }); }
-  } finally { await dispose(); }
+  } finally { await dispose(); await rm(checkout, { recursive: true, force: true }); }
 });
 
 const registration = (master: MasterConfig, name: string, commit: string, startedAt: string, overrides: Partial<ExecutorRegistration> = {}): ExecutorRegistration => ({

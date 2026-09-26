@@ -136,9 +136,8 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     { reviews: reviewRecords, producers: producerRecords, runtime, commit: cli.commit, approvals: cycling?.approvals ?? [], loop: cycling?.liveness ?? null, rows: status.work, trees,
       // The intervention report takes the server a minute: status reads the loop's copy, or a bounded live read.
       reports: 'bounded', reportBoundMs: dependencies.reportReadBoundMs });
-  // What the loop and each executor loaded against the base tip (GY-437), and a checkout the
-  // loop's own upgrade refused to touch — read the way the loop records them, from the cursor
-  // and the fleet.
+  // What the loop and each executor loaded against the base tip, and a checkout the loop's own
+  // upgrade refused to touch — read the way the loop records them (GY-437).
   const { lag, refusal: upgradeAttention } = await timedStep('release lag', () => releaseLagStatus(root, master.baseBranch, snapshot.work as Work[],
     { cliCommit: cli.commit, loop: cycling, executors: releases.executors }));
   // A merge pending on a head GitHub reports mergeable is named with the stalled items (GY-344).
@@ -190,10 +189,9 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     // The inverted loop: what the control plane says each item needs, who is running it, and
     // every session it can be watched through.
     actions: needsHumanActions(actionReport(snapshot), owed.rows),
-    // Presence and supervision (GY-105) and the release each registered executor runs (GY-126).
+    // Presence and supervision (GY-105), the release each registered executor runs (GY-126), and
+    // what the loop and each executor loaded against the base tip (GY-437).
     executors: { ...executors, ...releases, attention: [...executors.attention, ...releases.attention] }, sessions: sessionReport(snapshot),
-    // What the loop and each executor loaded against the base tip, and what lags past the grace
-    // window (GY-437); a refused upgrade is named among the attention items.
     releaseLag: { baseTip: lag.baseTip, graceMs: releaseLagGraceMs, components: lag.components },
     // Branches the queue's own pushes contaminated and the approvals its pushes cost (GY-127).
     branches: branchReport(status.work),
