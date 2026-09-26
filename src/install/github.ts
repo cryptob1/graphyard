@@ -119,8 +119,10 @@ export async function readProtection(gh: GitHubCli, repository: string, branch: 
 }
 /**
  * How GitHub merges on the branch, read whether or not it is protected yet: its merge queue
- * (GY-258) lives in the branch's rules, and a user-owned repository cannot have one and merges
- * through auto-merge instead (GY-310). Answers what `mergeQueueSatisfied` and `installMergeMode` read.
+ * (GY-258) lives in the branch's rules, and a repository without one merges through auto-merge
+ * instead (GY-310) — a user-owned repository, or an organization-owned one whose queue ruleset
+ * GitHub refused with 422, recorded persistently by the fallback's allow_auto_merge (GY-350).
+ * Answers what `mergeQueueSatisfied` and `installMergeMode` read.
  */
 export async function readMergeFacts(gh: GitHubCli, repository: string, branch: string) {
   return attachMergeFacts(gh, repository, branch, {});
@@ -138,7 +140,8 @@ export function installMergeMode(current: any | null) {
 }
 /**
  * Whether GitHub is set up to merge: the branch's merge queue requires the App's check, or, in
- * auto-merge mode, the repository allows auto-merge; null when the rules were not read.
+ * auto-merge mode — including an organization repository whose refused queue settled there (GY-350)
+ * — the repository allows auto-merge; null when the rules were not read.
  */
 export function mergeQueueSatisfied(current: any | null, graphyardAppId: number | null): boolean | null {
   const settings: RepositoryMergeSettings | null = current?.[installRepositoryMerge] ?? null;
