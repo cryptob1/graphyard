@@ -26,7 +26,7 @@ Running rows offer:
 
 ## The status sentence
 
-Rows show the steps **Research, Build, Validate, Test, Review, Prove, Merge, Deploy** (`web/pr-steps.ts`). Research is **current** while live, **done** with a brief, **skipped** on failure or where none starts: a bug, `"research": false`, work built briefless, or no `run.research`. A merged item reads *Merged*, then *Live* once production serves it. Moving and Blocked rows past thirty minutes read `1h 12m overdue`.
+Rows show **Research, Build, Validate, Test, Review, Prove, Merge, Deploy** (`web/pr-steps.ts`). Research: **current** while live, **done** with a brief, else **skipped** (failed, bug, `"research": false`, built briefless, no `run.research`). Merged items read *Merged*, then *Live* in production. Moving or Blocked over 30 minutes reads `1h 12m overdue`.
 
 ## An item page
 
@@ -34,4 +34,4 @@ Below the summary: **What is left** (unmet requirements, who clears each), **Req
 
 ## Insights
 
-Headline numbers, **Flow** replay, landed per day, where time goes, research's effect; **Show details** holds shipping pulse (PR-to-production from `POST /api/production-observations` or `master verify-deployment`) and flow analytics. **Shipped** holds **Interventions**, **Validation** and **Releases**; `GRAPHYARD_INTERVENTION_PATTERNS=1` files repeats as `bug` items. Missing values read `Unavailable`, never zero.
+Headline numbers, **Flow** replay, landed per day, time use, research effect; **Show details** holds shipping pulse (PR-to-production from `POST /api/production-observations` or `master verify-deployment`) and flow analytics. **Shipped** holds **Interventions**, **Validation** and **Releases**; `GRAPHYARD_INTERVENTION_PATTERNS=1` files repeats as `bug` items. Missing values read `Unavailable`, never zero.
