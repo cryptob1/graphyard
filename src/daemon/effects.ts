@@ -11,7 +11,7 @@ import type { SessionHandleInput } from '../model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from '../request-settlement.js';
 import { type ResourceReclaimReport, reclaimResources, dispatchRefusal } from '../master-resources.js';
 import { RefusedResponse } from '../model/refusal.js';
-import { mergeBatchSize } from '../master/profiles.js';
+import { mergeBatchSize, optimisticMergeEnabled } from '../master/profiles.js';
 import type { CapacityRole, PartialWork } from '../model/capacity.js';
 import { readProducerLedger, saveProducerLedger, independentProducerProfiles, launchProducer, reclaimCheckouts } from '../producer.js';
 import { followUpThreadIds, readReviewLedger, updateReviewLedger, launchReview } from '../reviewer.js';
@@ -101,8 +101,9 @@ export interface DaemonEffects {
    */
   publishProductionEnvironment?: () => Promise<unknown>;
   /**
-   * Publishes `mergeQueue.batchSize` (GY-330) to the control plane, whose merge queue batches by
-   * it; sent only on a change, and read at the start of every cycle so a reconfiguration applies
+   * Publishes `mergeQueue.batchSize` (GY-330) and `mergeQueue.optimistic` (GY-500) to the control
+   * plane, whose merge queue batches by the one and lets disjoint entries past it by the other;
+   * sent only on a change, and read at the start of every cycle so a reconfiguration applies
    * before the next merge.
    */
   publishMergeBatchSize?: () => Promise<unknown>;
@@ -479,7 +480,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   // The same route, as the same requester: only the identity that asked may take a request back.
   const withdraw: DaemonEffects['withdraw'] = (work, decision, reason) => asOperatorAgent('POST', `work/${work.id}/decide`, { action: 'withdraw', decision, reason });
   const decisions: DaemonEffects['decisions'] = work => asOperatorAgent('GET', `work/${encodeURIComponent(work.id)}/decisions`);
-  let publishedEnvironment: string | null = null, publishedBatchSize: number | null = null;
+  let publishedEnvironment: string | null = null, publishedBatchSize: number | null = null, publishedOptimistic: boolean | null = null;
   return {
     agents: () => listHerdrAgents(run).catch(() => []),
     // A reviewer or producer session ends with its ledger record (GY-205): its Herdr name is not one the registry session determines.
@@ -603,10 +604,10 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       publishedEnvironment = environment;
     },
     publishMergeBatchSize: async () => {
-      const batchSize = mergeBatchSize(current());
-      if (batchSize === publishedBatchSize) return;
-      await mutate('merge-queue', { batchSize });
-      publishedBatchSize = batchSize;
+      const batchSize = mergeBatchSize(current()), optimistic = optimisticMergeEnabled(current());
+      if (batchSize === publishedBatchSize && optimistic === publishedOptimistic) return;
+      await mutate('merge-queue', { batchSize, optimistic });
+      publishedBatchSize = batchSize; publishedOptimistic = optimistic;
     },
     recordDeployment: (work, observation) => mutate(`work/${work.id}/deployment`, { sha: observation.sha, mergeSha: work.delivery!.mergeSha, source: observation.source, observedAt: observation.observedAt }),
     requestSmoke: async work => {

@@ -13,6 +13,7 @@ import type { GitHubCacheStore } from './github-cache.js';
 import { nextAction } from './model/next-action.js';
 import { foldDecisions } from './model/approval.js';
 import { normalMergeState, repairAudit, repairAuditEvent, repairLaneVerdict, type RepairAudit, type RepairLaneVerdict } from './master/repair-lane.js';
+import { currentOptimisticMerge, describeGuard, mainGuard, postMergeVerdict, retestAfterRevert, revertRefusal, verdictCommit, type GuardState, type OptimisticMerge, type OptimisticRevert } from './optimistic-merge.js';
 export { CHECK_NAME };
 import { alreadyMergeableRefusal, approvalOfHead, baseRefreshNeeded, dismissedVerdict, enqueueRequestCurrent, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, pendingRestore, predictQueue, queuePlacement, queueRef, mergeCheckBranch, treeIdenticalPrediction, type GitHubMergeQueueState, type HeadForcePush, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type ObservedApproval, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread } from './merge-queue.js';
 import { blockedFeatures, controlPlanePermissions, describeShortfall, permissionShortfalls, requiredPermissions, type PermissionFeature, type PermissionLevel, type PermissionShortfall } from './github-permissions.js';
@@ -581,6 +582,8 @@ export class GitHub {
   }
   private blobs = new Map<string, string | null>();
   private histories = new Map<string, Set<string> | null>();
+  /** Files changed between two pinned commits (GY-500); immutable, so each pair is compared once. */
+  private baseChangeLists = new Map<string, string[] | null>();
   /** The persisted cold layer under the four maps above (src/github-cache.ts), when attached. */
   private persisted: GitHubCacheStore | null = null;
   private warming: Promise<void> | null = null;
@@ -1139,6 +1142,8 @@ export class GitHub {
     const budget = { remaining: scopeLookupBudget };
     const landing = pr.merged || pr.state !== 'open' ? undefined : await this.landingCheck(work, pr.head.sha, files, bound, speculative, branch, peers, budget);
     const revertedDelivery = pr.merged && work.stage !== 'done' ? await this.revertedDelivery(work, pr, files, branch, peers, budget) : undefined;
+    // What the base changed since the bound base: an optimistic merge (GY-500) needs it disjoint from the head's own files.
+    const baseChanges = pr.merged || pr.state !== 'open' ? undefined : await this.baseChangesSince(bound, branch.tip);
     const candidateBase = pr.merged && work.candidate && work.candidate.sha === pr.head.sha ? work.candidate.baseSha : bound;
     // A head contains the base tip by ancestry, or as a published tip whose bound base is the
     // tip's tree-identical predecessor, or as a published tip behind other queue entries, whose
@@ -1175,7 +1180,7 @@ export class GitHub {
       ...(pr.mergeable === null && pr.state === 'open' && !pr.merged ? { mergeabilityUnknown: true } : {}),
       protected: protection.protected, conversations, files: files.map(f => f.filename), at: startedAt,
       baseTip: branch.tip, baseTree: branch.tree, baseTipContained, baseTipAncestor: contained, scopeFiles,
-      ...(landing ? { landing } : {}), ...(revertedDelivery ? { revertedDelivery } : {}),
+      ...(landing ? { landing } : {}), ...(revertedDelivery ? { revertedDelivery } : {}), ...(baseChanges !== undefined ? { baseChanges } : {}),
       ...(dismissals.forcePushes.length ? { headForcePushes: dismissals.forcePushes } : {}),
     };
   }
@@ -1836,6 +1841,88 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     await this.graphql(headBoundMergeMutation, { id: state.pullRequestId, head: audit.head, method: autoMergeMethod() });
   }
   /**
+   * The files the base branch changed from `base` to `tip` (see changedFiles), or null when they
+   * cannot be listed completely. Two pinned commits never change, so each pair is compared once.
+   */
+  async baseChangesSince(base: string, tip: string): Promise<string[] | null> {
+    const key = `${base}...${tip}`;
+    if (this.baseChangeLists.has(key)) return this.baseChangeLists.get(key)!;
+    const files = await this.changedFiles(base, tip).then(paths => paths ? [...paths].sort() : null, () => null);
+    this.baseChangeLists.set(key, files);
+    if (this.baseChangeLists.size > historyEntries) this.baseChangeLists.delete(this.baseChangeLists.keys().next().value!);
+    return files;
+  }
+  /** Every check run on a commit, as the gates read a candidate's: what the main guard judges a merge commit by (GY-500). */
+  async commitChecks(sha: string): Promise<{ name: string; result: string; appId: number; id?: number }[]> {
+    return (await this.pages(`/commits/${sha}/check-runs?filter=all`, 'check_runs')).filter(check => check.name !== CHECK_NAME)
+      .map(check => ({ name: check.name, result: check.status === 'completed' ? check.conclusion : check.status, appId: check.app?.id, ...(Number.isSafeInteger(check.id) ? { id: check.id } : {}) }));
+  }
+  /**
+   * Opens the revert of an optimistic merge that broke main (GY-500): one commit on the base
+   * branch tip restoring each of the merge's files to its first parent's version (or removing a
+   * file the merge added), on a `graphyard-revert/` branch, as a pull request. Refused — nothing
+   * written — when a later merge changed one of those files again, since the revert would undo it.
+   */
+  async openRevert(work: Work, merge: OptimisticMerge, reason: string): Promise<{ pr: number; head: string } | { refusal: string }> {
+    const branch = await this.baseBranch();
+    const refusal = revertRefusal(merge, await this.changedFiles(merge.mergeSha, branch.tip).catch(() => null));
+    if (refusal) return { refusal };
+    const parent = (await this.request(`/commits/${merge.mergeSha}`))?.parents?.[0]?.sha;
+    demand(typeof parent === 'string' && /^[a-f0-9]{40}$/.test(parent), `GitHub did not return the first parent of ${merge.mergeSha}`, 502);
+    // Each file's entry in the parent's tree, walked down from its root tree by the entries' own shas.
+    const trees = new Map<string, Map<string, { mode: string; sha: string; type: string }>>();
+    const read = async (sha: string) => {
+      if (!trees.has(sha)) trees.set(sha, new Map(((await this.request(`/git/trees/${sha}`))?.tree ?? []).map((entry: any) => [entry.path, { mode: entry.mode, sha: entry.sha, type: entry.type }])));
+      return trees.get(sha)!;
+    };
+    const root = await this.commitTree(parent);
+    const entryAt = async (path: string) => {
+      let tree = root;
+      const segments = path.split('/');
+      for (const segment of segments.slice(0, -1)) {
+        const entry = (await read(tree)).get(segment);
+        if (entry?.type !== 'tree') return null;
+        tree = entry.sha;
+      }
+      return (await read(tree)).get(segments.at(-1)!) ?? null;
+    };
+    const tree = [];
+    for (const path of merge.lane.files) {
+      const entry = await entryAt(path);
+      tree.push(entry && entry.type === 'blob' ? { path, mode: entry.mode, type: 'blob', sha: entry.sha } : { path, mode: '100644', type: 'blob', sha: null });
+    }
+    const created = await this.request('/git/trees', 'POST', { base_tree: branch.tree, tree });
+    const title = `Revert optimistic merge of ${work.key} (${merge.mergeSha.slice(0, 12)})`;
+    const commit = await this.request('/git/commits', 'POST', { message: `${title}\n\n${reason}`, tree: created.sha, parents: [branch.tip] });
+    demand(typeof commit?.sha === 'string' && /^[a-f0-9]{40}$/.test(commit.sha), 'GitHub returned an invalid revert commit', 502);
+    const ref = `graphyard-revert/${work.key.toLowerCase()}-${merge.mergeSha.slice(0, 12)}`;
+    await this.publishRef(`refs/heads/${ref}`, commit.sha);
+    const existing = (await this.request(`/pulls?state=open&head=${encodeURIComponent(`${this.config.repository.split('/')[0]}:${ref}`)}`)) as any[];
+    const pull = existing?.[0] ?? await this.request('/pulls', 'POST', { title, head: ref, base: this.config.base, body: `${reason}\n\nOpened by Graphyard's main guard (GY-500); it merges through the repair lane's bypass, bound to this head.` });
+    demand(Number.isSafeInteger(pull?.number), 'GitHub did not open the revert pull request', 502);
+    return { pr: pull.number, head: commit.sha };
+  }
+  /**
+   * Lands a revert the main guard opened, exactly at `head`, with the repair lane's bypass (GY-406):
+   * the App publishes its `Graphyard / merge` verdict naming the revert and merges head-bound, so
+   * main is restored within one CI duration instead of after another queue round. Returns the
+   * merge commit once GitHub reports the pull request merged, else null.
+   */
+  async mergeRevert(work: Work, revert: Pick<OptimisticRevert, 'pr' | 'head' | 'failing'>): Promise<string | null> {
+    const pull = await this.request(`/pulls/${revert.pr}`);
+    if (pull?.merged) return typeof pull.merge_commit_sha === 'string' ? pull.merge_commit_sha : null;
+    const state = await this.mergeQueueState(revert.pr!);
+    requireCurrent(state.head === revert.head, `Revert pull request #${revert.pr} head moved from ${revert.head!.slice(0, 12)} to ${state.head.slice(0, 12)}; the guard merges only the head it built`);
+    if (state.mode !== 'none') await this.dequeuePullRequest(state);
+    const existing = (await this.pages(`/commits/${revert.head}/check-runs?check_name=${encodeURIComponent(CHECK_NAME)}&filter=latest`, 'check_runs')).find(c => c.app.id === this.config.appId);
+    const body = { name: CHECK_NAME, head_sha: revert.head, status: 'completed', conclusion: 'success', external_id: work.id,
+      output: { title: 'Main guard: optimistic-merge revert', summary: `Revert of ${work.key}'s optimistic merge at ${revert.head}: ${revert.failing.join(', ') || 'required checks failed'} on main` } };
+    await this.request(existing ? `/check-runs/${existing.id}` : '/check-runs', existing ? 'PATCH' : 'POST', body);
+    await this.graphql(headBoundMergeMutation, { id: state.pullRequestId, head: revert.head, method: autoMergeMethod() });
+    const merged = await this.request(`/pulls/${revert.pr}`);
+    return merged?.merged && typeof merged.merge_commit_sha === 'string' ? merged.merge_commit_sha : null;
+  }
+  /**
    * GitHub's merge queue requires every required check on the merge group commit it builds, not only
    * on the pull request head. The authorized head's verdict is carried to that commit, and only
    * while the head stays authorized: a withdrawn head is dequeued, which discards the group.
@@ -1929,6 +2016,64 @@ export async function repairLaneStep(engine: Pick<Engine, 'store' | 'enqueueRequ
   catch (error) { await record('repair.failed', { ...audit, error: error instanceof Error ? error.message : String(error) }); throw error; }
   return verdict;
 }
+/**
+ * The main guard (GY-500), run by the job loop every `mainGuardIntervalMs`. After an optimistic
+ * merge the required suite runs on the merge commit (CI's run on each push to the base branch);
+ * the guard reads its verdict on every optimistic merge commit that has not concluded, and when
+ * one failed it traces the culprit among the optimistic merges since the last green commit
+ * (mainGuard, bisecting when there are several) and reverts it at once: it opens a revert pull
+ * request and lands it head-bound through the repair lane's bypass, which reopens the culprit
+ * item for a rework round. Every step is on the ledger: each verdict (`optimistic.post-merge`),
+ * each guard state (`optimistic.guard`, once per state, culprit and probe) and each revert step
+ * (`optimistic.revert.*`). A revert it cannot make cleanly is recorded as refused, holds further
+ * optimistic merges, and is released once the base branch tip passes the required suite again.
+ */
+export const mainGuardIntervalMs = 30_000;
+export async function guardMain(engine: Pick<Engine, 'store' | 'ciAppIds' | 'recordPostMerge' | 'recordOptimisticRevert'>, github: Pick<GitHub, 'commitChecks' | 'openRevert' | 'mergeRevert' | 'baseBranch' | 'permissionShortfall'>, now = new Date()): Promise<GuardState> {
+  const required = (work: Work) => work.policy.checks;
+  for (const work of await engine.store.list()) {
+    const merge = currentOptimisticMerge(work);
+    if (!merge || (merge.postMerge && merge.postMerge.verdict !== 'pending')) continue;
+    await engine.recordPostMerge(work.id, merge.mergeSha, postMergeVerdict(await github.commitChecks(verdictCommit(merge)), required(work), engine.ciAppIds));
+  }
+  let all = await engine.store.list();
+  let guard = mainGuard(all);
+  const recorded = (await engine.store.pool.query("SELECT payload->'details' AS details FROM events WHERE work_id IS NULL AND kind='optimistic.guard' ORDER BY seq DESC LIMIT 1")).rows[0]?.details;
+  const summary = { state: guard.state, detail: describeGuard(guard), window: guard.window.map(merge => ({ key: merge.key, mergeSha: merge.mergeSha, verdict: merge.verdict })),
+    ...('culprit' in guard ? { culprit: guard.culprit.key, mergeSha: guard.culprit.mergeSha } : {}), ...('probe' in guard ? { probe: guard.probe.mergeSha } : {}), ...('probes' in guard ? { probes: guard.probes } : {}) };
+  // Postgres returns jsonb objects with their keys reordered, so the identity is built from values, never serialized objects.
+  const identity = (value: any) => JSON.stringify([value?.state ?? null, value?.culprit ?? null, value?.probe ?? null,
+    (Array.isArray(value?.window) ? value.window : []).map((merge: any) => [merge?.key, merge?.mergeSha, merge?.verdict])]);
+  if (identity(recorded) !== identity(summary) && !(guard.state === 'green' && !recorded)) await engine.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', ['graphyard', 'optimistic.guard', JSON.stringify({ details: { ...summary, at: now.toISOString() } })]);
+  // Writing a revert needs Contents: write; without it the guard keeps reading and waits for the permission.
+  if (github.permissionShortfall?.('merge-queue')) return guard;
+  if (guard.state === 'culprit') {
+    const found = guard, work = all.find(item => item.id === found.culprit.id)!, merge = currentOptimisticMerge(work)!;
+    const base = { at: now.toISOString(), failing: found.culprit.failing, probes: found.probes, kept: found.kept.map(entry => entry.key), resolvedBy: null };
+    const opened = autoMergeMethod() === 'REBASE' ? { refusal: 'The base branch merges by rebase, which lands several commits per pull request; the guard reverts merge and squash merges only' }
+      : await github.openRevert(work, merge, `${describeGuard(found)}. The main guard reverts it so main is green again; ${work.key} is reopened for a rework round.`);
+    await engine.recordOptimisticRevert(work.id, merge.mergeSha, 'refusal' in opened
+      ? { ...base, state: 'refused', pr: null, head: null, mergeSha: null, refusal: opened.refusal }
+      : { ...base, state: 'opened', pr: opened.pr, head: opened.head, mergeSha: null, refusal: null });
+    all = await engine.store.list(); guard = mainGuard(all);
+  }
+  const held = guard;
+  if (held.state === 'reverting') {
+    const work = all.find(item => item.id === held.culprit.id)!, revert = held.revert;
+    const merged = await github.mergeRevert(work, revert);
+    if (merged) {
+      await engine.recordOptimisticRevert(work.id, held.culprit.mergeSha, { ...revert, state: 'merged', mergeSha: merged });
+      // The merges that landed after the culprit failed on commits that held it: each is re-tested on the revert.
+      for (const merge of retestAfterRevert(held)) await engine.recordPostMerge(merge.id, merge.mergeSha, { verdict: 'pending' }, merged);
+    }
+  } else if (held.state === 'refused') {
+    // Main is released once its tip passes again, however it was fixed.
+    const tip = (await github.baseBranch()).tip;
+    const verdict = postMergeVerdict(await github.commitChecks(tip), required(all.find(item => item.id === held.culprit.id)!), engine.ciAppIds);
+    if (verdict.verdict === 'pass') await engine.recordOptimisticRevert(held.culprit.id, held.culprit.mergeSha, { ...held.revert, resolvedBy: { sha: tip, at: now.toISOString() } });
+  } else return held;
+  return mainGuard(await engine.store.list());
+}
 export async function githubFromEnv() {
   if (!process.env.GITHUB_APP_ID || !process.env.GITHUB_REPOSITORY) return null;
   const privateKey = process.env.GITHUB_PRIVATE_KEY ?? await readFile(process.env.GITHUB_PRIVATE_KEY_FILE!, 'utf8');
@@ -2019,6 +2164,7 @@ export const permissionRefusalLimit = 3;
 /** How often the job loop re-reads the batch size the master published (GY-330). */
 export const mergeBatchSizeRefreshMs = 30_000;
 const batchSizeRead = new WeakMap<Engine, number>();
+const guardRead = new WeakMap<Engine, number>(), guardFailure = new WeakMap<Engine, string>();
 /**
  * How far the claim priority reaches into the merge queue (GY-492): the head and the next
  * `max(2, batch size) - 1` entries. The head needs a fresh observation to merge at all; the
@@ -2131,6 +2277,18 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
   if (readAt === undefined || Date.now() - readAt >= mergeBatchSizeRefreshMs) {
     batchSizeRead.set(engine, Date.now());
     await engine.loadMergeBatchSize().catch(() => batchSizeRead.delete(engine));
+  }
+  // The main guard (GY-500) is the installation's, not a job's: it runs here on its own interval,
+  // and a failure of it is recorded and retried on the next interval, never failing a job.
+  const guardedAt = guardRead.get(engine);
+  if (typeof github.commitChecks === 'function' && (guardedAt === undefined || Date.now() - guardedAt >= mainGuardIntervalMs)) {
+    guardRead.set(engine, Date.now());
+    await guardMain(engine, github).catch(async error => {
+      const message = error instanceof Error ? error.message : String(error);
+      if (guardFailure.get(engine) === message) return;
+      guardFailure.set(engine, message);
+      await engine.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', ['graphyard', 'optimistic.guard.failed', JSON.stringify({ details: { error: message, at: new Date().toISOString() } })]).catch(() => {});
+    });
   }
   // The fleet is read before the claim, so the claim order can name it (GY-492): with a backlog
   // due, the merge-queue head's job is claimed first however recently it became due, instead of

@@ -7,7 +7,7 @@ import { currentEvidence, evidenceIndependenceRefusals } from './evidence.js';
 import { inheritedObligations } from './bootstrap.js';
 import { exactApproval, exhaustedReviewerProfiles, reviewProviderOf, reviewerProfileFor } from './review.js';
 import { carriedApproval, evidenceBindsCandidate } from './carry.js';
-import { placeInQueue } from './queue.js';
+import { placeInQueue, type MergeQueueSettings } from './queue.js';
 import { regressionRefusals } from '../regression-guard.js';
 import { mechanicalFailure, mechanicalVerdicts } from './mechanical-proofs.js';
 
@@ -24,7 +24,7 @@ declare module './work.js' {
 /** The merge gate's refusal while GitHub has not computed a pull request's mergeability (GY-548). */
 export const mergeabilityComputingRefusal = 'GitHub is computing mergeability against the current base; the next observation reads it again';
 
-export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[], mergeBatchSize?: number): { stage: Stage; gates: Gate[]; violations: string[]; queue: QueueEntry | null; queueSequence: number; queueEjection: QueueEjection | null; queueHistory: QueueHistoryEntry[] } {
+export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[], mergeQueue?: number | MergeQueueSettings): { stage: Stage; gates: Gate[]; violations: string[]; queue: QueueEntry | null; queueSequence: number; queueEjection: QueueEjection | null; queueHistory: QueueHistoryEntry[] } {
   const gates: Gate[] = [];
   const add = (name: string, reasons: string[]) => gates.push({ name, passed: reasons.length === 0, reasons });
   const dependencies = work.dependencies.filter(id => all.find(w => w.id === id)?.stage !== 'done');
@@ -102,10 +102,11 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[],
   // configured reviewer's verdict on this exact head. Only a branch whose protection still requires
   // conversation resolution — drift from the desired protection — makes a merge GitHub will
   // refuse; that is named here, thread by thread, and kept out of the queue until the protection
-  // is reconciled.
+  // is reconciled. An entry eligible for optimistic merge (GY-500, `mergeQueue.optimistic`) never
+  // joins: its merge gate carries no queue reason and it merges head-bound on its own head.
   const delivery = [...escalationRefusals(work), ...(leadHoldRefusal(work) ? [leadHoldRefusal(work)!] : [])];
   const threads = current ? conversationProtectionRefusal(work) : null;
-  const queueState = placeInQueue(work, all, now, ciAppIds, gates.every(g => g.passed) && !work.violations.length && !delivery.length && !threads && !!candidate && !obs?.merged, mergeBatchSize);
+  const queueState = placeInQueue(work, all, now, ciAppIds, gates.every(g => g.passed) && !work.violations.length && !delivery.length && !threads && !!candidate && !obs?.merged, mergeQueue);
   // CI on a queued entry's own speculative tip is the merge step validating the combined result,
   // not the change going back to Test because the base moved (GY-292): its checks refuse the merge
   // gate, and the test gate, which judges the candidate's own change, stands. A batch member the

@@ -30,13 +30,13 @@ Grants are rechecked every five minutes and on a 403; a shortfall (`appPermissio
 
 ## Require the check
 
-On the base branch require `Graphyard / merge` bound to this App, `strict` **off**, admin-enforced, force pushes and deletion forbidden, workers without bypass (the App's [repair lane](master-agent.md#repair-lane)); `master browser protection` reconciles it. `master protection --apply`, `install --apply`, `init --scan --apply` give organization repositories a merge queue requiring it (CI on `merge_group`), user-owned ones, a 422 `allow_auto_merge`.
+On the base branch require `Graphyard / merge` from this App, `strict` **off**, admin-enforced, no force pushes or deletion, workers without bypass ([repair lane](master-agent.md#repair-lane)); `master browser protection` reconciles it. `master protection --apply`, `install --apply`, `init --scan --apply` give organization repositories a merge queue requiring it, user-owned ones `allow_auto_merge`.
 
-The gate requires `GITHUB_CI_APP_IDS` CI checks, current-head approval, trusted passing evidence, a mergeable non-draft PR and the queue head. Unknown mergeability (`null`) is re-read 3 times in 10 s, then refused as computing; queued tips decide.
+The gate requires `GITHUB_CI_APP_IDS` CI checks, current-head approval, trusted passing evidence, a mergeable non-draft PR and the queue head or the [optimistic lane](#optimistic-merges). Unknown mergeability (`null`) is re-read 3 times in 10 s, then refused.
 
 ## Merge queue
 
-Once gated, a candidate's speculative tip (predicted base merged in), pushed onto the candidate branch and `refs/graphyard/queue/KEY`, binds every check, review and proof. A failed check, requested changes, a revoked proof, a conflict or rework ejects it to the back. One conflicting only with entries ahead of it re-enters unchanged once one lands or leaves; one leaving validation is skipped until revalidated. The App passes the check for an authorized head and merge group and asks GitHub to merge (queue, auto-merge or [direct](#direct-merges)); protection decides; withdrawal fails and dequeues; `master status` names `merge.enqueue.refused`.
+Once gated, a candidate's speculative tip, pushed onto the candidate branch and `refs/graphyard/queue/KEY`, binds every check, review and proof. A failed check, requested changes, a revoked proof, a conflict or rework ejects it to the back. One conflicting only with entries ahead of it re-enters unchanged once one lands or leaves. The App passes the check for an authorized head and merge group and asks GitHub to merge (queue, auto-merge or [direct](#direct-merges)); protection decides; withdrawal dequeues.
 
 ### Bindings and carry
 
@@ -46,22 +46,26 @@ Reviews and proofs bind one head, base and policy revision. The queue head's tip
 
 `mergeQueue.batchSize` (master config, default 4; 1 disables; published via `POST /api/merge-queue`) tests entries together: a pass merges members in order, a failure halves it until the culprit is ejected; batches behind an unpassed one eject nothing. A head batch tipless over ten minutes dissolves (`queue.batch-dissolved`).
 
+### Optimistic merges
+
+`mergeQueue.optimistic` (default on): a green entry disjoint from base changes and shared infrastructure lands head-bound, unqueued; a main guard [reverts](master-agent.md#repair-lane) and reopens culprits (`master status`: `optimisticMerge`).
+
 ### Direct merges
 
-Without a queue, `CLEAN`, `UNSTABLE` and `HAS_HOOKS` PRs merge at once, head-bound; five minutes pending is `merge-stalled`.
+Without a queue, `CLEAN`, `UNSTABLE` and `HAS_HOOKS` PRs merge at once, head-bound.
 
 ### Proofs in CI
 
-A protected `pull_request_target` workflow (the default branch's) runs on every `graphyard/*` push: **plan** finds the item's `unit:*`/`integration:*` proofs, **exercise** runs one secret-free job on the candidate merged with its base, **publish** submits reports via the `ciRun`-bound [CI producer](deployment.md#ci-producer); queue tips too, dependencies cached. Manual proofs stay producer sessions.
+A protected `pull_request_target` workflow runs on every `graphyard/*` push: **plan** finds the item's `unit:*`/`integration:*` proofs, **exercise** runs one secret-free job on the candidate merged with its base, **publish** submits reports via the `ciRun`-bound [CI producer](deployment.md#ci-producer); queue tips too, dependencies cached. Manual proofs stay producer sessions.
 
 ## Post-deployment smoke proof
 
-With `"deploySmoke": true`, the master dispatches `master init --smoke-workflow deploy-smoke.yml` once the release serves the merge; `scripts/deploy-smoke.mjs` publishes `e2e:deploy-smoke`; failure marks it [delivered with failure](operations-reference.md#delivered-with-a-failed-smoke-proof).
+With `"deploySmoke": true`, the master dispatches the smoke-workflow install once the release serves the merge; failure marks it [delivered with failure](operations-reference.md#delivered-with-a-failed-smoke-proof).
 
 ## Enforcement boundary
 
-GitHub merges only heads whose required check passed; Graphyard has no merge route; restrict other merge identities; a lease-losing worker can still push.
+GitHub merges only heads whose required check passed; restrict other merge identities; a lease-losing worker can still push.
 
 ## Identity-bound agent review
 
-`reviewProvider: "codex"` accepts only Codex's clean result on the exact head. `agent` requires a registered reviewer App distinct from the author (`github-setup URL --reviewer claude`, listed in `GRAPHYARD_REVIEWER_APPS`), adopted with `graphyard reviewpolicy GY-N agent REVISION "reason" --profiles` [FILE](../examples/reviewer-profiles.json). It replies `<!-- graphyard-verdict:MARKER head:FULL_40_CHAR_SHA verdict:approved -->`; `verdict:usage-limit` or silence fails over.
+`reviewProvider: "codex"` accepts only Codex's clean result on the exact head. `agent` requires a registered reviewer App distinct from the author (`github-setup URL --reviewer claude`, listed in `GRAPHYARD_REVIEWER_APPS`), adopted with `graphyard reviewpolicy GY-N agent REVISION "reason" --profiles` [FILE](../examples/reviewer-profiles.json). It replies an approved `graphyard-verdict` comment naming the head; `verdict:usage-limit` or silence fails over.
