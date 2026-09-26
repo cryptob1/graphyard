@@ -16,7 +16,9 @@ export async function openMasterSession(context: CliContext, root: string) {
   const masterToken = await readCredentialFile(master.credentialFile);
   const masterApi = async (path: string, credential = masterToken, timeoutMs = 30_000, headers: Record<string, string> = {}) => {
     const response = await fetch(`${master.url}/api/${path}`, { headers: { ...headers, Authorization: `Bearer ${credential}` }, signal: AbortSignal.timeout(timeoutMs) });
-    const body = await response.json(); if (!response.ok) throw new Error(JSON.stringify(body)); return body;
+    // The status rides on the error so a caller can tell a missing route (404) from a failing one.
+    if (!response.ok) { const text = await response.text(); let message = text; try { message = JSON.stringify(JSON.parse(text)); } catch {} throw Object.assign(new Error(message), { status: response.status }); }
+    return response.json();
   };
   const masterMutation = async (path: string, data: unknown, requestId: string = randomUUID(), credential: string = masterToken) => {
     const response = await fetch(`${master.url}/api/${path}`, { method: 'POST', headers: { Authorization: `Bearer ${credential}`, 'Content-Type': 'application/json', 'Idempotency-Key': requestId }, body: JSON.stringify(data), signal: AbortSignal.timeout(30_000) });

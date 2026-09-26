@@ -17,7 +17,7 @@ import { isClosed, isDelivered, type Principal, type Work } from '../src/model.j
 import { nextAction } from '../src/model/next-action.js';
 import type { Services } from '../src/server/routes.js';
 import { homeNumbers } from '../web/home-numbers.js';
-import { plainStatus } from '../web/plain-status.js';
+import { plainStatus } from '../src/model/plain-status.js';
 import ShippedPage from '../web/pages/shipped.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
 

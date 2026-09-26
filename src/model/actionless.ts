@@ -1,5 +1,5 @@
-import type { Work } from '../../src/model';
-import { plainReason } from '../plain-status';
+import type { Work } from '../model.js';
+import { plainReason } from './plain-status.js';
 
 /**
  * Open items the control plane names no action for, for the dashboard.
