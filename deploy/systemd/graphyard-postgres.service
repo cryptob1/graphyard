@@ -1,0 +1,22 @@
+# Postgres for a self-contained Graphyard host (GY-717): a system unit, because the database must
+# come back after a reboot whether or not anyone is logged in. `graphyard install --target host`
+# renders @WORKDIR@ (the Compose bundle it writes) and installs this file under /etc/systemd/system.
+# The container keeps its data on the durable data path the bundle names; Docker only runs it.
+[Unit]
+Description=Graphyard Postgres (@INSTALL@)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=@WORKDIR@
+ExecStart=/usr/bin/docker compose --project-directory @WORKDIR@ -f @WORKDIR@/compose.yaml up --no-log-prefix db
+ExecStop=/usr/bin/docker compose --project-directory @WORKDIR@ -f @WORKDIR@/compose.yaml stop db
+Restart=always
+RestartSec=10
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target

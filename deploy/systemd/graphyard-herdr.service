@@ -1,0 +1,19 @@
+# Herdr's headless server for the Graphyard account on a self-contained host (GY-717): a systemd
+# *user* unit of @USER@, which has lingering enabled, so every agent pane the loop launches lives
+# on this machine and the dashboard reaches it locally. The master loop and the executors run in
+# the same user manager (graphyard-master.service, graphyard-executor@.service).
+[Unit]
+Description=Herdr server for Graphyard
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=@HERDR@ server
+Restart=always
+RestartSec=10
+TimeoutStopSec=60
+
+[Install]
+WantedBy=default.target

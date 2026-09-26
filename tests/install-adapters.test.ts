@@ -20,7 +20,7 @@ const skipWithoutDocker = await (async () => {
 
 const inputsFor = (provider: Provider) => ({ repository: 'owner/project', provider,
   ...(provider === 'railway' || provider === 'compose' ? {} : { sshHost: '203.0.113.10', sshUser: 'root', domain: 'graphyard.example.test' }),
-  ...(provider === 'hetzner' ? { sshKey: 'graphyard-key' } : {}) });
+  ...(provider === 'hetzner' ? { sshKey: 'graphyard-key', maxMonthly: 50 } : {}) });
 
 const bundle = (fixture: Harness, name: string) => {
   const stores = [fixture.transport.files, ...[...fixture.remotes.values()].map(remote => remote.files)];
@@ -35,6 +35,7 @@ async function apply(fixture: Harness, provider: Provider) {
 
 test('--apply provisions Postgres and the application, sets every variable, and reaches a healthy HTTPS URL on each adapter', async () => {
   const expectedUrl: Record<Provider, string> = {
+    host: 'https://graphyard.example.test',
     railway: 'https://graphyard-owner-project.up.railway.app',
     hetzner: 'https://graphyard.example.test',
     'docker-host': 'https://graphyard.example.test',
@@ -291,7 +292,8 @@ test('a uid-1000 container reads the key a real transport wrote, through a real 
     const context: AdapterContext = {
       provider: 'compose', repository: 'owner/project', installId: 'key-mount', service: 'graphyard-key-mount',
       domain: null, image: 'alpine:3', workdir, sourceRoot: workdir, sshHost: null, sshUser: 'root',
-      sshKey: null, workspace: null, serverType: '', location: '', databasePassword: 'database-password-for-the-key-mount-test',
+      sshKey: null, workspace: null, serverType: '', serverTypeExplicit: false, plannedAgents: 2, location: '', databasePassword: 'database-password-for-the-key-mount-test',
+      host: null, spend: { maxMonthly: null, confirmPrice: null },
       port: 4310, dataPath: null, railwayDir: `${workdir}/railway`, wait: async () => {}, transport: docker, ssh: () => docker, fetch, vault: new Vault(),
     };
     await composeAdapter.setEnv(context, [{ name: 'GITHUB_PRIVATE_KEY', value: appKey, secret: true }]);

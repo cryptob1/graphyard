@@ -151,3 +151,33 @@ export async function ledgerCounts(pool: pg.Pool) {
   for (const name of ledgerTables) counts[name] = Number((await pool.query(`SELECT count(*) AS n FROM ${name}`)).rows[0].n);
   return counts;
 }
+
+/**
+ * Fence the database against every writer before a migration's backup (GY-717): new sessions
+ * default to read-only, and every other open session is ended, so the old server, a webhook it is
+ * handling and any agent session still calling it can no longer write — wherever they run — while
+ * reads (and `db backup`, a read-only snapshot) keep working. A write the old server attempts
+ * afterwards fails instead of landing in a ledger the new host never sees. `release` lifts it, for
+ * a migration that is abandoned. Requires the database owner (the role Graphyard's server uses).
+ */
+export async function fenceDatabase(pool: pg.Pool, options: { release?: boolean } = {}) {
+  const db = await pool.connect();
+  try {
+    // This session writes the setting, so it must not be read-only itself (a second fence runs in an
+    // already fenced database).
+    await db.query('SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE');
+    const database = String((await db.query('SELECT current_database() AS name')).rows[0].name);
+    const identifier = `"${database.replaceAll('"', '""')}"`;
+    await db.query(options.release ? `ALTER DATABASE ${identifier} RESET default_transaction_read_only` : `ALTER DATABASE ${identifier} SET default_transaction_read_only = on`);
+    if (options.release) return { database, fenced: false, ended: 0 };
+    const ended = (await db.query('SELECT count(*) FILTER (WHERE pg_terminate_backend(pid)) AS n FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid()')).rows[0].n;
+    return { database, fenced: true, ended: Number(ended) };
+  } finally { db.release(); }
+}
+
+/** Whether a new session on the database starts read-only: the fence holds. */
+export async function databaseFenced(pool: pg.Pool) {
+  const db = await pool.connect();
+  try { return (await db.query('SHOW default_transaction_read_only')).rows[0].default_transaction_read_only === 'on'; }
+  finally { db.release(); }
+}

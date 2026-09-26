@@ -1,6 +1,6 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { createBackup, ledgerCounts, restoreBackup, verifyBackup } from '../backup.js';
+import { createBackup, databaseFenced, fenceDatabase, ledgerCounts, restoreBackup, verifyBackup } from '../backup.js';
 import { Store } from '../store.js';
 import { releaseInfo, schemaVersion } from '../release.js';
 import { defineCommands } from './registry.js';
@@ -20,6 +20,7 @@ export const dbCommands = defineCommands([
       '  db backup FILE               Write a verified logical backup of the whole ledger (server host)',
       '  db verify FILE               Check a backup\'s digest and schema generation without restoring',
       '  db restore FILE              Restore a backup into an empty, migrated database (server host)',
+      '  db fence [--release]         Make the database read-only for every writer before a migration\'s backup',
     ],
     async run(context) {
       const { id, args, print } = context;
@@ -41,7 +42,13 @@ export const dbCommands = defineCommands([
           const result = await restoreBackup(store.pool, backup);
           return print({ ...result, counts: await ledgerCounts(store.pool) });
         }
-        throw new Error('Use db migrate | db status | db backup FILE | db verify FILE | db restore FILE');
+        if (id === 'fence' && (args.length === 0 || args.length === 1 && args[0] === '--release')) {
+          const result = await fenceDatabase(store.pool, { release: args[0] === '--release' });
+          // A fresh session proves the setting took: it is what every reconnecting writer gets.
+          const check = new Store(url);
+          try { return print({ ...result, readOnlyForNewSessions: await databaseFenced(check.pool) }); } finally { await check.close(); }
+        }
+        throw new Error('Use db migrate | db status | db backup FILE | db verify FILE | db restore FILE | db fence [--release]');
       } finally { await store.close(); }
     },
   },

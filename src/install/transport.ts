@@ -109,7 +109,7 @@ export interface RecordedCommand { program: string; args: string[]; input?: stri
 export interface BundleFileRecord { content: string; mode: number; owner?: string }
 export interface FakeTransportOptions {
   /** First match wins; a response is stdout, a full result, or a thunk for stateful fakes. */
-  responses?: { match: string; result: string | CommandResult | (() => string | CommandResult) }[];
+  responses?: { match: string; result: string | CommandResult | ((line: string, input?: string) => string | CommandResult) }[];
   files?: Map<string, BundleFileRecord>;
 }
 
@@ -130,7 +130,7 @@ export function fakeTransport(options: FakeTransportOptions = {}) {
       const line = [program, ...args].join(' ');
       const response = responses.find(candidate => line.includes(candidate.match));
       if (!response) return { stdout: '', stderr: '', code: 0 };
-      const produced = typeof response.result === 'function' ? response.result() : response.result;
+      const produced = typeof response.result === 'function' ? response.result(line, runOptions.input) : response.result;
       const result = typeof produced === 'string' ? { stdout: produced, stderr: '', code: 0 } : produced;
       if (result.code !== 0 && !runOptions.allowFailure) throw commandFailure(program, result);
       return result;

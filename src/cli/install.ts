@@ -59,6 +59,12 @@ export const installCommands = defineCommands([
       '          [--producer-proof PROOF] [--ssh-host HOST] [--ssh-user USER]',
       '          [--ssh-key NAME] [--port N] [--workspace NAME-OR-ID] [--image REF]',
       '                                Install or reconcile a complete control plane.',
+      '  install --target host|hetzner --repo OWNER/NAME [--plan|--apply]',
+      '          [--ssh-host HOST | --local] [--migrate] [--max-monthly N | --confirm-price X]',
+      '                                Self-contained host: server, Postgres, loop, executors,',
+      '                                Herdr and agent runtimes on one machine (hetzner creates it',
+      '                                and needs its monthly price confirmed). --migrate moves an',
+      '                                installation there from GRAPHYARD_MIGRATE_DATABASE_URL.',
       '                                --plan prints every action with secrets redacted and',
       '                                changes nothing; --apply executes the same plan.',
       '                                See docs/install.md for the agent-executable runbook.',
@@ -73,16 +79,26 @@ export const installCommands = defineCommands([
         'required-check': { type: 'string', multiple: true }, 'review-count': { type: 'string' },
         'ssh-host': { type: 'string' }, 'ssh-user': { type: 'string' }, 'ssh-key': { type: 'string' }, 'server-name': { type: 'string' }, workspace: { type: 'string' },
         'server-type': { type: 'string' }, location: { type: 'string' }, port: { type: 'string' }, logs: { type: 'boolean' },
+        target: { type: 'string' }, local: { type: 'boolean' }, migrate: { type: 'boolean' }, 'max-monthly': { type: 'string' }, 'confirm-price': { type: 'string' },
       }, allowPositionals: false });
       if (!values.repo) throw new Error('Use --repo OWNER/NAME');
-      if (!values.provider || !providers.includes(values.provider as any)) throw new Error(`Use --provider ${providers.join('|')}`);
+      // --target names a self-contained install (GY-717): an existing machine, or a Hetzner server it creates.
+      if (values.target && values.provider) throw new Error('Use either --target host|hetzner (a self-contained host) or --provider (a server-only install)');
+      if (values.target && !['host', 'hetzner'].includes(values.target)) throw new Error('Use --target host (an existing Linux machine) or --target hetzner (a server the installer creates)');
+      const provider = values.target ?? values.provider;
+      if (!provider || !providers.includes(provider as any)) throw new Error(`Use --provider ${providers.join('|')}, or --target host|hetzner`);
+      const money = (flag: string, value: string) => { const parsed = Number(value); if (!Number.isFinite(parsed) || parsed < 0) throw new Error(`--${flag} takes an amount such as 19.52`); return parsed; };
       if (values.plan && values.apply) throw new Error('Choose either --plan or --apply');
       const reviewPolicy = values['review-policy'];
       if (reviewPolicy && !['github', 'agent'].includes(reviewPolicy)) throw new Error('Use --review-policy github or agent');
       // A count that silently became NaN would install a control plane with no worker principal
       // or an unusable port, so a non-numeric value stops the command instead.
       const count = (flag: string, value: string) => { const parsed = Number(value); if (!Number.isSafeInteger(parsed) || parsed < 0) throw new Error(`--${flag} takes a whole number`); return parsed; };
-      const inputs: InstallInputs = { repository: values.repo, provider: values.provider as InstallInputs['provider'],
+      const inputs: InstallInputs = { repository: values.repo, provider: provider as InstallInputs['provider'],
+        ...(values.target || provider === 'host' ? { selfContained: true } : {}),
+        ...(values.local ? { local: true } : {}), ...(values.migrate ? { migrate: true } : {}),
+        ...(values['max-monthly'] ? { maxMonthly: money('max-monthly', values['max-monthly']) } : {}),
+        ...(values['confirm-price'] ? { confirmPrice: money('confirm-price', values['confirm-price']) } : {}),
         ...(values['base-branch'] ? { baseBranch: values['base-branch'] } : {}),
         ...(values.domain ? { domain: values.domain } : {}), ...(values.workers ? { workers: count('workers', values.workers) } : {}),
         ...(values.port ? { port: count('port', values.port) } : {}),

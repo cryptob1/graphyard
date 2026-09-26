@@ -42,16 +42,19 @@ export function appClient(facts: Pick<AppFacts, 'appId' | 'privateKey'>, fetcher
   };
 }
 
+/** A one-hour installation token of the App, with its expiry. */
+export async function installationToken(facts: Pick<AppFacts, 'appId' | 'privateKey' | 'installationId'>, fetcher: typeof fetch = fetch): Promise<{ token: string; expires: number }> {
+  const response = await fetcher(`https://api.github.com/app/installations/${facts.installationId}/access_tokens`, { method: 'POST', headers: { Authorization: `Bearer ${appJwt(facts.appId, facts.privateKey)}`, Accept: 'application/vnd.github+json' }, signal: AbortSignal.timeout(20_000) });
+  if (!response.ok) throw new Error(`GitHub installation authentication failed (${response.status})`);
+  const result: any = await response.json();
+  return { token: String(result.token), expires: Date.parse(result.expires_at) };
+}
+
 export function installationClient(facts: AppFacts, fetcher: typeof fetch = fetch): AppClient {
   let token = ''; let expires = 0;
   return {
     async request(method, path, body) {
-      if (expires < Date.now() + 60_000) {
-        const response = await fetcher(`https://api.github.com/app/installations/${facts.installationId}/access_tokens`, { method: 'POST', headers: { Authorization: `Bearer ${appJwt(facts.appId, facts.privateKey)}`, Accept: 'application/vnd.github+json' }, signal: AbortSignal.timeout(20_000) });
-        if (!response.ok) throw new Error(`GitHub installation authentication failed (${response.status})`);
-        const result: any = await response.json();
-        token = result.token; expires = Date.parse(result.expires_at);
-      }
+      if (expires < Date.now() + 60_000) ({ token, expires } = await installationToken(facts, fetcher));
       const response = await fetcher(`https://api.github.com${path}`, {
         method, headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28' },
         body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(20_000),

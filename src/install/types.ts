@@ -1,4 +1,8 @@
-export const providers = ['railway', 'hetzner', 'docker-host', 'compose'] as const;
+/**
+ * `host` is the self-contained target (GY-717): one existing Linux machine, reached over SSH, that
+ * runs the server, Postgres, the master loop, executors, Herdr and the agent runtimes.
+ */
+export const providers = ['railway', 'hetzner', 'docker-host', 'compose', 'host'] as const;
 export type Provider = (typeof providers)[number];
 export type Role = 'admin' | 'coordinator' | 'worker' | 'reader' | 'producer';
 
@@ -18,7 +22,7 @@ export interface PreflightItem { name: string; ok: boolean; detail: string; fix?
  */
 export interface PlanAction {
   id: string;
-  target: 'local' | 'provider' | 'github' | 'graphyard';
+  target: 'local' | 'provider' | 'github' | 'graphyard' | 'host';
   title: string;
   state: 'create' | 'update' | 'satisfied';
   command?: string;
@@ -44,6 +48,10 @@ export interface InstallPlan {
   actions: PlanAction[];
   drift: PlanDrift[];
   humanSteps: string[];
+  /** The self-contained host (GY-717): units, runtimes, credential paths and dashboard connections; absent otherwise. */
+  host?: import('./host.js').HostPlan;
+  /** The provider's monthly price for the server this install would create (Hetzner, GY-717 AC-5). */
+  price?: import('./pricing.js').PriceQuote | null;
 }
 
 export interface InstallInputs {
@@ -70,6 +78,19 @@ export interface InstallInputs {
   serverName?: string;
   serverType?: string;
   location?: string;
+  /**
+   * Put the whole of Graphyard — server, Postgres, loop, executors, Herdr and agent runtimes — on the
+   * machine this install provisions (`--target host`, `--target hetzner`). Implied by provider `host`.
+   */
+  selfContained?: boolean;
+  /** `--target host` against the machine the installer runs on, instead of one reached over SSH. */
+  local?: boolean;
+  /** Move an existing installation onto the host (`--migrate`): the old database is read from GRAPHYARD_MIGRATE_DATABASE_URL. */
+  migrate?: boolean;
+  /** Spend consent for a created server: proceed when its monthly price is at most this (`--max-monthly`). */
+  maxMonthly?: number;
+  /** Spend consent for a created server: the exact monthly price the plan showed (`--confirm-price`). */
+  confirmPrice?: number;
 }
 
 export function installIdFor(repository: string) {
