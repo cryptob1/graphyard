@@ -1,7 +1,7 @@
 // Concern: routine decisions — standing verdicts, decision reasons and the approver step.
-import { type Work, type AgentReview, reviewProviderOf, standingEscalations, leaseLossEpoch } from '../model.js';
+import { type Work, type AgentReview, reviewProviderOf, standingEscalations, leaseLossEpoch, RefusedResponse } from '../model.js';
 import { routableScopeRequest, scopeDecisionBinding, scopeDecisionReason } from '../model/scope.js';
-import { baseRefreshConflict, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, speculativeConflictReason, type ReviewThread, describeThread } from '../merge-queue.js';
+import { baseRefreshConflict, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, restoringAfterEjectionPrefix, speculativeConflictReason, type ReviewThread, describeThread } from '../merge-queue.js';
 import { mechanicalFailure, mechanicalVerdicts } from '../model/mechanical-proofs.js';
 import { unexercisedFindings } from '../auto-dispatch.js';
 import { decisionBindingMax } from '../model/approval.js';
@@ -130,11 +130,11 @@ export function scopeRoutineDecision(work: Work, now: number, judged: boolean): 
   if (!judged || work.stage === 'done') return null;
   const routable = routableScopeRequest(work, now);
   if (!routable) return null;
-  const { request, paths, plannedFiles } = routable;
+  const { request, paths, plannedFiles, collapsed } = routable;
   let broad: string | null = null;
   try { guardBroadScope({ ...work, plannedFiles }, request.reason, { allow: false, command: 'the loop', existing: work.plannedFiles }); }
   catch (error) { broad = `${guardBroadScope({ ...work, plannedFiles }, 'the approver grants it only with a stated reason', { allow: true, command: 'the loop', existing: work.plannedFiles })} (${message(error)})`; }
-  return { action: 'requirements', binding: scopeDecisionBinding(request), input: { plannedFiles, answers: { epoch: request.epoch, at: request.at } }, reason: scopeDecisionReason(work.key, request, work.criteria, paths, broad),
+  return { action: 'requirements', binding: scopeDecisionBinding(request), input: { plannedFiles, answers: { epoch: request.epoch, at: request.at } }, reason: scopeDecisionReason(work.key, request, work.criteria, paths, broad, undefined, collapsed),
     scope: { epoch: request.epoch, at: request.at, requestedBy: request.requestedBy, paths: paths.slice(0, 50).map(path => path.slice(0, 500)) } };
 }
 /**
@@ -157,12 +157,23 @@ export function routineDecision(work: Work, config: Pick<MasterConfig, 'autoMerg
   // the same head, base and grounds (GY-407) — not of every request the item ever carried.
   return stopped.stopped ? { ...needed, input: situatedInput(needed), reason: `${needed.reason} The previous worker is stopped: ${stopped.grounds}.` } : null;
 }
+/**
+ * GY-568. Whether the evaluated build gate holds the head for the control plane's restore after a
+ * predecessor's ejection. Nothing read from such a head is the worker's: no rework is asked for it.
+ */
+export function awaitingEjectionRestore(work: Pick<Work, 'gates'>): boolean {
+  return (work.gates ?? []).some(gate => gate.name === 'build' && gate.reasons.some(reason => reason.startsWith(restoringAfterEjectionPrefix)));
+}
 /** What the item calls for, before asking whether the loop may attest that its worker is stopped. */
 export function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>): RoutineDecision | null {
   if (work.stage === 'done') {
     return work.containmentQuarantine
       ? { action: 'recover', reason: `${work.key} is delivered and still fenced by its epoch ${work.containmentQuarantine.epoch} containment quarantine; recovery releases it without touching the delivery.`, binding: String(work.containmentQuarantine.epoch) } : null;
   }
+  // A stale speculative tip waits for the control plane's restore (GY-568): a conflict, a verdict,
+  // a failed check or proof, or a thread on it judged a tree that holds another item's unlanded
+  // work, so none of them is grounds to send it to a worker. Only a lease-loss is still settled.
+  if (awaitingEjectionRestore(work)) return leaseLossDecision(work);
   // Like a verdict, a conflict keeps matching the head it was found on until a new one is pushed,
   // and the engine's `rework` does not clear it: once the round is requested the item needs a
   // worker, not a second decision, even when that round's worker dies before pushing.
@@ -209,9 +220,8 @@ export function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge
   // settling it is a routine two-party decision, not a wait on a human master session (GY-161,
   // 2026-09-24: its first worker exited five minutes in, a new attempt took the item, and the
   // standing escalation would have refused the merge until somebody asked for the resolution).
-  const lost = supersededLeaseLoss(work);
-  if (lost) return { action: 'resolve', input: { trigger: 'lease-loss' }, escalation: { trigger: 'lease-loss', at: lost.escalation.at }, binding: `lease-loss:${lost.epoch}:${lost.escalation.at}`,
-    reason: `${work.key}: the control plane raised a lease-loss for epoch ${lost.epoch} at ${lost.escalation.at} (${lost.escalation.reason}). ${lost.evidence}Nothing from the lost attempt can act or merge. Resolving clears only this concern: it decides no gate and ships nothing.` };
+  const lost = leaseLossDecision(work);
+  if (lost) return lost;
   if (!config.autoMerge && mergeableCandidate(work)) return { action: 'merge', reason: `${work.key}: every gate passes for candidate ${work.candidate!.sha.slice(0, 12)} and automatic merging is off, so the merge needs an approved decision.`, binding: work.candidate!.sha };
   return null;
 }
@@ -306,6 +316,12 @@ export function syncConflict(work: Work): { reason: string; binding: string } | 
   if (ejection && !work.queue && ejection.sha === candidate.sha && ejection.policyRevision === work.policyRevision && speculativeConflictReason.test(ejection.reason) && !ejection.predecessors?.length && !pendingBaseRefresh(work))
     return { reason: `the merge queue ejected candidate ${candidate.sha.slice(0, 12)}: ${ejection.reason} (base branch tip ${tip.slice(0, 12)})`, binding: `${candidate.sha}:queue-conflict:${ejection.sequence}:${tip}` };
   return null;
+}
+/** The resolve decision a standing control-plane lease-loss calls for (see `supersededLeaseLoss`), or null. */
+function leaseLossDecision(work: Work): RoutineDecision | null {
+  const lost = supersededLeaseLoss(work);
+  return lost ? { action: 'resolve', input: { trigger: 'lease-loss' }, escalation: { trigger: 'lease-loss', at: lost.escalation.at }, binding: `lease-loss:${lost.epoch}:${lost.escalation.at}`,
+    reason: `${work.key}: the control plane raised a lease-loss for epoch ${lost.epoch} at ${lost.escalation.at} (${lost.escalation.reason}). ${lost.evidence}Nothing from the lost attempt can act or merge. Resolving clears only this concern: it decides no gate and ships nothing.` } : null;
 }
 /**
  * The standing control-plane lease-loss the loop may ask to settle, and why. `superseded` when a
@@ -428,18 +444,28 @@ export const reworkGroundsMin = 160;
  * both the bound and the server's check, and this is null: the loop escalates rather than sending a
  * request the server refuses on every retry.
  */
-export function reworkDecisionReason(prefix: string, grounds: string, refused: string[]): string | null {
+export function reworkDecisionReason(prefix: string, grounds: string, refused: string[], action: 'rework' | 'recover' = 'rework'): string | null {
   if (!refused.length) return fitDecisionReason(prefix, grounds, '');
-  const prose = ` This rests on different grounds from refused rework decision${refused.length === 1 ? '' : 's'} ${refused.join(', ')}, which ${refused.length === 1 ? 'was' : 'were'} judged on earlier grounds.`;
-  const bare = ` Answers refused rework decisions ${refused.join(' ')}.`;
+  const prose = ` This rests on different grounds from refused ${action} decision${refused.length === 1 ? '' : 's'} ${refused.join(', ')}, which ${refused.length === 1 ? 'was' : 'were'} judged on earlier grounds.`;
+  const bare = ` Answers refused ${action} decisions ${refused.join(' ')}.`;
   const suffix = [prose, bare].find(text => decisionReasonMax - prefix.length - text.length >= Math.min(reworkGroundsMin, grounds.length));
   return suffix === undefined ? null : fitDecisionReason(prefix, grounds, suffix);
 }
-/** How many standing refusals the server names that a rework request answers by citing them before it gives up. */
+/** How many standing refusals the server names that a rework or recover request answers by citing them before it gives up. */
 export const maxRefusalAnswers = 3;
-/** The refused rework decision the server's refusal of a request names as standing against it, or null. */
-export const refusalNamedIn = (error: string): string | null =>
-  /Decision ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}) \(rework\) with this input\b/.exec(error)?.[1] ?? null;
+const decisionId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/**
+ * The refused decision of `action` the server's refusal of a request names as standing against it,
+ * or null. The server returns it as a field of the 409 body (`standingRefusal`, GY-265), so the
+ * loop's retry does not depend on how the message is worded. Only a server that predates the field
+ * is read from its message, and a rewording there fails closed: the refusal is recorded, not retried.
+ */
+export function refusalNamedIn(error: unknown, action: 'rework' | 'recover' = 'rework'): string | null {
+  const field = error instanceof RefusedResponse ? (error.body as any)?.standingRefusal : undefined;
+  if (field && typeof field === 'object') return field.action === action && typeof field.decision === 'string' && decisionId.test(field.decision) ? field.decision : null;
+  const text = error instanceof Error ? error.message : String(error);
+  return new RegExp(`Decision ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}) \\(${action}\\) with this input\\b`).exec(text)?.[1] ?? null;
+}
 /**
  * Whether the loop may attest that the item's previous worker is stopped. `rework` and `recover`
  * carry that attestation and the engine lowers the containment fence on it, so it rests only on

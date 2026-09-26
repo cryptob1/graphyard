@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { Evidence, EvidenceArtifact } from '../../src/model';
-import { artifactLabel, safeExternalUrl } from '../format';
+import { artifactLabel, safeExternalUrl } from '../../src/model/format';
 
 export default function EvidenceArtifacts({ evidence, token, observedAt }: { evidence: Evidence; token: string; observedAt: number }) {
   const artifacts: EvidenceArtifact[] = evidence.artifacts?.length ? evidence.artifacts : evidence.url ? [{ kind: 'other', label: 'Legacy evidence link', availability: 'external', url: evidence.url }] : [];

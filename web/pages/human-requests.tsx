@@ -1,8 +1,8 @@
 import { useState } from 'react';
 import { humanDecisionLabel, humanOnlyRefusal, openHumanOnly, parkRule, type HumanOnlyPost, type HumanRequestRow } from '../../src/model/human-request';
 import type { Work } from '../../src/model/work';
-import { formatDuration } from '../duration';
-import { shortShas } from '../format';
+import { formatDuration } from '../../src/model/duration';
+import { shortShas } from '../../src/model/format';
 import type { Dashboard } from './dashboard';
 
 /**
