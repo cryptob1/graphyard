@@ -6,6 +6,7 @@
 // The reviewer's minted token never touches GraphQL: on 2026-09-23 its thread read failed, the
 // failure was swallowed, and the reviewer approved without judging or resolving any thread.
 import type { ChildRun } from './child-runner.js';
+import type { FollowUpEntry } from './model/machine-backlog.js';
 
 /** An unresolved review thread as the reviewer's launch prompt names it: an input to the verdict, not a merge blocker. */
 export interface LaunchThread { id: string; author: string; path: string; line: number | null; outdated: boolean; excerpt: string; createdAt?: string; url?: string }
@@ -241,11 +242,26 @@ export async function resolveNamedThreads(input: { repository: string; pr: numbe
  */
 export interface FollowUpFiling { at: string; reviewId: number; named: string[]; threads: LaunchThread[]; findings?: FollowUpFinding[]; item?: string; replied: string[]; resolved: string[]; refused: string[]; failure?: string; attempts: number; classified?: boolean }
 /** The backlog item the follow-ups become: the loop's create payload for the control plane. */
-export interface FollowUpItem { title: string; description: string; type: 'chore'; priority: 2; dependencies: string[]; criteria: { id: string; text: string; proofs: string[] }[]; producerProofs: string[]; plannedFiles: string[]; reason: string }
+export interface FollowUpItem { title: string; description: string; type: 'chore'; priority: 2; dependencies: string[]; criteria: { id: string; text: string; proofs: string[] }[]; producerProofs: string[]; plannedFiles: string[]; reason: string; origin?: { reviewFollowUps: { parent: string; findings: FollowUpEntry[] } } }
 /** The follow-up item's one proof: a manual review of the triage that a producer session may run. */
 export const followUpTriageProof = 'manual:review-followups-triaged';
 /** Creates the item, idempotent on `key`: a retry with the same key returns the item already created. */
 export type CreateFollowUpItem = (item: FollowUpItem, key: string) => Promise<{ key: string }>;
+/**
+ * Appends one approval's findings to the parent's open follow-up item (GY-402), idempotent on `key`:
+ * the control plane keeps only those the item does not already hold, by path and finding text.
+ */
+export type AppendFollowUpFindings = (item: string, findings: FollowUpEntry[], reason: string, key: string) => Promise<{ key: string; added: number }>;
+/**
+ * The findings one approval files, as the parent's follow-up item holds them: each thread's path and
+ * excerpt (its URL kept as where it was raised), then each finding with no thread.
+ */
+export function followUpEntriesOf(threads: readonly LaunchThread[], findings: readonly FollowUpFinding[]): FollowUpEntry[] {
+  return [
+    ...threads.map(thread => ({ path: thread.path && thread.path !== '(no path)' ? thread.path.slice(0, 1000) : null, text: (thread.excerpt.trim() || thread.id).slice(0, 2000), ref: (thread.url ?? thread.id).slice(0, 1000) })),
+    ...findings.map(finding => ({ path: finding.path ? finding.path.slice(0, 1000) : null, text: finding.text.slice(0, 2000) })),
+  ].slice(0, 200);
+}
 /** The idempotency key of an approval's follow-up create: one item per approval. */
 export const followUpCreateKey = (repository: string, pr: number, reviewId: number) => `graphyard-followups:${repository}#${pr}:${reviewId}`.slice(0, 200);
 /**
@@ -255,7 +271,7 @@ export const followUpCreateKey = (repository: string, pr: number, reviewId: numb
  * the item it made instead of refusing a key reused with different input, however the thread lines
  * or comments have moved on GitHub since.
  */
-export interface PendingFollowUpCreate { key: string; item: FollowUpItem; threads: LaunchThread[]; findings: FollowUpFinding[]; refused: string[] }
+export interface PendingFollowUpCreate { key: string; item: FollowUpItem; threads: LaunchThread[]; findings: FollowUpFinding[]; refused: string[]; appendTo?: string }
 export interface FollowUpCreateStore { read(key: string): Promise<PendingFollowUpCreate | undefined>; write(pending: PendingFollowUpCreate): Promise<void> }
 
 const replyMutation = 'mutation($thread:ID!,$body:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$thread,body:$body}){comment{id}}}';
@@ -370,6 +386,8 @@ export function followUpItem(input: { key: string; workId: string; pr: number; s
     producerProofs: [followUpTriageProof],
     plannedFiles: scopes.slice(0, plannedFilesMax),
     reason: `Follow-ups named by approval ${input.reviewId} of ${input.key} at ${input.sha.slice(0, 12)}`,
+    // The parent and its findings (GY-402): a later approval of the same parent appends here instead of filing another item.
+    origin: { reviewFollowUps: { parent: input.key, findings: followUpEntriesOf(threads, findings) } },
   };
 }
 
@@ -386,7 +404,7 @@ export function followUpItem(input: { key: string; workId: string; pr: number; s
  * is read for a reply already naming the item, so a reply whose record was lost is not posted again. Runs outside every
  * coordination transaction.
  */
-export async function fileFollowUpThreads(input: { repository: string; key: string; workId: string; pr: number; sha: string; reviewId: number; reviewer: string; previous?: FollowUpFiling; listed?: string[]; store?: FollowUpCreateStore }, run: ChildRun, create: CreateFollowUpItem, now: Date): Promise<FollowUpFiling> {
+export async function fileFollowUpThreads(input: { repository: string; key: string; workId: string; pr: number; sha: string; reviewId: number; reviewer: string; previous?: FollowUpFiling; listed?: string[]; store?: FollowUpCreateStore; existing?: string; append?: AppendFollowUpFindings }, run: ChildRun, create: CreateFollowUpItem, now: Date): Promise<FollowUpFiling> {
   const previous = input.previous;
   const createKey = followUpCreateKey(input.repository, input.pr, input.reviewId);
   const base = { at: now.toISOString(), reviewId: input.reviewId, attempts: (previous?.attempts ?? 0) + 1 };
@@ -438,13 +456,26 @@ export async function fileFollowUpThreads(input: { repository: string; key: stri
   let item = carried.item;
   if (!item) {
     const payload = pending?.item ?? followUpItem(input, threads, findings);
+    // One follow-up item per parent (GY-402): an open one the parent already has takes this
+    // approval's findings, and only those it does not hold yet; a new item is filed only when none is open.
+    const appendTo = pending ? pending.appendTo : input.append ? input.existing : undefined;
     // Kept before it is sent: a create whose response is lost must be retried with this very payload.
     if (!pending && input.store) {
-      try { await input.store.write({ key: createKey, item: payload, threads, findings, refused }); }
+      try { await input.store.write({ key: createKey, item: payload, threads, findings, refused, ...(appendTo ? { appendTo } : {}) }); }
       catch (error) { return { ...base, named, threads, findings, replied: [], resolved: [], refused, classified: true, failure: `the follow-up create could not be recorded before it was sent: ${firstLine(error)}` }; }
     }
-    try { item = (await create(payload, createKey)).key; }
-    catch (error) { return { ...base, named, threads, findings, replied: [], resolved: [], refused, classified: true, failure: `the follow-up item could not be created: ${firstLine(error)}` }; }
+    if (appendTo) {
+      if (!input.append) return { ...base, named, threads, findings, replied: [], resolved: [], refused, classified: true, failure: `the findings of review ${input.reviewId} are owed to ${appendTo}, and this pass cannot append to it` };
+      try { item = (await input.append(appendTo, followUpEntriesOf(threads, findings), payload.reason, `${createKey.slice(0, 193)}:append`)).key; }
+      catch (error) {
+        // The item was closed or delivered since it was chosen: the findings are filed as the parent's new follow-up item.
+        if (!(error as { notOpen?: boolean })?.notOpen) return { ...base, named, threads, findings, replied: [], resolved: [], refused, classified: true, failure: `the follow-ups could not be appended to ${appendTo}: ${firstLine(error)}` };
+      }
+    }
+    if (!item) {
+      try { item = (await create(payload, createKey)).key; }
+      catch (error) { return { ...base, named, threads, findings, replied: [], resolved: [], refused, classified: true, failure: `the follow-up item could not be created: ${firstLine(error)}` }; }
+    }
   }
   const replied = [...carried.replied], resolved = [...carried.resolved], failed: string[] = [];
   for (const thread of threads) {
