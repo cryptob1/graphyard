@@ -161,6 +161,7 @@ test('unit:interventions-bounded — the intervention report reads only its wind
   const seedQuery = interventionLedgerSeedQuery(interventionLedgerSeedLimit, iso(seededAt - 7 * day));
   const seedPlan = (await store.pool.query(`EXPLAIN ${seedQuery.text}`, seedQuery.values as any[])).rows.map(row => row['QUERY PLAN']).join('\n');
   assert.match(seedPlan, /events_kind_created/, seedPlan);
+  assert.doesNotMatch(seedPlan, /events_created\b/, seedPlan);
   const widePlan = (await store.pool.query(`EXPLAIN ${interventionLedgerSeedRowsQuery}`, [[1]])).rows.map(row => row['QUERY PLAN']).join('\n');
   assert.match(widePlan, /events_pkey/, widePlan);
   assert.doesNotMatch(widePlan, /Seq Scan on events/, widePlan);

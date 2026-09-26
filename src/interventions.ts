@@ -173,10 +173,13 @@ export const interventionLedgerSeedLimit = 2_000;
  * The straddle read's candidate statement (GY-432): the newest rows of the fold's kinds written
  * before `until`, read per kind in the (kind, created_at) index's own order — newest first,
  * stopping at the bound — and cut to the newest `limit` overall. One row past the limit, so the
- * caller can say it truncated.
+ * caller can say it truncated. The bound is a row comparison on (kind, created_at), which only
+ * that index can take as its condition: written as `created_at < until`, the planner may walk the
+ * (created_at) index instead, filtering on kind, and a kind with no rows then walks the whole
+ * ledger before the window — 800 ms over the scale test's 200,000 events, against 10 ms here.
  */
 export const interventionLedgerSeedQuery = (limit: number, until: string): { text: string; values: unknown[] } => ({
-  text: `SELECT b.seq, b.created_at FROM unnest($1::text[]) AS k(kind) CROSS JOIN LATERAL (SELECT e.seq, e.created_at FROM events e WHERE e.kind = k.kind AND e.created_at < $2::timestamptz ORDER BY e.created_at DESC LIMIT $3) b ORDER BY b.created_at DESC LIMIT $3`,
+  text: `SELECT b.seq, b.created_at FROM unnest($1::text[]) AS k(kind) CROSS JOIN LATERAL (SELECT e.seq, e.created_at FROM events e WHERE e.kind = k.kind AND (e.kind, e.created_at) < (k.kind, $2::timestamptz) ORDER BY e.kind DESC, e.created_at DESC LIMIT $3) b ORDER BY b.created_at DESC LIMIT $3`,
   values: [[...interventionLedgerKinds], until, limit + 1],
 });
 /**
