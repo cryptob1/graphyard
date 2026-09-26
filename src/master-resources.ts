@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 import { agentOwner, atomicPrivateWrite, closeHerdrPane, diskThresholdBytes, isProfileSession, neverStartedReason, privateFile, profileConcurrency, worktreesDirectory, type AttentionItem, type HerdrAgent, type MasterConfig } from './master.js';
 import { pinnedSessionRecords, readReviewLedger, sessionLedgerBound, SessionLedgerFullError, sessionLedgerRefusal, terminalSessionStates, updateReviewLedger, type ReviewRecord } from './reviewer.js';
 import { readProducerLedger, saveProducerLedger, type ProducerRecord } from './producer.js';
+import { describeTmpReclaim, reclaimTmpDirectories, tmpReclaimLimitPerCycle, tmpReclaimWorkMsPerCycle } from './tmp-reclaim.js';
 import type { Work } from './model.js';
 
 /**
@@ -418,6 +419,8 @@ export interface ResourceReclaimReport {
   reaped: { review: number; producer: number };
   closed: { name: string; pane: string; reason: string }[];
   released: { name: string; ledger: 'review' | 'producer'; reason: string }[];
+  /** The stale /tmp directories the pass removed and the bytes they freed (GY-421). */
+  tmp: { removed: number; bytes: number };
   errors: string[];
 }
 export const resourceReportFile = (root: string) => resolve(root, '.graphyard/resource-reclaims.json');
@@ -447,7 +450,7 @@ export async function readReclaimReports(root: string): Promise<ResourceReclaimR
 export async function reclaimResources(root: string, config: Pick<ProfileSet, 'reviewers' | 'producers'>, observed: { work: Work[]; agents: HerdrAgent[] | null }, options: { now?: number; closePane?: (pane: string) => void | Promise<void> } = {}): Promise<ResourceReclaimReport> {
   const now = options.now ?? Date.now();
   const close = options.closePane ?? (pane => { closeHerdrPane(pane); });
-  const report: ResourceReclaimReport = { at: new Date(now).toISOString(), reaped: { review: 0, producer: 0 }, closed: [], released: [], errors: [] };
+  const report: ResourceReclaimReport = { at: new Date(now).toISOString(), reaped: { review: 0, producer: 0 }, closed: [], released: [], tmp: { removed: 0, bytes: 0 }, errors: [] };
   // A pane is closed only once it has been seen finished and unowned by an earlier pass at least
   // the grace ago: a session launched a moment ago holds its name before its record is written.
   // A pending session is failed as absent only once every pass for `stuckSessionMs` missed it: one
@@ -523,7 +526,16 @@ export async function reclaimResources(root: string, config: Pick<ProfileSet, 'r
       if (result.changed) await saveProducerLedger(root, { ...ledger, producers: result.records });
     }
   } catch (error) { report.errors.push(`Producer ledger: ${error instanceof Error ? error.message : String(error)}`); }
-  const took = !!(report.reaped.review || report.reaped.producer || report.closed.length || report.released.length || report.errors.length);
+  // The host's own temporary directories (GY-421): a bounded pass removes what earlier runs left —
+  // a live owner keeps its directory, a dead owner's goes whatever its age, and an ownerless one
+  // goes once it is older than `tmpReclaimMinAgeMs` and no live process holds it open. Both bounds
+  // (count and wall-clock work) hold per cycle, so a backlog drains without ever stalling a cycle.
+  try {
+    const tmp = await reclaimTmpDirectories({ now, limit: tmpReclaimLimitPerCycle, workMs: tmpReclaimWorkMsPerCycle });
+    report.tmp = { removed: tmp.removed.length, bytes: tmp.bytes };
+    report.errors.push(...tmp.errors.map(error => `Tmp reclaim: ${error}`));
+  } catch (error) { report.errors.push(`Tmp reclaim: ${error instanceof Error ? error.message : String(error)}`); }
+  const took = !!(report.reaped.review || report.reaped.producer || report.closed.length || report.released.length || report.tmp.removed || report.errors.length);
   if (took || JSON.stringify(seen) !== JSON.stringify(file.seen)) {
     try { await atomicPrivateWrite(resourceReportFile(root), { version: 1, reports: (took ? [...file.reports, report] : file.reports).slice(-retainedReports), seen }); }
     catch (error) { report.errors.push(`Recording the reclaim: ${error instanceof Error ? error.message : String(error)}`); }
@@ -537,6 +549,7 @@ export function describeReclaim(report: ResourceReclaimReport) {
     report.reaped.review || report.reaped.producer ? `reaped ${report.reaped.review} review and ${report.reaped.producer} producer ledger record(s)` : '',
     report.closed.length ? `closed ${report.closed.length} finished session(s) and released their names (${report.closed.map(entry => entry.name).join(', ')})` : '',
     report.released.length ? `released ${report.released.length} stuck session slot(s) (${report.released.map(entry => entry.name).join(', ')})` : '',
+    describeTmpReclaim(report.tmp.removed, report.tmp.bytes),
     report.errors.length ? `${report.errors.length} could not be reclaimed: ${report.errors[0]}` : '',
   ].filter(Boolean);
   return parts.length ? `Resource reclaim: ${parts.join('; ')}` : null;
