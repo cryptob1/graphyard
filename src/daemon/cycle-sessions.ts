@@ -87,7 +87,8 @@ export async function closeStep(cycle: Cycle) {
       const agent = stopped(session.agentName), item = open.find(candidate => candidate.key === session.work);
       if (!agent || !item) return;
       const key = failoverKey(session.role, item, session.record), previous = state.actions[key];
-      if (previous?.state === 'done' || !readyToRetry(previous, state.cycle)) return;
+      // Its relaunch is still on the launcher: the failover is in flight, not due again.
+      if (cycle.launcher.busy(key) || previous?.state === 'done' || !readyToRetry(previous, state.cycle)) return;
       const signal = await notice(agent);
       if (!signal) return;
       const attempts = (previous?.attempts ?? 0) + 1, resets = signal.resetsAt ? `resets ${signal.resetsAt}` : 'reset time unknown';
@@ -97,16 +98,20 @@ export async function closeStep(cycle: Cycle) {
         await effects.reportCapacity!(item, { event: 'exhausted', role: session.role, ...(session.requestId ? { requestId: session.requestId } : {}), profile: session.profile, account, runtime, reason: signal.reason, resetsAt: signal.resetsAt,
           partialWork: { state: 'not-applicable', detail: `a ${session.role} session edits nothing: it reads the exact head and leaves no work to keep` } });
         await effects.endSession?.(session, `provider quota exhausted on ${account ?? `${session.profile}'s own account`} mid-session (${signal.reason}; ${resets}); launched again on another account`);
-        let next = 'its request launches again on the next dispatch tick';
-        if (session.requestId && effects.relaunch) {
-          try { next = `relaunched on profile ${(await effects.relaunch(session, item, snapshot)).profile}`; }
+        const done = (next: string) => record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'done',
+          detail: `${session.role} session ${session.agentName} for ${item.key} exhausted ${account ?? `${session.profile}'s own account`} mid-session (${signal.reason}; ${resets}); ${next}`, attempts, cycle: state.cycle }, now(), effects.persist);
+        if (!session.requestId || !effects.relaunch) { performed.push(await done('its request launches again on the next dispatch tick')); return; }
+        // The relaunch is a session launch: the launcher runs it beside the cycle (GY-616), and the
+        // failover is recorded done, with the profile it landed on, when it settles.
+        cycle.launch('failover', item, key, [], async sink => {
+          let next: string;
+          try { next = `relaunched on profile ${(await effects.relaunch!(session, item, snapshot)).profile}`; }
           catch (error) {
             next = (error as { capacityExhausted?: boolean })?.capacityExhausted ? `no other account is left for the role (${message(error)}), so it waits for capacity`
               : `it could not be launched again at once (${message(error)}), so the dispatcher launches it on its retry schedule`;
           }
-        }
-        performed.push(await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'done',
-          detail: `${session.role} session ${session.agentName} for ${item.key} exhausted ${account ?? `${session.profile}'s own account`} mid-session (${signal.reason}; ${resets}); ${next}`, attempts, cycle: state.cycle }, now(), effects.persist));
+          sink.push(await done(next));
+        });
       } catch (error) {
         performed.push(await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'failed', detail: `${session.role} session ${session.agentName} for ${item.key} exhausted its account (${signal.reason}) but could not be failed over: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist));
       }
@@ -290,8 +295,15 @@ export async function closeStep(cycle: Cycle) {
       await effects.endSession(session, `closed as failed: ${reason}`.slice(0, 500));
       await handle(`closed as failed: ${reason}`, true);
       if (!session.requestId || !effects.relaunch) return 'its request launches again on the next dispatch tick';
-      try { return `relaunched on profile ${(await effects.relaunch(session, item, snapshot)).profile}`; }
-      catch (error) { return `it could not be launched again at once (${message(error)}), so the dispatcher launches it on its retry schedule`; }
+      // Launched again on the launcher beside the cycle (GY-616); the profile it lands on is reported when it settles.
+      const key = `relaunch:${session.role}:${session.record}`;
+      cycle.launch('session', item, key, [], async sink => {
+        let detail: string;
+        try { detail = `${session.role} session ${session.agentName} for ${item.key} relaunched on profile ${(await effects.relaunch!(session, item, snapshot)).profile}`; }
+        catch (error) { detail = `${session.role} session ${session.agentName} for ${item.key} could not be launched again at once (${message(error)}), so the dispatcher launches it on its retry schedule`; }
+        sink.push(await record(state, key, { kind: 'session', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+      });
+      return 'its request is handed to the launcher to launch again on another profile';
     });
   });
 
