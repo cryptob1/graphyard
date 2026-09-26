@@ -26,7 +26,7 @@ Running rows offer:
 
 ## The status sentence
 
-Rows show the steps **Research, Build, Validate, Test, Review, Prove, Merge, Deploy** (`web/pr-steps.ts`). Research is **current** while live, **done** with a brief, **skipped** on failure or where none starts: a bug, `"research": false`, work built briefless, or no `run.research`. A merged item reads *Merged*, then *Live* once production serves it (counted this week). Moving and Blocked rows past thirty minutes read `1h 12m overdue`.
+Rows show the steps **Research, Build, Validate, Test, Review, Prove, Merge, Deploy** (`web/pr-steps.ts`). Research is **current** while live, **done** with a brief, **skipped** on failure or where none starts: a bug, `"research": false`, work built briefless, or no `run.research`. A merged item reads *Merged*, then *Live* once production serves it. Moving and Blocked rows past thirty minutes read `1h 12m overdue`.
 
 ## An item page
 

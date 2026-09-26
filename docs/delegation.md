@@ -1,11 +1,11 @@
 <!-- page: Operate Graphyard | 11 | slice leads and escalations. -->
 # Slice-lead delegation
 
-Optional slices (`product`, `infrastructure`, `docs-experience`) are each led by an AI session with its own `slice-lead` principal.
+Each optional slice (`product`, `infrastructure`, `docs-experience`) has an AI lead with its own `slice-lead` principal.
 
 ## Authority boundaries
 
-A lead coordinates its slice's workers, approves or rejects plans, sends work back and escalates. It cannot implement, claim, submit evidence, review its own slice, change requirements or merge (`lead.action.refused`). `reject-plan` and `send-back` record a **lead hold** that refuses the merge gate: a `reject-plan` clears only through a later `approve-plan` from that lead with `"supersedes": "RULING-ID"`, a `send-back` only through `rework`.
+A lead coordinates its slice's workers, judges plans, returns work and escalates. It cannot implement, claim, submit evidence, review its own slice, change requirements or merge (`lead.action.refused`). `reject-plan` and `send-back` record a **lead hold** that refuses the merge gate: a `reject-plan` clears only through a later `approve-plan` from that lead with `"supersedes": "RULING-ID"`, a `send-back` only through `rework`.
 
 A producer that ever held an assignment on the item or belongs to its slice is refused (`evidence.producer.refused`). Capacity limits are [deployment variables](deployment.md#variables).
 

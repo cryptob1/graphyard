@@ -6,7 +6,7 @@ Graphyard decides whether work may advance; runtimes such as Herdr run the sessi
 ## One trip from setup to Done
 
 1. **Ready**: an item with criteria naming proofs is released and unblocked.
-2. **Build**: a worker claims a lease and worktree, and submits a PR.
+2. **Build**: a worker claims a lease and worktree, submits a PR.
 3. **Review**: an independent reviewer approves the exact commit.
 4. **Test**: Graphyard observes CI itself.
 5. **Acceptance**: granted producers report evidence for that commit.
@@ -28,10 +28,10 @@ Text equivalent: the human operator sends human-only decisions to Graphyard. Her
 
 ![Control-plane components: callers, engine, Postgres, reconciler, GitHub.](diagrams/control-plane-components.svg)
 
-Text equivalent: sessions, the dashboard and producers call the API; the engine applies each mutation in one locked Postgres transaction and appends an event; the reconciliation worker syncs GitHub, publishes the required check and runs the guarded merge; the webhook only wakes a job.
+Text equivalent: sessions, the dashboard and producers call the API; each mutation is one locked Postgres transaction appending an event; the reconciliation worker syncs GitHub, publishes the required check and runs the guarded merge; the webhook only wakes a job.
 
 - Gates are deterministic checks of one candidate, `(PR, head SHA, base SHA)`, under the current policy revision; a push or base change invalidates old evidence.
 - Every claim increments the epoch; commands from an old epoch or an expired lease are refused.
 - Evidence is attributed to its authenticated producer; the latest trusted record per proof and candidate wins, even a later failure.
-- History is append-only, and a retried command replays its original result.
+- History is append-only; a retried command replays its original result.
 - Graphyard merges only the exact authorized candidate, once; any other merge is a permanent violation. Merge is not [delivery](delivery.md).
