@@ -30,7 +30,8 @@ export interface ControlPlaneStatus {
  */
 export interface AttentionOwner { role: 'master' | 'reviewer' | 'control plane' | 'human'; approvedBy: 'approver' | null; human: boolean; humanOnly: typeof humanOnlyDecisions[number] | null; next: string }
 /** An attention item carries its fault kind and class (GY-173); a builder that sets neither is classified by its wording. */
-export interface AttentionItem extends AttentionOwner { subject: string; text: string; kind?: FaultKind; faultClass?: FaultClass }
+/** `restates`: the subject of the standing fault this line is a symptom of, so the loop counts that fault alone (GY-374). */
+export interface AttentionItem extends AttentionOwner { subject: string; text: string; kind?: FaultKind; faultClass?: FaultClass; restates?: string }
 export const agentOwner = (role: 'master' | 'reviewer' | 'control plane', next: string, approvedBy: 'approver' | null = null): AttentionOwner => ({ role, approvedBy, human: false, humanOnly: null, next });
 export const humanOwner = (humanOnly: typeof humanOnlyDecisions[number], next: string): AttentionOwner => ({ role: 'human', approvedBy: null, human: true, humanOnly, next });
 /** The sources of installation attention; each is also its fault kind. */

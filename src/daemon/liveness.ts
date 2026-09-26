@@ -1,6 +1,7 @@
 // Concern: loop liveness — cycle cost, cycle-failure backoff, loop attention and the watchdog.
 import { type AttentionItem, agentOwner } from '../master.js';
-import { classified, noteFault } from '../model/fault-classes.js';
+import { classified } from '../model/fault-classes.js';
+import { noteFault } from '../model/fault-tracking.js';
 import { boundDaemonState, type CycleFailures, type CycleMetrics, type CycleStepName, type CycleSteps, type DaemonState, liveProcess, message, type StepCost } from './state.js';
 import type { LatencyBudget, SilenceReport } from './metrics.js';
 import type { DaemonEffects } from './effects.js';
