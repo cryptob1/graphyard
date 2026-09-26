@@ -162,7 +162,8 @@ export function tipReplacesHead(work: Pick<Work, 'candidate' | 'queue' | 'policy
  * named here, and the test gate, which judges the candidate's own change, stands. A check that
  * failed on the tip is an adverse conclusion that ejects the entry (`ejectionReason`), after
  * which this returns null and the test gate refuses it as ever. `testReasons` are the test gate's
- * refusals for the tip.
+ * refusals for the tip; only the CI-pending ones (`ciPendingReason`) are the tip's validation, and
+ * the caller lifts only those from the test gate.
  */
 export const tipValidationPrefix = 'Merge queue is validating speculative tip ';
 /**
@@ -181,10 +182,17 @@ export function tipValidation(work: Pick<Work, 'key' | 'candidate' | 'policyRevi
   // the plan merges or ejects others ahead of it, or waits for the tip it would test to be
   // published, nothing is required of it until it is replanned: its placement holds the merge.
   if (batch && (batch.state === 'waiting' || !batch.underTest?.tip)) return [];
-  if (!testReasons.length) return null;
+  const pending = testReasons.filter(ciPendingReason);
+  if (!pending.length) return null;
   const under = batch?.underTest?.tip ?? candidate.sha;
-  return testReasons.map(reason => `${tipValidationPrefix}${under.slice(0, 12)}: ${reason}`);
+  return pending.map(reason => `${tipValidationPrefix}${under.slice(0, 12)}: ${reason}`);
 }
+/**
+ * The one test-gate refusal the tip's own validation accounts for: a required CI check that has not
+ * yet passed on the candidate (GY-332). Any other test-gate refusal is the candidate's own and
+ * stays on the test gate, never relabelled as queue progress.
+ */
+export const ciPendingReason = (reason: string) => /^Required CI check .+ has not passed on the current candidate$/.test(reason);
 /** The carry decisions on record that moved bindings onto `sha`, under the current policy: a base refresh's, or a tip's. */
 export function onto(work: Pick<Work, 'queue' | 'baseRefresh' | 'policyRevision'>, sha: string): QueueCarry[] {
   return [work.queue?.speculation?.carry, work.baseRefresh?.carry].filter((carry): carry is QueueCarry => !!carry && carry.to.sha === sha && carry.policyRevision === work.policyRevision);

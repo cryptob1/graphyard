@@ -85,6 +85,12 @@ test('unit:diff-bound-carry — an approval and every proof carry across a base 
   assert.equal(evidenceBindsCandidate(work, evidence('unit:queue', { scopeFiles: ['src/queue.ts'] })), true);
   assert.deepEqual(tipValidation(work, work.queue!, ['Required CI check test has not passed on the current candidate']),
     [`Merge queue is validating speculative tip ${TIP.slice(0, 12)}: Required CI check test has not passed on the current candidate`], 'the combined-tip CI still runs before merge');
+  // Only the CI-pending refusal is the tip's validation (GY-332): any other test-gate refusal is the
+  // candidate's own and is never relabelled as queue progress.
+  const other = 'Required CI check test reported by an untrusted app';
+  assert.equal(tipValidation(work, work.queue!, [other]), null, 'a refusal of another shape is not the tip validating');
+  assert.deepEqual(tipValidation(work, work.queue!, [other, 'Required CI check test has not passed on the current candidate']),
+    [`Merge queue is validating speculative tip ${TIP.slice(0, 12)}: Required CI check test has not passed on the current candidate`], 'only the CI-pending refusal is relabelled');
 
   // An unchanged diff decides on its own: the base's file list is not needed.
   assert.equal(decideCarry(input({ ...merge, baseChanges: null })).approval.carried, true);
