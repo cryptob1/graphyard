@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { isClosed } from './closure.js';
 import { standingCapacity } from './capacity.js';
-import { scopeRefusalBlocker } from './scope.js';
+import { scopeBlockedBudgetMs, scopeRefusalBlocker } from './scope.js';
 // Types only from work.ts: work.ts reaches this module through the origin schema (interventions.ts),
 // so a value import back would read work.ts before it has evaluated.
 import type { EscalationTrigger, Work } from './work.js';
@@ -145,12 +145,28 @@ export function groupFaults(items: readonly { subject: string; kind: FaultKind; 
   return [...groups.values()].sort((a, b) => b.count - a.count || faultClasses.indexOf(a.faultClass) - faultClasses.indexOf(b.faultClass));
 }
 
+/**
+ * Where an item's scope request stands as a fault (GY-543). A request from an attempt that no longer
+ * holds the lease is `moot` (owed-report's rule). A live one is `deciding` while it is younger than the
+ * published bound on scope decisions (scopeBlockedBudgetMs, GY-85): asking for a file the plan did not
+ * name is the ordinary path of an item whose plan could not name its files — every loop-filed
+ * fault-class item plans none — and the rule or the approver answers it inside that bound. Counted
+ * while it was being decided, each such ask fed the scope class and filed a recurring item by itself.
+ * A request still standing past the bound, refused or undecided, is the `fault`.
+ */
+export function scopeRequestState(work: Pick<Work, 'scopeRequest' | 'lease'>, now: number): 'none' | 'moot' | 'deciding' | 'fault' {
+  const request = work.scopeRequest;
+  if (!request) return 'none';
+  if (!(work.lease?.epoch === request.epoch && Date.parse(work.lease.expiresAt) > now)) return 'moot';
+  return now - Date.parse(request.at) > scopeBlockedBudgetMs ? 'fault' : 'deciding';
+}
+
 /** One fault standing on a work item, read from the item's own record. */
 export interface FaultObservation extends Classified { subject: string; text: string }
 const observe = (kind: FaultKind, subject: string, text: string): FaultObservation => ({ ...classified(kind), subject, text: text.slice(0, 500) });
 /**
  * The faults an open item's own record shows: its standing escalations, a lapsed containment
- * fence, a human-only park, a live attempt's open scope request, a proof nobody may produce, a spent provider
+ * fence, a human-only park, a live attempt's scope request standing past its decision bound, a proof nobody may produce, a spent provider
  * account, its out-of-scope violations and its blocker. The dashboard and the loop read the same.
  */
 export function workFaults(work: Work, now: number): FaultObservation[] {
@@ -160,7 +176,7 @@ export function workFaults(work: Work, now: number): FaultObservation[] {
   for (const escalation of escalations) found.push(observe(escalationFaultKind(escalation.trigger), work.key, `${escalation.trigger} escalation: ${escalation.reason}`));
   if (work.containmentQuarantine && !(work.lease && Date.parse(work.lease.expiresAt) > now)) found.push(observe('containment', work.key, `Containment quarantine from epoch ${work.containmentQuarantine.epoch} holds ${work.key}`));
   if (work.humanRequest && !work.humanRequest.answer) found.push(observe('human-request', work.key, `${work.key} is parked on a human-only decision: ${work.humanRequest.needed}`));
-  if (work.scopeRequest && work.lease?.epoch === work.scopeRequest.epoch && Date.parse(work.lease.expiresAt) > now) /* an expired attempt's request is moot (owed-report's rule) */ found.push(observe('scope-request', work.key, `${work.key} needs files outside plannedFiles: ${work.scopeRequest.paths.join(', ')}`));
+  if (scopeRequestState(work, now) === 'fault') found.push(observe('scope-request', work.key, `${work.key} needs files outside plannedFiles: ${work.scopeRequest!.paths.join(', ')}`));
   if (work.proofGaps?.length) found.push(observe('proof-gap', work.key, `No principal is authorized to produce ${work.proofGaps.join(', ')}`));
   if (standingCapacity(work).length) found.push(observe('role-capacity', work.key, `${work.key} waits on a provider account out of quota`));
   if (work.violations.length) found.push(observe('scope-violation', work.key, work.violations[0]));
