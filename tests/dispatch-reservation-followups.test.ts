@@ -59,7 +59,7 @@ test('unit:stale-takeover-keeps-a-fresh-lock — a dispatcher that judged a lock
 
 // GY-509: a live dispatcher that stalls past the takeover guard's age between its read and its removal.
 test('unit:stalled-takeover-removes-only-what-it-judged — removal judges the lock it moved aside, never a lock created during a stall', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-stall-'));
+  const root = await temporaryDirectory('stall');
   try {
     const lock = join(root, 'work-GY-1.lock');
     const old = new Date(Date.now() - hour);
