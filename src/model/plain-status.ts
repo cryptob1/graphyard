@@ -1,7 +1,7 @@
-import { deliveryState, type Gate, type Work } from '../src/model';
-import type { PipelineTimeline } from '../src/pipeline-speed';
-import { assignment } from './assignment';
-import { formatAge, statusDuration, type StatusDuration } from './duration';
+import { deliveryState, type Gate, type Work } from '../model.js';
+import type { PipelineTimeline } from '../pipeline-speed.js';
+import { assignment } from './assignment.js';
+import { formatAge, statusDuration, type StatusDuration } from './duration.js';
 
 /**
  * Plain-English status for people who have never read the Graphyard docs. Every sentence is

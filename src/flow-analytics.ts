@@ -1177,13 +1177,13 @@ export type FlowReport = ReturnType<typeof computeFlow>;
 export interface DrilldownRequest { metric: string; key?: string | null; authorized?: boolean }
 const drilldownMetrics = ['bottleneck', 'wip', 'stage-dwell', 'lead-time', 'throughput', 'phase', 'evidence', 'merge-ready', 'deployments', 'review', 'blockers', 'steps'] as const;
 
-/** The seven pull-request steps the dashboard draws (web/pr-steps.ts), in the order a pull request travels. */
+/** The seven pull-request steps the dashboard draws (src/model/pr-steps.ts), in the order a pull request travels. */
 export const flowSteps = ['build', 'validate', 'test', 'review', 'prove', 'merge', 'deploy'] as const;
 export type FlowStep = typeof flowSteps[number];
 const gateStep: [string, FlowStep][] = [['build', 'validate'], ['test', 'test'], ['review', 'review'], ['acceptance', 'prove'], ['merge', 'merge']];
 /**
  * The step a recorded `gates.changed` fact places its item at, by the dashboard's own rule
- * (web/pr-steps.ts `prSteps`, which tests/ui-dashboard.test.ts holds this to): outside the flow
+ * (src/model/pr-steps.ts `prSteps`, which tests/ui-dashboard.test.ts holds this to): outside the flow
  * (null) while it is in backlog or waiting for a builder, unless a blocker holds it there (the
  * dashboard shows blocked work at Build); Build until the work is handed in, which is exactly when
  * the build gate refuses with "Worker has not submitted implementation for this attempt" (read
