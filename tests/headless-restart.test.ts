@@ -10,7 +10,7 @@ import { detachedLaunch, piRunner, processIdentity, readRunMeta, runAlive, runCo
 import { adoptRuns, applyOnce, clearRuns, detachRuns, liveRun, runsDirectory, type Applied } from '../src/runner/registry.js';
 import { approverRunOptions, startNarrowRun } from '../src/runner/roles.js';
 import { lostRun, lostRunReason, sessionRetry } from '../src/producer.js';
-import { emptyDaemonState, runDaemon, type DaemonEffects } from '../src/master-daemon.js';
+import { approvalStep, approvalWatchSchema, emptyDaemonState, maxApproverLaunches, maxLostApproverRuns, runDaemon, type DaemonEffects } from '../src/master-daemon.js';
 import { EventEmitter } from 'node:events';
 import type { RunResult } from '../src/runner/types.js';
 
@@ -242,4 +242,15 @@ test('unit:restart-leaves-runs a run launched from a systemd service gets its ow
   assert.equal(plain.file, '/bin/sh');
   assert.match(plain.args[1], /trap : TERM INT HUP/);
   assert.match(plain.args[1], /'\/runs\/r1\/exit'/, 'the shell records Pi\'s exit in the run directory');
+});
+
+test('unit:headless-run-survives-restart a lost approver run is relaunched without spending a launch only a bounded number of times, then counts, so the decision still escalates', () => {
+  const at = new Date(Date.now() - 60_000).toISOString();
+  const lost = { runtime: 'pi', startedAt: at, endedAt: at, events: [], applied: [], result: { ok: false as const, reason: 'lost' as const, detail: 'the run\'s process is gone and recorded no exit' } };
+  const watch = (lostRuns: number) => approvalWatchSchema.parse({ work: 'GY-1', action: 'rework', decision: 'decision-1', agentName: 'graphyard-approver-gy-1', requestedAt: at, launchedAt: at, launches: maxApproverLaunches, lostRuns, run: lost });
+  const gone = { agents: [], available: true };
+  assert.equal(approvalStep(watch(0), { state: 'requested' }, gone, Date.now()).step, 'relaunch', 'a lost run on the last launch is given that launch back');
+  assert.equal(approvalStep(watch(maxLostApproverRuns - 1), { state: 'requested' }, gone, Date.now()).step, 'relaunch');
+  assert.equal(approvalStep(watch(maxLostApproverRuns), { state: 'requested' }, gone, Date.now()).step, 'exhausted', 'past the bound a lost run spends its launch, and the decision escalates');
+  assert.equal(approvalStep({ ...watch(0), run: null }, { state: 'requested' }, gone, Date.now()).step, 'exhausted', 'a session that is merely gone always spent its launch');
 });

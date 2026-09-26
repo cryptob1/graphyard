@@ -501,6 +501,17 @@ export function withheldDecision(work: Work, config: Pick<MasterConfig, 'autoMer
  * and an actionable silence rather than as a relaunch every few minutes forever.
  */
 export const approverJudgeBoundMs = 600_000, approverSettleMs = 60_000, maxApproverLaunches = 3, maxApproverCloses = 3, maxDecisionRequests = 3;
+/**
+ * A headless approver run lost to something outside the loop (GY-453: killed, recording no exit)
+ * judged nothing, so its launch is given back — but only this many times per decision. Past it, a
+ * lost run spends its launch like any other ended session, so a decision whose approver keeps
+ * being killed still reaches `maxApproverLaunches` and its escalation: at most
+ * `maxApproverLaunches + maxLostApproverRuns` launches per decision.
+ */
+export const maxLostApproverRuns = 3;
+/** Whether the watch's last run was lost and its launch is still given back (see `maxLostApproverRuns`). */
+export const lostRunRefunded = (watch: Pick<ApprovalWatch, 'run' | 'lostRuns'>) =>
+  watch.run?.result?.ok === false && watch.run.result.reason === 'lost' && watch.lostRuns < maxLostApproverRuns;
 export type ApprovalStep =
   | { step: 'wait'; detail: string }
   | { step: 'settled'; detail: string }
@@ -528,7 +539,8 @@ export function approvalStep(watch: ApprovalWatch, decision: { state: string; ou
       : age > approverJudgeBoundMs ? `approver session ${watch.agentName} has not judged it for ${Math.round(age / 60_000)} minutes, past the ${Math.round(approverJudgeBoundMs / 60_000)}-minute bound`
         : null;
   if (!ended) return { step: 'wait', detail: `${label} is with approver session ${watch.agentName} (launch ${watch.launches} of ${maxApproverLaunches})` };
-  return watch.launches < maxApproverLaunches ? { step: 'relaunch', detail: `${label}: ${ended}` } : { step: 'exhausted', detail: `${label}: ${ended}` };
+  // A lost run whose launch is given back is relaunched even from the last launch (GY-453).
+  return watch.launches - (!session && lostRunRefunded(watch) ? 1 : 0) < maxApproverLaunches ? { step: 'relaunch', detail: `${label}: ${ended}` } : { step: 'exhausted', detail: `${label}: ${ended}` };
 }
 /** Every gate green on a submitted candidate: what "mergeable" means to the cycle and its budget. */
 export const mergeableCandidate = (work: Work) => work.stage === 'merge' && !!work.candidate && !work.violations.length && work.gates.every(gate => gate.passed);

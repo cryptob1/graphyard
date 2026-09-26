@@ -221,6 +221,8 @@ export const approvalWatchSchema = z.object({
   requestedAt: z.string(), launchedAt: z.string().nullable().default(null),
   /** Approver sessions launched (or attempted) for this decision; bounded by `maxApproverLaunches`. */
   launches: z.number().int().min(0).default(0),
+  /** Headless approver runs lost for this decision (GY-453) whose launch was given back; bounded by `maxLostApproverRuns`. */
+  lostRuns: z.number().int().min(0).default(0),
   /** Requests made for this binding, counting the ones the server settled without applying; bounded by `maxDecisionRequests`. */
   requests: z.number().int().min(0).default(1),
   /** How each earlier session ended without a judgement, oldest first. */
@@ -251,7 +253,7 @@ export type ApprovalWatch = z.infer<typeof approvalWatchSchema>;
  * What a re-keyed watch takes over from the one it retires: the session goes on, and so does what
  * it runs on, so a retained session's exhaustion holds the account it spent (GY-182).
  */
-export const carriedSession = (prior: ApprovalWatch) => ({ launches: prior.launches, agentName: prior.agentName, pane: prior.pane, launchedAt: prior.launchedAt,
+export const carriedSession = (prior: ApprovalWatch) => ({ launches: prior.launches, lostRuns: prior.lostRuns, agentName: prior.agentName, pane: prior.pane, launchedAt: prior.launchedAt,
   exhaustedAt: prior.exhaustedAt, account: prior.account, runtime: prior.runtime, session: prior.session });
 
 /**

@@ -1,4 +1,7 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { mkdirSync } from 'node:fs';
+import { join } from 'node:path';
+import type { Run, RunEvent, RunOptions, RunResult, Runner } from '../../src/runner/types.js';
 import type { GitHub } from '../../src/github.js';
 import type { HerdrAgent } from '../../src/master.js';
 import type { Observation, Work } from '../../src/model.js';
@@ -268,4 +271,52 @@ export class SimulatedHerdr {
   close(pane: string) { if (!this.agents.delete(pane)) throw new Error(`pane_not_found: ${pane}`); this.closed.push(pane); }
   list(): HerdrAgent[] { return [...this.agents.values()].map(agent => ({ ...agent })); }
   byName(name: string) { return [...this.agents.values()].find(agent => agent.name === name); }
+}
+
+// ---------------------------------------------------------------------------
+// Pi: headless runs (GY-453), detached from the loop that started them. A run's process lives here,
+// in the world, not in the loop: the loop's restart (`detachRuns`) leaves it running, and the loop
+// that follows adopts it from its directory under the real run registry on disk. The world ends a
+// run with a submission, or kills it from outside so it ends without one: lost.
+// ---------------------------------------------------------------------------
+interface SimulatedRunProcess { state: 'live' | 'submitted' | 'killed' | 'cancelled'; payload: unknown; detail: string; wake: Set<() => void> }
+export class SimulatedPi implements Runner {
+  readonly name = 'pi';
+  processes = new Map<string, SimulatedRunProcess>();
+  started: string[] = [];
+  start<T>(_prompt: string, options: RunOptions<T>): Run<T> {
+    const directory = join(options.runs!, randomUUID());
+    mkdirSync(directory, { recursive: true });
+    this.processes.set(directory, { state: 'live', payload: null, detail: '', wake: new Set() });
+    this.started.push(directory);
+    return this.adopt(directory, options);
+  }
+  adopt<T>(directory: string, options: Pick<RunOptions<T>, 'tool' | 'validate'>): Run<T> {
+    const child = this.processes.get(directory)!, events: RunEvent[] = [], listeners = new Set<(event: RunEvent) => void>();
+    let resolve!: (result: RunResult<T>) => void, detached = false;
+    const result = new Promise<RunResult<T>>(done => { resolve = done; });
+    const settle = () => {
+      if (detached || child.state === 'live') return;
+      child.wake.delete(settle);
+      if (child.state === 'submitted') { const payload = options.validate(child.payload); resolve({ ok: true, tool: options.tool, payload, payloads: [payload] }); }
+      else resolve({ ok: false, failure: { reason: child.state === 'killed' ? 'lost' : 'cancelled', detail: child.detail }, payloads: [] });
+    };
+    child.wake.add(settle); settle();
+    return { id: directory, directory, events,
+      onEvent: listener => { listeners.add(listener); return () => listeners.delete(listener); },
+      cancel: reason => this.end(directory, 'cancelled', null, reason ?? 'cancelled'),
+      detach: () => { detached = true; child.wake.delete(settle); },
+      result: () => result };
+  }
+  private end(directory: string, state: SimulatedRunProcess['state'], payload: unknown, detail: string) {
+    const child = this.processes.get(directory);
+    if (!child || child.state !== 'live') return;
+    Object.assign(child, { state, payload, detail });
+    for (const wake of [...child.wake]) wake();
+  }
+  /** The agent submits through its Graphyard tool and exits. */
+  submit(directory: string, payload: unknown) { this.end(directory, 'submitted', payload, ''); }
+  /** Killed from outside (OOM, a host reboot): gone, recording no exit. */
+  kill(directory: string) { this.end(directory, 'killed', null, 'the run\'s process is gone and recorded no exit'); }
+  live() { return [...this.processes.values()].filter(child => child.state === 'live').length; }
 }

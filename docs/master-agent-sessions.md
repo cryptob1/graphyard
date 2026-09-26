@@ -55,7 +55,7 @@ A reviewer or producer is `awaiting acknowledgement` until 30 s of activity (`co
 
 When a live attempt's blocker or scope request resolves, its inactive session is re-prompted once (item, epoch, change, `complete GY-N EPOCH PR`), recorded on its handle. **Idle-with-lease** (30 quiet minutes, nothing open) shows on its handle with the pane, re-prompted once, then after 30 more handed to a new attempt on its branch. Agentless panes, or items that left build, close with a reason.
 
-Headless Pi runs (`.graphyard/runs/`) survive restarts and are re-adopted; lost ones retry free.
+Headless Pi runs (`.graphyard/runs/`) survive restarts and are re-adopted; lost ones retry free, an approver up to three times per decision.
 
 ### The dispatcher's own state
 
