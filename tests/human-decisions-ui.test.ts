@@ -1,7 +1,7 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createElement } from 'react';
@@ -17,6 +17,10 @@ import type { Principal, Work } from '../src/model.js';
 import HumanRequestsPage, { signInAction } from '../web/pages/human-requests.js';
 import { redeemSignIn, signInCode } from '../web/pages/login.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
+import { buildPlan, coreEnv, materializeInstall, prepareInstall } from '../src/install/index.js';
+import { principalSchema } from '../src/server/principals.js';
+import { previewPrincipalRotation, readProposedRoster } from '../src/master/autonomy.js';
+import { harness } from './install-harness.js';
 
 /**
  * GY-738: the decisions only a human may make are the easiest thing in the product. The operator
@@ -181,4 +185,38 @@ test('unit:human-request-choices — every human-only request carries its reques
   const written = JSON.stringify((await store.pool.query('SELECT document FROM work_items')).rows) + JSON.stringify((await store.pool.query('SELECT payload FROM events')).rows) + JSON.stringify((await store.pool.query('SELECT result, fingerprint FROM receipts')).rows);
   assert.ok(!written.includes(secret), 'the value is written nowhere in the clear');
   assert.throws(() => resolveHumanAnswer(credential.humanRequest!, { request: randomUUID(), outcome: 'provided', choice: 'decline', secret }), /sent only with the choice that asks for it/);
+});
+
+test('unit:operator-principal-declared-human — the install plan declares its operator principal a human session and no agent principal; a roster rotation keeps it so', async () => {
+  const fixture = await harness({ provider: 'railway' });
+  try {
+    const session = await materializeInstall(await prepareInstall(fixture.root, { repository: 'owner/project', provider: 'railway', workers: 2, producerProofs: ['integration:claim-safety'] }, fixture.deps, 'apply'));
+    const plan = await buildPlan(session);
+    assert.deepEqual(plan.principals.filter(principal => principal.sessionKind === 'human').map(principal => principal.id), ['owner-project-operator'], 'the plan declares the operator, and only it, human');
+    // What the deployment authenticates: GRAPHYARD_PRINCIPALS as the server parses it.
+    const deployed = principalSchema.parse(JSON.parse(coreEnv(session).find(value => value.name === 'GRAPHYARD_PRINCIPALS')!.value));
+    assert.deepEqual(deployed.map(principal => [principal.id, principal.role, principal.sessionKind]), [
+      ['owner-project-operator', 'admin', 'human'], ['owner-project-master', 'coordinator', 'ai'], ['owner-project-worker-1', 'worker', 'ai'], ['owner-project-worker-2', 'worker', 'ai'],
+      ['owner-project-dashboard', 'reader', 'ai'], ['owner-project-ci', 'producer', 'ai']]);
+
+    // `master principals` reads the proposed roster from .graphyard/credentials.json and previews it
+    // against the live one: adding a worker keeps the operator human and applies.
+    const live = deployed.map(({ token: _token, ...principal }) => principal);
+    const roster = async (entries: object[]) => {
+      await mkdir(join(fixture.root, '.graphyard'), { recursive: true });
+      await writeFile(join(fixture.root, '.graphyard/credentials.json'), JSON.stringify(entries), { mode: 0o600 });
+      return previewPrincipalRotation(live, await readProposedRoster(fixture.root));
+    };
+    const rotated = await roster([...deployed, { id: 'owner-project-worker-3', role: 'worker', sessionKind: 'ai', token: 'w'.repeat(43) }]);
+    assert.equal(rotated.applicable, true, rotated.refusals.join('; '));
+    assert.deepEqual(rotated.humans, ['owner-project-operator']);
+    // A rotation that drops the declaration (the 2026-09-26 roster: nobody human) is refused.
+    const undeclared = await roster(deployed.map(({ sessionKind: _kind, ...principal }) => principal));
+    assert.equal(undeclared.applicable, false);
+    assert.ok(undeclared.refusals.includes('owner-project-operator would stop being a declared human session'));
+    assert.ok(undeclared.refusals.some(refusal => /no admin principal is declared "sessionKind": "human"; declare the operator's \(owner-project-operator\)/.test(refusal)));
+    // An agent principal declared human is refused too: it could answer a human-only request itself.
+    const agentHuman = await roster(deployed.map(principal => principal.role === 'worker' ? { ...principal, sessionKind: 'human' } : principal));
+    assert.deepEqual(agentHuman.refusals, ['owner-project-worker-1 (worker) is an agent role and may not be declared human', 'owner-project-worker-2 (worker) is an agent role and may not be declared human']);
+  } finally { await fixture.cleanup(); }
 });

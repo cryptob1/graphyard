@@ -119,20 +119,22 @@ export async function writeInstallRecord(directory: string, record: InstallRecor
 
 /** The exact value of GRAPHYARD_PRINCIPALS, matching the server's principal schema. */
 export function principalsVariable(principals: PlannedPrincipal[], tokens: Map<string, string>) {
-  return JSON.stringify(principals.map(principal => ({ id: principal.id, role: principal.role, ...(principal.proofs?.length ? { proofs: principal.proofs } : {}), token: tokens.get(principal.id) ?? '' })));
+  return JSON.stringify(principals.map(principal => ({ id: principal.id, role: principal.role, ...(principal.proofs?.length ? { proofs: principal.proofs } : {}), sessionKind: principal.sessionKind, token: tokens.get(principal.id) ?? '' })));
 }
 
 export function plannedPrincipals(installId: string, options: { workers?: number; producerProofs?: string[] } = {}): PlannedPrincipal[] {
   const workers = Math.min(Math.max(options.workers ?? 1, 1), 20);
   const proofs = [...new Set(options.producerProofs ?? [])].sort();
+  // The operator is the one human session (GY-738): human-only requests are answerable from the
+  // first day, and every agent credential is declared AI so none can answer one.
   return [
-    { id: `${installId}-operator`, role: 'admin' as Role },
-    { id: `${installId}-master`, role: 'coordinator' as Role },
-    ...Array.from({ length: workers }, (_, index) => ({ id: `${installId}-worker-${index + 1}`, role: 'worker' as Role })),
-    { id: `${installId}-dashboard`, role: 'reader' as Role },
+    { id: `${installId}-operator`, role: 'admin' as Role, sessionKind: 'human' as const },
+    { id: `${installId}-master`, role: 'coordinator' as Role, sessionKind: 'ai' as const },
+    ...Array.from({ length: workers }, (_, index) => ({ id: `${installId}-worker-${index + 1}`, role: 'worker' as Role, sessionKind: 'ai' as const })),
+    { id: `${installId}-dashboard`, role: 'reader' as Role, sessionKind: 'ai' as const },
     // A producer is created only with an explicit proof allowlist; an empty grant would
     // be a standing credential with no lane, and widening it later is never automatic.
-    ...(proofs.length ? [{ id: `${installId}-ci`, role: 'producer' as Role, proofs }] : []),
+    ...(proofs.length ? [{ id: `${installId}-ci`, role: 'producer' as Role, proofs, sessionKind: 'ai' as const }] : []),
   ];
 }
 

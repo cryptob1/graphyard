@@ -6,7 +6,7 @@ export type Role = 'admin' | 'coordinator' | 'worker' | 'reader' | 'producer';
 export const REDACTED = '[redacted]';
 export const SERVER_PORT = 4310;
 
-export interface PlannedPrincipal { id: string; role: Role; proofs?: string[] }
+export interface PlannedPrincipal { id: string; role: Role; proofs?: string[]; sessionKind: 'human' | 'ai' }
 export interface EnvValue { name: string; value: string; secret: boolean }
 export interface PlanValue { name: string; value: string; secret: boolean; fingerprint?: string; note?: string }
 export interface PlanDrift { action: string; field: string; expected: string; observed: string }

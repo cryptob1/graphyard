@@ -13,7 +13,7 @@ Each open item is in one group: **Needs you** (only you decide), **Blocked**, **
 
 ## Needs you
 
-`graphyard login` prints a single-use, ten-minute sign-in link for a human operator session; others get **Sign in as the operator**. Requests offer buttons (`park --choice`, plus **Decline**) and notes; **Provide now** seals credentials for `graphyard unseal GY-N`.
+`graphyard login` prints a single-use, ten-minute sign-in link for the operator's human session (declared at install); others get **Sign in as the operator**. Requests offer buttons (`park --choice`, plus **Decline**) and notes; **Provide now** seals credentials for `graphyard unseal GY-N`.
 
 ## Workers
 
