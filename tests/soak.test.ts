@@ -13,10 +13,11 @@ import { server } from '../src/server.js';
 import { processJob } from '../src/github.js';
 import { Refusal, type Principal, type Work } from '../src/model.js';
 import { approverSessionName, decisionInput, masterConfigSchema, mergeExecutor, type MasterConfig, type WorkerProfile } from '../src/master.js';
-import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { Launcher } from '../src/daemon/cycle.js';
 import { successorWidening } from '../src/model/successors.js';
 import { systemInvariants, type InvariantCheck } from '../src/model/invariants.js';
+import { performSelfUpgrade, type SelfUpgradeOutcome } from '../src/daemon/upgrade.js';
 import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } from './helpers/soak-world.js';
 
 /**
@@ -27,11 +28,13 @@ import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } f
  * (src/model/invariants.ts) holds. Fifteen items pass through it: released every fifteen minutes so
  * a merge lands about every fifteen, three sent back by their reviewer, two whose worker dies, two
  * production deploys, a file split on main that re-plans an item, one pull request GitHub reports
- * CLEAN at once and one UNSTABLE, and a reviewer bot out of quota that fails over. Every one of the
- * fifteen must be delivered. The loop carries one `Launcher` across its cycles (GY-616), as
- * `runDaemon` does, so session launches run beside the cycle — outliving it, holding their profile
- * from hand-off, and reported by the next cycle — and the invariants hold on that detached path. A
- * change to the loop that breaks an invariant fails here, in CI, before
+ * CLEAN at once and one UNSTABLE, a reviewer bot out of quota that fails over, and the loop's
+ * between-cycles self-upgrade (GY-437) against a simulated coordinator checkout that stands dirty
+ * across the second deploy for a while. Every one of the fifteen must be delivered. The loop
+ * carries one `Launcher` across its cycles (GY-616), as `runDaemon` does, so session launches run
+ * beside the cycle — outliving it, holding their profile from hand-off, and reported by the next
+ * cycle — and the invariants hold on that detached path. A change to the loop that breaks an
+ * invariant fails here, in CI, before
  * it merges; a new behaviour that repeats per cycle, head or item belongs in this world. That
  * includes the loop's own post-deploy throughput measurement (GY-393): every release the simulated
  * day observes serving is measured exactly once, on the loop's per-release action.
@@ -61,7 +64,7 @@ const start = Date.parse('2031-06-02T08:00:00Z');
 const plan = {
   items: 15, releaseEveryMs: 15 * minute, workMs: 20 * minute,
   rework: new Set([3, 7, 11]), deaths: new Set([5, 9]), deathAfterMs: 8 * minute,
-  deploys: [2 * hour + 30 * minute, 5 * hour], split: { at: 45 * minute, item: 12 }, clean: 2, unstable: 4, slowRecompute: 8, exhaustedReviewer: 6,
+  deploys: [2 * hour + 30 * minute, 5 * hour], dirtyCheckout: { from: 4 * hour + 50 * minute, to: 6 * hour }, split: { at: 45 * minute, item: 12 }, clean: 2, unstable: 4, slowRecompute: 8, exhaustedReviewer: 6,
 };
 const file = (n: number) => `src/soak/item-${n}.ts`;
 
@@ -101,7 +104,7 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
  * effects, standing for a change that breaks an invariant, so the soak shows it would fail.
  */
 let days = 0;
-async function simulateDay(options: { hours: number; regression?: 'approvers-left-open' }) {
+async function simulateDay(options: { hours: number; regression?: 'approvers-left-open'; handApprovers?: boolean }) {
   const dayStart = clock.now();
   const github = new SimulatedGitHub({ repository, baseBranch: 'main', appId: 1234, ciAppId: 15368, reviewerApps, ciMs: 5 * minute, reviewMs: 3 * minute, firstPullRequest: 100 * ++days },
     [...Array.from({ length: plan.items }, (_, index) => file(index + 1)), 'README.md']);
@@ -159,7 +162,19 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
 
   // ---- Approvers and producers: sessions the loop launches, each acting on the minute after. ----
   const pending: (() => Promise<void>)[] = [];
+  // GY-551: decisions a master requested and put to an approver by hand (`master approver`), whose
+  // sessions all end without judging: the first vanishes or stops, each relaunch the loop makes
+  // stops `done`, and one relaunch is refused by a registry timeout.
+  const hand = new Map<string, { key: string; launches: number; refused: number }>();
   const approver: DaemonEffects['approver'] = async (work, decision) => {
+    const unjudged = hand.get(decision);
+    if (unjudged) {
+      unjudged.launches += 1;
+      if (unjudged.key === items[plan.items - 1].key && unjudged.launches === 1) { unjudged.refused += 1; throw new Error('the agent registry for the approver role is unreachable: timeout'); }
+      const agentName = approverSessionName(work, decision), pane = herdr.open(agentName);
+      pending.push(async () => { herdr.status(pane, 'done'); });
+      return { agentName, pane };
+    }
     const agentName = approverSessionName(work, decision), pane = herdr.open(agentName);
     pending.push(async () => { await api(principals.approver, 'POST', `work/${work.id}/approve`, { decision, reason: `Approved: the loop's routine ${decision} decision for ${work.key} rests on what it verified` }); herdr.status(pane, 'done'); });
     return { agentName, pane };
@@ -214,13 +229,56 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
   };
 
+  // ---- The coordinator checkout the loop runs from, and its supervisor (GY-437). ----
+  // A detached checkout of the base branch, at the tip the day starts on; git answers from the
+  // simulated GitHub, and a restart of the fleet or of the loop itself is recorded, not performed.
+  const checkout = { head: github.tip, origin: github.tip, dirty: false };
+  const upgrades = { fetches: 0, checkouts: [] as { at: number; from: string; to: string }[], executors: [] as string[], self: 0, outcomes: [] as SelfUpgradeOutcome['outcome'][] };
+  /** The paths the base branch changed between two commits: every merged pull request's files, and what any other commit added or removed. */
+  const changedPaths = (from: string, to: string) => {
+    const paths = new Set<string>(), seen = new Set<string>(), queue = [to];
+    while (queue.length) {
+      const at = queue.pop()!;
+      if (seen.has(at) || github.contains(from, at)) continue;
+      seen.add(at);
+      const commit = github.commits.get(at)!, merged = github.merges.find(entry => entry.sha === at);
+      if (merged) for (const path of github.prs.get(merged.pr)!.files) paths.add(path);
+      else if (commit.parents[0]) {
+        const before = new Set(github.commits.get(commit.parents[0])!.files), after = new Set(commit.files);
+        for (const path of [...before, ...after]) if (before.has(path) !== after.has(path)) paths.add(path);
+      }
+      if (!merged) queue.push(...commit.parents);
+      else queue.push(commit.parents[0]);
+    }
+    return [...paths];
+  };
+  const coordinatorGit = async (command: string, args: string[]): Promise<string> => {
+    assert.equal(command, 'git');
+    const [op, ...operands] = args.slice(2);
+    if (op === 'fetch') { upgrades.fetches++; checkout.origin = github.tip; return ''; }
+    if (op === 'rev-parse') return `${operands[0] === 'HEAD' ? checkout.head : checkout.origin}\n`;
+    if (op === 'symbolic-ref') throw Object.assign(new Error('fatal: ref HEAD is not a symbolic ref'), { status: 1 });
+    if (op === 'status') return checkout.dirty ? ' M src/master.ts\n' : '';
+    if (op === 'diff') { const [from, to] = operands[1].split('..'); return `${changedPaths(from, to).join('\n')}\n`; }
+    if (op === 'checkout') { assert.ok(!checkout.dirty, 'a dirty checkout is never touched'); upgrades.checkouts.push({ at: clock.now(), from: checkout.head, to: operands[2] }); checkout.head = operands[2]; return ''; }
+    throw new Error(`the simulated coordinator checkout cannot answer git ${args.slice(2).join(' ')}`);
+  };
+  const selfUpgrade = (state: DaemonState) => performSelfUpgrade(config, state, {
+    root: '/soak/coordinator', run: coordinatorGit, now: clock.now, persist: async () => {},
+    restartExecutors: async to => { upgrades.executors.push(to); return { result: 'restarted', reason: null, coordinator: { commit: to }, held: [], restarted: [], unsupervised: [], forgotten: [] }; },
+    // The supervisor re-executes the loop: the next process loads the release the checkout holds, as runDaemon records it.
+    restartSelf: async () => { upgrades.self++; state.release = { commit: checkout.head, dirty: checkout.dirty }; },
+  });
+
   // ---- The day. ----
   const state = emptyDaemonState(config);
+  /** The cursor's upgrade actions and the refusal's attempts, sampled every cycle the checkout stood refused. */
+  const refusalSamples: { keys: number; attempts: number }[] = [];
   // Session launches run beside the cycle (GY-616): the loop carries one launcher across its
   // cycles, the way `runDaemon` does, and a launch settles in the interval after the cycle that
   // handed it over — here, before the simulated clock moves on.
   const launcher = new Launcher();
-  const violations: string[] = [], observed = new Set<string>(), failures: string[] = [];
+  const violations: string[] = [], observed = new Set<string>(), failures: string[] = [], escalations: string[] = [], spent = new Set<string>();
   let released = 0, split = false, deploys = 0, cycles = 0, reportedDispatches = 0;
   const jobsDue = async () => Number((await store.pool.query('SELECT count(*) AS due FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now())')).rows[0].due);
   for (let elapsed = 0; elapsed <= options.hours * hour;) {
@@ -232,6 +290,16 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       const from = file(plan.split.item), successors = [`src/soak/item-${plan.split.item}-a.ts`, `src/soak/item-${plan.split.item}-b.ts`];
       const commit = github.commit(`Split ${from}\n\nGraphyard-Successor: ${from} -> ${successors.join(', ')}`, [...github.files.filter(path => path !== from), ...successors]);
       github.successions.push(...successors.map(to => ({ from, to, commit: commit.sha, similarity: 70 })));
+    }
+    // GY-551: twenty minutes in, the master requests a release of the last two items by hand and
+    // puts each to an approver session it launches itself; neither session judges it.
+    if (options.handApprovers && elapsed === 20 * minute) for (const [n, ending] of [[plan.items, 'vanishes'], [plan.items - 1, 'stops']] as const) {
+      const current = (await store.list()).find(item => item.id === items[n - 1].id)!;
+      const decision = await api(principals.operatorAgent, 'POST', `work/${current.id}/decide`, { action: 'release', input: decisionInput('release', current, {}), reason: `Soak: a hand-requested release of ${current.key} its approver never judges` });
+      hand.set(decision.id, { key: current.key, launches: 0, refused: 0 });
+      const pane = herdr.open(approverSessionName(current, decision.id));
+      // Each ends a minute after the loop first lists it.
+      pending.push(async () => { pending.push(async () => { if (ending === 'vanishes') herdr.kill(pane); else herdr.status(pane, 'done'); }); });
     }
     const deploying = deploys < plan.deploys.length && elapsed >= plan.deploys[deploys];
     if (deploying) { production.build = sha('build', ++deploys); production.sha = github.tip; production.deploys.push({ at: now, build: production.build, sha: production.sha }); }
@@ -246,12 +314,20 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       try {
         const result = await runCycle(config, state, effects, clock.now, launcher); cycles++;
         reportedDispatches += result.actions.filter(action => action.kind === 'dispatch' && action.state === 'done').length;
+        escalations.push(...result.actions.filter(action => action.kind === 'escalation').map(action => action.detail));
+        for (const watch of Object.values(state.approvals)) if (hand.has(watch.decision) && watch.exhaustedAt) spent.add(watch.decision);
         if (process.env.SOAK_TRACE) for (const action of result.actions) console.error(`+${Math.round(elapsed / minute)} ${action.kind} ${action.state} ${action.work ?? ''}: ${action.detail.slice(0, 300)}`);
       }
       catch (error) { failures.push(`${new Date(now).toISOString()}: ${error instanceof Error ? error.message : String(error)}`); }
       // The interval between cycles is when a hand-off launch settles; the day's clock waits for
       // them so the world never acts on a half-finished launch.
       await launcher.idle();
+      // Between cycles, as runDaemon runs it: the self-upgrade against the simulated checkout.
+      checkout.dirty = elapsed >= plan.dirtyCheckout.from && elapsed < plan.dirtyCheckout.to;
+      const upgraded = await selfUpgrade(state);
+      upgrades.outcomes.push(upgraded.outcome);
+      if (upgraded.outcome === 'failed') failures.push(`${new Date(now).toISOString()}: self-upgrade failed: ${upgraded.reason}`);
+      if (upgraded.outcome === 'refused') refusalSamples.push({ keys: Object.keys(state.actions).filter(key => key.startsWith('upgrade:')).length, attempts: state.actions['upgrade:refused']?.attempts ?? 0 });
       for (const check of state.invariants.report as InvariantCheck[]) {
         if (check.observed) observed.add(check.invariant);
         if (!check.holds) violations.push(`${new Date(now).toISOString()} (+${Math.round(elapsed / minute)} min) ${check.line}`);
@@ -263,12 +339,12 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   }
 
   const final = (await store.list()).filter(item => items.some(entry => entry.id === item.id));
-  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, baseTip, measurements };
+  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, herdr, hand, escalations, spent, upgrades, refusalSamples, checkout, baseTip, measurements };
 }
 
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 180_000 }, async () => {
   const began = performance.now();
-  const { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, baseTip, measurements } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
+  const { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, baseTip, measurements, upgrades, refusalSamples, checkout } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
   const undelivered = final.filter(item => item.stage !== 'done' || !item.delivery);
   assert.deepEqual(undelivered.map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
@@ -300,8 +376,45 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   const reviewed = final.find(item => item.key === items[plan.exhaustedReviewer - 1].key)!;
   assert.ok(reviewed.reviewFailovers?.some(failover => failover.profile === 'claude-reviewer' && failover.exhaustion === 'usage-limit' && failover.nextProfile === 'cursor-reviewer'), `the exhausted reviewer bot failed over to the next profile: ${JSON.stringify(reviewed.reviewFailovers)}`);
   assert.ok(cycles > 24 * 6, `the loop cycled through the day (${cycles} cycles)`);
+  // GY-437: the between-cycles self-upgrade ran after every cycle of the day. Each deploy aligned
+  // the checkout once, and restarted the fleet and the loop once (every merge touches src/); the
+  // dirty checkout across the second deploy was refused, untouched, without growing the cursor,
+  // and aligned once it was clean again.
+  const summary = `${upgrades.checkouts.map(entry => `+${Math.round((entry.at - dayStart) / minute)} min ${entry.from.slice(0, 7)}..${entry.to.slice(0, 7)}`).join(', ')}`;
+  assert.equal(upgrades.outcomes.length, cycles, 'the self-upgrade ran between every cycle');
+  assert.equal(upgrades.checkouts.length, production.deploys.length, `one alignment per deploy: ${summary}`);
+  assert.equal(upgrades.executors.length, production.deploys.length, 'one fleet restart per deploy');
+  assert.equal(upgrades.self, production.deploys.length, 'one re-execution of the loop per deploy');
+  assert.deepEqual(upgrades.executors, upgrades.checkouts.map(entry => entry.to), 'the fleet restarts against the tip the checkout moved to');
+  assert.ok(upgrades.checkouts[1].at >= dayStart + plan.dirtyCheckout.to, `the second deploy aligned only once the checkout was clean: ${summary}`);
+  assert.ok(refusalSamples.length >= 3, `the dirty checkout stood refused across the second deploy (${refusalSamples.length} cycles)`);
+  assert.deepEqual(new Set(refusalSamples.map(sample => JSON.stringify(sample))).size, 1, `a standing refusal does not grow the cursor's actions: ${JSON.stringify(refusalSamples.slice(0, 3))}`);
+  assert.equal(state.upgrade.refused, null, 'the refusal cleared with the alignment');
+  assert.equal(state.upgrade.alignedRelease, production.deploys[1].sha, 'the loop stands aligned with the last deployed release');
+  assert.equal(state.release?.commit, checkout.head, 'the re-executed loop reports the release the checkout holds');
+  assert.ok(Object.keys(state.actions).filter(key => key.startsWith('upgrade:')).length <= production.deploys.length + 1, `the cursor holds one upgrade action per deploy and one refusal: ${Object.keys(state.actions).filter(key => key.startsWith('upgrade:')).join(', ')}`);
   const seconds = (performance.now() - began) / 1000;
   assert.ok(seconds < 120, `the day runs well inside the three minutes the CI test job allows it (${seconds.toFixed(1)} s)`);
+});
+
+test('unit:soak-invariants-hold — hand-launched approvers that vanish or stop without judging are relaunched within the bound, a refused relaunch is retried, and the spent watches keep every invariant holding', { timeout: 120_000 }, async () => {
+  // GY-551: for every decision a master put to an approver by hand the loop now launches up to two
+  // more sessions itself and keeps the spent watch past the bound, so both repeat per item here.
+  const { final, violations, failures, state, herdr, hand, escalations, spent } = await simulateDay({ hours: 6, handApprovers: true });
+  // Every item is delivered, so the day after starts from a clean board.
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}`), [], 'all fifteen items are delivered');
+  assert.deepEqual(violations, [], 'every system invariant holds across the relaunches and the kept spent watches');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.equal(hand.size, 2);
+  for (const [decision, { key, launches, refused }] of hand) {
+    assert.equal(launches - refused, 2, `${key}: the loop relaunched the hand-launched approver twice, the hand launch being the first of three`);
+    assert.ok(spent.has(decision), `${key}: past the bound the watch was kept, spent`);
+    assert.ok(escalations.some(detail => detail.includes(decision) && /3 approver session\(s\)/.test(detail) && /session 1: .*session 2: .*session 3: /.test(detail)), `${key}: the unanswered decision was escalated with each session's end reason`);
+    assert.equal(final.find(item => item.key === key)!.stage, 'done', `${key} was still delivered`);
+    assert.ok(!Object.values(state.approvals).some(watch => watch.decision === decision), `${key}: the spent watch went with its delivered item`);
+    assert.ok(![...herdr.agents.values()].some(agent => agent.name === approverSessionName(final.find(item => item.key === key)!, decision)), `${key}: no approver session for it is left open`);
+  }
+  assert.equal([...hand.values()].reduce((total, entry) => total + entry.refused, 0), 1, 'one relaunch was refused by a registry timeout, and retried');
 });
 
 test('unit:soak-invariants-hold — a loop change that breaks an invariant fails the soak: approver sessions the loop no longer closes are named within the hour', { timeout: 120_000 }, async () => {
