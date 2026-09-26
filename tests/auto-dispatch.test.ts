@@ -741,10 +741,8 @@ test('integration:instant-exit-classified — a session Herdr cannot find second
     await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: credential, accounts: ['env-a', 'env-b'] }, async () => ({ actor: { id: 'proof-runner', role: 'producer', proofs: ['unit:*', 'integration:*'] } }));
     const config = await loadMasterConfig(root);
     const item = requestedWork();
-    // A reset in the future, on the hour, whenever the suite runs: a fixed date here held the account
-    // only until that date passed, then failed every candidate's CI (2026-09-26).
-    const resetsIso = new Date(Math.ceil(Date.now() / 3_600_000) * 3_600_000 + 30 * 86_400_000).toISOString();
-    const resetsAt = resetsIso.replace('.000Z', 'Z');
+    // A reset a week ahead of the run, on the hour: a fixed date turns into a past reset, held for an hour instead.
+    const resetsIso = new Date(Math.ceil(Date.now() / 3_600_000) * 3_600_000 + 7 * 86_400_000).toISOString(), resetsAt = resetsIso.replace('.000Z', 'Z');
     // The stub runtime under a stub Herdr: on env-a it prints the weekly-limit notice and exits before Herdr ever
     // sees it (`agent get` answers agent_not_found with a long JSON body on every read, the pane holds the notice
     // under the banner); on env-b it starts at once.
