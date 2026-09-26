@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { dependencyMap, listTestFiles, mergeDurations, readDurations, selectAffected, selectForRun, shardFiles, shardImbalance } from '../scripts/ci-tests.mjs';
-import { nodeTestArgs } from './helpers/run-tests.js';
+import { nestedFirst, nestedPortGap, nodeTestArgs, runTests } from './helpers/run-tests.js';
 import { readWorkflow } from '../src/protection.js';
 
 // GY-499: the required `test` check ran the whole suite on one runner in about fifteen minutes, on
@@ -124,4 +124,20 @@ test('unit:affected-tests-selected — a pull request runs only the tests that r
   const own = selectAffected(['tests/ci-shards.test.ts'], map, tests);
   assert.equal(own.mode, 'affected'); assert.ok(own.files.includes('tests/ci-shards.test.ts'), 'a changed test file selects itself');
   assert.equal(selectAffected(['README.missing.md'], map, tests).mode, 'full');
+});
+
+test('a test run started inside another test run reserves its ports above the parent\'s window, so a sibling file\'s Postgres keeps its port', async () => {
+  assert.deepEqual(nestedFirst({}), {}, 'a top-level run starts at the default base');
+  assert.deepEqual(nestedFirst({ GRAPHYARD_TEST_PORT: '15438' }), { first: 15438 + nestedPortGap });
+  // This file runs inside the suite's window; a run it starts lands above that window's every offset.
+  const parent = Number(process.env.GRAPHYARD_TEST_PORT);
+  assert.ok(parent > 0, 'the suite runs under a reserved GRAPHYARD_TEST_PORT');
+  const project = await mkdtemp(join(tmpdir(), 'graphyard-nested-run-'));
+  try {
+    await mkdir(join(project, 'tests'));
+    await writeFile(join(project, 'tests/port.test.ts'), "import { test } from 'node:test';\ntest('reserved', () => {});\n");
+    const run = await runTests({ cwd: project, args: ['tests/port.test.ts'], stdio: 'pipe', ports: { span: 20 } });
+    assert.equal(run.code, 0, run.stdout + run.stderr);
+    assert.ok(run.base >= parent + nestedPortGap, `nested window ${run.base} lies above the parent's ${parent} and its offsets`);
+  } finally { await rm(project, { recursive: true, force: true }); }
 });

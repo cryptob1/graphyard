@@ -74,6 +74,20 @@ export function nodeTestArgs(cwd: string, args: string[]) {
   return { args: [...reporters, ...flags, ...files], empty: !files.length, ordered: false };
 }
 
+/** How far above its parent's base a run started inside a test run begins: past every per-file port offset (the highest is 642). */
+export const nestedPortGap = 1000;
+
+/**
+ * A run started from inside a test run — tests/test-isolation.test.ts runs this runner on fixture
+ * projects — starts its window above the parent's. The parent holds only its sentinel, so a window
+ * taken inside it hands the nested run ports a sibling test file's Postgres is about to bind: on a
+ * shard, 15458 + 7 took tests/escalation-context.test.ts's 15438 + 27 (GY-499).
+ */
+export function nestedFirst(environment: NodeJS.ProcessEnv = process.env): { first?: number } {
+  const parent = Number(environment.GRAPHYARD_TEST_PORT);
+  return Number.isInteger(parent) && parent > 0 ? { first: parent + nestedPortGap } : {};
+}
+
 export async function runTests(options: RunOptions = {}): Promise<RunResult> {
   const cwd = resolve(options.cwd ?? process.cwd()), args = options.args ?? [];
   const selection = options.browser ? null : nodeTestArgs(cwd, args);
@@ -84,7 +98,7 @@ export async function runTests(options: RunOptions = {}): Promise<RunResult> {
     return { code: 0, base: 0, environment: {}, stdout: '', stderr: '' };
   }
   // The browser window is the dev server's port and the sentinel above it that holds the window.
-  const reservation = await reserveTestPorts(options.browser ? { first: defaultBrowserPort, span: 2, last: 65_000, ...options.ports } : options.ports);
+  const reservation = await reserveTestPorts(options.browser ? { first: defaultBrowserPort, span: 2, last: 65_000, ...options.ports } : { ...nestedFirst(), ...options.ports });
   try {
     const set = options.browser ? { GRAPHYARD_BROWSER_PORT: String(reservation.base) } : testPortEnvironment(reservation.base);
     const environment = isolatedTestEnvironment(options.environment ?? process.env, set);
