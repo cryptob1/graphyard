@@ -1,8 +1,8 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { chmod, mkdir, readdir, readFile, realpath, stat, writeFile } from 'node:fs/promises';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { delimiter, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { selectFleetSession, type FleetClient, type FleetSelection } from '../src/fleet.js';
@@ -28,10 +28,10 @@ const coordinatorToken = 'coordinator-token-'.padEnd(40, 'x'), approverToken = '
 const coordinatorStatus = (async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }))) as typeof fetch;
 const accepted = (async () => new Response(JSON.stringify({ ok: true }))) as typeof fetch;
 const durable: FilesystemProbe = async path => ({ probed: path, volatile: null, freeBytes: 200e9 });
-const scratch = await realpath(await mkdtemp(join(tmpdir(), 'graphyard-pi-key-')));
+const scratch = await realpath(await temporaryDirectory('pi-key'));
 // A key in the test's own environment would reach every run it starts, so the keyless case is keyless.
 const inherited = process.env.ZAI_API_KEY; delete process.env.ZAI_API_KEY;
-after(async () => { clearRuns(); if (inherited !== undefined) process.env.ZAI_API_KEY = inherited; await rm(scratch, { recursive: true, force: true }); });
+after(async () => { clearRuns(); if (inherited !== undefined) process.env.ZAI_API_KEY = inherited; });
 const decisionId = (n: number) => `0e3b2c1a-7f00-4a70-8170-${String(n).padStart(12, '0')}`;
 
 /**
