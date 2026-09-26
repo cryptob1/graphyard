@@ -1558,6 +1558,14 @@ export class Engine {
    * or a request wrote while it yielded is overwritten, and resumes after the last item it
    * finished. Between batches the lock is released and the event loop runs, so a renewal waits
    * at most one batch however long the whole pass takes. One item always completes per batch.
+   *
+   * A pass therefore reads every document once per batch, O(batches x items) (GY-392), and that
+   * is kept deliberately: every item is evaluated against `all`, the whole fleet as it stands
+   * (dependencies, the merge queue, fleet capacity), so each batch needs the full snapshot, not
+   * just the rows it reconciles. A keyset read of the batch's own rows saves nothing while `all`
+   * must still be read, and a snapshot carried across batches would evaluate items against state
+   * that the heartbeats and requests admitted between batches have already changed. The number
+   * of batches is bounded by the pass's duration over reconcileBatchMs, not by the backlog.
    */
   async reconcile() {
     let cursor = 0, first = true;
