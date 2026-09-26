@@ -1,8 +1,7 @@
 import { leaseHealthStatus } from './lease-health-attention.js';
 import { probeCandidateConflicts } from '../conflicts.js';
-import { mergeQueueStatus, mergeQueueWindow } from '../master/profiles.js';
 import { humanOnlyStatusRow, type HumanRequestRow } from '../model/human-request.js';
-import { agentOwner, assessContainment, branchReport, buildMasterStatus, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, humanOwner, inspectWorkerCredentials, installationOwner, statusWorktreeInventory, managedRootStatus, mergeProtocolSkew, observeHerdrAgents, planWorktreeReclaim, profileConcurrency, reclaimIdleMs, snapshotWithClock, worktreesDirectory, type AttentionItem, type MasterConfig } from '../master.js';
+import { agentOwner, assessContainment, branchReport, buildMasterStatus, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, humanOwner, inspectWorkerCredentials, installationOwner, statusWorktreeInventory, managedRootStatus, mergeProtocolSkew, mergeQueueStatus, mergeQueueWindow, observeHerdrAgents, planWorktreeReclaim, profileConcurrency, reclaimIdleMs, snapshotWithClock, worktreesDirectory, type AttentionItem, type MasterConfig } from '../master.js';
 import { impliedScopeRequests, type Work } from '../model/work.js';
 import { actionReport, agentRequestReport, sessionReport } from './loop-report.js';
 import { needsHumanActions, routedScopeStatus } from './owed-report.js';
