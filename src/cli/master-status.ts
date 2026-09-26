@@ -32,6 +32,7 @@ import { releaseLagGraceMs, releaseLagStatus } from '../master/release-lag.js';
 import { throughputStatus } from '../throughput.js';
 import { Timings, timedApi, timedStep, withTimings } from '../master/timings.js';
 import { slowReportReader } from '../master/report-cache.js';
+import { repairLaneAttention } from '../master/repair-lane.js';
 
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
 // `master scope` lives in its own module; it is read from here as it always was.
@@ -141,7 +142,8 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const { lag, refusal: upgradeAttention } = await timedStep('release lag', () => releaseLagStatus(root, master.baseBranch, snapshot.work as Work[],
     { cliCommit: cli.commit, loop: cycling, executors: releases.executors }));
   // A merge pending on a head GitHub reports mergeable is named with the stalled items (GY-344).
-  const stalledItems = [...derivedStalls, ...mergeStallAttention(snapshot)];
+  // A repair-lane merge stays in front of the master until a normal merge proves the merge path healthy (GY-406).
+  const stalledItems = [...derivedStalls, ...mergeStallAttention(snapshot), ...repairLaneAttention(snapshot.work)];
   // Exactly one component merges (GY-245): the loop, where one is installed or running, else the executors.
   const merger = installationMerger({ loop: { configured: !!setup.supervisor.installed, running: !!cycling?.running, autoMerge: master.autoMerge },
     declaration: executors.supervision.declaration, served: executors.presence.served });

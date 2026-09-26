@@ -32,6 +32,9 @@ export const mergeRetryBaseMs = 15_000, mergeRetryCapMs = 60_000;
  * passes, a refusal is retried on a doubling pause capped at one minute, never on the cycle
  * backoff that can stretch to thirty cycles: a mergeable candidate is retried until GitHub shows it
  * merged or its head moves (GY-202). A candidate with a failing gate keeps the cycle backoff.
+ * A merge left `started` by a daemon that died mid-merge never reaches here in that state: each
+ * cycle begins by resolving it from Graphyard's record (reconcilePendingActions) — done when the
+ * merge was observed, otherwise failed, and so retried here (GY-246).
  */
 export function mergeRetryDue(previous: DaemonAction | undefined, work: Work, cycle: number, now: number) {
   if (readyToRetry(previous, cycle)) return true;
@@ -141,11 +144,13 @@ export async function mergeStep(cycle: Cycle) {
     await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'started', detail: `Invoking the guarded merge for ${item.key}`, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist);
     for (let retries = 0; ; retries++) {
       try {
-        const result = await effects.merge(target) as { result?: string; pending?: boolean } | undefined;
+        const result = await effects.merge(target) as { result?: string; pending?: boolean; merged?: boolean } | undefined;
         // GitHub executes the merge (GY-258): the step only requests it, so the outcome stays
-        // pending until the merged observation, from which the delivery is recorded.
-        if (result?.pending) performed.push(await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'waiting', detail: `Guarded merge pending for ${item.key}: ${result.result ?? 'GitHub has not merged it yet'}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
-        else performed.push(await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'done', detail: `Guarded merge accepted for ${item.key}: ${result?.result ?? 'merge requested'}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+        // pending until the merged observation, from which the delivery is recorded. The action is
+        // done only on an outcome that says GitHub merged it; one that says neither pending nor
+        // merged is no observation of a merge, so it waits and is asked again (GY-246).
+        if (result?.merged === true) performed.push(await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'done', detail: `Guarded merge observed for ${item.key}: ${result.result ?? 'GitHub shows the pull request merged'}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+        else performed.push(await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'waiting', detail: `Guarded merge pending for ${item.key}: ${result?.result ?? (result?.pending ? 'GitHub has not merged it yet' : 'the merge reported neither a pending request nor a merge GitHub performed')}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
         return;
       } catch (error) {
         // A race with the item's own background writes judged nothing about the candidate: it is

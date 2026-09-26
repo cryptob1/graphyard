@@ -38,7 +38,7 @@ Never attest a stop you have not confirmed. Merged work changes only through a f
 - Workers never hold `admin`, `coordinator` or `producer` tokens. No AI principal can hold `admin`.
 - Proof authority is a live [grant](operations-reference.md#proof-authority-grants); `admin` attests only `manual:` proofs.
 - Operator agents add requirements, never remove them.
-- The guarded merge is the only path: no bypass, no lifecycle-state endpoint.
+- Only guarded or audited [repair-lane](master-agent.md#repair-lane) merges: no bypass, no lifecycle-state endpoint.
 - History is append-only.
 
 ## Deeper references
