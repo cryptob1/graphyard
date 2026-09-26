@@ -3,10 +3,11 @@ import { stableJson } from './model/stable-json.js';
 import { z } from 'zod';
 import type { PoolClient } from 'pg';
 import { Store, save, wakeJob, documentBefore, eventWorkSql } from './store.js';
+import { leaseCommands } from './store/pools.js';
 import { compactHeartbeatReceipt } from './store/receipts.js';
 import { authorizedForProof, unauthorizedProofs } from './proof-grants.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, submittedEpoch, type Attestation, requireCurrent, createSchema, criterionSchema, bindingApproval, carriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type ApprovalIdentity, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
+import { activeLease, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, submittedEpoch, type Attestation, requireCurrent, createSchema, criterionSchema, bindingApproval, carriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type ApprovalIdentity, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type Lease, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
 import { Refusal } from './model/refusal.js';
 import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
@@ -21,6 +22,7 @@ import { configuredDocumentation, documentationObligation, recordDocumentationSu
 import { liveDispatchHandleIds, reconcileAutoDispatch, type DispatchTransition } from './model/dispatch.js';
 import { reconcileReviewConflict, type ReviewConflictTransition } from './model/review-conflict.js';
 import { nextAction, nextActionKinds, sameAction } from './model/next-action.js';
+import type { ObservationJobState } from './model/action-kinds.js';
 import { claimCandidatesParams, claimCandidatesSql } from './model/action-candidates.js';
 import { claimAction, openActions, reconcileActions, renewClaim, settleAction, settleDelivered, type ActionRow } from './model/actions.js';
 import { livenessFallback, livenessOf, livenessRepairEntry } from './model/liveness.js';
@@ -43,6 +45,16 @@ const evidenceArtifact = z.object({
   digest: z.string().regex(/^sha256:[a-f0-9]{64}$/).optional(), expiresAt: z.iso.datetime().optional(),
   availability: z.enum(['available', 'expired', 'redacted', 'missing', 'upload-failed', 'external']), url: publicArtifactUrl.optional(),
 }).strict().refine(value => value.availability === 'external' ? !!value.url : !value.url, 'Only external artifacts may carry a public URL');
+/**
+ * A planned or requested path never begins with '-' (GY-522): such an entry is a command-line flag
+ * a client failed to parse, such as `--wait` after the paths of `scope-request`, and recording it
+ * would put a flag in plannedFiles, which any decision built from it is then refused for. The
+ * refusal names the entry so the asker sees what was mistaken for a path.
+ */
+export function flagPathRefusal(paths: readonly string[] | undefined, field: string) {
+  const flag = paths?.find(path => path.startsWith('-'));
+  return flag === undefined ? null : `${field} entry '${flag}' begins with '-': it is a command-line flag, not a repository path`;
+}
 // Longer than acknowledgeContainment's three 30-second HTTP attempts plus retry delays.
 export const launchFenceMs = 120_000;
 export const containmentScopeSchema = z.object({ unit: z.string().trim().min(1).max(200), pid: z.number().int().positive() }).strict();
@@ -131,6 +143,9 @@ const actionSettleSchema = z.object({ executor: executorName.optional(), result:
 // A renewal carries no result: it says only that the executor named on the claim is still
 // inside the handler, and asks for the lease it already holds to run on.
 const actionRenewSchema = z.object({ executor: executorName.optional(), leaseSeconds: z.number().int().min(10).max(900).optional() }).strict();
+// A resync names the instant its claim was made, so the answer says whether an observation saved
+// since then satisfies it; `wake: false` only reads, for an executor waiting on the job it woke.
+const resyncSchema = z.object({ since: z.string().datetime({ offset: true }).optional(), wake: z.boolean().optional() }).strict();
 const pullAssignmentSchema = z.object({ host: executorName.optional(), work: z.string().min(1).max(200).optional() }).strict();
 // The merge request names the executor instance that recorded it — one daemon process or one
 // interactive `master merge` request — bound here to the principal that authenticates it (GY-92).
@@ -237,6 +252,30 @@ function applyScopeDecision(work: Work, request: NonNullable<Work['scopeRequest'
 /** The violation an observed merge records when no valid execution covered it. */
 export const unauthorizedMergeViolation = 'Merge observed without a prior authorization for this candidate';
 /**
+ * Whether two readings of one item differ only in action-queue bookkeeping (GY-607). Claiming,
+ * renewing, completing or failing a row moves the item's rows, its revision and its `updatedAt`,
+ * and nothing a gate reads; everything else is compared by its stable JSON, so any other change
+ * still counts.
+ */
+export function sameBesideActions(read: Work, current: Work): boolean {
+  const rest = ({ actionQueue: _queue, revision: _revision, updatedAt: _updated, ...others }: Work) => stableJson(others);
+  return rest(read) === rest(current);
+}
+/** How many saves behind a reader may be and still have its read resolved from the ledger. */
+export const actionOnlyLookback = 20;
+/**
+ * Whether the item as it stood at `revision` — every save appends the document it wrote to the
+ * ledger — differs from `work` only in action-queue bookkeeping. A writer that read the item at
+ * that revision may then still write: what it read is what it would read now.
+ */
+async function onlyActionsMovedSince(db: { query: (text: string, values: unknown[]) => Promise<{ rows: any[] }> }, work: Work, revision: number): Promise<boolean> {
+  const behind = work.revision - revision;
+  if (!Number.isInteger(behind) || behind <= 0 || behind > actionOnlyLookback) return false;
+  const read = (await db.query(`SELECT ${eventWorkSql('saved')} AS work FROM (SELECT work_id, payload FROM events WHERE work_id=$1 AND (payload ? 'work' OR payload ? 'delta') ORDER BY seq DESC OFFSET $2 LIMIT 1) saved`, [work.id, behind])).rows[0]?.work as Work | undefined;
+  return !!read && read.revision === revision && sameBesideActions(read, work);
+}
+
+/**
  * How a delivery that recovered from that violation was judged (GY-92): the two-party merge
  * decision it rests on, the cutoff the history was re-checked at, and the judgement itself.
  * Recorded on the delivery beside the snapshot revision and evidence instant it cites.
@@ -317,6 +356,45 @@ function operatorAuthorizing(decision: PostMergeDecision, refused: Set<string>):
   return operator ? { operator, refusedDecision: cited }
     : { refusal: `an operator-authorized delivery needs an admin credential as requester or approver; ${decision.requestedBy} is ${decision.requesterRole ?? 'of unrecorded role'} and ${decision.approvedBy} is ${decision.approverRole ?? 'of unrecorded role'}` };
 }
+/** The ledger kind of a lease renewal that failed server-side (GY-558). */
+export const renewalFaultEvent = 'lease.renewal-failed';
+/** A lease carrying the server-side renewal fault that extended it (GY-558); cleared by the next renewal. */
+type GracedLease = Lease & { renewalFault?: { at: string; error: string } };
+/** A renewal that failed server-side: 503, with the grace its recorded fault earned, if any. */
+export class RenewalFault extends Refusal {
+  constructor(message: string, readonly grace: { at: string; graceUntil: string; now: string } | null) { super(message, 503); }
+}
+/** How far back heartbeat health looks, and the p95 latency above which `master status` raises it (GY-558). */
+export const leaseHealthWindowMs = 10 * 60_000, heartbeatLatencyAttentionMs = 5_000;
+/**
+ * Heartbeat latency and the renewals refused or failed server-side, over the last ten minutes in
+ * this server process (GY-558), reported by GET /api/status as `leaseHealth`.
+ */
+export class LeaseHealth {
+  private samples: { at: number; ms: number; outcome: 'renewed' | 'refused' | 'failed' }[] = [];
+  record(outcome: 'renewed' | 'refused' | 'failed', ms: number, at = Date.now()) {
+    this.samples.push({ at, ms: Math.max(0, ms), outcome });
+    this.prune(at);
+    if (this.samples.length > 20_000) this.samples.splice(0, this.samples.length - 20_000);
+  }
+  private prune(now: number) {
+    const since = now - leaseHealthWindowMs;
+    const first = this.samples.findIndex(sample => sample.at >= since);
+    this.samples.splice(0, first < 0 ? this.samples.length : first);
+  }
+  report(now = Date.now()) {
+    this.prune(now);
+    const sorted = this.samples.map(sample => sample.ms).sort((a, b) => a - b);
+    const percentile = (p: number) => sorted.length ? sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(p * sorted.length) - 1))] : null;
+    const p50Ms = percentile(0.5), p95Ms = percentile(0.95);
+    const refused = this.samples.filter(sample => sample.outcome === 'refused').length, failed = this.samples.filter(sample => sample.outcome === 'failed').length;
+    const attention = p95Ms !== null && p95Ms > heartbeatLatencyAttentionMs
+      ? `Lease renewals are slow: heartbeat p95 ${p95Ms} ms (p50 ${p50Ms} ms) over the last 10 minutes exceeds ${heartbeatLatencyAttentionMs} ms across ${sorted.length} renewal(s), ${failed} failed server-side and ${refused} refused; a renewal slower than the lease loses it — find what holds the coordination lock or the lease pool in the server logs`
+      : null;
+    return { windowMs: leaseHealthWindowMs, renewals: sorted.length, p50Ms, p95Ms, refused, failed, thresholdMs: heartbeatLatencyAttentionMs, attention };
+  }
+}
+
 export class Engine {
   operatorAuthorizer?: (db: any, now: Date, actor: Principal) => Promise<Principal>;
   /** The direct-merge window the deployment environment declares (direct-merge.ts), read once at construction. */
@@ -358,8 +436,9 @@ export class Engine {
     if (this.submissionObserver === undefined) { const github = await githubFromEnv(); this.submissionObserver = github ? (probe, peers) => github.observe(probe, peers) : null; }
     if (!this.submissionObserver || !id) return null;
     // A replayed submission returns its receipt; it must not depend on the provider again.
-    if ((await this.store.pool.query('SELECT 1 FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rowCount) return null;
-    const all = await this.store.list();
+    // `complete` is a lease command (GY-558): its reads take the lease pool, like its transaction.
+    if ((await this.store.leasePool.query('SELECT 1 FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rowCount) return null;
+    const all: Work[] = (await this.store.leasePool.query('SELECT document FROM work_items ORDER BY number')).rows.map(row => row.document);
     const work = all.find(w => w.id === id || w.key === id);
     if (!work || work.stage === 'done' || !work.workspaces.some(w => w.epoch === data.epoch)) return null;
     // Every item goes with it: the landing check reads other items' unlanded candidates (GY-97).
@@ -394,7 +473,79 @@ export class Engine {
       demand(!renewed, `${renewed?.id}: ${obligation.proof} is already a bootstrap obligation inherited from ${obligation.key} ${obligation.criterionId} and cannot be deferred again`);
     }
   }
+  /**
+   * Run one command. A renewal is timed and counted in `leaseHealth` (GY-558), and one that fails
+   * server-side — a connection or statement timeout, a lost connection — is recorded against its
+   * lease (`recordRenewalFault`) and answered 503 with the grace that record earned.
+   */
   async execute(actor: Principal, command: Command, id: string | null, input: unknown, key: string, context: { observation?: Observation; ciRun?: CiRunObservation | null } = {}) {
+    if (command !== 'heartbeat') return this.executeCommand(actor, command, id, input, key, context);
+    const started = new Date();
+    try {
+      const work = await this.executeCommand(actor, command, id, input, key, context);
+      this.leaseHealth.record('renewed', Date.now() - started.getTime());
+      return work;
+    } catch (error) {
+      const fault = !(error instanceof Refusal && error.status < 500) && !(error instanceof z.ZodError);
+      this.leaseHealth.record(fault ? 'failed' : 'refused', Date.now() - started.getTime());
+      if (!fault || !id) throw error;
+      throw await this.recordRenewalFault(actor, id, Number((input as { epoch?: unknown } | null)?.epoch), started, error);
+    }
+  }
+  /** Heartbeat latency and the renewals refused or failed server-side, in this server process (GY-558). */
+  readonly leaseHealth = new LeaseHealth();
+  /**
+   * Record a renewal that failed server-side inside its lease's expiry window (GY-558), on the
+   * lease pool and without the coordination lock: a `lease.renewal-failed` event naming the owner,
+   * epoch and the time the renewal arrived. `renewalGrace` then keeps the lease valid until the next
+   * successful renewal or one further lease period from that time, whichever comes first. A record
+   * the database refuses is retried in the background until that period has passed. The returned
+   * refusal carries the grace, so the worker's supervisor keeps retrying through it.
+   */
+  private async recordRenewalFault(actor: Principal, id: string, epoch: number, at: Date, error: unknown) {
+    const reason = (error instanceof Error ? error.message : String(error)).slice(0, 300);
+    console.error(`[lease] renewal of ${id} epoch ${epoch} by ${actor.id} failed server-side: ${reason}`);
+    const payload = JSON.stringify({ owner: actor.id, epoch, at: at.toISOString(), error: reason });
+    const until = at.getTime() + this.leaseSeconds * 1000;
+    // Only a live lease of this owner and epoch earns a grace; the refusal says what it earned.
+    const write = async () => (await this.store.leasePool.query(`WITH live AS (
+        SELECT id, CASE WHEN document->'lease' ? 'renewalFault' THEN (document->'lease'->>'expiresAt')::timestamptz
+          ELSE GREATEST((document->'lease'->>'expiresAt')::timestamptz, $7::timestamptz) END AS grace_until
+        FROM work_items WHERE (id::text=$1 OR document->>'key'=$1) AND document->'lease'->>'owner'=$2
+          AND (document->'lease'->>'epoch')::int=$5 AND (document->'lease'->>'expiresAt')::timestamptz>=$6::timestamptz LIMIT 1),
+      recorded AS (INSERT INTO events(work_id,actor,kind,payload) SELECT id, $2, $3, $4::jsonb FROM live RETURNING work_id)
+      SELECT live.grace_until, clock_timestamp() AS now FROM live JOIN recorded ON recorded.work_id=live.id`,
+    [id, actor.id, renewalFaultEvent, payload, Number.isSafeInteger(epoch) ? epoch : -1, at.toISOString(), new Date(until).toISOString()])).rows[0] as { grace_until: Date; now: Date } | undefined;
+    let recorded: { grace_until: Date; now: Date } | undefined, unrecorded: string | null = null;
+    try { recorded = await write(); } catch (failure) {
+      unrecorded = (failure as Error).message;
+      const retry = () => setTimeout(() => { if (Date.now() < until) write().catch(retry); }, 1000).unref();
+      retry();
+    }
+    const grace = recorded ? { at: at.toISOString(), graceUntil: recorded.grace_until.toISOString(), now: recorded.now.toISOString() } : null;
+    return new RenewalFault(grace
+      ? `Lease renewal failed server-side (${reason}); the failure is recorded and the lease stays valid until ${grace.graceUntil} or the next successful renewal`
+      : `Lease renewal failed server-side (${reason})${unrecorded ? `; the failure could not be recorded yet (${unrecorded.slice(0, 200)})` : '; no live lease of this owner and epoch was found to keep'}`, grace);
+  }
+  /**
+   * A lease past its expiry that a recorded server-side renewal fault still covers (GY-558): the
+   * first fault after its last renewal and inside its expiry window extends it to one lease period
+   * after that fault, once — a later fault before a successful renewal extends nothing. A lease
+   * whose worker stopped renewing has no such record and expires as before.
+   */
+  private async renewalGrace(db: PoolClient, work: Work, now: Date) {
+    const lease = work.lease as GracedLease | null;
+    if (!lease || lease.renewalFault || Date.parse(lease.expiresAt) > now.getTime()) return false;
+    const leaseMs = this.leaseSeconds * 1000, expires = Date.parse(lease.expiresAt);
+    const fault = (await db.query(`SELECT payload->>'at' AS at, payload->>'error' AS error FROM events WHERE kind=$1 AND created_at>$2::timestamptz AND work_id=$3
+      AND payload->>'owner'=$4 AND (payload->>'epoch')::int=$5 AND (payload->>'at')::timestamptz>$2::timestamptz AND (payload->>'at')::timestamptz<=$6::timestamptz
+      ORDER BY (payload->>'at')::timestamptz LIMIT 1`, [renewalFaultEvent, new Date(expires - leaseMs).toISOString(), work.id, lease.owner, lease.epoch, lease.expiresAt])).rows[0] as { at: string; error: string } | undefined;
+    if (!fault) return false;
+    lease.renewalFault = { at: new Date(fault.at).toISOString(), error: fault.error };
+    lease.expiresAt = new Date(Math.max(expires, Date.parse(fault.at) + leaseMs)).toISOString();
+    return true;
+  }
+  private async executeCommand(actor: Principal, command: Command, id: string | null, input: unknown, key: string, context: { observation?: Observation; ciRun?: CiRunObservation | null } = {}) {
     demand(Object.hasOwn(commands, command), 'Unknown command', 404);
     // Leads coordinate through rulings; no lifecycle command is lead-permitted.
     demand(actor.role !== 'slice-lead' || leadMay(command), 'Slice leads cannot perform lifecycle mutations', 403);
@@ -455,6 +606,8 @@ export class Engine {
         this.refuseRenewedDeferral(work!, all);
       }
       demand(work, 'Work item not found', 404);
+      // A lease past its expiry that a recorded server-side renewal fault still covers stays live (GY-558).
+      await this.renewalGrace(db, work, now);
       if (actor.role === 'operator-agent') {
         authorizeOperatorCommand(actor, command, data, work, this.repository);
         if (command === 'ready' || command === 'unblock') demand(data.expectedRevision === work.revision, 'Task revision changed; reload before mutating');
@@ -528,6 +681,7 @@ export class Engine {
       }
       if (command === 'requirements') {
         if (actor.role !== 'operator-agent') admin(actor);
+        const flag = flagPathRefusal(data.plannedFiles, 'plannedFiles'); demand(!flag, flag!, 422);
         demand(!work.observation?.merged, 'Merged work requires a follow-up task');
         // A purely additive planned-files widening is non-weakening intent: applied to a live
         // attempt it keeps the lease (and any containment fence) so the worker never hands the
@@ -724,7 +878,7 @@ export class Engine {
       if ((command === 'heartbeat' || command === 'release') && !work.lease && submittedEpoch(work, data.epoch))
         demand(false, `Implementation lease for epoch ${data.epoch} ended when ${work.key} was submitted; stop heartbeating after complete`);
       if (['heartbeat', 'release', 'workspace', 'submit', 'blocked', 'scope', 'quarantine', 'launch'].includes(command)) activeLease(work, actor, data.epoch, now);
-      if (command === 'heartbeat') work.lease!.expiresAt = new Date(now.getTime() + this.leaseSeconds * 1000).toISOString();
+      if (command === 'heartbeat') { work.lease!.expiresAt = new Date(now.getTime() + this.leaseSeconds * 1000).toISOString(); delete (work.lease as GracedLease).renewalFault; }
       if (command === 'quarantine') {
         demand(!work.containmentQuarantine || work.containmentQuarantine.owner === actor.id && work.containmentQuarantine.epoch === data.epoch
           && work.containmentQuarantine.settlementHash === data.settlementHash, 'Containment quarantine already exists and cannot be replaced');
@@ -765,6 +919,7 @@ export class Engine {
           // Withdrawing the ask withdraws the refusal it earned; the item is no longer blocked on scope.
           if (work.blocker?.startsWith(scopeRefusalBlocker)) work.blocker = null;
         } else {
+          const flag = flagPathRefusal(data.paths, 'Requested path') ?? flagPathRefusal(data.remove, 'Removed path'); demand(!flag, flag!, 422);
           const outside = data.paths.filter((path: string) => !(work.plannedFiles ?? []).some(planned => pathScopeContains(planned, path)));
           demand(outside.length || data.remove?.length || data.criteria?.length, 'Every named path is already inside plannedFiles; no scope request is needed');
           // A fresh ask is undecided by construction: the loop decides it on its next cycle, and
@@ -856,6 +1011,7 @@ export class Engine {
             activeLease(work, actor, data.epoch, now);
           } else if (data.epoch !== undefined) activeLease(work, actor, data.epoch, now);
           demand(data.type !== 'scope-request' || data.paths?.length, 'A scope request names its attempt epoch and the paths it needs');
+          const flag = flagPathRefusal(data.paths, 'Requested path'); demand(!flag, flag!, 422);
           demand(data.type !== 'decision' || data.action, 'A decision request names the action an independent approver must approve');
           demand(data.type !== 'escalation' || data.trigger, 'An escalation request names the trigger it raises');
           const request: AgentRequest = { id: randomUUID(), type: data.type, epoch: data.epoch ?? null, requestedBy: actor.id, at: now.toISOString(), reason: data.reason,
@@ -1014,9 +1170,9 @@ export class Engine {
       // A renewal's replay needs only the lease, not a whole document per renewal.
       await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(command === 'heartbeat' ? compactHeartbeatReceipt(work) : work)]);
       return work;
-    // A worker's lease renewal takes the reserved connection (GY-274): however busy the pool is, a
-    // live worker is never stopped because its heartbeat could not reach the database.
-    }, command === 'heartbeat' ? { lane: 'lease' } : undefined);
+    // Lease commands take the lease pool (GY-274, GY-558): however busy every other pool is, a live
+    // worker is never stopped because its renewal, claim, completion or blocker could not reach the database.
+    }, leaseCommands.has(command) ? { lane: 'lease' } : undefined);
   }
 
   /** The one item holding action row `id`, found by containment rather than by loading every document. */
@@ -1169,17 +1325,36 @@ export class Engine {
    * look again. It decides nothing itself; it schedules the observation the server already knows
    * how to make and runs the reconciliation that clears a lapsed lease, then returns the item as
    * it now stands, so the executor reports what its attempt actually achieved.
+   *
+   * A re-read that saves nothing satisfies no `resync` (GY-607): the executor passes `since`, the
+   * instant its claim was made, and the answer says whether an observation newer than that has been
+   * saved (`observed`) and what the item's observation job is doing (`job`), which is what the
+   * executor waits on — reading again with `wake: false` — and what it names when none arrives.
    */
-  async resyncWork(actor: Principal, id: string) {
+  async resyncWork(actor: Principal, id: string, input: unknown = {}) {
     demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
+    const data = resyncSchema.parse(input ?? {});
     const before = (await this.store.list()).find(item => item.id === id || item.key === id);
     demand(before, `Unknown work item ${id}`, 404);
+    const wake = data.wake !== false;
     // The observation job only exists for an item with a candidate to observe; waking it for one
     // without a submission would schedule a read of nothing.
-    if (before!.submission) await this.store.transaction(async db => { await wakeJob(db, before!.id); });
-    await this.reconcile();
+    if (wake && before!.submission) await this.store.transaction(async db => { await wakeJob(db, before!.id); });
+    if (wake) await this.reconcile();
     const work = (await this.store.list()).find(item => item.id === before!.id)!;
-    return { work, observationScheduled: !!before!.submission, revision: work.revision, changed: work.revision !== before!.revision };
+    // Without `since`, the claim of the item's own `resync` row is the instant a reading must beat.
+    const since = data.since ?? work.actionQueue?.actions.find(row => row.kind === 'resync' && row.state === 'claimed')?.claim?.claimedAt ?? null;
+    const observedAt = work.observation?.at ?? null;
+    const observed = !!since && !!observedAt && Date.parse(observedAt) > Date.parse(since);
+    return { work, observationScheduled: wake && !!before!.submission, revision: work.revision, changed: work.revision !== before!.revision,
+      since, observedAt, observed, job: await this.observationJob(work.id) };
+  }
+  /** The item's durable observation job as the queue holds it, or null when it has none. */
+  async observationJob(id: string): Promise<ObservationJobState | null> {
+    const row = (await this.store.pool.query('SELECT available_at, locked_until, attempts, error, held_until, held_reason FROM jobs WHERE work_id=$1', [id])).rows[0];
+    if (!row) return null;
+    const iso = (value: Date | null) => value ? new Date(value).toISOString() : null;
+    return { availableAt: iso(row.available_at), lockedUntil: iso(row.locked_until), attempts: Number(row.attempts), error: row.error ?? null, heldUntil: iso(row.held_until), heldReason: row.held_reason ?? null };
   }
   /**
    * GitHub executes merges; Graphyard only gates them (GY-258). The coordinator's merge step records
@@ -1684,6 +1859,8 @@ export class Engine {
     // touched it, so a violation the tick repairs is recorded rather than silently absorbed.
     const stranded = livenessOf(work, all, now).violation;
     preserveAssignment(work); retainQuarantineFence(work);
+    // A recorded server-side renewal fault keeps the lease for one more period (GY-558).
+    await this.renewalGrace(db, work, now);
     const leaseLost = !!work.lease && Date.parse(work.lease.expiresAt) <= now.getTime();
     // GitHub executes merges (GY-258): a merge execution recorded before that stays in the
     // ledger, where delivery attribution reads it, and no longer holds the record.
@@ -1739,6 +1916,15 @@ export class Engine {
       if (ejected) for (const behind of all) if (behind.queue && behind.id !== work.id) await wakeJob(db, behind.id);
     }
   }
+  /**
+   * Save a provider observation of the item, read at `expectedRevision`.
+   *
+   * An item that moved since that read refuses the observation, except where every move was
+   * action-queue bookkeeping (`onlyActionsMovedSince`): an executor claiming or settling the item's
+   * `resync` row saves the item, and refusing the observation over that write discarded the very
+   * reading the row was waiting for, so the item stayed stale and the row was claimed again,
+   * forever (GY-607).
+   */
   async observe(id: string, expectedRevision: number, observation: Observation, jobToken?: string) {
     return this.store.transaction(async (db, now) => {
       if (jobToken) {
@@ -1747,7 +1933,7 @@ export class Engine {
       }
       const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
       const work = all.find(w => w.id === id);
-      requireCurrent(work && work.revision === expectedRevision, 'Task changed while GitHub was being observed; retry');
+      requireCurrent(work && (work.revision === expectedRevision || await onlyActionsMovedSince(db, work, expectedRevision)), 'Task changed while GitHub was being observed; retry');
       demand(work.submission?.pr === observation.candidate.pr, 'Unassigned pull request');
       demand(work.workspaces.some(w => w.epoch === work.submission!.epoch && w.branch === observation.candidate.branch), 'PR branch does not match the assigned workspace');
       if (work.stage === 'done') return work;
