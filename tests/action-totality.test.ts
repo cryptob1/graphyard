@@ -217,6 +217,7 @@ test('integration:action-mapping-total-over-states — every refusal the engine 
     { name: 'reviewer roster spent', work: { ...unproven, policy: { ...unproven.policy, reviewProvider: 'agent', reviewerProfiles: profiles }, observation: { ...unproven.observation!, reviews: [] },
       reviewFailovers: [{ profile: 'reviewer-a', reviewerApp: 'app-a', runtime: 'claude', exhaustion: 'timeout', reason: 'the reviewer session timed out', at: now.toISOString(), sha: head, baseSha: base, policyRevision: unproven.policyRevision, requestCommentId: 7, nextProfile: null }] } as Work },
     { name: 'a required check failed', work: { ...unproven, observation: { ...unproven.observation!, checks: [{ name: 'test', result: 'failure', appId: CI_APP }, { name: 'typecheck', result: 'success', appId: CI_APP }] } } as Work },
+    { name: 'a check only branch protection requires failed', work: { ...unproven, observation: { ...unproven.observation!, requiredChecks: [{ name: 'secrets', appId: null }], checks: [...unproven.observation!.checks, { name: 'secrets', result: 'failure', appId: CI_APP }] } } as Work },
     { name: 'a required check has not answered', work: { ...unproven, observation: { ...unproven.observation!, checks: [] } } as Work },
     { name: 'no trusted evidence', work: unproven },
     { name: 'an inherited bootstrap obligation', work: unproven, all: [deferrer, unproven] },
