@@ -7,7 +7,7 @@ import { unexercisedFindings } from '../auto-dispatch.js';
 import { decisionBindingMax } from '../model/approval.js';
 import { guardBroadScope, type MasterConfig, type ContainmentAssessment, containmentPhase, type HerdrAgent } from '../master.js';
 import { researchRework } from '../research.js';
-import { unproducedManualProofs } from '../model/next-action.js';
+import { unproducedManualProofs } from '../model/unproduced-attestation.js';
 import { actionDetailMax, type ApprovalWatch, message } from './state.js';
 
 // ---- Routine decisions ---------------------------------------------------------------------

@@ -4,7 +4,8 @@ import { fileURLToPath } from 'node:url';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import type { Work } from '../src/model.js';
-import { actionAccount, attestationOwner, humanNeededActions, unproducedManualProofs } from '../src/model/next-action.js';
+import { actionAccount, humanNeededActions } from '../src/model/next-action.js';
+import { attestationOwner, unproducedManualProofs } from '../src/model/unproduced-attestation.js';
 import { accountOutcome, stalledItems } from '../src/model/action-account.js';
 import { loopAttestations } from '../src/cli/hand-actions.js';
 
@@ -110,7 +111,7 @@ test('unit:unproduced-manual-proof-attestation-requested — requested once with
   await runCycle(config(), state, effects, () => clock + 30_000);
   assert.equal(decided.length, 1);
   assert.deepEqual(approvers, ['d-1']);
-  assert.deepEqual(withdrawn, []);
+  assert.equal(withdrawn.length, 0);
 
   // A new head moves the binding: the request nobody judged is withdrawn, and the new head is asked afresh.
   work = item(moved);
