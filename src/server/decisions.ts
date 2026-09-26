@@ -3,7 +3,7 @@ import type pg from 'pg';
 import { z } from 'zod';
 import { Refusal, demand, resolveEscalation, standingEscalations, type Principal, type Work } from '../model.js';
 import { save, wakeJob } from '../store.js';
-import { approvalConflict, approveCapability, assertDecisionAuthority, decisionApprovalSchema, decisionInputs, decisionPrecondition, decisionRequestSchema, decisionSituation, foldDecisions, requiredDecisionCapabilities, unansweredRefusal, type Decision, type DecisionState } from '../model/approval.js';
+import { approvalConflict, approveCapability, assertDecisionAuthority, decisionApprovalSchema, decisionInputs, decisionPrecondition, decisionRequestSchema, decisionSituation, foldDecisions, requiredDecisionCapabilities, standingRefusal, type Decision, type DecisionState } from '../model/approval.js';
 import { canonical, decisionRace, readDecisions, resolvePin, samePin, type DecisionRecord, type StaleRace } from './decision-ledger.js';
 import type { Services } from './routes.js';
 import { refuseDecision, withdrawDecision } from './decision-refusal.js';
@@ -67,8 +67,9 @@ export async function requestDecision(services: Services, caller: Principal, id:
     // A refused decision is answered, never retried unchanged (GY-141). A rework or recover
     // refusal judged the candidate and base it was requested against, and stands only for those (GY-229).
     const situation = decisionSituation(data.action, work!);
-    const repeated = unansweredRefusal(history, data.action, input, data.reason, (a, b) => JSON.stringify(canonical(a)) === JSON.stringify(canonical(b)), data.precedent ?? [], situation);
-    demand(!repeated, repeated!, 409);
+    // The refused decision travels as a field beside the message (GY-265), so the loop answers it by id.
+    const repeated = standingRefusal(history, data.action, input, data.reason, (a, b) => JSON.stringify(canonical(a)) === JSON.stringify(canonical(b)), data.precedent ?? [], situation);
+    if (repeated) throw new Refusal(repeated.message, 409, { standingRefusal: { decision: repeated.decision, action: repeated.action, legacy: repeated.legacy } });
     const pending = history.find(decision => decision.action === data.action && (decision.state === 'requested' || decision.state === 'approved'));
     const cited = data.precedent ? [...new Set(data.precedent)].sort() : null;
     // The ledger's "precedent it relied on" is only worth following if it names real decisions:

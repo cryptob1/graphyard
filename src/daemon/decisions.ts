@@ -1,5 +1,5 @@
 // Concern: routine decisions — standing verdicts, decision reasons and the approver step.
-import { type Work, type AgentReview, reviewProviderOf, standingEscalations, leaseLossEpoch } from '../model.js';
+import { type Work, type AgentReview, reviewProviderOf, standingEscalations, leaseLossEpoch, RefusedResponse } from '../model.js';
 import { routableScopeRequest, scopeDecisionBinding, scopeDecisionReason } from '../model/scope.js';
 import { baseRefreshConflict, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, speculativeConflictReason, type ReviewThread, describeThread } from '../merge-queue.js';
 import { mechanicalFailure, mechanicalVerdicts } from '../model/mechanical-proofs.js';
@@ -96,7 +96,7 @@ export function reworkObservationWait(work: Work, now: number, pause: GitHubPaus
   return null;
 }
 
-export const routineDecisionActions = ['rework', 'recover', 'merge', 'resolve', 'requirements', 'close'] as const;
+export const routineDecisionActions = ['rework', 'recover', 'merge', 'resolve', 'requirements', 'close', 'attest'] as const;
 export type RoutineDecisionAction = typeof routineDecisionActions[number];
 /** `input` is what the decision names beyond what `decisionInput` derives from the item: a resolve's trigger, and the grounds binding a situated request judges (GY-407). */
 /** `escalation` is the one standing escalation a resolve settles: a standing request for any other is not this decision. */
@@ -147,8 +147,9 @@ export function scopeRoutineDecision(work: Work, now: number, judged: boolean): 
 export function routineDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>, now: number, assessment?: ContainmentAssessment | null): RoutineDecision | null {
   const needed = neededDecision(work, config);
   if (!needed) return null;
-  // Neither attests anything about a worker: a merge is of a mergeable candidate, a triage closure of an unreleased backlog item.
-  if (needed.action === 'merge' || needed.action === 'close') return needed;
+  // None attests anything about a worker: a merge is of a mergeable candidate, a triage closure of an unreleased backlog item,
+  // and an attestation's approver judges the proof.
+  if (needed.action === 'merge' || needed.action === 'close' || needed.action === 'attest') return needed;
   // A lease-loss a newer attempt superseded rests on the record, not on this host: see supersededLeaseLoss.
   if (needed.action === 'resolve' && supersededLeaseLoss(work)?.superseded) return needed;
   const stopped = workerStopped(work, now, assessment);
@@ -197,6 +198,10 @@ export function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge
   // differs from that recommendation (GY-259): the head no longer builds what was asked.
   const research = researchRework(work);
   if (research) return { action: 'rework', ...research };
+  // An unexercised `manual:` proof is answered by an attestation carrying its exercise record
+  // (GY-523), never by rework: nothing in the change is wrong, only the record of the attestation.
+  const attestation = attestationDecision(work);
+  if (attestation) return attestation;
   // Unresolved review threads block no merge: the reviewer's verdict on the head is the review
   // gate and the threads are its inputs. A thread still open once the review of the current head
   // has settled — one it was not shown, or a policy with no review — is a finding the loop sends
@@ -250,7 +255,8 @@ export function proofRework(work: Work): { reason: string; binding: string } | n
   const candidate = work.candidate;
   if (!work.submission || work.reworkRequested || !candidate || work.stage === 'done' || work.observation?.merged) return null;
   const failed = mechanicalVerdicts(work, [work], new Date()).filter(verdict => verdict.outcome === 'failed');
-  const unexercised = unexercisedFindings(work);
+  // An unexercised `manual:` proof is not the worker's to fix: see attestationDecision.
+  const unexercised = unexercisedFindings(work).filter(entry => !entry.proof.startsWith('manual:'));
   if (!failed.length && !unexercised.length) return null;
   const threads = work.observation?.candidate.sha === candidate.sha ? work.observation.conversations?.unresolved ?? [] : [];
   const findings = [
@@ -261,6 +267,27 @@ export function proofRework(work: Work): { reason: string; binding: string } | n
   const open = threads.length ? ` ${threads.length} review thread${threads.length === 1 ? ' is' : 's are'} also unresolved on the pull request (${named.join('; ')}${threads.length > named.length ? `; and ${threads.length - named.length} more` : ''}); address them in the same round.` : '';
   return { reason: `${work.key}: ${findings.join('. ')}. No review judges a head whose proof did not pass, so the item returns to a worker now to fix what the proof found.${open}`,
     binding: `${candidate.sha}:proof:${[...failed.map(verdict => verdict.proof), ...unexercised.map(entry => `unexercised:${entry.proof}`)].sort().join(',')}` };
+}
+
+/**
+ * GY-523. The attestation an unexercised `manual:` proof on the current head calls for, or null.
+ * On 2026-09-26 GY-374's and GY-393's attestations were approved — GY-393's approver had run the
+ * proof against the base and the candidate — but carried no exercise record, so the control plane
+ * stored each pass as not exercising its criterion, and the loop asked for rework: the wrong
+ * remedy, which the GY-393 approver refused. The change was never at fault, only the record, so the
+ * loop asks for the attestation again, carrying the exercise record (`attestationExercise`) its
+ * approver confirms by running the proof against the candidate base.
+ */
+export function attestationDecision(work: Work): RoutineDecision | null {
+  const candidate = work.candidate;
+  if (!work.submission || work.reworkRequested || !candidate || work.stage === 'done' || work.observation?.merged) return null;
+  const entry = unexercisedFindings(work).filter(finding => finding.proof.startsWith('manual:')).sort((a, b) => a.proof.localeCompare(b.proof))[0];
+  if (!entry) return null;
+  const criterion = work.criteria.find(each => each.proofs.includes(entry.proof));
+  if (!criterion) return null;
+  const finding = entry.finding.length > 300 ? `${entry.finding.slice(0, 299)}…` : entry.finding;
+  return { action: 'attest', input: { proof: entry.proof }, binding: `${candidate.sha}:attest:${entry.proof}`,
+    reason: `${work.key}: the attestation of ${entry.proof} on ${candidate.sha.slice(0, 12)} was recorded as not exercising ${criterion.id} ("${finding}"). The change is not at fault, so rework is the wrong remedy: this attestation carries the exercise record — ${entry.proof} fails against the candidate base ${candidate.baseSha.slice(0, 12)}, the tree without the change — and the approver confirms it by running the proof there and against the candidate before approving.` };
 }
 
 /**
@@ -408,18 +435,28 @@ export const reworkGroundsMin = 160;
  * both the bound and the server's check, and this is null: the loop escalates rather than sending a
  * request the server refuses on every retry.
  */
-export function reworkDecisionReason(prefix: string, grounds: string, refused: string[]): string | null {
+export function reworkDecisionReason(prefix: string, grounds: string, refused: string[], action: 'rework' | 'recover' = 'rework'): string | null {
   if (!refused.length) return fitDecisionReason(prefix, grounds, '');
-  const prose = ` This rests on different grounds from refused rework decision${refused.length === 1 ? '' : 's'} ${refused.join(', ')}, which ${refused.length === 1 ? 'was' : 'were'} judged on earlier grounds.`;
-  const bare = ` Answers refused rework decisions ${refused.join(' ')}.`;
+  const prose = ` This rests on different grounds from refused ${action} decision${refused.length === 1 ? '' : 's'} ${refused.join(', ')}, which ${refused.length === 1 ? 'was' : 'were'} judged on earlier grounds.`;
+  const bare = ` Answers refused ${action} decisions ${refused.join(' ')}.`;
   const suffix = [prose, bare].find(text => decisionReasonMax - prefix.length - text.length >= Math.min(reworkGroundsMin, grounds.length));
   return suffix === undefined ? null : fitDecisionReason(prefix, grounds, suffix);
 }
-/** How many standing refusals the server names that a rework request answers by citing them before it gives up. */
+/** How many standing refusals the server names that a rework or recover request answers by citing them before it gives up. */
 export const maxRefusalAnswers = 3;
-/** The refused rework decision the server's refusal of a request names as standing against it, or null. */
-export const refusalNamedIn = (error: string): string | null =>
-  /Decision ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}) \(rework\) with this input\b/.exec(error)?.[1] ?? null;
+const decisionId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/**
+ * The refused decision of `action` the server's refusal of a request names as standing against it,
+ * or null. The server returns it as a field of the 409 body (`standingRefusal`, GY-265), so the
+ * loop's retry does not depend on how the message is worded. Only a server that predates the field
+ * is read from its message, and a rewording there fails closed: the refusal is recorded, not retried.
+ */
+export function refusalNamedIn(error: unknown, action: 'rework' | 'recover' = 'rework'): string | null {
+  const field = error instanceof RefusedResponse ? (error.body as any)?.standingRefusal : undefined;
+  if (field && typeof field === 'object') return field.action === action && typeof field.decision === 'string' && decisionId.test(field.decision) ? field.decision : null;
+  const text = error instanceof Error ? error.message : String(error);
+  return new RegExp(`Decision ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}) \\(${action}\\) with this input\\b`).exec(text)?.[1] ?? null;
+}
 /**
  * Whether the loop may attest that the item's previous worker is stopped. `rework` and `recover`
  * carry that attestation and the engine lowers the containment fence on it, so it rests only on
@@ -441,7 +478,7 @@ export function workerStopped(work: Work, now: number, assessment?: ContainmentA
 /** The decision an item needs but the loop will not request, because the stopped worker is unverified. */
 export function withheldDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>, now: number, assessment?: ContainmentAssessment | null): { action: RoutineDecisionAction; reason: string } | null {
   const needed = neededDecision(work, config);
-  if (!needed || needed.action === 'merge' || needed.action === 'resolve' && supersededLeaseLoss(work)?.superseded) return null;
+  if (!needed || needed.action === 'merge' || needed.action === 'attest' || needed.action === 'resolve' && supersededLeaseLoss(work)?.superseded) return null;
   const unverified = workerStopped(work, now, assessment).unverified;
   return unverified ? { action: needed.action, reason: `${work.key} needs a ${needed.action} decision, but it attests that the previous worker is stopped and that is not verified: ${unverified}` } : null;
 }

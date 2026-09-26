@@ -191,7 +191,17 @@ export function approvalConflict(decision: Pick<Decision, 'id' | 'action' | 'inp
  * a new request, not a retry, and one whose binding differs names grounds the refusal never
  * judged, so neither is barred by it whatever the rest of its input.
  */
-export function unansweredRefusal(decisions: (Pick<Decision, 'id' | 'action' | 'input' | 'reason' | 'refusal'> & { state: string; precedent?: string[]; situation?: DecisionSituation | null })[], action: DecisionAction, input: unknown, reason: string, same: (a: unknown, b: unknown) => boolean, precedent: string[] = [], situation?: DecisionSituation | null): string | null {
+export function unansweredRefusal(...args: Parameters<typeof standingRefusal>): string | null {
+  return standingRefusal(...args)?.message ?? null;
+}
+/**
+ * The refusal `unansweredRefusal` names, as the server returns it in a 409 body beside the message
+ * (`standingRefusal`): the loop answers the refused decision by its id without reading the prose
+ * (GY-265). A refusal recorded before situations were kept (GY-229) names no candidate and stands
+ * against every one, so its message says so, and that a hand `master decide` must cite it by id:
+ * only the loop cites such refusals on its own.
+ */
+export function standingRefusal(decisions: (Pick<Decision, 'id' | 'action' | 'input' | 'reason' | 'refusal'> & { state: string; precedent?: string[]; situation?: DecisionSituation | null })[], action: DecisionAction, input: unknown, reason: string, same: (a: unknown, b: unknown) => boolean, precedent: string[] = [], situation?: DecisionSituation | null): { decision: string; action: DecisionAction; legacy: boolean; message: string } | null {
   const refused = decisions.filter(decision => decision.state === 'refused' && decision.action === action && same(decision.input, input) && judgedSame(action, decision, situation));
   const bare = (text: string) => text.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
   const names = (text: string, cited: string[], id: string) => text.includes(id) || cited.includes(id);
@@ -206,7 +216,11 @@ export function unansweredRefusal(decisions: (Pick<Decision, 'id' | 'action' | '
     }
   }
   const standing = refused.find(decision => !answered.has(decision.id));
-  return standing ? `Decision ${standing.id} (${action}) with this input${situation?.sha ? ` for candidate ${situation.sha.slice(0, 12)} on base ${String(situation.baseSha).slice(0, 12)}` : ''} was refused by ${standing.refusal?.approver ?? 'its approver'}: ${standing.refusal?.reason ?? standing.reason}. An identical request is refused; answer the refusal with a new request whose reason cites ${standing.id} and gives what the refused request lacked` : null;
+  if (!standing) return null;
+  const legacy = situatedDecisionActions.includes(action) && !standing.situation;
+  const message = `Decision ${standing.id} (${action}) with this input${situation?.sha ? ` for candidate ${situation.sha.slice(0, 12)} on base ${String(situation.baseSha).slice(0, 12)}` : ''} was refused by ${standing.refusal?.approver ?? 'its approver'}: ${standing.refusal?.reason ?? standing.reason}. An identical request is refused; answer the refusal with a new request whose reason cites ${standing.id} and gives what the refused request lacked`
+    + (legacy ? `. It was refused before refusals recorded the candidate they judged, so it stands against every candidate of this item until a request cites it: pass --precedent ${standing.id} to master decide, or name it in the reason` : '');
+  return { decision: standing.id, action, legacy, message };
 }
 
 /**
