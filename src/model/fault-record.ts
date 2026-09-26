@@ -1,6 +1,7 @@
 // Concern: the loop's fault record (GY-173) — which observations are one standing fault, when one ends,
 // and each failing action's run, bounded. The catalogue and classification stay in fault-classes.ts.
 import type { FaultInstance, FaultObservation } from './fault-classes.js';
+import { wording } from './fault-wording.js';
 
 /** The loop's record: every instance it retains, the one each standing fault is, and each failing action's run. */
 export interface FaultRecord { instances: FaultInstance[]; open: Record<string, string>; failing: Record<string, string>; observedAt?: string }
@@ -12,8 +13,6 @@ function retain(record: FaultRecord) { // drops the oldest past the bound: first
     if (excess > 0) record.instances.splice(0, record.instances.length, ...record.instances.filter(entry => excess <= 0 || spare.has(entry.id) || excess-- <= 0)); }
   const kept = new Set(record.instances.map(entry => entry.id)); for (const refs of [record.open, record.failing]) for (const key of Object.keys(refs)) if (!kept.has(refs[key])) delete refs[key];
 }
-const wording = (text: string) => (text.toLowerCase().replace(/\d+/g, '#').match(/[a-z]+|#/g) ?? []).map(word => word.replace(/s$/, ''))
-  .filter(word => !/^(|i|are|wa|were|ha|have|m|h|d|w|second|minute|hour|day|week)$/.test(word)).join(' ').replace(/#( #)+/g, '#').slice(0, 300);
 /**
  * One cycle's observations against the record. A fault that stood last cycle and still stands is
  * the same instance (its `lastSeenAt` moves); one not seen before, or seen again after it cleared,
