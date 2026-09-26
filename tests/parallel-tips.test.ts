@@ -219,9 +219,16 @@ test('unit:parallel-tips-visible — status shows each in-flight tip (position, 
   const fourthView = windowBatchView('GY-4', windowViews.get('GY-4')!, window);
   assert.equal(fourthView.state, 'waiting', 'entry 4 waits: the first failing tip is not its own');
   assert.match(fourthView.summary, /tip 2 \(GY-1, GY-2\) passed; tip 3 \(GY-1, GY-2, GY-3\) failed test/, 'the summary names every in-flight tip with its entries and CI state');
-  const steps = prSteps({ ...third, queue: { ...third.queue!, batch: thirdView } } as Work, now);
-  assert.equal(steps.current, 'merge');
-  assert.match(steps.label, /Merging · validating the combined tip of batch 1 with GY-1, GY-2/, 'the dashboard shows the entries the tip holds');
+  // The dashboard's Merge step names each in-flight tip the entry merges behind: position,
+  // entries and CI state, never a single "combined tip of batch 1".
+  const fourthSteps = prSteps({ ...fourth, queue: { ...fourth.queue!, batch: fourthView, tips: windowViews.get('GY-4')!.tips } } as Work, now);
+  assert.equal(fourthSteps.current, 'merge');
+  assert.equal(fourthSteps.label, 'Merging · validating 4 parallel tips: tip 1 (GY-1) passed; tip 2 (GY-1, GY-2) passed; tip 3 (GY-1, GY-2, GY-3) failed test; tip 4 (GY-1, GY-2, GY-3, GY-4) running · 0 of 1 checks done',
+    'the dashboard shows every in-flight tip with its position, entries and CI state');
+  assert.doesNotMatch(fourthSteps.label, /batch 1/);
+  const unpublished = { position: 2, entries: ['GY-1', 'GY-2'], tip: null, ci: 'none' as const };
+  assert.equal(prSteps({ ...third, gates: [{ name: 'merge', passed: false, reasons: ['Merge queue position 2 of 4: GY-1 is ahead'] }], queue: { ...third.queue!, tips: [windowViews.get('GY-1')!.tips[0], unpublished] } } as Work, now).detail,
+    'validating 2 parallel tips: tip 1 (GY-1) passed; tip 2 (GY-1, GY-2) not published yet', 'a tip not yet published reads so, before its own checks exist');
   // Insights: merges per hour and the median queue wait.
   const mergedSince = (key: string, minutesAgo: number) => entry(0, [pass], { key, id: `id-${key}`, stage: 'done', queue: null,
     observation: { clockOffset: { min: 0, max: 0 }, candidate: { sha: sha40(key), baseSha: B0, pr: 1, branch: 'b', author: 'a' }, baseTip: B0, checks: [pass], reviews: [], protected: true, mergeable: true, merged: true, mergeSha: sha40(`m${key}`), mergedAt: new Date(now - minutesAgo * 60_000).toISOString(), files: [], scopeFiles: [], at: new Date(now - minutesAgo * 60_000).toISOString() } } as unknown as Work);
