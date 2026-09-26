@@ -1,10 +1,21 @@
 import { readFile } from 'node:fs/promises';
-import { wholeDocument } from '../model/work-summary.js';
-import { inheritedObligations } from '../model.js';
+import { isSummary, wholeDocument } from '../model/work-summary.js';
+import { inheritedObligations, type Work } from '../model.js';
 import { diagnose, fileConflicts, obligationLedger, proofAuthorization, proofPreview, resourceConflicts } from '../coordination.js';
 import { handoff } from '../repository-setup.js';
 import { eventHistoryLimits, parseEventHistoryFlags } from '../events-history.js';
 import { defineCommands } from './registry.js';
+
+/**
+ * The snapshot as the obligation readers (`obligations`, `diagnose`) need it (GY-447): each entry
+ * with the criteria, planned files and candidate-binding evidence that bootstrap obligations derive
+ * from. A settled delivery's summary carries all three, so it is used as it is; a summary served
+ * without its criteria is read whole, so a bootstrap obligation declared on, or discharged by, a
+ * delivered item never drops out of the ledger because the snapshot trimmed it.
+ */
+export async function obligationDocuments<T extends { id: string }>(entries: T[], read: (path: string) => Promise<any>): Promise<Work[]> {
+  return Promise.all(entries.map(entry => isSummary(entry) && !Array.isArray((entry as Partial<Work>).criteria) ? wholeDocument(entry, read) : entry as unknown as Work));
+}
 
 /** Reading work: control-plane status, the ledger, diagnosis, creation and history. */
 export const workCommands = defineCommands([
@@ -23,19 +34,21 @@ export const workCommands = defineCommands([
       if (!listed) throw new Error(`Unknown work item ${id}`);
       // A settled delivery is a summary in the snapshot (GY-422); its diagnosis reads the whole document.
       const item = await wholeDocument(listed, api);
+      // Obligations inherited from a delivered dependency derive from its criteria (GY-447).
+      const all = await obligationDocuments(snapshot.work, api);
       // A required proof nobody is authorized to produce can never be satisfied; report it
       // alongside the other blockers rather than leaving it to be discovered at acceptance.
       let authorities: any[] = [];
       try { authorities = (await api('proof-grants')).authorities ?? []; } catch { /* reported as unknown authority below */ }
-      const authorization = proofAuthorization(item, authorities, snapshot.work);
-      return print({ key: item.key, observedAt: snapshot.now, diagnostics: diagnose(item, snapshot.work, Date.parse(snapshot.now), snapshot.jobs), overlaps: fileConflicts(item, snapshot.work), proofs: proofPreview(item, snapshot.work), obligations: inheritedObligations(item, snapshot.work),
+      const authorization = proofAuthorization(item, authorities, all);
+      return print({ key: item.key, observedAt: snapshot.now, diagnostics: diagnose(item, all, Date.parse(snapshot.now), snapshot.jobs), overlaps: fileConflicts(item, snapshot.work), proofs: proofPreview(item, all), obligations: inheritedObligations(item, all),
         proofAuthority: authorization, proofGaps: authorization.filter(entry => !entry.producers.length).map(entry => entry.proof) });
     },
   },
   {
     name: 'obligations',
     help: ['  obligations                  List every deferred bootstrap proof still owed and who inherits it'],
-    run: async ({ api, print }) => print(obligationLedger((await api('work-snapshot')).work)),
+    run: async ({ api, print }) => print(obligationLedger(await obligationDocuments((await api('work-snapshot')).work, api))),
   },
   {
     name: 'list',
