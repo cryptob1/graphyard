@@ -1,6 +1,5 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -8,6 +7,7 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { answeringWidening, emptyDaemonState, runCycle, scopeRoutineDecision, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { approverSessionName, decisionInput, masterConfigSchema, type HerdrAgent, type MasterConfig } from '../src/master.js';
 import { liveScopeWidening, scopeRequestOutcome, type ScopeRequestState } from '../src/model/scope.js';
@@ -94,7 +94,7 @@ const requirementsDecisions = async (work: Work) => (await ok(master.token, 'GET
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 549;
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-scope-collapse-db-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('scope-collapse-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('scope_collapse_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/scope_collapse_test`); await store.init();
   engine = new Engine(store, [15368], 300, repository); engine.submissionObserver = null;
