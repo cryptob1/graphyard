@@ -8,11 +8,14 @@ import { readyToRetry } from './sessions.js';
 import { approvalStep, boundDetail, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, maxApproverCloses, maxRefusalAnswers, maxApproverLaunches, maxDecisionRequests, namePaths, neededDecision, observedFrom, resolveCovers, reworkDecisionReason, refusalNamedIn, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, standingVerdict, withheldDecision } from './decisions.js';
 import { type DaemonEffects, failoverKey, record, stoppedStates } from './effects.js';
 import { detectExhaustion } from '../model/capacity.js';
-import { approverPrefixes, capacityRefusal } from '../fleet.js';
+import { capacityRefusal } from '../fleet.js';
+import { sessionName } from '../session-name.js';
 import type { Cycle } from './cycle.js';
 
 /** The approval-watch key of an approver session no request of the loop's launched (GY-403). */
 export const handWatchPrefix = 'hand:';
+/** The name prefixes every approver session for `key` starts with (see `approverSessionName`). */
+const approverPrefixes = (key: string) => ['graphyard-approver', 'gy-approver'].map(prefix => `${sessionName(prefix, key)}-`);
 
 /** Step 4c: request and supervise the routine decisions. */
 export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, assessments: Record<string, ContainmentAssessment>, { capacities, approversSpent }: { capacities: RoleCapacity[]; approversSpent: boolean }) {
