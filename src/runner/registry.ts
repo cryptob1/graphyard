@@ -2,7 +2,7 @@ import { closeSync, existsSync, openSync, readdirSync, readFileSync, rmSync, sta
 import { randomUUID } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import { z } from 'zod';
-import { piRunner, readRunMeta, runAlive } from './pi.js';
+import { piRunner, processIdentity, readRunMeta, runAlive } from './pi.js';
 import { runRecord, runRecordSchema, type Run, type RunOptions, type RunRecord, type RunResult, type Runner } from './types.js';
 
 /**
@@ -76,7 +76,7 @@ export function clearRuns() { for (const entry of runs.values()) if (entry.ended
  */
 export function detachRuns() {
   const left = [...watched];
-  for (const run of left) run.detach?.();
+  for (const run of left) { run.detach?.(); if (run.directory) releaseRunWatch(run.directory); }
   watched.clear(); runs.clear();
   return left.length;
 }
@@ -94,6 +94,7 @@ export type RunOwner = z.infer<typeof runOwnerSchema>;
 const ownerFile = (directory: string) => join(directory, 'owner.json');
 const recordFile = (directory: string) => join(directory, 'record.json');
 const claimFile = (directory: string) => join(directory, 'apply.claim');
+const watchFile = (directory: string) => join(directory, 'watch.claim');
 
 export function writeRunOwner(directory: string, owner: Omit<RunOwner, 'version'>) {
   writeFileSync(ownerFile(directory), JSON.stringify(runOwnerSchema.parse({ version: 1, ...owner })), { mode: 0o600 });
@@ -105,8 +106,42 @@ export function readEndedRecord(directory: string): RunRecord | null {
   try { return runRecordSchema.parse(JSON.parse(readFileSync(recordFile(directory), 'utf8'))); } catch { return null; }
 }
 
+/** This process, named so that a later process given the same pid is never taken for it. */
+const self = () => `${process.pid}:${processIdentity(process.pid) ?? ''}`;
 /** One watcher of a run in this process: a claim names the process and the watcher, so neither a restart nor a second watcher applies twice. */
-const claimant = () => `${process.pid}:${randomUUID()}`;
+const claimant = () => `${self()}:${randomUUID()}`;
+/** Whether the process a claim names is still that process: its pid is alive and, where recorded, started when it did. */
+const holderAlive = (claim: string) => {
+  const [pid, identity] = claim.split(':'), holder = Number(pid);
+  if (!Number.isInteger(holder) || holder <= 0) return false;
+  // A claim written before the identity was recorded names the pid and a watcher id only.
+  return runAlive({ pid: holder, identity: claim.split(':').length >= 3 && identity ? identity : null });
+};
+/** Takes a claim file for this process; a claim whose process is gone is taken over. `held` when another live process has it. */
+function takeClaim(file: string, content: string): 'taken' | 'mine' | 'held' {
+  const take = () => { const fd = openSync(file, 'wx', 0o600); try { writeSync(fd, content); } finally { closeSync(fd); } };
+  try { take(); return 'taken'; }
+  catch (error: any) { if (error?.code !== 'EEXIST') throw error; }
+  let holder = '';
+  try { holder = readFileSync(file, 'utf8'); } catch { /* removed meanwhile: retried below */ }
+  if (holder && holder.startsWith(`${self()}:`)) return 'mine';
+  if (holder && holderAlive(holder)) return 'held';
+  rmSync(file, { force: true });
+  try { take(); return 'taken'; } catch { return 'held'; }
+}
+
+/**
+ * Claim the watch of a run for this process (GY-453): exactly one live process — a loop or an
+ * executor — watches each run, so adoption never has two processes waiting on one run. A launch
+ * claims its run before its owner is written, so no adopter elsewhere sees an unwatched run in
+ * between; an adopter takes only a run nobody live is watching. A crashed watcher's claim is taken
+ * over; a planned shutdown gives its claims back (`detachRuns`). False when another process has it.
+ */
+export function claimRunWatch(directory: string) { return takeClaim(watchFile(directory), `${self()}:watch`) === 'taken'; }
+function releaseRunWatch(directory: string) {
+  try { if (readFileSync(watchFile(directory), 'utf8').startsWith(`${self()}:`)) rmSync(watchFile(directory), { force: true }); } catch { /* not held */ }
+}
+
 /**
  * Apply a run's result at most once, whoever watches it (GY-453). The first watcher to claim the
  * run applies it and records it; any other — a second watcher, or a loop that adopted the run while
@@ -115,22 +150,14 @@ const claimant = () => `${process.pid}:${randomUUID()}`;
  */
 export async function applyOnce(directory: string | undefined, apply: () => Promise<RunRecord>): Promise<RunRecord | null> {
   if (!directory) return apply();
-  const claim = claimFile(directory), mine = claimant();
-  const take = () => { const fd = openSync(claim, 'wx', 0o600); try { writeSync(fd, mine); } finally { closeSync(fd); } };
-  try { take(); }
-  catch (error: any) {
-    if (error?.code !== 'EEXIST') throw error;
-    if (existsSync(recordFile(directory))) return null;
-    const holder = Number((readFileSync(claim, 'utf8').split(':')[0]));
-    if (Number.isInteger(holder) && holder > 0 && holderAlive(holder)) return null;
-    rmSync(claim, { force: true });
-    try { take(); } catch { return null; }
-  }
+  if (existsSync(recordFile(directory))) return null;
+  const claimed = takeClaim(claimFile(directory), claimant());
+  // Held by another live watcher, or by another watcher in this process: that one applies it.
+  if (claimed !== 'taken' || existsSync(recordFile(directory))) return null;
   const record = await apply();
   writeFileSync(recordFile(directory), JSON.stringify(record), { mode: 0o600 });
   return record;
 }
-const holderAlive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (error: any) { return error?.code === 'EPERM'; } };
 
 /** Ended runs are kept this long on disk, for the record, then removed. */
 export const runDirectoryRetentionMs = 24 * 60 * 60_000;
@@ -216,9 +243,11 @@ export async function adoptRuns(root: string, adopters: Partial<Record<RunRole, 
   for (const { directory, owner, record } of listRunDirectories(runsRoot)) {
     if (record || !adopters[owner.role] || !runner.adopt) continue;
     if (owner.role !== 'research' && liveRun(owner.name)) continue;
+    // Another live process — the loop, or an executor on this host — is watching it already.
+    if (!claimRunWatch(directory)) continue;
     let plan: Awaited<ReturnType<RunAdopter>>;
-    try { plan = await adopters[owner.role]!(owner); } catch { continue; }
-    if (!plan) continue;
+    try { plan = await adopters[owner.role]!(owner); } catch { releaseRunWatch(directory); continue; }
+    if (!plan) { releaseRunWatch(directory); continue; }
     const meta = readRunMeta(directory);
     const run = runner.adopt(directory, plan.options);
     const settled = superviseRun({ runner, run, name: owner.name, role: owner.role, work: owner.work, subject: owner.subject, startedAt: owner.startedAt, apply: plan.apply })

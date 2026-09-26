@@ -55,7 +55,7 @@ A runtime stopped on a first-run prompt is **`awaiting consent`**. The launcher 
 
 A reviewer or producer is `awaiting acknowledgement` until 30 s of activity (`counts.dispatchAwaiting`). Still quiet after `run.acknowledgementSeconds` (30–900, default 90), it is re-prompted once; if it then settles without a result it is **`never started`**, relaunched a minute later without spending retry budget. Three exhaust the request (`retry.neverStarted`).
 
-**Headless Pi runs outlive restarts.** Detached (`graphyard-run-*.scope` under systemd), output in `.graphyard/runs/`: a restarted loop adopts and applies them once; killed ones (`headless run lost`) retry free.
+**Headless Pi runs outlive restarts.** Detached (`graphyard-run-*.scope`), in `.graphyard/runs/`: each loop cycle adopts unwatched runs, executors' included, applied once; killed ones (`headless run lost`) retry free.
 
 ### The dispatcher's own state
 

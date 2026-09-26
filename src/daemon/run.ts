@@ -78,14 +78,16 @@ export async function noteWatchdog(state: DaemonState, plan: ReturnType<typeof w
 }
 
 /**
- * Take back the headless runs a restart left running (GY-453). An approver's run reports its
- * record on the watch of the decision it judges when it ends, as a run this loop launched would.
+ * Take back the headless runs a restart left running (GY-453): on the loop's start, and on every
+ * later cycle any run no live process watches — one an executor left running when it stopped and
+ * was not started again. An approver's run reports its record on the watch of the decision it
+ * judges when it ends, as a run this loop launched would.
  */
-export async function adoptHeadlessRuns(state: DaemonState, effects: DaemonEffects, log: (line: string) => void) {
+export async function adoptHeadlessRuns(state: DaemonState, effects: DaemonEffects, log: (line: string) => void, when: 'start' | 'cycle' = 'start') {
   if (!effects.adoptRuns) return [];
   try {
     const adopted = await effects.adoptRuns();
-    if (adopted.length) log(`[graphyard-master] adopted ${adopted.length} headless run(s) left running by a restart: ${adopted.map(run => `${run.name} (${run.role} for ${run.work}${run.live ? '' : ', ended while unwatched'})`).join(', ')}`);
+    if (adopted.length) log(`[graphyard-master] adopted ${adopted.length} headless run(s) ${when === 'start' ? 'left running by a restart' : 'no live process was watching'}: ${adopted.map(run => `${run.name} (${run.role} for ${run.work}${run.live ? '' : ', ended while unwatched'})`).join(', ')}`);
     for (const run of adopted) {
       if (run.role !== 'approver') continue;
       run.settled.then(async record => {
@@ -154,6 +156,7 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
           for (const action of await noteConfigReload(state, await options.reload().then(reload => { config = reload.config; return reload; }), effects.persist)) log(`[graphyard-master] ${action.kind} ${action.state}: ${action.detail}`);
         }
         phase = 'cycle';
+        if (cycles.length + failed.length) await adoptHeadlessRuns(state, effects, log, 'cycle');
         const result = await runCycle(config, state, effects, now);
         // The end of a run of failures is written at once, so `master status` stops naming it.
         const recovered = noteCycleSuccess(state);

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { defaultPiModel, piRunner } from './pi.js';
 import type { FleetLaunchAccount } from '../fleet.js';
 import { z } from 'zod';
-import { liveRun, runsDirectory, superviseRun, writeRunOwner, type Applied, type RunAdopter } from './registry.js';
+import { claimRunWatch, liveRun, runsDirectory, superviseRun, writeRunOwner, type Applied, type RunAdopter } from './registry.js';
 import { decidePayloadSchema, evidencePayloadSchema, graphyardTools, piRuntimeSchema, type DecidePayload, type EvidencePayload } from './payloads.js';
 import { runRecord, type RunOptions, type RunResult, type Runner } from './types.js';
 
@@ -56,7 +56,8 @@ export function startNarrowRun<T>(input: { runner: Runner; name: string; role: '
   const startedAt = new Date().toISOString();
   const run = input.runner.start(input.prompt, input.root ? { ...input.options, runs: runsDirectory(input.root) } : input.options);
   if (run.directory) {
-    try { writeRunOwner(run.directory, { name: input.name, role: input.role, work: input.work, subject: input.subject, context: input.context ?? {}, startedAt }); }
+    // Watched here from its start, so no adopter elsewhere takes it once its owner is on disk.
+    try { claimRunWatch(run.directory); writeRunOwner(run.directory, { name: input.name, role: input.role, work: input.work, subject: input.subject, context: input.context ?? {}, startedAt }); }
     catch { /* the run is still watched here; only its adoption after a restart is lost */ }
   }
   const settled = superviseRun({ runner: input.runner, run, name: input.name, role: input.role, work: input.work, subject: input.subject, startedAt, apply: input.apply });

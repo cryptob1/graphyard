@@ -132,7 +132,8 @@ export function detachedLaunch(directory: string, id: string, command: string, a
   return unit ? { file: 'systemd-run', args: ['--user', '--scope', '--quiet', '--collect', `--unit=${unit}`, '--', ...shell], unit } : { file: shell[0], args: shell.slice(1), unit };
 }
 
-function processIdentity(pid: number): string | null {
+/** A process's start time (/proc/PID/stat), which tells it from a later process given the same pid. */
+export function processIdentity(pid: number): string | null {
   try {
     const stat = readFileSync(`/proc/${pid}/stat`, 'utf8'), end = stat.lastIndexOf(') ');
     return end < 0 ? null : stat.slice(end + 2).trim().split(/\s+/)[19] ?? null;

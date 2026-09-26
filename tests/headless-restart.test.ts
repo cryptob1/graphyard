@@ -6,11 +6,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { graphyardTools, type DecidePayload } from '../src/runner/payloads.js';
-import { detachedLaunch, piRunner, readRunMeta, runAlive, runContainment, signalRun } from '../src/runner/pi.js';
+import { detachedLaunch, piRunner, processIdentity, readRunMeta, runAlive, runContainment, signalRun } from '../src/runner/pi.js';
 import { adoptRuns, applyOnce, clearRuns, detachRuns, liveRun, runsDirectory, type Applied } from '../src/runner/registry.js';
 import { approverRunOptions, startNarrowRun } from '../src/runner/roles.js';
 import { lostRun, lostRunReason, sessionRetry } from '../src/producer.js';
 import { emptyDaemonState, runDaemon, type DaemonEffects } from '../src/master-daemon.js';
+import { EventEmitter } from 'node:events';
 import type { RunResult } from '../src/runner/types.js';
 
 // GY-453. Headless Pi runs are detached from the process that launched them: a restart of the loop
@@ -47,16 +48,17 @@ async function fixture() {
     applied.push({ decision: result.ok ? result.payload.decision : '', ok: result.ok, reason: result.ok ? null : result.failure.reason });
     return result.ok ? [{ subject: `decision ${result.payload.decision}`, outcome: 'applied', detail: 'approved' }] : [];
   };
-  const start = async (decision: string, name: string) => {
+  const start = async (decision: string, name: string, role: 'approver' | 'producer' = 'approver') => {
     const { file, release, verdict } = await scenario(decision);
-    const started = startNarrowRun({ runner: runner(file), name, role: 'approver', work: 'GY-1', subject: decision, root, context: { decision },
+    const started = startNarrowRun({ runner: runner(file), name, role, work: 'GY-1', subject: decision, root, context: { decision },
       prompt: `Judge ${decision}`, options: approverRunOptions(root, decision, {}, 60_000), apply });
     // Live once the fake Pi has taken its request up.
     await new Promise<void>(resolve => { const off = started.run.onEvent(event => { if (event.kind === 'tool-start') { off(); resolve(); } }); });
     return { started, release, verdict, meta: readRunMeta(started.run.directory!)! };
   };
   // The restarted loop's approver adoption: the options the run is judged by, and the same apply.
-  const adopters = { approver: async (owner: { context: Record<string, unknown> }) => ({ options: approverRunOptions('', String(owner.context.decision), {}, 60_000), apply }) };
+  const adopter = async (owner: { context: Record<string, unknown> }) => ({ options: approverRunOptions('', String(owner.context.decision), {}, 60_000), apply });
+  const adopters = { approver: adopter, producer: adopter };
   return { root, start, applied, adopters, cleanup: async () => { clearRuns(); await rm(root, { recursive: true, force: true }); } };
 }
 
@@ -129,6 +131,71 @@ test('unit:headless-run-survives-restart a run that ended while unwatched is app
     assert.equal(retry.started, 1, 'only the run that ran counts against the budget');
     assert.equal(retry.nextAt, '2030-01-01T00:09:00.000Z', 'retried after the base wait, not a widened one');
     assert.equal(retry.launch, true);
+  } finally { await cleanup(); }
+});
+
+test('unit:headless-run-survives-restart a run an executor launched is re-adopted by the loop on its next cycle once that executor restarts, and applied once', async () => {
+  const { root, start, applied, adopters, cleanup } = await fixture();
+  try {
+    // An executor on this host launched a headless producer run and is watching it (here: a live
+    // process that is not this one holds the run's watch claim).
+    const { started, release, meta } = await start('decision-5', 'graphyard-producer-gy-5', 'producer');
+    detachRuns();
+    const claim = join(started.run.directory!, 'watch.claim');
+    await writeFile(claim, `${process.ppid}:${processIdentity(process.ppid) ?? ''}:watch`);
+
+    // The loop runs its cycles beside it; each one looks for runs no live process watches.
+    const host = new EventEmitter(), lines: string[] = [];
+    let calls = 0, restarted: () => Promise<void> = async () => {};
+    const executorRestarted = new Promise<void>(resolve => { restarted = async () => { resolve(); }; });
+    const config = { url: 'https://graphyard.example', repository: 'owner/project', run: { intervalSeconds: 30 } } as never;
+    const effects = { persist: async () => {}, snapshot: async () => { throw new Error('the control plane is offline'); },
+      adoptRuns: async () => {
+        const adopted = await adoptRuns(root, adopters);
+        calls++;
+        if (calls === 2) {
+          assert.deepEqual(adopted, [], 'a run a live executor watches is left to it');
+          // `master executors restart`: the executor's process ends; the run, detached, does not.
+          await writeFile(claim, `${process.ppid}:1:watch`);
+          await restarted();
+        }
+        if (adopted.length) { host.emit('SIGUSR2'); }
+        return adopted;
+      } } as unknown as DaemonEffects;
+    const loop = runDaemon(config, emptyDaemonState(config), effects, { intervalMs: 5, identity: { pid: process.pid, host: 'machine-a' }, signals: ['SIGUSR2'], process: host as never, log: line => lines.push(line) });
+    await executorRestarted;
+    await loop;
+    assert.ok(runAlive(meta), 'the executor\'s restart left the run running');
+    assert.ok(calls >= 3, 'the loop adopts on its start and again on later cycles');
+    assert.ok(lines.some(line => /adopted 1 headless run\(s\) no live process was watching: graphyard-producer-gy-5 \(producer for GY-1\)/.test(line)), lines.join('\n'));
+
+    // The loop that adopted it stopped too (and signalled nothing); the next one picks it up again and applies it once.
+    const [adopted] = await adoptRuns(root, adopters);
+    assert.equal(adopted?.name, 'graphyard-producer-gy-5');
+    await release();
+    await adopted.settled;
+    assert.deepEqual(applied, [{ decision: 'decision-5', ok: true, reason: null }], 'the result was applied exactly once');
+    detachRuns();
+    assert.deepEqual(await adoptRuns(root, adopters), [], 'an applied run is never adopted again');
+  } finally { await cleanup(); }
+});
+
+test('unit:headless-run-survives-restart a run another live process watches is left to it, and a dead watcher\'s run is taken over', async () => {
+  const { root, start, applied, adopters, cleanup } = await fixture();
+  try {
+    const { started, release } = await start('decision-6', 'graphyard-producer-gy-6', 'producer');
+    detachRuns();
+    const claim = join(started.run.directory!, 'watch.claim');
+    // Another live process (here, this test's parent) holds the watch: nobody else adopts the run.
+    await writeFile(claim, `${process.ppid}:${processIdentity(process.ppid) ?? ''}:watch`);
+    assert.deepEqual(await adoptRuns(root, adopters), [], 'a run a live loop or executor watches is not adopted beside it');
+    // The same pid under a different start time is a later process: its claim is stale.
+    await writeFile(claim, `${process.ppid}:1:watch`);
+    const [adopted] = await adoptRuns(root, adopters);
+    assert.equal(adopted?.name, 'graphyard-producer-gy-6', 'a claim whose process is gone is taken over');
+    await release();
+    await adopted.settled;
+    assert.deepEqual(applied, [{ decision: 'decision-6', ok: true, reason: null }]);
   } finally { await cleanup(); }
 });
 

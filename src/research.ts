@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { demand, operatorScopeIncludes, type Principal, type Work } from './model.js';
 import { humanOnlyRefusal, parkRule } from './model/human-request.js';
 import { defaultPiModel, piRunner } from './runner/pi.js';
-import { listRunDirectories, runsDirectory, superviseRun, writeRunOwner } from './runner/registry.js';
+import { claimRunWatch, listRunDirectories, runsDirectory, superviseRun, writeRunOwner } from './runner/registry.js';
 import type { Run, RunResult, Runner } from './runner/types.js';
 import { save } from './store.js';
 import type { Services } from './server/routes.js';
@@ -320,7 +320,7 @@ export async function researchStep(input: ResearchStepInput): Promise<{ held: Se
     const run = input.runner.start(researchPrompt(input.config, work, input.settings), {
       cwd: input.cwd, env: { GRAPHYARD_PI_ROLE: researchRole }, tool: researchTool, timeoutMs, validate: payload => researchBriefSchema.parse(payload), runs: runsDirectory(input.cwd) });
     if (run.directory) {
-      try { writeRunOwner(run.directory, { name: `research:${work.key}`, role: 'research', work: work.id, subject: revision, context: {}, startedAt }); }
+      try { claimRunWatch(run.directory); writeRunOwner(run.directory, { name: `research:${work.key}`, role: 'research', work: work.id, subject: revision, context: {}, startedAt }); }
       catch { /* watched here all the same; only an adoption after a restart is lost */ }
     }
     followResearch(input, work, revision, run, startedAt);
@@ -346,7 +346,7 @@ function followResearch(input: ResearchStepInput, work: Work, revision: string, 
 function adoptResearch(input: ResearchStepInput, work: Work, revision: string) {
   if (!input.runner.adopt) return false;
   const found = listRunDirectories(runsDirectory(input.cwd)).find(entry => !entry.record && entry.owner.role === 'research' && entry.owner.work === work.id && entry.owner.subject === revision);
-  if (!found) return false;
+  if (!found || !claimRunWatch(found.directory)) return false;
   const run = input.runner.adopt<ResearchBrief>(found.directory, { tool: researchTool, timeoutMs: input.settings.timeoutMinutes * 60_000, validate: payload => researchBriefSchema.parse(payload) });
   followResearch(input, work, revision, run, found.owner.startedAt);
   return true;
