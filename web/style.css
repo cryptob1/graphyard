@@ -194,6 +194,9 @@ img.mark{width:26px;height:26px}
 .steps-track{display:flex;gap:3px}.step-seg{flex:1;height:6px;border-radius:3px;background:var(--border)}
 .step-seg.done{background:var(--shipped)}.step-seg.current{background:var(--moving);animation:gy-pulse 1.6s ease-in-out infinite}
 .group-blocked .step-seg.current{background:var(--blocked)}
+.step-seg.skipped{background:repeating-linear-gradient(90deg,var(--border) 0 3px,transparent 3px 6px)}.step-seg-detail.skipped strong{color:var(--text-3)}
+.research-brief summary{cursor:pointer;font-weight:600}.research-brief summary small{font-weight:400;color:var(--text-2);margin-left:var(--space-2)}.research-brief h3{margin-top:var(--space-4)}
+.research-effect-table{width:100%;border-collapse:collapse}.research-effect-table th,.research-effect-table td{text-align:left;padding:var(--space-2) 0}
 .steps-label{font-size:var(--type-small);color:color-mix(in srgb,var(--moving) 75%,var(--text))}.group-blocked .steps-label{color:color-mix(in srgb,var(--blocked) 75%,var(--text))}
 @keyframes gy-pulse{0%,100%{opacity:1}50%{opacity:.35}}
 .steps-detail{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:10px}
@@ -247,12 +250,12 @@ img.mark{width:26px;height:26px}
 /* GY-204: the replay waits under a video-style play button; every colour is a token, so it follows the dashboard in either theme. */
 .replay-stage{position:relative}.replay-overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;width:100%;margin:0;padding:0;border:0;border-radius:0;background:color-mix(in srgb,var(--bg) 55%,transparent);color:var(--on-accent);cursor:pointer}.replay-overlay[hidden]{display:none}.replay-disc{display:flex;align-items:center;justify-content:center;width:72px;height:72px;min-width:64px;min-height:64px;border-radius:50%;background:var(--accent);color:var(--on-accent);box-shadow:0 0 0 6px color-mix(in srgb,var(--accent) 22%,transparent);transition:transform .15s ease}.replay-disc svg{margin-left:3px}.replay-overlay[data-replay=replay] .replay-disc svg{margin-left:0}.replay-overlay:hover .replay-disc{transform:scale(1.06)}.replay-overlay:focus{outline:none}.replay-overlay:focus-visible .replay-disc{outline:3px solid var(--text);outline-offset:4px}.replay-progress{flex:1;height:4px;border-radius:2px;background:var(--border);overflow:hidden}.replay-progress>span{display:block;height:100%;background:var(--moving)}.replay-pause{font-size:var(--type-tiny)}
 .flow-wait{padding:var(--space-4)}
-.insight-charts{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(0,1fr);gap:var(--space-5)}
+.insight-charts{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(0,1fr);gap:var(--space-5)}.insight-charts .research-effect{grid-column:1/-1}
 .landed-bars{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(0,1fr);gap:10px;align-items:end;min-height:200px}
 .landed-day{display:flex;flex-direction:column;align-items:center;justify-content:flex-end;gap:6px;font-size:var(--type-tiny);color:var(--text-2)}
 .landed-bar{width:100%;min-height:2px;border-radius:4px 4px 0 0;background:color-mix(in srgb,var(--shipped) 55%,var(--bg))}.landed-day:last-child .landed-bar{background:var(--up-next)}.landed-day small{color:var(--text-3)}
 .time-bar{display:flex;height:18px;border-radius:9px;overflow:hidden}
-.time-share{display:inline-block;background:var(--moving)}.time-share.step-validate{background:color-mix(in srgb,var(--moving) 75%,var(--bg))}.time-share.step-test{background:color-mix(in srgb,var(--moving) 55%,var(--bg))}.time-share.step-review{background:var(--needs-you)}.time-share.step-prove{background:var(--shipped)}.time-share.step-merge,.time-share.step-deploy{background:var(--up-next)}
+.time-share{display:inline-block;background:var(--moving)}.time-share.step-research{background:color-mix(in srgb,var(--up-next) 55%,var(--bg))}.time-share.step-validate{background:color-mix(in srgb,var(--moving) 75%,var(--bg))}.time-share.step-test{background:color-mix(in srgb,var(--moving) 55%,var(--bg))}.time-share.step-review{background:var(--needs-you)}.time-share.step-prove{background:var(--shipped)}.time-share.step-merge,.time-share.step-deploy{background:var(--up-next)}
 .time-legend{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 20px;font-size:var(--type-small)}.time-legend i{width:10px;height:10px;border-radius:2px;margin-right:var(--space-2);vertical-align:-1px}.time-legend .slowest{color:var(--needs-you)}
 /* Every animation respects the viewer's reduced-motion setting. */
 @media (prefers-reduced-motion: reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}.step-seg.current,.now-dot,.now-dot::before,.replay-dot{animation:none;transition:none}}

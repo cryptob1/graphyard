@@ -77,18 +77,40 @@ export function LandedPerDay({ report }: { report: any }) {
   const coverage = flowCoverage(report);
   const until = readUntil(report, 'delivered');
   const end = Date.parse(report?.window?.to ?? '');
-  const landed: { bucket: string; delivered: number; covered: boolean }[] = (Array.isArray(report?.throughput) ? report.throughput : []).slice(-7)
-    .map((entry: any) => ({ bucket: entry.bucket, delivered: entry.delivered, covered: !coverage?.stale && !coverage?.population && (typeof entry.covered === 'boolean' ? entry.covered : Math.min(Date.parse(entry.bucket) + day, Number.isNaN(end) ? Infinity : end) <= until) }));
+  const landed: { bucket: string; delivered: number; researched: number | null; covered: boolean }[] = (Array.isArray(report?.throughput) ? report.throughput : []).slice(-7)
+    .map((entry: any) => ({ bucket: entry.bucket, delivered: entry.delivered, researched: typeof entry.researched === 'number' ? entry.researched : null, covered: !coverage?.stale && !coverage?.population && (typeof entry.covered === 'boolean' ? entry.covered : Math.min(Date.parse(entry.bucket) + day, Number.isNaN(end) ? Infinity : end) <= until) }));
   const peak = Math.max(1, ...landed.filter(entry => entry.covered).map(entry => entry.delivered));
   return <section className="panel" aria-label="Landed per day"><h2>Landed on main per day <small>last 7 days, UTC</small></h2>
     {coverage && <p className="notice" role="status" data-flow="coverage">{coverage.statement}</p>}
     {landed.length ? <div className="landed-bars">{landed.map(entry => entry.covered
-      ? <div key={entry.bucket} className="landed-day" data-bucket={entry.bucket} title={`${entry.delivered} on ${entry.bucket.slice(0, 10)}`}>
+      ? <div key={entry.bucket} className="landed-day" data-bucket={entry.bucket} data-researched={entry.researched ?? undefined}
+        title={`${entry.delivered} on ${entry.bucket.slice(0, 10)}${entry.researched !== null ? `, ${entry.researched} built from a research brief` : ''}`}>
         <span>{entry.delivered}</span><span className="landed-bar" style={{ height: `${Math.round(entry.delivered / peak * 160)}px` }}/><small>{new Date(entry.bucket).toISOString().slice(5, 10)}</small>
       </div>
       : <div key={entry.bucket} className="landed-day uncovered" data-bucket={entry.bucket} data-uncovered="true" title={`${entry.bucket.slice(0, 10)} was not read`}>
         <span>—</span><small>{new Date(entry.bucket).toISOString().slice(5, 10)} not read</small>
       </div>)}</div> : <p className="muted">{report ? coverage ? 'No day of this window was read.' : 'Nothing landed in this window.' : 'Reading the recorded deliveries…'}</p>}
+  </section>;
+}
+
+const perItem = (summary: any) => summary && typeof summary.average === 'number' ? summary.average.toFixed(1) : '—';
+/**
+ * Research (GY-434): the step's runs over the window — briefs, runs that ended without one, and the
+ * median time from a run's start to its brief — and its effect: rework rounds and review findings
+ * per feature for features researched in the window against features that were not. The figures
+ * are the flow report's own (`research`), computed from the recorded research facts.
+ */
+export function ResearchEffect({ report }: { report: any }) {
+  const research = report?.research;
+  if (!research) return <section className="panel" aria-label="Research"><h2>Research</h2><p className="muted">{report ? 'No research run was recorded in this window.' : 'Reading the recorded research runs…'}</p></section>;
+  const { researched, unresearched } = research.effect ?? {};
+  return <section className="panel research-effect" aria-label="Research"><h2>Research <small>last 7 days</small></h2>
+    <p data-research="runs">{research.runs} {research.runs === 1 ? 'run' : 'runs'} · {research.briefs} {research.briefs === 1 ? 'brief' : 'briefs'} · {research.skipped} without a brief · median {minutes(research.duration?.medianMs ?? null)}</p>
+    <table className="research-effect-table"><thead><tr><th scope="col">Features</th><th scope="col">Items</th><th scope="col">Rework rounds per item</th><th scope="col">Review findings per item</th></tr></thead>
+      <tbody>
+        <tr data-cohort="researched"><th scope="row">Researched</th><td>{researched?.items ?? 0}</td><td>{perItem(researched?.reworkRounds)}</td><td>{perItem(researched?.reviewFindings)}</td></tr>
+        <tr data-cohort="unresearched"><th scope="row">Not researched</th><td>{unresearched?.items ?? 0}</td><td>{perItem(unresearched?.reworkRounds)}</td><td>{perItem(unresearched?.reviewFindings)}</td></tr>
+      </tbody></table>
   </section>;
 }
 
@@ -185,7 +207,7 @@ export function Headline({ shipped, moving, waiting, now, pulse, requests }: { s
   return <section className="insight-kpis" aria-label="Headline numbers">
     <div className="kpi" data-kpi="shipped"><span>Shipped</span><strong>{shipped}</strong><small>seen live this week</small></div>
     <div className={`kpi${stale ? ' stale' : ''}`} data-kpi="start-to-live" data-stale={stale ? 'true' : undefined}><span>Start to live, median</span><strong>{live}</strong><small>{liveNote}</small></div>
-    <div className="kpi" data-kpi="moving"><span>Moving now</span><strong>{moving}</strong><small>build to live</small></div>
+    <div className="kpi" data-kpi="moving"><span>Moving now</span><strong>{moving}</strong><small>research to live</small></div>
     <div className="kpi" data-kpi="waiting-on-people"><span>Time waiting on people</span><strong>{waiting.length ? formatDuration(waited / 60000) : 'None'}</strong><small>{waiting.length} {waiting.length === 1 ? 'item waits' : 'items wait'} on you now</small></div>
   </section>;
 }
@@ -259,14 +281,16 @@ export function ReplaySection({ frames, truncated, initial, clock = browserClock
  * shipping pulse and flow analytics detail folded behind one Show details toggle. The detail is
  * mounted only once opened, so a visit that never opens it reads none of its reports.
  *
- * The Flow panel is build to live, one column per pull-request step.
+ * The Flow panel is research to live, one column per pull-request step.
  *
  * - **Now** places every open item at its true step (`prSteps`, the same reading the Work page
  *   draws). A dot is keyed by its item, so it moves only when that item's step changes.
  * - **Last 24 hours, replayed** plays the recorded step changes (web/flow-replay.ts) in
  *   twenty seconds, once the viewer presses its play button; a return to Build is rework and is drawn red.
  * - **Landed on main per day** and **where the time goes** are the flow report's own daily
- *   deliveries and per-step dwell medians, computed from the same recorded step moves.
+ *   deliveries (with how many were built from a research brief) and per-step dwell medians,
+ *   computed from the same recorded step moves; **Research** is the research step's runs and its
+ *   effect on rework and review findings (GY-434).
  *
  * Every animation stops under prefers-reduced-motion: the replay then shows its last frame with
  * a slider to step through it in place of the play button, and the CSS rule turns the dots' movement off.
@@ -303,11 +327,11 @@ export default function InsightsPage({ work, status, api, token, observedAt, set
   const counted = [...times.values()].filter(entry => !entry.marked && entry.medianMs !== null && entry.medianMs > 0);
   const slowest = counted.length ? counted.reduce((a, b) => b.medianMs! > a.medianMs! ? b : a).step : null;
   return <>
-    <div className="page-heading"><div><h1>Insights</h1><p className="summary">How work moves from build to live. {now7.length} {now7.length === 1 ? 'item is' : 'items are'} in the flow now.</p></div></div>
+    <div className="page-heading"><div><h1>Insights</h1><p className="summary">How work moves from research to live. {now7.length} {now7.length === 1 ? 'item is' : 'items are'} in the flow now.</p></div></div>
     <Headline shipped={shippedThisWeek(work, now, release).length} moving={byGroup.moving.length} waiting={byGroup['needs-you']} now={now} pulse={pulse} requests={status?.humanOnly}/>
     {error && <p className="notice" role="status">The recorded history could not be read: {error}. The Now view below is live.</p>}
     <section className="flow-panel" aria-label="Flow">
-      <div className="flow-subhead flow-title"><h2>Flow</h2><span>Build to live, one column per step.</span></div>
+      <div className="flow-subhead flow-title"><h2>Flow</h2><span>Research to live, one column per step.</span></div>
       <div className="flow-columns-head">{stepIds.map(step => <div key={step} className={step === slowest ? 'flow-step slowest' : 'flow-step'}>
         <strong>{stepLabel[step]}</strong><span>{now7.filter(entry => entry.steps.current === step).length} now · median {minutes(times.get(step)?.medianMs)}</span><StepMarker time={times.get(step)!}/>{step === slowest && <small>slowest step</small>}
       </div>)}</div>
@@ -324,6 +348,7 @@ export default function InsightsPage({ work, status, api, token, observedAt, set
     <div className="insight-charts">
       <LandedPerDay report={report}/>
       <WhereTimeGoes report={report}/>
+      <ResearchEffect report={report}/>
     </div>
     <details className="insight-details" onToggle={event => { if (event.currentTarget.open) setDetailed(true); }}><summary>Show details</summary>
       {detailed && <div className="insight-details-body"><InsightsDetails pulse={pulse} repository={status?.repository} api={api} token={token} canAudit={['admin', 'coordinator', 'producer'].includes(status?.actor?.role)}/></div>}

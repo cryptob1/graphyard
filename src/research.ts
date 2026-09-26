@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { z } from 'zod';
-import { demand, operatorScopeIncludes, type Principal, type Work } from './model.js';
+import { demand, isClosed, operatorScopeIncludes, type Principal, type Work } from './model.js';
 import { humanOnlyRefusal, parkRule } from './model/human-request.js';
 import { defaultPiModel, piRunner } from './runner/pi.js';
 import type { Run, RunResult, Runner } from './runner/types.js';
@@ -48,6 +48,8 @@ export interface ResearchRecord {
   state: 'running' | 'recorded' | 'failed';
   startedAt: string; endedAt: string | null;
   runtime: string; model: string; timeoutMs: number; tokenBudget: number;
+  /** The tokens the run streamed, as the runner estimated them; null when the record predates the count (GY-434). */
+  tokens: number | null;
   brief: {
     existingCode: { path: string; note: string }[];
     patterns: { pattern: string; source: string }[];
@@ -124,7 +126,8 @@ export const researchEventSchema = z.discriminatedUnion('event', [
   z.object({ event: z.literal('started'), revision: z.string().regex(/^[0-9a-f]{16}$/), runtime: line(40), model: line(200),
     timeoutMs: z.number().int().positive().max(3_600_000), tokenBudget: z.number().int().positive() }).strict(),
   z.object({ event: z.literal('recorded'), revision: z.string().regex(/^[0-9a-f]{16}$/), brief: researchBriefSchema,
-    questionDeadlineMs: z.number().int().positive().max(7 * 24 * 3_600_000).default(4 * 3_600_000) }).strict(),
+    questionDeadlineMs: z.number().int().positive().max(7 * 24 * 3_600_000).default(4 * 3_600_000),
+    tokens: z.number().int().nonnegative().max(1_000_000_000).optional() }).strict(),
   z.object({ event: z.literal('failed'), revision: z.string().regex(/^[0-9a-f]{16}$/), reason: line(40), detail: line(1000) }).strict(),
 ]);
 export type ResearchEvent = z.input<typeof researchEventSchema>;
@@ -141,17 +144,17 @@ export function applyResearchEvent(work: Work, input: ResearchEvent, actor: stri
   if (event.event === 'started') {
     demand(!existing, `${work.key} was already researched at requirements revision ${event.revision} (${existing?.state}); one run per revision`);
     work.researchBrief = { revision: event.revision, state: 'running', startedAt: at, endedAt: null, runtime: event.runtime, model: event.model,
-      timeoutMs: event.timeoutMs, tokenBudget: event.tokenBudget, brief: null, questions: [], failure: null, recordedBy: actor };
+      timeoutMs: event.timeoutMs, tokenBudget: event.tokenBudget, tokens: null, brief: null, questions: [], failure: null, recordedBy: actor };
     return work.researchBrief;
   }
   demand(existing?.state === 'running', `${work.key} has no research run at revision ${event.revision} to record the end of`);
   if (event.event === 'failed') {
-    work.researchBrief = { ...existing!, state: 'failed', endedAt: at, failure: { reason: event.reason, detail: event.detail } };
+    work.researchBrief = { ...existing!, state: 'failed', endedAt: at, tokens: existing!.tokens ?? null, failure: { reason: event.reason, detail: event.detail } };
     return work.researchBrief;
   }
   const { questions, ...brief } = event.brief;
   const deadline = new Date(now.getTime() + event.questionDeadlineMs).toISOString();
-  work.researchBrief = { ...existing!, state: 'recorded', endedAt: at, brief,
+  work.researchBrief = { ...existing!, state: 'recorded', endedAt: at, tokens: event.tokens ?? null, brief,
     questions: questions.map(question => ({ id: randomUUID(), kind: 'goals-and-priorities', ...question, at, deadline, answer: null })) };
   return work.researchBrief;
 }
@@ -316,17 +319,17 @@ export async function researchStep(input: ResearchStepInput): Promise<{ held: Se
       streamed += estimatedTokens(event.text);
       if (streamed > input.settings.tokenBudget && !overBudget) { overBudget = true; run.cancel(`the run streamed about ${streamed} tokens, over its ${input.settings.tokenBudget}-token budget`); }
     });
-    const settled = run.result().then(result => settleResearch(input, work, revision, result, overBudget)).catch(() => {}).finally(() => { if (live.get(work.id)?.run === run) live.delete(work.id); });
+    const settled = run.result().then(result => settleResearch(input, work, revision, result, overBudget, streamed)).catch(() => {}).finally(() => { if (live.get(work.id)?.run === run) live.delete(work.id); });
     live.set(work.id, { revision, run, settled });
     actions.push({ work: work.key, state: 'started', detail: `Researching ${work.key} on ${input.settings.model} before build (at most ${input.settings.timeoutMinutes} minutes and ${input.settings.tokenBudget} tokens); dispatch waits for its brief` });
   }
   return { held, actions };
 }
 
-/** Record how a run ended: its brief, or its failure. Either way the item is dispatched on the next cycle. */
-async function settleResearch(input: ResearchStepInput, work: Work, revision: string, result: RunResult<ResearchBrief>, overBudget: boolean) {
+/** Record how a run ended: its brief, or its failure — with what the run streamed, as the token spend (GY-434). Either way the item is dispatched on the next cycle. */
+async function settleResearch(input: ResearchStepInput, work: Work, revision: string, result: RunResult<ResearchBrief>, overBudget: boolean, tokens: number) {
   if (result.ok) {
-    await input.record(work, { event: 'recorded', revision, brief: result.payload, questionDeadlineMs: Math.round(input.settings.questionDeadlineHours * 3_600_000) });
+    await input.record(work, { event: 'recorded', revision, brief: result.payload, tokens, questionDeadlineMs: Math.round(input.settings.questionDeadlineHours * 3_600_000) });
     return;
   }
   const reason = overBudget ? 'token-budget' : result.failure.reason;
@@ -335,6 +338,34 @@ async function settleResearch(input: ResearchStepInput, work: Work, revision: st
 /** Every run this process has in flight, settled: a test's way to wait for the step's effects. */
 export async function researchSettled() { await Promise.all([...live.values()].map(entry => entry.settled)); }
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
+
+// ---- What master status counts (GY-434) ----------------------------------------------------------
+
+/** One research run as `master status` counts it: the item, and the model, start or failure it ran under. */
+export interface ResearchRunLine { key: string; model?: string; since?: string; reason?: string }
+/**
+ * The research step across the fleet, as `master status` reports it: `live` are the runs recorded
+ * as running within their time limit (plus the grace to record their end), `waiting` the released
+ * items whose run has still to start — and, past its bound, the recorded-but-unfinished run the
+ * loop is about to fail — and `failed` the runs that ended without a brief, so their items built
+ * from the criteria alone.
+ */
+export function researchStatus(work: readonly Work[], now: number): { live: ResearchRunLine[]; waiting: ResearchRunLine[]; failed: ResearchRunLine[] } {
+  const live: ResearchRunLine[] = [], waiting: ResearchRunLine[] = [], failed: ResearchRunLine[] = [];
+  for (const item of work) {
+    if (item.stage === 'done' || isClosed(item) || !researchWanted(item)) continue;
+    const record = currentResearch(item);
+    if (record?.state === 'running') {
+      if (researchHold(item, now)) live.push({ key: item.key, model: record.model, since: record.startedAt });
+      else waiting.push({ key: item.key });
+      continue;
+    }
+    if (record?.state === 'failed') { failed.push({ key: item.key, reason: record.failure?.reason ?? 'failed' }); continue; }
+    if (record?.state === 'recorded') continue;
+    if (item.ready && !item.blocker && !item.submission && !item.candidate) waiting.push({ key: item.key });
+  }
+  return { live, waiting, failed };
+}
 
 // ---- The control plane's routes ------------------------------------------------------------------
 

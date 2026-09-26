@@ -20,6 +20,7 @@ import { plainStatus } from '../plain-status';
 import { groupWithin, nextActor, timedGroups } from '../groups';
 import { checkStates, prSteps, stepHeld } from '../pr-steps';
 import { releaseView } from '../release';
+import { formatDuration } from '../duration';
 import StatusBadge from '../components/status-badge';
 import { StepsDetail } from '../components/steps-bar';
 import { RequestCard } from './human-requests';
@@ -37,7 +38,7 @@ const oneLine = (text: string) => { const first = text.split(/(?<=[.;:])\s/)[0];
 /**
  * One work item's page (GY-161). Its first screen answers, without scrolling or a click: what
  * state it is in (its group's badge), why (one plain sentence), who acts next (a role, never a
- * code name), where it is in the seven pull-request steps, and its pull request, linked once in
+ * code name), where it is in the eight pull-request steps, and its pull request, linked once in
  * the header. A decision only the human may make is answered right here. Below it (GY-171), each
  * section answers one question, in this order: What is left (one plain line per unmet
  * requirement, grouped by step, naming who clears it; gate reasons only through `plainReason`),
@@ -101,6 +102,27 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
   const [currentLeft, ...laterLeft] = left;
   const leftCount = left.reduce((sum, group) => sum + group.lines.length, 0);
   const overlap = overlapLine(item, work);
+  // The research brief the build started from (GY-259), collapsed by default: its sections, the
+  // product questions with their state, and what the run cost — model, duration and token spend.
+  const research = item.researchBrief ?? null;
+  const researchMs = research ? research.endedAt ? Date.parse(research.endedAt) - Date.parse(research.startedAt) : now - Date.parse(research.startedAt) : 0;
+  const researchMeta = research
+    ? `${research.model} · ${Number.isFinite(researchMs) && researchMs >= 0 ? formatDuration(researchMs / 60000) : 'duration unknown'} · ${research.tokens != null ? `≈${research.tokens.toLocaleString('en-US')} tokens` : `budget ${research.tokenBudget.toLocaleString('en-US')} tokens`}`
+    : '';
+  const researchBrief = research && <details className="panel research-brief" data-research={research.state} aria-label="Research brief">
+    <summary>Research brief <small>{researchMeta}</small></summary>
+    {research.state === 'recorded' && research.brief ? <>
+      <h3>Approach</h3><p>{research.brief.approach}</p>
+      {research.brief.existingCode.length > 0 && <><h3>Existing code</h3><ul className="research-existing">{research.brief.existingCode.map(entry => <li key={entry.path}><code>{entry.path}</code> — {entry.note}</li>)}</ul></>}
+      {research.brief.patterns.length > 0 && <><h3>Patterns and prior art</h3><ul className="research-patterns">{research.brief.patterns.map(entry => <li key={entry.pattern}>{entry.pattern} <small>({entry.source})</small></li>)}</ul></>}
+      {research.brief.risks.length > 0 && <><h3>Risks and edge cases</h3><ul className="research-risks">{research.brief.risks.map(risk => <li key={risk}>{risk}</li>)}</ul></>}
+      <h3>Product questions</h3>
+      {research.questions.length ? <ul className="research-questions">{research.questions.map(question => <li key={question.id} data-answered={question.answer ? 'true' : 'false'}>
+        {question.question} — {question.answer ? <>answered by {question.answer.by}: {question.answer.text}</> : <>provisional, built on the recommendation: {question.recommendation}</>}
+      </li>)}</ul> : <p className="muted">None: every open question was settled in the approach.</p>}
+    </> : research.state === 'failed' ? <p className="muted">The research run produced no brief ({research.failure?.reason}: {research.failure?.detail}); the build started from the criteria alone.</p>
+      : <p className="muted">A research run is writing the brief now.</p>}
+  </details>;
   const leftGroup = (group: LeftGroup) => <section key={group.step} className="left-step" aria-label={`${group.label} step`}>
     <h3>{group.label} <small>· cleared by {group.who}</small></h3>
     <ul className="left-list">{group.lines.map(text => <li key={text}><Explained sentence={text}/></li>)}</ul></section>;
@@ -131,6 +153,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
     <section className="panel" aria-label="What is left"><h2>What is left <small>{leftCount ? `${leftCount} ${leftCount === 1 ? 'thing' : 'things'}` : 'nothing blocks it'}</small></h2>
       {currentLeft ? leftGroup(currentLeft) : <p className="muted">When something blocks a step it is listed here in plain words, with who clears it.</p>}
       {laterLeft.length > 0 && <details className="later-steps"><summary>Later steps ({laterLeft.length})</summary>{laterLeft.map(leftGroup)}</details>}</section>
+    {researchBrief}
     <section className="panel requirements" aria-label="Requirements"><h2>Requirements <small>{item.criteria.length} · {proofs.filter(p => p.status === 'passed').length} of {proofs.length} proofs passed</small></h2>
       {item.criteria.map(ac => { const own = proofs.filter(p => p.criterion === ac.id); const met = own.length > 0 && own.every(p => p.status === 'passed');
         return <div className={`criterion ${met ? 'criterion-met' : 'criterion-pending'}`} key={ac.id}>

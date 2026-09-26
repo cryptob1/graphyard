@@ -33,7 +33,7 @@ export interface Dashboard {
   editingRequirements: boolean; setEditingRequirements(value: boolean | ((value: boolean) => boolean)): void;
   codexAvailable: boolean;
   /**
-   * Each item's recorded moves between the seven steps (the steps drill-down, read about once a
+   * Each item's recorded moves between the eight steps (the steps drill-down, read about once a
    * minute), which start the "In step" clock; null or absent until they are read.
    */
   stepMoves?: StepTransition[] | null;

@@ -8,22 +8,26 @@ import type { StepTransition } from './flow-replay';
 import { plainReason, statusSince } from './plain-status';
 
 /**
- * The seven pull-request steps every moving item shows (GY-161): Build, Validate, Test, Review,
- * Prove, Merge, Deploy. Each step after Build reads one gate the control plane evaluates
- * (ready, build, review, test, acceptance, merge): Validate is the build gate once the work is
- * handed in, Test the CI checks, Review the approval, Prove the acceptance criteria and Merge the
- * merge gate; Deploy is the delivery after the merge. A step whose gate passed is done, the first
- * step (in the order a pull request travels) whose gate refuses is current, and the rest are
- * pending. The dashboard adds nothing the gates do not say; it only names the step in plain words
- * and says what it waits on and who acts next — as a role, never a worker's code name.
+ * The eight pull-request steps every moving item shows (GY-161, GY-434): Research, Build, Validate,
+ * Test, Review, Prove, Merge, Deploy. Research is first: before a builder starts, a cheap research
+ * session writes the brief the build begins from, and its run is a step like the gates are. Each
+ * step after Build reads one gate the control plane evaluates (ready, build, review, test,
+ * acceptance, merge): Validate is the build gate once the work is handed in, Test the CI checks,
+ * Review the approval, Prove the acceptance criteria and Merge the merge gate; Deploy is the
+ * delivery after the merge. A step whose gate passed is done, the first step (in the order a pull
+ * request travels) whose gate refuses is current, and the rest are pending. Research is done once
+ * its brief is recorded and skipped — never missing, never failed — where no brief will exist: a
+ * bug without `"research": true`, an item opted out, research not configured, or a run that failed.
+ * The dashboard adds nothing the gates do not say; it only names the step in plain words and says
+ * what it waits on and who acts next — as a role, never a worker's code name.
  */
-export const stepIds = ['build', 'validate', 'test', 'review', 'prove', 'merge', 'deploy'] as const;
+export const stepIds = ['research', 'build', 'validate', 'test', 'review', 'prove', 'merge', 'deploy'] as const;
 export type StepId = typeof stepIds[number];
-export type StepState = 'done' | 'current' | 'pending';
-export const stepLabel: Record<StepId, string> = { build: 'Build', validate: 'Validate', test: 'Test', review: 'Review', prove: 'Prove', merge: 'Merge', deploy: 'Deploy' };
+export type StepState = 'done' | 'current' | 'pending' | 'skipped';
+export const stepLabel: Record<StepId, string> = { research: 'Research', build: 'Build', validate: 'Validate', test: 'Test', review: 'Review', prove: 'Prove', merge: 'Merge', deploy: 'Deploy' };
 /** The verb the live label starts with: "Testing · 3 of 5 checks done". */
-export const stepVerb: Record<StepId, string> = { build: 'Building', validate: 'Validating', test: 'Testing', review: 'Reviewing', prove: 'Proving', merge: 'Merging', deploy: 'Deploying' };
-/** The gate each step after Build reads. */
+export const stepVerb: Record<StepId, string> = { research: 'Researching', build: 'Building', validate: 'Validating', test: 'Testing', review: 'Reviewing', prove: 'Proving', merge: 'Merging', deploy: 'Deploying' };
+/** The gate each step after Build reads. Research reads no gate: the item's research record is its state. */
 export const stepGate: Partial<Record<StepId, string>> = { validate: 'build', test: 'test', review: 'review', prove: 'acceptance', merge: 'merge' };
 /** The control plane's gate evaluation order (src/model evaluate). */
 export const gateOrder = ['ready', 'build', 'review', 'test', 'acceptance', 'merge'] as const;
@@ -49,6 +53,28 @@ export interface PrSteps {
 
 const ordinal = (n: number) => `${n}${n % 100 >= 11 && n % 100 <= 13 ? 'th' : ['th', 'st', 'nd', 'rd'][n % 10] ?? 'th'}`;
 const pendingCheck = new Set(['', 'pending', 'queued', 'in_progress', 'waiting', 'requested', 'expected']);
+
+/**
+ * The research step's state, read from the item's own record (GY-434). A run recorded as running
+ * is current while it is live or awaited — within its time limit plus the grace the loop records
+ * its end in (src/research.ts `researchHold`); past that bound nobody is researching and the step
+ * waits pending until the loop records the failure. A recorded brief is done. A failed run is
+ * skipped — build proceeds without a brief, so the step reads skipped, never failed. Where no run
+ * exists at all, research is skipped for anything that will not be researched: a bug without
+ * `"research": true`, an item opted out with `"research": false`, research not configured (no run
+ * had started when a builder claimed it), and any item already building or handed in without a
+ * brief. A feature released and not yet researched is pending: its run has still to start.
+ */
+export function researchStepState(work: Pick<Work, 'type' | 'research' | 'researchBrief' | 'submission' | 'candidate' | 'lease'>, now: number): StepState {
+  const record = work.researchBrief ?? null;
+  if (record?.state === 'running')
+    return Number.isFinite(Date.parse(record.startedAt)) && now < Date.parse(record.startedAt) + record.timeoutMs + 60_000 ? 'current' : 'pending';
+  if (record?.state === 'recorded') return 'done';
+  if (record?.state === 'failed') return 'skipped';
+  const wanted = work.research === true || work.type === 'feature' && work.research !== false;
+  if (!wanted || work.lease || work.submission || work.candidate) return 'skipped';
+  return 'pending';
+}
 
 /** True while the review gate refuses on a reviewer's request for changes. */
 export const changesRequested = (work: Work) => !!work.gates.find(gate => gate.name === 'review')?.reasons.some(reason => reason.startsWith('Outstanding change requests'));
@@ -111,6 +137,13 @@ const mergeBuilderClears = /^Pull request is not mergeable against the current b
 export function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: number, release: ReleaseView): { detail: string; who: string } {
   const reasons = gate?.reasons ?? [];
   switch (step) {
+    case 'research': {
+      // The run is current only while it is live or awaited (`researchStepState`); the loop starts
+      // it, so a step still waiting for its run is the master agent's to start.
+      return work.researchBrief?.state === 'running'
+        ? { detail: 'the research session is writing the brief', who: 'Research agent' }
+        : { detail: 'the research run has not started yet', who: 'Master agent' };
+    }
     case 'build': {
       // Handed in, but the ready gate refuses (a recorded blocker, or a dependency a requirements
       // revision added): the control plane holds it at build, so it waits there on that, not on a builder.
@@ -196,14 +229,18 @@ export function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: n
 }
 
 /**
- * The seven steps for one item. Before the work is handed in only Build can be current. After
- * it, each step's own gate decides done, and the first step whose gate refuses is current; when
- * every gate passes the item is merging. A merged item has every step done — reading "Live" where
- * production was observed serving it — unless its policy asks for a post-deployment check that has
- * not passed, or the production watch observes production not serving it yet (web/release.ts),
- * which keeps it at Deploy. Work closed without merging has no step at all.
+ * The eight steps for one item. Research comes first: while its run is live or awaited it is the
+ * current step, whatever the gates say; once its brief is recorded — or research is skipped — it
+ * reads done or skipped and the gates take over. Before the work is handed in only Build (or a
+ * live research run) can be current. After it, each step's own gate decides done, and the first
+ * step whose gate refuses is current; when every gate passes the item is merging. A merged item
+ * has every gate step done — reading "Live" where production was observed serving it — unless its
+ * policy asks for a post-deployment check that has not passed, or the production watch observes
+ * production not serving it yet (web/release.ts), which keeps it at Deploy. Work closed without
+ * merging has no step at all.
  */
 export function prSteps(work: Work, now: number, release: ReleaseView = noRelease): PrSteps {
+  const research = researchStepState(work, now);
   const make = (state: (id: StepId) => StepState, current: StepId | null, detail: string, who: string): PrSteps => ({
     steps: stepIds.map(id => ({ id, label: stepLabel[id], state: state(id) })), current,
     label: current ? `${stepVerb[current]} · ${detail}` : detail, detail, who,
@@ -213,25 +250,35 @@ export function prSteps(work: Work, now: number, release: ReleaseView = noReleas
   if (work.stage === 'done') {
     // Delivered once merged, unless a post-deployment check or the production watch holds it at
     // Deploy (web/groups.ts reads the same `leftFlowAt`). "Live" only once the release is observed serving it.
-    if (!work.delivery || leftFlowAt(work, release)) return servedFor(work, release) ? make(() => 'done', null, 'Live', 'Nobody — it is live')
-      : make(() => 'done', null, 'Merged', 'Nobody — it has merged');
+    // The flow is over: every step reads done, except research merged without a brief, which
+    // reads skipped — a merged item never shows research still open, and never as missing.
+    const over = (id: StepId): StepState => id === 'research' && research !== 'done' ? 'skipped' : 'done';
+    if (!work.delivery || leftFlowAt(work, release)) return servedFor(work, release) ? make(over, null, 'Live', 'Nobody — it is live')
+      : make(over, null, 'Merged', 'Nobody — it has merged');
     const { detail, who } = waitsOn('deploy', undefined, work, now, release);
-    return make(id => id === 'deploy' ? 'current' : 'done', 'deploy', detail, who);
+    return make(id => id === 'deploy' ? 'current' : over(id), 'deploy', detail, who);
   }
   // A change request sends the work back to its builder, so it waits at Build, not at Review; and
   // a refusing ready gate keeps handed-in work at build, as the control plane's stage does (src/model/gates.ts).
   const readyRefused = work.gates.some(gate => gate.name === 'ready' && !gate.passed);
   const handedIn = !!work.submission && !work.reworkRequested && !changesRequested(work) && !readyRefused;
   if (!handedIn) {
+    // A research run live or awaited is the step that is happening, before any builder starts.
+    if (research === 'current') {
+      const { detail, who } = waitsOn('research', undefined, work, now, release);
+      return make(id => id === 'research' ? 'current' : 'pending', 'research', detail, who);
+    }
     const { detail, who } = waitsOn('build', undefined, work, now, release);
-    return make(id => id === 'build' ? 'current' : 'pending', 'build', detail, who);
+    return make(id => id === 'build' ? 'current' : id === 'research' ? research : 'pending', 'build', detail, who);
   }
   const byName = new Map(work.gates.map(gate => [gate.name, gate]));
-  // A gate the item does not carry has nothing to refuse, so its step reads done.
-  const passed = (id: StepId) => id === 'build' || (id !== 'merge' && id !== 'deploy' && byName.get(stepGate[id]!)?.passed !== false);
+  // A gate the item does not carry has nothing to refuse, so its step reads done. Research reads
+  // its own record: done with a brief, skipped without one — never pending once the work is in.
+  const passed = (id: StepId) => id === 'research' ? research === 'done' || research === 'skipped'
+    : id === 'build' || (id !== 'merge' && id !== 'deploy' && byName.get(stepGate[id]!)?.passed !== false);
   const current = stepIds.find(id => id !== 'deploy' && !passed(id)) ?? 'merge';
   const { detail, who } = waitsOn(current, stepGate[current] ? byName.get(stepGate[current]!) : undefined, work, now, release);
-  const steps = make(id => id === current ? 'current' : passed(id) ? 'done' : 'pending', current, detail, who);
+  const steps = make(id => id === current ? 'current' : id === 'research' && research === 'skipped' ? 'skipped' : passed(id) ? 'done' : 'pending', current, detail, who);
   // A Review or Prove step passed by carry reads as carried, with its ground (GY-330).
   const carried = carriedBindings(work, [work], new Date(now));
   const marks: Partial<Record<StepId, string>> = {
@@ -247,15 +294,20 @@ export function prSteps(work: Work, now: number, release: ReleaseView = noReleas
  * replay plays, read through the steps drill-down — so the clock starts at this item's latest
  * recorded move when that move put it at the step it is at now. Before the moves are read, or
  * while the record is a moment behind the gates, the item's own record gives the step's start:
- * Build keeps the builder's clock (`statusSince`: the claim, or the send-back, which is when
- * Build restarted), Validate starts at the hand-in, Deploy at the merge, and a later step at the
- * latest move the item recorded (`statusSince`).
+ * Research keeps its run's start (`researchBrief.startedAt`), Build keeps the builder's clock
+ * (`statusSince`: the claim, or the send-back, which is when Build restarted), Validate starts at
+ * the hand-in, Deploy at the merge, and a later step at the latest move the item recorded
+ * (`statusSince`).
  */
 export function stepSince(work: Work, now: number, moves?: readonly StepTransition[] | null, release: ReleaseView = noRelease): string {
   const current = prSteps(work, now, release).current;
   const own = statusSince(work, now);
   if (!current || current === 'build') return own;
   const at = (value: string | null | undefined) => value && Number.isFinite(Date.parse(value)) && Date.parse(value) <= now ? Date.parse(value) : null;
+  if (current === 'research') {
+    const started = at(work.researchBrief?.startedAt);
+    return started !== null ? new Date(started).toISOString() : own;
+  }
   const latest = (moves ?? []).filter(move => move.key === work.key && at(move.at) !== null).sort((a, b) => Date.parse(a.at) - Date.parse(b.at)).at(-1);
   if (latest?.to === current) return latest.at;
   if (current === 'deploy') return work.delivery?.mergedAt ?? work.observation?.mergedAt ?? own;

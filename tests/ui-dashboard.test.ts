@@ -327,20 +327,21 @@ test('unit:ui-pr-steps — every moving item shows the seven steps from its gate
   for (const [name, item, current, label, who] of cases) {
     const steps = prSteps(item, NOW, trusted);
     assert.deepEqual(steps.steps.map(step => step.id), [...stepIds], name);
-    assert.deepEqual(steps.steps.map(step => step.label), ['Build', 'Validate', 'Test', 'Review', 'Prove', 'Merge', 'Deploy']);
+    assert.deepEqual(steps.steps.map(step => step.label), ['Research', 'Build', 'Validate', 'Test', 'Review', 'Prove', 'Merge', 'Deploy']);
     assert.equal(steps.current, current, name); assert.equal(steps.label, label, name); assert.equal(steps.who, who, name);
     const at = stepIds.indexOf(current as any);
     assert.equal(steps.steps.filter(step => step.state === 'current').length, 1, `${name}: one current step`);
-    for (const step of steps.steps.slice(0, at)) assert.equal(step.state, 'done', `${name}: ${step.id} before the current step is done`);
+    // Research before the current step is done or, with no brief recorded, skipped (GY-434).
+    for (const step of steps.steps.slice(0, at)) assert.ok(step.state === 'done' || step.id === 'research' && step.state === 'skipped', `${name}: ${step.id} before the current step is done`);
     assert.equal(steps.steps[stepIds.length - 1].state, current === 'deploy' ? 'current' : 'pending', `${name}: deploy`);
   }
   // A shipped item the live release serves has every step done.
-  assert.ok(prSteps(find('GY-18', work), NOW).steps.every(step => step.state === 'done'));
+  assert.ok(prSteps(find('GY-18', work), NOW).steps.every(step => step.state === 'done' || step.id === 'research' && step.state === 'skipped'));
   // The Work page row, the phone card (the same element, laid out as a card) and the item page draw the same steps.
   for (const key of ['GY-14', 'GY-15', 'GY-16', 'GY-21', 'GY-22']) {
     const steps = prSteps(find(key, work), NOW);
     const row = markup(createElement(WorkCard, { item: find(key, work), now: NOW, onOpen: noop }));
-    assert.equal((row.match(/data-step="/g) ?? []).length, 7, `${key} row shows seven steps`);
+    assert.equal((row.match(/data-step="/g) ?? []).length, stepIds.length, `${key} row shows every step, Research first`);
     assert.match(row, new RegExp(`data-step="${steps.current}" data-state="current"`));
     assert.ok(row.includes(steps.label), `${key} row labels the current step`);
     const detail = firstScreen(itemPage(key));
@@ -609,7 +610,7 @@ test('unit:ui-delivered-without-deployment-record — a merged item is Shipped w
     assert.equal(groupOf(item, NOW), 'shipped', `${item.key} is Shipped`);
     const steps = prSteps(item, NOW);
     assert.equal(steps.current, null, `${item.key} is at no step`);
-    assert.ok(steps.steps.every(step => step.state === 'done'), `${item.key} has every step done`);
+    assert.ok(steps.steps.every(step => step.state === 'done' || step.id === 'research' && step.state === 'skipped'), `${item.key} has every step done`);
     // No production observation covers it, so it reads "Merged", not "Live": it left the flow at its
     // merge (`deliveredAt`), but nothing says the release serves it yet (`servedAt` is null).
     assert.equal(steps.label, 'Merged');

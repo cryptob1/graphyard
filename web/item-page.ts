@@ -22,7 +22,7 @@ export interface LeftGroup {
   current: boolean;
 }
 
-/** The step whose requirement a gate states. The build gate is Build until the work is handed in, then Validate. */
+/** The step whose requirement a gate states. The build gate is Build until the work is handed in, then Validate. Research reads no gate. */
 const stepOfGate = (gate: string, handedIn: boolean): StepId | undefined =>
   ({ ready: 'build', build: handedIn ? 'validate' : 'build', test: 'test', review: 'review', acceptance: 'prove', merge: 'merge' } as Record<string, StepId>)[gate];
 
@@ -50,15 +50,20 @@ export function readyOwner(work: Work, gate: Gate): string | undefined {
 /**
  * Every unmet requirement, one plain line each, grouped by step. The current step comes first —
  * its lines are the refusal of that step's own gate (Test before Review, unlike the evaluation
- * order), or, before the hand-in, whatever holds the build — then every later step in the order a
- * pull request travels. Merged work held at Deploy is left with what the release lacks; work closed
- * without merging has nothing left.
+ * order), or, before the hand-in, whatever holds the build, or, while a research run is live, the
+ * research step's own sentence — then every later step in the order a pull request travels.
+ * Merged work held at Deploy is left with what the release lacks; work closed without merging has
+ * nothing left.
  */
 export function whatIsLeft(work: Work, now: number, release: ReleaseView = noRelease): LeftGroup[] {
   if (isClosed(work)) return [];
   const steps = prSteps(work, now, release);
   if (!steps.current) return [];
   if (steps.current === 'deploy') return [{ step: 'deploy', label: stepLabel.deploy, who: steps.who, lines: [`${steps.detail.replace(/^./, c => c.toUpperCase())}.`], current: true }];
+  // A live research run is the current step, and its own sentence is what is left there: the gates
+  // still refuse the build, which would read as Build while the item is Researching.
+  if (steps.current === 'research')
+    return [{ step: 'research', label: stepLabel.research, who: steps.who, lines: [`${steps.detail.replace(/^./, c => c.toUpperCase())}.`], current: true }];
   const unmet = work.gates.filter(gate => !gate.passed);
   const own = steps.current !== 'build' ? work.gates.find(gate => gate.name === stepGate[steps.current!] && !gate.passed) : undefined;
   const failing = own ?? unmet[0];
@@ -100,6 +105,8 @@ export function activityLabel(kind: string): string {
     'base.refreshed': 'Brought up to date with the main branch', 'base.conflict': 'Conflicts with the main branch', 'capacity.exhausted': 'Out of agent capacity',
     'capacity.interrupted': 'Out of agent capacity', 'capacity.restored': 'Agent capacity restored', 'capacity.escalated': 'Asked for more agent capacity',
     'evidence.exercise.refused': 'A proof did not count',
+    // The research step's own facts (src/research.ts).
+    'research.started': 'A research run started', 'research.recorded': 'The research brief was recorded', 'research.failed': 'The research run failed — building without a brief', 'research.answered': 'You answered a research question',
   };
   if (exact[kind]) return exact[kind];
   const prefix: [RegExp, string][] = [
