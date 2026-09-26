@@ -12,6 +12,8 @@ import { capacityRefusal } from '../fleet.js';
 import { sessionName } from '../session-name.js';
 import type { Cycle } from './cycle.js';
 
+/** The launcher key of the approver launch for a decision (GY-616). */
+const approverLaunchKey = (decision: string) => `launch:approver:${decision}`;
 /** The approval-watch key of an approver session no request of the loop's launched (GY-403). */
 export const handWatchPrefix = 'hand:';
 /** The name prefixes every approver session for `key` starts with (see `approverSessionName`). */
@@ -68,6 +70,15 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     }
     catch (error) { inventory = null; watch.closeAttempts += 1; await note(key, item, 'close', 'failed', `Could not close approver session ${watch.agentName}: ${message(error)}`); return false; }
   };
+  /**
+   * Keep how a watch's session ended, named by its launch so two sessions that ended alike under
+   * the same name stay two reasons (GY-551). The same step taken again on the same session — a
+   * close or re-request retried next cycle — records nothing new.
+   */
+  const recordEnded = (watch: ApprovalWatch, detail: string) => {
+    const entry = `${watch.agentName ? `session ${watch.launches}: ` : ''}${detail}`.slice(0, 300);
+    if (watch.ended.at(-1) !== entry) watch.ended = [...watch.ended, entry].slice(-10);
+  };
   const approverCapacity = capacities.find(capacity => capacity.role === 'approver');
   const capacityWait = () => `every approver account is spent, so no approver is launched before ${approverCapacity?.retryAt ?? 'an account reports quota again'}`;
   /**
@@ -90,6 +101,20 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     await effects.persist(state);
     if (listed) return `adopted approver session ${name}${adopted?.account ? ` on ${adopted.account}` : ''}, already judging it`;
     inventory = null;
+    // The launch itself — a pane and a registered session — runs on the launcher beside the cycle
+    // (GY-616), so this cycle's merges and closes do not wait on it. The watch is not supervised
+    // while it is in flight, and what the launch did is reported on the next cycle. A cycle run on
+    // its own, with no loop beside it, launches in place.
+    if (!cycle.detached) return start(item, watch);
+    const key = approverLaunchKey(watch.decision), count = watch.launches;
+    cycle.launch('decision', item, key, [], async sink => {
+      const detail = await start(item, watch);
+      sink.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${item.key}'s ${watch.action} decision ${watch.decision}: ${detail}`, attempts: (state.actions[key]?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+    });
+    return `handed approver session ${name} to the launcher (launch ${count} of ${maxApproverLaunches})`;
+  };
+  /** The approver launch the launcher runs, and what it did with the watch. */
+  const start = async (item: Work, watch: ApprovalWatch) => {
     let launched: Awaited<ReturnType<NonNullable<DaemonEffects['approver']>>>;
     try { launched = await effects.approver!(item, watch.decision); }
     catch (error) {
@@ -100,8 +125,12 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       const full = capacityRefusal(error);
       if (!full) {
         // A registry session the failed launch could not end stays on the watch, so the next launch ends it first.
+        // The launch made no session, so it is taken back like a capacity refusal (GY-551): a
+        // registry or server timeout is retried next cycle within the bound, never spends it, and
+        // the escalation past the bound counts only the sessions that ran.
         const orphan = (error as { registrySession?: string })?.registrySession;
-        if (orphan) { watch.session = orphan; await effects.persist(state); }
+        Object.assign(watch, { launches: watch.launches - 1, agentName: null, pane: null, launchedAt: null, account: null, runtime: null, session: orphan ?? null });
+        await effects.persist(state);
         throw error;
       }
       Object.assign(watch, { launches: watch.launches - 1, agentName: null, pane: null, launchedAt: null, account: null, runtime: null, session: null, capacity: full.slice(0, 500) });
@@ -146,7 +175,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       const ended = `approver session ${watch.agentName} exhausted ${spentOn} mid-session (${signal.reason}; ${resets})`;
       // The registry slot goes first (closeApprover ends it): at a role concurrency of 1 the replacement is refused while it is held.
       if (!await closeApprover(item, watch, ended)) throw new Error(`the session could not be closed, so its name or registry slot still refuses a replacement`);
-      watch.ended = [...watch.ended, ended.slice(0, 300)].slice(-10);
+      recordEnded(watch, ended);
       Object.assign(watch, { launches: Math.max(0, watch.launches - 1), agentName: null, pane: null });
       const next = await launch(item, watch, false);
       performed.push(await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'done', detail: `${ended} judging ${watch.action} decision ${watch.decision}; ${next}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
@@ -323,6 +352,8 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   };
   /** Look again at a decision already requested: its state on the control plane, and its session. */
   const supervise = async (item: Work, decision: RoutineDecision, key: string, watch: ApprovalWatch) => {
+    // Its approver is still being launched (GY-616): there is no session to judge yet.
+    if (cycle.launcher.busy(approverLaunchKey(watch.decision))) return;
     const history = effects.decisions ? await effects.decisions(item).then(result => result.decisions, () => undefined) : undefined;
     const judged = history === undefined ? undefined : history.find(entry => entry.id === watch.decision) ?? null;
     if ((!judged || judged.state === 'requested') && await approverExhausted(item, watch)) return;
@@ -355,13 +386,15 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     // Every other step replaces the session, so the one that ended goes first. While it cannot be
     // closed its name is still taken, and the step is taken again next cycle.
     if (!await closeApprover(item, watch, step.detail) && watch.closeAttempts < maxApproverCloses) return;
-    // A launch waiting for a slot never ran a session, so there is no ending to record: it is only made again.
-    if (step.step === 'relaunch' && watch.capacity && !watch.agentName) {
-      try { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'done', `${item.key}'s ${watch.action} decision ${watch.decision} waits for an approver slot; ${await launch(item, watch, false)}`); }
-      catch (error) { await note(`${base}:launch:${watch.launches}`, item, 'decision', 'failed', `${item.key}'s ${watch.action} decision ${watch.decision} waited for an approver slot; its approver session could not be launched: ${message(error)}`); }
+    // A launch waiting for a slot, or refused outright (GY-551), never ran a session, so there is no
+    // ending to record: it is only made again.
+    if (step.step === 'relaunch' && !watch.agentName) {
+      const waited = watch.capacity ? 'waited for an approver slot' : 'had its last approver launch refused';
+      try { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'done', `${item.key}'s ${watch.action} decision ${watch.decision} ${waited}; ${await launch(item, watch, false)}`); }
+      catch (error) { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'failed', `${item.key}'s ${watch.action} decision ${watch.decision} ${waited}; its approver session could not be launched: ${message(error)}`); }
       return;
     }
-    if (watch.ended.at(-1) !== step.detail.slice(0, 300)) watch.ended = [...watch.ended, step.detail.slice(0, 300)].slice(-10);
+    recordEnded(watch, step.detail);
     if (step.step === 'rerequest') {
       // The server settled it some other way — failed on a precondition, stale, withdrawn — and
       // the item still needs the decision, so it is asked again: a bounded number of times, and on
@@ -375,7 +408,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     }
     if (step.step === 'exhausted') { await escalateUnjudged(item, watch, step.detail); return; }
     try { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'done', `${step.detail}; ${await launch(item, watch, false)}`); }
-    catch (error) { await note(`${base}:launch:${watch.launches}`, item, 'decision', 'failed', `${step.detail}; a replacement approver session could not be launched: ${message(error)}`); }
+    catch (error) { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'failed', `${step.detail}; a replacement approver session could not be launched: ${message(error)}`); }
   };
 
   const needed = new Set<string>(), unattestable = new Set<string>();
@@ -487,9 +520,12 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   // 4c'. Approver sessions no request of the loop's launched (GY-403). `master approver` records the
   //      item and decision with its launch, and the loop registers such a session in its approval
   //      watch; one with no record is known by its name, which `approverSessionName` derives from the
-  //      item and decision. Either way the session is closed, with why, once its decision is applied,
-  //      refused or otherwise settled, or its item is delivered — exactly as the loop's own approvers
-  //      are. One the loop still needs is adopted by the request path, which retires this watch.
+  //      item and decision. Either way the session is supervised exactly as the loop's own approvers
+  //      are (GY-551): closed, with why, once its decision is applied, refused or otherwise settled,
+  //      or its item is delivered, and relaunched while the decision stands open and it ends without
+  //      judging it — on the next eligible approver account, up to the same launch bound, a relaunch
+  //      the registry or control plane refused retried on the next cycle. One the loop still needs
+  //      is adopted by the request path, which retires this watch.
   await isolate('decision', null, 'hand-approvers', async () => {
     const seen = await sessions();
     if (!seen.available) return;
@@ -514,19 +550,77 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       watched.push(watch);
       await note(`approver:${decision}:watched`, item, 'decision', 'done', `Watching approver session ${agent.name}, which no request of the loop's launched, for ${item.key} decision ${decision}${record ? ' (launched with graphyard master approver)' : ''}`);
     }
+    // A `master approver` session that ended before any cycle listed it is known by its launch
+    // record alone (GY-551): while its decision still waits for a judgement it is watched as gone,
+    // so supervision relaunches it like one seen to end. Without the approver effect nothing could
+    // relaunch it, and the watch would only be closed and found again every cycle.
+    if (effects.approver) for (const record of records) {
+      if (!record.work || !record.decision || seen.agents.some(agent => agent.name === record.agentName) || watched.some(watch => watch.decision === record.decision || watch.agentName === record.agentName)) continue;
+      const item = snapshot.work.find(candidate => candidate.key === record.work);
+      if (!item || item.stage === 'done' || !effects.decisions) continue;
+      const judged = await effects.decisions(item).then(result => result.decisions.find(entry => entry.id === record.decision) ?? null, () => null);
+      if (judged?.state !== 'requested') continue;
+      const watch = state.approvals[`${handWatchPrefix}${record.decision}`] = approvalWatchSchema.parse({ work: item.key, action: judged.action, decision: record.decision, requestedAt: stamp, agentName: record.agentName,
+        launchedAt: record.launchedAt, launches: 1, account: record.account, runtime: record.runtime, session: record.session });
+      watched.push(watch);
+      await note(`approver:${record.decision}:watched`, item, 'decision', 'done', `Watching approver session ${record.agentName}, launched with graphyard master approver for ${item.key} decision ${record.decision} and gone before the loop saw it`);
+    }
     await effects.persist(state);
     for (const [key, watch] of Object.entries(state.approvals)) {
       if (!key.startsWith(handWatchPrefix)) continue;
       const item = snapshot.work.find(candidate => candidate.key === watch.work);
       const listed = seen.agents.some(agent => agent.name === watch.agentName);
-      let why: string | null = null;
+      let why: string | null = null, judged: { state: string; action: string } | null | undefined;
       if (!item) why = `${watch.work} is no longer open`;
       else if (item.stage === 'done') why = `${item.key} is delivered`;
       else if (effects.decisions) {
-        const judged = await effects.decisions(item).then(result => result.decisions.find(entry => entry.id === watch.decision) ?? null, () => undefined);
+        judged = await effects.decisions(item).then(result => result.decisions.find(entry => entry.id === watch.decision) ?? null, () => undefined);
         if (judged === null) why = `${item.key} holds no decision ${watch.decision}`;
         else if (judged && !['requested', 'approved'].includes(judged.state)) why = `its decision is ${judged.state}`;
         if (judged) watch.action = judged.action;
+      }
+      // GY-551. A decision still open whose approver ended without judging it is moved on exactly
+      // as the loop's own are: a replacement is launched on the next eligible approver account
+      // within the same launch bound, a relaunch the registry or control plane refused is retried
+      // next cycle rather than ending the decision, and past the bound the watch is kept, with
+      // each session's end reason, for `master status` to name the decision unanswered. Without
+      // the approver effect there is nothing to launch with, so only the close below runs.
+      if (item && !why && effects.approver) {
+        // Spent: the watch stays, with each session's end reason for `master status`, until the
+        // decision settles or the item closes; no further session is launched for it. The
+        // escalation's answer — `master approver` again — starts a session under the same name,
+        // which the registration above cannot tell apart from this watch, so a session listed
+        // under it that was launched after the escalation (the one it ended was closed first)
+        // re-arms the watch as a fresh hand launch: supervised, closed and relaunched within the
+        // bound like the first, rather than left to linger if it too ends without judging.
+        if (watch.exhaustedAt) {
+          const agent = seen.agents.find(candidate => candidate.name === watch.agentName);
+          if (!agent?.pane_id) continue;
+          const fresh = records.findLast(entry => entry.agentName === watch.agentName);
+          if (fresh ? !(Date.parse(fresh.launchedAt) > Date.parse(watch.exhaustedAt)) : watch.closeAttempts >= maxApproverCloses) continue;
+          Object.assign(watch, { exhaustedAt: null, launches: 1, closeAttempts: 0, pane: agent.pane_id, launchedAt: fresh?.launchedAt ?? stamp, account: fresh?.account ?? null, runtime: fresh?.runtime ?? null, session: fresh?.session ?? watch.session, capacity: null, reportedExhaustion: null });
+          await note(`approver:${watch.decision}:rewatched:${watch.launchedAt}`, item, 'decision', 'done', `Watching approver session ${agent.name}, put to ${item.key} decision ${watch.decision} again after its earlier sessions were spent`);
+        }
+        if ((!judged || judged.state === 'requested') && await approverExhausted(item, watch)) continue;
+        const step = approvalStep({ ...watch, launchedAt: watch.launchedAt ?? watch.requestedAt }, judged, seen, clock);
+        if (step.step === 'wait') continue;
+        if (step.step === 'relaunch' && !watch.agentName && approversSpent) continue;
+        const base = `approver:${watch.decision}`;
+        // While the ended session cannot be put down, its name or registry slot still refuses a
+        // replacement, so the step is taken again next cycle.
+        if (!await closeApprover(item, watch, step.detail) && watch.closeAttempts < maxApproverCloses) continue;
+        // A launch that waited for a slot or was refused ran no session: it is only made again.
+        if (step.step === 'relaunch' && !watch.agentName) {
+          const waited = watch.capacity ? 'waited for an approver slot' : 'had its last approver launch refused';
+          try { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'done', `${watch.work}'s ${watch.action} decision ${watch.decision} ${waited}; ${await launch(item, watch, false)}`); }
+          catch (error) { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'failed', `${watch.work}'s ${watch.action} decision ${watch.decision} ${waited}; its approver session could not be launched: ${message(error)}`); }
+          continue;
+        }
+        recordEnded(watch, step.detail);
+        if (step.step === 'exhausted') { await escalateUnjudged(item, watch, step.detail); continue; }
+        try { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'done', `${step.detail}; ${await launch(item, watch, false)}`); }
+        catch (error) { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'failed', `${step.detail}; a replacement approver session could not be launched: ${message(error)}`); }
+        continue;
       }
       if (listed && !why) continue;
       // A session gone on its own has no pane to close, only a registry session to end.
