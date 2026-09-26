@@ -3,6 +3,7 @@
 import type { Work } from '../model/work.js';
 import { agentOwner, type AttentionItem } from './attention.js';
 import { mergeBatchSize, optimisticMergeEnabled, type MasterConfig } from './profiles.js';
+import { repairLaneAttention } from './repair-lane.js';
 import { describeGuard, mainGuard, optimisticMetrics } from '../optimistic-merge.js';
 
 /**
@@ -29,3 +30,6 @@ export function optimisticGuardAttention(work: Work[]): AttentionItem[] {
   return [{ subject, text, ...agentOwner('control plane', guard.state === 'await' ? `Nothing to run: the guard reads the required suite on ${guard.probe.mergeSha.slice(0, 12)} and names the culprit`
     : `Nothing to run: the guard reverts ${guard.culprit.key} through the repair lane and reopens it for a rework round`) }];
 }
+
+/** Control-plane merges that stay in front of the master until proven: repair-lane merges (GY-406) and a main red after optimistic merges. */
+export const landingAttention = (work: Work[]): AttentionItem[] => [...repairLaneAttention(work), ...optimisticGuardAttention(work)];

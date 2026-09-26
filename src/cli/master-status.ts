@@ -1,7 +1,7 @@
 import { leaseHealthStatus } from './lease-health-attention.js';
 import { probeCandidateConflicts } from '../conflicts.js';
 import { mergeBatchSize } from '../master.js';
-import { optimisticGuardAttention, optimisticStatus } from '../master/optimistic-attention.js';
+import { landingAttention, optimisticStatus } from '../master/optimistic-attention.js';
 import { humanOnlyStatusRow, type HumanRequestRow } from '../model/human-request.js';
 import { agentOwner, assessContainment, branchReport, buildMasterStatus, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, humanOwner, inspectWorkerCredentials, installationOwner, statusWorktreeInventory, managedRootStatus, mergeProtocolSkew, observeHerdrAgents, planWorktreeReclaim, profileConcurrency, reclaimIdleMs, snapshotWithClock, worktreesDirectory, type AttentionItem, type MasterConfig } from '../master.js';
 import { impliedScopeRequests, type Work } from '../model/work.js';
@@ -35,7 +35,6 @@ import { executorFleetReport, readCommit, readExecutorRegistrations } from '../e
 import { throughputStatus } from '../throughput.js';
 import { Timings, timedApi, timedStep, withTimings } from '../master/timings.js';
 import { slowReportReader } from '../master/report-cache.js';
-import { repairLaneAttention } from '../master/repair-lane.js';
 
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
 // The cycle-budget measure is a daemon metric (src/daemon/metrics.ts); it is read from here,
@@ -150,7 +149,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   // Repair-lane merges (GY-406) and a main red after optimistic merges (GY-500) stay until proven.
   // Queue-head observation lag (GY-492) and slow renewals (GY-558) stall what waits.
   const observation = observationThroughputStatus(coordinator, snapshot), health = leaseHealthStatus(coordinator);
-  const stalledItems = [...derivedStalls, ...mergeStallAttention(snapshot), ...observation.attention, ...repairLaneAttention(snapshot.work), ...optimisticGuardAttention(snapshot.work), ...health.attention];
+  const stalledItems = [...derivedStalls, ...mergeStallAttention(snapshot), ...observation.attention, ...landingAttention(snapshot.work), ...health.attention];
   // Exactly one component merges (GY-245): the loop, where one is installed or running, else the executors.
   const merger = installationMerger({ loop: { configured: !!setup.supervisor.installed, running: !!cycling?.running, autoMerge: master.autoMerge },
     declaration: executors.supervision.declaration, served: executors.presence.served });
