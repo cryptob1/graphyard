@@ -4,6 +4,7 @@ import { classified, noteFault } from '../model/fault-classes.js';
 import { boundDaemonState, type CycleFailures, type CycleMetrics, type CycleStepName, type CycleSteps, type DaemonState, liveProcess, message, type StepCost } from './state.js';
 import type { LatencyBudget, SilenceReport } from './metrics.js';
 import type { DaemonEffects } from './effects.js';
+import { slowestSteps } from '../master/timings.js';
 
 // ---- The loop's own liveness ---------------------------------------------------------------
 export type LoopState = 'running' | 'slow' | 'stalled' | 'absent';
@@ -29,7 +30,13 @@ export interface CycleCost {
   withinInterval: boolean; withinLivenessBound: boolean;
   /** The step breakdown as an operator sentence, longest first, each step's wait beside it. */
   breakdown: string;
+  /** The cycle's three slowest timed steps by wall time (GY-616), slowest first. */
+  slowestSteps: { step: string; ms: number }[];
 }
+/** A cycle whose wall time passes this raises a liveness attention naming its three slowest steps (GY-616). */
+export const slowCycleMs = 60_000;
+/** The window `master status` reports the cycle-time percentiles over (GY-616). */
+export const cycleTimeWindowMs = 30 * 60_000;
 const seconds = (ms: number) => `${Math.round(ms / 100) / 10}s`;
 export function cycleCost(metrics: CycleMetrics | null | undefined, intervalMs: number): CycleCost | null {
   if (!metrics) return null;
@@ -40,11 +47,24 @@ export function cycleCost(metrics: CycleMetrics | null | undefined, intervalMs: 
   const slowest = ordered.length && ordered[0][1].ms - ordered[0][1].childWaitMs > 0 ? { step: ordered[0][0], ms: ordered[0][1].ms - ordered[0][1].childWaitMs, childWaitMs: ordered[0][1].childWaitMs } : null;
   const waits = ordered.filter(([, cost]) => cost.childWaitMs > 0).sort((a, b) => b[1].childWaitMs - a[1].childWaitMs);
   const longestWait = waits.length ? { step: waits[0][0], childWaitMs: waits[0][1].childWaitMs } : null;
-  return { cycle: metrics.cycle, at: metrics.at, durationMs: metrics.durationMs, childWaitMs, workMs, intervalMs, stalledAfterMs: 2 * intervalMs, steps, slowest, longestWait,
+  // The timed steps name what ran (`dispatch`, `merges`, `close`); the coarse buckets are the fallback for a cycle recorded before them.
+  const slowestTimed = metrics.timings?.steps.length ? slowestSteps(metrics.timings, 3) : ordered.slice(0, 3).map(([step, cost]) => ({ step, ms: cost.ms }));
+  return { cycle: metrics.cycle, at: metrics.at, durationMs: metrics.durationMs, childWaitMs, workMs, intervalMs, stalledAfterMs: 2 * intervalMs, steps, slowest, longestWait, slowestSteps: slowestTimed.map(step => ({ step: step.step, ms: step.ms })),
     withinInterval: workMs <= intervalMs, withinLivenessBound: workMs <= 2 * intervalMs,
     breakdown: ordered.length
       ? `${seconds(workMs)} of its own work and ${seconds(childWaitMs)} waiting on child processes; ${ordered.map(([step, cost]) => `${step} ${seconds(cost.ms)}${cost.childWaitMs ? ` (${seconds(cost.childWaitMs)} waiting)` : ''}`).join(', ')}`
       : 'no step breakdown was recorded for this cycle' };
+}
+
+/**
+ * The median and 95th-percentile cycle wall time over the last 30 minutes (GY-616), from the cycles
+ * the cursor keeps: what `master status` shows beside the last cycle, so one slow cycle reads
+ * against the loop's usual cadence. Null percentiles when no cycle completed in the window.
+ */
+export function cycleTimes(metrics: Pick<CycleMetrics, 'at' | 'durationMs'>[], now: number, windowMs = cycleTimeWindowMs) {
+  const durations = metrics.filter(entry => { const at = Date.parse(entry.at); return Number.isFinite(at) && at >= now - windowMs && at <= now; }).map(entry => entry.durationMs).sort((a, b) => a - b);
+  const rank = (p: number) => durations.length ? durations[Math.min(durations.length - 1, Math.ceil(p * durations.length) - 1)] : null;
+  return { windowMs, cycles: durations.length, p50Ms: rank(0.5), p95Ms: rank(0.95) };
 }
 
 /**
@@ -216,6 +236,21 @@ export function loopAttention(report: { liveness: LoopLiveness; silence?: Silenc
   if (report.budget?.met === false) items.push({ subject: 'loop', text: `The unattended delivery budget is not met: ${report.budget.reasons.join('; ')}`,
     ...agentOwner('master', 'graphyard master status shows daemon.budget with every measured passage; clear what is holding the breached step'), ...classified('delivery-budget') });
   return items;
+}
+
+/**
+ * A cycle longer than a minute (GY-616), whatever its time divided into: the cost lines above judge
+ * the loop's own work net of its child waits, which is right for "shorten a step or look at a
+ * provider", but every merge, decision and close in a cycle waits for the whole of it, waiting
+ * included. This liveness attention names the cycle's wall time and its three slowest steps, so a
+ * burst of launches or a slow provider holding the delivery steps back is seen, not read as work.
+ */
+export function slowCycleAttention(report: { liveness: Pick<LoopLiveness, 'state'>; cost?: CycleCost | null; cycleTime?: ReturnType<typeof cycleTimes> | null }): AttentionItem[] {
+  const cost = report.cost;
+  if (!cost || cost.durationMs <= slowCycleMs || report.liveness.state === 'absent') return [];
+  const usual = report.cycleTime?.p50Ms != null ? ` (p50 ${seconds(report.cycleTime.p50Ms)}, p95 ${seconds(report.cycleTime.p95Ms ?? report.cycleTime.p50Ms)} over the last ${Math.round(report.cycleTime.windowMs / 60_000)} minutes)` : '';
+  return [{ subject: 'loop', text: `Cycle ${cost.cycle} took ${seconds(cost.durationMs)}, past the ${seconds(slowCycleMs)} cycle bound${usual}, and every merge, decision and close in it waited that long; slowest steps: ${cost.slowestSteps.map(step => `${step.step} ${seconds(step.ms)}`).join(', ') || 'none recorded'}`,
+    ...agentOwner('master', `graphyard master status shows the cycle's timings under daemon.metrics.timings and the loop's cycle time under daemon.cycleTime; shorten the ${cost.slowestSteps[0]?.step ?? 'slowest'} step rather than restarting a loop that is still cycling`), ...classified('loop-liveness') }];
 }
 
 /**

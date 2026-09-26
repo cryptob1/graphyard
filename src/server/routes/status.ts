@@ -34,6 +34,9 @@ export const statusRoutes = defineRoutes('status', [
       // feature needs, with the operator sentences the dashboard and master status raise.
       const appPermissions = github ? github.permissionReport() ?? { appId: github.config.appId, installationId: github.config.installationId, app: String(github.config.appId), account: null, installationUrl: installationSettingsUrl(github.config.installationId), observedAt: null, verifiedAt: null, error: 'Permission preflight has not run yet', suspended: false, required: requiredPermissions(controlPlanePermissions), granted: null, missing: [], blockedFeatures: [], attention: ['GitHub App permissions have not been verified yet; the preflight runs at startup and every five minutes'] } : null;
       const heldJobs = actor.role === 'operator-agent' ? 0 : (await engine.store.heldJobs()).length;
+      // Observation jobs rescheduled three times in a row without an observation (GY-506): the
+      // merge-queue deadlock shape, raised by master status rather than left for someone to diagnose.
+      const starvedJobs = actor.role === 'operator-agent' ? [] : await engine.store.starvedJobs();
       const observedAt = (await engine.store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date;
       const work = await engine.store.list();
       const visibleWork = operatorVisible(work);
@@ -55,7 +58,7 @@ export const statusRoutes = defineRoutes('status', [
       // of pending action none of them serves, with its wait and what to start.
       const executors = executorReport(visibleWork, executorRegistry(engine), observedAt);
       return { actor, humanOnly, delegation: delegationSnapshot(principals.map(p => p.actor), visibleWork, observedAt.getTime(), limits), repository: repository || null,
-        executors: { live: executors.live.length, liveMs: executors.liveMs, served: executors.served, unserved: executors.unserved, attention: describeUnserved(executors) }, baseBranch: github?.config.base ?? process.env.GITHUB_BASE_BRANCH ?? 'main', github: !!github, check: 'Graphyard / merge', reviewProviders: ['github', ...(dispatchAvailable ? ['codex'] : []), ...(dispatchAvailable && engine.reviewerApps.length ? ['agent'] : [])], reviewerApps: engine.reviewerApps, githubPermissions, githubRepository, githubAppId: github?.config.appId ?? null, githubInstallationId: github?.config.installationId ?? null, appPermissions, heldJobs, jobs, githubBudget, webhooks,
+        executors: { live: executors.live.length, liveMs: executors.liveMs, served: executors.served, unserved: executors.unserved, attention: describeUnserved(executors) }, baseBranch: github?.config.base ?? process.env.GITHUB_BASE_BRANCH ?? 'main', github: !!github, check: 'Graphyard / merge', reviewProviders: ['github', ...(dispatchAvailable ? ['codex'] : []), ...(dispatchAvailable && engine.reviewerApps.length ? ['agent'] : [])], reviewerApps: engine.reviewerApps, githubPermissions, githubRepository, githubAppId: github?.config.appId ?? null, githubInstallationId: github?.config.installationId ?? null, appPermissions, heldJobs, starvedJobs, jobs, githubBudget, webhooks,
         // The installation facts the master and doctor raise as attention: capacity variables
         // that no longer cover the roster, what production serves against the base branch, and
         // the build/protocol the CLI checks before brokering a merge. Production names work
@@ -73,6 +76,8 @@ export const statusRoutes = defineRoutes('status', [
         fleet: ['admin', 'coordinator', 'reader', 'slice-lead'].includes(actor.role) ? await services.agentRegistry.snapshot(executorHost(url, req)) : null,
         // Direct-merge mode (direct-merge.ts): the open windows and the one line master status shows while any is.
         directMerge: await directMergeStatus(engine.store.pool, engine.directMergeEnvironment, observedAt),
+        // Heartbeat latency and the renewals refused or failed server-side, this process, last 10 minutes (GY-558).
+        leaseHealth: engine.leaseHealth.report(),
         now: observedAt.toISOString(), release: releaseInfo(), schema: schemaVersion };
     },
   },
@@ -185,7 +190,10 @@ export const statusRoutes = defineRoutes('status', [
     method: 'GET', path: '/api/events',
     async handle({ actor, url, services, operatorVisible }) {
       const query = parseEventHistoryQuery(url.searchParams);
-      if (actor.role === 'operator-agent') { demand(query.work, 'Operator-agent history reads require a scoped work item', 403); const item = (await services.engine.store.list()).find(w => w.id === query.work); demand(item && operatorVisible([item]).length, 'Work item is outside this operator-agent scope', 403); }
+      // An approver judges decisions resting on the ledger (GY-642), so one scoped to every item
+      // reads it whole; the read grants nothing, and every other operator agent names its item.
+      const wholeLedger = actor.role === 'operator-agent' && !!actor.capabilities?.includes('decision:approve') && !!actor.scope?.workItems.includes('*');
+      if (actor.role === 'operator-agent' && !wholeLedger) { demand(query.work, 'Operator-agent history reads require a scoped work item', 403); const item = (await services.engine.store.list()).find(w => w.id === query.work); demand(item && operatorVisible([item]).length, 'Work item is outside this operator-agent scope', 403); }
       const history = await readEventHistory(services.engine.store.pool, query);
       return query.view === 'rows' ? history.events : history;
     },
