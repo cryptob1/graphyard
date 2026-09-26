@@ -2,6 +2,7 @@ import { agentOwner, humanOwner, type AttentionItem } from '../master.js';
 import type { Work } from '../model.js';
 import { stallBoundMs, stalledItems, type ActionlessItem } from '../model/action-account.js';
 import { elapsed } from '../model/sessions.js';
+import { mergeStalls } from '../merge-queue.js';
 
 // The orphaned-supervisor builders live in their own module (GY-138); they are read from here too.
 export { nameOrphanSupervisors, orphanSupervisorAttention, supervisorReclaimCommand } from './orphan-supervisors.js';
@@ -83,3 +84,7 @@ export function routedScopeRequests(approvals: readonly { work: string; action: 
   const routed = new Set(approvals.filter(watch => watch.action === 'requirements' && watch.scope).map(watch => `${watch.work}:${watch.scope!.epoch}:${watch.scope!.at}`));
   return (work: { key: string; scopeRequest?: { epoch: number; at: string } | null }) => !!work.scopeRequest && routed.has(`${work.key}:${work.scopeRequest.epoch}:${work.scopeRequest.at}`);
 }
+
+/** A merge pending past five minutes on a head GitHub reports mergeable, with no refusal (GY-344). */
+export const mergeStallAttention = (snapshot: { work: Work[]; now: string }): AttentionItem[] =>
+  mergeStalls(snapshot.work, Date.parse(snapshot.now)).map(stall => ({ subject: stall.key, text: stall.text, ...agentOwner('master', stall.next) }));
