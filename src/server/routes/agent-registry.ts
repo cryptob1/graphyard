@@ -81,7 +81,11 @@ const progressSchema = z.object({
   url: z.string().trim().min(1).max(500).optional(),
   code: z.string().trim().min(1).max(100).optional(),
   detail: z.string().trim().min(1).max(500).optional(),
+  // The login waits for the code its sign-in page shows to be pasted back (Claude Code).
+  awaitingCode: z.boolean().optional(),
 }).strict();
+/** The code a login's sign-in page showed, sealed to the host in the browser like a pasted key. */
+const answerSchema = z.object({ sealed: sealedSchema }).strict();
 const resultSchema = z.object({
   state: z.enum(['healthy', 'failed']),
   name: z.string().trim().min(1).max(80).optional(),
@@ -101,19 +105,23 @@ export interface ConnectView {
   name: string | null; home: string | null;
   /** The device or sign-in URL and code the provider's login printed, relayed to the operator. */
   url: string | null; code: string | null;
+  /** The login asks for the code its sign-in page showed, and whether the operator has sent it. */
+  awaitingCode: boolean; answered: boolean;
   error: string | null; detail: string | null;
   /** The roles the account joined by default, by capability (GY-409 AC-4). */
   placement: string[] | null;
   worker: string | null;
   /** The sealed payload, served only to the owning host's executor on its claim. */
   sealed?: { ephemeral: string; iv: string; ciphertext: string };
+  /** The sealed sign-in code the operator pasted back, served only to the owning host's executor. */
+  answerSealed?: { ephemeral: string; iv: string; ciphertext: string };
 }
 /** How long an open connect may sit before another claim may take it: a subscription login can wait for the operator, so it gets far longer than a key paste. */
 export const connectStaleMs = { login: 2 * 3_600_000, work: 30 * 60_000 };
 const openState = (state: ConnectView['state']) => state === 'pending' || state === 'claimed' || state === 'connecting' || state === 'waiting-login';
 
 /** The public fields of a connect: the sealed payload never leaves the executor path. */
-const withoutSealed = (view: ConnectView): ConnectView => { const { sealed: _sealed, ...rest } = view; return rest; };
+const withoutSealed = (view: ConnectView): ConnectView => { const { sealed: _sealed, answerSealed: _answer, ...rest } = view; return rest; };
 
 /**
  * Fold a newest-first page of `connect-account.*` events into one view per request, oldest first.
@@ -128,13 +136,14 @@ export function foldConnectEvents(rows: { actor: string; kind: string; payload: 
     const at = row.created_at.toISOString();
     const base = byId.get(connect.id);
     if (row.kind === `${connectEventPrefix}request`) {
-      byId.set(connect.id, { id: connect.id, at, updatedAt: at, host: connect.host, provider: connect.provider, state: 'pending', name: null, home: null, url: null, code: null, error: null, detail: null, placement: null, worker: null, ...(connect.sealed ? { sealed: connect.sealed } : {}) });
+      byId.set(connect.id, { id: connect.id, at, updatedAt: at, host: connect.host, provider: connect.provider, state: 'pending', name: null, home: null, url: null, code: null, awaitingCode: false, answered: false, error: null, detail: null, placement: null, worker: null, ...(connect.sealed ? { sealed: connect.sealed } : {}) });
       continue;
     }
     if (!base) continue;
     base.updatedAt = at;
     if (row.kind === `${connectEventPrefix}claimed`) { base.state = 'claimed'; base.worker = row.actor; }
-    else if (row.kind === `${connectEventPrefix}progress`) { base.state = connect.state; base.name = connect.name ?? base.name; base.home = connect.home ?? base.home; base.url = connect.url ?? base.url; base.code = connect.code ?? base.code; base.detail = connect.detail ?? base.detail; }
+    else if (row.kind === `${connectEventPrefix}progress`) { base.state = connect.state; base.name = connect.name ?? base.name; base.home = connect.home ?? base.home; base.url = connect.url ?? base.url; base.code = connect.code ?? base.code; base.detail = connect.detail ?? base.detail; base.awaitingCode = connect.awaitingCode ?? base.awaitingCode; }
+    else if (row.kind === `${connectEventPrefix}answer`) { base.answered = true; base.answerSealed = connect.sealed; }
     else if (row.kind === `${connectEventPrefix}result`) { base.state = connect.state; base.name = connect.name ?? base.name; base.home = connect.home ?? base.home; base.error = connect.error ?? null; base.placement = connect.placement ?? base.placement; }
     else if (row.kind === `${connectEventPrefix}cancel`) { base.state = 'cancelled'; }
   }
@@ -220,10 +229,11 @@ function connectAccountRoutes(): import('../routes.js').Route[] {
         return { id, at, host: data.host, provider: provider.id, state: 'pending' as const };
       });
     } },
-  { method: 'POST', path: /^\/api\/agent-registry\/connect\/([0-9a-f-]{36})\/(claim|progress|result|cancel)$/, async handle(context, [id, action]) {
+  { method: 'POST', path: /^\/api\/agent-registry\/connect\/([0-9a-f-]{36})\/(claim|progress|result|cancel|answer)$/, async handle(context, [id, action]) {
       const { actor, services } = context;
       const data = action === 'cancel' || action === 'claim' ? null : await parseJson(context, undefined, '{}');
-      demand((configurators as readonly string[]).includes(actor.role) && (action !== 'cancel' || actor.role === 'admin'), action === 'cancel' ? 'Cancelling a connect is an operator decision' : 'Connect requests are worked by the host\'s executor identity', 403);
+      const operatorAction = action === 'cancel' || action === 'answer';
+      demand((configurators as readonly string[]).includes(actor.role) && (!operatorAction || actor.role === 'admin'), operatorAction ? `${action === 'cancel' ? 'Cancelling a connect' : 'Answering a sign-in'} is an operator decision` : 'Connect requests are worked by the host\'s executor identity', 403);
       return services.engine.store.transaction(async (db, now) => {
         const at = now.toISOString();
         const connects = foldConnectEvents((await readConnectEvents(db)).rows);
@@ -240,6 +250,15 @@ function connectAccountRoutes(): import('../routes.js').Route[] {
           demand(openState(connect.state), `The connect is already ${connect.state}`, 409);
           await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, `${connectEventPrefix}cancel`, JSON.stringify({ connect: { id, at } })]);
           return { id, state: 'cancelled' as const };
+        }
+        if (action === 'answer') {
+          // The code a sign-in page showed travels like a pasted key: sealed to the host in the
+          // browser, stored and relayed as ciphertext, and handed to the login once.
+          const answer = answerSchema.parse(data);
+          demand(connect.state === 'waiting-login' && connect.awaitingCode, 'This connect is not waiting for a sign-in code', 409);
+          demand(!connect.answered, 'The sign-in code was already sent; cancel and connect again to retry', 409);
+          await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, `${connectEventPrefix}answer`, JSON.stringify({ connect: { id, at, sealed: answer.sealed } })]);
+          return { id, state: connect.state, answered: true as const };
         }
         const working = connect.state === 'claimed' || connect.state === 'connecting' || connect.state === 'waiting-login';
         demand(working, `The connect is ${connect.state}; claim it before working it`, 409);

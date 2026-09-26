@@ -95,9 +95,10 @@ export function startConnectAccountWorker(config: () => MasterConfig, options: {
     try { await connect(config()); } catch (error) { log(`[graphyard-executor] connect-account worker: ${message(error)}`); }
     finally { running = false; }
   };
-  const first = setTimeout(() => { void tick(); const rest = setInterval(() => { void tick(); }, intervalMs); rest.unref?.(); }, intervalMs);
+  let rest: ReturnType<typeof setInterval> | undefined;
+  const first = setTimeout(() => { void tick(); rest = setInterval(() => { void tick(); }, intervalMs); rest.unref?.(); }, intervalMs);
   first.unref?.();
-  return { stop: () => clearTimeout(first) };
+  return { stop: () => { clearTimeout(first); clearInterval(rest); } };
 }
 
 /**

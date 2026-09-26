@@ -704,7 +704,7 @@ export async function runSmokePrompt(provider: ConnectProvider, home: string, op
 }
 
 /** One connect request as the worker reads it from the control plane. */
-interface ConnectAssignment { id: string; state: string; provider: string; name?: string | null; url?: string | null; code?: string | null; sealed?: { ephemeral: string; iv: string; ciphertext: string } }
+interface ConnectAssignment { id: string; state: string; provider: string; name?: string | null; url?: string | null; code?: string | null; sealed?: { ephemeral: string; iv: string; ciphertext: string }; answerSealed?: { ephemeral: string; iv: string; ciphertext: string } }
 export interface ConnectWorkerReport { id: string; provider: string; state: 'healthy' | 'failed' | 'skipped'; detail: string }
 export interface ConnectAccountOptions {
   fetch?: typeof fetch; now?: () => number;
@@ -761,9 +761,17 @@ export async function processConnectAccounts(config: Pick<MasterConfig, 'url' | 
       } else {
         await fleetRequest(config, `agent-registry/connect/${connect.id}/progress`, { body: { state: 'connecting', name }, fetch: fetcher });
         // The URL and code reach the card while the login is still waiting on the operator's sign-in.
-        const waiting = (printed: { url: string | null; code: string | null }) => fleetRequest(config, `agent-registry/connect/${connect.id}/progress`, { body: { state: 'waiting-login', name, ...(printed.url ? { url: printed.url } : {}), ...(printed.code ? { code: printed.code } : {}) }, fetch: fetcher });
+        const awaitingCode = !!provider.login?.pasteCode;
+        const waiting = (printed: { url: string | null; code: string | null }) => fleetRequest(config, `agent-registry/connect/${connect.id}/progress`, { body: { state: 'waiting-login', name, ...(printed.url ? { url: printed.url } : {}), ...(printed.code ? { code: printed.code } : {}), ...(awaitingCode ? { awaitingCode } : {}) }, fetch: fetcher });
         const announced: Promise<unknown>[] = [];
-        const relay = await relaySubscriptionLogin(provider, home, { ...options, onPrinted: printed => announced.push(waiting(printed)) });
+        // A login that asks for its sign-in page's code (Claude Code) gets the one the operator
+        // pasted on the card: sealed to this host in the browser, opened here and nowhere else.
+        const answer = async () => {
+          const { connects: current } = await fleetRequest(config, `agent-registry/connect/requests?host=${encodeURIComponent(config.hostId!)}`, { fetch: fetcher }) as { connects: ConnectAssignment[] };
+          const sealed = current.find(entry => entry.id === connect.id)?.answerSealed;
+          return sealed ? unsealToHost(privateKey, sealed) : null;
+        };
+        const relay = await relaySubscriptionLogin(provider, home, { ...options, onPrinted: printed => announced.push(waiting(printed)), ...(awaitingCode ? { answer } : {}) });
         await Promise.allSettled(announced);
         if (!announced.length && (relay.url || relay.code)) await waiting(relay);
         if (!relay.loggedIn) { await report(false, relay.error ?? 'the login did not complete'); continue; }

@@ -12,6 +12,8 @@ export interface ConnectView {
   id: string; at: string; updatedAt: string; host: string; provider: string;
   state: 'pending' | 'claimed' | 'connecting' | 'waiting-login' | 'healthy' | 'failed' | 'cancelled';
   name: string | null; home: string | null; url: string | null; code: string | null;
+  /** The login waits for the code its sign-in page shows (Claude Code), and whether it was sent. */
+  awaitingCode?: boolean; answered?: boolean;
   error: string | null; detail: string | null; placement: string[] | null; worker: string | null;
 }
 export interface ConnectProviderView { id: string; label: string; kind: 'api-key' | 'subscription'; tier: string; help: string }
@@ -22,11 +24,33 @@ const stateText = (connect: ConnectView) => connect.state === 'waiting-login' ? 
   : openState(connect.state) ? 'Connecting…'
   : connect.state === 'healthy' ? 'Connected' : connect.state === 'failed' ? 'Failed' : 'Cancelled';
 
+/**
+ * The code a sign-in page shows, pasted back on the card: asked for only once the operator says
+ * they have it, so the default view carries no field (GY-409 AC-1).
+ */
+function SignInCode({ connect, onAnswer }: { connect: ConnectView; onAnswer: (id: string, code: string) => Promise<void> }) {
+  const [asking, setAsking] = useState(false);
+  const [code, setCode] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  if (connect.answered) return <p className="muted" data-connect-answered>Code sent; the host is finishing the sign-in.</p>;
+  if (!asking) return <p>After signing in, the page shows a code. <button data-paste-code={connect.id} onClick={() => setAsking(true)}>Paste the code</button></p>;
+  return <form className="grant-form" aria-label="Send the sign-in code" onSubmit={event => {
+    event.preventDefault(); setBusy(true); setError('');
+    onAnswer(connect.id, code).then(() => setCode(''), failure => setError((failure as Error).message)).finally(() => setBusy(false));
+  }}>
+    <label>The code the sign-in page shows<input type="password" name="code" autoComplete="off" required value={code} onChange={event => setCode(event.target.value)}/></label>
+    {error && <p role="alert" className="amber">{error}</p>}
+    <button disabled={busy || !code.trim()} data-send-code>Send the code</button>
+  </form>;
+}
+
 /** One connect in flight or finished: what the provider's login printed, and why it failed when it did. */
-export function ConnectCard({ connect, onCancel }: { connect: ConnectView; onCancel?: (id: string) => void }) {
+export function ConnectCard({ connect, onCancel, onAnswer }: { connect: ConnectView; onCancel?: (id: string) => void; onAnswer?: (id: string, code: string) => Promise<void> }) {
   return <div className="criterion" data-connect={connect.id} data-provider={connect.provider}>
     <strong className={connect.state === 'failed' ? 'amber' : undefined}>{connect.provider} · {stateText(connect)}{connect.name ? ` · ${connect.name}` : ''}</strong>
     {(connect.url || connect.code) && <p data-connect-login={connect.state}>{connect.state === 'waiting-login' ? 'Finish the sign-in in your own browser:' : 'Signed in'}{connect.url ? <> <a href={connect.url} rel="noreferrer">{connect.url}</a></> : null}{connect.url && connect.code ? ' · code ' : connect.code ? ' code ' : null}{connect.code ? <code data-connect-code>{connect.code}</code> : null}</p>}
+    {connect.state === 'waiting-login' && connect.awaitingCode && onAnswer && <SignInCode connect={connect} onAnswer={onAnswer}/>}
     {connect.state === 'failed' && connect.error && <p role="alert" className="amber" data-connect-error>{connect.error}</p>}
     {connect.placement && <p className="muted" data-connect-placement>Joins by default: {connect.placement.join(', ')}</p>}
     <p className="muted">On {connect.host} · asked {when(connect.at)}</p>
@@ -53,14 +77,14 @@ export const policyText = (policy: RolePolicy | undefined) => {
 };
 
 /** The Agents page body, pure over the view so it renders the same in a test as in the browser. */
-export function FleetOverview({ fleet, connects = [], onChangeRoles, onCancelConnect }: { fleet: FleetView; connects?: ConnectView[]; onChangeRoles?: (account: string) => void; onCancelConnect?: (id: string) => void }) {
+export function FleetOverview({ fleet, connects = [], onChangeRoles, onCancelConnect, onAnswerConnect }: { fleet: FleetView; connects?: ConnectView[]; onChangeRoles?: (account: string) => void; onCancelConnect?: (id: string) => void; onAnswerConnect?: (id: string, code: string) => Promise<void> }) {
   const running = fleet.sessions.filter(session => !session.endedAt);
   const byName = new Map(connects.filter(connect => connect.name).map(connect => [connect.name!, connect]));
   return <>
     {!fleet.configured && <div className="notice">No role is configured yet, so sessions still launch from each host's local profiles. Connect an account below — or run <code>graphyard master registry propose --apply</code> on a host whose agent CLIs are logged in.</div>}
     {fleet.attention.map(line => <div role="alert" className="notice danger" key={line}>{line}</div>)}
     <section><div className="section-title"><h2>Accounts <span className="count">{fleet.accounts.length}</span></h2></div>
-      {connects.map(connect => <ConnectCard key={connect.id} connect={connect} onCancel={onCancelConnect}/>)}
+      {connects.map(connect => <ConnectCard key={connect.id} connect={connect} onCancel={onCancelConnect} onAnswer={onAnswerConnect}/>)}
       {fleet.accounts.map(account => <AccountCard key={account.name} account={account} connect={byName.get(account.name)} onChangeRoles={onChangeRoles}/>)}
       {!fleet.accounts.length && !connects.length && <p>No account is connected yet. Connect an account above: pick a provider, paste its key or finish its sign-in — no shell, no configuration files.</p>}
     </section>
@@ -176,6 +200,15 @@ export default function FleetPage({ api, status }: Pick<Dashboard, 'api' | 'stat
       await load();
     } catch (error) { setWizard(current => ({ ...current, busy: '', error: (error as Error).message })); }
   };
+  /** The sign-in code goes the way a pasted key does: sealed to the connect's host in this browser. */
+  const answer = async (id: string, code: string) => {
+    const host = connects.find(entry => entry.id === id)?.host;
+    let registered = hosts.find(entry => entry.host === host)?.publicKey;
+    if (!registered) registered = ((await api('agent-registry/connect/host-key')).hosts as ConnectHostView[] ?? []).find(entry => entry.host === host)?.publicKey;
+    if (!registered) throw new Error(`The host ${host} has not registered its key yet; its executor registers it by itself shortly.`);
+    await api(`agent-registry/connect/${id}/answer`, { sealed: await sealForHost(registered, code.trim()) });
+    await load();
+  };
   const cancel = async (id: string) => { try { await api(`agent-registry/connect/${id}/cancel`, { reason: 'Cancelled from Settings › Agents' }); await load(); } catch (error) { setFormError((error as Error).message); } };
   /** The card's 'change': open Advanced and name the account in the role editor's order. */
   const changeRoles = (account: string) => {
@@ -191,7 +224,7 @@ export default function FleetPage({ api, status }: Pick<Dashboard, 'api' | 'stat
     {fleet && canEdit && <section><div className="section-title"><h2>Connect an account</h2>{!wizard.open && <button className="connect-button" data-connect-account onClick={() => setWizard({ ...closedWizard, open: true, host: hosts[0]?.host ?? null })}>Connect an account</button>}</div>
       {wizard.open && <ConnectWizard providers={providers} hosts={hosts} wizard={wizard} setWizard={setWizard} onConnect={id => void connect(id, wizard.host ?? hosts[0]?.host ?? '', wizard.key)} onClose={() => setWizard(closedWizard)}/>}
     </section>}
-    {fleet && <FleetOverview fleet={fleet} connects={connects} onChangeRoles={canEdit ? changeRoles : undefined} onCancelConnect={canEdit ? id => void cancel(id) : undefined}/>}
+    {fleet && <FleetOverview fleet={fleet} connects={connects} onChangeRoles={canEdit ? changeRoles : undefined} onCancelConnect={canEdit ? id => void cancel(id) : undefined} onAnswerConnect={status?.actor?.role === 'admin' ? answer : undefined}/>}
     {fleet && canEdit && <section><details className="advanced more-details" ref={advanced}><summary>Advanced: runtimes, models, roles and policies</summary>
       <p className="muted">Everything below names where a login lives — never the credential. Connect accounts at the top of the page; use this only to shape the fleet itself. Every change is recorded with its reason.</p>
       {formError && <p role="alert" className="amber">{formError}</p>}

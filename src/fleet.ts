@@ -424,8 +424,14 @@ export interface ConnectProvider {
   authFile?: string;
   /** The provider's auth file content: what `key` becomes, laid over whatever the file already held. */
   authDocument?: (existing: Record<string, unknown>, key: string) => Record<string, unknown>;
-  /** The provider's own login command for `subscription` providers, and the env variable that selects the login home. */
-  login?: { command: string; args: string[]; envVariable: string };
+  /**
+   * The provider's own login command for `subscription` providers, and the env variable that selects
+   * the login home. `env` is laid over the host's environment (to keep a login from opening a
+   * browser on the host). `pasteCode` marks a login that, after the sign-in, asks for the code the
+   * provider's page shows to be pasted back: the card asks the operator for it and the host writes
+   * it to the login's stdin.
+   */
+  login?: { command: string; args: string[]; envVariable: string; env?: Record<string, string>; pasteCode?: boolean };
   /** Path inside the login home whose presence means the login completed. */
   loginFile?: string;
   /** The one-line smoke prompt: what is run inside the login home to decide the card's health. */
@@ -465,19 +471,25 @@ export const connectProviders: readonly ConnectProvider[] = [
   },
   {
     id: 'claude', label: 'Claude (subscription)', kind: 'subscription', runtime: 'claude', model: 'claude-default', tier: 'strong',
-    login: { command: 'claude', args: ['login'], envVariable: 'CLAUDE_CONFIG_DIR' }, loginFile: '.credentials.json',
+    // Claude Code signs in with `claude auth login` (`claude login` is a session whose prompt is
+    // "login"). Off a terminal it prints the sign-in URL and waits on stdin for the code the
+    // provider's page shows after the sign-in, so the operator pastes that code back on the card.
+    login: { command: 'claude', args: ['auth', 'login'], envVariable: 'CLAUDE_CONFIG_DIR', pasteCode: true }, loginFile: '.credentials.json',
     smoke: { command: 'claude', args: ['-p', smokePrompt], envVariable: 'CLAUDE_CONFIG_DIR' },
     help: 'Your Claude subscription. Finish the sign-in in your own browser.',
   },
   {
     id: 'chatgpt', label: 'ChatGPT / Codex (subscription)', kind: 'subscription', runtime: 'codex', model: 'codex-default', tier: 'strong',
-    login: { command: 'codex', args: ['login'], envVariable: 'CODEX_HOME' }, loginFile: 'auth.json',
+    // The device flow: a URL and a one-time code that work from any browser, where plain `codex
+    // login` waits on a localhost callback only a browser on the agent host can reach.
+    login: { command: 'codex', args: ['login', '--device-auth'], envVariable: 'CODEX_HOME' }, loginFile: 'auth.json',
     smoke: { command: 'codex', args: ['exec', smokePrompt], envVariable: 'CODEX_HOME' },
     help: 'Your ChatGPT plan, through the Codex CLI. Finish the sign-in in your own browser.',
   },
   {
     id: 'cursor', label: 'Cursor (subscription)', kind: 'subscription', runtime: 'cursor', model: 'cursor-default', tier: 'strong',
-    login: { command: 'cursor-agent', args: ['login'], envVariable: 'CURSOR_CONFIG_DIR' }, loginFile: 'cli-config.json',
+    // Without NO_OPEN_BROWSER the login opens a browser on the host; the card's URL is the only path.
+    login: { command: 'cursor-agent', args: ['login'], envVariable: 'CURSOR_CONFIG_DIR', env: { NO_OPEN_BROWSER: '1' } }, loginFile: 'cli-config.json',
     smoke: { command: 'cursor-agent', args: ['-p', smokePrompt], envVariable: 'CURSOR_CONFIG_DIR' },
     help: 'Your Cursor plan. Finish the sign-in in your own browser.',
   },
@@ -499,27 +511,38 @@ export function connectDefaultRoles(tier: ConnectProvider['tier']): readonly str
   return tier === 'fast' ? ['research', 'approver', 'producer'] : ['worker', 'reviewer'];
 }
 
-/** The URL a provider's login printed, and the device or one-time code beside it, or nulls. */
+/**
+ * The URL a provider's login printed, and the device or one-time code beside it, or nulls. Terminal
+ * colour codes are stripped first (Codex colours its URL and code), a code is looked for only
+ * outside URLs (Claude's carries `code=true`), and a code holds a digit, so prose such as "Paste
+ * code here" or "device code authorization" is never read as one.
+ */
 export function parseLoginOutput(text: string): { url: string | null; code: string | null } {
-  const url = text.match(/https?:\/\/[^\s"'<>]+/)?.[0] ?? null;
-  const code = text.match(/(?:one-time|device|verification)?\s*code(?:\s*is)?[:\s]+([A-Za-z0-9][A-Za-z0-9-]{3,30})/i)?.[1] ?? null;
+  const plain = text.replace(/\u001b\[[0-9;?]*[A-Za-z]/g, '');
+  const url = plain.match(/https?:\/\/[^\s"'<>]+/)?.[0] ?? null;
+  const prose = plain.replace(/https?:\/\/[^\s"'<>]+/g, ' ');
+  const code = [...prose.matchAll(/code\b(?:\s*is)?(?:\s*\([^)\n]*\))?[:\s]+([A-Za-z0-9][A-Za-z0-9-]{3,30})\b/gi)]
+    .map(match => match[1]).find(candidate => /\d/.test(candidate)) ?? null;
   return { url, code };
 }
 
 /**
  * Start the provider's own login inside a fresh login home and relay what it prints (GY-409): the
  * URL and code reach the UI as soon as they appear, the login file's arrival ends the wait, and
- * the caller runs the smoke prompt before the card turns healthy. The child is bounded: past the
+ * the caller runs the smoke prompt before the card turns healthy. A login that asks for the code
+ * its sign-in page shows (`pasteCode`) reads it on stdin: `answer` is polled once the URL is out,
+ * and the first code it returns is written to the login once. The child is bounded: past the
  * window it is stopped and the failure is what the card shows.
  */
-export async function relaySubscriptionLogin(provider: ConnectProvider, home: string, options: { login?: { command: string; args: string[] }; pollMs?: number; loginTimeoutMs?: number; onPrinted?: (printed: { url: string | null; code: string | null }) => unknown } = {}): Promise<{ url: string | null; code: string | null; loggedIn: boolean; error: string | null }> {
+export async function relaySubscriptionLogin(provider: ConnectProvider, home: string, options: { login?: { command: string; args: string[] }; pollMs?: number; loginTimeoutMs?: number; onPrinted?: (printed: { url: string | null; code: string | null }) => unknown; answer?: () => Promise<string | null> } = {}): Promise<{ url: string | null; code: string | null; loggedIn: boolean; error: string | null }> {
   const login = options.login ?? { command: provider.login!.command, args: provider.login!.args };
   const pollMs = options.pollMs ?? 2_000, timeoutMs = options.loginTimeoutMs ?? 10 * 60_000;
   const file = resolve(home, provider.loginFile ?? '');
   const seen = () => access(file).then(() => true, () => false);
   return await new Promise(done => {
     let child: ReturnType<typeof spawn>;
-    try { child = spawn(login.command, login.args, { env: { ...process.env, [provider.login!.envVariable]: home }, stdio: ['ignore', 'pipe', 'pipe'] }); }
+    const pasteCode = !!provider.login!.pasteCode;
+    try { child = spawn(login.command, login.args, { env: { ...process.env, ...provider.login!.env, [provider.login!.envVariable]: home }, stdio: [pasteCode ? 'pipe' : 'ignore', 'pipe', 'pipe'] }); }
     catch (error) { done({ url: null, code: null, loggedIn: false, error: `${login.command} could not be started: ${error instanceof Error ? error.message : 'unknown reason'}` }); return; }
     let text = '', found: { url: string | null; code: string | null } | null = null, settled = false;
     const finish = (result: { url: string | null; code: string | null; loggedIn: boolean; error: string | null }) => {
@@ -545,12 +568,22 @@ export async function relaySubscriptionLogin(provider: ConnectProvider, home: st
     child.stdout?.on('data', read);
     child.stderr?.on('data', read);
     const limit = setTimeout(() => finish({ ...(found ?? { url: null, code: null }), loggedIn: false, error: `${login.command} did not finish within ${Math.round(timeoutMs / 1000)}s and was stopped` }), timeoutMs);
-    const polling = setInterval(() => { if (settled) return; void seen().then(there => { if (there) finish({ ...(printed() ?? { url: null, code: null }), loggedIn: true, error: null }); }); }, pollMs);
+    // The pasted code goes to the login exactly once; a wrong one fails the login, and the card says so.
+    let answered = !pasteCode || !options.answer, asking = false;
+    child.stdin?.on('error', () => { /* the login exited before reading the code; its exit reports why */ });
+    const ask = () => {
+      if (answered || asking || !told || settled) return;
+      asking = true;
+      void options.answer!().then(code => { if (code && !answered && !settled) { answered = true; child.stdin?.end(`${code.trim()}\n`); } }, () => {}).finally(() => { asking = false; });
+    };
+    const polling = setInterval(() => { if (settled) return; ask(); void seen().then(there => { if (there) finish({ ...(printed() ?? { url: null, code: null }), loggedIn: true, error: null }); }); }, pollMs);
     limit.unref?.(); polling.unref?.();
     child.on('error', error => finish({ ...(printed() ?? { url: null, code: null }), loggedIn: false, error: `${login.command} failed: ${error instanceof Error ? error.message : 'unknown reason'}` }));
     child.on('close', status => { void seen().then(there => {
       if (there) return finish({ ...(printed() ?? { url: null, code: null }), loggedIn: true, error: null });
-      finish({ ...(printed() ?? { url: null, code: null }), loggedIn: false, error: `${login.command} exited ${status ?? 'to a signal'} before the login file appeared` });
+      // The login's own last word (a rejected code, an expired sign-in) is what the card shows.
+      const last = text.replace(/\u001b\[[0-9;?]*[A-Za-z]/g, '').split('\n').map(line => line.trim()).filter(Boolean).at(-1);
+      finish({ ...(printed() ?? { url: null, code: null }), loggedIn: false, error: `${login.command} exited ${status ?? 'to a signal'} before the login file appeared${last ? `: ${last.slice(0, 300)}` : ''}` });
     }); });
   });
 }

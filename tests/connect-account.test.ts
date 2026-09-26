@@ -59,6 +59,24 @@ before(async () => {
       '',
     ].join('\n'), { mode: 0o755 });
   }
+  // Claude Code as it really signs in off a terminal: `claude auth login` prints the sign-in URL
+  // (with `code=true` in it and no device code), then reads the code the sign-in page shows from
+  // stdin, and writes its login file only for the right one. `claude login` is not a sign-in: it
+  // is a session whose prompt is "login", so the fake refuses it.
+  await writeFile(join(bin, 'claude'), [
+    '#!/bin/sh',
+    'if [ "$1" = "auth" ] && [ "$2" = "login" ]; then',
+    '  echo "Opening browser to sign in…"',
+    `  echo "If the browser didn't open, visit: https://claude.example/oauth/authorize?code=true&client_id=fixture&state=fixture-state"`,
+    '  printf "Paste code here if prompted > "',
+    '  read answer',
+    '  if [ "$answer" = "fixture-code#fixture-state" ]; then printf \'{"claudeAiOauth":{"accessToken":"fake-token"}}\\n\' > "$CLAUDE_CONFIG_DIR/.credentials.json"; exit 0; fi',
+    '  echo "Login failed: Request failed with status code 400" >&2; exit 1',
+    'fi',
+    'if [ "$1" = "login" ]; then echo "claude login is a session, not a sign-in" >&2; exit 3; fi',
+    'exit 0',
+    '',
+  ].join('\n'), { mode: 0o755 });
   originalPath = process.env.PATH ?? '';
   process.env.PATH = `${bin}:${originalPath}`;
   await writeFile(join(scratch, 'master.token'), tokens.get(coordinator.id)!, { mode: 0o600 });
@@ -250,6 +268,62 @@ test('unit:subscription-login-relayed — the provider login runs on the host, i
   assert.ok(markup.includes('Connected'), 'the card says healthy');
 });
 
+test('unit:subscription-login-relayed — a Claude sign-in runs `claude auth login`, relays its URL, and takes the code the operator pastes back on the card', async () => {
+  const claude = connectProviders.find(provider => provider.id === 'claude')!;
+  assert.deepEqual(claude.login!.args, ['auth', 'login'], 'Claude Code signs in with `claude auth login`');
+  const { hosts } = await ok('agent-registry/connect/host-key', operator);
+  const publicKey = hosts.find((entry: { host: string }) => entry.host === HOST)?.publicKey!;
+  const requested = await ok('agent-registry/connect', operator, { host: HOST, provider: 'claude', reason: 'Connect the Claude subscription' });
+  // Too early: nothing is waiting for a code yet.
+  assert.equal((await call(`agent-registry/connect/${requested.id}/answer`, operator, { sealed: await sealForHost(publicKey, 'fixture-code#fixture-state') })).status, 409, 'a code is refused before the login asks for one');
+  const working = runWorker();
+  let pending: ConnectView | undefined;
+  for (const deadline = Date.now() + 10_000; Date.now() < deadline; await new Promise(resolve => setTimeout(resolve, 25))) {
+    pending = (await connectViews()).find(entry => entry.id === requested.id);
+    if (pending?.state === 'waiting-login' && pending.url) break;
+  }
+  assert.equal(pending?.state, 'waiting-login', 'the Claude sign-in waits on the operator');
+  assert.equal(pending!.url, 'https://claude.example/oauth/authorize?code=true&client_id=fixture&state=fixture-state', 'the sign-in URL reaches the UI');
+  assert.equal(pending!.code, null, 'prose around the URL is never read as a code');
+  assert.equal(pending!.awaitingCode, true, 'the card knows the login waits for the code the sign-in page shows');
+  // The card offers to take the code without putting a field on the default view.
+  const card = renderToStaticMarkup(createElement(ConnectCard, { connect: pending!, onAnswer: async () => {} }));
+  assert.ok(card.includes('data-paste-code') && !/<input/.test(card), 'the card offers Paste the code, with no field until asked');
+  // Only the operator answers, and the code travels sealed to the host like a key.
+  const sealed = await sealForHost(publicKey, 'fixture-code#fixture-state');
+  assert.equal((await call(`agent-registry/connect/${requested.id}/answer`, coordinator, { sealed })).status, 403, 'answering a sign-in is the operator\'s');
+  assert.equal((await call(`agent-registry/connect/${requested.id}/answer`, operator, { code: 'fixture-code#fixture-state' })).status, 400, 'a code in the clear is refused');
+  await ok(`agent-registry/connect/${requested.id}/answer`, operator, { sealed });
+  assert.equal((await call(`agent-registry/connect/${requested.id}/answer`, operator, { sealed })).status, 409, 'the code is sent once');
+  const reports = await working;
+  assert.equal(reports[0].state, 'healthy', `the Claude subscription connected: ${reports[0].detail}`);
+  const view = (await connectViews()).find(entry => entry.id === requested.id)!;
+  assert.equal(view.state, 'healthy');
+  assert.equal(view.answered, true);
+  assert.ok(!JSON.stringify(await ok('agent-registry/connect', operator)).includes('fixture-code'), 'no browser read carries the pasted code');
+  assert.ok(!JSON.stringify((await store.pool.query("SELECT payload FROM events WHERE kind LIKE 'connect-account.%'")).rows).includes('fixture-code'), 'the ledger holds the pasted code sealed only');
+  const home = join(scratch, 'agents', view.name!);
+  assert.equal(JSON.parse(await readFile(join(home, '.credentials.json'), 'utf8')).claudeAiOauth.accessToken, 'fake-token', 'the login wrote its file in the new login home');
+  assert.ok((await ok('agent-registry/document', operator)).accounts.some((entry: { name: string }) => entry.name === view.name), 'the Claude account is registered');
+  assert.equal((await checkAgentEnvironment({ name: view.name!, kind: 'claude', home }, { quota: false })).loggedIn, true, 'the probe reads the Claude login');
+});
+
+test('connect sign-in — a wrong pasted code fails the connect with the login\'s own error on the card', async () => {
+  const { hosts } = await ok('agent-registry/connect/host-key', operator);
+  const publicKey = hosts.find((entry: { host: string }) => entry.host === HOST)?.publicKey!;
+  const requested = await ok('agent-registry/connect', operator, { host: HOST, provider: 'claude', reason: 'Connect a second Claude subscription' });
+  const working = runWorker();
+  for (const deadline = Date.now() + 10_000; Date.now() < deadline; await new Promise(resolve => setTimeout(resolve, 25))) {
+    if ((await connectViews()).find(entry => entry.id === requested.id)?.state === 'waiting-login') break;
+  }
+  await ok(`agent-registry/connect/${requested.id}/answer`, operator, { sealed: await sealForHost(publicKey, 'wrong-code') });
+  const reports = await working;
+  assert.equal(reports[0].state, 'failed');
+  const view = (await connectViews()).find(entry => entry.id === requested.id)!;
+  assert.equal(view.state, 'failed');
+  assert.match(view.error!, /Login failed: Request failed with status code 400/, 'the card shows why the sign-in failed');
+});
+
 test('unit:agents-page-simple-default — the page opens on account cards and the connect button, with no form field outside Advanced', async () => {
   const at = new Date().toISOString();
   const fleet: FleetView = {
@@ -292,6 +366,13 @@ test('connect helpers — parseLoginOutput and redactKey', () => {
   const printed = parseLoginOutput('Visit https://example.com/device and enter code ABCD-1234 to finish.');
   assert.equal(printed.url, 'https://example.com/device');
   assert.equal(printed.code, 'ABCD-1234');
+  // What the real CLIs print: Codex's device flow (coloured), Claude Code's URL and paste prompt.
+  const codex = parseLoginOutput('Follow these steps to sign in with ChatGPT using device code authorization:\n\n1. Open this link in your browser and sign in to your account\n   \u001b[94mhttps://auth.openai.com/codex/device\u001b[0m\n\n2. Enter this one-time code \u001b[90m(expires in 15 minutes)\u001b[0m\n   \u001b[94mZSA1-7FZXI\u001b[0m\n');
+  assert.deepEqual(codex, { url: 'https://auth.openai.com/codex/device', code: 'ZSA1-7FZXI' });
+  const claude = parseLoginOutput('Opening browser to sign in…\nIf the browser didn\'t open, visit: https://claude.com/cai/oauth/authorize?code=true&client_id=x&state=y\nPaste code here if prompted > ');
+  assert.deepEqual(claude, { url: 'https://claude.com/cai/oauth/authorize?code=true&client_id=x&state=y', code: null });
+  assert.deepEqual(connectProviders.find(provider => provider.id === 'chatgpt')!.login!.args, ['login', '--device-auth'], 'Codex signs in with the device flow, usable from any browser');
+  assert.equal(connectProviders.find(provider => provider.id === 'cursor')!.login!.env?.NO_OPEN_BROWSER, '1', 'Cursor\'s login never opens a browser on the host');
   assert.equal(redactKey(`quota exhausted for ${KEY} today`, KEY), 'quota exhausted for [redacted] today');
 });
 
