@@ -47,6 +47,8 @@ export function daemonSummary(state: DaemonState, now: number, intervalMs: numbe
     approvals: Object.entries(state.approvals).map(([key, watch]) => ({ key, ...watch })),
     // Fault instances by class in the recurrence window, and the item each recurring class filed (GY-173).
     faults: faultRecurrenceReport(state, faultClassPolicyFromEnv(process.env), now),
+    // The system invariants as the last cycle judged them (GY-404): one line per invariant, with its threshold and reading.
+    invariants: { at: state.invariants.at, violated: state.invariants.report.filter(check => !check.holds).length, lines: state.invariants.report.map(check => check.line), checks: state.invariants.report },
   };
 }
 

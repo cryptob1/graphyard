@@ -11,7 +11,7 @@
 
 ## Items, scope and human waits
 
-An unplanned file needs `scope-request GY-N EPOCH PATH… -- REASON`. Automatic: documentation; files the criteria name; for items planning `docs/`, single `web/` and `browser-tests/` files; existing base files an unresolved reviewer or `run.awaitReviewers`-bot thread, or the reviewer's current-head `CHANGES_REQUESTED` review, names literally (unnegated; rechecked every two minutes); tests whose quoted failing assertion a planned file holds; planned files' successors (git renames, copies, `Graphyard-Successor: OLD -> NEW` trailers), which the loop also adds, audited, to open items. The approver judges the rest (`--allow-broad-scope` needs a reason); workers keep their lease (`scope-request GY-N EPOCH --wait` reads the outcome). A human-only decision needs `park GY-N EPOCH KIND NEEDED -- REASON`; the item waits under **Work → Needs you** for `graphyard answer GY-N …`.
+An unplanned file needs `scope-request GY-N EPOCH PATH… -- REASON`. Automatic: documentation; files the criteria name; for items planning `docs/`, single `web/` and `browser-tests/` files; existing base files an unresolved reviewer or `run.awaitReviewers`-bot thread, or the reviewer's current-head `CHANGES_REQUESTED` review, names literally (unnegated; rechecked every two minutes); tests whose quoted failing assertion a planned file holds; planned files' successors (git renames, copies, `Graphyard-Successor: OLD -> NEW` trailers), which the loop also adds, audited, to open items. The approver judges the rest (`--allow-broad-scope` needs a reason); workers keep their lease (`scope-request GY-N EPOCH --wait` reads the outcome). A request belongs to the attempt that filed it: when that attempt ends (submit, release, lease lapse, rework, a requirements revision) an open or refused request is closed with reason `attempt ended` (a `scope.closed` history entry), its refusal stops holding the ready gate, and the next attempt asks afresh; `master unblock GY-N` closes one whose attempt has already ended and names it in the unblock's history. A human-only decision needs `park GY-N EPOCH KIND NEEDED -- REASON`; the item waits under **Work → Needs you** for `graphyard answer GY-N …`.
 
 ## Conflict avoidance
 
@@ -21,7 +21,7 @@ Dispatch is optimistic (overlap holds nothing), smallest planned scope first; `g
 
 **An approval must survive a tip publication.** [Carry rules](github.md#bindings-and-carry) apply.
 
-**A merge-base dismissal is not a reviewer withdrawing a verdict.** An approval of the current head dismissed with `The merge-base changed after approval.` is restored (`observation.reviews[].dismissal`); no other dismissal is.
+**A merge-base dismissal is not a reviewer withdrawing a verdict.** An approval of the current head dismissed with `The merge-base changed after approval.` is restored (`observation.reviews[].dismissal`); no other dismissal is. Its re-post is no second verdict (`observation.dismissedReviewIds`).
 
 **A branch must never keep another item's unlanded commits.** Tips build from the reviewed head; an ejection restores the branches it leaves (`baseRefresh.restore`).
 
@@ -55,7 +55,7 @@ Three failures with an unchanged reason mark a row stalled rather than retrying 
 
 ### Loop failure recovery
 
-A failed snapshot read retries once after 0.5–1.5 s jitter; a failed cycle waits min(interval, 30 s), doubling to the ceiling. One item's throw fails only its `isolated:KIND:ITEM-ID` action.
+A failed snapshot read retries once after 0.5–1.5 s; a failed cycle waits min(interval, 30 s), doubling to the ceiling. One item's throw fails only its `isolated:KIND:ITEM-ID` action.
 
 ### Running executors under supervision
 
@@ -75,7 +75,7 @@ An unexplained lapsed lease raises `lease-loss` (`blocked-awaiting-operator` and
 
 ## Fault classes
 
-Faults carry `faultClass` (`master status` `faults`); recurring classes file one item (`GRAPHYARD_FAULT_CLASS_*`). A section whose route fails is listed in `unavailable` (section, route, error); the report still returns.
+Faults carry `faultClass` (`master status` `faults`); recurring classes file one item (`GRAPHYARD_FAULT_CLASS_*`); moving hashes never reopen a standing fault. A failed section is only listed in `unavailable`.
 
 ## Pipeline speed
 
