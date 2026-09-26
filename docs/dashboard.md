@@ -13,18 +13,18 @@ Each open item is in one group: **Needs you** (only you may decide), **Blocked**
 
 ## Workers
 
-**Workers** (`web/pages/index.tsx`): a row is one [session handle](master-agent-sessions.md#session-handles), from the item, not from Herdr.
+**Workers** is its own sidebar entry, registered beside Shipped and Insights in `web/pages/index.tsx`. A row is one [session handle](master-agent-sessions.md#session-handles), from the item, not from Herdr.
 
 A running handle last observed (`observedAt`, else `updatedAt`) over **15 minutes** by default, `sessionStaleThresholdMs` in `web/workers-view.ts`, reads *not seen for <time since that observation>*, never as running, and is not counted among the open sessions; the loop's [session report](master-agent.md#session-liveness-is-reconciled-not-trusted) is what ends a dead handle.
 
 Running rows offer:
 
 - **Copy local**, on the launching host: `herdr agent attach w1V:pJD`.
-- **Copy remote**: `--machine` does not forward interactive attachment, so it focuses the pane then attaches remotely: `herdr --machine vishrog agent focus w1V:pJD && herdr --remote vishrog`.
+- **Copy remote**: `herdr --help` documents `herdr --machine <label-or-id> <command>` and `herdr --remote <ssh-target>`, and interactive attachment is not forwarded by `--machine`, so the form focuses the pane then attaches remotely: `herdr --machine vishrog agent focus w1V:pJD && herdr --remote vishrog`.
 
 ## The status sentence
 
-Rows show **Build, Validate, Test, Review, Prove, Merge, Deploy**. A merged item reads *Merged*, then *Live* once production serves it (counted this week). Moving and Blocked rows past thirty minutes read `1h 12m overdue`.
+Rows show **Build, Validate, Test, Review, Prove, Merge, Deploy** (`src/model/pr-steps.ts`). A merged item reads *Merged*, then *Live* once production serves it (counted this week). Moving and Blocked rows past thirty minutes read `1h 12m overdue`.
 
 ## An item page
 
