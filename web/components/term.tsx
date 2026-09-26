@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import { glossary, type GlossaryTerm } from '../glossary';
-import { shortShas } from '../format';
+import { shortShas } from '../../src/model/format';
 
 /**
  * A technical word with its plain-English definition on hover and focus, from the shared glossary.
