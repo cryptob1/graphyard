@@ -1,11 +1,10 @@
-import { carriedBindings, deliveryState, isClosed, type Gate, type Work } from '../src/model';
-import { latestCheck, tipValidationPrefix } from '../src/merge-queue';
-import { leftFlowAt, noRelease, servedFor, type ReleaseView } from './release';
-import type { PipelineTimeline } from '../src/pipeline-speed';
-import { assignment } from './assignment';
-import { statusDuration, type StatusDuration } from './duration';
-import type { StepTransition } from './flow-replay';
-import { plainReason, statusSince } from './plain-status';
+import { carriedBindings, deliveryState, isClosed, type Gate, type Work } from '../model.js';
+import { latestCheck, tipValidationPrefix } from '../merge-queue.js';
+import { leftFlowAt, noRelease, servedFor, type ReleaseView } from './release.js';
+import type { PipelineTimeline } from '../pipeline-speed.js';
+import { assignment } from './assignment.js';
+import { statusDuration, type StatusDuration } from './duration.js';
+import { plainReason, statusSince } from './plain-status.js';
 
 /**
  * The seven pull-request steps every moving item shows (GY-161): Build, Validate, Test, Review,
@@ -19,6 +18,8 @@ import { plainReason, statusSince } from './plain-status';
  */
 export const stepIds = ['build', 'validate', 'test', 'review', 'prove', 'merge', 'deploy'] as const;
 export type StepId = typeof stepIds[number];
+/** One recorded move of an item between steps, as the Insights Flow replay (web/flow-replay.ts) plays it. */
+export interface StepTransition { key: string; from: StepId | null; to: StepId | null; at: string }
 export type StepState = 'done' | 'current' | 'pending';
 export const stepLabel: Record<StepId, string> = { build: 'Build', validate: 'Validate', test: 'Test', review: 'Review', prove: 'Prove', merge: 'Merge', deploy: 'Deploy' };
 /** The verb the live label starts with: "Testing · 3 of 5 checks done". */
@@ -200,7 +201,7 @@ export function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: n
  * it, each step's own gate decides done, and the first step whose gate refuses is current; when
  * every gate passes the item is merging. A merged item has every step done — reading "Live" where
  * production was observed serving it — unless its policy asks for a post-deployment check that has
- * not passed, or the production watch observes production not serving it yet (web/release.ts),
+ * not passed, or the production watch observes production not serving it yet (src/model/release.ts),
  * which keeps it at Deploy. Work closed without merging has no step at all.
  */
 export function prSteps(work: Work, now: number, release: ReleaseView = noRelease): PrSteps {
@@ -269,7 +270,7 @@ export function stepSince(work: Work, now: number, moves?: readonly StepTransiti
 
 /**
  * How long the item has held its current step, and whether that is past the one threshold
- * (web/duration.ts). Only work that has left the flow (no current step, `leftFlowAt`) has arrived
+ * (src/model/duration.ts). Only work that has left the flow (no current step, `leftFlowAt`) has arrived
  * and is never overdue; merged work still held at Deploy keeps a running clock.
  */
 export function stepHeld(work: Work, now: number, moves?: readonly StepTransition[] | null, release: ReleaseView = noRelease): StatusDuration {
