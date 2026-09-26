@@ -1,5 +1,6 @@
 // Concern: agent identities and autonomy — approver and escalation launches, and the autonomy commands.
 import { randomUUID, randomBytes } from 'node:crypto';
+import { wholeDocument } from '../model/work-summary.js';
 import { readFile, mkdir, lstat } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { z } from 'zod';
@@ -97,6 +98,8 @@ export function decisionInput(action: string, work: Work, input: Record<string, 
   if (action === 'requirements') return { expectedPolicyRevision: work.policyRevision, criteria: work.criteria, dependencies: work.dependencies, plannedFiles: work.plannedFiles, exclusiveResources: work.exclusiveResources ?? [], producerProofs: work.producerProofs ?? [], ...input };
   if ((action === 'merge' || action === 'attest') && work.candidate) return { sha: work.candidate.sha, baseSha: work.candidate.baseSha, policyRevision: work.policyRevision, ...(action === 'attest' ? { result: 'pass', executed: 1, skipped: 0 } : {}), ...input };
   if (action === 'rework' || action === 'recover') return { previousWorkerStopped: true, ...input };
+  // The repair lane (GY-406) binds the exact head it may merge.
+  if (action === 'repair-merge' && work.candidate) return { sha: work.candidate.sha, ...input };
   return input;
 }
 /** With automatic merging off, the guarded merge runs only for a candidate an approver agent approved. */
@@ -598,7 +601,8 @@ export async function runAutonomyCommand(root: string, config: MasterConfig, id:
   const snapshotItem = async (key: string | undefined) => {
     if (!key) throw new Error(`Use master ${id} GY-N …`);
     const snapshot = await deps.coordinator('work-snapshot'), found = snapshot.work.find((work: Work) => work.id === key || work.key === key);
-    if (!found) throw new Error(`Unknown work item ${key}`); return { work: found as Work, now: Date.parse(snapshot.now) };
+    // A settled delivery is a summary in the snapshot (GY-422); a decision reads its whole document.
+    if (!found) throw new Error(`Unknown work item ${key}`); return { work: await wholeDocument(found, deps.coordinator), now: Date.parse(snapshot.now) };
   };
   const item = async (key: string | undefined) => (await snapshotItem(key)).work;
   const reason = (rest: string[]) => { const text = words(rest); if (!text) throw new Error(`master ${id} needs a REASON; every agent decision is attributable`); return text; };
