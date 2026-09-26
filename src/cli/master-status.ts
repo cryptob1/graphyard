@@ -1,5 +1,6 @@
 import { probeCandidateConflicts } from '../conflicts.js';
 import { mergeBatchSize } from '../master.js';
+import { optimisticGuardAttention, optimisticStatus } from '../master/optimistic-attention.js';
 import { humanOnlyStatusRow, type HumanRequestRow } from '../model/human-request.js';
 import { agentOwner, assessContainment, branchReport, buildMasterStatus, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, humanOwner, inspectWorkerCredentials, installationOwner, statusWorktreeInventory, managedRootStatus, mergeProtocolSkew, observeHerdrAgents, planWorktreeReclaim, profileConcurrency, reclaimIdleMs, snapshotWithClock, worktreesDirectory, type AttentionItem, type MasterConfig } from '../master.js';
 import { impliedScopeRequests, type Work } from '../model/work.js';
@@ -142,7 +143,8 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
       reports: 'bounded', reportBoundMs: dependencies.reportReadBoundMs, sections });
   // A merge pending on a head GitHub reports mergeable is named with the stalled items (GY-344).
   // A repair-lane merge stays in front of the master until a normal merge proves the merge path healthy (GY-406).
-  const stalledItems = [...derivedStalls, ...mergeStallAttention(snapshot), ...repairLaneAttention(snapshot.work)];
+  // Main red after an optimistic merge stays in front of the master until it is green (GY-500).
+  const stalledItems = [...derivedStalls, ...mergeStallAttention(snapshot), ...repairLaneAttention(snapshot.work), ...optimisticGuardAttention(snapshot.work)];
   // Exactly one component merges (GY-245): the loop, where one is installed or running, else the executors.
   const merger = installationMerger({ loop: { configured: !!setup.supervisor.installed, running: !!cycling?.running, autoMerge: master.autoMerge },
     declaration: executors.supervision.declaration, served: executors.presence.served });
@@ -179,7 +181,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     terminalDecisions: decisions.listed, throughput, unansweredDecisions: decisions.unanswered,
     // The commits no reviewer session has ever obtained a verdict on, with the dismissed review.
     unobtainableReviews: unobtainable.map(item => ({ work: item.subject, ...item.review })),
-    merger: { merger: merger.merger, detail: merger.detail }, autoMerge: master.autoMerge, mergeQueue: { batchSize: mergeBatchSize(master) }, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'each merge needs an approved merge decision: graphyard master decide GY-N merge REASON, approved by the approver agent',
+    merger: { merger: merger.merger, detail: merger.detail }, autoMerge: master.autoMerge, ...optimisticStatus(master, snapshot.work, mergeBatchSize(master)), mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'each merge needs an approved merge decision: graphyard master decide GY-N merge REASON, approved by the approver agent',
     versionSkew: mergeProtocolSkew(coordinator, cli), cli,
     reviewer: master.reviewer ? { identity: `${master.reviewer.slug}[bot]`, appId: master.reviewer.appId, profiles: master.reviewers.map(profile => profile.name), automatic: master.run.reviewerProfile ?? (master.reviewers.length === 1 ? master.reviewers[0].name : null),
       concurrency: master.reviewers.map(profile => ({ name: profile.name, agentName: profile.agentName, concurrency: profileConcurrency(profile) })) } : null,
@@ -233,3 +235,4 @@ export async function reportedAttention(root: string, master: MasterConfig, mast
   const attribute = (status: { work: any[]; attentionItems: AttentionItem[] }) => attributeAttention(ledgerRefusalAttention(status, snapshot.work).attentionItems, resources.readings);
   return { generatedFiles, overflow, interventions, releases, decisions, throughput, resources, derived, items, attribute, unavailable: sections.unavailable };
 }
+
