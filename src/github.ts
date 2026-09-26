@@ -15,6 +15,7 @@ import { foldDecisions } from './model/approval.js';
 import { normalMergeState, repairAudit, repairAuditEvent, repairLaneVerdict, type RepairAudit, type RepairLaneVerdict } from './master/repair-lane.js';
 export { CHECK_NAME };
 import { alreadyMergeableRefusal, approvalOfHead, baseRefreshNeeded, dismissedVerdict, enqueueRequestCurrent, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, pendingRestore, predictQueue, queuePlacement, queueRef, mergeCheckBranch, treeIdenticalPrediction, type GitHubMergeQueueState, type HeadForcePush, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type ObservedApproval, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread } from './merge-queue.js';
+import { MERGE_METHOD } from './protection.js';
 import { blockedFeatures, controlPlanePermissions, describeShortfall, permissionShortfalls, requiredPermissions, type PermissionFeature, type PermissionLevel, type PermissionShortfall } from './github-permissions.js';
 import { agentOwner, type AttentionItem } from './master/attention.js';
 import type { IntegrationJob } from './coordination.js';
@@ -551,8 +552,22 @@ const autoMergeMutation = `mutation($id: ID!, $head: GitObjectID!, $method: Pull
 /** An immediate merge bound to the exact head, for a pull request GitHub reports mergeable now (no queue); branch protection still applies. */
 const headBoundMergeMutation = `mutation($id: ID!, $head: GitObjectID!, $method: PullRequestMergeMethod!) { mergePullRequest(input: { pullRequestId: $id, expectedHeadOid: $head, mergeMethod: $method }) { pullRequest { id } } }`;
 const disableAutoMergeMutation = `mutation($id: ID!) { disablePullRequestAutoMerge(input: { pullRequestId: $id }) { pullRequest { id } } }`;
-/** The merge method auto-merge uses where the base branch has no queue; a queue's own ruleset sets its method. */
-const autoMergeMethod = () => (['MERGE', 'SQUASH', 'REBASE'] as const).find(method => method === process.env.GITHUB_MERGE_METHOD?.toUpperCase()) ?? 'MERGE';
+/**
+ * Why a merge group commit GitHub built must not carry the authorized head's verdict, or null when
+ * it may (GY-303). The queue builds one entry at a time with a merge commit, so the group of an
+ * authorized head is that head merged onto the base branch as GitHub holds it: parents [base, head].
+ * The base must be the one the head was authorized against — that commit, or one with its tree,
+ * which is how a speculative tip is carried onto the commit GitHub landed for the entry ahead
+ * (GY-100) — and the group must land the head's own tree, which it does because the head contains
+ * its bound base. A group on any other base, or landing any other content, lands what no check verified.
+ */
+export function mergeGroupRefusal(candidate: { sha: string; baseSha: string }, groupHead: string, group: { parents: string[]; tree: string | null; baseTree: string | null }, verified: { headTree: string; boundBaseTree: string }): string | null {
+  const short = (sha: string) => sha.slice(0, 12);
+  if (group.parents.length !== 2 || group.parents[1] !== candidate.sha) return `Merge group ${short(groupHead)} does not merge authorized head ${short(candidate.sha)} (parents ${group.parents.map(short).join(', ') || 'none'}); its check is withheld`;
+  if (group.parents[0] !== candidate.baseSha && group.baseTree !== verified.boundBaseTree) return `Merge group ${short(groupHead)} merges ${short(candidate.sha)} onto ${short(group.parents[0])}, which is neither its authorized base ${short(candidate.baseSha)} nor a commit with that base's tree; its check is withheld until the candidate is bound to the base GitHub merges onto`;
+  if (group.tree !== verified.headTree) return `Merge group ${short(groupHead)} lands tree ${group.tree ? short(group.tree) : 'unknown'}, not the verified tree ${short(verified.headTree)} of head ${short(candidate.sha)}; its check is withheld`;
+  return null;
+}
 export const installationSettingsUrl = (installationId: number) => `https://github.com/settings/installations/${installationId}`;
 export class GitHub {
   /** The wait between re-requests of a pull request whose mergeability GitHub has not computed yet. */
@@ -1785,7 +1800,7 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
    */
   async enqueuePullRequest(state: GitHubMergeQueueState, sha: string) {
     if (state.queue) return void await this.graphql(enqueueMutation, { id: state.pullRequestId, head: sha });
-    const variables = { id: state.pullRequestId, head: sha, method: autoMergeMethod() };
+    const variables = { id: state.pullRequestId, head: sha, method: MERGE_METHOD };
     if (mergeableNow(state)) return void await this.graphql(headBoundMergeMutation, variables);
     try { await this.graphql(autoMergeMutation, variables); }
     catch (error) {
@@ -1814,19 +1829,31 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     const body = { name: CHECK_NAME, head_sha: audit.head, status: 'completed', conclusion: 'success', external_id: work.id,
       output: { title: 'Repair lane: merge-path repair', summary: `Repair-lane merge of ${work.key} at ${audit.head}, decision ${audit.decision} (requested by ${audit.requestedBy}, approved by ${audit.approver}) for the fault in ${audit.fault}; bypassing a normal guarded merge ${audit.bypassed.state} since ${audit.bypassed.since}` } };
     await this.request(existing ? `/check-runs/${existing.id}` : '/check-runs', existing ? 'PATCH' : 'POST', body);
-    await this.graphql(headBoundMergeMutation, { id: state.pullRequestId, head: audit.head, method: autoMergeMethod() });
+    await this.graphql(headBoundMergeMutation, { id: state.pullRequestId, head: audit.head, method: MERGE_METHOD });
   }
   /**
    * GitHub's merge queue requires every required check on the merge group commit it builds, not only
    * on the pull request head. The authorized head's verdict is carried to that commit, and only
-   * while the head stays authorized: a withdrawn head is dequeued, which discards the group.
+   * while the head stays authorized: a withdrawn head is dequeued, which discards the group. It is
+   * carried only to a group that is the head merged onto its authorized base with the head's own
+   * tree (`mergeGroupRefusal`); otherwise nothing is published and the refusal is returned, so
+   * GitHub never lands content the head's checks did not cover.
    */
-  async publishGroupCheck(work: Work, groupHead: string) {
+  async publishGroupCheck(work: Work, groupHead: string): Promise<string | null> {
+    const candidate = work.candidate!;
+    const commit = await this.request(`/commits/${groupHead}`);
+    const group = { parents: Array.isArray(commit?.parents) ? commit.parents.map((parent: any) => String(parent?.sha)) : [], tree: typeof commit?.commit?.tree?.sha === 'string' ? commit.commit.tree.sha : null };
+    const onBoundBase = group.parents[0] === candidate.baseSha;
+    const [headTree, boundBaseTree, baseTree] = await Promise.all([this.commitTree(candidate.sha), this.commitTree(candidate.baseSha),
+      onBoundBase || !group.parents[0] ? null : this.commitTree(group.parents[0])]);
+    const refusal = mergeGroupRefusal(candidate, groupHead, { ...group, baseTree: onBoundBase ? boundBaseTree : baseTree }, { headTree, boundBaseTree });
+    if (refusal) return refusal;
     const existing = (await this.pages(`/commits/${groupHead}/check-runs?check_name=${encodeURIComponent(CHECK_NAME)}&filter=latest`, 'check_runs')).find(c => c.app.id === this.config.appId);
-    if (existing?.status === 'completed' && existing.conclusion === 'success' && existing.external_id === work.id) return;
+    if (existing?.status === 'completed' && existing.conclusion === 'success' && existing.external_id === work.id) return null;
     const body = { name: CHECK_NAME, head_sha: groupHead, status: 'completed', conclusion: 'success', external_id: work.id,
-      output: { title: 'All required gates passed', summary: `Merge group for ${work.key}: candidate ${work.candidate!.sha}; base ${work.candidate!.baseSha}; policy ${work.policyRevision}` } };
+      output: { title: 'All required gates passed', summary: `Merge group for ${work.key}: candidate ${candidate.sha}; base ${candidate.baseSha}; policy ${work.policyRevision}` } };
     await this.request(existing ? `/check-runs/${existing.id}` : '/check-runs', existing ? 'PATCH' : 'POST', body);
+    return null;
   }
   async publish(work: Work, forcedReason?: string, beforeWrite: () => Promise<void> = async () => {}) {
     if (!work.candidate) return;
@@ -1876,7 +1903,10 @@ export async function gateMerge(github: MergeGateClient, work: Work, request: Me
   try {
     if (action.kind === 'dequeue') await github.dequeuePullRequest(state);
     if (action.kind === 'enqueue') { await beforeWrite(); await github.enqueuePullRequest(state, work.candidate.sha); }
-    if (action.kind === 'hold' && state.mode === 'queued' && state.groupHead && state.head === work.candidate.sha && mergeAuthorized(work)) await github.publishGroupCheck(work, state.groupHead);
+    if (action.kind === 'hold' && state.mode === 'queued' && state.groupHead && state.head === work.candidate.sha && mergeAuthorized(work)) {
+      const refusal = await github.publishGroupCheck(work, state.groupHead);
+      if (refusal) return { action: { kind: 'hold', reason: refusal }, state };
+    }
   } catch (error) { return { action: { kind: 'hold', reason: `GitHub refused to ${action.kind} ${work.key}: ${error instanceof Error ? error.message : String(error)}` }, state }; }
   return { action, state };
 }
