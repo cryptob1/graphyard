@@ -5,7 +5,7 @@ import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
-import { Store } from '../src/store.js';
+import { Store, wakeJob } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { GitHub, firstObservationOwed, headClaimBand, observationClaimOrder, observationHeadCount, observationFreshnessMs, observationThroughput, processJob, waitsOnObservation } from '../src/github.js';
 import { evaluate, type Principal, type Work } from '../src/model.js';
@@ -197,6 +197,30 @@ test('unit:starved-job-claimed — a job due longer than the starvation bound is
   const early: string[] = [];
   for (let index = 0; index < 3; index++) early.push(byId.get((await store.takeJob([head.id, named.id], 1))!.work_id)!);
   assert.deepEqual(early, ['GY-HEAD', 'GY-NAMED', 'GY-STARVED'], 'within the bound the claim order is unchanged');
+});
+
+test('unit:wake-keeps-seniority — waking a job already due keeps its due time, so an item saved every minute still reaches the starvation bound', async () => {
+  await freshStore();
+  const base = sha('main-wake');
+  const head = item('GY-WHEAD', 530, sha(`head-wh-${base}`), base);
+  const named = item('GY-WNAMED', 531, sha(`head-wn-${base}`), base);
+  const busy = item('GY-BUSY', 532, sha(`head-wb-${base}`), base);
+  await insert([head, named, busy]);
+  for (const [work, ageMs] of [[head, 1_000], [named, 2_000], [busy, 10 * 60_000]] as [Work, number][])
+    await store.pool.query('INSERT INTO jobs(work_id,available_at) VALUES($1,$2)', [work.id, new Date(Date.now() - ageMs)]);
+  // Every save of the item wakes its job; a wake must not make a long-due job look freshly due.
+  await store.transaction(async db => { await wakeJob(db, busy.id); await wakeJob(db, busy.id); });
+  const due = (await store.pool.query('SELECT available_at FROM jobs WHERE work_id=$1', [busy.id])).rows[0].available_at as Date;
+  assert.ok(Date.now() - due.getTime() > 9 * 60_000, 'the wake kept the job due since ten minutes ago');
+  const byId = new Map([head, named, busy].map(work => [work.id, work.key]));
+  const claims: string[] = [];
+  for (let index = 0; index < 3; index++) claims.push(byId.get((await store.takeJob([head.id, named.id], 1))!.work_id)!);
+  assert.deepEqual(claims, ['GY-WHEAD', 'GY-BUSY', 'GY-WNAMED'], 'the woken job is still claimed as starved');
+  // A job scheduled for later is still made due now by a wake.
+  await store.pool.query("UPDATE jobs SET token=NULL,locked_until=NULL,available_at=now()+interval '5 minutes' WHERE work_id=$1", [named.id]);
+  await store.transaction(async db => { await wakeJob(db, named.id); });
+  const woken = (await store.pool.query('SELECT available_at FROM jobs WHERE work_id=$1', [named.id])).rows[0].available_at as Date;
+  assert.ok(woken.getTime() <= Date.now() + 1_000, 'a wake still brings a later job forward');
 });
 
 test('unit:parallel-observation-jobs — twenty due jobs whose observations each take a second are processed in about five seconds at concurrency four, and no item is ever observed twice at once', async t => {
