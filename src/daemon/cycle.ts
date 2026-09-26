@@ -15,7 +15,63 @@ import { dispatchStep } from './cycle-dispatch.js';
 import { decisionStep } from './cycle-decisions.js';
 import { deploymentStep, mergeStep, shepherdStep } from './cycle-delivery.js';
 import { faultStep } from './faults.js';
-import { Timings, withTimings } from '../master/timings.js';
+import { Timings, withTimings, withoutTimings } from '../master/timings.js';
+
+/** How many session launches the launcher runs at once when master.json sets no `run.launchConcurrency` (GY-616). */
+export const defaultLaunchConcurrency = 3;
+
+/**
+ * The session launcher beside the cycle (GY-616). A launch — a worker dispatch, an approver, a
+ * failover relaunch — creates a Herdr pane and registers a session, which under memory pressure
+ * costs eight seconds a call; run inline, a burst of them held every merge, decision and close
+ * behind it. The cycle hands the launcher a request and moves on: the launcher runs up to
+ * `concurrency` of them at once, queues the rest, and keeps what each one recorded for the next
+ * cycle to report. A request whose key is already queued or running is not made twice, and the
+ * resources a request holds (a worker profile) stay held from hand-off until it settles, so the
+ * next cycle does not give the same profile to another item.
+ */
+export class Launcher {
+  private readonly queue: { key: string; body: (sink: DaemonAction[]) => Promise<void> }[] = [];
+  private readonly flying = new Map<string, string[]>();
+  private readonly reports: DaemonAction[] = [];
+  private readonly waiters: (() => void)[] = [];
+  private running = 0;
+  constructor(public concurrency: number = defaultLaunchConcurrency) {}
+  /** Hands one launch over. False when a launch under the same key is already queued or running. */
+  submit(key: string, holds: string[], body: (sink: DaemonAction[]) => Promise<void>) {
+    if (this.flying.has(key)) return false;
+    this.flying.set(key, holds);
+    this.queue.push({ key, body });
+    this.pump();
+    return true;
+  }
+  /** Whether a launch under `key` is queued or running. */
+  busy(key: string) { return this.flying.has(key); }
+  /** The keys of every launch queued or running. */
+  keys() { return [...this.flying.keys()]; }
+  /** Every resource a queued or running launch holds. */
+  held() { return new Set([...this.flying.values()].flat()); }
+  /** Queued and running launches. */
+  get pending() { return this.flying.size; }
+  /** What the launches that settled since the last drain recorded, for the cycle to report. */
+  drain() { return this.reports.splice(0); }
+  /** Resolves once nothing is queued or running. */
+  idle() { return this.flying.size ? new Promise<void>(resolve => this.waiters.push(resolve)) : Promise.resolve(); }
+  private pump() {
+    while (this.running < Math.max(1, this.concurrency) && this.queue.length) {
+      const { key, body } = this.queue.shift()!, sink: DaemonAction[] = [];
+      this.running += 1;
+      // A launch outlives the cycle that handed it over, so its calls are not that cycle's timings.
+      void withoutTimings(() => Promise.resolve().then(() => body(sink))).catch(() => undefined).finally(() => {
+        this.running -= 1;
+        this.flying.delete(key);
+        this.reports.push(...sink);
+        if (!this.flying.size) for (const resolve of this.waiters.splice(0)) resolve();
+        this.pump();
+      });
+    }
+  }
+}
 
 /**
  * One coordination cycle: close finished sessions, reclaim the disk finished assignments hold,
@@ -23,16 +79,20 @@ import { Timings, withTimings } from '../master/timings.js';
  * guarded merge, verify the deployed SHA, and measure the stages. The cursor is persisted before and after every external action, so a kill between
  * them leaves an entry the next start reconciles against Graphyard instead of repeating.
  */
-export async function runCycle(config: MasterConfig, state: DaemonState, unbounded: DaemonEffects, now: () => number = Date.now) {
+export async function runCycle(config: MasterConfig, state: DaemonState, unbounded: DaemonEffects, now: () => number = Date.now, launcher?: Launcher) {
   // Every step this cycle runs is timed, and every external call beneath it of a second or more is
   // recorded against the step it was made in (GY-377): the recorder is found through the async
   // context, so the dispatcher running beside the cycle in the same process keeps its own calls.
   const timings = new Timings(now);
-  return withTimings(timings, () => cycle(config, state, unbounded, now, timings));
+  // Without a launcher the loop keeps across cycles (a single cycle, a test), the cycle is its own
+  // and settles its launches after each step that makes them, as one cycle always did: the step's
+  // launches run at once, bounded only by the profiles free for them, and are reported in the cycle.
+  return withTimings(timings, () => cycle(config, state, unbounded, now, timings, launcher ?? new Launcher(Number.POSITIVE_INFINITY), !launcher));
 }
 
-async function cycle(config: MasterConfig, state: DaemonState, unbounded: DaemonEffects, now: () => number, timings: Timings) {
-  const effects = serialPersist(boundedPersist(unbounded));
+async function cycle(config: MasterConfig, state: DaemonState, unbounded: DaemonEffects, now: () => number, timings: Timings, launcher: Launcher, settle: boolean) {
+  const effects = serialPersist(boundedPersist(unbounded), unbounded);
+  if (!settle) launcher.concurrency = config.run.launchConcurrency ?? defaultLaunchConcurrency;
   const startedAt = now();
   const read = await timings.step('snapshot', () => effects.snapshot());
   const readAt = now();
@@ -43,10 +103,16 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   // The same bound `master status` uses, from the read that produced this snapshot: containment
   // settlement may only be proposed while the local clock can be compared with the control plane.
   const clockOffset = { min: Math.round(startedAt - clock), max: Math.round(readAt - clock) };
-  const performed: DaemonAction[] = [];
+  // What the launches handed over by earlier cycles recorded since the last one is this cycle's to report.
+  const performed: DaemonAction[] = launcher.drain();
   // The merge queue batches by this loop's configuration; a failed publication is retried next cycle.
   if (effects.publishMergeBatchSize) await timings.step('merge queue', () => effects.publishMergeBatchSize!().catch(() => undefined));
+  // A launch still queued or running is not interrupted: its `started` entry is its own to settle,
+  // so it is kept out of the reconciliation a restart's leftovers get.
+  const inFlight = launcher.keys().flatMap(key => state.actions[key]?.state === 'started' ? [[key, state.actions[key]] as const] : []);
+  for (const [key] of inFlight) delete state.actions[key];
   const resumed = reconcilePendingActions(state, snapshot.work, clock);
+  for (const [key, action] of inFlight) state.actions[key] = action;
   if (resumed.length) { performed.push(...resumed); await timings.step('reconcile', () => effects.persist(state)); }
   // One item's failure is that item's failed action, never the cycle's (GY-187). Each step handles
   // its items one at a time inside this: a throw — a malformed field, an effect that failed outside
@@ -83,8 +149,27 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   /** The item a worker profile holds a live lease on, which a failure while handling that profile is recorded against. */
   const heldBy = (profile: WorkerProfile) => open.find(item => !!item.lease && item.lease.owner === profile.principal && Date.parse(item.lease.expiresAt) > clock) ?? null;
 
-  const cycle: Cycle = { config, state, effects, now, snapshot, clock, clockOffset, performed, isolate, agents, credentials, open, owns, heldBy, timings };
+  /**
+   * Hand one launch to the launcher and move on (GY-616). `key` is the cursor key the launch records
+   * its `started` entry under, so a launch in flight is neither repeated nor reconciled as
+   * interrupted; a throw is that launch's own failed action, reported with its result next cycle.
+   */
+  const launch = (kind: DaemonActionKind, item: Work | null, key: string, holds: string[], body: (sink: DaemonAction[]) => Promise<void>) => launcher.submit(key, holds, async sink => {
+    try { await body(sink); }
+    catch (error) {
+      const failed = `isolated:${kind}:${item?.id ?? key}`;
+      try {
+        sink.push(await record(state, failed, { kind, work: item?.key ?? null, principal: null, state: 'failed', epoch: item?.epoch ?? null,
+          detail: `The ${kind} launch for ${item?.key ?? key} threw, so only that launch failed: ${message(error)}`,
+          attempts: (state.actions[failed]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+      } catch { /* a cursor that cannot be written is the next cycle's failure */ }
+    }
+  });
+  const cycle: Cycle = { config, state, effects, now, snapshot, clock, clockOffset, performed, isolate, agents, credentials, open, owns, heldBy, timings, launcher, launch, detached: !settle };
+  /** A cycle that owns its launcher waits for what a step handed it; the loop's cycles never do. */
+  const settleLaunches = async () => { if (settle && launcher.pending) { await timings.step('launches', () => launcher.idle()); performed.push(...launcher.drain()); } };
   await timings.step('close', () => closeStep(cycle));
+  await settleLaunches();
 
   // A pane this cycle just closed frees its profile, so health is read after the closures.
   const health = profileHealth(config.workers, credentials, await timings.step('observe', () => effects.agents()), state, clock);
@@ -100,9 +185,11 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   spent('close');
 
   const capacity = await timings.step('dispatch', () => dispatchStep(cycle, health, assessments));
+  await settleLaunches();
   spent('dispatch');
 
   await timings.step('decisions', () => decisionStep(cycle, settled, assessments, capacity));
+  await settleLaunches();
   spent('decisions');
 
   await timings.step('reviews and proofs', () => shepherdStep(cycle));
@@ -116,6 +203,8 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   //     deployment step's clock: it reads the same snapshot and makes at most one call per class.
   await timings.step('faults', () => faultStep(cycle, assessments));
   spent('deployment');
+
+  await settleLaunches();
 
   // 8. Measure. Every cycle records stage p50/p90 whether or not it acted, what it could have
   //    acted on and how long the longest of those has waited, and the passage of every item it
@@ -150,11 +239,14 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
 /**
  * Cursor writes one at a time, in the order they were asked for. Launches run at once (GY-377), and
  * two writes racing each other could otherwise land the older state last — a kill right after would
- * leave a cursor missing the action the later write recorded.
+ * leave a cursor missing the action the later write recorded. Launches outlive their cycle (GY-616),
+ * so the order is kept per underlying effects, across cycles, not per cycle.
  */
-function serialPersist(effects: DaemonEffects): DaemonEffects {
-  let writing: Promise<unknown> = Promise.resolve();
-  const persist = (state: DaemonState) => { const write = writing.then(() => effects.persist(state)); writing = write.catch(() => {}); return write; };
+const writeChains = new WeakMap<object, { writing: Promise<unknown> }>();
+function serialPersist(effects: DaemonEffects, owner: object): DaemonEffects {
+  let chain = writeChains.get(owner);
+  if (!chain) writeChains.set(owner, chain = { writing: Promise.resolve() });
+  const persist = (state: DaemonState) => { const write = chain!.writing.then(() => effects.persist(state)); chain!.writing = write.catch(() => {}); return write; };
   return new Proxy(effects, { get: (target, property, receiver) => property === 'persist' ? persist : Reflect.get(target, property, receiver) });
 }
 
@@ -168,4 +260,10 @@ export interface Cycle {
   owns: (principal: string) => boolean; heldBy: (profile: WorkerProfile) => Work | null;
   /** This cycle's step and call timings (GY-377); a step may time a phase of its own inside it. */
   timings: Timings;
+  /** The launcher beside the cycle (GY-616): what is in flight, and what it holds. */
+  launcher: Launcher;
+  /** Hands a launch to the launcher without waiting on it; false when one under `key` is already in flight. */
+  launch: (kind: DaemonActionKind, item: Work | null, key: string, holds: string[], body: (sink: DaemonAction[]) => Promise<void>) => boolean;
+  /** Whether launches outlive this cycle (the loop's launcher), or are settled within it (a cycle run on its own). */
+  detached: boolean;
 }
