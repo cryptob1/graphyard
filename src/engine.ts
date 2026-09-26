@@ -1626,12 +1626,16 @@ export class Engine {
       ledger.push({ kind: 'escalation.auto-settled', details: { trigger: settled.escalation.trigger, epoch: settled.epoch, escalation: settled.escalation, note: settled.note, cause: settled.cause, attestation: settled.attestation, submission: work.submission } });
     }
     const queuedBefore = work.queue?.sequence ?? null;
+    const dissolvedBefore = work.queue?.batchDissolved ?? null;
     this.evaluate(work, all, now);
     // A queue entry the evaluation derived out — here, a merged entry whose reconciliation a
     // standing refusal already answered (GY-94) — is recorded as an ejection, and the entries
     // behind it are woken to predict against the real base.
     const ejected = queuedBefore !== null && !work.queue && work.queueEjection?.sequence === queuedBefore;
     if (ejected) ledger.push({ kind: 'queue.ejected', details: { sequence: queuedBefore, reason: work.queueEjection!.reason } });
+    // A stuck batch the evaluation dissolved (GY-506) is recorded on the ledger once, when it happened.
+    const dissolved = work.queue?.batchDissolved ?? null;
+    if (dissolved && JSON.stringify(dissolved) !== JSON.stringify(dissolvedBefore)) ledger.push({ kind: 'queue.batch-dissolved', details: { ...dissolved } });
     // Every violation found at the start of the tick is repaired by the evaluation above — the
     // derivation names its successor and the queue opens its row — and the ledger says so.
     if (stranded) ledger.push(livenessRepairEntry(stranded, work, all, now));
@@ -1656,6 +1660,7 @@ export class Engine {
       demand(work.workspaces.some(w => w.epoch === work.submission!.epoch && w.branch === observation.candidate.branch), 'PR branch does not match the assigned workspace');
       if (work.stage === 'done') return work;
       const queuedBefore = work.queue?.sequence ?? null;
+      const dissolvedBefore = work.queue?.batchDissolved ?? null;
       let authorizedSnapshot: Work | null = null; let authorizationRevision: number | null = null;
       // The repository-clock instant at which this authorization's evidence was judged
       // applicable. The provider merge timestamp cannot stand in for it: the two clocks
@@ -1866,6 +1871,11 @@ export class Engine {
         await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'queue.ejected',
           JSON.stringify({ details: { sequence: queuedBefore, reason: work.queueEjection.reason, ...(refusedReconciliation ? { decision: refusedReconciliation.decision, mergeSha: observation.mergeSha } : {}), at: now.toISOString() } })]);
         for (const behind of nextQueueEntries(all, work.id, Math.max(mergeBandQueueDepth, this.mergeBatchSize))) await wakeJob(db, behind.id);
+      }
+      // A stuck batch the evaluation dissolved (GY-506) is recorded on the ledger once, when it happened.
+      const dissolved = work.queue?.batchDissolved ?? null;
+      if (dissolved && JSON.stringify(dissolved) !== JSON.stringify(dissolvedBefore)) {
+        await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'queue.batch-dissolved', JSON.stringify({ details: { ...dissolved } })]);
       }
       await this.recordDispatch(db, work, now);
       await save(db, work, 'github', 'github.observed', now);

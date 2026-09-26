@@ -196,7 +196,7 @@ export class Store {
     return (await this.pool.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
   }
   async workSnapshot(): Promise<{ work: Work[]; now: string; jobs: IntegrationJob[] }> {
-    const row = (await this.pool.query("SELECT COALESCE(jsonb_agg(document ORDER BY number), '[]'::jsonb) AS work, statement_timestamp() AS observed_at, (SELECT COALESCE(jsonb_agg(jsonb_build_object('work_id',work_id,'available_at',available_at,'locked_until',locked_until,'error',error,'held_until',held_until)), '[]'::jsonb) FROM jobs) AS jobs FROM work_items")).rows[0];
+    const row = (await this.pool.query("SELECT COALESCE(jsonb_agg(document ORDER BY number), '[]'::jsonb) AS work, statement_timestamp() AS observed_at, (SELECT COALESCE(jsonb_agg(jsonb_build_object('work_id',work_id,'available_at',available_at,'locked_until',locked_until,'error',error,'held_until',held_until,'deferred_reason',deferred_reason,'unobserved',unobserved)), '[]'::jsonb) FROM jobs) AS jobs FROM work_items")).rows[0];
     return { work: row.work, now: row.observed_at.toISOString(), jobs: row.jobs };
   }
   /**
@@ -218,7 +218,7 @@ export class Store {
         FROM (SELECT w.number, ${detoasted('w.document')} AS document FROM work_items w WHERE NOT EXISTS (SELECT 1 FROM work_index i WHERE i.id = w.id AND i.settled) OFFSET 0) d
         CROSS JOIN ${coordinationRelevance(coordinationTail)} CROSS JOIN LATERAL (SELECT ${coordinationDocumentSql} AS document) x`)).rows;
       const rows = [...settled, ...live].sort((a, b) => Number(a.number) - Number(b.number));
-      const meta = (await client.query("SELECT statement_timestamp() AS observed_at, (SELECT COALESCE(jsonb_agg(jsonb_build_object('work_id',work_id,'available_at',available_at,'locked_until',locked_until,'error',error,'held_until',held_until)), '[]'::jsonb) FROM jobs) AS jobs")).rows[0];
+      const meta = (await client.query("SELECT statement_timestamp() AS observed_at, (SELECT COALESCE(jsonb_agg(jsonb_build_object('work_id',work_id,'available_at',available_at,'locked_until',locked_until,'error',error,'held_until',held_until,'deferred_reason',deferred_reason,'unobserved',unobserved)), '[]'::jsonb) FROM jobs) AS jobs")).rows[0];
       await client.query('COMMIT');
       const trimmed = new Map<string, CoordinationTrim>(rows.map(row => [row.document.id, row.trimmed as CoordinationTrim]));
       return { work: rows.map(row => row.document), now: meta.observed_at.toISOString(), jobs: meta.jobs, trimmed };
@@ -242,28 +242,23 @@ export class Store {
     return result.rows[0] as { work_id: string; token: string; attempts: number; woken: boolean } | undefined;
   }
   /**
-   * Release a job with its next due time. A clean run comes back at the observation cadence its
-   * item's state earned (`availableInMs`, GY-117; twenty seconds when the caller sets none), a
-   * failed one after 45 seconds, and a concurrency retry after two. A webhook that arrived during
-   * the run has moved the generation, and the job comes back at once whatever was asked.
+   * Release a job with its next due time: a clean run at its observation cadence (`availableInMs`, GY-117), a failure after 45 seconds, a retry after two, a woken run at once.
    */
-  async finishJob(id: string, token: string, error?: string, retry = false, availableInMs?: number) {
+  async finishJob(id: string, token: string, error?: string, retry = false, availableInMs?: number, observed?: boolean) {
     const scheduled = availableInMs === undefined ? null : String(Math.max(0, Math.floor(availableInMs)));
-    await this.pool.query(`UPDATE jobs SET token=NULL,locked_until=NULL,error=$3,held_until=NULL,held_reason=NULL,held_on=NULL,refusals=CASE WHEN $3::text IS NULL THEN 0 ELSE refusals END,
-      available_at=now()+ CASE WHEN generation<>claimed_generation THEN interval '0 seconds' WHEN $4::boolean THEN interval '2 seconds' WHEN $5::text IS NOT NULL THEN ($5::text||' milliseconds')::interval WHEN $3::text IS NULL THEN interval '20 seconds' ELSE interval '45 seconds' END
-      WHERE work_id=$1 AND token=$2 AND locked_until>clock_timestamp()`, [id, token, error ?? null, retry, scheduled]);
+    await this.pool.query(`UPDATE jobs SET token=NULL,locked_until=NULL,error=$3,held_until=NULL,held_reason=NULL,held_on=NULL,deferred_reason=NULL,refusals=CASE WHEN $3::text IS NULL THEN 0 ELSE refusals END, unobserved=CASE WHEN $6::boolean IS TRUE THEN 0 WHEN $6::boolean IS FALSE THEN unobserved+1 ELSE unobserved END,
+      available_at=now()+ CASE WHEN generation<>claimed_generation THEN interval '0 seconds' WHEN $4::boolean THEN interval '2 seconds' WHEN $5::text IS NOT NULL THEN ($5::text||' milliseconds')::interval WHEN $3::text IS NULL THEN interval '20 seconds' ELSE interval '45 seconds' END WHERE work_id=$1 AND token=$2 AND locked_until>clock_timestamp()`, [id, token, error ?? null, retry, scheduled, observed ?? null]);
   }
   /**
    * Parks a job that needs a permission the App does not hold. Webhook wakeups move
    * `available_at` but never lift a hold; only a preflight that sees a different installation
    * or the hold's own bounded expiry lets the job run again, so a missing permission costs one
-   * attempt per hold. `heldOn` is the installation the hold was decided against
-   * (`installationFingerprint`), so a preflight that merely re-reads the same installation
-   * does not release it.
+   * attempt per hold. `heldOn` is the installation the hold was decided against (`installationFingerprint`),
+   * so re-reading the same installation does not release it. `observed` counts the hold for the GY-506 count.
    */
-  async holdJob(id: string, token: string, reason: string, holdMs: number, heldOn: string | null = null) {
-    await this.pool.query(`UPDATE jobs SET token=NULL,locked_until=NULL,error=$3,held_reason=$3,held_on=$5,held_until=now()+($4::text||' milliseconds')::interval,available_at=now()+($4::text||' milliseconds')::interval
-      WHERE work_id=$1 AND token=$2 AND locked_until>clock_timestamp()`, [id, token, reason, String(Math.max(0, Math.floor(holdMs))), heldOn]);
+  async holdJob(id: string, token: string, reason: string, holdMs: number, heldOn: string | null = null, observed: boolean = false) {
+    await this.pool.query(`UPDATE jobs SET token=NULL,locked_until=NULL,error=$3,held_reason=$3,held_on=$5,held_until=now()+($4::text||' milliseconds')::interval,available_at=now()+($4::text||' milliseconds')::interval,deferred_reason=NULL, unobserved=CASE WHEN $6::boolean IS TRUE THEN 0 WHEN $6::boolean IS FALSE THEN unobserved+1 ELSE unobserved END
+      WHERE work_id=$1 AND token=$2 AND locked_until>clock_timestamp()`, [id, token, reason, String(Math.max(0, Math.floor(holdMs))), heldOn, observed]);
   }
   /** A permission refusal retries at the ordinary cadence a bounded number of times, then holds. */
   async refuseJob(id: string, token: string, reason: string, limit: number, holdMs: number, heldOn: string | null = null) {
@@ -290,10 +285,15 @@ export class Store {
   async heldJobs() {
     return (await this.pool.query('SELECT work_id,held_reason,held_until FROM jobs WHERE held_until>now() ORDER BY held_until')).rows as { work_id: string; held_reason: string; held_until: Date }[];
   }
-  async deferJob(id: string, token: string, until: string) {
-    await this.pool.query(`UPDATE jobs SET token=NULL,locked_until=NULL,error=NULL,
-      available_at=CASE WHEN generation<>claimed_generation THEN now() ELSE $3::timestamptz END
-      WHERE work_id=$1 AND token=$2 AND locked_until>clock_timestamp()`, [id, token, until]);
+  /** A concurrency retry: back within seconds, never an operator error, never silent (GY-506). */
+  async retryJob(id: string, token: string, reason: string, observed: boolean) {
+    await this.pool.query(`UPDATE jobs SET token=NULL,locked_until=NULL,error=NULL,held_until=NULL,held_reason=NULL,held_on=NULL,deferred_reason=$3,refusals=0, unobserved=CASE WHEN $4::boolean IS TRUE THEN 0 WHEN $4::boolean IS FALSE THEN unobserved+1 ELSE unobserved END, available_at=now()+interval '2 seconds'
+      WHERE work_id=$1 AND token=$2 AND locked_until>clock_timestamp()`, [id, token, reason, observed]);
+  }
+  /** Reschedules past a deferral, keeping its reason on the job record (GY-506). */
+  async deferJob(id: string, token: string, until: string, reason?: string, observed: boolean = false) {
+    await this.pool.query(`UPDATE jobs SET token=NULL,locked_until=NULL,error=NULL,deferred_reason=$4, unobserved=CASE WHEN $5::boolean IS TRUE THEN 0 WHEN $5::boolean IS FALSE THEN unobserved+1 ELSE unobserved END, available_at=CASE WHEN generation<>claimed_generation THEN now() ELSE $3::timestamptz END
+      WHERE work_id=$1 AND token=$2 AND locked_until>clock_timestamp()`, [id, token, until, reason ?? null, observed]);
   }
   /**
    * Whether GitHub's webhook is actually delivering: the last verified delivery recorded and the
