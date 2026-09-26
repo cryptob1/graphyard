@@ -47,11 +47,9 @@ export { approveScopeRequest } from './master-scope.js';
 /** A merge pending past five minutes on a head GitHub reports mergeable, with no refusal (GY-344). */
 export const mergeStallAttention = (snapshot: { work: Work[]; now: string }): AttentionItem[] =>
   mergeStalls(snapshot.work, Date.parse(snapshot.now)).map(stall => ({ subject: stall.key, text: stall.text, ...agentOwner('master', stall.next) }));
-// Observation throughput and the queue head's lag live beside the observation schedule they read
-// (src/github.ts); the report reads them from here, as do the tests.
+// Observation throughput and the queue head's lag live in src/github.ts; read here as before.
 export { observationThroughputStatus };
-// The attention builders live beside each other in `status-attention.ts`; the report reads them
-// from here, as does everything that was reading them from here before the split.
+// The attention builders live in status-attention.ts; the report reads them from here.
 export { approverLaunchAttention, nameOrphanSupervisors, orphanSupervisorAttention, stalledItemAttention, supervisorReclaimCommand } from './status-attention.js';
 export { humanNeededAttention, needsHumanActions, scopeRequestAttention } from './owed-report.js';
 export { stalledActionAttention } from './stalled-actions.js';
@@ -96,10 +94,8 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   // A dispatcher failing its tick launches nothing; it is named before the requests it is not launching.
   const dispatchItems = dispatchFailureAttention(dispatch);
   const containment = await timedStep('containment', () => assessContainment(snapshot.work, { hostId: master.hostId, observedAt: snapshot.now, clockOffset }));
-  // Disk is reported from the host, not from the cursor: the loop may be stopped, and the volume
-  // filling is exactly the condition that stops it. The plan is the one `master reclaim` computes,
-  // over the inventory the loop's reclaim step cached (GY-360): walking a thousand trees here, on
-  // every call, is what made status take minutes.
+  // Disk is reported from the host, not the cursor: the loop may be stopped, and a filling volume
+  // is what stops it. The plan is `master reclaim`'s, over the inventory its step cached (GY-360).
   const worktrees = worktreesDirectory(root);
   const inventory = await timedStep('worktrees', () => statusWorktreeInventory(root).catch(() => ({ entries: [], at: null, cached: false }))), trees = inventory.entries, reclaimPlan = planWorktreeReclaim(trees, snapshot.work, { now: Date.now(), idleMs: reclaimIdleMs(master) });
   const disk = diskPressure(worktrees, await freeBytes(worktrees), diskThresholdBytes(master), reclaimPlan);
