@@ -1,7 +1,5 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
@@ -10,11 +8,12 @@ import { shippingPulse, SHIPPING_PULSE_LIMIT } from '../src/shipping-pulse.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { ProductionDelivery, PRODUCTION_CLOCK_PRECISION_MS } from '../src/production-delivery.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 let database: EmbeddedPostgres; let store: Store;
 before(async () => {
   const port = Number(process.env.GRAPHYARD_PULSE_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 9);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-pulse-test-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('pulse-test'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_pulse_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_pulse_test`); await store.init();
 });

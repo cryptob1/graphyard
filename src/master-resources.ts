@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 import { agentOwner, atomicPrivateWrite, closeHerdrPane, diskThresholdBytes, isProfileSession, neverStartedReason, privateFile, profileConcurrency, worktreesDirectory, type AttentionItem, type HerdrAgent, type MasterConfig } from './master.js';
 import { pinnedSessionRecords, readReviewLedger, sessionLedgerBound, SessionLedgerFullError, sessionLedgerRefusal, terminalSessionStates, updateReviewLedger, type ReviewRecord } from './reviewer.js';
 import { readProducerLedger, saveProducerLedger, type ProducerRecord } from './producer.js';
-import { describeTmpReclaim, reclaimTmpDirectories, tmpReclaimLimitPerCycle, tmpReclaimWorkMsPerCycle } from './tmp-reclaim.js';
+import { describeTmpReclaim, reclaimTmpDirectories, tmpReclaimLimitPerCycle, tmpReclaimWorkMsPerCycle, type TmpReclaimReport } from './tmp-reclaim.js';
 import type { Work } from './model.js';
 
 /**
@@ -447,6 +447,27 @@ export async function readReclaimReports(root: string): Promise<ResourceReclaimR
  * or a running session needs, and it never touches a worker's pane: the loop's first step closes
  * those once their lease ends.
  */
+/** The loop's /tmp pass in flight, and the report of the last one to finish, not yet recorded. */
+let tmpPass: Promise<void> | null = null;
+let tmpFinished: TmpReclaimReport | null = null;
+/**
+ * Hand over the last finished /tmp pass's report, if one is waiting, and start the next pass when
+ * none is running. The pass is never awaited here: its bounded work runs beside the cycle.
+ */
+export function takeTmpReclaim(run: () => Promise<TmpReclaimReport> = () => reclaimTmpDirectories({ limit: tmpReclaimLimitPerCycle, workMs: tmpReclaimWorkMsPerCycle })): TmpReclaimReport | null {
+  const finished = tmpFinished;
+  tmpFinished = null;
+  if (!tmpPass) {
+    tmpPass = run()
+      .then(report => { tmpFinished = report; })
+      .catch(error => { tmpFinished = { at: new Date().toISOString(), scanned: 0, removed: [], bytes: 0, kept: 0, errors: [error instanceof Error ? error.message : String(error)] }; })
+      .finally(() => { tmpPass = null; });
+  }
+  return finished;
+}
+/** Wait for the /tmp pass in flight, if any: for a caller that must see it finish. */
+export const settleTmpReclaim = async () => { await tmpPass; };
+
 export async function reclaimResources(root: string, config: Pick<ProfileSet, 'reviewers' | 'producers'>, observed: { work: Work[]; agents: HerdrAgent[] | null }, options: { now?: number; closePane?: (pane: string) => void | Promise<void> } = {}): Promise<ResourceReclaimReport> {
   const now = options.now ?? Date.now();
   const close = options.closePane ?? (pane => { closeHerdrPane(pane); });
@@ -529,12 +550,15 @@ export async function reclaimResources(root: string, config: Pick<ProfileSet, 'r
   // The host's own temporary directories (GY-421): a bounded pass removes what earlier runs left —
   // a live owner keeps its directory, a dead owner's goes whatever its age, and an ownerless one
   // goes once it is older than `tmpReclaimMinAgeMs` and no live process holds it open. Both bounds
-  // (count and wall-clock work) hold per cycle, so a backlog drains without ever stalling a cycle.
-  try {
-    const tmp = await reclaimTmpDirectories({ now, limit: tmpReclaimLimitPerCycle, workMs: tmpReclaimWorkMsPerCycle });
+  // (count and wall-clock work) hold per pass, and the pass runs beside the cycle rather than in
+  // it: a host with thousands of leftovers never stalls a cycle, and each cycle records what the
+  // last finished pass freed. Ages are judged on the host's real clock, never the cycle's `now`,
+  // which a caller may set anywhere: a directory is old only when it truly is.
+  const tmp = takeTmpReclaim();
+  if (tmp) {
     report.tmp = { removed: tmp.removed.length, bytes: tmp.bytes };
     report.errors.push(...tmp.errors.map(error => `Tmp reclaim: ${error}`));
-  } catch (error) { report.errors.push(`Tmp reclaim: ${error instanceof Error ? error.message : String(error)}`); }
+  }
   const took = !!(report.reaped.review || report.reaped.producer || report.closed.length || report.released.length || report.tmp.removed || report.errors.length);
   if (took || JSON.stringify(seen) !== JSON.stringify(file.seen)) {
     try { await atomicPrivateWrite(resourceReportFile(root), { version: 1, reports: (took ? [...file.reports, report] : file.reports).slice(-retainedReports), seen }); }

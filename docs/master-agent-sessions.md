@@ -5,13 +5,13 @@
 
 Add a worker with `master worker add FILE` from a template ([Codex](../examples/master/codex-worker.json), [Claude](../examples/master/claude-worker.json), [Cursor](../examples/master/cursor-worker.json), [Muse](../examples/master/muse-worker.json)); it points to a mode-0600 token file outside every worktree.
 
-Add reviewers with `master reviewer setup` and `master reviewer add FILE` ([Claude](../examples/master/claude-reviewer.json), [opencode](../examples/master/opencode-reviewer.json)); the loop launches each review; `master review GY-N [PROFILE]` recovers a refused launch or unsatisfied attempt.
+Add reviewers with `master reviewer setup` and `master reviewer add FILE` ([Claude](../examples/master/claude-reviewer.json), [opencode](../examples/master/opencode-reviewer.json)); `master review GY-N [PROFILE]` recovers a refused launch or unsatisfied attempt.
 
 `master producer replace FILE`, `master producer remove NAME` and `master reviewer remove NAME` apply next tick; `setup.attention` reports launch-stopping setup.
 
 ### Session handles
 
-`master status` `sessions` lists each handle (runtime, host, pane, transcript, attach command).
+`master status` `sessions` lists each handle (runtime, host, pane, transcript, attach).
 
 ### Approval modes
 
@@ -25,7 +25,7 @@ Codex's sandbox gets `.git/worktrees/GY-N-E` and the shared `.git` via `--add-di
 
 A profile's `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`) in failover order, unless the [agent registry](onboarding.md#configure-the-fleet) defines the role. A launch takes the first account logged in and under `run.quotaCeilingPercent` (default 95), else **fails over** to the next (`dispatch.accounts`).
 
-On a mid-session limit notice the loop commits a worker's changes as unpushed `WIP:`, records `capacity.exhausted` (not `lease-loss`) and relaunches on the next account; a role with none left pauses until the first reset.
+On a mid-session limit notice (provider-authored, never agent text) the loop commits a worker's changes as unpushed `WIP:`, records `capacity.exhausted` (not `lease-loss`) and relaunches on the next account; a role with none left pauses until the first reset.
 
 ## How a session starts
 
@@ -45,7 +45,7 @@ The typed line is bounded at **512 bytes** whatever the request is.
 
 #### The start bound reads the pane
 
-The runtime is **ready** when Herdr reports it working, idle or done with no prompt on screen, or its banner shows (`the claude runtime is on screen while Herdr reports it unknown`). Ready within **60 seconds** (`run.launchStartSeconds`) means started, logged with its duration; one still starting gets up to **120 seconds** (`started.extended`). Otherwise it is refused naming the case and the pane's last non-empty line, never Herdr's own `agent_not_found`: `the claude runtime never started within 60 s in pane w1V:pR6 (command still echoing)`, `… was still starting after 120 s` or `… is blocked before it is ready`; retried as `Automatic producer launch for GY-N refused 1 time(s): …`. A failed launch closes its pane, stopping any supervisor first, then releases its claim.
+The runtime is **ready** when Herdr reports it working, idle or done with no prompt on screen, or its banner shows (`the claude runtime is on screen while Herdr reports it unknown`). Ready within **60 seconds** (`run.launchStartSeconds`) means started; one still starting gets up to **120 seconds** (`started.extended`). Otherwise it is refused naming the case and the pane's last non-empty line, never Herdr's own `agent_not_found`: `the claude runtime never started within 60 s in pane w1V:pR6 (command still echoing)`, `… was still starting after 120 s` or `… is blocked before it is ready`; retried as `Automatic producer launch for GY-N refused 1 time(s): …`. A failed launch closes its pane, stopping any supervisor first, then releases its claim.
 
 #### First-run consent prompts
 

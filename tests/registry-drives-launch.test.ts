@@ -1,8 +1,7 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { chmod, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { delimiter, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { FleetClient, FleetSelection } from '../src/fleet.js';
@@ -13,6 +12,7 @@ import { registryHeadlessLaunch } from '../src/runner/roles.js';
 import { clearRuns } from '../src/runner/registry.js';
 import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
 import type { FilesystemProbe } from '../src/install/worktree-root.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-170 AC-2: each registry role carries its launch policy — flags such as a permission mode or
@@ -29,7 +29,7 @@ const coordinatorToken = 'coordinator-token-'.padEnd(40, 'x'), approverToken = '
 const coordinatorStatus = (async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }))) as typeof fetch;
 const durable: FilesystemProbe = async path => ({ probed: path, volatile: null, freeBytes: 200e9 });
 const decision = '0e3b2c1a-7f00-4a70-8170-000000000170';
-const scratch = await realpath(await mkdtemp(join(tmpdir(), 'graphyard-registry-launch-')));
+const scratch = await realpath(await temporaryDirectory('registry-launch'));
 after(async () => { clearRuns(); await rm(scratch, { recursive: true, force: true }); });
 
 /** The control plane's registry, in memory: mutations and choices through the same functions the server runs. */

@@ -4,6 +4,7 @@ import { CODEX_APP_ID, CODEX_USER_ID } from '../src/codex-review.js';
 import { GitHub, CHECK_NAME, scopeLookupBudget, compareFileCap } from '../src/github.js';
 import { Refusal, SpeculativeConflict, type Work } from '../src/model.js';
 import type { QueuePlacement, QueueSpeculation } from '../src/merge-queue.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 // @ts-expect-error Dependency-free inspection script.
 import { evaluateEnforcement } from '../scripts/verify-enforcement.mjs';
 const head = 'a'.repeat(40), base = 'b'.repeat(40);
@@ -530,9 +531,9 @@ test('enforcement inspection revalidates every protected required context, not o
 });
 
 test('the enforcement CLI judges observation freshness by server time read after the final re-reads', async () => {
-  const { mkdtemp, writeFile, rm } = await import('node:fs/promises');
-  const { tmpdir } = await import('node:os'); const { join } = await import('node:path'); const { spawnSync } = await import('node:child_process');
-  const dir = await mkdtemp(join(tmpdir(), 'graphyard-enforcement-'));
+  const { writeFile, rm } = await import('node:fs/promises');
+  const { join } = await import('node:path'); const { spawnSync } = await import('node:child_process');
+  const dir = await temporaryDirectory('enforcement');
   try {
     const started = '2026-09-17T05:00:00.000Z', finished = '2026-09-17T05:02:30.000Z';
     const work = { key: 'GY-1', revision: 7, stage: 'merge', policyRevision: 1, policy: { review: true, reviewProvider: 'codex', checks: ['test'] },

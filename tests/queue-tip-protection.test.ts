@@ -1,7 +1,6 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
@@ -12,6 +11,7 @@ import { baseRefreshConflict, branchContamination, currentRestore, decideIdentit
 import { CHECK_NAME, Refusal, carriedApproval, exactApproval, type Evidence, type Principal, type Work } from '../src/model.js';
 import { branchReport, buildMasterStatus, masterConfigSchema, repostCarriedApproval, runAutonomyCommand, type MasterConfig } from '../src/master.js';
 import { readMasterGuide } from './helpers/master-guide.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // Each test is named for the proof it produces, so acceptance evidence maps to one executed
 // case per required proof (GY-127).
@@ -147,7 +147,7 @@ let database: EmbeddedPostgres, store: Store, engine: Engine;
 let pr = 700;
 before(async () => {
   const port = Number(process.env.GRAPHYARD_QUEUE_TIP_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 33);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-queue-tip-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('queue-tip'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'owner/project'); engine.controlPlaneAppId = 1234;
@@ -602,7 +602,7 @@ test('integration:contaminated-branch-repaired — a branch already carrying ano
   repo.dismiss(work.submission!.pr, mergeBaseMessage, null, 'owner');
   assert.match(buildMasterStatus({ work: [await reload(work), foreign], now: new Date().toISOString() }, [], []).work.find(entry => entry.key === work.key)!.attention!, /A restore is requested \(repair\) and runs on the next reconciliation/);
   // `master repair` is that request: it posts the command with the coordinator credential and refuses a clean branch.
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-master-')), credentialFile = join(root, 'coordinator.token');
+  const root = await temporaryDirectory('master'), credentialFile = join(root, 'coordinator.token');
   await writeFile(credentialFile, 'coordinator-token-'.padEnd(48, 'x'), { mode: 0o600 });
   const config = masterConfigSchema.parse({ version: 1, url: 'http://control-plane.test', credentialFile, cliPath: '/opt/graphyard/cli', repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'host-a', masterAgentName: 'graphyard-master' });
   const requests: { url: string; init: any }[] = [];

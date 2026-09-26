@@ -1,8 +1,7 @@
 import { before, after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -14,6 +13,7 @@ import { masterConfigSchema, mergeExecutor, type MasterConfig } from '../src/mas
 import { mergeQueueRuleset, mergeQueueRulesetName, protectionPlan, applyProtection } from '../src/protection.js';
 import { queueRef, type MergeEnqueueRequest, type QueueSpeculation } from '../src/merge-queue.js';
 import type { Observation, Principal, Work } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-258: GitHub executes merges; Graphyard only gates them. The control plane's App publishes
 // `Graphyard / merge` on the exact head and puts an authorized, requested pull request in GitHub's
@@ -145,7 +145,7 @@ async function sources(directory: string): Promise<string[]> {
 }
 
 test('unit:no-graphyard-merge-call — the merge step requests the merge and GitHub performs it: no code path calls the GitHub merge endpoint', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-merge-delegation-'));
+  const directory = await temporaryDirectory('merge-delegation');
   try {
     const credentialFile = join(directory, 'coordinator.token');
     await writeFile(credentialFile, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
@@ -246,7 +246,7 @@ let pg: EmbeddedPostgres, store: Store, engine: Engine;
 let serial = 0;
 before(async () => {
   const port = Number(process.env.GRAPHYARD_MERGE_DELEGATION_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 258);
-  pg = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-merge-delegation-pg-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('merge-delegation-pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('merge_delegation_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/merge_delegation_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'test/repository');

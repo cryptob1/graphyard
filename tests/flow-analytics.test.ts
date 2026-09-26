@@ -1,7 +1,5 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
@@ -21,6 +19,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import InsightsFlow, { LandedPerDay, WhereTimeGoes, flowNow } from '../web/pages/insights-flow.js';
 import { groupOf } from '../web/groups.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const operator: Principal = { id: 'operator', role: 'admin' };
 const worker: Principal = { id: 'worker-a', role: 'worker' };
@@ -36,7 +35,7 @@ let http: ReturnType<typeof server>; let url: string; let pullRequest = 500;
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_FLOW_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 8);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-flow-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('flow'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_flow');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_flow`);
   await store.init();

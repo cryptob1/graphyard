@@ -1,7 +1,6 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
@@ -21,6 +20,7 @@ import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-da
 import { stalledActionAttention } from '../src/cli/master-status.js';
 import { attributeAttention, resourceStatus } from '../src/master-status.js';
 import { dispatchRefusal, loadedRevision, planeVerdict, finishedSessionGraceMs, stuckSessionMs, ledgerRetentionMs, readReclaimReports, readResources, reclaimResources, registryGaps, resourceIds, resourceRegistry, reviewLedgerBound, type ResourceInputs } from '../src/master-resources.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-132: Graphyard observes its own resources.
@@ -50,7 +50,7 @@ const record = (index: number, overrides: Partial<ReviewRecord> = {}): ReviewRec
 /** A terminal record an open request still reads: pinned, so it counts against the bound (GY-131). */
 const pinned = (index: number) => record(index, { requestId: randomUUID() });
 async function scratchRoot() {
-  const directory = await mkdtemp(join(tmpdir(), 'gy-res-'));
+  const directory = await temporaryDirectory('gy-res');
   await mkdir(join(directory, '.graphyard'), { recursive: true, mode: 0o700 });
   return directory;
 }
@@ -103,7 +103,7 @@ const credential = (principal: Principal): Credential => ({ ...principal, token:
 let database: EmbeddedPostgres, store: Store, databaseUrl: string;
 before(async () => {
   const port = Number(process.env.GRAPHYARD_RESOURCE_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 83);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-resources-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('resources'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('resources_test');
   databaseUrl = `postgres://graphyard:testing-only@127.0.0.1:${port}/resources_test`;
   store = new Store(databaseUrl); await store.init();

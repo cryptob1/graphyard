@@ -1,7 +1,5 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createElement } from 'react';
@@ -20,6 +18,7 @@ import { actionReport, stalledActionAttention } from '../src/cli/master-status.j
 import { plainStatus, stalledStep } from '../web/plain-status.js';
 import WorkCard from '../web/components/work-card.js';
 import { readMasterGuide } from './helpers/master-guide.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-110: an action that keeps failing for the same reason is a stall, not a retry.
@@ -48,7 +47,7 @@ before(async () => {
   // An offset no other test file takes: two files sharing a port fail whichever starts its
   // Postgres second, in its `before` hook, with no reason given.
   const port = Number(process.env.GRAPHYARD_STALLED_ACTIONS_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 72);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-stalled-actions-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('stalled-actions'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'owner/project');

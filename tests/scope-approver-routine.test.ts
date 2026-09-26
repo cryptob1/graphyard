@@ -1,6 +1,5 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -16,6 +15,7 @@ import { scopeBlockedBudgetMs, scopeOutcomeMessage, scopeRequestOutcome } from '
 import { awaitScopeOutcome } from '../src/cli/session-commands.js';
 import { approveScopeRequest } from '../src/cli/master-status.js';
 import type { Principal, Work } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-176: an additive scope request the implication rule refuses and no review finding grounds
 // used to wait for a master to run `master scope`. The loop now requests a `requirements`
@@ -105,7 +105,7 @@ const standing = async (work: Work) => (await ok(master.token, 'GET', `work/${wo
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_SCOPE_APPROVER_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 183);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-scope-approver-db-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('scope-approver-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('scope_approver_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/scope_approver_test`); await store.init();
   engine = new Engine(store, [15368], 300, repository); engine.submissionObserver = null;

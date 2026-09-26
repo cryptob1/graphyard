@@ -1,7 +1,5 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -15,6 +13,7 @@ import { diagnose } from '../src/coordination.js';
 import { buildMasterStatus } from '../src/master.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import type { MasterConfig } from '../src/master.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // Each test is named for the proof it produces, so acceptance evidence maps to one executed
 // case per required proof.
@@ -159,7 +158,7 @@ let database: EmbeddedPostgres, store: Store, engine: Engine;
 let pullRequest = 700;
 before(async () => {
   const port = Number(process.env.GRAPHYARD_AUTO_REBASE_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 24);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-auto-rebase-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('auto-rebase'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'owner/project'); engine.controlPlaneAppId = 1234;

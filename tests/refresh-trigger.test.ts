@@ -1,7 +1,5 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
@@ -12,6 +10,7 @@ import { baseRefreshNeeded, ejectedTipRestore, pendingBaseRefresh, pendingRestor
 import { behindBaseHold } from '../src/model/behind-base.js';
 import { neededDecision, syncConflict } from '../src/daemon/decisions.js';
 import { Refusal, type Observation, type Principal, type Work } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-375. After GY-292 an unqueued candidate is refreshed only when GitHub reports it conflicting
 // with the moved base — but GitHub's reading is recomputed lazily, and clean candidates were
@@ -27,7 +26,7 @@ let database: EmbeddedPostgres, store: Store, engine: Engine;
 let pullRequest = 900;
 before(async () => {
   const port = Number(process.env.GRAPHYARD_REFRESH_TRIGGER_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 375);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-refresh-trigger-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('refresh-trigger'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'owner/project'); engine.controlPlaneAppId = 1234;

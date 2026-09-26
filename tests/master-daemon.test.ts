@@ -1,19 +1,19 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { chmod, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { acquireDaemonLock, actionDetailMax, candidateKey, cycleFailureDelay, cycleFailureStart, daemonStatePath, daemonStateSchema, daemonSummary, dispatchKey, emptyDaemonState, missingProofs, noteCycleFailure, observeDeployment, percentiles, profileHealth, pruneDaemonState, readDaemonState, reconcilePendingActions, retainedActions, retriedSnapshot, runCycle, runDaemon, snapshotRetryDelayMs, stageMetrics, writeDaemonState, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { masterConfigSchema, type MasterConfig, type MasterRun, type WorkerProfile } from '../src/master.js';
 import type { Work } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const workerToken = 'worker-token-'.padEnd(40, 'x');
 
 async function privateDirectory() {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-daemon-'));
+  const directory = await temporaryDirectory('daemon');
   const token = join(directory, 'coordinator.token');
   await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
   return { directory, token };
@@ -71,7 +71,7 @@ test('the daemon cursor lives beside the coordinator credential, stays private, 
   try {
     const master = config(token);
     assert.equal(daemonStatePath(master), join(directory, 'coordinator.daemon.json'));
-    const root = await mkdtemp(join(tmpdir(), 'graphyard-daemon-root-'));
+    const root = await temporaryDirectory('daemon-root');
     execFileSync('git', ['init', '-q', root]);
     try {
       assert.equal((await readDaemonState(root, master)).cycle, 0, 'a missing cursor is an empty cursor, not a failure');
@@ -145,7 +145,7 @@ test('restarting the loop resumes the cursor without dispatching or requesting a
   const { directory, token } = await privateDirectory();
   const workerCredential = join(directory, 'worker.token');
   await writeFile(workerCredential, workerToken, { mode: 0o600 });
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-daemon-root-'));
+  const root = await temporaryDirectory('daemon-root');
   execFileSync('git', ['init', '-q', root]);
   try {
     const master = config(token, { workers: [profile('codex', workerCredential)] });

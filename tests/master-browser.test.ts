@@ -2,9 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile as execFileCallback, execFileSync } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -13,6 +12,7 @@ import { masterHarnessPlan, writeHarnessPermissions } from '../src/harness.js';
 import { agentBrowserArguments, agentBrowserPage, appendAdministrationEntry, browserFlows, controlPlanePermissions, detectSudo, missingPermissions, passSudo, readAdministrationLedger, readSudoState, recordingPage, runBrowserFlow, sudoAttention, summarizeAdministration, type BrowserPage, type Located, type SudoState } from '../src/master-browser.js';
 import type { Work } from '../src/model.js';
 import { readMasterGuide } from './helpers/master-guide.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const execFile = promisify(execFileCallback);
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
@@ -20,7 +20,7 @@ const coordinatorToken = 'coordinator-token-'.padEnd(40, 'x');
 const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
 
 async function master(browser = { profile: 'Default' }) {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-browser-')), credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-browser-credentials-'));
+  const root = await temporaryDirectory('browser'), credentialDirectory = await temporaryDirectory('browser-credentials');
   execFileSync('git', ['init', '-q', root]);
   execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
   await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory, browser }, coordinatorStatus as typeof fetch);
@@ -296,7 +296,7 @@ test('the agent-browser page drives one headless session on the operator profile
 });
 
 test('the recording page captures every step and a screenshot after each mutation', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-record-'));
+  const directory = await temporaryDirectory('record');
   try {
     const github = new StubGitHub();
     const steps: any[] = [];
@@ -361,7 +361,7 @@ test('the generated master instructions and the guides assign GitHub administrat
 });
 
 test('the master CLI stores the browser profile, refuses flows without one, and reports administration in status', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-browser-cli-')), credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-browser-cli-credentials-'));
+  const root = await temporaryDirectory('browser-cli'), credentialDirectory = await temporaryDirectory('browser-cli-credentials');
   execFileSync('git', ['init', '-q', root]);
   execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
   const server = createServer((request, response) => {

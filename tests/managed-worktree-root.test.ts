@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readdir, readFile, realpath, rm, utimes, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, realpath, rm, utimes, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -14,6 +14,7 @@ import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-da
 import { launchProducer, producerPrompt, readProducerLedger, reclaimCheckouts, reconcileProducers, producerIdleGraceMs, type ProducerBinding } from '../src/producer.js';
 import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, reviewIdleGraceMs, reviewPrompt, saveReviewerProfile } from '../src/reviewer.js';
 import { allocateSessionCheckout, dataDirectory, defaultWorktreeRoot, inspectWorktreeRoot, orphanGraceMs, probeFilesystem, reclaimCommand, reclaimSessionCheckouts, removeSessionCheckout, sessionCheckout, sweepAbandonedRoots, verifyWorktreeRoot, worktreeRoot, worktreeRootBudgetBytes, worktreeRootMinFreeBytes, type FilesystemProbe } from '../src/install/worktree-root.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // Each test is named for the proof it produces: integration:managed-worktree-root,
 // integration:ephemeral-checkout-reclaim, integration:worktree-root-preflight and
@@ -46,7 +47,7 @@ const promptOf = (calls: string[][]) => launchOf(calls).args.at(-1)!;
 
 /** A managed repository with one commit, a bound reviewer, a reviewer profile and two producer profiles, its worktree root under `managed`. */
 async function installation(run: Partial<MasterRun> = {}) {
-  const scratch = await realpath(await mkdtemp(join(tmpdir(), 'graphyard-managed-root-')));
+  const scratch = await realpath(await temporaryDirectory('managed-root'));
   const root = join(scratch, 'repository'), credentialDirectory = join(scratch, 'credentials'), managed = join(scratch, 'data', 'worktrees');
   await mkdir(root); await mkdir(credentialDirectory, { mode: 0o700 });
   const git = (...args: string[]) => execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
@@ -302,7 +303,7 @@ test('integration:ephemeral-checkout-reclaim — every checkout is removed when 
 });
 
 test('integration:worktree-root-preflight — setup refuses a tmpfs or a volume without the configured room, and master status asks for a reclaim before the volume or quota is exhausted', async () => {
-  const scratch = await realpath(await mkdtemp(join(tmpdir(), 'graphyard-root-preflight-')));
+  const scratch = await realpath(await temporaryDirectory('root-preflight'));
   try {
     const root = join(scratch, 'repository'), credentialDirectory = join(scratch, 'credentials'), managed = join(scratch, 'data/worktrees');
     await mkdir(root); execFileSync('git', ['init', '-q', '-b', 'main', root]); execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
@@ -409,7 +410,7 @@ test('unit:disk-exhaustion-message — a write that failed for want of room is r
 
   // A real write into a place that cannot take it is reported through the same path: the
   // allocation under the managed root, and the reclaim pass.
-  const scratch = await realpath(await mkdtemp(join(tmpdir(), 'graphyard-exhaustion-')));
+  const scratch = await realpath(await temporaryDirectory('exhaustion'));
   try {
     const orphan = await allocateSessionCheckout(scratch, 'proof', 'GY-88', H, randomUUID());
     const refusing = () => { throw quota; };
@@ -439,7 +440,7 @@ test('unit:disk-exhaustion-message — a write that failed for want of room is r
 
   // And the loop records it that way: an action that failed for want of room carries its own
   // output, the condition, the path and the reclaim command — once.
-  const credentials = await realpath(await mkdtemp(join(tmpdir(), 'graphyard-exhaustion-loop-')));
+  const credentials = await realpath(await temporaryDirectory('exhaustion-loop'));
   try {
     const token = join(credentials, 'coordinator.token'); await writeFile(token, coordinatorToken, { mode: 0o600 });
     const config = { version: 1, url: 'https://graphyard.example', credentialFile: token, cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'host', masterAgentName: 'master', autoMerge: true, mergeMethod: 'merge',

@@ -2,8 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { statSync } from 'node:fs';
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Observation, Work } from '../src/model.js';
@@ -15,6 +14,7 @@ import { launchProducer, producerPrompt, readProducerLedger, summarizeProducers 
 import { bounded, dispatchFailureReasonLimit, emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { readMasterGuide } from './helpers/master-guide.js';
 import { autonomyContract } from '../src/autonomy.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-121: a session launch types a short, constant-size command line that references the
 // request and role files in the session's own checkout; the start bound reads the pane and tells
@@ -54,7 +54,7 @@ const requested = () => { const item = work(); reconcileAutoDispatch(item, [item
 
 /** A master installed in a throwaway repository with one Claude producer profile, its credential outside it. */
 async function installed() {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-launch-delivery-')), credentials = await mkdtemp(join(tmpdir(), 'graphyard-launch-delivery-credentials-'));
+  const root = await temporaryDirectory('launch-delivery'), credentials = await temporaryDirectory('launch-delivery-credentials');
   execFileSync('git', ['init', '-q', root]);
   execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
   await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory: credentials, herdrWorkspace: 'wE' }, coordinatorStatus as typeof fetch);
@@ -121,7 +121,7 @@ const readyAtOnce = () => ({ agent: { agent: 'claude', agent_status: 'idle' }, s
 const echoLine = 'vish@host ~/code/project ❯ GY=/home/vish/code/project/.graphyard/launch/produce-a; claude --permission-mode bypassPermissions --setting-sources user --settings /home/vish/co';
 
 test('unit:launch-command-bounded — the typed launch command line is short and constant-size: the request and the role authorization are files in the session checkout (mode 0600) that the line references, so a 20 KB request types at most 512 bytes and reaches the runtime exactly', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-launch-checkout-'));
+  const directory = await temporaryDirectory('launch-checkout');
   try {
     // A 20 KB request with every character the shell could trip on: quotes, dollars, backticks, newlines.
     const request = `Produce trusted evidence for GY-121 at ${H}. It's "quoted", costs $5, runs \`tests\`, and says: don't stop.\n${'The proof group is integration; run every case, skip none, and submit pass or fail. '.repeat(250)}`;
@@ -208,7 +208,7 @@ test('unit:launch-command-bounded — the typed launch command line is short and
 });
 
 test('unit:start-bound-reads-the-pane — before a start is declared failed the launcher reads the pane: a runtime starting at the bound is given until the ceiling and reported started at 45 s, one that never starts is refused with the pane\'s last line', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-launch-start-'));
+  const directory = await temporaryDirectory('launch-start');
   try {
     assert.equal(agentStartTimeoutMs, 60_000); assert.equal(agentStartCeilingMs, 120_000);
     // Ready at 45 s: the process exists under the pane from 2 s (Herdr reports the kind, state unknown) with nothing of it drawn yet, interactive at 45 s.

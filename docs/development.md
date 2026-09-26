@@ -23,7 +23,7 @@ npm ci && npm run build && npm test
 
 ## Documentation
 
-`docs/README.md` and `docs/protocol.md` are generated in full from each page's `<!-- page: Section | order | summary -->` line by `npm run docs:check -- --write`; never edit them by hand. The regression guard exempts them when the deployment sets `GRAPHYARD_GENERATED_FILES` to what `scripts/check-docs.mjs --list` prints. README.md and `docs/` stay within 12,000 words, no page over 1,200, and each topic lives on one page (`tests/docs-budget.test.ts`): link to it instead of restating it.
+`docs/README.md` and `docs/protocol.md` are generated in full from each page's `<!-- page: Section | order | summary -->` line by `npm run docs:check -- --write`; never edit them by hand. The regression guard exempts them when the deployment sets `GRAPHYARD_GENERATED_FILES` to what `scripts/check-docs.mjs --list` prints. README.md and `docs/` stay within 12,000 words, no page over 1,200, and each topic lives on one page (`tests/docs-budget.test.ts`): link to it.
 
 ## Trusted contracts
 

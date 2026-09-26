@@ -1,8 +1,6 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store, appendSave, applyWorkDelta, eventStats, resolvedPayloadSql, snapshotEvery, workDiff, type WorkDelta } from '../src/store.js';
@@ -11,6 +9,7 @@ import { readInterventionLedger } from '../src/interventions.js';
 import { ledgerEntry, ledgerReplayColumns, reconstructTimeline } from '../src/pipeline-speed.js';
 import { readEventHistory, parseEventHistoryQuery } from '../src/events-history.js';
 import type { Principal, Work } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * Every save of every kind is stored as a delta on the item's last full snapshot when the
@@ -26,7 +25,7 @@ let serial = 0;
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 177;
-  pg = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-event-ledger-delta-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('event-ledger-delta'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('event_ledger_delta_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/event_ledger_delta_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'owner/project'); engine.submissionObserver = null;

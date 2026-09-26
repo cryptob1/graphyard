@@ -2,8 +2,6 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, createHmac, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
@@ -12,6 +10,7 @@ import { server } from '../src/server/index.js';
 import { CHECK_NAME, GitHub, mergePathReserve, observationBand, observationCadence, observationCadenceMs, processJob, reserveDecision, steadyStateInterval, steadyStateShare } from '../src/github.js';
 import { evaluate, type Principal, type Work } from '../src/model.js';
 import { exhaustionAttention, githubBudgetAttention, pauseAttention, webhookAttention } from '../src/cli/github-budget-attention.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-117. Each test is named for the proof it produces: unit:github-budget-tracked,
 // integration:observation-cadence-by-state, integration:merge-path-reserve-held,
@@ -243,7 +242,7 @@ const adminToken = 'o'.repeat(40);
 let port = 0, databases = 0;
 before(async () => {
   port = Number(process.env.GRAPHYARD_RATE_BUDGET_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 117);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-rate-budget-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('rate-budget'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start();
 });
 after(async () => { if (http) await new Promise(resolve => http.close(resolve)); if (store) await store.close(); if (database) await database.stop(); });

@@ -11,11 +11,11 @@
 
 ## Items, scope and human waits
 
-An unplanned file needs `scope-request GY-N EPOCH PATH… -- REASON`. Automatic: documentation; files the criteria name; for items planning `docs/`, single `web/` and `browser-tests/` files; existing base files an unresolved reviewer or `run.awaitReviewers`-bot thread, or the reviewer's current-head `CHANGES_REQUESTED` review, names literally (unnegated; rechecked every two minutes); tests whose quoted failing assertion a planned file holds; planned files' successors (git renames, copies, `Graphyard-Successor: OLD -> NEW` trailers), which the loop also adds, audited, to open items. The approver judges the rest (`--allow-broad-scope` needs a reason); workers keep their lease (`scope-request GY-N EPOCH --wait` reads the outcome). A human-only decision needs `park GY-N EPOCH KIND NEEDED -- REASON`; the item waits under **Work → Needs you** for `graphyard answer GY-N …`.
+An unplanned file needs `scope-request GY-N EPOCH PATH… -- REASON`. Automatic: documentation; files the criteria name; for items planning `docs/`, single `web/` and `browser-tests/` files; existing base files an unresolved reviewer or `run.awaitReviewers`-bot thread, or the reviewer's current-head `CHANGES_REQUESTED` review, names literally (rechecked every two minutes); tests whose quoted failing assertion a planned file holds; planned files' successors (git renames, copies, `Graphyard-Successor: OLD -> NEW` trailers), which the loop also adds, audited, to open items. The approver judges the rest (`--allow-broad-scope` needs a reason); workers keep their lease (`scope-request GY-N EPOCH --wait` reads the outcome). A human-only decision needs `park GY-N EPOCH KIND NEEDED -- REASON`; the item waits under **Work → Needs you** for `graphyard answer GY-N …`.
 
 ## Conflict avoidance
 
-Dispatch is optimistic (overlap holds nothing), smallest planned scope first; `git merge-tree` reports candidate conflicts (`conflicts`) ([rules](coordination.md#dispatch-optimistically-smallest-scope-first)).
+Dispatch is optimistic (overlap holds nothing), smallest planned scope first; `git merge-tree` reports candidate conflicts ([rules](coordination.md#dispatch-optimistically-smallest-scope-first)).
 
 ### Speculative tips and branch protection
 
@@ -63,7 +63,7 @@ A failed snapshot read retries once after 0.5–1.5 s jitter; a failed cycle wai
 
 ## Resources and disk
 
-`resourceRegistry` declares every bounded resource, reported under `resources` ([remedies](operations-reference.md#control-plane-resources)). The loop `git worktree remove`s finished worktrees (`run.reclaimIdleHours`; never dirty/unpushed), `run.worktreeRemovalLimit`/cycle, logging `.graphyard/worktree-reclaim.jsonl`; `disk` attention below `run.diskThresholdGb`.
+`resourceRegistry` declares every bounded resource, reported under `resources` ([remedies](operations-reference.md#control-plane-resources)). The loop `git worktree remove`s finished worktrees (`run.reclaimIdleHours`; never dirty/unpushed), `run.worktreeRemovalLimit`/cycle, logging `.graphyard/worktree-reclaim.jsonl`; `disk` attention below `run.diskThresholdGb`. It also frees stale `/tmp/graphyard-*` and `tsx-<uid>` directories (owner dead, or 6 h idle, unheld), ≤100/cycle.
 
 ### The managed worktree root
 
@@ -79,7 +79,7 @@ An unexplained lapsed lease raises `lease-loss` (`blocked-awaiting-operator` and
 
 ## Fault classes
 
-Faults carry `faultClass` (`master status` `faults`); recurring classes file one item (`GRAPHYARD_FAULT_CLASS_*`). A section whose route fails is listed in `unavailable` (section, route, error); the report still returns.
+Faults carry `faultClass` (`master status` `faults`); recurring classes file one item (`GRAPHYARD_FAULT_CLASS_*`). A failing section is listed in `unavailable`; the report still returns.
 
 ## Pipeline speed
 

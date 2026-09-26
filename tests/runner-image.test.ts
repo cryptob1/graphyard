@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, readFile, rm, chmod } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, writeFile, readFile, rm, chmod } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { reportFiles } from '../src/runner-executor.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const exec = promisify(execFile);
 const root = new URL('../', import.meta.url);
@@ -19,7 +19,7 @@ const entrypoint = new URL('docker/runner/entrypoint.sh', root).pathname;
  * script, and a stub `node` on PATH records the Playwright invocation it would make.
  */
 async function phase(argv: string[], env: Record<string, string>, oracle: string) {
-  const bin = await mkdtemp(join(tmpdir(), 'graphyard-image-bin-'));
+  const bin = await temporaryDirectory('image-bin');
   const log = join(bin, 'argv.json');
   await writeFile(join(bin, 'node'), `#!/bin/sh\nprintf '%s\\n' "$@" > ${JSON.stringify(log)}\n`);
   await chmod(join(bin, 'node'), 0o755);
@@ -32,13 +32,13 @@ async function phase(argv: string[], env: Record<string, string>, oracle: string
 }
 
 async function bundle(configName = 'playwright.config.ts') {
-  const dir = await mkdtemp(join(tmpdir(), 'graphyard-image-oracle-'));
+  const dir = await temporaryDirectory('image-oracle');
   await writeFile(join(dir, configName), 'export default { testDir: "." };');
   return dir;
 }
 
 test('the image entrypoint enumerates offline and executes against the approved target', async () => {
-  const oracle = await bundle(), output = await mkdtemp(join(tmpdir(), 'graphyard-image-out-'));
+  const oracle = await bundle(), output = await temporaryDirectory('image-out');
   try {
     // Enumeration must not be able to see the target, so it is `--list` and carries no
     // target URL at all: the approved inventory cannot be shaped by the deployment.
@@ -59,7 +59,7 @@ test('the image entrypoint enumerates offline and executes against the approved 
 });
 
 test('the image entrypoint refuses a phase it cannot honestly complete', async () => {
-  const oracle = await bundle(), output = await mkdtemp(join(tmpdir(), 'graphyard-image-out-'));
+  const oracle = await bundle(), output = await temporaryDirectory('image-out');
   const report = join(output, reportFiles.execute);
   try {
     const target = { GRAPHYARD_TARGET_URL: 'https://preview.example.test/' };
@@ -78,7 +78,7 @@ test('the image entrypoint refuses a phase it cannot honestly complete', async (
       assert.equal(refused.invoked, null, 'a refused phase starts no Playwright run');
     }
 
-    const empty = await mkdtemp(join(tmpdir(), 'graphyard-image-empty-'));
+    const empty = await temporaryDirectory('image-empty');
     const unconfigured = await phase(['execute'], { GRAPHYARD_REPORT_FILE: report, ...target }, empty);
     assert.equal(unconfigured.code, 64);
     assert.match(unconfigured.stderr, /Playwright configuration/);

@@ -1,9 +1,8 @@
 import { before, after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
@@ -11,6 +10,7 @@ import { Engine } from '../src/engine.js';
 import { bootstrapObligations, criterionSchema, deliveredProof, evaluate, inheritedObligations, pathScopeContains, pathScopesOverlap, requiredProofs, type Observation, type Principal, type Work } from '../src/model.js';
 import { queueRef } from '../src/merge-queue.js';
 import { diagnose, obligationLedger, proofPreview } from '../src/coordination.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const operator: Principal = { id: 'operator', role: 'admin' };
 const worker: Principal = { id: 'implementer', role: 'worker' };
@@ -23,7 +23,7 @@ const id = () => randomUUID();
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_BOOTSTRAP_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 2);
-  pg = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-bootstrap-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('bootstrap'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('bootstrap_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/bootstrap_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'owner/project');

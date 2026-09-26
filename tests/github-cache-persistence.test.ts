@@ -1,12 +1,11 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store, ledgerTables } from '../src/store.js';
 import { GitHub } from '../src/github.js';
 import { GitHubCacheStore } from '../src/github-cache.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GitHub response caches persist in Postgres so a restart starts warm instead of re-spending
 // the App's request budget on answers that have not changed.
@@ -14,7 +13,7 @@ import { GitHubCacheStore } from '../src/github-cache.js';
 let database: EmbeddedPostgres, store: Store;
 before(async () => {
   const port = Number(process.env.GRAPHYARD_GITHUB_CACHE_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 163);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-github-cache-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('github-cache'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
 });

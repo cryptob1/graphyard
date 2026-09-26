@@ -16,7 +16,7 @@
 // gone" checkable rather than guessed from a modification time.
 
 import { existsSync, readFileSync, type Dirent } from 'node:fs';
-import { readdir, readFile, readlink, rm, stat, writeFile } from 'node:fs/promises';
+import { lstat, readdir, readFile, readlink, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -93,10 +93,33 @@ export async function heldOpenPaths(procRoot = '/proc'): Promise<Set<string>> {
   }));
   return held;
 }
-const isHeld = (directory: string, held: Set<string>) => {
-  for (const path of held) if (path === directory || path.startsWith(`${directory}/`)) return true;
-  return false;
-};
+/**
+ * The entries directly under `root` that some held path lies in or names: reduced once per pass, so
+ * each candidate's check is one lookup rather than a scan of every open path on the host.
+ */
+export function heldEntries(root: string, held: Iterable<string>): Set<string> {
+  const entries = new Set<string>();
+  for (const path of held) {
+    if (!path.startsWith(`${root}/`)) continue;
+    const rest = path.slice(root.length + 1), slash = rest.indexOf('/');
+    entries.add(join(root, slash < 0 ? rest : rest.slice(0, slash)));
+  }
+  return entries;
+}
+
+/**
+ * When a directory was last written: its own mtime, or the newest of its entries' when later. A
+ * cache such as tsx's rewrites the files inside it without touching the directory's own mtime, so
+ * the directory's alone would call a cache in daily use stale.
+ */
+async function lastWritten(path: string, own: number): Promise<number> {
+  let newest = own;
+  const entries = await readdir(path).catch(() => [] as string[]);
+  for (const name of entries) {
+    try { newest = Math.max(newest, (await lstat(join(path, name))).mtimeMs); } catch { /* removed while reading */ }
+  }
+  return newest;
+}
 
 /** Recursively sum the sizes of the regular files under `path`, following no symlink. */
 async function sizeOf(path: string): Promise<number> {
@@ -155,7 +178,7 @@ export async function reclaimTmpDirectories(options: TmpReclaimOptions = {}): Pr
   const match = options.prefixes ? (name: string) => options.prefixes!.some(prefix => name.startsWith(prefix)) : defaultCandidate;
   const dirents = await readdir(root, { withFileTypes: true }).catch(() => [] as Dirent[]);
   const removable: { path: string; mtime: number }[] = [];
-  let held: Set<string> | null = options.held ?? null;
+  let held: Set<string> | null = null;
   for (const entry of dirents) {
     const path = join(root, entry.name);
     // A marker whose directory is already gone is clutter: take it back, whatever the bound.
@@ -166,20 +189,24 @@ export async function reclaimTmpDirectories(options: TmpReclaimOptions = {}): Pr
     if (!match(entry.name) || !entry.isDirectory()) continue;
     report.scanned++;
     const owner = await readTempOwner(path);
-    if (owner && !tempOwnerGone(owner)) { report.kept++; continue; }
-    if (owner) { removable.push({ path, mtime: 0 }); }
+    const gone = owner ? tempOwnerGone(owner) : false;
+    // A live owner keeps its directory only when its start could be recorded: without it a recycled
+    // pid would pass for the dead run's owner for as long as it lives, so such a directory is judged
+    // as an ownerless one is — by its age and its live holders.
+    if (owner && !gone && owner.startedAt !== null) { report.kept++; continue; }
+    if (owner && gone) { removable.push({ path, mtime: 0 }); }
     else {
       let info;
       try { info = await stat(path); } catch { continue; }
-      if (now - info.mtimeMs < maxAgeMs) { report.kept++; continue; }
+      // The entries are read only once the directory itself is old: a young one is kept on one stat.
+      const written = now - info.mtimeMs < maxAgeMs ? info.mtimeMs : await lastWritten(path, info.mtimeMs);
+      if (now - written < maxAgeMs) { report.kept++; continue; }
       // Only holders under the scanned root can hold a candidate, and on a host with a backlog the
-      // raw scan holds thousands of paths elsewhere: reduce it once, then every check is local.
-      if (!held) {
-        const open = await heldOpenPaths();
-        held = new Set([...open].filter(target => target === root || target.startsWith(`${root}/`)));
-      }
-      if (isHeld(path, held)) { report.kept++; continue; }
-      removable.push({ path, mtime: info.mtimeMs });
+      // raw scan holds thousands of paths elsewhere: reduce it once to the root's entries, then
+      // every check is a single lookup.
+      if (!held) held = heldEntries(root, options.held ?? await heldOpenPaths());
+      if (held.has(path)) { report.kept++; continue; }
+      removable.push({ path, mtime: written });
     }
     // The scan is bounded with the removals: once this pass cannot remove more, another 10,000
     // candidates are the next pass's work, not this cycle's. Order in the directory otherwise.

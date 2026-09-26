@@ -1,7 +1,5 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -18,6 +16,7 @@ import { actionSettleMs } from '../src/model/action-progress.js';
 import { queueRef, type QueueSpeculation } from '../src/merge-queue.js';
 import { coordinationHistoryLimit, coordinationRecordLimit, coordinationSessionLimit, coordinationSnapshot as trimInProcess, coordinationViewHeader, coordinationWork, deliverySettled, type CoordinationOmissions } from '../src/server/work-view.js';
 import { coordinationRecords, coordinationSessions, coordinationTail } from '../src/store/coordination-sql.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-203: migrations and backups take their own advisory locks, and the coordination snapshot is
@@ -35,7 +34,7 @@ const open = async (database: string) => { const store = new Store(url(database)
 before(async () => {
   // An offset no other test file takes (see tests/stalled-actions.test.ts).
   port = Number(process.env.GRAPHYARD_STORE_LOCKS_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 203);
-  postgres = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-store-locks-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  postgres = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('store-locks'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await postgres.initialise(); await postgres.start();
   for (const name of ['locks', 'restored', 'lifecycle', 'board']) await postgres.createDatabase(name);
 });

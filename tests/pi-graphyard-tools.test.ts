@@ -1,12 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, symlink } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, rm, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import graphyard, { guardCommand, systemPromptSection, type ExtensionApi, type ToolDefinition } from '../integrations/pi/index.js';
 import { autonomyContract } from '../src/autonomy.js';
 import { decidePayloadSchema, evidencePayloadSchema } from '../src/runner/payloads.js';
 import { piArgs, piRunner } from '../src/runner/pi.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-169: the Graphyard Pi extension (integrations/pi). One test per proof it produces:
 // unit:pi-graphyard-tools (AC-2), unit:pi-session-autonomous (AC-4), unit:pi-destructive-guard (AC-5).
@@ -117,8 +117,8 @@ test('unit:pi-session-autonomous the extension puts the autonomy contract in the
 });
 
 test('unit:pi-destructive-guard the tool-call guard refuses rm on a statically unresolvable target with a reason, allows rm inside the session mktemp directory, and never prompts', async () => {
-  const worktree = await mkdtemp(join(tmpdir(), 'graphyard-pi-guard-worktree-'));
-  const session = await mkdtemp(join(tmpdir(), 'graphyard-pi-guard-session-'));
+  const worktree = await temporaryDirectory('pi-guard-worktree');
+  const session = await temporaryDirectory('pi-guard-session');
   try {
     const { emit, prompted } = load();
     const call = (command: string) => emit('tool_call', { type: 'tool_call', toolName: 'bash', toolCallId: 'c', input: { command } }, worktree) as Promise<{ block: true; reason: string } | undefined>;
@@ -161,13 +161,13 @@ test('unit:pi-destructive-guard the tool-call guard refuses rm on a statically u
     assert.equal(await call(`rm -rf ${session}`), undefined, 'removing the mktemp directory itself runs');
     assert.equal((await call(`rm -rf ${session}/*`))?.block, true, 'a glob stays refused even inside it');
     // A path printed by something other than mktemp is not a session directory.
-    const other = await mkdtemp(join(tmpdir(), 'graphyard-pi-guard-other-'));
+    const other = await temporaryDirectory('pi-guard-other');
     await emit('tool_result', { toolName: 'bash', input: { command: `echo ${other}` }, content: [{ type: 'text', text: other }] }, worktree);
     assert.equal((await call(`rm -rf ${other}`))?.block, true);
     await rm(other, { recursive: true, force: true });
 
     // Symbolic links are followed as rm follows them: a trailing slash on a link to a directory outside deletes outside.
-    const outside = await mkdtemp(join(tmpdir(), 'graphyard-pi-guard-outside-'));
+    const outside = await temporaryDirectory('pi-guard-outside');
     await symlink(outside, join(worktree, 'link'));
     assert.match((await call('rm -rf link/'))!.reason, /outside the worktree/, 'a link to outside with a trailing slash is refused');
     assert.equal(await call('rm link'), undefined, 'removing the link itself runs');

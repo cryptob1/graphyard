@@ -1,7 +1,5 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
@@ -14,6 +12,7 @@ import { dispatchEffects, emptyDispatchCursor, herdrSessionListing, runDispatchT
 import { runtimeEndedStates } from '../src/harness.js';
 import { masterConfigSchema } from '../src/master.js';
 import { sessionReport } from '../src/cli/master-status.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-172 AC-1: one session state. The loop reports, on every dispatch tick, what it observes of
@@ -34,7 +33,7 @@ const worker: Principal = { id: 'agent-a', role: 'worker', runtime: 'claude' };
 let database: EmbeddedPostgres, store: Store, engine: Engine;
 before(async () => {
   const port = Number(process.env.GRAPHYARD_SESSION_MODEL_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 191);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-session-model-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('session-model'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'owner/project');

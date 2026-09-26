@@ -2,12 +2,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readdir, stat, utimes, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readdir, readFile, stat, utimes, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
-import { describeTmpReclaim, heldOpenPaths, readTempOwner, reclaimTmpDirectories, tempOwnerMarker, writeTempOwner } from '../src/tmp-reclaim.js';
+import { describeTmpReclaim, readTempOwner, reclaimTmpDirectories, tempOwnerMarker, writeTempOwner } from '../src/tmp-reclaim.js';
+import { describeReclaim, readReclaimReports, reclaimResources, settleTmpReclaim, takeTmpReclaim } from '../src/master-resources.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-421: test runs used to leak their temporary directories — by 25 September 2026 the host held
@@ -19,51 +18,77 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // loop's reclaim pass (src/master-resources.ts, through src/tmp-reclaim.ts) removes what is old
 // and unheld, bounded per cycle, reporting the bytes freed.
 
-/** The directories the named test files create: their mkdtemp prefixes under the host's tmpdir. */
-const dbTestDirNames = async (prefixes: readonly string[]) =>
-  (await readdir(tmpdir())).filter(name => prefixes.some(prefix => name.startsWith(prefix))).sort();
+/** Every TypeScript file under tests/, the helpers included. */
+const suiteFiles = async (directory = fileURLToPath(new URL('.', import.meta.url))): Promise<string[]> => {
+  const files: string[] = [];
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) files.push(...await suiteFiles(path));
+    else if (entry.name.endsWith('.ts')) files.push(path);
+  }
+  return files;
+};
 /**
- * Spawn one test file the way the suite runner does — its own test context, never the caller's —
- * and wait for it to end. The port is spelled so the suite's port-collision scan (which reads the
- * per-file `?? GRAPHYARD_TEST_PORT ?? 15438) + offset` idiom) records no static resolution here:
- * this file creates no database of its own, and the two it spawns run on explicit overrides far
- * above every file's own offset, so they cannot collide with a parallel file.
+ * Spawn test files the way the suite runner does — their own test context, never the caller's —
+ * in a private temporary directory, and wait for them to end. The port is spelled so the suite's
+ * port-collision scan (which reads the per-file `?? GRAPHYARD_TEST_PORT ?? 15438) + offset` idiom)
+ * records no static resolution here: this file creates no database of its own, and the files it
+ * spawns run on explicit overrides far above every file's own offset, so they cannot collide with
+ * a parallel file.
  */
 const suitePortBase = Number(process.env.GRAPHYARD_TEST_PORT) || 15438;
-const runTestFile = (file: string, port: number, override: string) => new Promise<{ code: number; stderr: string }>(done => {
+const runTestFiles = (files: string[], environment: NodeJS.ProcessEnv) => new Promise<{ code: number; stdout: string; stderr: string }>(done => {
   // NODE_TEST_CONTEXT is this process's own test-runner inheritance: a child carrying it would
   // skip running files rather than nest a suite, and exit 0 having run nothing.
-  const { NODE_TEST_CONTEXT: _inherited, ...environment } = process.env;
-  const child = spawn(process.execPath, ['--import', import.meta.resolve('tsx'), '--test', file],
-    { env: { ...environment, [override]: String(suitePortBase + port) }, stdio: ['ignore', 'ignore', 'pipe'] });
-  let stderr = '';
+  const { NODE_TEST_CONTEXT: _inherited, ...inherited } = process.env;
+  const child = spawn(process.execPath, ['--import', import.meta.resolve('tsx'), '--test', ...files], { env: { ...inherited, ...environment }, stdio: ['ignore', 'pipe', 'pipe'] });
+  let stdout = '', stderr = '';
+  child.stdout?.on('data', chunk => { stdout += chunk; });
   child.stderr?.on('data', chunk => { stderr += chunk; });
-  child.on('close', code => done({ code: code ?? 1, stderr }));
+  child.on('close', code => done({ code: code ?? 1, stdout, stderr }));
+});
+
+test('unit:tests-clean-temp-dirs: every test in the suite creates its temporary directories through the one shared helper', async () => {
+  const helper = fileURLToPath(new URL('./helpers/temp-dirs.ts', import.meta.url));
+  const bare: string[] = [], databases: string[] = [];
+  for (const file of await suiteFiles()) {
+    if (file === helper) continue;
+    const source = await readFile(file, 'utf8');
+    // A bare mkdtemp has no after hook behind it: a failing or killed test leaks what it made. The
+    // timing-stability script is no test: it is run by hand and keeps its directory for the failed
+    // runs' logs it names.
+    if (/\bmkdtemp(Sync)?\s*\(/.test(source) && !file.endsWith('/timing-stability.ts')) bare.push(file);
+    // Every embedded Postgres keeps its data dir in a directory the helper made and removes: made
+    // right there, or held in a variable the helper's result was assigned to (`dir`, `join(dir, …)`).
+    const madeByHelper = (expression: string) => {
+      if (/temporaryDirectory\(/.test(expression)) return true;
+      const name = /^(?:join\()?\s*([A-Za-z_$][\w$]*)/.exec(expression)?.[1];
+      return !!name && new RegExp(`\\b${name}\\s*=\\s*await temporaryDirectory\\(`).test(source);
+    };
+    for (const match of source.matchAll(/new EmbeddedPostgres\(\{\s*databaseDir:\s*([^\n]+?)\s*,\s*user:/g)) if (!madeByHelper(match[1])) databases.push(`${file}: ${match[1]}`);
+  }
+  assert.deepEqual(bare, [], 'these test files create temporary directories with a bare mkdtemp instead of tests/helpers/temp-dirs.ts');
+  assert.deepEqual(databases, [], 'these embedded Postgres data dirs are not made by the shared helper');
 });
 
 test('unit:tests-clean-temp-dirs: after the suite\'s DB tests run, no directory they created remains', async () => {
-  const prefixes = ['graphyard-deploy-observation-', 'graphyard-action-priority-'];
-  const before = new Set(await dbTestDirNames(prefixes));
-  // Two real database tests, each on its own port, run the way the suite runs them. Their after
-  // hooks stop the embedded Postgres, which removes its data directory: when they end, nothing
-  // they created is left on the tmpfs. A directory of a run still in flight — the same test file
-  // running beside this one in the full suite — is held open by its live Postgres and named in no
-  // verdict; a directory of an earlier run is not: it is the leak this criterion exists for.
-  const runs = await Promise.all([
-    runTestFile('tests/deploy-observation.test.ts', 150, 'GRAPHYARD_DEPLOY_OBSERVATION_TEST_PORT'),
-    runTestFile('tests/action-priority.test.ts', 151, 'GRAPHYARD_ACTION_PRIORITY_TEST_PORT'),
-  ]);
-  for (const run of runs) assert.equal(run.code, 0, run.stderr.slice(-2_000));
-  // A directory of a run still starting — the same test file running beside this one — is not yet
-  // held by its Postgres; one settle delay later it is, and only a true leak stays unheld.
-  const unheld = async () => {
-    const held = await heldOpenPaths();
-    return (await dbTestDirNames(prefixes)).filter(name => !before.has(name)).map(name => join(tmpdir(), name))
-      .filter(directory => ![...held].some(path => path === directory || path.startsWith(`${directory}/`)));
-  };
-  let leaked = await unheld();
-  if (leaked.length) { await delay(2_000); leaked = await unheld(); }
-  assert.deepEqual(leaked, [], `the DB tests left temporary directories behind: ${leaked.join(', ')}`);
+  // Real database tests — embedded Postgres data dirs, homes, worktrees, nested scratch trees —
+  // each on its own port, run the way the suite runs them but with a temporary directory of their
+  // own, so everything they create lands where this test can see it and nothing else does. When
+  // they end, the directory is empty: nothing they created is left for the next run.
+  const tmp = await temporaryDirectory('tmp-cleanup-db-tests');
+  const run = await runTestFiles(['tests/deploy-observation.test.ts', 'tests/action-priority.test.ts', 'tests/exhaustion-notice.test.ts', 'tests/agent-registry.test.ts'], {
+    TMPDIR: tmp,
+    GRAPHYARD_DEPLOY_OBSERVATION_TEST_PORT: String(suitePortBase + 150),
+    GRAPHYARD_ACTION_PRIORITY_TEST_PORT: String(suitePortBase + 151),
+    GRAPHYARD_EXHAUSTION_NOTICE_TEST_PORT: String(suitePortBase + 152),
+    GRAPHYARD_REGISTRY_TEST_PORT: String(suitePortBase + 154),
+  });
+  assert.equal(run.code, 0, `${run.stdout.slice(-2_000)}\n${run.stderr.slice(-2_000)}`);
+  assert.match(run.stdout, /^ℹ pass [1-9]\d*$/m, 'the DB tests ran');
+  // tsx keeps its compile cache in the temporary directory; that is the loader's, not a test's.
+  const leftover = (await readdir(tmp)).filter(name => !/^tsx-\d+$/.test(name));
+  assert.deepEqual(leftover, [], `the DB tests left temporary directories behind: ${leftover.join(', ')}`);
 });
 
 test('unit:tests-clean-temp-dirs: a test that fails still removes the directories its file created', async () => {
@@ -102,12 +127,12 @@ test('unit:tests-clean-temp-dirs: the runner removes directories left by runs wh
   // A corpse: a directory a run marked, whose owning process has since exited.
   const exited = spawn('true', { stdio: 'ignore' });
   await new Promise(done => exited.on('close', done));
-  const dead = await mkdtemp(join(root, 'graphyard-corpse-'));
+  const dead = await temporaryDirectory('graphyard-corpse', root);
   const owner = await writeTempOwner(dead);
   owner.pid = exited.pid!; owner.startedAt = null;
   await writeFile(tempOwnerMarker(dead), JSON.stringify(owner));
   // A live one: marked by this very process.
-  const live = await mkdtemp(join(root, 'graphyard-live-'));
+  const live = await temporaryDirectory('graphyard-live', root);
   await writeTempOwner(live);
   const sweep = await reclaimTmpDirectories({ now: Date.now(), tmpRoot: root, prefixes: ['graphyard-'], limit: 10 });
   assert.deepEqual(sweep.removed.map(entry => entry.path), [dead], 'the corpse goes whatever its age');
@@ -123,7 +148,7 @@ test('unit:tmp-reclaim: the loop\'s reclaim pass removes an old, unheld director
   const old = join(root, 'graphyard-old-unheld');
   await mkdir(old); await writeFile(join(old, 'data.bin'), Buffer.alloc(4096, 1));
   const backdate = async (path: string, hours: number) => { const past = new Date(Date.now() - hours * 3_600_000); await utimes(path, past, past); };
-  await backdate(old, 8);
+  await backdate(join(old, 'data.bin'), 8); await backdate(old, 8);
   // Old but held: a live process works inside it, as an embedded Postgres does while its suite runs.
   const held = join(root, 'graphyard-held');
   await mkdir(held); await writeFile(join(held, 'data.bin'), Buffer.alloc(4096, 1));
@@ -138,16 +163,27 @@ test('unit:tmp-reclaim: the loop\'s reclaim pass removes an old, unheld director
   await mkdir(mine); await writeTempOwner(mine); await backdate(mine, 8);
   // The tsx cache, stale: the same pass takes it.
   const tsx = join(root, 'tsx-1000');
-  await mkdir(tsx); await writeFile(join(tsx, 'chunk.js'), 'export {};\n'); await backdate(tsx, 8);
+  await mkdir(tsx); await writeFile(join(tsx, 'chunk.js'), 'export {};\n'); await backdate(join(tsx, 'chunk.js'), 8); await backdate(tsx, 8);
+  // A tsx cache in use: its directory's own mtime is old, but tsx rewrote an entry a minute ago.
+  const busy = join(root, 'tsx-1001');
+  await mkdir(busy); await writeFile(join(busy, 'stale.js'), 'export {};\n'); await backdate(join(busy, 'stale.js'), 8);
+  await writeFile(join(busy, 'fresh.js'), 'export {};\n'); await backdate(busy, 8);
+  // Marked by a live pid whose start could not be recorded: it may be a recycled pid, so the
+  // marker does not keep an old, unheld directory.
+  const unverified = join(root, 'graphyard-unverified-owner');
+  await mkdir(unverified);
+  await writeFile(tempOwnerMarker(unverified), JSON.stringify({ pid: process.pid, startedAt: null, at: new Date().toISOString() }));
+  await backdate(unverified, 9);
 
   const report = await reclaimTmpDirectories({ now: Date.now(), tmpRoot: root });
-  assert.deepEqual(report.removed.map(entry => entry.path), [old, tsx], 'the old unheld directory and the stale tsx cache go, oldest first');
+  assert.deepEqual(report.removed.map(entry => entry.path), [unverified, old, tsx], 'the old unheld directories and the stale tsx cache go, oldest first');
+  assert.equal(existsSync(busy), true, 'a tsx cache with a freshly written entry stays, however old its directory');
   assert.deepEqual(report.errors, []);
   assert.equal(existsSync(held), true, 'a directory a live process holds open stays');
   assert.equal(existsSync(young), true, 'a directory younger than the age bound stays');
   assert.equal(existsSync(mine), true, 'a directory whose owning process still runs stays, however old');
   assert.ok(report.bytes >= 4096 + 'export {};\n'.length, `the report carries the bytes freed (${report.bytes})`);
-  assert.match(describeTmpReclaim(report.removed.length, report.bytes) ?? '', /^freed .+ from 2 stale \/tmp directories$/);
+  assert.match(describeTmpReclaim(report.removed.length, report.bytes) ?? '', /^freed .+ from 3 stale \/tmp directories$/);
 
   // The bound: one pass removes at most its limit, whatever the backlog, so a reclaim never stalls a cycle.
   const backlog = await temporaryDirectory('reclaim-bound-root');
@@ -159,4 +195,25 @@ test('unit:tmp-reclaim: the loop\'s reclaim pass removes an old, unheld director
   assert.equal(bounded.removed.length, 1, 'one pass removes at most its limit');
   assert.equal(bounded.kept, 1, 'the rest waits for the next pass');
   assert.ok((await stat(bounded.removed[0].path).catch(() => null)) === null, 'the removed one is gone');
+});
+
+test('unit:tmp-reclaim: the loop\'s reclaim step records the bytes the /tmp pass freed, and never waits on the pass', async () => {
+  const root = await temporaryDirectory('tmp-reclaim-loop');
+  await mkdir(join(root, '.graphyard'));
+  // A pass that frees two directories: the step starts it and moves on — its cycle records nothing
+  // yet, however long the pass takes — and the next cycle's record carries what it freed.
+  let release!: () => void;
+  const gate = new Promise<void>(done => { release = done; });
+  const freed = { at: new Date().toISOString(), scanned: 2, removed: [{ path: '/tmp/graphyard-a', bytes: 3e8 }, { path: '/tmp/graphyard-b', bytes: 2e8 }], bytes: 5e8, kept: 0, errors: [] };
+  assert.equal(takeTmpReclaim(async () => { await gate; return freed; }), null, 'a pass just started has nothing to report');
+  const during = await reclaimResources(root, { reviewers: [], producers: [] }, { work: [], agents: [] });
+  assert.deepEqual(during.tmp, { removed: 0, bytes: 0 }, 'the cycle did not wait for the pass in flight');
+  release(); await settleTmpReclaim();
+  const after = await reclaimResources(root, { reviewers: [], producers: [] }, { work: [], agents: [] });
+  assert.deepEqual(after.tmp, { removed: 2, bytes: 5e8 });
+  assert.match(describeReclaim(after) ?? '', /freed 0\.5 GB from 2 stale \/tmp directories/);
+  assert.deepEqual(after.errors, []);
+  const recorded = await readReclaimReports(root);
+  assert.deepEqual(recorded.at(-1)?.tmp, { removed: 2, bytes: 5e8 }, 'the reclaim record carries the bytes freed');
+  await settleTmpReclaim();
 });

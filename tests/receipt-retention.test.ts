@@ -1,14 +1,13 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { pruneReceipts, receiptReplayWindowMs } from '../src/store/receipts.js';
 import type { Principal } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * Receipts grew without bound: no timestamp, no pruning, and every lease renewal stored a whole
@@ -22,7 +21,7 @@ let serial = 0;
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 171;
-  pg = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-receipt-retention-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('receipt-retention'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('receipt_retention_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/receipt_retention_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'owner/project'); engine.submissionObserver = null;

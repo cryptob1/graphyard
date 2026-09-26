@@ -1,7 +1,5 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
@@ -13,6 +11,7 @@ import { batchStep, defaultMergeBatchSize, describeMergeBatches, predictQueue, q
 import { buildMasterStatus, masterConfigSchema, mergeBatchSize } from '../src/master.js';
 import { decideCarry, evaluate, type Evidence, type Work } from '../src/model.js';
 import { prSteps } from '../web/pr-steps.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-330: the merge queue tests several entries on one combined tip and bisects only on failure.
 // Each test is named for the proof it produces.
@@ -242,7 +241,7 @@ test('unit:batch-and-carry-visible — master status and the dashboard show a ba
 
 test('the master publishes mergeQueue.batchSize from its config, and the control plane batches its queue by it', async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 330;
-  const database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-batch-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  const database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('batch'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_batch');
   const store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_batch`);
   const tokens = { coordinator: 'm'.repeat(32), worker: 'w'.repeat(32) };

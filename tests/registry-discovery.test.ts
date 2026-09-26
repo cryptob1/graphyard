@@ -1,10 +1,10 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { registryCommand } from '../src/cli/master-registry.js';
 import { applyRegistryMutation, emptyRegistry, fleetRoles, type AgentRegistry } from '../src/model/registry.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-170 AC-1: `master registry propose` turns this installation's ~/.coding_agents tree into a
@@ -15,7 +15,7 @@ import { applyRegistryMutation, emptyRegistry, fleetRoles, type AgentRegistry } 
  */
 
 const HOST = 'agent-host-1';
-const scratch = await mkdtemp(join(tmpdir(), 'graphyard-registry-discovery-'));
+const scratch = await temporaryDirectory('registry-discovery');
 after(() => rm(scratch, { recursive: true, force: true }));
 
 const secrets: string[] = [];

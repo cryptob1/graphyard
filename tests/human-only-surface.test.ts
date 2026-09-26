@@ -1,8 +1,6 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createElement } from 'react';
@@ -17,6 +15,7 @@ import { humanOnlyRefusal, humanOnlyRules, openHumanOnly, operatorApprovalRule, 
 import type { Observation, Principal, Work } from '../src/model.js';
 import HumanRequestsPage from '../web/pages/human-requests.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-102: every action the control plane will take from the operator's own credential alone is
@@ -50,7 +49,7 @@ let serial = 0;
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_HUMAN_SURFACE_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 82);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-human-surface-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('human-surface'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('human_surface_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/human_surface_test`); await store.init();
   engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null;

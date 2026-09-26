@@ -1,7 +1,5 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createElement } from 'react';
@@ -20,6 +18,7 @@ import { actionlessCards, stalledCards } from '../web/pages/actionless.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
 import OverviewPage from '../web/pages/overview.js';
 import { boardFromStatus } from '../src/model/board.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-106: an item may not hold a failing gate with no action computed and nobody told.
@@ -50,7 +49,7 @@ before(async () => {
   // An offset no other test file takes: two files sharing a port fail whichever starts its
   // Postgres second, in its `before` hook, with no reason given.
   const port = Number(process.env.GRAPHYARD_ACTION_TOTALITY_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 106);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-action-totality-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('action-totality'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
   engine = new Engine(store, [CI_APP], 120, 'owner/project');

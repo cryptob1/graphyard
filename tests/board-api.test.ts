@@ -1,8 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createElement } from 'react';
@@ -19,6 +18,7 @@ import { releaseView } from '../web/release.js';
 import OverviewPage from '../web/pages/overview.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
 import { NOW, boardStatus, boardWork } from '../browser-tests/ui-board.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-200: one board. The dashboard derived its groups in the browser (web/groups.ts) while master
@@ -110,7 +110,7 @@ test('unit:board-api-matches-dashboard — GET /api/board gives each open item i
 });
 
 async function masterFixture() {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-board-master-'));
+  const root = await temporaryDirectory('board-master');
   const git = (...args: string[]) => execFileSync('git', ['-C', root, '-c', 'user.name=Graphyard', '-c', 'user.email=graphyard@example.com', ...args], { stdio: 'ignore' });
   git('init', '-q'); git('remote', 'add', 'origin', 'https://github.com/owner/project.git');
   await writeFile(join(root, 'README.md'), 'board\n'); git('add', 'README.md'); git('commit', '-q', '-m', 'board');
