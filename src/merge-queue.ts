@@ -162,6 +162,17 @@ export interface QueueEntry {
    * to eject only the member a bisection isolates, and status and the dashboard show it.
    */
   batch?: MergeBatchView | null;
+  /**
+   * When the entry's head batch last sat in 'testing' with no published tip (GY-506): the timer
+   * the dissolution waits on. Kept on the head member's entry, dropped when the state passes.
+   */
+  batchStall?: { since: string } | null;
+  /**
+   * The dissolved stuck batch (GY-506): its members validate as single-entry batches in their
+   * existing order until one of them leaves the queue, which ends the dissolution and lets the
+   * ordinary batch plan resume. Recorded on the head member's entry with the queue history.
+   */
+  batchDissolved?: { at: string; members: string[] } | null;
 }
 /** The published tip that replaces a queued entry's head on the next observation, or null when the head is the tip. */
 export function tipReplacesHead(work: Pick<Work, 'candidate' | 'queue' | 'policyRevision'>): string | null {
@@ -284,7 +295,7 @@ export interface QueueEjection {
   conflict?: { base: string | null } | null;
 }
 export interface QueueHistoryEntry {
-  at: string; event: 'enqueued' | 'predicted' | 'ejected'; sequence: number; reason?: string; tip?: string;
+  at: string; event: 'enqueued' | 'predicted' | 'ejected' | 'dissolved'; sequence: number; reason?: string; tip?: string;
   /** For a prediction: the entries the tip was published behind, and the item's own reviewed head it was built from. For a speculative-conflict ejection: the entries the conflicting merge was predicted behind (GY-321). */
   predecessors?: string[]; from?: string;
 }
@@ -1217,6 +1228,30 @@ export function describeGitHubQueue(work: Pick<Work, 'observation'>): string | n
 export const defaultMergeBatchSize = 4;
 /** The largest batch size master config and the control plane accept. */
 export const maxMergeBatchSize = 32;
+/**
+ * How long a head batch may sit in 'testing' with no published tip before it is dissolved
+ * (GY-506): ten minutes past the first evaluation that found the state, so a wedged batch costs
+ * the queue at most one CI-timeout's worth of waiting before its members validate singly again.
+ */
+export const stuckBatchMs = 10 * 60_000;
+/** Canonical JSON: object keys sorted, so two views equal in content compare equal whatever key order each holds. */
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(entry => canonicalJson(entry)).join(',')}]`;
+  if (value && typeof value === 'object') return `{${Object.keys(value as object).sort().map(key => `${JSON.stringify(key)}:${canonicalJson((value as Record<string, unknown>)[key])}`).join(',')}}`;
+  return JSON.stringify(value) ?? 'null';
+}
+/**
+ * Whether a re-derived batch view equals the one stored on the queue entry, content for content.
+ * Postgres jsonb does not preserve object key order, and the derived view names `batch` last
+ * while jsonb stores keys shortest-first: rewriting the stored entry with an equal view changed
+ * the document on every evaluation, so every reconcile pass re-saved every queued entry and every
+ * in-flight observation lost the revision race (GY-506). An equal view keeps the stored entry.
+ */
+export function sameMergeBatch(left: MergeBatchView | null | undefined, right: MergeBatchView | null | undefined): boolean {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  return canonicalJson(left) === canonicalJson(right);
+}
 /** The installation-ledger event recording the batch size the master published (POST /api/merge-queue). */
 export const mergeBatchSizeEvent = 'merge-queue.batch-size';
 /** A combined tip's verdict: every required check passed, or the first one that failed. */
@@ -1313,15 +1348,28 @@ export interface MergeBatchView {
  * Each prefix of the chain is an entry's own tip, so a batch's combined tip is its last member's,
  * each half a bisection tests is the tip of the half's last member, and a verdict is the required
  * checks as observed on that tip. The head batch acts; the batches behind it wait their turn.
+ * Entries named by a live stuck-batch dissolution (GY-506) are validated one at a time: each is
+ * its own batch, in the chain's existing order, and no batch spans one of them.
  */
 export function describeMergeBatches(all: Work[], placements: QueuePlacement[], batchSize: number, ciAppIds: readonly number[] | null = null): Map<string, MergeBatchView> {
   const size = Math.max(1, Math.floor(batchSize));
   const chain = placements.filter(placement => !placement.passedOver).sort((a, b) => a.position - b.position || a.sequence - b.sequence);
   const byKey = new Map(all.map(work => [work.key, work]));
   const placed = new Map(chain.map(placement => [placement.key, placement]));
+  // The dissolutions on record that still hold: every member they named is still a live queued entry.
+  const live = new Set(chain.map(placement => placement.key));
+  const singles = new Set<string>();
+  for (const work of all) {
+    const dissolved = work.queue?.batchDissolved;
+    if (!dissolved || !dissolved.members.every(key => live.has(key))) continue;
+    for (const key of dissolved.members) if (live.has(key)) singles.add(key);
+  }
   const views = new Map<string, MergeBatchView>();
-  for (let start = 0, batch = 1; start < chain.length; start += size, batch++) {
-    const members = chain.slice(start, start + size).map(placement => placement.key);
+  let start = 0, batch = 1;
+  while (start < chain.length) {
+    let width = singles.has(chain[start].key) ? 1 : Math.min(size, chain.length - start);
+    if (width > 1) for (let end = start + 1; end < start + width; end++) if (singles.has(chain[end].key)) { width = end - start; break; }
+    const members = chain.slice(start, start + width).map(placement => placement.key);
     const tipOf = (key: string) => placed.get(key)?.tip ?? null;
     const verdict = (prefix: string[]) => { const last = byKey.get(prefix.at(-1)!); return last && tipOf(last.key) ? tipVerdict(last, ciAppIds) : undefined; };
     // The batches ahead are this batch's base: their combined tip is the tip of the entry just before it.
@@ -1332,13 +1380,14 @@ export function describeMergeBatches(all: Work[], placements: QueuePlacement[], 
     const state: MergeBatchView['state'] = !head ? 'waiting' : step.kind === 'merge' ? 'merging' : step.kind === 'eject' ? 'ejecting' : step.combination.length === members.length ? 'testing' : 'bisecting';
     const underTest = step.kind === 'test' ? { members: step.combination, tip: tipOf(step.combination.at(-1)!) } : null;
     const tip = tipOf(members.at(-1)!);
-    const named = `batch ${batch} (${members.join(', ')})`;
+    const named = `batch ${batch} (${members.join(', ')})${singles.has(members[0]) ? ', dissolved from a stuck batch' : ''}`;
     const summary = state === 'waiting' ? `${named} waits for batch ${batch - 1} to merge`
       : state === 'merging' ? `${named}: combined tip ${tipOf((step as { members: string[] }).members.at(-1)!)?.slice(0, 12) ?? 'unpublished'} passed; merging ${(step as { members: string[] }).members.join(', ')} in order`
       : state === 'ejecting' ? `${named}: ${(step as { member: string }).member} is isolated as failing ${(step as { check: string }).check} and is ejected; the rest stay queued`
       : state === 'bisecting' ? `${named}: the combined tip failed; bisecting on the tip of ${underTest!.members.join(', ')}${underTest!.tip ? ` (${underTest!.tip.slice(0, 12)})` : ''}`
       : `${named}: validating combined tip ${tip?.slice(0, 12) ?? '(not yet published)'}`;
     for (const key of members) views.set(key, { batch, size: members.length, members, tip, underTest, state, step, summary });
+    start += width; batch++;
   }
   return views;
 }
