@@ -7,15 +7,15 @@ Restart `graphyard master run` freely; it never dispatches twice. `master status
 
 ### Perpetual master loop
 
-`master verify-deployment GY-N` refuses a release *unobserved*, *stale* (rerun), not serving the merge (keep cycling), or *already recording deployment* (use a follow-up item).
+`master verify-deployment GY-N` refuses a release *unobserved*, *stale* (rerun), not serving the merge (keep cycling) or *already recording deployment* (use a follow-up item).
 
 ## Lost worker before submission
 
-A lease expires 120 seconds after the last heartbeat; the next claim, a higher epoch, keeps the worktree. An unexplained lapse raises `lease-loss` ([classification](protocol/leases.md#how-a-lease-ends)), blocking merge until [settled](delegation.md#who-may-settle-what).
+A lease expires 120 seconds after the last heartbeat; the next claim (higher epoch) keeps the worktree. An unexplained lapse raises `lease-loss` ([classification](protocol/leases.md#how-a-lease-ends)), blocking merge until [settled](delegation.md#who-may-settle-what).
 
 ## Supervisor died leaving a containment quarantine
 
-On the worker's machine `graphyard master settle-containment GY-N "reason"` verifies nothing survives; only the loop excuses an idle pane shell (childless, parent `herdr server`). If refused, confirm the stop, then `graphyard rework GY-N --previous-worker-stopped "reason"`, or `graphyard recover-containment GY-N --previous-worker-stopped "reason"` once delivered.
+On the worker's machine `graphyard master settle-containment GY-N "reason"` verifies nothing survives; only the loop excuses an idle pane shell (childless, parent `herdr server`). If refused, confirm the stop, then `graphyard rework GY-N --previous-worker-stopped "reason"` (delivered: `graphyard recover-containment GY-N --previous-worker-stopped "reason"`).
 
 ## Submitted implementation needs rework
 
@@ -56,7 +56,7 @@ A rate-limit `403`/`429` pauses requests; gates read stale until it lifts.
 
 ### Reading the budget
 
-`graphyard status` (or `GET /api/status`) → `githubBudget`; `master status` attention items with subject `github`.
+`graphyard status` (or `GET /api/status`) → `githubBudget`; `master status` attention with subject `github`.
 
 ### Webhook liveness
 
@@ -102,7 +102,7 @@ Only admins grant, only to `producer` principals. Patterns: an exact name, `kind
 
 ## Scale limits
 
-Observation claims `GRAPHYARD_OBSERVATION_CONCURRENCY` jobs at once (default 4, capped at half the pool), each `SKIP LOCKED`: queue head and `max(2, batchSize)` band first, then never-observed submissions, then any job due over five minutes, then review/rework waits, then `available_at`; `master status` raises `github` once the head's observation passes two minutes. Watch `observationThroughput` lag, budget.
+Observation claims `GRAPHYARD_OBSERVATION_CONCURRENCY` jobs at once (default 4, at most half the pool), each `SKIP LOCKED`: queue head and `max(2, batchSize)` band first, then never-observed submissions, any job due over five minutes, review/rework waits, then `available_at`; `master status` raises `github` once the head's observation passes two minutes. Watch `observationThroughput` lag, budget.
 
 ### Concurrent reconciliation
 

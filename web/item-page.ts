@@ -1,9 +1,9 @@
 import { isClosed, type Gate, type Work } from '../src/model';
 import { parkedOnHuman } from '../src/model/human-request';
 import { fileConflicts } from '../src/coordination';
-import { plainReason } from './plain-status';
-import { prSteps, stepGate, stepIds, stepLabel, waitsOn, type StepId } from './pr-steps';
-import { noRelease, type ReleaseView } from './release';
+import { plainReason } from '../src/model/plain-status';
+import { prSteps, stepGate, stepIds, stepLabel, waitsOn, type StepId } from '../src/model/pr-steps';
+import { noRelease, type ReleaseView } from '../src/model/release';
 
 /**
  * The item page below its first screen (GY-171), as plain data the page renders: what is left,

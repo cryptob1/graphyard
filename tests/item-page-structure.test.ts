@@ -13,7 +13,7 @@ import { activityLabel, historyLabel, historyPage, overlapLine, plainLines, what
 import { eventHistoryLimits } from '../src/events-history.js';
 import type { Command } from '../src/engine.js';
 import { nextActor, groupWithin } from '../web/groups.js';
-import { prSteps } from '../web/pr-steps.js';
+import { prSteps } from '../src/model/pr-steps.js';
 import { describeHumanRequest } from '../src/model/human-request.js';
 
 // GY-171: the item page below its first screen. Each section answers one question, in plain words,
