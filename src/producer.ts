@@ -193,6 +193,24 @@ export class ClosedQuestionsDecided extends Error {
 }
 
 /**
+ * Thrown instead of launching when a session for the item's proof group is already pending
+ * (GY-415). The loop's own tick and the control-plane executors both launch producers for one
+ * request; whichever claims it second finds the other's session in the ledger. A session pending on
+ * the requested head is that request being answered, and the executor settles its row on it
+ * (`answeredByPendingSession`) rather than failing it for as long as the session runs — which read
+ * as a stalled dispatch. A session pending on another head is still a refusal: it must be
+ * reconciled before the group is launched again.
+ */
+export class ProducerSessionPending extends Error {
+  constructor(readonly work: string, readonly group: string, readonly pending: Pick<ProducerRecord, 'id' | 'sha' | 'requestId' | 'agentName'>) {
+    super(`A producer session for ${work} ${group} proofs is already pending on ${pending.sha.slice(0, 7)}; reconcile it with master status before launching another`);
+  }
+}
+/** The pending session a launch was refused for, when it is already producing the requested head. */
+export const answeredByPendingSession = (error: unknown, request: Pick<DispatchRequest, 'sha'>) =>
+  error instanceof ProducerSessionPending && error.pending.sha === request.sha ? error.pending : null;
+
+/**
  * `checkout` is the session directory a launch allocated under the managed worktree root; a
  * session record carries its own, so the request rebuilt from a record (the GY-93 re-prompt) names
  * the directory the session was launched into. Without either the prompt names the directory a
@@ -237,7 +255,7 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
   if (!independentProducerProfiles(work, [profile]).length) throw new Error(`Producer principal ${profile.principal} has held an assignment on ${work.key}; its evidence would not be trusted`);
   const ledger = await readProducerLedger(root);
   const pending = ledger.producers.find(record => record.state === 'pending' && record.key === work.key && record.group === binding.group);
-  if (pending) throw new Error(`A producer session for ${work.key} ${binding.group} proofs is already pending on ${pending.sha.slice(0, 7)}; reconcile it with master status before launching another`);
+  if (pending) throw new ProducerSessionPending(work.key, binding.group, pending);
   // One live session per request: a request whose sessions all failed or expired may be launched
   // again, as its next attempt, until the retry limit. A session that settled any other way while
   // the request still stands answered nothing, and the dispatcher attempts it again (GY-193), up to
