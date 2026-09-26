@@ -315,6 +315,10 @@ export function reserveDecision(band: CadenceBand, budget: Pick<GitHubBudget, 'r
   const until = new Date(reset + 2000).toISOString();
   return { until, reason: `GitHub budget is below the ${budget.reserve}-request merge-path reserve (${budget.remaining} remaining, reset ${budget.resetAt}); this ${band}-cadence observation is rescheduled to ${until} rather than spent, so the merge path, webhook wakes and merge verification keep the reserve` };
 }
+/** The id of every review on a pull request GitHub reports as dismissed, from its full review list. */
+export function dismissedReviewIds(reviews: readonly { id?: unknown; state?: unknown }[]): number[] {
+  return reviews.flatMap(review => review.state === 'DISMISSED' && Number.isSafeInteger(review.id) && (review.id as number) > 0 ? [review.id as number] : []);
+}
 export interface GitHubConfig { repository: string; base: string; appId: number; installationId: number; privateKey: string; reviewerApps?: ReviewerApp[] }
 /**
  * A 401 or a non-rate-limit 403. Retrying it does not help: the credentials or the installed
@@ -948,6 +952,10 @@ export class GitHub {
         ...(Number.isSafeInteger(c.id) ? { id: c.id } : {}), ...(Number.isSafeInteger(c.run_attempt) ? { attempt: c.run_attempt } : {}) })),
       ...(agentReview ? { agentReview } : {}),
       reviewIds: reviews.every(r => Number.isSafeInteger(r.id) && r.id > 0) ? reviews.map(r => r.id) : undefined,
+      // Every review GitHub now reports dismissed, not only each identity's latest (GY-486): an
+      // approval dismissed and then re-posted by the same identity is hidden behind the re-post in
+      // `reviews`, and review-conflict.ts must still read it as withdrawn rather than standing.
+      dismissedReviewIds: dismissedReviewIds(reviews),
       reviews: [...latest.values()].map(r => ({ id: r.id, reviewer: r.user.login, sha: r.commit_id, state: r.state, submittedAt: r.submitted_at,
         ...(r.state === 'DISMISSED' && dismissalOf(r.id) ? { dismissal: dismissalOf(r.id)! } : {}) })),
       prState: pr.state, draft: pr.draft, prCreatedAt: pr.created_at, merged: pr.merged, mergeSha: pr.merge_commit_sha, mergedAt: pr.merged_at, mergeable: pr.mergeable === true && !pr.draft && pr.state === 'open', conflicting: pr.mergeable === false && pr.state === 'open',
