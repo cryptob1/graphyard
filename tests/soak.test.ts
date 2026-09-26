@@ -206,7 +206,8 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
 
   // ---- Production: two deploys, each a new control-plane build serving the base tip it was cut from. ----
   const production = { build: sha('build', 0), sha: github.tip, deploys: [] as { at: number; build: string; sha: string }[] };
-  const snapshot = async () => { const read = await store.coordinationSnapshot(); return { work: read.work, now: read.now, jobs: read.jobs }; };
+  // Each day's loop sees only that day's items: an earlier day may leave some open in the shared store.
+  const snapshot = async () => { const read = await store.coordinationSnapshot(); return { work: read.work.filter(work => items.some(item => item.id === work.id)), now: read.now, jobs: read.jobs }; };
   const transport = async (path: string, data: any, key: string = id()) => {
     const match = /^work\/([^/]+)\/merge-acquire$/.exec(path);
     if (!match) throw new Error(`Unexpected mutation ${path}`);
