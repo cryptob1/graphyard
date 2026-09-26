@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm, utimes, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir, hostname } from 'node:os';
 import { join } from 'node:path';
-import { currentAgents, dispatchReservationDirectory, dispatchReserved, dispatchedFile, profileLaunchedFile, reserveDispatch, takeOverStale } from '../src/master/dispatch-reservation.js';
+import { currentAgents, dispatchReservationDirectory, dispatchReserved, dispatchedFile, profileLaunchedFile, removeJudged, reserveDispatch, takeOverStale } from '../src/master/dispatch-reservation.js';
 // @ts-expect-error The standalone executor is a dependency-free entry point script.
 import { controlPlaneEffects } from '../scripts/graphyard-executor.mjs';
 import type { HerdrAgent, WorkerProfile } from '../src/master.js';
@@ -53,6 +53,33 @@ test('unit:stale-takeover-keeps-a-fresh-lock — a dispatcher that judged a lock
     await writeFile(`${lock}.takeover`, JSON.stringify({ token: 'other', pid: process.pid, host: hostname(), at: new Date().toISOString() }));
     await takeOverStale(lock, judged, JSON.stringify({ ...judged, token: 'slower' }), 'slower');
     assert.equal(JSON.parse(await readFile(lock, 'utf8')).token, 'stale', 'the lock is left to the takeover holding the guard');
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+// GY-509: a live dispatcher that stalls past the takeover guard's age between its read and its removal.
+test('unit:stalled-takeover-removes-only-what-it-judged — removal judges the lock it moved aside, never a lock created during a stall', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'graphyard-stall-'));
+  try {
+    const lock = join(root, 'work-GY-1.lock');
+    const old = new Date(Date.now() - hour);
+    const stale = JSON.stringify({ token: 'stale', pid: 1, host: 'elsewhere', at: old.toISOString() });
+    const fresh = JSON.stringify({ token: 'fresh', pid: process.pid, host: hostname(), at: new Date().toISOString() });
+    const judgedStale = (held: { holder: { token: string } | null }) => held.holder?.token === 'stale';
+    // The lock was replaced by a fresh one while the dispatcher stalled: it is moved aside, fails the
+    // judgement and is put back, whatever its age.
+    await writeFile(lock, fresh); await utimes(lock, old, old);
+    await removeJudged(lock, judgedStale, 'slower');
+    assert.equal(await readFile(lock, 'utf8'), fresh, 'a fresh lock is put back');
+    // A takeover creates its lock while this one holds the fresh lock aside: that lock is not replaced.
+    const newer = JSON.stringify({ token: 'newer', pid: process.pid, host: hostname(), at: new Date().toISOString() });
+    await removeJudged(lock, judgedStale, 'slower', async () => { await writeFile(lock, newer, { flag: 'wx' }); });
+    assert.equal(await readFile(lock, 'utf8'), newer, 'a lock created during the stall stands');
+    // The judged lock itself is removed, and a missing lock is nothing to remove.
+    await writeFile(lock, stale);
+    await removeJudged(lock, judgedStale, 'slower');
+    await assert.rejects(readFile(lock, 'utf8'), 'the stale lock is removed');
+    await removeJudged(lock, judgedStale, 'slower');
+    await assert.rejects(readFile(`${lock}.slower.removing`, 'utf8'), 'nothing is left aside');
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
