@@ -32,4 +32,4 @@ Below the summary: **What is left**, **Requirements** (✓ or ○ per criterion)
 
 ## Insights
 
-Headline numbers, **Flow** replay, landed per day, time spent, [optimistic merges](github.md#optimistic-merges); **Show details** holds shipping pulse (from `master verify-deployment`) and flow analytics. **Shipped** holds **Interventions**, **Validation** and **Releases**. Missing values read `Unavailable`, never zero.
+Headline numbers, **Flow** (Now columns show 12 dots, then **+N more**; medians survive a failed replay read), landed per day, time spent, [optimistic merges](github.md#optimistic-merges); **Show details** holds shipping pulse (PR-to-production from `POST /api/production-observations` or `master verify-deployment`) and flow analytics. **Shipped** holds **Interventions**, **Validation** and **Releases**; `GRAPHYARD_INTERVENTION_PATTERNS=1` files repeats as `bug` items. Missing values read `Unavailable`.
