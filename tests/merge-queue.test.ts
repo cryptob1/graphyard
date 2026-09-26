@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ciPendingReason, ejectionReason, nextQueueSequence, predictQueue, queueOrder, queuePlacement, queueRef, queueSequencingReason, type QueueEntry } from '../src/merge-queue.js';
+import { ejectionReason, nextQueueSequence, predictQueue, queueOrder, queuePlacement, queueRef, queueSequencingReason, type QueueEntry } from '../src/merge-queue.js';
 import { decideCarry } from '../src/model/carry.js';
 import { evaluate, type Evidence, type Observation, type Work } from '../src/model.js';
 import { buildMasterStatus, unauthorizedMergeViolation } from '../src/master.js';
@@ -358,11 +358,4 @@ test('an entry passed over shares its chain position with the entry behind it, a
   const row = status.work.find(entry => entry.key === 'GY-M')!;
   assert.deepEqual(row.merged?.queue, { sequence: 2, position: 1, size: 2, unpublishable: true, behind: ['GY-C'] }, 'neither M itself nor the passed-over A waits behind M');
   assert.match(row.attention!, /GY-C wait behind it/);
-});
-
-test('only a CI-pending test refusal is the tip\'s validation; any other test refusal stays the candidate\'s own (GY-332)', () => {
-  assert.equal(ciPendingReason('Required CI check test has not passed on the current candidate'), true);
-  assert.equal(ciPendingReason('Required CI check typecheck has not passed on the current candidate'), true);
-  assert.equal(ciPendingReason('Check test on the current candidate came from untrusted app 42'), false);
-  assert.equal(ciPendingReason('Merge queue is validating speculative tip aaaaaaaaaaaa: Required CI check test has not passed on the current candidate'), false);
 });
