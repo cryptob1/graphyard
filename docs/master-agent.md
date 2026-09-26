@@ -53,7 +53,7 @@ Each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `linge
 
 With `run.research` set (`model`, `timeoutMinutes` 15, `tokenBudget`), a feature (or `"research": true`) gets one read-only Pi briefing per revision. Product questions: Needs you; build proceeds on the recommendation, a differing answer requests rework, failure never blocks.
 
-Each `Recurring <class> faults` item, or `invariant:` fault (above) past `invariantBoundMinutes`, gets a read-only diagnostician (`run.diagnostician` `model`/`fallbackModel`/`serverLogCommand`, or registry role). Approved decisions release its fix or `close` it as duplicate; recurrences re-file post-delivery.
+Each `Recurring <class> faults` item, or `invariant:` fault (above) past `invariantBoundMinutes`, gets a read-only diagnostician (`run.diagnostician` `model`/`fallbackModel`/`serverLogCommand`, or registry role). Approved decisions release its fix or `close` it as duplicate; recurrences re-file post-delivery. `tests/soak.test.ts` holds this over a simulated day: with the diagnostician and fault-class filing wired as fakes, the loop files each recurring class once, diagnoses it in the filing cycle, closes it on the approved decision, and keeps every invariant and its approver sessions bounded.
 
 ## Automatic dispatch at submit
 
