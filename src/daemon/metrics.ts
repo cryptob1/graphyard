@@ -5,7 +5,7 @@ import { pendingBaseRefresh } from '../merge-queue.js';
 import { standingCapacity } from '../model/capacity.js';
 import { stalledItems } from '../model/action-account.js';
 import { type MasterConfig, type ContainmentAssessment, assertDispatchable, containmentPhase } from '../master.js';
-import { type DaemonAction, type DaemonActionKind, type DaemonState, type ItemClock, itemClockSchema, type LatencySample, latencySampleSchema, type ScopeMeasurement } from './state.js';
+import { type DaemonAction, type DaemonActionKind, type DaemonState, type CycleMetrics, type ItemClock, itemClockSchema, type LatencySample, latencySampleSchema, type ScopeMeasurement } from './state.js';
 import { decisionKey } from './reconcile.js';
 import { boundDetail, mergeableCandidate, namePaths, routineDecision, standingVerdict, withheldDecision } from './decisions.js';
 
@@ -13,6 +13,25 @@ export function percentiles(values: number[]) {
   const sorted = [...values].sort((a, b) => a - b);
   const at = (p: number) => sorted.length ? Math.max(0, Math.round(sorted[Math.min(sorted.length - 1, Math.ceil(p / 100 * sorted.length) - 1)])) : 0;
   return { count: sorted.length, p50Ms: at(50), p90Ms: at(90) };
+}
+
+/**
+ * How the coordination cycle keeps to its configured interval, from the durations the daemon
+ * records for its retained cycles: the last one, the p95, and every cycle that overran. A cycle
+ * longer than its interval means the loop is falling behind the work it shepherds.
+ */
+export function cycleBudget(state: Pick<DaemonState, 'metrics'>, intervalMs: number) {
+  const metrics = state.metrics;
+  const last = metrics.at(-1) ?? null;
+  const durations = metrics.map(metric => metric.durationMs).sort((a, b) => a - b);
+  const p95Ms = durations.length ? durations[Math.min(durations.length - 1, Math.ceil(durations.length * 0.95) - 1)] : null;
+  const overruns = metrics.filter(metric => metric.durationMs > intervalMs);
+  const describe = (m: CycleMetrics) => ({ cycle: m.cycle, at: m.at, durationMs: m.durationMs, childWaitMs: m.childWaitMs ?? null, workMs: m.workMs ?? null });
+  return {
+    intervalMs, measured: metrics.length, lastCycle: last ? describe(last) : null,
+    withinInterval: last ? last.durationMs <= intervalMs : null, p95Ms, overruns: overruns.length,
+    lastOverrun: overruns.length ? describe(overruns.at(-1)!) : null,
+  };
 }
 
 /**
