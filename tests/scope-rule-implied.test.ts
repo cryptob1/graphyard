@@ -178,7 +178,7 @@ const exists = (path: string) => path in tree;
 function item(key: string, plannedFiles: string[], extra: Partial<Work> = {}): Work {
   return {
     id: `00000000-0000-4000-8000-${key.replace(/\D/g, '').padStart(12, '0')}`, key, title: key, description: '', type: 'feature', priority: 1,
-    dependencies: [], criteria: criteria[key], policy: { checks: ['test'], review: true },
+    dependencies: [], criteria: criteria[key].map(criterion => ({ proofs: ['unit:scope-rule-criteria-implied'], ...criterion })), policy: { checks: ['test'], review: true },
     plannedFiles, stage: 'build', revision: 3, policyRevision: 1, createdAt: '2026-09-25T07:39:46.044Z', updatedAt: '2026-09-26T00:00:00.000Z',
     stageEnteredAt: '2026-09-26T00:00:00.000Z', ready: true, epoch: 1, lease: null, workspaces: [], submission: null, candidate: null, reworkRequested: false,
     scenarioRequirements: [], evidence: [], observation: null, blocker: null, violations: [], gates: [], exclusiveResources: [], producerProofs: [],
