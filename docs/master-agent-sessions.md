@@ -7,7 +7,7 @@ Add a worker with `master worker add FILE` from a template ([Codex](../examples/
 
 Add reviewers with `master reviewer setup` and `master reviewer add FILE` ([Claude](../examples/master/claude-reviewer.json), [opencode](../examples/master/opencode-reviewer.json)); `master review GY-N [PROFILE]` relaunches a refused one.
 
-`master producer replace FILE`, `master producer remove NAME` and `master reviewer remove NAME` apply next tick; `setup.attention` reports launch-stopping setup.
+`master producer replace FILE`, `master producer remove NAME` and `master reviewer remove NAME` apply next tick; `setup.attention` reports blocking setup.
 
 ### Session handles
 
@@ -15,13 +15,13 @@ Add reviewers with `master reviewer setup` and `master reviewer add FILE` ([Clau
 
 ### Approval modes
 
-Sessions run in no-approval mode (`"approvals": "auto"`): `--permission-mode bypassPermissions`, `.claude.json` trust (Claude Code); `--ask-for-approval never --sandbox workspace-write`, network, `--add-dir` (Codex); `--force --trust` (Cursor); allow-all `OPENCODE_PERMISSION` (opencode); `--yolo` (Gemini, Qwen); `--allow-all-tools --allow-all-paths` (Copilot); `--approval-mode never --trust-workspace` (Muse); none (Pi). `"prompt"`, `refusedLaunchKinds` and runtimes without command-line requests never start; [registry](onboarding.md#configure-the-fleet) runtimes need `{request}` in their arguments. Codex's sandbox gets `.git/worktrees/GY-N-E` and shared `.git` via `--add-dir`, probed first (`Worker launch failed: the codex sandbox cannot write PATH`).
+Sessions run in no-approval mode (`"approvals": "auto"`): `--permission-mode bypassPermissions`, `.claude.json` trust (Claude Code); `--ask-for-approval never --sandbox workspace-write`, network, `--add-dir` (Codex); `--force --trust` (Cursor); allow-all `OPENCODE_PERMISSION` (opencode); `--yolo` (Gemini, Qwen); `--allow-all-tools --allow-all-paths` (Copilot); `--approval-mode never --trust-workspace` (Muse); none (Pi). `"prompt"`, `refusedLaunchKinds` and runtimes without command-line requests never start; [registry](onboarding.md#configure-the-fleet) runtimes need `{request}` in their arguments. Codex gets `.git/worktrees/GY-N-E` and shared `.git` via `--add-dir`, probed first (`Worker launch failed: the codex sandbox cannot write PATH`).
 
 ## Accounts and failover
 
 A profile's `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`), in order, unless the [agent registry](onboarding.md#configure-the-fleet) defines the role. A launch takes the first logged-in account under `run.quotaCeilingPercent`, else **fails over** to the next (`dispatch.accounts`).
 
-On a mid-session limit notice the loop commits worker changes as unpushed `WIP:`, records `capacity.exhausted` (not `lease-loss`) and relaunches on the next account or waits for the first reset.
+On a mid-session limit notice the loop commits worker changes as unpushed `WIP:`, records `capacity.exhausted` (not `lease-loss`) and relaunches on the next account or awaits a reset.
 
 ## How a session starts
 
@@ -53,9 +53,9 @@ A reviewer or producer is `awaiting acknowledgement` until 30 s of activity (`co
 
 ### Resume, idle-with-lease and exited sessions
 
-When a live attempt's blocker or scope request resolves, its inactive session is re-prompted once (item, epoch, change, `complete GY-N EPOCH PR`), recorded on its handle. **Idle-with-lease** (30 quiet minutes, nothing open) shows on its handle with the pane, re-prompted once, then after 30 more handed to a new attempt on its branch. Sessions with an agentless pane, or whose item left build, close with a reason.
+When a live attempt's blocker or scope request resolves, its inactive session is re-prompted once (item, epoch, change, `complete GY-N EPOCH PR`), recorded on its handle. **Idle-with-lease** (30 quiet minutes, nothing open) shows on its handle with the pane, re-prompted once, then after 30 more handed to a new attempt on its branch. Agentless panes, or items that left build, close with a reason.
 
-**Headless Pi runs outlive restarts**: detached (`graphyard-run-*.scope`, `.graphyard/runs/`), re-adopted, applied once; lost ones retry free.
+Headless Pi runs (`.graphyard/runs/`) survive restarts and are re-adopted; lost ones retry free.
 
 ### The dispatcher's own state
 
