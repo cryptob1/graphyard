@@ -61,7 +61,11 @@ export async function requestDecision(services: Services, caller: Principal, id:
     const work = await findWork(db, id); demand(work, 'Work item not found', 404);
     for (const capability of requiredDecisionCapabilities(data.action, input, work!)) assertDecisionAuthority(actor, capability, work!, services.repository);
     const precondition = decisionPrecondition(data.action, input, work!); demand(!precondition, precondition!, 409);
-    // The repair lane's decision names the fault it repairs (GY-406): a merge-path location.
+    // The repair lane's decision names the fault it repairs (GY-406): a merge-path location. The
+    // name is not matched against a ledger record (GY-428, declined): a merge left pending records no
+    // refusal event, and a refusal names GitHub's reason, never the broken file. What the ledger must
+    // show is judged where the merge is made: repairLaneVerdict's `normal-merge-stalled` condition,
+    // whose recorded state the `repair.merged` audit carries as `bypassed`.
     demand(data.action !== 'repair-merge' || namedMergePathFault(data.reason), `A repair-merge reason must name the merge-path fault: the broken location, one of ${mergePath.join(', ')}`, 422);
     const history = await readDecisions(db, work!);
     // A refused decision is answered, never retried unchanged (GY-141). A rework or recover
