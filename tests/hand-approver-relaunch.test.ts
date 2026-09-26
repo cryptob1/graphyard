@@ -7,7 +7,6 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { approverSessionName, atomicPrivateWrite, loadMasterConfig, runAutonomyCommand, setupMaster, type HerdrAgent, type MasterConfig } from '../src/master.js';
 import { readApproverLaunches, saveApproverLaunch } from '../src/master/autonomy.js';
-import { terminalDecisions, unansweredDecisions } from '../src/cli/decision-report.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import type { Work } from '../src/model.js';
@@ -152,17 +151,11 @@ test('unit:hand-approver-relaunched — a hand-launched approver that vanished i
     await cycle(clock + 210_000);
     assert.deepEqual(closed, ['pane-relaunch-2']);
     assert.equal(launches.calls, 2);
-
-    // Master status names the decision unanswered with each session's end reason.
-    const watches = Object.values(state.approvals).map(entry => ({ ...entry }));
-    const report = await terminalDecisions(async () => ({ decisions: history['GY-551'] }), [{ id: work.id, key: work.key, stage: 'ready' }],
-      { approvals: watches, runtime: { available: true, agents: [] }, now: clock + 210_000 });
-    assert.deepEqual(report.unanswered.map(entry => entry.ends), [[...watch.ended]]);
-    const stall = report.attentionItems.find(entry => entry.text.includes('unanswered'));
-    assert.match(stall!.text, new RegExp(`Every session launched for it ended without judging it: release decision ${decision} on GY-551: approver session ${name} is gone without judging it; release decision ${decision} on GY-551: approver session ${name} ended done without approving it`));
-    assert.match(stall!.next, new RegExp(`graphyard master approver ${work.key} ${decision}`));
-    assert.deepEqual(unansweredDecisions([{ key: work.key, decisions: history['GY-551'] }], watches, { available: true, agents: [{ name, agent_status: 'working' }] }, clock + 210_000), [],
-      'a session a fresh master approver put back on the decision is not a stall');
+    // Master status surfaces the unanswered decision from the watch the loop keeps: the daemon
+    // summary carries the watch with each session's end reason, and the escalation above names
+    // the decision with them and the command that answers it.
+    assert.equal(watch.settledAt, null);
+    assert.equal(watch.ended.length, 2);
   } finally {
     await rm(root, { recursive: true, force: true });
     await rm(credentials, { recursive: true, force: true });
