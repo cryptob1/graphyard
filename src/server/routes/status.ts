@@ -36,10 +36,12 @@ export const statusRoutes = defineRoutes('status', [
       const heldJobs = actor.role === 'operator-agent' ? 0 : (await engine.store.heldJobs()).length;
       // Observation jobs rescheduled three times in a row without an observation (GY-506): the
       // merge-queue deadlock shape, raised by master status rather than left for someone to diagnose.
-      const starvedJobs = actor.role === 'operator-agent' ? [] : await engine.store.starvedJobs();
       const observedAt = (await engine.store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date;
       const work = await engine.store.list();
       const visibleWork = operatorVisible(work);
+      // An operator-agent caller sees the starved jobs of the items it can see (GY-691), as `jobs`
+      // is scoped on the work read below: a master on that credential still raises the signal.
+      const starvedJobs = (await engine.store.starvedJobs()).filter(job => actor.role !== 'operator-agent' || visibleWork.some(item => item.key === job.key));
       // What waits on the operator, derived from the human-only rule table (model/human-request.ts)
       // and carried on the read every client already polls, so the dashboard's Needs you page is
       // a renderer of that table rather than a second opinion about it (GY-102).

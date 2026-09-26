@@ -38,6 +38,7 @@ export function placeInQueue(work: Work, all: Work[], now: Date, ciAppIds: numbe
   const waiting = queue ? null : predecessorWait({ ...work, queue, queueEjection: ejection } as Work, all);
   const shadow = { ...work, queue, queueSequence } as Work;
   const placement = queue ? queuePlacement(shadow, all.map(item => item.id === work.id ? shadow : item), now.getTime()) : null;
+  let stalledAfterDissolution: string | null = null;
   if (queue) {
     const batch = batchOf(shadow);
     let mutated = false;
@@ -60,6 +61,13 @@ export function placeInQueue(work: Work, all: Work[], now: Date, ciAppIds: numbe
         const { batchStall: _stall, ...entry } = queue;
         queue = entry; mutated = true;
       }
+      // Dissolution happens once per stuck batch. A head that is then a single-entry batch and
+      // still sits in testing with no tip has nothing left to dissolve, so it is escalated instead
+      // (GY-691): the merge gate names the stall, and master status raises the item's gate
+      // attention on it. The text is fixed for the stall, so the escalation re-saves nothing.
+      const stalledSince = queue.batchDissolved && queue.batchStall ? Math.max(Date.parse(queue.batchDissolved.at), Date.parse(queue.batchStall.since)) : NaN;
+      if (stuck && now.getTime() - stalledSince >= stuckBatchMs)
+        stalledAfterDissolution = `Merge queue head ${work.key} has sat in testing with no published tip since its stuck batch was dissolved at ${queue.batchDissolved!.at} (GY-506); a single-entry batch cannot be dissolved further, so the queue behind it waits on this entry's tip being published: read graphyard diagnose ${work.key} for the observation job's recorded reason`;
     }
     // The dissolution holds while every member it named is still queued; one that left (merged,
     // or ejected) ends it and the ordinary batch plan resumes for the rest.
@@ -81,7 +89,7 @@ export function placeInQueue(work: Work, all: Work[], now: Date, ciAppIds: numbe
       queue = batch ? { ...entry, batch } : entry;
     }
   }
-  const reasons = placement ? placement.reasons
+  const reasons = placement ? [...(stalledAfterDissolution ? [stalledAfterDissolution] : []), ...placement.reasons]
     : work.observation?.merged || work.stage === 'done' ? []
     : waiting?.length ? [predecessorWaitText(work, waiting)]
     : ejection ? [`Ejected from the merge queue: ${ejection.reason}; a new candidate re-enters at the back of the queue`]

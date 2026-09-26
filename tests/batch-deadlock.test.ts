@@ -180,23 +180,23 @@ test('unit:batch-tip-published-from-stale-state — the GY-438 state (batch test
   head.observation!.at = staleAt;
   await store.pool.query('UPDATE work_items SET document=$2 WHERE id=$1', [head.id, JSON.stringify(head)]);
   assert.equal((await reload(head)).observation!.at, staleAt);
+  // The stale observation was written behind the engine's back, so one pass re-derives the gates
+  // it now fails; from there reconciling the queued entry is idempotent (unit:batch-view-stable).
+  await engine.reconcile();
+  const settledRevision = (await reload(head)).revision;
+  await engine.reconcile();
+  assert.equal((await reload(head)).revision, settledRevision, 'the settled GY-438 state is not rewritten by reconciling');
   // The control plane's tick keeps reconciling while the observation runs, exactly as the server's
   // two-second tick did against GY-438. Before the fix every pass re-saved every queued entry (the
   // derived batch view rewrote the document's key order), so the observation always lost the
-  // revision race and its job was rescheduled without one — the deadlock. A run that still loses
-  // the race records why and comes back; the queue advances on the next one.
+  // revision race and its job was rescheduled without one — the deadlock. Reconciling a queued
+  // entry is idempotent now, so the very first run saves its observation despite the tick.
   const observeRaw = github.observe.bind(github);
   (github as any).observe = async (work: Work, peers?: Work[]) => { const pending = observeRaw(work, peers); await engine.reconcile(); await engine.reconcile(); return pending; };
-  let settled: Work | null = null;
-  for (let attempt = 1; attempt <= 3 && !settled; attempt++) {
-    head = await cycle(github, head);
-    const job = await jobRow(head);
-    if (head.observation && head.observation.at !== staleAt && head.queue?.speculation?.tip) settled = head;
-    else assert.match(String(job.deferred_reason ?? job.error), /Task changed while GitHub was being observed/, `a run that saved no observation records why (attempt ${attempt})`);
-  }
+  head = await cycle(github, head);
   (github as any).observe = observeRaw;
-  assert.ok(settled, 'the queue advanced within three runs of the churning record');
-  head = settled!;
+  assert.notEqual(head.observation?.at, staleAt, `the first run saved an observation despite the reconciling tick: ${JSON.stringify(await jobRow(head))}`);
+  assert.ok(head.queue?.speculation?.tip, 'and published the batch tip');
   assert.equal(head.observation!.baseTip, moved2, 'the observation binds the live base branch tip');
   assert.equal(head.queue!.speculation!.base, moved2, 'the tip was built onto the predicted base the observation saw');
   const job = await jobRow(head);
@@ -322,4 +322,38 @@ test('unit:batch-view-stable — a re-derived batch view equal in content keeps 
   assert.deepEqual(after.queue.batch, stored.queue.batch, 'the stored batch view stands');
   // The queue ref namespace is untouched by any of this.
   assert.match(queueRef(work.key), /^refs\/graphyard\/queue\//);
+});
+
+test('unit:stuck-batch-escalated — a head that still sits in testing with no tip ten minutes after its batch dissolved is escalated on the merge gate, once, not dissolved again', { timeout: 60_000 }, async () => {
+  await clearQueue();
+  const repo = new Repo(), github = repo.adapter();
+  const main = repo.commit([], 'main'); repo.refs.set('heads/main', main);
+  const lone = await validated(repo, github, await submitted(repo, 'Lone stuck head', () => repo.change([main], 'feat: lone', ['src/lone.ts'])));
+  const wedge = async (minutes: number) => {
+    const stuck = await reload(lone);
+    const since = new Date(Date.now() - minutes * 60_000).toISOString();
+    stuck.queue!.batchStall = { since };
+    if (stuck.queue!.batchDissolved) stuck.queue!.batchDissolved.at = since;
+    await store.pool.query('UPDATE work_items SET document=$2 WHERE id=$1', [stuck.id, JSON.stringify(stuck)]);
+  };
+  const stalled = (work: Work) => work.gates.find(gate => gate.name === 'merge')!.reasons.filter(reason => /since its stuck batch was dissolved/.test(reason));
+  // The single-entry batch wedges and dissolves, and is not yet escalated: dissolution is the first answer.
+  await wedge(11); await engine.reconcile();
+  let work = await reload(lone);
+  assert.deepEqual([work.queue!.batch?.state, work.queue!.batch?.tip, work.queue!.batchDissolved?.members], ['testing', null, [lone.key]]);
+  assert.deepEqual(stalled(work), [], 'a freshly dissolved head is not escalated');
+  // Ten more minutes with no tip: nothing is left to dissolve, so the merge gate names the stall.
+  await wedge(11); await engine.reconcile();
+  work = await reload(lone);
+  assert.equal((work.queueHistory ?? []).filter(entry => entry.event === 'dissolved').length, 1, 'the batch is dissolved once, never again');
+  assert.equal(stalled(work).length, 1, 'the merge gate escalates the stalled head');
+  assert.match(stalled(work)[0], new RegExp(`Merge queue head ${work.key} has sat in testing with no published tip since its stuck batch was dissolved at .*graphyard diagnose ${work.key}`));
+  // The escalation is fixed text: reconciling again re-saves nothing.
+  const revision = work.revision;
+  await engine.reconcile(); await engine.reconcile();
+  assert.equal((await reload(lone)).revision, revision, 'the escalation does not churn the record');
+  // Publishing the tip ends the stall and the escalation with it.
+  work = await cycle(github, work); work = await cycle(github, work);
+  assert.ok(work.queue!.speculation?.tip, 'the head published its tip');
+  assert.deepEqual(stalled(work), [], 'the published tip clears the escalation');
 });

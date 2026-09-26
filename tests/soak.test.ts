@@ -62,7 +62,7 @@ const start = Date.parse('2031-06-02T08:00:00Z');
 const plan = {
   items: 15, releaseEveryMs: 15 * minute, workMs: 20 * minute,
   rework: new Set([3, 7, 11]), deaths: new Set([5, 9]), deathAfterMs: 8 * minute,
-  deploys: [2 * hour + 30 * minute, 5 * hour], dirtyCheckout: { from: 4 * hour + 50 * minute, to: 6 * hour }, split: { at: 45 * minute, item: 12 }, clean: 2, unstable: 4, slowRecompute: 8, exhaustedReviewer: 6,
+  deploys: [2 * hour + 30 * minute, 5 * hour], dirtyCheckout: { from: 4 * hour + 50 * minute, to: 6 * hour }, split: { at: 45 * minute, item: 12 }, stuckBatch: { at: 3 * hour, forMs: 15 * minute }, clean: 2, unstable: 4, slowRecompute: 8, exhaustedReviewer: 6,
 };
 const file = (n: number) => `src/soak/item-${n}.ts`;
 
@@ -108,6 +108,16 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     [...Array.from({ length: plan.items }, (_, index) => file(index + 1)), 'README.md']);
   const herdr = new SimulatedHerdr();
   const adapter = github.adapter();
+  // GY-691: from `plan.stuckBatch.at`, GitHub refuses the first fresh queue head's speculative tip
+  // for `forMs`, so its batch sits in testing with no published tip past the dissolution threshold;
+  // the day then shows the stuck batch dissolves once, and the queue resumes once GitHub recovers.
+  let stuck = null as { key: string; at: number } | null;
+  const publish = adapter.publishSpeculativeTip.bind(adapter);
+  adapter.publishSpeculativeTip = async (work, ...rest) => {
+    if (!stuck && !work.queue?.speculation && clock.now() >= dayStart + plan.stuckBatch.at) stuck = { key: work.key, at: clock.now() };
+    if (stuck?.key === work.key && clock.now() < stuck.at + plan.stuckBatch.forMs) throw new Error(`GitHub refused the speculative tip for ${work.key}: 502 Bad Gateway`);
+    return publish(work, ...rest);
+  };
   const moveClock = async (ms: number) => { clock.advance(ms); await store.pool.query('UPDATE simulated_clock SET offset_ms=$1', [clock.offsetMs]); };
   await moveClock(0);
 
@@ -268,6 +278,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   const launcher = new Launcher();
   const violations: string[] = [], observed = new Set<string>(), failures: string[] = [], escalations: string[] = [], spent = new Set<string>();
   let released = 0, split = false, deploys = 0, cycles = 0, reportedDispatches = 0;
+  const starved: string[] = [];
   const jobsDue = async () => Number((await store.pool.query('SELECT count(*) AS due FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now())')).rows[0].due);
   for (let elapsed = 0; elapsed <= options.hours * hour;) {
     const now = clock.now();
@@ -316,6 +327,8 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       upgrades.outcomes.push(upgraded.outcome);
       if (upgraded.outcome === 'failed') failures.push(`${new Date(now).toISOString()}: self-upgrade failed: ${upgraded.reason}`);
       if (upgraded.outcome === 'refused') refusalSamples.push({ keys: Object.keys(state.actions).filter(key => key.startsWith('upgrade:')).length, attempts: state.actions['upgrade:refused']?.attempts ?? 0 });
+      // No observation job starves in steady state (GY-506): none finishes three times running without saving one.
+      for (const job of await store.starvedJobs()) starved.push(`${new Date(now).toISOString()} (+${Math.round(elapsed / minute)} min) ${job.key} unobserved ${job.unobserved}: ${job.deferred_reason ?? job.error ?? 'no reason recorded'}`);
       for (const check of state.invariants.report as InvariantCheck[]) {
         if (check.observed) observed.add(check.invariant);
         if (!check.holds) violations.push(`${new Date(now).toISOString()} (+${Math.round(elapsed / minute)} min) ${check.line}`);
@@ -327,18 +340,27 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   }
 
   const final = (await store.list()).filter(item => items.some(entry => entry.id === item.id));
-  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, herdr, hand, escalations, spent, upgrades, refusalSamples, checkout };
+  const dissolutions = (await store.pool.query("SELECT w.document->>'key' AS key, e.payload FROM events e JOIN work_items w ON w.id=e.work_id WHERE e.kind='queue.batch-dissolved' AND e.work_id=ANY($1::uuid[]) ORDER BY e.seq", [items.map(item => item.id)])).rows as { key: string; payload: any }[];
+  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, herdr, hand, escalations, spent, upgrades, refusalSamples, checkout, stuck, starved, dissolutions };
 }
 
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 180_000 }, async () => {
   const began = performance.now();
-  const { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, state, upgrades, refusalSamples, checkout } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
+  const { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, state, upgrades, refusalSamples, checkout, stuck, starved, dissolutions } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
   const undelivered = final.filter(item => item.stage !== 'done' || !item.delivery);
   assert.deepEqual(undelivered.map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
   assert.deepEqual(failures, [], 'no cycle failed');
   assert.deepEqual(lost, [], 'no worker lost its lease: a dead worker lapses, it is not refused');
   assert.deepEqual([...observed].sort(), [...systemInvariants].sort(), 'every invariant was observed, not merely left unread');
+  // GY-691: no observation job starved at any point of the day, and the wedged head batch
+  // dissolved exactly once — no flapping — and its item was still delivered.
+  assert.deepEqual(starved, [], 'no observation job starves in steady state');
+  assert.ok(stuck, 'the day wedged a head batch in testing with no published tip');
+  assert.deepEqual(dissolutions.map(row => row.key), [stuck!.key], `the stuck batch dissolved once, and nothing else did: ${JSON.stringify(dissolutions)}`);
+  const wedged = final.find(item => item.key === stuck!.key)!;
+  assert.equal((wedged.queueHistory ?? []).filter(entry => entry.event === 'dissolved').length, 1, 'one dissolution on the head\'s queue history');
+  assert.ok(wedged.stage === 'done' && wedged.delivery, 'the dissolved batch\'s head was delivered');
   // The day held what it was meant to: a merge about every fifteen minutes, the rework rounds, the deaths,
   // the deploys, the split, both merge states, auto-merge, and the failover.
   assert.equal(github.merges.length, plan.items, 'fifteen merges');
