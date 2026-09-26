@@ -82,35 +82,36 @@ test('unit:lease-pool-isolated — renewal, claim, complete and blocked obtain a
   assert.equal((store.leasePool as unknown as { options: { max: number } }).options.max, leasePoolConnections, 'the lease pool is sized by the product default in store/pools.ts');
   const engine = engineOn(store);
   const http = await listening(engine);
-  const work = await claimed(engine, 'isolated-renewal');
-  const open = await ready(engine, 'isolated-claim');
-  // Every pool but the lease pool — the general pool, and the report pool where the store has one —
-  // is held to its last connection, as slow report and observation queries held it in production.
-  const others = Object.entries(store).filter((entry): entry is [string, pg.Pool] => entry[1] instanceof pg.Pool && entry[1] !== store.leasePool);
-  assert.ok(others.some(([name]) => name === 'pool'), 'the general pool is among the pools exhausted');
-  const held = (await Promise.all(others.map(([, pool]) => exhaust(pool)))).flat();
   try {
-    const renewal = await timed(() => http.post(engineer, `work/${work.id}/heartbeat`, { epoch: work.epoch }));
-    assert.equal(renewal.value.status, 200, JSON.stringify(renewal.value.body));
-    assert.ok(renewal.ms < 2000, `the heartbeat, authentication included, completed in ${Math.round(renewal.ms)} ms`);
-    const blocked = await timed(() => http.post(engineer, `work/${work.id}/blocked`, { epoch: work.epoch, reason: 'waiting on a fixture' }));
-    assert.equal(blocked.value.status, 200, JSON.stringify(blocked.value.body)); assert.ok(blocked.ms < 2000, `blocked completed in ${Math.round(blocked.ms)} ms`);
-    await http.post(engineer, `work/${work.id}/blocked`, { epoch: work.epoch, reason: null });
-    const claim = await timed(() => http.post(rival, `work/${open.id}/claim`, {}));
-    assert.equal(claim.value.status, 200, JSON.stringify(claim.value.body)); assert.ok(claim.ms < 2000, `claim completed in ${Math.round(claim.ms)} ms`);
-    const complete = await timed(() => http.post(engineer, `work/${work.id}/submit`, { epoch: work.epoch, pr: 558 }));
-    assert.equal(complete.value.status, 200, JSON.stringify(complete.value.body)); assert.ok(complete.ms < 2000, `complete completed in ${Math.round(complete.ms)} ms`);
-    assert.equal(complete.value.body.submission.pr, 558);
-  } finally { for (const client of held) client.release(); }
-  // The other way round: with every lease connection held, status and reconciliation still run,
-  // because neither ever takes a lease connection.
-  const leases = await exhaust(store.leasePool);
-  try {
-    const status = await timed(() => http.get(operator, 'status'));
-    assert.equal(status.value.status, 200); assert.ok(status.ms < 5000, `status answered in ${Math.round(status.ms)} ms without a lease connection`);
-    await engine.reconcile();
-  } finally { for (const client of leases) client.release(); }
-  await http.close(); await store.close();
+    const work = await claimed(engine, 'isolated-renewal');
+    const open = await ready(engine, 'isolated-claim');
+    // Every pool but the lease pool — the general pool, and the report pool where the store has one —
+    // is held to its last connection, as slow report and observation queries held it in production.
+    const others = Object.entries(store).filter((entry): entry is [string, pg.Pool] => entry[1] instanceof pg.Pool && entry[1] !== store.leasePool);
+    assert.ok(others.some(([name]) => name === 'pool'), 'the general pool is among the pools exhausted');
+    const held = (await Promise.all(others.map(([, pool]) => exhaust(pool)))).flat();
+    try {
+      const renewal = await timed(() => http.post(engineer, `work/${work.id}/heartbeat`, { epoch: work.epoch }));
+      assert.equal(renewal.value.status, 200, JSON.stringify(renewal.value.body));
+      assert.ok(renewal.ms < 2000, `the heartbeat, authentication included, completed in ${Math.round(renewal.ms)} ms`);
+      const blocked = await timed(() => http.post(engineer, `work/${work.id}/blocked`, { epoch: work.epoch, reason: 'waiting on a fixture' }));
+      assert.equal(blocked.value.status, 200, JSON.stringify(blocked.value.body)); assert.ok(blocked.ms < 2000, `blocked completed in ${Math.round(blocked.ms)} ms`);
+      await http.post(engineer, `work/${work.id}/blocked`, { epoch: work.epoch, reason: null });
+      const claim = await timed(() => http.post(rival, `work/${open.id}/claim`, {}));
+      assert.equal(claim.value.status, 200, JSON.stringify(claim.value.body)); assert.ok(claim.ms < 2000, `claim completed in ${Math.round(claim.ms)} ms`);
+      const complete = await timed(() => http.post(engineer, `work/${work.id}/submit`, { epoch: work.epoch, pr: 558 }));
+      assert.equal(complete.value.status, 200, JSON.stringify(complete.value.body)); assert.ok(complete.ms < 2000, `complete completed in ${Math.round(complete.ms)} ms`);
+      assert.equal(complete.value.body.submission.pr, 558);
+    } finally { for (const client of held) client.release(); }
+    // The other way round: with every lease connection held, status and reconciliation still run,
+    // because neither ever takes a lease connection.
+    const leases = await exhaust(store.leasePool);
+    try {
+      const status = await timed(() => http.get(operator, 'status'));
+      assert.equal(status.value.status, 200); assert.ok(status.ms < 5000, `status answered in ${Math.round(status.ms)} ms without a lease connection`);
+      await engine.reconcile();
+    } finally { for (const client of leases) client.release(); }
+  } finally { await http.close(); await store.close(); }
 });
 
 test('unit:server-fault-keeps-lease — a renewal that failed server-side keeps its lease for one more period; a lease nobody renews still expires', async () => {
@@ -237,21 +238,22 @@ test('unit:heartbeat-latency-reported — status reports heartbeat p50/p95 and f
   const store = new Store(connection);
   const engine = engineOn(store);
   const http = await listening(engine);
-  const work = await claimed(engine, 'latency-reported');
-  for (let n = 0; n < 3; n++) assert.equal((await http.post(engineer, `work/${work.id}/heartbeat`, { epoch: work.epoch })).status, 200);
-  assert.equal((await http.post(engineer, `work/${work.id}/heartbeat`, { epoch: work.epoch + 1 })).status, 409, 'a renewal for another epoch is refused');
-  const transaction = store.transaction.bind(store);
-  store.transaction = (async () => { store.transaction = transaction; throw new Error('canceling statement due to statement timeout'); }) as Store['transaction'];
-  const failed = await http.post(engineer, `work/${work.id}/heartbeat`, { epoch: work.epoch });
-  assert.equal(failed.status, 503);
-  assert.ok(failed.body.renewalFault?.graceUntil, 'the 503 names the grace its recorded fault earned');
-  const status = await http.get(operator, 'status');
-  assert.equal(status.status, 200);
-  const served = status.body.leaseHealth;
-  assert.equal(served.renewals, 5); assert.equal(served.refused, 1); assert.equal(served.failed, 1);
-  assert.ok(typeof served.p50Ms === 'number' && typeof served.p95Ms === 'number' && served.p95Ms >= served.p50Ms);
-  assert.equal(served.attention, null);
-  await http.close(); await store.close();
+  try {
+    const work = await claimed(engine, 'latency-reported');
+    for (let n = 0; n < 3; n++) assert.equal((await http.post(engineer, `work/${work.id}/heartbeat`, { epoch: work.epoch })).status, 200);
+    assert.equal((await http.post(engineer, `work/${work.id}/heartbeat`, { epoch: work.epoch + 1 })).status, 409, 'a renewal for another epoch is refused');
+    const transaction = store.transaction.bind(store);
+    store.transaction = (async () => { store.transaction = transaction; throw new Error('canceling statement due to statement timeout'); }) as Store['transaction'];
+    const failed = await http.post(engineer, `work/${work.id}/heartbeat`, { epoch: work.epoch });
+    assert.equal(failed.status, 503);
+    assert.ok(failed.body.renewalFault?.graceUntil, 'the 503 names the grace its recorded fault earned');
+    const status = await http.get(operator, 'status');
+    assert.equal(status.status, 200);
+    const served = status.body.leaseHealth;
+    assert.equal(served.renewals, 5); assert.equal(served.refused, 1); assert.equal(served.failed, 1);
+    assert.ok(typeof served.p50Ms === 'number' && typeof served.p95Ms === 'number' && served.p95Ms >= served.p50Ms);
+    assert.equal(served.attention, null);
+  } finally { await http.close(); await store.close(); }
 
   // The operations reference states the lease pool and the rule.
   const docs = await readFile(new URL('../docs/operations-reference.md', import.meta.url), 'utf8');
