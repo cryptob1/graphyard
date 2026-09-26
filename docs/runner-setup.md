@@ -1,17 +1,17 @@
-<!-- page: Build integrations | 3 | the packaged runner and collector. -->
-# The packaged Playwright runner and collector
+<!-- page: Build integrations | 3 | host setup. -->
+# Playwright runner and collector
 
-An approved oracle bundle runs in an isolated container supervised by a host attestor; a separately trusted collector verifies it, then publishes.
+An approved oracle bundle runs in an isolated container under a host attestor; a separately trusted collector verifies it before publishing.
 
 ## Approve the bundle
 
 ```bash
 graphyard runner inspect [packages/web]                 # reads metadata only
 graphyard runner snapshot selected-files.json > oracle-source.json
-graphyard runner bundle-digest ./oracle                 # the digest to execute
+graphyard runner bundle-digest ./oracle                 # the digest the runner will execute
 ```
 
-The bundle holds the reviewed specs with every helper and lockfile, attestor-owned, not group- or world-writable. Pin `digest` and `runnerImageDigest` with `validation define`. The image builds from `docker/runner/Dockerfile`; specs read the target from `GRAPHYARD_TARGET_URL`.
+The bundle holds the reviewed specs, helpers and lockfiles, owned by the attestor, not group- or world-writable. Pin `digest` and `runnerImageDigest` with `validation define`. The image builds from `docker/runner/Dockerfile`; specs read the target from `GRAPHYARD_TARGET_URL`.
 
 ## Run an attempt
 
@@ -52,11 +52,11 @@ install -d -o graphyard-attestor -g graphyard-boundary -m 2750 /srv/graphyard/at
 setfacl -d -m g:graphyard-boundary:rx /srv/graphyard/attempts
 ```
 
-The container writes through the group, the attestor and collector read; **never add the runner account to the group**.
+The container writes through the group, the attestor and collector read; **never add the runner account to it**.
 
 ## Collect and publish
 
-The collector uses a separate `producer` credential scoped to the proof and its own OS account in the boundary group; `graphyard runner collect collector.json`:
+The collector uses a separate `producer` credential scoped to the proof, and its own OS account in the boundary group; `graphyard runner collect collector.json`:
 
 ```json
 {

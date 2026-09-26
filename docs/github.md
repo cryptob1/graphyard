@@ -1,4 +1,4 @@
-<!-- page: Operate Graphyard | 2 | the App, protection, the merge queue, CI proofs. -->
+<!-- page: Operate Graphyard | 2 | App, protection, merge queue, CI proofs. -->
 # GitHub enforcement
 
 The installer's App publishes **`Graphyard / merge`** on the exact PR head.
@@ -47,11 +47,11 @@ Reviews and proofs bind one head, base and policy revision. The queue head's tip
 
 ### Batches
 
-`mergeQueue.batchSize` (master config, default 4; 1 disables; published via `POST /api/merge-queue`) tests entries together: a pass merges members in order, a failure is halved until the culprit is ejected, naming its check (`mergeStep`); batches behind an unpassed one eject nothing. A docs-budget-only failure ejects the entry crossing it, naming words over and pages grown.
+`mergeQueue.batchSize` (master config, default 4; 1 disables; published via `POST /api/merge-queue`) tests entries together: a pass merges members in order, a failure is halved until the culprit is ejected, naming its check (`mergeStep`); batches behind an unpassed one eject nothing. A tip failing only the docs word budget ejects the entry that crossed it, naming the words over and the pages that grew.
 
 ### Direct merges
 
-Without a queue, mergeable `CLEAN`, `UNSTABLE` (optional checks failing) and `HAS_HOOKS` PRs merge at once, head-bound; pending five minutes is `merge-stalled`.
+Without a queue, mergeable `CLEAN`, `UNSTABLE` (optional checks failing) and `HAS_HOOKS` PRs merge at once, head-bound; five minutes pending is `merge-stalled`.
 
 ### Proofs in CI
 

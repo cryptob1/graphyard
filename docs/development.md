@@ -1,4 +1,4 @@
-<!-- page: Understand or contribute | 1 | where features go and how to test. -->
+<!-- page: Understand or contribute | 1 | code layout and testing. -->
 # Development and dogfooding
 
 ## Where a new feature goes
@@ -23,7 +23,7 @@ npm ci && npm run build && npm test
 
 ## Documentation
 
-`docs/README.md` and `docs/protocol.md` are generated in full from each page's `<!-- page: Section | order | summary -->` line by `npm run docs:check -- --write`; never edit them by hand. The regression guard exempts them when the deployment sets `GRAPHYARD_GENERATED_FILES` to what `scripts/check-docs.mjs --list` prints. README.md and `docs/` stay within 12,000 words, no page over 1,200, and each topic lives on one page (`tests/docs-budget.test.ts`): link to it instead of restating it. Within 3% of the total, `master status` raises `docs`; the loop files one trim item.
+`docs/README.md` and `docs/protocol.md` are generated in full from each page's `<!-- page: Section | order | summary -->` line by `npm run docs:check -- --write`; never edit them by hand; the regression guard exempts them via `GRAPHYARD_GENERATED_FILES` (what `scripts/check-docs.mjs --list` prints). README.md and `docs/` stay within 12,000 words, no page over 1,200, and each topic lives on one page (`tests/docs-budget.test.ts`): link, never restate. Within 3% of the total, `master status` raises `docs` and the loop files one trim item to restore 5% headroom.
 
 ## Trusted contracts
 
