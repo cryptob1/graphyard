@@ -130,6 +130,19 @@ export async function baseText(root: string, baseBranch: string, path: string, r
 }
 
 /**
+ * How many files on the base branch mention `identifier` as a whole word, as `basePaths` last
+ * fetched it: the base-tree search the criteria-implied rule (GY-438, model/criterion-scope.ts
+ * criterionSymbolGround) weighs a phrase-spelled call by. A failed search is Infinity, which
+ * grounds nothing, never zero.
+ */
+export async function baseMentions(root: string, baseBranch: string, identifier: string, run: ChildRun): Promise<number> {
+  if (!/^[A-Za-z_$][\w$]*$/.test(identifier)) return Infinity;
+  try {
+    return String(await run('git', ['-C', root, 'grep', '-l', '-w', '-F', '-e', identifier, `origin/${baseBranch}`, '--'])).split('\n').filter(Boolean).length;
+  } catch { return Infinity; }
+}
+
+/**
  * Which of `paths` exist as files on the base branch as the remote has it now; a directory is not a file. The base is fetched once per
  * decision and its commit pinned, so every path is judged against one tree and a request of many
  * paths costs one network fetch: the daemon's other base fetch is lazy, so a local
