@@ -73,8 +73,8 @@ An unexplained lapsed lease raises `lease-loss` (`blocked-awaiting-operator` and
 
 ## Fault classes
 
-Faults carry `faultClass` (`master status` `faults`); non-`baseline` recurrences file one item (`GRAPHYARD_FAULT_CLASS_*`); `daemon.faults.since` dates the first full cycle; moving hashes never reopen a standing fault. A section whose route fails is listed in `unavailable` (section, route, error); the report still returns.
+Faults carry `faultClass` (`master status` `faults`); non-`baseline` recurrences file one item (`GRAPHYARD_FAULT_CLASS_*`); `daemon.faults.since` dates the first full cycle; moving hashes never reopen a standing fault. A failed section is only listed in `unavailable`.
 
 ## Pipeline speed
 
-Target: submit→merge p50 ≤ 30 minutes and p90 ≤ 60 minutes over ten-plus deliveries. Each row's `speed` carries `executionMs`, `waitMs`, `reworkRounds`, `interventions`; `speed.submitToMerge` gives the verdict. `scripts/measure-pipeline-speed.mjs` records what `manual:speed-target-met` reads.
+Target: submit→merge p50 ≤ 30 minutes and p90 ≤ 60 minutes over ten-plus deliveries. Each row's `speed` carries `executionMs`, `waitMs`, `reworkRounds` and `interventions`; `speed.submitToMerge` gives the verdict. `node scripts/measure-pipeline-speed.mjs` records what `manual:speed-target-met` reads.
