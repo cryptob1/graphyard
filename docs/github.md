@@ -44,7 +44,7 @@ Reviews and proofs bind one head, base and policy revision. The queue head's tip
 
 ### Parallel tips
 
-`mergeQueue.parallelTips` (master config, default 4, published with `batchSize` via `POST /api/merge-queue`) tips run CI at once, each on the last; entries merge in order once theirs and all ahead passed. A failing tip ejects its entry; later tips rebuild. `batchSize` now only widens observation and wakes. `master status`, Merge step, [Insights](dashboard.md#insights) show tips, merges/hour, queue wait.
+`mergeQueue.parallelTips` (master config, default 4, published with `batchSize` via `POST /api/merge-queue`) tips run CI at once, each on the last; entries merge in order once theirs and all ahead passed. A failing tip ejects its entry once every tip ahead passed; until then it waits, and a failure ahead is inherited. Later tips rebuild. `batchSize` now only widens observation and wakes. `master status`, Merge step, [Insights](dashboard.md#insights) show tips, merges/hour, queue wait.
 
 ### Direct merges
 

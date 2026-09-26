@@ -35,7 +35,7 @@ const CI_APP = 15368;
  * tree is named by the entries it holds, so a rebuilt tip holding the same entries binds the
  * entries behind it unchanged, as GY-100 binds them.
  */
-function driveParallelTips(parallelTips: number, failing: string | null, count = keys.length) {
+function driveParallelTips(parallelTips: number, failing: string | null, count = keys.length, durationOf: (holding: string[]) => number = () => 100) {
   const duration = 100, start = Date.parse('2026-09-25T09:00:00.000Z'), at = '2026-09-25T08:00:00.000Z';
   let clock = start, published = 0;
   const trees = new Map<string, string>(), holds = new Map<string, string[]>();
@@ -74,13 +74,14 @@ function driveParallelTips(parallelTips: number, failing: string | null, count =
       }
     }
   };
-  const runs: { tip: string; holding: string[]; startedAt: number }[] = [], merged: { key: string; at: number }[] = [], ejected: { key: string; reason: string }[] = [], predictions: { key: string; predecessors: string[]; holding: string[] }[] = [];
+  const runs: { tip: string; holding: string[]; startedAt: number; endsAt: number }[] = [], merged: { key: string; at: number }[] = [], ejected: { key: string; reason: string }[] = [], predictions: { key: string; predecessors: string[]; holding: string[] }[] = [];
   for (let round = 0; queued().length && round < 200; round++) {
+    const ejectedBefore = ejected.length;
     publish();
     for (const item of queued()) Object.assign(item, windowed(item));
     for (const item of items) if (!item.queue && item.queueEjection && item.stage !== 'done' && !ejected.some(entry => entry.key === item.key)) ejected.push({ key: item.key, reason: item.queueEjection!.reason });
     // Entries whose every gate passed land in queue order; each landing moves the base and frees a window position.
-    const landedBefore = merged.length, ejectedBefore = ejected.length;
+    const landedBefore = merged.length;
     for (let landed = true; landed;) {
       landed = false;
       for (const item of queued()) {
@@ -103,9 +104,10 @@ function driveParallelTips(parallelTips: number, failing: string | null, count =
     for (const prefix of named) {
       const item = queued().find(entry => entry.candidate!.sha.startsWith(prefix))!;
       const known = runs.find(run => item.candidate!.sha.startsWith(run.tip));
-      if (known) { next = Math.min(next, known.startedAt + duration); continue; }
-      runs.push({ tip: prefix, holding: holds.get(item.candidate!.sha)!, startedAt: clock });
-      next = Math.min(next, clock + duration);
+      if (known) { next = Math.min(next, known.endsAt); continue; }
+      const holding = holds.get(item.candidate!.sha)!;
+      runs.push({ tip: prefix, holding, startedAt: clock, endsAt: clock + durationOf(holding) });
+      next = Math.min(next, runs.at(-1)!.endsAt);
       started++;
     }
     // A landing or an ejection moved the queue: republish and re-read it before judging progress.
@@ -114,7 +116,7 @@ function driveParallelTips(parallelTips: number, failing: string | null, count =
       continue;
     }
     clock = next;
-    for (const run of runs.filter(run => run.startedAt + duration === clock)) {
+    for (const run of runs.filter(run => run.endsAt === clock)) {
       const item = queued().find(entry => entry.candidate!.sha.startsWith(run.tip));
       if (item) observe(item, [{ name: 'test', result: failing && run.holding.includes(failing) ? 'failure' : 'success', appId: CI_APP }]);
     }
@@ -158,6 +160,29 @@ test('unit:parallel-tips-failure-rebuild — tip 2 of 4 fails: entry 1 merges, e
   // The rebuilt tips passed and merged within one further CI duration of the first merge.
   const at = (key: string) => driven.merged.find(entry => entry.key === key)!.at;
   assert.ok(at('GY-4') - at('GY-1') <= driven.duration * 1.5, `only the tips after the failure were rebuilt: +${at('GY-4') - at('GY-1')}ms`);
+});
+
+test('unit:parallel-tips-failure-rebuild — a later tip failing while the tip ahead still runs ejects nobody until that tip resolves: the entry that caused it is ejected, the innocent entry behind it merges', () => {
+  // Entry 1 breaks the build and later tips finish first, so tip 2 (entries 1 and 2) fails while
+  // tip 1 is still running. Entry 2 must not be attributed the failure it inherits from entry 1.
+  const driven = driveParallelTips(4, 'GY-1', 4, holding => 100 - 20 * (holding.length - 1));
+  const firstVerdict = Math.min(...driven.runs.map(run => run.endsAt)), tip1 = driven.runs.find(run => run.holding.length === 1)!;
+  assert.ok(firstVerdict < tip1.endsAt, `a later tip reports before tip 1 does: ${JSON.stringify(driven.runs)}`);
+  assert.deepEqual(driven.ejected.map(entry => entry.key), ['GY-1'], `only the entry that caused the failure is ejected: ${JSON.stringify(driven.ejected)}`);
+  assert.match(driven.ejected[0].reason, /^Required CI check test did not pass on speculative tip [0-9a-f]{12}$/, 'the head is attributed on its own tip, with no claim about a tip ahead');
+  assert.deepEqual(driven.merged.map(entry => entry.key), ['GY-2', 'GY-3', 'GY-4'], 'the entries behind it stay queued, are rebuilt without it, and merge in queue order');
+  assert.deepEqual(driven.predictions.filter(prediction => prediction.key === 'GY-2').at(-1)!.holding, ['GY-2'], 'tip 2 is rebuilt without entry 1');
+
+  // Evaluated directly: tip 2 failed while tip 1 runs, so entry 2 stays queued and its merge gate
+  // names tip 1 as still being validated; once tip 1 passes, entry 2's failure is its own.
+  const head = entry(0, [running]), second = entry(1, [failing]);
+  const held = evaluate(second, [head, second], new Date(now), [CI_APP], 1, 4);
+  assert.ok(held.queue && !held.queueEjection, `entry 2 stays queued while tip 1 runs: ${JSON.stringify(held.queueEjection)}`);
+  const reasons = held.gates.find(gate => gate.name === 'merge')!.reasons;
+  assert.ok(reasons.some(reason => reason.startsWith(`${tipValidationPrefix}${tip(0).slice(0, 12)}: speculative tip ${tip(1).slice(0, 12)} of GY-2 failed test`)), `the merge gate waits on tip 1: ${JSON.stringify(reasons)}`);
+  assert.equal(held.queue!.batch!.state, 'waiting', 'the Merge step shows the entry waiting on the tip ahead, not ejecting');
+  const judged = evaluate(second, [entry(0, [pass]), second], new Date(now), [CI_APP], 1, 4);
+  assert.match(judged.queueEjection?.reason ?? '', /attributed to this entry: speculative tip [0-9a-f]{12} ahead of it passed test$/, 'with tip 1 passed, entry 2 is ejected as the cause');
 });
 
 // A four-entry validated chain, tips published on the one ahead, with CI states per tip.

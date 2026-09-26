@@ -207,6 +207,10 @@ export function tipValidation(work: Pick<Work, 'key' | 'candidate' | 'policyRevi
     // A tip that is not published is not being validated: the placement's own reason says the
     // predicted tip has not been published, and naming nothing here keeps that refusal standing.
     const failing = tips.find(tip => tip.ci === 'fail' && tip.tip);
+    // Its own tip failed: attributed once every tip ahead passed; until then the tips ahead are
+    // still being validated and name themselves, since a failure among them would be inherited.
+    const ahead = tips.slice(0, -1).filter(tip => tip.ci !== 'pass' && tip.tip);
+    if (failing && failing === tips.at(-1) && ahead.length) return ahead.map(tip => `${tipValidationPrefix}${tip.tip?.slice(0, 12)}: speculative tip ${failing.tip?.slice(0, 12)} of ${work.key} failed ${failing.failedCheck}, and is attributed to it only once the tips ahead pass`);
     if (failing && failing === tips.at(-1)) return testReasons.map(reason => `${tipValidationPrefix}${failing.tip?.slice(0, 12)}: ${reason}`);
     if (failing) return [`Waiting for speculative tip ${failing.tip?.slice(0, 12)} to resolve: Required CI check ${failing.failedCheck} failed on it and ${work.key} is not the cause; its tip holds the same change and is rebuilt once the entry that caused it leaves the queue`];
     const unjudged = tips.filter(tip => tip.ci !== 'pass' && tip.tip);
@@ -940,6 +944,9 @@ export function ejectionReason(work: Work, ciAppIds: number[], all: Work[] = [],
     const own = window.own;
     if (!own?.tip && publishedTip) return null;
     if (own && own.tip === candidate!.sha && window.firstFailure && window.firstFailure !== own) return null;
+    // Its own tip failing is attributed to it only once every tip ahead is a known pass (GY-471):
+    // a tip ahead still running may yet fail on the same change, and the failure is then inherited.
+    if (own && own.tip === candidate!.sha && !aheadPassed(window)) return null;
     const passedAhead = own && own.tip === candidate!.sha && window.firstFailure === own && window.tips.length > 1
       ? `, attributed to this entry: speculative tip ${window.tips.at(-2)!.tip?.slice(0, 12)} ahead of it passed ${check}`
       : '';
@@ -1365,6 +1372,8 @@ export interface TipWindowView {
   /** The tip view of the entry's own published tip, when it is the current candidate; null otherwise. */
   own: TipView | null;
 }
+/** True when every tip ahead of the entry's own passed: a failure on its own tip is then its change's. */
+export const aheadPassed = (view: Pick<TipWindowView, 'tips'>) => view.tips.slice(0, -1).every(tip => tip.ci === 'pass');
 /** The CI a published tip's required checks are at, read from the observation of exactly that commit. */
 function tipCi(work: Work, ciAppIds: readonly number[] | null): { ci: TipView['ci']; failedCheck?: string } {
   const observation = work.observation, candidate = work.candidate;
@@ -1417,10 +1426,14 @@ export function tipWindowStatus(all: Work[], placements: QueuePlacement[], paral
 export function windowBatchView(key: string, view: TipWindowView, parallelTips: number): MergeBatchView {
   const unjudged = view.tips.filter(tip => tip.ci !== 'pass');
   const failing = view.firstFailure;
-  const state: MergeBatchView['state'] = view.tips.length === 0 ? 'waiting' : failing ? failing === view.own ? 'ejecting' : 'waiting' : unjudged.length ? 'testing' : 'merging';
+  // An own failing tip behind an unjudged one is not attributed yet: the entry waits on the tip ahead.
+  const attributed = !!failing && failing === view.own && aheadPassed(view);
+  const pendingAhead = !!failing && failing === view.own && !attributed ? unjudged.find(tip => tip !== failing) ?? null : null;
+  const state: MergeBatchView['state'] = view.tips.length === 0 ? 'waiting' : attributed ? 'ejecting' : failing ? 'waiting' : unjudged.length ? 'testing' : 'merging';
   const step: BatchStep = view.tips.length === 0 ? { kind: 'test', combination: [] }
-    : failing ? failing === view.own ? { kind: 'eject', member: key, check: failing.failedCheck! }
-      : { kind: 'test', combination: failing.entries }
+    : attributed ? { kind: 'eject', member: key, check: failing!.failedCheck! }
+      : pendingAhead ? { kind: 'test', combination: pendingAhead.entries }
+      : failing ? { kind: 'test', combination: failing.entries }
       : unjudged.length ? { kind: 'test', combination: unjudged.at(-1)!.entries } : { kind: 'merge', members: view.tips.at(-1)!.entries };
   const underTest = unjudged.length ? { members: unjudged.at(-1)!.entries, tip: unjudged.at(-1)!.tip } : null;
   const said = (tip: TipView) => tip.ci === 'pass' ? 'passed' : tip.ci === 'fail' ? `failed ${tip.failedCheck}` : tip.ci === 'running' ? 'running' : 'not validated';
