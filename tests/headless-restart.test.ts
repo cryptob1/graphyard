@@ -7,8 +7,8 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { graphyardTools, type DecidePayload } from '../src/runner/payloads.js';
 import { detachedLaunch, piRunner, processIdentity, readRunMeta, runAlive, runContainment, signalRun } from '../src/runner/pi.js';
-import { adoptRuns, applyOnce, clearRuns, detachRuns, liveRun, runsDirectory, type Applied } from '../src/runner/registry.js';
-import { approverRunOptions, startNarrowRun } from '../src/runner/roles.js';
+import { adoptRuns, applyOnce, clearRuns, detachRuns, liveRun, liveRunCheckouts, runsDirectory, type Applied } from '../src/runner/registry.js';
+import { approverRunAdopter, approverRunContext, approverRunOptions, startNarrowRun } from '../src/runner/roles.js';
 import { lostRun, lostRunReason, sessionRetry } from '../src/producer.js';
 import { approvalStep, approvalWatchSchema, emptyDaemonState, maxApproverLaunches, runDaemon, type DaemonEffects } from '../src/master-daemon.js';
 import { maxLostApproverRuns } from '../src/daemon/decisions.js';
@@ -49,9 +49,10 @@ async function fixture() {
     applied.push({ decision: result.ok ? result.payload.decision : '', ok: result.ok, reason: result.ok ? null : result.failure.reason });
     return result.ok ? [{ subject: `decision ${result.payload.decision}`, outcome: 'applied', detail: 'approved' }] : [];
   };
-  const start = async (decision: string, name: string, role: 'approver' | 'producer' = 'approver') => {
+  const start = async (decision: string, name: string, role: 'approver' | 'producer' = 'approver', checkout?: string) => {
     const { file, release, verdict } = await scenario(decision);
-    const started = startNarrowRun({ runner: runner(file), name, role, work: 'GY-1', subject: decision, root, context: { decision },
+    const started = startNarrowRun({ runner: runner(file), name, role, work: 'GY-1', subject: decision, root,
+      context: checkout ? approverRunContext('http://127.0.0.1:1', 'work-1', decision, 60_000, checkout) : { decision }, ...(checkout ? { checkout } : {}),
       prompt: `Judge ${decision}`, options: approverRunOptions(root, decision, {}, 60_000), apply });
     // Live once the fake Pi has taken its request up.
     await new Promise<void>(resolve => { const off = started.run.onEvent(event => { if (event.kind === 'tool-start') { off(); resolve(); } }); });
@@ -132,6 +133,29 @@ test('unit:headless-run-survives-restart a run that ended while unwatched is app
     assert.equal(retry.started, 1, 'only the run that ran counts against the budget');
     assert.equal(retry.nextAt, '2030-01-01T00:09:00.000Z', 'retried after the base wait, not a widened one');
     assert.equal(retry.launch, true);
+  } finally { await cleanup(); }
+});
+
+test('unit:headless-run-survives-restart an adopted approver run keeps its managed checkout from a reclaim pass while it lives, and settles it once it ends', async () => {
+  const { root, start, cleanup } = await fixture();
+  try {
+    const checkout = join(root, 'approval-checkout');
+    const { meta } = await start('decision-9', 'graphyard-approver-gy-9', 'approver', checkout);
+    assert.deepEqual(liveRunCheckouts(), [checkout], 'the launching loop holds the run\'s checkout');
+    detachRuns();
+    assert.deepEqual(liveRunCheckouts(), [], 'the restarted loop starts holding nothing');
+
+    const settledCheckouts: string[] = [];
+    const [adopted] = await adoptRuns(root, { approver: approverRunAdopter(async () => 'token', undefined, async directory => { settledCheckouts.push(directory); }) });
+    assert.equal(adopted.live, true);
+    assert.deepEqual(liveRunCheckouts(), [checkout], 'the adopted run holds its checkout again, so a reclaim pass leaves it');
+
+    // Lost from outside: no verdict is applied (so no approve route is called), and the checkout is settled once.
+    signalRun(meta, 'SIGKILL');
+    const record = await adopted.settled;
+    assert.equal(record.result?.ok === false && record.result.reason, 'lost');
+    assert.deepEqual(settledCheckouts, [checkout]);
+    assert.deepEqual(liveRunCheckouts(), []);
   } finally { await cleanup(); }
 });
 

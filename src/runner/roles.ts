@@ -51,7 +51,7 @@ const failure = (error: unknown) => error instanceof Error ? error.message : Str
  * and the `context` its role needs to apply the result, so a restart that leaves the run going
  * (it is detached) is followed by an adoption that applies it — once, whichever process sees it end.
  */
-export function startNarrowRun<T>(input: { runner: Runner; name: string; role: 'approver' | 'producer'; work: string; subject: string; prompt: string; options: RunOptions<T>;
+export function startNarrowRun<T>(input: { runner: Runner; name: string; role: 'approver' | 'producer'; work: string; subject: string; prompt: string; options: RunOptions<T>; checkout?: string;
   apply: (result: RunResult<T>) => Promise<Applied[]>; root?: string; context?: Record<string, unknown> }) {
   const live = liveRun(input.name);
   if (live) throw new Error(`A ${live.role} run named ${input.name} is already running for ${live.work}`);
@@ -62,7 +62,7 @@ export function startNarrowRun<T>(input: { runner: Runner; name: string; role: '
     try { claimRunWatch(run.directory); writeRunOwner(run.directory, { name: input.name, role: input.role, work: input.work, subject: input.subject, context: input.context ?? {}, startedAt }); }
     catch { /* the run is still watched here; only its adoption after a restart is lost */ }
   }
-  const settled = superviseRun({ runner: input.runner, run, name: input.name, role: input.role, work: input.work, subject: input.subject, startedAt, apply: input.apply });
+  const settled = superviseRun({ runner: input.runner, run, name: input.name, role: input.role, work: input.work, subject: input.subject, startedAt, apply: input.apply, ...(input.checkout ? { checkout: input.checkout } : {}) });
   return { run, settled, record: runRecord(input.runner.name, run, null, startedAt, null) };
 }
 
@@ -103,18 +103,21 @@ export const approverRunOptions = (cwd: string, decision: string, env: Record<st
 });
 
 /** What an approver run's adoption after a restart needs (GY-453): never the token, which the adopter reads itself. */
-export const approverRunContext = (url: string, workId: string, decision: string, timeoutMs: number) => ({ url, workId, decision, timeoutMs });
-const approverRunContextSchema = z.object({ url: z.string(), workId: z.string(), decision: z.string(), timeoutMs: z.number().int().positive() }).passthrough();
+export const approverRunContext = (url: string, workId: string, decision: string, timeoutMs: number, checkout?: string) => ({ url, workId, decision, timeoutMs, ...(checkout ? { checkout } : {}) });
+const approverRunContextSchema = z.object({ url: z.string(), workId: z.string(), decision: z.string(), timeoutMs: z.number().int().positive(), checkout: z.string().optional() }).passthrough();
 /**
  * How a restarted loop takes back a headless approver run (GY-453, registry.ts adoptRuns): its
  * verdict is validated against the decision it was launched for and applied as the approver
- * identity, exactly as the launch would have applied it.
+ * identity, exactly as the launch would have applied it. The managed directory it works in (GY-391)
+ * stays held while it lives and is settled, through `settle`, once it ends.
  */
-export function approverRunAdopter(token: () => Promise<string>, fetcher?: typeof fetch): RunAdopter {
+export function approverRunAdopter(token: () => Promise<string>, fetcher?: typeof fetch, settle?: (checkout: string) => Promise<unknown>): RunAdopter {
   return async owner => {
     const context = approverRunContextSchema.parse(owner.context);
+    const checkout = context.checkout;
     return { options: approverRunOptions('', context.decision, {}, context.timeoutMs),
-      apply: async result => result.ok ? [await applyDecision(context.url, await token(), { id: context.workId }, result.payload as DecidePayload, fetcher)] : [] };
+      apply: async result => result.ok ? [await applyDecision(context.url, await token(), { id: context.workId }, result.payload as DecidePayload, fetcher)] : [],
+      ...(checkout ? { checkout, settled: () => settle?.(checkout) } : {}) };
   };
 }
 
@@ -130,9 +133,10 @@ export const producerRunOptions = (cwd: string, binding: { sha: string; baseSha:
   },
 });
 
-export function piApproverPrompt(config: { repository: string; cliPath: string }, key: string, decision: string, identity: string) {
+export function piApproverPrompt(config: { repository: string; cliPath: string }, key: string, decision: string, identity: string, repository?: string) {
   const cli = `node ${config.cliPath}`;
   return `You are the independent Graphyard approver for ${config.repository}, acting as ${identity}. Judge decision ${decision} on ${key}: run ${cli} master decisions ${key}, read the item with ${cli} status ${key}, its pull request and history, and weigh the requester's reason against the item's criteria and the operator's goals. `
+    + (repository ? `Your working directory is a scratch directory of your own; the repository is at ${repository} and is read-only to you: read it with git -C ${repository}, never write, move or remove anything in it. ` : '')
     + `Then call the graphyard_decide tool exactly once with decision "${decision}", approve true if the decision is justified or false if it is not, and your reason; a decline is a call with approve false, never an exit without one. Graphyard applies your verdict as ${identity}, so do not run master approve or master refuse yourself. `
     + 'Never approve a decision you requested, implemented, or produced evidence for; never edit, push, merge, review, or submit evidence. Stop after the call.';
 }

@@ -26,6 +26,8 @@ export interface RegisteredRun {
   /** The producer ledger record id, or the decision id, the run answers. */
   subject: string;
   run: Run<unknown>;
+  /** The managed directory the run works in, when it was given one (the approver's, GY-391): a reclaim pass leaves it while the run lives. */
+  checkout?: string;
   /** Filled in when the run ends and its payload was applied. */
   record: RunRecord | null;
   endedAt: number | null;
@@ -58,6 +60,8 @@ export const liveRuns = () => { prune(); return [...runs.values()].filter(entry 
 /** How many runs this process watches, research runs included. */
 export const watchedRuns = () => watched.size;
 
+/** The managed directories live runs work in: not a reclaim pass's to take. */
+export const liveRunCheckouts = () => liveRuns().filter(entry => entry.checkout).map(entry => entry.checkout!);
 /** The live runs as Herdr-shaped sessions: no pane, and a working status. A research run is no session. */
 export function runnerAgents(): { name: string; agent: string; agent_status: string }[] {
   return liveRuns().filter(entry => entry.role !== 'research').map(entry => ({ name: entry.name, agent: 'pi', agent_status: 'working' }));
@@ -194,10 +198,10 @@ const failure = (error: unknown) => error instanceof Error ? error.message : Str
  * Watch a run registered under its session name and apply its result once when it ends. Shared by
  * a run's start and its adoption after a restart: the same registration, the same single apply.
  */
-export function superviseRun<T>(input: { runner: Pick<Runner, 'name'>; run: Run<T>; name: string; role: RunRole; work: string; subject: string; startedAt: string;
+export function superviseRun<T>(input: { runner: Pick<Runner, 'name'>; run: Run<T>; name: string; role: RunRole; work: string; subject: string; startedAt: string; checkout?: string;
   apply: (result: RunResult<T>) => Promise<Applied[]> }) {
   const { run } = input;
-  if (input.role !== 'research') registerRun({ name: input.name, role: input.role, work: input.work, subject: input.subject, run: run as Run<unknown> });
+  if (input.role !== 'research') registerRun({ name: input.name, role: input.role, work: input.work, subject: input.subject, run: run as Run<unknown>, ...(input.checkout ? { checkout: input.checkout } : {}) });
   watched.add(run as Run<unknown>);
   const settled = run.result().then(async result => {
     watched.delete(run as Run<unknown>);
@@ -226,6 +230,8 @@ export type RunAdopter = (owner: RunOwner) => Promise<{
   settled?: (record: RunRecord) => Promise<unknown> | unknown;
   /** The role's subject settled while the run was unwatched: the run is stopped with this reason, and applies nothing. */
   cancel?: string;
+  /** The managed directory the run works in, kept from a reclaim pass while it lives (GY-391). */
+  checkout?: string;
 } | null>;
 export interface AdoptedRun { name: string; role: RunRole; work: string; subject: string; directory: string; live: boolean; settled: Promise<RunRecord> }
 
@@ -250,7 +256,7 @@ export async function adoptRuns(root: string, adopters: Partial<Record<RunRole, 
     if (!plan) { releaseRunWatch(directory); continue; }
     const meta = readRunMeta(directory);
     const run = runner.adopt(directory, plan.options);
-    const settled = superviseRun({ runner, run, name: owner.name, role: owner.role, work: owner.work, subject: owner.subject, startedAt: owner.startedAt, apply: plan.apply })
+    const settled = superviseRun({ runner, run, name: owner.name, role: owner.role, work: owner.work, subject: owner.subject, startedAt: owner.startedAt, apply: plan.apply, ...(plan.checkout ? { checkout: plan.checkout } : {}) })
       .then(async ended => { await plan!.settled?.(ended); return ended; });
     if (plan.cancel) run.cancel(plan.cancel);
     adopted.push({ name: owner.name, role: owner.role, work: owner.work, subject: owner.subject, directory, live: !!meta && runAlive(meta), settled });
