@@ -1,7 +1,7 @@
 <!-- page: Start here | 0 | the one command and upgrades. -->
 # Install Graphyard
 
-One command installs the control plane; an agent or person runs this runbook from one instruction:
+An agent or person runs this runbook from one instruction:
 
 > install Graphyard for OWNER/REPO on PROVIDER following docs/install.md
 
@@ -19,6 +19,8 @@ A person is asked for exactly four things: **Which provider** (and `--workspace`
 
 Node 24; a checkout of `OWNER/REPO`; `export GRAPHYARD_CLI=/abs/path/graphyard/bin/graphyard.mjs`; `gh auth status` logged in as a repository admin with `repo,admin:repo_hook`.
 
+Worker and non-Actions unit-proof hosts need bubblewrap: `bwrap --unshare-all --ro-bind / / -- true` must succeed (Ubuntu 24.04: `sysctl kernel.apparmor_restrict_unprivileged_userns=0`).
+
 ### Providers
 
 - `railway`: `npm i -g @railway/cli`, `railway login`.
@@ -34,11 +36,11 @@ node "$GRAPHYARD_CLI" install --provider PROVIDER --repo OWNER/REPO --plan
 
 Options: `--workers N`, `--producer-proof NAME`, `--required-check NAME`, `--domain`; `init --scan` [proposes](operations-reference.md#setup-proposals-and-drift) check and proof names.
 
-**Verify:** `secretsRedacted` and every `preflight[].ok` are `true` (else run its `fix` and re-plan).
+**Verify:** `secretsRedacted` and every `preflight[].ok` are `true` (else run its `fix`).
 
 ## Step 2: approve the plan
 
-Show the human the plan and any `drift`. **Verify** their explicit approval; an agent never approves.
+Show the human the plan and any `drift`. **Verify** their explicit approval.
 
 ## Step 3: apply
 
@@ -46,11 +48,11 @@ Show the human the plan and any `drift`. **Verify** their explicit approval; an 
 node "$GRAPHYARD_CLI" install --provider PROVIDER --repo OWNER/REPO --apply
 ```
 
-It writes credentials, sets [variables](deployment.md#variables), deploys, runs the App flow, applies [branch protection](github.md#require-the-check). **Verify** `GET /healthz` answers.
+It writes credentials, sets [variables](deployment.md#variables), deploys, applies [branch protection](github.md#require-the-check). **Verify** `GET /healthz` answers.
 
 ## Step 4: the GitHub App confirmation
 
-The installer prints `Open http://127.0.0.1:4311 ...`; the human registers and installs the App. **Verify:** the page reports *App registered and installation verified*.
+At the printed `http://127.0.0.1:4311` the human registers and installs the App. **Verify:** the page reports *App registered and installation verified*.
 
 ## Step 5: read the summary
 
@@ -58,19 +60,19 @@ The installer prints `Open http://127.0.0.1:4311 ...`; the human registers and i
 
 ## Step 6: the first pull request
 
-Dispatch a small item ([onboarding](onboarding.md#4-prove-the-first-pr)); after `Graphyard / merge` first appears, rerun `--apply` when `nextSteps` says so. **Verify** the check is required on the base branch.
+Dispatch a small item ([onboarding](onboarding.md#4-prove-the-first-pr)); once `Graphyard / merge` appears, rerun `--apply`. **Verify** the check is required on the base branch.
 
 `--plan` and `--apply` are idempotent: done actions show `"satisfied"`, differences `drift`; credentials never rotate.
 
 ## Upgrading an existing installation
 
-A release needing a new App permission holds the jobs using it. [Back up, deploy](deployment.md#backup-upgrade-rollback), then on the machine holding `.graphyard/github-app.json`:
+A release needing a new App permission holds jobs using it. [Back up, deploy](deployment.md#backup-upgrade-rollback), then where `.graphyard/github-app.json` lives:
 
 ```sh
 node "$GRAPHYARD_CLI" github-setup --update-permissions --wait 600
 ```
 
-Confirm `doctor` shows `appPermissions.missing` empty; a re-run fixes `delegationLimits` drift such as `Set GRAPHYARD_MAX_REVIEWERS=N on the deployment`.
+Confirm `doctor` shows `appPermissions.missing` empty; a re-run fixes `delegationLimits` drift (`Set GRAPHYARD_MAX_REVIEWERS=N on the deployment`).
 
 ## Failure handling
 
@@ -83,11 +85,12 @@ Confirm `doctor` shows `appPermissions.missing` empty; a re-run fixes `delegatio
 | `The GitHub App confirmation did not complete in time` | rerun `--apply`; it resumes |
 | `webhook.delivered` `false`, 401 | rerun `--apply`; it rewrites both secrets |
 | `Branch protection could not be applied` | `gh auth login` as a repository admin, rerun |
+| worktree dependencies `failed` | [bubblewrap](#preconditions) |
 | `Refusing to store installation credentials inside the managed repository` | point `GRAPHYARD_CONFIG_HOME` outside every worktree |
 
 ## Agent execution contract
 
-Follow steps 1–6, reporting verification and `nextSteps`; never read a token file or weaken a gate to finish.
+Follow steps 1–6, reporting verification and `nextSteps`; never weaken a gate to finish.
 
 ## Manual fallback for unsupported platforms
 
