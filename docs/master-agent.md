@@ -17,7 +17,7 @@ Keep cycling: status, dispatch, review, merge, deployment verification. Stop onl
 4. `master verify-deployment GY-N` after delivery ([refusals](operations-reference.md#perpetual-master-loop)). Railway: `master config productionEnvironment='graphyard / production'`.
 5. Close finished agent sessions.
 
-Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions. `controlPlane.production` flags main ahead of production.
+Ordinary review findings, rework, idle workers and proof setup are not stopping conditions. `controlPlane.production` flags main ahead of production.
 
 `master run` runs this loop under the `graphyard-master.service` unit ([supervision](onboarding.md#the-loop-must-be-supervised)); restart it (`systemctl --user restart graphyard-master`) when `daemon.liveness` is `stalled` or `absent`.
 
@@ -28,22 +28,21 @@ Unless created `"systemDriven": false`, an item refuses hand `dispatch`, `merge`
 ### Session liveness is reconciled, not trusted
 
 **The control plane reconciles session liveness; closing finished sessions is not the master's
-manual duty.** A sweep runs on every automatic-dispatch tick (`run.dispatchIntervalSeconds`, default 10, 30 at most). A handle closes at the second consecutive sweep
+manual duty.** A sweep runs every automatic-dispatch tick (`run.dispatchIntervalSeconds`, default 10, 30 at most). A handle closes at the second consecutive sweep
 that misses it; an unobserved one is left alone for its first 3 minutes. A handle another host launched is left to
 that host's loop. `sessions.unseen` lists stale handles. `dispatch.sessionReconcile` reports each closure:
 
 - **Vanished**: missing from two consecutive listings.
 - **Ended**: agentless pane or terminal state. `idle`, `done` and
   `blocked` are deliberately not terminal.
-- **Superseded**: a review or proof session for a head the item moved past; a delivered item is closed the same
+- **Superseded**: a review or proof session for a head the item moved past; a delivered item closes the same
   way as any other. Implementation sessions are left to the lease.
 - **Duplicate**: the older of two sessions for one role and head.
 
-A closure decides no gate, ends no lease, and stops no process. A profile's concurrency is counted against live
-sessions only, and a name is busy only while a live session has it. A session past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) raises attention and is never closed.
+A closure decides no gate, ends no lease, stops no process. Profile concurrency counts live sessions only; a name is busy only while a live session has it. A session past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) raises attention and is never closed.
 
-**So what an operator or a master does instead of closing sessions by hand:** nothing, for a session
-that finished or died (with the loop stopped, `graphyard master run --once` sweeps); for an overlong one, attach to it with the command on the handle. Never mark
+**What an operator or master does instead:** nothing for a session
+that finished or died (with the loop stopped, `graphyard master run --once` sweeps); for an overlong one, attach with the command on the handle. Never mark
 another session's handle finished to free a slot.
 
 ### System invariants
@@ -52,7 +51,7 @@ Checked each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open)
 
 ## Research before build
 
-With `run.research` set (`model`, `timeoutMinutes` 15, `tokenBudget`), a feature (or `"research": true`) gets one read-only Pi briefing per revision. Product questions go under Needs you; build proceeds on the recommendation, a differing answer requests rework, failure never blocks.
+With `run.research` set (`model`, `timeoutMinutes` 15, `tokenBudget`), a feature (or `"research": true`) gets one read-only Pi briefing per revision. Product questions go under Needs you; build proceeds on it, a differing answer requests rework, failure never blocks.
 
 ## Automatic dispatch at submit
 
@@ -64,7 +63,7 @@ A candidate passing the build gate gets, in `autoDispatch`, one producer request
 
 **Every role, approvers too, fails over on spent quota** or waits as one `capacity` line.
 
-The master never launches reviews or producers by hand, except `master review GY-N [PROFILE]` once the loop stops relaunching that review.
+The master never launches reviews or producers by hand, except `master review GY-N [PROFILE]` once the loop stops relaunching it.
 
 ### Proofs must exercise their criterion
 
