@@ -21,7 +21,14 @@ export interface ProviderDeployment {
   commit: string | null; branch: string | null; createdAt: string; updatedAt: string | null; url: string | null;
 }
 /** One hosting provider's deployment list for the linked service, newest first. */
-export interface DeploymentProvider { name: string; description: string; list(): Promise<ProviderDeployment[]> }
+export interface DeploymentProvider { name: string; description: string; list(): Promise<ProviderDeployment[]>;
+  /**
+   * Asks the provider to deploy the base branch's newest commit (GY-393). The watch used to only
+   * observe a stalled rollout; a provider that can deploy on request lets the product recover the
+   * drift it observes instead of leaving it to a master session to trigger by hand. Absent, the
+   * provider stays observe-only and the attention keeps its master-routed remedy.
+   */
+  redeploy?: () => Promise<{ id: string | null }> }
 
 const railwayStatus: Record<string, ProviderDeploymentStatus> = {
   SUCCESS: 'success', SLEEPING: 'success', FAILED: 'failed', CRASHED: 'crashed',
@@ -30,6 +37,10 @@ const railwayStatus: Record<string, ProviderDeploymentStatus> = {
 };
 const railwayQuery = `query graphyardDeployments($input: DeploymentListInput!, $first: Int) {
   deployments(input: $input, first: $first) { edges { node { id status createdAt updatedAt url meta } } }
+}`;
+/** Deploys the newest commit of the service's configured branch — the call `railway redeploy` makes. */
+const railwayDeployMutation = `mutation graphyardRedeploy($serviceId: String!, $environmentId: String!) {
+  serviceInstanceDeploy(serviceId: $serviceId, environmentId: $environmentId)
 }`;
 /**
  * Railway's public GraphQL API for the service this control plane runs as. Railway injects
@@ -62,6 +73,17 @@ export function railwayProvider(env: Record<string, string | undefined> = proces
           branch: typeof node?.meta?.branch === 'string' ? node.meta.branch : null, createdAt: String(node?.createdAt ?? ''), updatedAt: typeof node?.updatedAt === 'string' ? node.updatedAt : null, url: typeof node?.url === 'string' ? node.url : null };
       }).filter((deployment: ProviderDeployment) => deployment.id);
     },
+    async redeploy() {
+      const response = await fetcher(endpoint, {
+        method: 'POST', signal: AbortSignal.timeout(15_000),
+        headers: { 'Content-Type': 'application/json', ...(accountToken ? { Authorization: `Bearer ${accountToken}` } : { 'Project-Access-Token': projectToken! }) },
+        body: JSON.stringify({ query: railwayDeployMutation, variables: { serviceId, environmentId } }),
+      });
+      if (!response.ok) throw new Error(`Railway API answered ${response.status}`);
+      const body: any = await response.json();
+      if (Array.isArray(body?.errors) && body.errors.length) throw new Error(`Railway API refused the redeploy: ${body.errors[0]?.message ?? 'unknown error'}`);
+      return { id: typeof body?.data?.serviceInstanceDeploy === 'string' ? body.data.serviceInstanceDeploy : null };
+    },
   };
 }
 
@@ -81,6 +103,10 @@ export interface ProductionReport {
   deployed: string[]; pending: string[];
   incidents: ProductionIncident[];
   attention: string[];
+  /** The redeploy the watch itself triggered, and when; null while none stands from this pass. */
+  redeploy: { at: string; trigger: string } | null;
+  /** Why a requested redeploy could not be asked for; reported, never thrown. */
+  redeployError: string | null;
 }
 export const INCIDENT_EVENT = 'delivery.deployment-incident', RECOVERY_EVENT = 'delivery.deployment-recovered';
 /** A delivery first observed inside the release production serves; containment is never asked again for it. */
@@ -98,6 +124,15 @@ export const DEPLOYMENT_WINDOW_MS = 14 * 86_400_000;
 export const DEPLOYMENT_POLL_MS = 60_000;
 /** How often the watch's own timer offers it a pass; the pass itself runs at most once per poll interval. */
 export const PRODUCTION_WATCH_TIMER_MS = 5_000;
+/**
+ * How long after triggering a redeploy the watch waits before triggering another (GY-393). The
+ * provider needs minutes to build and serve the new commit, so a tighter cadence would stack
+ * deploys on a drift the first trigger is already recovering; an hour bounds the recovery to the
+ * hour while a crash-looping provider cannot make the watch spin deployments.
+ */
+export const REDEPLOY_COOLDOWN_MS = 60 * 60_000;
+/** Provider attempts that mean a deployment is already under way and must not be stacked on. */
+const inFlightStatuses: readonly ProviderDeploymentStatus[] = ['building', 'deploying', 'queued'];
 
 export interface ProductionWatchOptions {
   provider: DeploymentProvider | null;
@@ -108,7 +143,7 @@ export interface ProductionWatchOptions {
    */
   github: { request(path: string): Promise<any>; contains?(base: string, head: string): Promise<boolean>; aheadBy?(base: string, head: string): Promise<number> } | null;
   build: BuildIdentity; baseBranch: string;
-  graceMs?: number; windowMs?: number; pollMs?: number; now?: () => number;
+  graceMs?: number; windowMs?: number; pollMs?: number; redeployCooldownMs?: number; now?: () => number;
 }
 
 export class ProductionWatch {
@@ -126,9 +161,11 @@ export class ProductionWatch {
   /** The pending set last written to the ledger, so an unchanged one is not written again. */
   private recordedPending = '';
   private passing = false;
+  /** When this watch last asked the provider to deploy; `REDEPLOY_COOLDOWN_MS` apart (GY-393). */
+  private lastRedeployAt = 0;
   private report: ProductionReport;
   constructor(private store: Store, private options: ProductionWatchOptions) {
-    this.report = { provider: options.provider?.name ?? null, providerDescription: options.provider?.description ?? null, observedAt: null, error: null, running: options.build.commit, serving: null, servingSource: null, latest: null, ahead: null, aheadError: null, deployed: [], pending: [], incidents: [], attention: [] };
+    this.report = { provider: options.provider?.name ?? null, providerDescription: options.provider?.description ?? null, observedAt: null, error: null, running: options.build.commit, serving: null, servingSource: null, latest: null, ahead: null, aheadError: null, deployed: [], pending: [], incidents: [], attention: [], redeploy: null, redeployError: null };
   }
   private get now() { return (this.options.now ?? Date.now)(); }
   private get grace() { return this.options.graceMs ?? DEPLOYMENT_GRACE_MS; }
@@ -204,7 +241,7 @@ export class ProductionWatch {
   private async pass(now: number): Promise<ProductionReport> {
     if (!this.loaded) await this.load();
     const at = new Date(now).toISOString();
-    const report: ProductionReport = { ...this.report, observedAt: at, error: null, attention: [] };
+    const report: ProductionReport = { ...this.report, observedAt: at, error: null, attention: [], redeploy: null, redeployError: null };
     let deployments: ProviderDeployment[] = [];
     if (this.options.provider) {
       try { deployments = (await this.options.provider.list()).filter(d => !d.branch || d.branch === this.options.baseBranch); }
@@ -221,6 +258,7 @@ export class ProductionWatch {
       } catch (error) { report.aheadError = `Base branch comparison is unavailable: ${error instanceof Error ? error.message : String(error)}`; }
     } else if (!report.serving) report.aheadError = 'Production commit is unknown: no provider deployment list is configured and the build reports no commit (set GRAPHYARD_BUILD_SHA or RAILWAY_GIT_COMMIT_SHA)';
     else report.aheadError = 'Base branch comparison needs the GitHub App';
+    await this.maybeRedeploy(report, now, at);
 
     const delivered = (await this.store.list()).filter(item => item.stage === 'done' && item.delivery && now - Date.parse(item.delivery.mergedAt) <= (this.options.windowMs ?? DEPLOYMENT_WINDOW_MS))
       .sort((a, b) => Date.parse(a.delivery!.mergedAt) - Date.parse(b.delivery!.mergedAt));
@@ -251,6 +289,31 @@ export class ProductionWatch {
     report.attention = attentionLines(report);
     this.report = report;
     return this.status();
+  }
+
+  /**
+   * The watch's own recovery of the drift it observes (GY-393). When the base branch is ahead of
+   * what production serves and the provider has no deployment under way, the product asks the
+   * provider to deploy the branch's newest commit itself, instead of leaving the fix to "fix or
+   * trigger the deployment with the configured provider" — a master session that is routinely not
+   * running, which is how the drift grew unchecked before. Never while an attempt is in flight
+   * (that would stack deploys), and at most one per cooldown: the provider needs minutes to build
+   * and serve, and a provider that refuses or crash-loops must not turn this into a deploy loop.
+   * A refusal is reported on the pass and never thrown; the incidents the existing logic raises
+   * stay the record of a rollout that is failing.
+   */
+  private async maybeRedeploy(report: ProductionReport, now: number, at: string) {
+    const provider = this.options.provider;
+    if (!provider?.redeploy || !report.ahead || report.ahead.by <= 0) return;
+    if (report.latest && inFlightStatuses.includes(report.latest.status)) return;
+    if (now - this.lastRedeployAt < (this.options.redeployCooldownMs ?? REDEPLOY_COOLDOWN_MS)) return;
+    // The cooldown is held from the asking, not the answering: a provider that refuses or fails is
+    // asked again no sooner than a served one, so a broken deploy path cannot spin deployments.
+    this.lastRedeployAt = now;
+    try {
+      const asked = await provider.redeploy();
+      report.redeploy = { at, trigger: `${provider.name}${asked?.id ? ` deployment ${asked.id}` : ''}` };
+    } catch (error) { report.redeployError = `${provider.name} refused the redeploy: ${error instanceof Error ? error.message : String(error)}`; }
   }
 
   /** Containment of one delivery, asked of GitHub only when neither the record nor the last answer for this serving commit decides it. */

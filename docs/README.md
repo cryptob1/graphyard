@@ -19,7 +19,7 @@ Start with the numbered path; the other pages are references to open when a task
 - [Master-agent sessions](master-agent-sessions.md) — profiles, accounts and launches.
 - [Master-agent reference](master-agent-reference.md) — scheduling, executors, GitHub administration.
 - [Operations and recovery](operations.md) — checklist and incident tree.
-- [Operations reference](operations-reference.md) — every recovery procedure and limit.
+- [Operations reference](operations-reference.md) — recovery procedures and limits.
 - [Coordinating independent agents](coordination.md) — criteria, overlap and scope.
 - [Slice-lead delegation](delegation.md) — slice leads and escalations.
 

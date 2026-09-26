@@ -5,11 +5,11 @@ Graphyard is one stateless container plus Postgres.
 
 ## The one command
 
-`node "$GRAPHYARD_CLI" install --provider railway --repo OWNER/REPO --apply` ([install](install.md)) is the supported path; this page is its reference.
+`node "$GRAPHYARD_CLI" install --provider railway --repo OWNER/REPO --apply` ([install](install.md)) is the supported path; this page references it.
 
 ## Versioned images
 
-Tag `vX.Y.Z` publishes `ghcr.io/cryptob1/graphyard:X.Y.Z`. `/healthz` reports version and `commit`; alert on `/healthz?strict` (503 when unhealthy).
+Tag `vX.Y.Z` publishes `ghcr.io/cryptob1/graphyard:X.Y.Z`. `/healthz` reports version and `commit`; alert on `/healthz?strict` (503 unhealthy).
 
 ## Variables
 
@@ -29,9 +29,9 @@ Tag `vX.Y.Z` publishes `ghcr.io/cryptob1/graphyard:X.Y.Z`. `/healthz` reports ve
 | `GRAPHYARD_GENERATED_FILES` | What `node scripts/check-docs.mjs --list` prints |
 | `GRAPHYARD_BUILD_SHA` | Commit the image was built from (Railway supplies `RAILWAY_GIT_COMMIT_SHA`) |
 | `GRAPHYARD_ARTIFACT_BACKEND` | `postgres` or `s3` ([artifacts](recovery.md#artifact-backends-capacity-and-migration)) |
-| `RAILWAY_API_TOKEN` | Optional; records failed or missing deployments as incidents |
+| `RAILWAY_API_TOKEN` | Optional; incident records and stalled-deploy re-triggering |
 
-Installers derive the four capacity limits from the deployed principals; an unset one is derived at start-up, reported as `delegationLimits` drift.
+Installers derive the four capacity limits from the deployed principals; an unset one derives at start-up (`delegationLimits` drift).
 
 ### CI producer
 
@@ -41,24 +41,26 @@ Installers derive the four capacity limits from the deployed principals; an unse
 {"id":"ci-proofs","role":"producer","runtime":"github-actions","proofs":["unit:*","integration:*"],"token":"…"}
 ```
 
-Store its token as `GRAPHYARD_CI_PRODUCER_TOKEN` on the `graphyard-reporting` environment (default branch only) with `GRAPHYARD_URL`. `scripts/configure-integrations.mjs --apply` merges `.graphyard/credentials.json` into the live roster (`--remove ID` drops a principal); `--rotate ID` rotates one producer and `--deploy` sets the GitHub secret.
+Store its token as `GRAPHYARD_CI_PRODUCER_TOKEN` on the `graphyard-reporting` environment (default branch only) with `GRAPHYARD_URL`. `scripts/configure-integrations.mjs --apply` merges `.graphyard/credentials.json` into the live roster (`--remove ID` drops a principal, `--rotate ID` rotates a producer, `--deploy` sets the GitHub secret).
 
 ### Production deployment observation
 
-When the serving commit (`GRAPHYARD_BUILD_SHA`) changes, undeployed merges are compared once; answers are recorded (`delivery.deployment-contained`, `production.deployment-pending`), so a same-commit restart compares nothing. One unserved after five minutes is a `delivery.deployment-incident`; `master status` shows `main is N commits ahead of production`. Probe: `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`.
+When the serving commit (`GRAPHYARD_BUILD_SHA`) changes, undeployed merges are compared once, recording answers (`delivery.deployment-contained`, `production.deployment-pending`); a same-commit restart compares nothing. One unserved after five minutes is a `delivery.deployment-incident`; `master status` shows `main is N commits ahead of production`. Probe: `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`.
+
+When main is ahead with no attempt in flight, the watch re-deploys the branch tip (hourly); the loop records the throughput measurement per release under `.graphyard/measurements/throughput`. Neither waits on a master session.
 
 ## Backup, upgrade, rollback
 
 ```sh
-node bin/graphyard.mjs db backup ./graphyard.json   # with DATABASE_URL set
+node bin/graphyard.mjs db backup ./graphyard.json
 node bin/graphyard.mjs db verify FILE
 ```
 
-**Upgrade:** back up, deploy, confirm `/healthz` names the new commit, then any [App-permission migration](install.md#upgrading-an-existing-installation). **Rollback** only to a same-schema-generation image. **Restore:** `graphyard db migrate` an empty database, then `graphyard db restore FILE`.
+**Upgrade:** back up, deploy, confirm `/healthz` names the new commit, then any [App-permission migration](install.md#upgrading-an-existing-installation). **Rollback** only within a schema generation. **Restore:** `graphyard db migrate` an empty database, then `graphyard db restore FILE`.
 
 ## Manual fallback
 
-Only for an unsupported platform or an existing deployment: set the variables table above by hand, run `node "$GRAPHYARD_CLI" github-setup https://YOUR-DOMAIN`, and verify with `doctor`.
+Only for an unsupported platform or an existing deployment: set the variables table by hand, run `node "$GRAPHYARD_CLI" github-setup https://YOUR-DOMAIN`, verify with `doctor`.
 
 - Compose: `cp .env.example .env`, replace every secret, `docker compose --profile full up -d`; front 4310 with TLS, never expose Postgres.
 - Kubernetes: `helm install graphyard deploy/helm/graphyard --set secrets.existingSecret=graphyard-credentials …`.
