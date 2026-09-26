@@ -51,7 +51,7 @@ Each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `linge
 
 ## Research before build
 
-With `run.research` set (`model`, `timeoutMinutes` 15, `tokenBudget`), a feature (or `"research": true`) gets one read-only Pi briefing per revision. Product questions: Needs you; build follows the recommendation, a differing answer requests rework, failure never blocks.
+With `run.research` set (`model`, `timeoutMinutes` 15, `tokenBudget`), a feature (or `"research": true`) gets one read-only Pi briefing per revision. Product questions: Needs you; build follows the recommendation, a differing answer reworks, failure never blocks.
 
 ## Automatic dispatch at submit
 
@@ -63,9 +63,9 @@ A candidate passing the build gate gets, in `autoDispatch`, one producer request
 
 **Every role, approvers too, fails over on spent quota** or waits as one `capacity` line.
 
-**Unjudged approvers relaunch**, hand-launched too: 3 per decision, timeouts uncounted, then escalated with `session N:` end reasons.
+**Unjudged approvers relaunch** (hand-launched too): 3 per decision, timeouts uncounted, then escalate (`session N:` ends).
 
-The master never launches reviews or producers by hand, except `master review GY-N [PROFILE]` once the loop stops relaunching it.
+The master never launches reviews or producers by hand, except `master review GY-N [PROFILE]` once the loop stops relaunching.
 
 ### Proofs must exercise their criterion
 
