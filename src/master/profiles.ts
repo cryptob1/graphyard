@@ -6,6 +6,7 @@ import { defaultMergeBatchSize, maxMergeBatchSize } from '../merge-queue.js';
 import { diagnosticianSettingsSchema, narrowRoleRuntimeSchema, piRuntimeSchema } from '../runner/payloads.js';
 import { researchSettingsSchema } from '../research.js';
 import { sessionNameField, sessionNameLimit, assertSessionName, sessionNameDigestLength, SessionNameRefusedError } from '../session-name.js';
+import { invariantThresholdsSchema } from '../model/invariants.js';
 
 const safeEnvironment = z.record(
   z.string().regex(/^[A-Z_][A-Z0-9_]*$/)
@@ -278,6 +279,9 @@ export const masterConfigSchema = z.object({
   // approves the master's two-party decisions (master autonomy). Paths only, never tokens.
   operatorAgent: agentIdentitySchema.optional(),
   approver: agentIdentitySchema.optional(),
+  // The system invariants' thresholds (GY-404, src/model/invariants.ts): every field optional,
+  // each defaulting to the bound the loop checks every cycle.
+  invariants: invariantThresholdsSchema.optional(),
 }).strict();
 export type MasterConfig = z.infer<typeof masterConfigSchema>;
 /** The merge queue's batch size under this master config: `mergeQueue.batchSize`, or the default of 4. */

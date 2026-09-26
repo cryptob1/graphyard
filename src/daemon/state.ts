@@ -9,6 +9,7 @@ import { type MasterConfig, assertOutsideWorktrees, writeFailure, diskExhaustion
 import { boundDetail } from './decisions.js';
 import { classified, faultClasses, faultInstanceSchema, noteActionOutcome, type FaultKind } from '../model/fault-classes.js';
 import { timingsSchema } from '../master/timings.js';
+import { emptyInvariantRecord, invariantRecordSchema } from '../model/invariants.js';
 
 export const daemonActionKinds = ['close', 'dispatch', 'review', 'refresh', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session', 'reclaim', 'decision', 'scope', 'settle', 'failover', 'capacity', 'human', 'preserve', 'fault', 'diagnosis'] as const;
 export type DaemonActionKind = typeof daemonActionKinds[number];
@@ -323,6 +324,12 @@ export const daemonStateSchema = z.object({
    * launched for it and what became of the diagnosis (GY-439, src/daemon/diagnosis.ts).
    */
   diagnoses: z.record(z.string(), diagnosisRecordSchema).default(() => ({})),
+  /**
+   * The system invariants (GY-404): what the loop carries between cycles to judge them — base
+   * refreshes per candidate, when each merge candidate was first seen mergeable, the builds and lease
+   * losses seen — and the last cycle's report, one line per invariant, for `master status`.
+   */
+  invariants: invariantRecordSchema.default(emptyInvariantRecord),
 }).strict();
 export type DaemonState = z.infer<typeof daemonStateSchema>;
 

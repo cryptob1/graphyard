@@ -46,6 +46,8 @@ export function daemonSummary(state: DaemonState, now: number, intervalMs: numbe
     faults: faultRecurrenceReport(state, faultClassPolicyFromEnv(process.env), now),
     // Each diagnosis the diagnostician returned, and the fix item or covering item answering it (GY-439).
     diagnoses: diagnosisReport(state),
+    // The system invariants as the last cycle judged them (GY-404): one line per invariant, with its threshold and reading.
+    invariants: { at: state.invariants.at, violated: state.invariants.report.filter(check => !check.holds).length, lines: state.invariants.report.map(check => check.line), checks: state.invariants.report },
   };
 }
 
