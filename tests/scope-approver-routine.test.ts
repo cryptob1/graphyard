@@ -214,8 +214,10 @@ test('unit:scope-approver-routine — an approval is refused once the asking att
   const [requested] = await standing(work);
   // The asking attempt ends and a new one claims the item while the approver is still deciding.
   await engine.execute(implementer, 'release', work.id, { epoch: asked.epoch }, randomUUID());
+  // The refusal belonged to the attempt that ended, so the release closed it (GY-597): no unblock is needed.
   const released = await reload(work.id);
-  await ok(master.token, 'POST', `work/${work.id}/unblock`, { expectedRevision: released.revision, reason: 'The refusal belonged to the attempt that ended' });
+  assert.equal(released.scopeRequest, null);
+  assert.equal(released.blocker, null);
   work = await engine.execute(implementer, 'claim', work.id, {}, randomUUID());
   assert.equal(work.policyRevision, asked.policyRevision, 'nothing moved the policy revision');
   const late = await call(approver.token, 'POST', `work/${work.id}/approve`, { decision: requested.id, reason: 'The helper is AC-1 spelled out' });

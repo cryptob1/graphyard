@@ -279,6 +279,16 @@ test('the master publishes mergeQueue.batchSize from its config, and the control
     assert.equal(posted.length, 2);
     assert.equal(await restarted.loadMergeBatchSize(), 4, 'removing the setting publishes the default');
     assert.equal((await store.pool.query("SELECT count(*)::int AS n FROM events WHERE work_id IS NULL AND kind='merge-queue.batch-size'")).rows[0].n, 2, 'one ledger entry per change');
+    // A ledger write that fails leaves the evaluation on the recorded size (GY-384), so the
+    // master's retry and the control plane agree.
+    const query = store.pool.query.bind(store.pool);
+    (store.pool as any).query = (text: unknown, ...rest: unknown[]) => typeof text === 'string' && text.startsWith('INSERT INTO events') ? Promise.reject(new Error('ledger unavailable')) : (query as any)(text, ...rest);
+    try {
+      assert.notEqual((await api('/api/merge-queue', tokens.coordinator, { method: 'POST', body: JSON.stringify({ batchSize: 3 }) })).status, 200);
+    } finally { (store.pool as any).query = query; }
+    assert.equal(engine.mergeBatchSize, 4, 'an unrecorded batch size is not applied');
+    assert.equal((await api('/api/merge-queue', tokens.coordinator, { method: 'POST', body: JSON.stringify({ batchSize: 3 }) })).body.recorded, true, 'the retry records it');
+    assert.equal(engine.mergeBatchSize, 3);
   } finally {
     if (http) await new Promise<void>(resolve => http!.close(() => resolve()));
     await store.close();
