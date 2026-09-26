@@ -14,5 +14,4 @@ Create with `POST /api/work` ([example](../../examples/work.json)): `title` and 
 - `submit`: `{"epoch":1,"pr":123}`, refused with `409` when a file outside `plannedFiles` [regresses shipped code](../coordination.md#refuse-candidates-that-revert-shipped-code-outside-their-scope).
 - `deployment`: `{"sha":…, "mergeSha":…, "source":"endpoint", "observedAt":…}`; coordinator or admin, delivered work, once.
 - `followups` `{findings,reason}` (master; `409` unless open), `triage` `{judgement}` (coordinator), `POST /api/followups/migrate` (once): [backlog](../master-agent.md#machine-filed-backlog).
-
 No endpoint sets lifecycle state.

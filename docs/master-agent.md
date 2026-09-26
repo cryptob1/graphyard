@@ -55,7 +55,7 @@ With `run.research` set (`model`, `timeoutMinutes` 15, `tokenBudget`), a feature
 
 ## Machine-filed backlog
 
-One follow-up item per parent gains each approval's findings; with `run.research`, Pi triages machine-filed items: release, close or merge; closure needs approval. Untriaged past 24h raises attention; status counts `machineUntriaged` beside `operatorBacklog`.
+One follow-up item per parent; approvals append their findings. With `run.research`, Pi triages machine-filed items (release, close, merge; closure needs approval). Untriaged past 24h raises attention; status counts `machineUntriaged`/`operatorBacklog`.
 
 ## Automatic dispatch at submit
 

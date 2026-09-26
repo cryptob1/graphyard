@@ -1,7 +1,7 @@
 <!-- page: Operate Graphyard | 11 | leads and escalations. -->
 # Slice-lead delegation
 
-Optional slices (`product`, `infrastructure`, `docs-experience`) are each led by an AI session holding a `slice-lead` principal.
+Optional slices (`product`, `infrastructure`, `docs-experience`), each led by an AI `slice-lead` session.
 
 ## Authority boundaries
 

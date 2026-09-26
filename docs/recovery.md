@@ -32,7 +32,7 @@ The executor claims with `POST /api/delivery/rollback-claim` (a retry returns th
 {"rollbackId":"6c2f0e2e-5c3a-4c65-9d2b-1f1c8a3f9e01","registration":{"id":"production-rollback","revision":1},"epoch":3}
 ```
 
-It performs the write and reports `applied`, `failed` or `unknown` with `POST /api/delivery/rollback-settle`:
+It writes and reports `applied`, `failed` or `unknown` via `POST /api/delivery/rollback-settle`:
 
 ```json
 {"rollbackId":"6c2f0e2e-5c3a-4c65-9d2b-1f1c8a3f9e01","operationId":"b8c9d0e1-2f3a-4b5c-8d6e-7f8091a2b3c4",
