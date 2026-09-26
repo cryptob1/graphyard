@@ -77,6 +77,11 @@ export function supersededByRequest(registry: Pick<AgentRegistry, 'sessions'>, r
     && (request.role !== 'producer' || (!!request.group && (session.group ?? null) === request.group)));
 }
 
+/**
+ * How long after a failed smoke test the account's executor tests it again (GY-515): a provider
+ * outage during the one prompt would otherwise keep a sound account out until an operator changed it.
+ */
+export const smokeRetestMs = 3_600_000;
 const until = (iso: string | null) => iso ? ` until ${iso}` : '';
 /**
  * Why an account cannot take a session right now, whatever role asks — null when it can. `host`
@@ -89,7 +94,7 @@ export function accountIneligibility(registry: AgentRegistry, account: FleetAcco
   if (!registry.models.some(model => model.name === account.model)) return `${account.name} runs ${account.model}, which is not a registered model`;
   if (host && account.credential.host !== host) return `${account.name} is placed on ${account.credential.host}; this executor is ${host}`;
   if (account.quota.loggedIn === false) return `${account.name} is not logged in`;
-  if (account.smoke?.result === 'fail') return `${account.name} failed its smoke test${account.smoke.reason ? `: ${account.smoke.reason}` : ''}; change the account (master registry account set) once it is fixed, and it is tested again`;
+  if (account.smoke?.result === 'fail') return `${account.name} failed its smoke test${account.smoke.reason ? `: ${account.smoke.reason}` : ''}; it is tested again after ${smokeRetestMs / 60_000} minutes, or at once when the account is changed (master registry account set)`;
   if (account.quota.state === 'exhausted' && (!account.quota.resetsAt || Date.parse(account.quota.resetsAt) > now)) return `${account.name} quota is exhausted${until(account.quota.resetsAt)}${account.quota.reason ? ` (${account.quota.reason})` : ''}`;
   const running = liveSessions(registry).filter(session => session.account === account.name).length;
   if (account.maxSessions !== null && running >= account.maxSessions) return `${account.name} is at its session limit (${running} of ${account.maxSessions} live)`;

@@ -335,7 +335,8 @@ export async function launchApprover(root: string, work: Work, decision: string,
     // The run is the session: the registry's slot is given back the moment it ends.
     // Its outcome counts toward the account's runs without a result (GY-446).
     const settled = started.settled.then(async run => { await registry.release(`the headless approver run for ${work.key} ended`, runOutcome(run)); return run; },
-      async error => { await registry.release(`the headless approver run for ${work.key} ended`); throw error; });
+      // A run whose record could not even be kept ended without a result too (GY-515).
+      async error => { await registry.release(`the headless approver run for ${work.key} ended`, 'no-result'); throw error; });
     settled.catch(() => { /* the run's own record carries its failure */ });
     return { agentName: name, work: work.key, decision, identity: config.approver!.id, pane: null as string | null, runtime: 'pi' as const, delivery: 'request' as RequestDelivery, focusChanged: false, session: registry.account.fleet.session,
       account: { environment: registry.account.name, kind: registry.account.kind, quota: registry.health?.quota ?? null, skipped: registry.skipped },

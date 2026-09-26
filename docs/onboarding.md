@@ -68,7 +68,7 @@ node "$GRAPHYARD_CLI" master registry account set claude-b --runtime claude --mo
 node "$GRAPHYARD_CLI" master registry account quota opencode-a exhausted --resets-at 2026-09-22T00:00:00Z --reason "Plan exhausted"
 ```
 
-`--key-file zai.key --key-variable ZAI_API_KEY`: a 0600 home key file, exported per run. New or changed Pi accounts are smoke-tested; failure bars the account; two unjudged runs bench it from that role an hour.
+`--key-file zai.key --key-variable ZAI_API_KEY`: a 0600 home key file, exported per run. New or changed Pi accounts are smoke-tested; failure bars the account until it changes or passes a retest an hour later; two unjudged runs bench it from that role an hour.
 
 ### Add a role
 
