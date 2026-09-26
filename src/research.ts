@@ -78,8 +78,9 @@ export type ResearchBrief = z.infer<typeof researchBriefSchema>;
 /**
  * `run.research` in .graphyard/master.json. `command` is the environment wrapper or Pi binary the
  * research account runs through (it defaults to `run.pi.command`), `model` the cheapest model
- * configured for research, `timeoutMinutes` the bound on one run, `tokenBudget` the estimated
- * tokens one run may stream before it is stopped, and `questionDeadlineHours` how long a product
+ * configured for research, `timeoutMinutes` the bound on one run, `tokenBudget` the billed
+ * tokens one run may spend before it is stopped (each call's reported input plus output, summed;
+ * estimated from the text when the runtime reports no usage), and `questionDeadlineHours` how long a product
  * question waits for the operator before its recommendation stands unchallenged.
  */
 export const researchSettingsSchema = z.object({
@@ -251,17 +252,28 @@ export function researchReviewSection(work: Pick<Work, 'key' | 'title' | 'descri
 // ---- The loop's step -----------------------------------------------------------------------------
 
 export interface ResearchStepAction { work: string; state: 'started' | 'done' | 'failed'; detail: string }
-interface LiveResearch { revision: string; run: Run<ResearchBrief>; settled: Promise<void> }
+interface LiveResearch { revision: string; run: Run<ResearchBrief>; settled: Promise<void>; directory?: string }
 const live = new Map<string, LiveResearch>();
 /** The research run this process has live for an item, if any. */
 export const researchRunning = (workId: string) => live.get(workId) ?? null;
+/**
+ * The managed session directories the research runs in flight still read: live to the reclaim
+ * pass (GY-401), so a run bounded past the orphan grace period keeps its checkout until it settles.
+ */
+export const researchCheckouts = () => [...live.values()].flatMap(entry => entry.directory ? [entry.directory] : []);
 /** Test seam: stop and forget every research run. */
 export function clearResearchRuns() { for (const entry of live.values()) entry.run.cancel('the research runs were cleared'); live.clear(); }
 
 /** The research runner: Pi on the research account and model. */
 export const researchRunner = (settings: ResearchSettings): Runner => piRunner({ command: settings.command, model: settings.model });
-/** Roughly four characters a token: what a run has streamed, for its budget. */
+/** Roughly four characters a token: what a run has spent when its runtime reports no usage. */
 const estimatedTokens = (text: string) => Math.ceil(text.length / 4);
+
+/**
+ * One checkout a research run reads, created detached for the run and discarded when it settles.
+ * `directory` is the managed session directory holding it, which the reclaim pass keeps while the run is live.
+ */
+export interface ResearchCheckout { cwd: string; directory?: string; dispose(): void | Promise<void> }
 
 export interface ResearchStepInput {
   /** The items dispatch would offer this cycle, in order. */
@@ -269,8 +281,15 @@ export interface ResearchStepInput {
   clock: number;
   settings: ResearchSettings;
   config: { repository: string };
-  /** The checkout the research session reads: the loop's own. */
-  cwd: string;
+  /**
+   * The checkout one research run reads: created detached — never the loop's own checkout, which
+   * only the prompt told the session to leave alone (GY-401), while Pi's edit and shell tools
+   * could still have written it — and discarded when the run settles, brief or failure alike.
+   * It names the item, so the allocation records what the run was for.
+   */
+  checkout?: (work: Work) => Promise<ResearchCheckout>;
+  /** The checkout the session reads directly: the test seam. Production passes `checkout`. */
+  cwd?: string;
   runner: Runner;
   /** Records an event on the item through the control plane (POST work/ID/research as the coordinator). */
   record: (work: Work, event: ResearchEvent) => Promise<unknown>;
@@ -282,6 +301,9 @@ export interface ResearchStepInput {
  * and records the brief or the failure. The result names every item dispatch must hold this
  * cycle — only those with a run in progress within its bound — and what the step did.
  */
+const demandCwd = (cwd: string | undefined): string => { demand(cwd, 'Research needs a checkout to read: pass checkout (production) or cwd (tests)'); return cwd; };
+const message = (error: unknown) => error instanceof Error ? error.message : String(error);
+
 export async function researchStep(input: ResearchStepInput): Promise<{ held: Set<string>; actions: ResearchStepAction[] }> {
   const held = new Set<string>(), actions: ResearchStepAction[] = [];
   for (const work of input.items) {
@@ -301,23 +323,39 @@ export async function researchStep(input: ResearchStepInput): Promise<{ held: Se
       continue;
     }
     const timeoutMs = input.settings.timeoutMinutes * 60_000;
+    let checkout: ResearchCheckout;
+    try { checkout = input.checkout ? await input.checkout(work) : { cwd: demandCwd(input.cwd), dispose: () => {} }; }
+    catch (error) {
+      // Research never blocks: a checkout that cannot be created starts no run, and dispatch goes on.
+      actions.push({ work: work.key, state: 'failed', detail: `Research for ${work.key} was not started, so it is built without a brief: ${message(error)}` });
+      continue;
+    }
     try { await input.record(work, { event: 'started', revision, runtime: input.runner.name, model: input.settings.model, timeoutMs, tokenBudget: input.settings.tokenBudget }); }
     catch (error) {
       // Research never blocks: a plane that cannot record the run gets no run, and dispatch goes on.
+      await checkout.dispose();
       actions.push({ work: work.key, state: 'failed', detail: `Research for ${work.key} was not started, so it is built without a brief: ${message(error)}` });
       continue;
     }
     held.add(work.id);
     const run = input.runner.start(researchPrompt(input.config, work, input.settings), {
-      cwd: input.cwd, env: { GRAPHYARD_PI_ROLE: researchRole }, tool: researchTool, timeoutMs, validate: payload => researchBriefSchema.parse(payload) });
-    let streamed = 0, overBudget = false;
+      cwd: checkout.cwd, env: { GRAPHYARD_PI_ROLE: researchRole }, tool: researchTool, timeoutMs, validate: payload => researchBriefSchema.parse(payload) });
+    // The budget is billed tokens: each call's reported input plus output, summed over the run's
+    // calls — a call's input already holds the context and the tool output before it, so once the
+    // runtime reports usage, tool output is not counted again. Characters over four only stand in
+    // for a runtime that reports no usage (GY-401).
+    let spent = 0, reporting = false, overBudget = false;
     run.onEvent(event => {
-      if (event.kind !== 'message' && event.kind !== 'tool-end') return;
-      streamed += estimatedTokens(event.text);
-      if (streamed > input.settings.tokenBudget && !overBudget) { overBudget = true; run.cancel(`the run streamed about ${streamed} tokens, over its ${input.settings.tokenBudget}-token budget`); }
+      if (event.kind === 'message' && event.usage) { reporting = true; spent += event.usage.input + event.usage.output; }
+      else if (event.kind === 'message' || event.kind === 'tool-end' && !reporting) spent += estimatedTokens(event.text);
+      else return;
+      if (spent > input.settings.tokenBudget && !overBudget) { overBudget = true; run.cancel(`the run spent about ${spent} tokens, over its ${input.settings.tokenBudget}-token budget`); }
     });
-    const settled = run.result().then(result => settleResearch(input, work, revision, result, overBudget)).catch(() => {}).finally(() => { if (live.get(work.id)?.run === run) live.delete(work.id); });
-    live.set(work.id, { revision, run, settled });
+    // The checkout is discarded before the run leaves the live set, so the reclaim pass never sees it unowned while in use.
+    const settled = run.result().then(result => settleResearch(input, work, revision, result, overBudget)).catch(() => {})
+      .then(() => checkout.dispose()).catch(() => {})
+      .finally(() => { if (live.get(work.id)?.run === run) live.delete(work.id); });
+    live.set(work.id, { revision, run, settled, directory: checkout.directory });
     actions.push({ work: work.key, state: 'started', detail: `Researching ${work.key} on ${input.settings.model} before build (at most ${input.settings.timeoutMinutes} minutes and ${input.settings.tokenBudget} tokens); dispatch waits for its brief` });
   }
   return { held, actions };
@@ -334,7 +372,6 @@ async function settleResearch(input: ResearchStepInput, work: Work, revision: st
 }
 /** Every run this process has in flight, settled: a test's way to wait for the step's effects. */
 export async function researchSettled() { await Promise.all([...live.values()].map(entry => entry.settled)); }
-const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 
 // ---- The control plane's routes ------------------------------------------------------------------
 

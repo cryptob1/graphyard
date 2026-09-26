@@ -48,7 +48,7 @@ function config(credentialFile: string, worktreeRoot: string): MasterConfig {
   // is the fixture's own, so the loop's reclaim scans this test's checkouts and never the host's.
   return masterConfigSchema.parse({ version: 1, url: 'http://127.0.0.1:9', credentialFile, cliPath: launcher,
     repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project',
-    autoMerge: true, mergeMethod: 'merge', workers: [], run: { worktreeRoot } });
+    autoMerge: true, mergeMethod: 'merge', workers: [], run: { worktreeRoot, research: { enabled: false } } });
 }
 function item(index: number, now: string): Work {
   const key = `GY-${index}`;

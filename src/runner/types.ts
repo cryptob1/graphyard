@@ -12,7 +12,9 @@ import { z } from 'zod';
 export type RunEvent =
   | { kind: 'start'; at: string; pid: number | null; command: string }
   | { kind: 'session'; at: string; id: string }
-  | { kind: 'message'; at: string; role: string; text: string; stopReason: string | null; error: string | null }
+  | { kind: 'message'; at: string; role: string; text: string; stopReason: string | null; error: string | null;
+      /** The token usage the runtime itself reported for this call, when it reports one (GY-401). */
+      usage?: { input: number; output: number } }
   | { kind: 'tool-start'; at: string; tool: string; call: string }
   | { kind: 'tool-end'; at: string; tool: string; call: string; error: boolean; text: string }
   | { kind: 'retry'; at: string; attempt: number; error: string }
