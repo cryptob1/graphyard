@@ -9,7 +9,8 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { processJob, type GitHub } from '../src/github.js';
 import { server } from '../src/server.js';
-import { daemonEffects } from '../src/master-daemon.js';
+import { daemonEffects, routineDecision } from '../src/master-daemon.js';
+import { refusalAction } from '../src/model/refusal-mapping.js';
 import { checkRerunVisibilityMs, queueRef, reconcileCheckReruns, rerunFailedChecksEvent, tipVerdict, type QueuePlacement, type QueueSpeculation } from '../src/merge-queue.js';
 import { defaultRerunFailedChecks, masterConfigSchema, maxRerunFailedChecks, rerunFailedChecks } from '../src/master/profiles.js';
 import type { Observation, Principal, Work } from '../src/model.js';
@@ -106,6 +107,7 @@ test('unit:tip-flake-rerun-once — a failed required check on a queued tip is r
   assert.ok(gate(work, 'merge').reasons.some(reason => /required CI check test failed and its failed jobs are rerunning \(workflow run 9001\); the entry keeps its position/.test(reason)), 'master status reads the pending rerun on the queue row');
   assert.equal(tipVerdict(work, [15368]), undefined, 'a batch waits for the rerun as for a pending run');
   assert.deepEqual((await kinds(work)).filter(kind => kind.startsWith('check.rerun')), ['check.rerun.owed', 'check.rerun.requested'], 'the rerun is in the item\'s history');
+  assert.equal(routineDecision(work, { autoMerge: true }, Date.now()), null, 'the loop asks for no rework round while the rerun is pending');
 
   // Until GitHub shows the rerun, the same failure is seen again: it still holds and is not rerun a second time.
   step = await reconcile(work, [run('test', 11, 'failure'), run('typecheck', 12, 'success')]);
@@ -163,12 +165,23 @@ test('unit:tip-flake-rerun-once — a failed check on a candidate head outside t
   let work = await submitted('Flaky head');
   work = await engine.observe(work.id, work.revision, seen(work, { sha: head, baseSha: main }, [run('test', 41, 'failure'), run('typecheck', 42, 'success')]));
   assert.deepEqual(work.checkReruns!.map(entry => [entry.check, entry.state]), [['test', 'owed']]);
+  const failing = 'Required CI check test has not passed on the current candidate';
+  // Owed and then running, the rerun holds the head: the loop's decision asks for no rework round and
+  // the test gate's refusal waits for a reading, so the head is not sent back to its worker.
+  assert.equal(routineDecision(work, { autoMerge: true }, Date.now()), null, 'no rework while the rerun is owed');
+  assert.equal(refusalAction(work, 'test', failing), 'resync');
   let step = await reconcile(work, [run('test', 41, 'failure'), run('typecheck', 42, 'success')]);
   assert.deepEqual(step.reruns, [41]);
+  assert.equal(routineDecision(step.work, { autoMerge: true }, Date.now()), null, 'no rework while the rerun is requested');
+  assert.equal(refusalAction(step.work, 'test', failing), 'resync');
+  assert.notEqual(step.work.nextAction?.kind, 'request-rework');
   step = await reconcile(step.work, [run('test', 41, 'failure'), run('test', 43, 'failure'), run('typecheck', 42, 'success')]);
   assert.deepEqual(step.reruns, []);
   assert.deepEqual(step.work.checkReruns!.map(entry => entry.state), ['failed']);
-  assert.deepEqual(gate(step.work, 'test').reasons, ['Required CI check test has not passed on the current candidate']);
+  assert.deepEqual(gate(step.work, 'test').reasons, [failing]);
+  // The second failure on the same sha is the worker's: the rework round is asked for as before.
+  assert.equal(refusalAction(step.work, 'test', failing), 'request-rework');
+  assert.deepEqual([routineDecision(step.work, { autoMerge: true }, Date.now())?.action, routineDecision(step.work, { autoMerge: true }, Date.now())?.binding], ['rework', `${head}:ci:test`]);
   // A rerun GitHub accepted but never ran stops holding after the visibility bound.
   const record = { sha: head, check: 'test', failedRunId: 41, state: 'requested' as const, at: new Date(Date.now() - checkRerunVisibilityMs).toISOString() };
   const expired = reconcileCheckReruns({ ...step.work, checkReruns: [record], observation: seen(step.work, { sha: head, baseSha: main }, [run('test', 41, 'failure')]) }, [15368], 1, new Date());

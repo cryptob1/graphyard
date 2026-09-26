@@ -1390,6 +1390,16 @@ export function holdingCheckRerun(work: Pick<Work, 'checkReruns'>, sha: string, 
   if (!run || run.id === undefined || !failedConclusions.has(run.result)) return null;
   return checkReruns(work).find(entry => entry.sha === sha && entry.check === check && entry.failedRunId === run.id && holdingRerun.has(entry.state)) ?? null;
 }
+/**
+ * Whether `check`'s newest run on the observed current candidate failed and is held by its one
+ * owed or requested rerun: the loop's decisions and the test gate's next action then wait for the
+ * rerun instead of returning the head to its worker, which would cost the bindings the rerun keeps.
+ */
+export function checkRerunHeld(work: Pick<Work, 'checkReruns' | 'candidate' | 'observation'>, check: string): boolean {
+  const observation = work.observation, sha = work.candidate?.sha;
+  if (!observation || !sha || observation.candidate.sha !== sha) return false;
+  return !!holdingCheckRerun(work, sha, check, latestCheck((observation.checks ?? []).filter(run => run.name === check)));
+}
 /** The required check whose newest trusted run failed on the observed candidate and is not held by a rerun. */
 function failedRequiredCheck(work: Work, observation: Observation, ciAppIds: readonly number[] | null): string | undefined {
   return (work.policy?.checks ?? []).find(name => {

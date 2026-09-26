@@ -1,7 +1,7 @@
 // Concern: routine decisions — standing verdicts, decision reasons and the approver step.
 import { type Work, type AgentReview, reviewProviderOf, standingEscalations, leaseLossEpoch, RefusedResponse } from '../model.js';
 import { routableScopeRequest, scopeDecisionBinding, scopeDecisionReason } from '../model/scope.js';
-import { baseRefreshConflict, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, restoringAfterEjectionPrefix, speculativeConflictReason, type ReviewThread, describeThread } from '../merge-queue.js';
+import { baseRefreshConflict, checkRerunHeld, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, restoringAfterEjectionPrefix, speculativeConflictReason, type ReviewThread, describeThread } from '../merge-queue.js';
 import { mechanicalFailure, mechanicalVerdicts } from '../model/mechanical-proofs.js';
 import { unexercisedFindings } from '../auto-dispatch.js';
 import { decisionBindingMax } from '../model/approval.js';
@@ -240,7 +240,9 @@ export function failedCheckRework(work: Work): { reason: string; binding: string
   const failed = work.policy.checks.filter(name => {
     const runs = observation.checks.filter(check => check.name === name);
     const latest = runs.length ? runs.reduce((newest, check) => (check.attempt ?? 0) >= (newest.attempt ?? 0) ? check : newest) : null;
-    return !!latest && ['failure', 'timed_out', 'action_required', 'cancelled'].includes(latest.result);
+    // A failure awaiting its one rerun (GY-516) is not yet the worker's: a rework round would push a
+    // new head and lose the queue position, approval and proofs the rerun keeps.
+    return !!latest && ['failure', 'timed_out', 'action_required', 'cancelled'].includes(latest.result) && !checkRerunHeld(work, name);
   }).sort();
   if (!failed.length) return null;
   return { reason: `${work.key}: required CI check${failed.length === 1 ? '' : 's'} ${failed.join(', ')} failed on candidate ${candidate.sha.slice(0, 12)}. No gate passes a head whose required checks failed, so the item returns to a worker to fix what CI found.`,
