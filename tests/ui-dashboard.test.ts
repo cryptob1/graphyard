@@ -10,12 +10,12 @@ import { NOW, boardApi, boardStatus, boardWork, realDeliveredWork } from '../bro
 // @ts-expect-error Dependency-free fixture script.
 import { fixtureApi, flowApi, flowDataset, visibleWords } from '../scripts/dashboard-fixture.mjs';
 import { boardFromStatus, classify, groupLabel, groupOf, groupWithin, groups, humanOnlyIds, mergedAt, nextActor, releasedAt, timedGroups, type OpenGroup } from '../web/groups.js';
-import { checkStates, prSteps, stepHeld, stepIds, stepSince } from '../web/pr-steps.js';
-import { noRelease, releaseView } from '../web/release.js';
+import { checkStates, prSteps, stepHeld, stepIds, stepSince } from '../src/model/pr-steps.js';
+import { noRelease, releaseView } from '../src/model/release.js';
 import ShippedPage from '../web/pages/shipped.js';
 import { positionsAt, replayFrames, transitionsFromRows } from '../web/flow-replay.js';
-import { jargon } from '../web/plain-status.js';
-import { formatAge, formatDuration } from '../web/duration.js';
+import { jargon } from '../src/model/plain-status.js';
+import { formatAge, formatDuration } from '../src/model/duration.js';
 import { primaryEntry, sections, views, visibleViews } from '../web/pages/index.js';
 import { endedItemIdleMs, workersView } from '../web/workers-view.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
