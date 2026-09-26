@@ -12,6 +12,7 @@ import { type DaemonEffects, record } from './effects.js';
 import { loopAttention } from './liveness.js';
 import { daemonSummary } from './run.js';
 import type { Cycle } from './cycle.js';
+import { diagnosisStep, standingFaultClassItem } from './diagnosis.js';
 import { candidateKey } from './reconcile.js';
 import { checkInvariants, invariantFaultKind, invariantFaults } from '../model/invariants.js';
 
@@ -132,7 +133,7 @@ export function endFailingRuns(state: Pick<DaemonState, 'actions' | 'faults'>, p
  */
 export async function fileRecurringFaultClasses(state: DaemonState, effects: DaemonEffects, work: Work[], clock: number, now: () => number, performed: DaemonAction[]) {
   const policy = effects.faultClassPolicy ?? faultClassPolicyFromEnv(process.env);
-  for (const recurrence of recurringClasses(state.faults.instances, work, policy, clock)) {
+  for (const recurrence of recurringClasses(state.faults.instances, work, policy, clock, standingFaultClassItem)) {
     if (recurrence.item) { for (const instance of recurrence.unlinked) instance.linkedTo = recurrence.item.key; continue; }
     if (!recurrence.file || !effects.fileFaultClass) continue;
     const key = faultActionKey(recurrence.faultClass), previous = state.actions[key];
@@ -190,4 +191,7 @@ export async function faultStep(cycle: Cycle, assessments: Record<string, Contai
   trackFaults(state.faults, [...cycleFaults(state, snapshot.work, clock, { config, agents: seen, credentials, containment: assessments, status: controlPlane, jobs: snapshot.jobs, reported: reported?.items, attribute: reported?.attribute, loop, herdrUnavailable: !herdrRead.available }), ...invariantFaults(invariants)],
     new Date(clock).toISOString(), partial || (herdrRead.available ? false : new Set<string>([...herdrFaultKinds, invariantFaultKind('lingering-sessions')])));
   await fileRecurringFaultClasses(state, effects, snapshot.work, clock, now, performed);
+  // 7c. Each recurring-fault item filed (this cycle included) and each invariant violation past its
+  //     bound gets its diagnosis, and each diagnosis moves on by one decision (GY-439).
+  await diagnosisStep(cycle);
 }

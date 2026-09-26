@@ -18,7 +18,7 @@ export const proposedRuntimes: readonly FleetRuntime[] = [
 ];
 
 /** Default concurrency a proposal gives each role; an operator changes it in the registry. */
-export const proposedConcurrency: Record<FleetRoleName, number> = { worker: 4, reviewer: 2, producer: 3, approver: 1, 'escalation-handler': 1 };
+export const proposedConcurrency: Record<FleetRoleName, number> = { worker: 4, reviewer: 2, producer: 3, approver: 1, 'escalation-handler': 1, diagnostician: 1 };
 
 /**
  * The roles a proposal names a runtime's accounts for, where not every role: Pi runs the narrow

@@ -65,7 +65,7 @@ export const faultCatalogue = {
   'proof': ['proof-gap', 'timing-failure', 'escalation:evidence-policy-conflict', 'action:proof'],
   'capacity': ['reviewer-exhausted', 'role-capacity', 'concurrency-starved', 'action:failover', 'action:capacity'],
   'resources': ['disk-pressure', 'resource-bound', 'ledger-refusal', 'action:reclaim'],
-  'loop': ['loop-liveness', 'loop-cost', 'loop-failures', 'loop-silence', 'delivery-budget', 'loop-cursor', 'dispatch-failures', 'action:fault'],
+  'loop': ['loop-liveness', 'loop-cost', 'loop-failures', 'loop-silence', 'delivery-budget', 'loop-cursor', 'dispatch-failures', 'action:fault', 'action:diagnosis'],
   'human-decision': ['human-request', 'sudo', 'action:human'],
   'stalled-gate': ['gate', 'blocker', 'stalled-item', 'stalled-action', 'actorless'],
   'unclassified': ['unclassified'],
@@ -213,16 +213,16 @@ export function openFaultClassItem(work: readonly Work[], faultClass: FaultClass
 export interface ClassRecurrence { faultClass: FaultClass; count: number; recent: FaultInstance[]; unlinked: FaultInstance[]; item: Work | null; file: boolean }
 /**
  * Every class with an instance inside the window. A class files an item when the instances in the
- * window that no item accounts for yet reach the threshold and no open item names the class; with
- * an open item, every instance not yet linked is linked to it instead, however many there are.
+ * window no item accounts for reach the threshold and no item stands for the class (`standing`,
+ * GY-439); with one, every unlinked instance links to it.
  * Instances linked to an item that has since closed stay counted by it, never by a second one.
  */
-export function recurringClasses(instances: readonly FaultInstance[], work: readonly Work[], policy: FaultClassPolicy, now: number): ClassRecurrence[] {
+export function recurringClasses(instances: readonly FaultInstance[], work: readonly Work[], policy: FaultClassPolicy, now: number, standing = openFaultClassItem): ClassRecurrence[] {
   const from = now - policy.windowHours * 3_600_000;
   return faultClasses.flatMap(faultClass => {
     const all = instances.filter(entry => entry.faultClass === faultClass);
     const recent = all.filter(entry => Date.parse(entry.at) >= from && Date.parse(entry.at) <= now && !entry.linkedTo);
-    const item = openFaultClassItem(work, faultClass);
+    const item = standing(work, faultClass);
     const unlinked = item ? all.filter(entry => !entry.linkedTo) : recent;
     if (!unlinked.length) return [];
     return [{ faultClass, count: recent.length, recent, unlinked, item, file: !item && recent.length >= policy.threshold }];

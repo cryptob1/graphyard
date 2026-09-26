@@ -109,8 +109,16 @@ export const accountSchema = z.object({
 export type FleetAccountInput = z.infer<typeof accountSchema>;
 export interface FleetAccount extends FleetAccountInput { quota: ObservedQuota }
 
+/** The roles setup proposes and a configured registry is expected to name. */
 export const fleetRoles = ['worker', 'reviewer', 'producer', 'approver', 'escalation-handler'] as const;
-export type FleetRoleName = typeof fleetRoles[number];
+/**
+ * Every role the registry may define: the proposed ones, and the diagnostician (GY-439), which turns
+ * a recurring-fault item into its root cause and a fix item. The diagnostician runs headless on Pi
+ * from `run.diagnostician` until an operator names accounts for it here, so it is never proposed
+ * and never reported missing.
+ */
+export const registryRoles = [...fleetRoles, 'diagnostician'] as const;
+export type FleetRoleName = typeof registryRoles[number];
 /**
  * How every session of a role is launched, whichever account serves it (GY-170): the runtime
  * flags it starts with beyond its runtime's contract — a permission mode, an auto-approve flag —
@@ -128,7 +136,7 @@ export const rolePolicySchema = z.object({
 export type RolePolicy = z.infer<typeof rolePolicySchema>;
 export const emptyRolePolicy = (): RolePolicy => ({ args: [], tools: [], model: null });
 export const roleSchema = z.object({
-  name: z.enum(fleetRoles),
+  name: z.enum(registryRoles),
   /** Eligible accounts, most preferred first. */
   accounts: z.array(entryName).max(50).refine(list => new Set(list).size === list.length, 'A role lists each account once'),
   /** How many sessions of this role may run at once; 0 pauses the role. */
@@ -172,15 +180,15 @@ export const registryMutationSchemas = {
   'account.remove': z.object({ name: entryName, reason }).strict(),
   'account.quota': z.object({ name: entryName, quota: quotaObservationSchema, reason }).strict(),
   'role.set': z.object({ role: roleSchema, reason }).strict(),
-  'role.remove': z.object({ name: z.enum(fleetRoles), reason }).strict(),
+  'role.remove': z.object({ name: z.enum(registryRoles), reason }).strict(),
   /** A whole proposal at once, in dependency order: what setup discovers and an operator accepts. */
-  apply: z.object({ runtimes: z.array(runtimeSchema).max(50).default([]), models: z.array(modelSchema).max(100).default([]), accounts: z.array(accountSchema).max(200).default([]), roles: z.array(roleSchema).max(fleetRoles.length).default([]), reason }).strict(),
+  apply: z.object({ runtimes: z.array(runtimeSchema).max(50).default([]), models: z.array(modelSchema).max(100).default([]), accounts: z.array(accountSchema).max(200).default([]), roles: z.array(roleSchema).max(registryRoles.length).default([]), reason }).strict(),
 } as const;
 export type RegistryMutation = keyof typeof registryMutationSchemas;
 export const registryLimits = { runtimes: 50, models: 100, accounts: 200 } as const;
 
 export const selectionRequestSchema = z.object({
-  role: z.enum(fleetRoles),
+  role: z.enum(registryRoles),
   host: hostName,
   work: z.string().trim().min(1).max(40).nullable().default(null),
   principal: z.string().trim().min(1).max(200).nullable().default(null),

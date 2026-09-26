@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
 import type { MasterConfig } from '../master.js';
 import { discoverHostLogins, proposeFleet } from '../fleet.js';
-import { emptyRolePolicy, fleetRoles, quotaStates, rolePolicy, type AgentRegistry } from '../model/registry.js';
+import { emptyRolePolicy, quotaStates, registryRoles, rolePolicy, type AgentRegistry } from '../model/registry.js';
 
 export const registryHelp = [
   '  master registry               The fleet the control plane holds: every account with its runtime,',
@@ -114,7 +114,7 @@ export async function registryCommand(master: Pick<MasterConfig, 'hostId'>, args
   const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { reason: { type: 'string' }, concurrency: { type: 'string' },
     arg: { type: 'string', multiple: true }, tool: { type: 'string', multiple: true }, model: { type: 'string' }, 'clear-policy': { type: 'boolean' } } });
   const [name, list] = positionals;
-  if (!(fleetRoles as readonly string[]).includes(name ?? '') || !values.reason) throw new Error(`Use master registry role set ${fleetRoles.join('|')} ACCOUNT[,ACCOUNT…] [--concurrency N] [--arg=A]… [--tool T]… [--model M] [--clear-policy] --reason REASON`);
+  if (!(registryRoles as readonly string[]).includes(name ?? '') || !values.reason) throw new Error(`Use master registry role set ${registryRoles.join('|')} ACCOUNT[,ACCOUNT…] [--concurrency N] [--arg=A]… [--tool T]… [--model M] [--clear-policy] --reason REASON`);
   const existing = current.roles.find(role => role.name === name);
   const accounts = list === undefined ? existing?.accounts : list.split(',').map(entry => entry.trim()).filter(Boolean);
   const concurrency = number(values.concurrency, '--concurrency') ?? existing?.concurrency;

@@ -4,6 +4,7 @@ import { proofSchema } from './proof.js';
 import { criterionSchema, resourcesSchema } from './policy.js';
 import { implementerIdentities, proofExerciseSchema } from './evidence.js';
 import { standingEscalations } from './escalation.js';
+import { closureKinds } from './closure.js';
 import { reconciliationRefusalPrefix } from '../merge-queue.js';
 import { createSchema, escalationTriggers, operatorCapability, type OperatorCapability, type Principal, type Work } from './work.js';
 
@@ -15,7 +16,7 @@ import { createSchema, escalationTriggers, operatorCapability, type OperatorCapa
  * human-only is not a decision here: goals and priorities, spending money or opening
  * third-party accounts, and issuing credentials to people.
  */
-export const decisionActions = ['release', 'unblock', 'requirements', 'resolve', 'attest', 'merge', 'rework', 'recover', 'grant', 'repair-merge'] as const;
+export const decisionActions = ['release', 'unblock', 'requirements', 'resolve', 'attest', 'merge', 'rework', 'recover', 'grant', 'repair-merge', 'close'] as const;
 export type DecisionAction = typeof decisionActions[number];
 export const decisionCapabilities: Record<DecisionAction, OperatorCapability> = {
   release: 'intent:ready', unblock: 'intent:unblock', requirements: 'policy:requirements', resolve: 'decision:resolve',
@@ -25,6 +26,8 @@ export const decisionCapabilities: Record<DecisionAction, OperatorCapability> = 
   // from an operator agent to a master loop, and the master requests this decision by hand, so it
   // is no loop-owned hand action. A second, independent approver agent still has to apply it.
   'repair-merge': 'decision:merge',
+  // Closing is the same capability `master close` demands of an operator agent.
+  close: 'intent:create',
 };
 export const approveCapability: OperatorCapability = 'decision:approve';
 
@@ -57,6 +60,9 @@ export const decisionInputs = {
   // only the same head, base and grounds, never another ground on the same head.
   rework: z.object({ previousWorkerStopped: z.literal(true), binding: groundsBinding.optional() }).strict(),
   recover: z.object({ previousWorkerStopped: z.literal(true), binding: groundsBinding.optional() }).strict(),
+  // A closure the loop's diagnostician proposes (GY-439): the recurring-fault item closed as a
+  // duplicate of the item that answers it, applied through `master close`'s own transaction.
+  close: z.object({ kind: z.enum(closureKinds), ref: z.string().trim().min(1).max(200).nullable().optional(), expectedRevision: revision }).strict(),
   grant: z.object({ principal: principalId, patterns: z.array(z.string().min(1).max(200)).min(1).max(50), expectedRevision: z.number().int().min(0).optional() }).strict(),
   // Head-bound: the repair lane merges exactly this head (expectedHeadOid) and nothing else.
   'repair-merge': z.object({ sha }).strict(),
@@ -249,7 +255,7 @@ export function requiredDecisionCapabilities(action: DecisionAction, input: any,
 export function decisionPrecondition(action: DecisionAction, input: any, work: Work): string | null {
   if (action === 'recover') return work.stage === 'done' && work.containmentQuarantine ? null : 'Containment recovery applies to delivered work that is still quarantined';
   if (work.stage === 'done') return 'Delivered work is immutable; create a follow-up task';
-  if ((action === 'release' || action === 'unblock' || action === 'resolve') && input.expectedRevision !== work.revision) return `Task revision changed (now ${work.revision}); reload and request again`;
+  if ((action === 'release' || action === 'unblock' || action === 'resolve' || action === 'close') && input.expectedRevision !== work.revision) return `Task revision changed (now ${work.revision}); reload and request again`;
   if (action === 'release' && (work.stage !== 'backlog' || work.ready)) return 'Only unreleased backlog work can be released';
   if (action === 'unblock' && !work.blocker) return 'Task has no blocker to clear';
   if (action === 'resolve' && !standingEscalations(work).some(entry => entry.trigger === input.trigger)) return `No standing ${input.trigger} escalation; standing: ${standingEscalations(work).map(entry => entry.trigger).join(', ') || 'none'}`;
