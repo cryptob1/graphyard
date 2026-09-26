@@ -3,7 +3,7 @@
 
 ## Launch profiles
 
-Add a worker with `master worker add FILE` from a [template](../examples/master/claude-worker.json) ([Codex](../examples/master/codex-worker.json), [Cursor](../examples/master/cursor-worker.json), [Muse](../examples/master/muse-worker.json)); it points to a mode-0600 token file outside every worktree.
+Add a worker with `master worker add FILE` from a shipped [template](../examples/master/claude-worker.json); it points to a mode-0600 token file outside every worktree.
 
 Add reviewers with `master reviewer setup` and `master reviewer add FILE` ([Claude](../examples/master/claude-reviewer.json), [opencode](../examples/master/opencode-reviewer.json)); the loop launches each review; `master review GY-N [PROFILE]` recovers a refused launch or unsatisfied attempt.
 
