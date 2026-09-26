@@ -7,7 +7,7 @@ Restart `graphyard master run` freely; it never dispatches twice. `master status
 
 ### Perpetual master loop
 
-`master verify-deployment GY-N` refuses a release *unobserved* (set `--deployment-url`), *stale* (rerun), not serving the merge (keep cycling), or *already recording deployment* (use a follow-up item).
+`master verify-deployment GY-N` refuses a release *unobserved*, *stale* (rerun), not serving the merge (keep cycling), or *already recording deployment* (use a follow-up item).
 
 ## Lost worker before submission
 
@@ -15,7 +15,7 @@ A lease expires 120 seconds after the last heartbeat; the next claim, a higher e
 
 ## Supervisor died leaving a containment quarantine
 
-On the worker's machine `graphyard master settle-containment GY-N "reason"` verifies no process survives (`containment.held` lists them); only the loop excuses an idle pane shell (childless, parent `herdr server`), closing its pane. If refused, confirm the stop, then `graphyard rework GY-N --previous-worker-stopped "reason"`, or `graphyard recover-containment GY-N --previous-worker-stopped "reason"` once delivered.
+On the worker's machine `graphyard master settle-containment GY-N "reason"` verifies no process survives; only the loop excuses an idle pane shell (childless, parent `herdr server`). If refused, confirm the stop, then `graphyard rework GY-N --previous-worker-stopped "reason"`, or `graphyard recover-containment GY-N --previous-worker-stopped "reason"` once delivered.
 
 ## Submitted implementation needs rework
 
@@ -27,8 +27,6 @@ Stop the worker, then `graphyard rework GY-N --previous-worker-stopped "reason"`
 
 ## GitHub request budget
 
-Observation spends the hourly limit, webhook-first.
-
 ### The live budget
 
 `x-ratelimit-remaining`, `-limit` and `-reset` project exhaustion (`projectedExhaustionAt`).
@@ -37,7 +35,7 @@ Observation spends the hourly limit, webhook-first.
 
 | Band | State | Cadence |
 | --- | --- | --- |
-| `merge` | heads the queue or passes every other gate | 20 seconds |
+| `merge` | within two of the queue head, gates passing | 20 seconds |
 | `active` | waiting on a check, review, base refresh or rework | 1 minute |
 | `steady` | unchanged since last observed | 5 minutes, fleet-stretched |
 | `idle` | next action is dispatch or escalation | 5 minutes, stretched when unchanged |
@@ -54,7 +52,7 @@ About ten uncached; unchanged, none.
 
 ### What a pause means for gates
 
-A rate-limit `403`/`429` pauses requests; gates read stale until it lifts: nothing merges on an observation over two minutes old.
+A rate-limit `403`/`429` pauses requests; gates read stale until it lifts.
 
 ### Reading the budget
 
@@ -70,7 +68,7 @@ Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROF
 
 ## Bootstrap mode for a self-proving change
 
-For a change shipping its own proof harness, a `policy:bootstrap` holder adds `"bootstrap": {"reason": "…", "contractPaths": ["src/herdr/recovery.ts"]}` to that criterion. Other gates apply; `e2e:` proofs cannot be deferred; the next item touching those paths owes it (`graphyard obligations`).
+A `policy:bootstrap` holder adds `"bootstrap": {"reason": "…", "contractPaths": ["src/herdr/recovery.ts"]}` to that criterion. Other gates apply; `e2e:` proofs cannot be deferred; the next item touching those paths owes it (`graphyard obligations`).
 
 ## Delivered with a failed smoke proof
 
@@ -82,7 +80,7 @@ A merge production never served is a `delivery.deployment-incident` ([observatio
 
 ## Merge bypass
 
-An ungated merge is a permanent violation: repair access, open a follow-up item, never backfill evidence. An admin opens a direct-merge window with `graphyard operator direct-merges on --since ISO REASON`.
+An ungated merge is a permanent violation: repair access and open a follow-up item, never backfilling evidence. An admin opens a direct-merge window with `graphyard operator direct-merges on --since ISO REASON`.
 
 ## Credentials
 
@@ -104,7 +102,7 @@ Only an `admin` grants, only to `producer` principals. Patterns: an exact name, 
 
 ## Scale limits
 
-Four provider jobs per tick per replica; watch lock wait, job lag, budget.
+Observation claims `GRAPHYARD_OBSERVATION_CONCURRENCY` jobs at once (default 4, capped at half the pool), each `SKIP LOCKED`: queue head and `max(2, batchSize)` band first, then review/rework waits, then `available_at`; `master status` raises `github` once the head's observation passes two minutes. Watch `observationThroughput` lag, budget.
 
 ### Concurrent reconciliation
 
