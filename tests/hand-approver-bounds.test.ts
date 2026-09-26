@@ -86,7 +86,7 @@ test('a hand-launched approver whose launch is refused for a reason other than c
     const watch = Object.values(state.approvals).find(entry => entry.decision === decision)!;
     assert.equal(launches.calls, round);
     assert.equal(watch.launches, 1, 'a refused launch ran no session, so it never spends the bound');
-    assert.equal(watch.refusals, round, 'each refusal in a row is counted');
+    assert.equal(state.actions[`approver:${decision}:refused`]?.attempts, round, 'each refusal in a row is counted');
     assert.equal(watch.exhaustedAt, null, 'the decision is retried until the refusal bound');
   }
   const fourth = await cycle(clock + 120_000);
