@@ -12,11 +12,16 @@ import { type DaemonEffects, record } from './effects.js';
 import { loopAttention } from './liveness.js';
 import { daemonSummary } from './run.js';
 import type { Cycle } from './cycle.js';
+import { budgetedPage, docsHeadroom, docsHeadroomText, docsTrimItem, docsWords, openDocsTrimItem, repositoryConfigFile, repositoryDocsBudget, type DocsHeadroom, type DocsWordBudget, type DocsWordCount } from '../model/documentation.js';
+import { agentOwner } from '../master/attention.js';
+import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { candidateKey } from './reconcile.js';
 import { checkInvariants, invariantFaultKind, invariantFaults } from '../model/invariants.js';
 
 /** The attention `master status` adds after buildMasterStatus, and its final attribution over the whole list. */
-export interface ReportedAttention { items: AttentionItem[]; attribute?: (status: { work: any[]; attentionItems: AttentionItem[] }) => AttentionItem[] }
+export interface ReportedAttention { items: AttentionItem[]; attribute?: (status: { work: any[]; attentionItems: AttentionItem[] }) => AttentionItem[];
+  /** The documentation word budget's headroom on the base branch (GY-574), when it could be counted. */
+  docs?: { base: string; headroom: DocsHeadroom } | null }
 /** What the cycle already read that faults are derived from, beside the items' own records. */
 export interface FaultSources {
   config?: MasterConfig; agents?: HerdrAgent[]; credentials?: Record<string, { available: boolean; reason: string | null }>;
@@ -151,6 +156,89 @@ export async function fileRecurringFaultClasses(state: DaemonState, effects: Dae
     }
   }
 }
+/** The budget a commit configures and its pages' words. */
+export interface DocsBudgetCount { budget: DocsWordBudget; pages: DocsWordCount }
+/** The last count per tree: the base branch moves far less often than the loop cycles. */
+const docsCounts = new Map<string, DocsBudgetCount | null>();
+/**
+ * The documentation word budget the project's graphyard.json configures at `ref` in the checkout at
+ * `root`, and the words per page it counts there, read from Git so the count is the base branch's
+ * whatever the checkout has out. Null when the project keeps no budget there, or when unreadable.
+ */
+export async function docsWordCountAt(root: string, ref: string, run: ChildRun = defaultChildRun): Promise<DocsBudgetCount | null> {
+  const git = async (...args: string[]) => await run('git', args, { cwd: root, timeoutMs: 30_000 });
+  try {
+    const tree = (await git('rev-parse', '--verify', '--quiet', `${ref}^{tree}`)).trim();
+    if (docsCounts.has(tree)) return docsCounts.get(tree)!;
+    const remember = (count: DocsBudgetCount | null) => {
+      if (docsCounts.size >= 8) docsCounts.delete(docsCounts.keys().next().value!);
+      docsCounts.set(tree, count);
+      return count;
+    };
+    // `<mode> <type> <sha> <size>\t<path>` per file; the budget comes from the committed configuration beside the pages.
+    const files = (await git('ls-tree', '-r', '-l', tree)).split('\n').map(line => line.match(/^\S+ blob \S+\s+(\d+)\t(.+)$/)).filter(match => !!match).map(match => ({ path: match![2], size: Number(match![1]) }));
+    const budget = files.some(file => file.path === repositoryConfigFile) ? repositoryDocsBudget(await git('show', `${tree}:${repositoryConfigFile}`)) : null;
+    if (!budget) return remember(null);
+    const pages = files.filter(file => budgetedPage(file.path, budget));
+    if (!pages.length) return null;
+    // Every page in one `git show`, split by those sizes.
+    const blobs = Buffer.from(await git('show', ...pages.map(page => `${tree}:${page.path}`)), 'utf8'), count: DocsWordCount = {};
+    let at = 0;
+    for (const page of pages) { count[page.path] = docsWords(blobs.subarray(at, at + page.size).toString('utf8')); at += page.size; }
+    if (at !== blobs.length) return null;
+    return remember({ budget, pages: count });
+  } catch { return null; }
+}
+/**
+ * The documentation word budget's headroom on the base branch (GY-574), against the budget the
+ * project's graphyard.json configures there: its origin copy when the checkout has one, else the
+ * local branch. A project that configures no budget is not monitored. A set within 3% of the budget
+ * is an attention line for the master (`master status` and the loop read it through
+ * reportedAttention), and the loop files the one trim item for it (fileDocsTrim).
+ */
+export async function docsHeadroomStatus(root: string, baseBranch: string, count: (root: string, ref: string) => Promise<DocsBudgetCount | null> | DocsBudgetCount | null = docsWordCountAt): Promise<{ docs: { base: string; headroom: DocsHeadroom } | null; attention: AttentionItem[] }> {
+  for (const ref of [`origin/${baseBranch}`, baseBranch]) {
+    const counted = await count(root, ref);
+    if (!counted) continue;
+    const headroom = docsHeadroom(counted.pages, counted.budget), text = docsHeadroomText(headroom, ref);
+    return { docs: { base: ref, headroom }, attention: text ? [{ subject: 'docs', text, kind: 'resource-bound', faultClass: 'resources', ...agentOwner('master', 'The loop files one trim item for it (a docs-trim bug naming the largest pages); dispatch it ahead of items that add documentation') }] : [] };
+  }
+  return { docs: null, attention: [] };
+}
+/** The loop's action key for the documentation trim item (GY-574). */
+export const docsTrimActionKey = 'fault:docs-headroom';
+/** The loop's last action for the trim item opened a filing episode that no restoration has closed. */
+const docsTrimEpisodeOpen = (action: DaemonAction | undefined) => action?.state === 'done' && action.detail.startsWith('Filed ');
+/**
+ * The documentation within 3% of its word budget on the base branch files one trim item (GY-574),
+ * as the operator-agent, naming the largest pages. One saturation episode files once (review finding
+ * 1 on 2639e4d6): the filing stands on the loop cursor until the first counted set with its headroom
+ * records its restoration, so a trim item that closed or merged and a total that drifted file nothing
+ * more — only restored headroom lets a later saturation file again. A set with its headroom files
+ * nothing, and neither does a loop without the operator-agent identity.
+ */
+export async function fileDocsTrim(state: DaemonState, effects: Pick<DaemonEffects, 'fileFaultClass' | 'persist'>, work: Work[], docs: ReportedAttention['docs'], now: () => number, performed: DaemonAction[]) {
+  const previous = state.actions[docsTrimActionKey];
+  if (!docs?.headroom.saturated) {
+    if (docs && docsTrimEpisodeOpen(previous))
+      performed.push(await record(state, docsTrimActionKey, { kind: 'fault', work: null, principal: null, state: 'done', detail: `Documentation headroom restored on ${docs.base} (${docs.headroom.total} of ${docs.headroom.budget} words); the next saturation may file again`, attempts: previous!.attempts, cycle: state.cycle }, now(), effects.persist));
+    return;
+  }
+  if (!effects.fileFaultClass || openDocsTrimItem(work) || docsTrimEpisodeOpen(previous)) return;
+  if (previous && previous.state !== 'done' && !readyToRetry(previous, state.cycle)) return;
+  const attempts = previous?.state === 'done' ? 1 : (previous?.attempts ?? 0) + 1;
+  // One key per base and total, so a retry after a lost reply returns the item already filed.
+  const idempotency = `docs-headroom:${docs.base}:${docs.headroom.total}`;
+  await record(state, docsTrimActionKey, { kind: 'fault', work: null, principal: null, state: 'started', detail: `Filing one item to restore documentation headroom: ${docs.headroom.total} of ${docs.headroom.budget} words on ${docs.base}`, attempts, cycle: state.cycle }, now(), effects.persist);
+  try {
+    // The trim item goes through the same operator-agent intent route as a fault-class item; it names no class.
+    const filed = await effects.fileFaultClass(docsTrimItem(docs.headroom, docs.base), idempotency);
+    work.push(filed);
+    performed.push(await record(state, docsTrimActionKey, { kind: 'fault', work: filed.key, principal: null, state: 'done', detail: `Filed ${filed.key} to restore documentation headroom (${docs.headroom.total} of ${docs.headroom.budget} words on ${docs.base}); nothing more is filed until headroom is restored`, attempts, cycle: state.cycle }, now(), effects.persist));
+  } catch (error) {
+    performed.push(await record(state, docsTrimActionKey, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `Could not file the documentation trim item: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist));
+  }
+}
 /** The recurrences `master status` reports under daemon.faults: per class, the window's count and the item standing for it. */
 export function faultRecurrenceReport(state: Pick<DaemonState, 'faults'>, policy: FaultClassPolicy, now: number) {
   const instances = state.faults.instances;
@@ -206,4 +294,5 @@ export async function faultStep(cycle: Cycle, assessments: Record<string, Contai
   trackFaults(state.faults, [...cycleFaults(state, snapshot.work, clock, { config, agents: seen, credentials, containment: assessments, status: controlPlane, jobs: snapshot.jobs, reported: reported?.items, attribute: reported?.attribute, loop, herdrUnavailable: !herdrRead.available }), ...invariantFaults(invariants)],
     new Date(clock).toISOString(), partial || (herdrRead.available ? false : new Set<string>([...herdrFaultKinds, invariantFaultKind('lingering-sessions')])));
   await fileRecurringFaultClasses(state, effects, snapshot.work, clock, now, performed);
+  await fileDocsTrim(state, effects, snapshot.work, reported?.docs, now, performed);
 }

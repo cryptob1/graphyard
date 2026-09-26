@@ -1,4 +1,5 @@
-import { agentOwner, humanOwner, type AttentionItem } from '../master.js';
+import { agentOwner, humanOwner, installationOwner, type AttentionItem } from '../master.js';
+import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable, generatedManifestScript } from '../install/generated-files.js';
 import type { Work } from '../model.js';
 import { mergeStalls } from '../merge-queue.js';
 import { stallBoundMs, stalledItems, type ActionlessItem } from '../model/action-account.js';
@@ -83,6 +84,19 @@ export const directMergeLine = (coordinator: any): { directMerge?: string } => c
 export function routedScopeRequests(approvals: readonly { work: string; action: string; scope?: { epoch: number; at: string } | null }[] = []) {
   const routed = new Set(approvals.filter(watch => watch.action === 'requirements' && watch.scope).map(watch => `${watch.work}:${watch.scope!.epoch}:${watch.scope!.at}`));
   return (work: { key: string; scopeRequest?: { epoch: number; at: string } | null }) => !!work.scopeRequest && routed.has(`${work.key}:${work.scopeRequest.epoch}:${work.scopeRequest.at}`);
+}
+
+/** The deployed generated-file manifest against the repository's, as installation attention; an unreadable manifest is the master's to fix. */
+export function generatedFilesAttention(root: string, coordinator: any): AttentionItem[] {
+  const generatedFiles: AttentionItem[] = [];
+  try {
+    const deployed = coordinator?.delegationLimits?.deployed?.[generatedFilesVariable];
+    for (const text of generatedFilesDrift(deployed, generatedFilesAssignment(root))) generatedFiles.push({ subject: 'installation', text, ...installationOwner('delegation-limits', text) });
+  } catch (error) {
+    generatedFiles.push({ subject: 'installation', text: `The repository generated-file manifest is unreadable: ${error instanceof Error ? error.message : 'unknown reason'}`,
+      ...agentOwner('master', `Fix ${generatedManifestScript} so --list prints the generated paths; master status reports the deployment drift again once it does`) });
+  }
+  return generatedFiles;
 }
 
 /** A merge pending past five minutes on a head GitHub reports mergeable, with no refusal (GY-344). */

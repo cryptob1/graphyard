@@ -4,6 +4,7 @@ import { reviewProviderOf } from './model/review.js';
 import { pathScopesOverlap } from './model/scope.js';
 import { queuedRegressions } from './regression-guard.js';
 import { missingAncestryReason, missingBaseAncestry } from './merge-base-ancestry.js';
+import { attributeDocsOverflow, docsBudgetProof, docsOverflowReason, docsTotal, type DocsWordBudget, type DocsWordCount } from './model/documentation.js';
 
 // Graphyard publishes speculative tips outside refs/heads and refs/tags: the namespace is
 // owned by the App, is never a branch a worker can push, and never appears as a PR head.
@@ -703,7 +704,7 @@ export interface RevertedDelivery {
 
 export const queueHistoryLimit = 40;
 // Pending, queued, or missing is not failure. Only a reported adverse conclusion ejects.
-const failedConclusions = new Set(['failure', 'timed_out', 'cancelled', 'action_required', 'startup_failure', 'stale', 'neutral']);
+export const failedConclusions = new Set(['failure', 'timed_out', 'cancelled', 'action_required', 'startup_failure', 'stale', 'neutral']);
 
 /** Deterministic service order: enqueue sequence, then key. Position is never bought or bypassed. */
 export function queueOrder(all: Work[]) {
@@ -920,6 +921,8 @@ export function ejectionReason(work: Work, ciAppIds: number[], all: Work[] = [],
   const speculation = work.queue.speculation;
   const planned = !!batch && speculation?.tip === candidate.sha && speculation.base === candidate.baseSha;
   const isolated = !planned || batch!.step.kind === 'eject' && batch!.step.member === work.key;
+  const attributed = planned && batch!.step.kind === 'eject' && batch!.step.member === work.key ? batch!.step.reason : undefined;
+  if (check && attributed) return `Required CI check ${check} did not pass on speculative tip ${tip}: ${attributed}`;
   if (check && isolated) return `Required CI check ${check} did not pass on speculative tip ${tip}${planned && batch!.size > 1 ? `, isolated by bisecting batch ${batch.batch} (${batch.members.join(', ')})` : ''}`;
   if (observation.reviews.some(review => review.sha === candidate.sha && review.state === 'CHANGES_REQUESTED')) return `Review requested changes on speculative tip ${tip}`;
   // Unresolved threads are the reviewer's inputs, not a reason to eject; only a branch that still
@@ -1244,7 +1247,13 @@ export type TipVerdict = { result: 'pass' } | { result: 'fail'; check: string };
 export type BatchStep =
   | { kind: 'test'; combination: string[] }
   | { kind: 'merge'; members: string[] }
-  | { kind: 'eject'; member: string; check: string };
+  | { kind: 'eject'; member: string; check: string; reason?: string };
+/**
+ * The docs word counts a batch's overflow is attributed from (GY-574): the count of the batch's base
+ * and of each prefix's combined tip, undefined where none was observed, and the budget the project
+ * configures (undefined when its tips carry none, so nothing is attributed).
+ */
+export interface BatchDocs { base: DocsWordCount | undefined; count: (prefix: string[]) => DocsWordCount | undefined; budget: DocsWordBudget | undefined }
 /**
  * The next step for a batch, from the verdicts on record. `verdict(prefix)` answers for the combined
  * tip of the batch's base and exactly that prefix, or undefined when it has not run; `before` is the
@@ -1255,10 +1264,17 @@ export type BatchStep =
  * until a single entry fails on the prefix before it. A prefix of the whole batch that is known to fail is never run
  * again, which is what keeps the bisection to one run per halving.
  */
-export function batchStep(members: string[], verdict: (prefix: string[]) => TipVerdict | undefined, before: TipVerdict | null = { result: 'pass' }): BatchStep {
+export function batchStep(members: string[], verdict: (prefix: string[]) => TipVerdict | undefined, before: TipVerdict | null = { result: 'pass' }, docs?: BatchDocs): BatchStep {
   if (!members.length) throw new Error('A batch has at least one member');
   const results = members.map((_, index) => verdict(members.slice(0, index + 1)));
   const failing = results.findIndex(result => result?.result === 'fail');
+  // A tip that failed only the docs word budget needs no bisection (GY-574): the counts name the
+  // entry whose docs change crossed the budget — the first prefix whose total exceeds it — and only
+  // that entry is ejected; the entries ahead of it fit, and merge once their own tip passes.
+  if (failing !== -1 && (results[failing] as { check: string }).check === docsBudgetProof && before?.result === 'pass' && docs?.budget) {
+    const overflow = attributeDocsOverflow(docs.base, members.slice(0, failing + 1).map((key, index) => ({ key, count: docs.count(members.slice(0, index + 1)) })), docs.budget);
+    if (overflow) return { kind: 'eject', member: overflow.member, check: docsBudgetProof, reason: docsOverflowReason(overflow) };
+  }
   // A member whose tip fails where the prefix before it passed (or on a base known to pass) is
   // isolated: it is ejected at once, before the passing prefix merges, so the entries behind
   // rebuild without it. The first member of a batch behind the head sits on the batches ahead,
@@ -1273,31 +1289,33 @@ export function batchStep(members: string[], verdict: (prefix: string[]) => TipV
   return { kind: 'test', combination: members.slice(0, Math.floor((failing - 1) / 2) + 1) };
 }
 /** The batch at the head of the queue — its first `batchSize` entries — and its next step. */
-export function planMergeBatch(queue: string[], batchSize: number, verdict: (prefix: string[]) => TipVerdict | undefined): { members: string[]; step: BatchStep } | null {
+export function planMergeBatch(queue: string[], batchSize: number, verdict: (prefix: string[]) => TipVerdict | undefined, docs?: BatchDocs): { members: string[]; step: BatchStep } | null {
   if (!queue.length) return null;
   const members = queue.slice(0, Math.max(1, Math.floor(batchSize)));
-  return { members, step: batchStep(members, verdict) };
+  return { members, step: batchStep(members, verdict, undefined, docs) };
 }
 /**
  * Drives a queue through its batches to the end: the reference the live plan follows step for
  * step. `runTip(merged, prefix)` runs CI on the combined tip of the base, the entries merged so far
  * and `prefix`; every run is recorded, and a combination already judged is never run again.
  */
-export function runMergeBatches(queue: string[], batchSize: number, runTip: (merged: string[], prefix: string[]) => TipVerdict) {
-  const pending = [...queue], merged: string[] = [], ejected: { member: string; check: string }[] = [], runs: string[][] = [];
+export function runMergeBatches(queue: string[], batchSize: number, runTip: (merged: string[], prefix: string[]) => TipVerdict, docsCount?: (holds: string[]) => DocsWordCount, budget?: DocsWordBudget) {
+  const pending = [...queue], merged: string[] = [], ejected: { member: string; check: string; reason?: string }[] = [], runs: string[][] = [];
   // A combined tip is named by everything it holds past the base: merging a prefix leaves the
   // tips of what stays pending exactly as they were, so their verdicts stand.
   const judged = new Map<string, TipVerdict>();
   const holds = (prefix: string[]) => [...merged, ...prefix].join(',');
   while (pending.length) {
-    const step = planMergeBatch(pending, batchSize, prefix => judged.get(holds(prefix)))!.step;
+    // A docs count is a property of the commit: every prefix's tip has one, run or not.
+    const docs = docsCount && { base: docsCount([...merged]), count: (prefix: string[]) => docsCount([...merged, ...prefix]), budget };
+    const step = planMergeBatch(pending, batchSize, prefix => judged.get(holds(prefix)), docs)!.step;
     if (step.kind === 'test') {
       judged.set(holds(step.combination), runTip([...merged], step.combination));
       runs.push([...merged, ...step.combination]);
     } else if (step.kind === 'merge') {
       merged.push(...pending.splice(0, step.members.length));
     } else {
-      ejected.push({ member: step.member, check: step.check });
+      ejected.push({ member: step.member, check: step.check, ...(step.reason ? { reason: step.reason } : {}) });
       pending.splice(pending.indexOf(step.member), 1);
     }
   }
@@ -1309,6 +1327,9 @@ export function tipVerdict(work: Work, ciAppIds: readonly number[] | null = null
   if (!speculation || !candidate || speculation.tip !== candidate.sha || !observation || observation.candidate.sha !== candidate.sha) return undefined;
   const runs = (work.policy?.checks ?? []).map(name => ({ name, run: latestCheck((observation.checks ?? []).filter(entry => entry.name === name && (!ciAppIds || ciAppIds.includes(entry.appId)))) }));
   const failed = runs.find(entry => !!entry.run && failedConclusions.has(entry.run.result));
+  // A tip whose only failure is the docs word budget is judged as that proof (GY-574), so the batch plan attributes it.
+  const docs = observation.docsBudget;
+  if (failed && docs?.sha === candidate.sha && docs.onlyFailure && docs.budget && docsTotal(docs.pages) > docs.budget.total) return { result: 'fail', check: docsBudgetProof };
   if (failed) return { result: 'fail', check: failed.name };
   return runs.every(entry => entry.run?.result === 'success') ? { result: 'pass' } : undefined;
 }
@@ -1356,7 +1377,13 @@ export function describeMergeBatches(all: Work[], placements: QueuePlacement[], 
     // The batches ahead are this batch's base: their combined tip is the tip of the entry just before it.
     const ahead = start > 0 ? byKey.get(chain[start - 1].key) : undefined;
     const before: TipVerdict | null = start === 0 ? { result: 'pass' } : ahead && tipOf(ahead.key) ? tipVerdict(ahead, ciAppIds) ?? null : null;
-    const step = batchStep(members, verdict, before);
+    // The docs counts each member's published tip was observed with (GY-574); the first member's base is the batch's.
+    // Only a failing tip is counted, so a prefix's count is its last member's record, or the base the member behind it recorded.
+    const tipDocs = (key: string) => { const entry = byKey.get(key), docs = entry?.observation?.docsBudget; return docs && tipOf(key) && docs.sha === tipOf(key) ? docs : undefined; };
+    const counted = (prefix: string[]) => tipDocs(prefix.at(-1)!)?.pages ?? (prefix.length < members.length ? tipDocs(members[prefix.length])?.base : undefined);
+    // The budget is the one the members' tips were counted against, as their project's graphyard.json configures it.
+    const budget = members.map(tipDocs).find(docs => docs?.budget)?.budget;
+    const step = batchStep(members, verdict, before, { base: tipDocs(members[0])?.base, count: counted, budget });
     const head = batch === 1;
     const state: MergeBatchView['state'] = !head ? 'waiting' : step.kind === 'merge' ? 'merging' : step.kind === 'eject' ? 'ejecting' : step.combination.length === members.length ? 'testing' : 'bisecting';
     const underTest = step.kind === 'test' ? { members: step.combination, tip: tipOf(step.combination.at(-1)!) } : null;
@@ -1364,7 +1391,7 @@ export function describeMergeBatches(all: Work[], placements: QueuePlacement[], 
     const named = `batch ${batch} (${members.join(', ')})${singles.has(members[0]) ? ', dissolved from a stuck batch' : ''}`;
     const summary = state === 'waiting' ? `${named} waits for batch ${batch - 1} to merge`
       : state === 'merging' ? `${named}: combined tip ${tipOf((step as { members: string[] }).members.at(-1)!)?.slice(0, 12) ?? 'unpublished'} passed; merging ${(step as { members: string[] }).members.join(', ')} in order`
-      : state === 'ejecting' ? `${named}: ${(step as { member: string }).member} is isolated as failing ${(step as { check: string }).check} and is ejected; the rest stay queued`
+      : state === 'ejecting' ? `${named}: ${(step as { member: string }).member} is ${(step as { reason?: string }).reason ? 'attributed' : 'isolated'} as failing ${(step as { check: string }).check} and is ejected; the rest stay queued`
       : state === 'bisecting' ? `${named}: the combined tip failed; bisecting on the tip of ${underTest!.members.join(', ')}${underTest!.tip ? ` (${underTest!.tip.slice(0, 12)})` : ''}`
       : `${named}: validating combined tip ${tip?.slice(0, 12) ?? '(not yet published)'}`;
     for (const key of members) views.set(key, { batch, size: members.length, members, tip, underTest, state, step, summary });
