@@ -535,6 +535,13 @@ export function disprovedConflict(work: Pick<Work, 'baseRefresh' | 'policyRevisi
   return stale && stale.head === observation.candidate.sha && stale.base === observation.baseTip && stale.policyRevision === work.policyRevision ? stale : null;
 }
 /**
+ * The observation with its conflict disproved by `stale` (GY-375): it reads mergeable and not
+ * conflicting, and GitHub's raw reading is kept beside that under `disproved` (GY-390).
+ */
+export function withDisprovedConflict<T extends Pick<Observation, 'mergeable' | 'conflicting' | 'disproved'>>(observation: T, stale: StaleMergeability): T {
+  return { ...observation, mergeable: true, conflicting: false, disproved: { mergeable: observation.mergeable, conflicting: !!observation.conflicting, reading: stale.reading } };
+}
+/**
  * A branch that carried another item's unlanded commits, and what the control plane did about it.
  *
  * A speculative tip is a merge of the item's own reviewed head and the tip of the entry ahead of

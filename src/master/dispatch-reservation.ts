@@ -1,7 +1,7 @@
 // Concern: the per-host dispatch reservation of a profile and an item, and the watch-supervisor probe a failed launch consults (GY-273).
 import { randomUUID } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
-import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { link, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { hostname } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import type { ChildRun } from '../child-runner.js';
@@ -45,13 +45,32 @@ const staleHolder = (held: { holder: ReservationHolder | null; ageMs: number }, 
 /** A takeover guard is held only between a re-read and an `rm`: one older than this was abandoned by a crash. */
 const takeoverGuardMs = 60_000;
 /**
+ * Removes the lock at `file` only if the lock actually removed passes `judged` (GY-509). The guard
+ * of a takeover counts as abandoned after `takeoverGuardMs` of age alone, so a live dispatcher that
+ * stalls between reading a lock and removing it can find its guard cleared and a fresh lock created
+ * in the meantime; an `rm` of the path would then delete that fresh lock. The lock is instead moved
+ * aside by an atomic rename to a name of this dispatcher's own and judged there: what was moved is
+ * exactly what gets judged, however long the dispatcher stalled. A lock that fails the judgement is
+ * put back with `link`, which never replaces a lock created at the path in the meantime.
+ */
+export async function removeJudged(file: string, judged: (held: { holder: ReservationHolder | null; ageMs: number }) => boolean, token: string, afterMove?: () => Promise<void>) {
+  const aside = `${file}.${token}.removing`;
+  try { await rename(file, aside); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
+  try {
+    await afterMove?.();
+    const held = await reservationHolder(aside);
+    if (held && !judged(held)) await link(aside, file).catch(error => { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; });
+  } finally { await rm(aside, { force: true }); }
+}
+/**
  * Removes a stale lock, but only the lock that was judged stale (GY-356). Two dispatchers can both
  * judge one lock stale; were each simply to `rm` it and retry the create, the slower one's `rm`
  * could delete the lock the faster one had just created, and both would hold the reservation. A
  * takeover is therefore serialised by a `.takeover` guard created with O_EXCL, and under it the
- * lock is read again and removed only while it still carries the token that was judged stale. A
- * lock created by a faster takeover carries a new token and is left alone; the slower dispatcher's
- * next create then finds it held.
+ * lock is removed only while it still carries the token that was judged stale, judged on the lock
+ * actually moved aside (`removeJudged`). A lock created by a faster takeover carries a new token and
+ * is left alone; the slower dispatcher's next create then finds it held.
  */
 export async function takeOverStale(file: string, judged: ReservationHolder | null, body: string, token: string) {
   const guard = `${file}.takeover`;
@@ -64,8 +83,7 @@ export async function takeOverStale(file: string, judged: ReservationHolder | nu
     return;
   }
   try {
-    const held = await reservationHolder(file);
-    if (held && held.holder?.token === judged?.token && staleHolder(held, dispatchReservationMs)) await rm(file, { force: true });
+    await removeJudged(file, held => held.holder?.token === judged?.token && staleHolder(held, dispatchReservationMs), token);
   } finally {
     const own = await reservationHolder(guard).catch(() => null);
     if (own?.holder?.token === token) await rm(guard, { force: true });
