@@ -30,7 +30,7 @@ Text equivalent: the human operator sends human-only decisions to Graphyard. Her
 
 Text equivalent: sessions, the dashboard and producers call the API; the engine applies each mutation in one locked Postgres transaction and appends an event; the reconciliation worker syncs GitHub, publishes the required check and runs the guarded merge; the webhook only wakes a job.
 
-- Gates deterministically check one candidate, `(PR, head SHA, base SHA)`, under the current policy revision; a push or base change invalidates old evidence.
+- Gates are deterministic checks of one candidate, `(PR, head SHA, base SHA)`, under the current policy revision; a push or base change invalidates old evidence.
 - Every claim increments the epoch; commands from an old epoch or an expired lease are refused.
 - Evidence is attributed to its authenticated producer; the latest trusted record per proof and candidate wins, even a later failure.
 - History is append-only, and a retried command replays its original result.
