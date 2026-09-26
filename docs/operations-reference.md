@@ -21,6 +21,10 @@ On the worker's machine `graphyard master settle-containment GY-N "reason"` veri
 
 Stop the worker, then `graphyard rework GY-N --previous-worker-stopped "reason"`; the next worker resubmits.
 
+## Rework rounds by cause
+
+`node scripts/rework-causes.mjs` classifies every rework round of the last 100 delivered items from the ledger's recorded rework reasons — findings on the item's own change, base breakage, conflict with the base, docs budget, lost approval or proof, CI flake, other — and names the share of each. The three largest causes each link to an open fix item; it files one when none exists (needs an admin or wildcard-scope credential, else it prints the payload). `master status` carries the split under `speed.reworkRounds.ownChange`: the rework median again with out-of-item causes removed, so a pipeline change is measured only against the rounds it can affect. As of 2026-09-26: 55% findings on the item's own change, 33% conflicts with the base, 12% spread across docs budget, CI flakes, base breakage, lost approvals, other; the raw median of 2 rounds falls to 0 once out-of-item causes are removed.
+
 ## Accepted evidence turns out to be wrong
 
 `graphyard revoke GY-N revoke.json` ([body](protocol/evidence.md#revocation)) closes the gate; the queue ejects the entry.
