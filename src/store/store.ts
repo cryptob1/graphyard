@@ -1,15 +1,16 @@
 import pg from 'pg';
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import type { Work } from '../model.js';
 import type { IntegrationJob } from '../coordination.js';
-import { migration, tables } from './schema.js';
-import { releaseInfo, schemaVersion } from '../release.js';
 import { appendSave, resolvedPayloadSql } from './snapshot-delta.js';
 import { advisoryLocks } from './locks.js';
-import { lockRebuiltTriggerTables, retryDeadlocks } from './migration-locks.js';
+import { runStartupMigration } from './migration-locks.js';
+// The startup migration's engine lives beside its locks and its recorded state (migration-locks.ts);
+// the lock budget stays exported here with the store that applies it.
+export { migrationLockTimeoutMs } from './migration-locks.js';
 import { coordinationDocumentSql, coordinationRelevance, coordinationTail, coordinationTrimSql, detoasted, type CoordinationTrim } from './coordination-sql.js';
 import { namedPool, reportPool, type ReportPoolOptions } from './report-pool.js';
-import { closePool, leasePoolConnections, reserve, trackedPool } from './pools.js';
+import { closePool, leasePoolConnections, trackedPool } from './pools.js';
 
 export * from './snapshot-delta.js';
 export type { CoordinationTrim } from './coordination-sql.js';
@@ -23,12 +24,6 @@ export type { CoordinationTrim } from './coordination-sql.js';
  */
 export const storeConnectionTimeoutMs = 10_000, storeStatementTimeoutMs = 60_000;
 const coordinationLock = advisoryLocks.coordination;
-/** How long a migrating release may wait for locks in total: well inside Railway's 120-second health check. */
-export const migrationLockTimeoutMs = 30_000;
-/** The migration's statements ahead of the first table's DDL: the shared trigger function. */
-const migrationPrelude = migration.slice(0, migration.indexOf(tables[0].ddl));
-const literal = (text: string) => `'${text.replace(/'/g, "''")}'`;
-const newerSchema = (current: number) => new Error(`Database schema generation ${current} is newer than this release supports (${schemaVersion}); deploy the release that migrated it, or restore a backup taken at generation ${schemaVersion} or earlier`);
 
 /**
  * Which connections a transaction may use (GY-274). Lease commands run on the lease pool (pools.ts, GY-558),
@@ -62,106 +57,31 @@ export class Store {
    * against a database a newer release already migrated refuses: rolling the application
    * back under a schema it does not know is how columns and rows go missing silently.
    *
-   * A release whose generation and migration are already recorded starts without any
-   * coordination or table lock: it reads graphyard_schema and its comment (the digest of the
-   * migration that last ran) and skips the DDL, so a new container never queues behind a busy
-   * live replica. Only a release that must migrate takes a lock — the migration lock, never the
-   * coordination lock (GY-203) — and every
-   * lock wait of the migration shares one `lockTimeoutMs` deadline: each step's lock_timeout
-   * is the time left, and a watchdog cancels any lock wait still running at the deadline, so
-   * waits on the migration lock, across tables, and between the statements of one table's
-   * DDL never add up past it. The watchdog's connection is reserved before the migration begins,
-   * and a migration that cannot reserve it, or loses it past the deadline, fails at once.
-   * Startup then fails naming the lock, well inside the platform's
+   * A release whose generation, prelude and every table's DDL are already recorded starts
+   * without any coordination or table lock: it reads graphyard_schema and its comment (the
+   * digest of the migration that last ran, with a digest per table, GY-773) and skips the
+   * DDL, so a new container never queues behind a busy live replica. A release that must
+   * migrate takes a lock — the migration lock, never the coordination lock (GY-203) — but
+   * touches only the tables whose DDL is not already recorded: a table whose recorded digest
+   * matches this release's is skipped without any lock at all, so `ALTER TABLE ... ADD COLUMN
+   * IF NOT EXISTS` and a trigger rebuild on receipts never hold up the writes that stream
+   * through an unchanged events table. A release whose whole-migration digest is recorded at
+   * this generation but whose per-table digests are not records them alone: a matching whole
+   * digest proves every table's DDL ran, so the upgrade itself takes no lock on a work table.
+   *
+   * Every lock wait of the migration shares one `lockTimeoutMs` deadline: each step's
+   * lock_timeout is the time left, and a watchdog cancels any lock wait still running at the
+   * deadline, so waits on the migration lock, across tables, and between the statements of one
+   * table's DDL never add up past it. The watchdog's connection is reserved before the migration
+   * begins, and a migration that cannot reserve it, or loses it past the deadline, fails at once.
+   * A deadlock or an expired lock wait under live traffic (40P01, 55P03, the watchdog's 57014) is
+   * transient: the attempt rolls back — releasing every lock at once, so live requests queue
+   * behind a failed attempt no longer — and retries with backoff while the deadline allows, all
+   * inside the health-check window. Startup then fails naming the lock, well inside the platform's
    * health window. The migration's own work is not timed: a backfill or index build that takes
    * longer than the lock budget (the offline `graphyard db migrate` Job) still completes.
    */
-  async init(options: { lockTimeoutMs?: number } = {}) {
-    const digest = `migration sha256:${createHash('sha256').update(migration).digest('hex')}`;
-    const recorded = await this.recordedGeneration();
-    if (recorded && recorded.version > schemaVersion) throw newerSchema(recorded.version);
-    if (recorded?.version === schemaVersion && recorded.digest === digest) return;
-    const timeout = Math.max(1, Math.floor(options.lockTimeoutMs ?? migrationLockTimeoutMs));
-    const deadline = Date.now() + timeout;
-    const db = await this.pool.connect();
-    // The watchdog's connection is reserved before the migration begins: at the database's
-    // connection limit, startup fails here, boundedly, rather than migrating without a deadline.
-    let guard: pg.PoolClient;
-    try { guard = await reserve(this.pool); } catch (error) {
-      db.release();
-      throw new Error(`Schema migration to generation ${schemaVersion} could not reserve the connection its lock-wait watchdog needs (${(error as Error).message}); startup fails instead of migrating without a deadline — retry the deploy`, { cause: error });
-    }
-    let lost: Error | undefined;
-    const lose = (error: Error) => { lost ??= error; };
-    guard.on('error', lose);
-    guard.on('end', () => lose(new Error('Connection terminated')));
-    let waitingOn = `the migration advisory lock pg_advisory_xact_lock(${advisoryLocks.migration})`;
-    // A watchdog that cannot run past the deadline aborts the migration: without it, lock waits
-    // inside one step could restart lock_timeout without end.
-    let abort!: (error: Error) => void, aborted: Error | undefined;
-    const abandoned = new Promise<never>((_, reject) => { abort = error => { aborted ??= error; reject(error); }; });
-    abandoned.catch(() => {});
-    // Each step may wait for a lock only for what is left of the migration's single deadline.
-    const step = async (waiting: string, sql: string, values?: unknown[]) => {
-      waitingOn = waiting;
-      await Promise.race([db.query(`SET LOCAL lock_timeout = ${Math.max(1, deadline - Date.now())}`), abandoned]);
-      return Promise.race([db.query(sql, values), abandoned]);
-    };
-    // lock_timeout restarts for every lock one step's statements wait on; past the deadline
-    // the watchdog cancels whichever lock wait is still running.
-    let cancelledWaiting = false, watching = true, poll: NodeJS.Timeout | undefined, polling = Promise.resolve();
-    const watch = async (pid: number) => {
-      if (!watching) return;
-      try {
-        if (lost) throw lost;
-        const { rows } = await guard.query("SELECT pg_cancel_backend(pid) AS cancelled FROM pg_stat_activity WHERE pid=$1 AND wait_event_type='Lock'", [pid]);
-        if (rows[0]?.cancelled) cancelledWaiting = true;
-        else if (watching) poll = setTimeout(() => { polling = watch(pid); }, 100);
-      } catch (error) {
-        if (watching) abort(new Error(`Schema migration to generation ${schemaVersion} lost the connection its lock-wait watchdog needs (${(error as Error).message}) past its ${timeout} ms deadline, while waiting for ${waitingOn}; startup fails instead of outlasting the health check — retry the deploy`, { cause: error }));
-      }
-    };
-    try {
-      await guard.query('SET application_name = \'graphyard migration watchdog\'');
-      await guard.query('SET statement_timeout = 5000');
-      const pid = Number((await db.query('SELECT pg_backend_pid() AS pid')).rows[0].pid);
-      poll = setTimeout(() => { polling = watch(pid); }, Math.max(0, deadline - Date.now()));
-      const migrate = async () => {
-        // The pool's statement timeout bounds coordination work, not the migration's: its lock waits share the deadline above.
-        await db.query('BEGIN'); await db.query('SET LOCAL statement_timeout = 0');
-        // The migration's own lock, never the coordination lock (GY-203): two migrations serialize beside live coordination.
-        await step(waitingOn, 'SELECT pg_advisory_xact_lock($1)', [advisoryLocks.migration]);
-        await step('a lock on the migration\'s shared function graphyard_immutable', migrationPrelude);
-        for (const { name, ddl } of tables) { const waiting = `a lock on table ${name} (or an object its migration touches)`; await lockRebuiltTriggerTables(step, waiting, ddl); await step(waiting, ddl); }
-        const current = Number((await step('a lock on table graphyard_schema', 'SELECT COALESCE(MAX(version),0) AS version FROM graphyard_schema')).rows[0].version);
-        if (current > schemaVersion) throw newerSchema(current);
-        if (current < schemaVersion) await step(waitingOn, 'INSERT INTO graphyard_schema(version, graphyard_version) VALUES($1,$2)', [schemaVersion, releaseInfo().version]);
-        await step(waitingOn, `COMMENT ON TABLE graphyard_schema IS ${literal(digest)}`);
-        await Promise.race([db.query('COMMIT'), abandoned]);
-      }; await retryDeadlocks(migrate, () => !aborted && Date.now() < deadline, () => db.query('ROLLBACK').catch(() => {}));
-    } catch (error) {
-      // An abandoned migration's connection is still busy: it is destroyed below, which rolls it back.
-      if (aborted) throw aborted;
-      await db.query('ROLLBACK').catch(() => {});
-      // 55P03: a lock wait hit the time left; 57014 after the watchdog fired: it cancelled a lock wait past the deadline.
-      const code = (error as { code?: string }).code;
-      if (code === '55P03' || (code === '57014' && cancelledWaiting)) throw new Error(`Schema migration to generation ${schemaVersion} gave up after ${timeout} ms waiting for ${waitingOn}, held by another session; startup fails instead of outlasting the health check — retry the deploy when it is released`, { cause: error });
-      throw error;
-    } finally {
-      // A cancel still in flight must not reach whatever this connection runs next.
-      watching = false; clearTimeout(poll); await polling;
-      db.release(aborted ? true : undefined);
-      // The watchdog's session settings must not follow its connection back into the pool.
-      guard.release(true);
-    }
-  }
-  /** The recorded generation and migration digest, read without any lock a replica holds; null before the first migration. */
-  private async recordedGeneration(): Promise<{ version: number; digest: string | null } | null> {
-    const table = (await this.pool.query("SELECT to_regclass('graphyard_schema') AS oid")).rows[0].oid;
-    if (!table) return null;
-    const { rows } = await this.pool.query("SELECT COALESCE((SELECT MAX(version) FROM graphyard_schema),0) AS version, obj_description(to_regclass('graphyard_schema'),'pg_class') AS digest");
-    return { version: Number(rows[0].version), digest: rows[0].digest };
-  }
+  async init(options: { lockTimeoutMs?: number } = {}) { return runStartupMigration(this.pool, options); }
   async schema() { return Number((await this.pool.query('SELECT COALESCE(MAX(version),0) AS version FROM graphyard_schema')).rows[0].version); }
   /** Resolves once every connection of all three pools has closed (GY-483), so the database may be stopped right after. */
   async close() { await Promise.all([closePool(this.pool, 'main'), closePool(this.leasePool, 'lease'), closePool(this.reportPool, 'report')]); }
