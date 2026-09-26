@@ -77,6 +77,12 @@ export default function OverviewPage({ work, board, status, query, setQuery, set
       <h2>Problems by class <small>one cause, counted once per class</small></h2>
       <ul>{faults.map(group => <li key={group.faultClass} data-fault-class={group.faultClass} title={group.meaning}><span className="mono">{group.faultClass}</span> <strong>{group.count}</strong> <small>{group.subjects.join(', ')}</small></li>)}</ul>
     </section>}
+    {/* The pipeline doctor (GY-711): its last runs, newest first, as /api/status serves them. */}
+    {!!status?.doctor?.length && <section className="fault-classes" aria-label="Doctor" data-doctor-panel>
+      <h2>Doctor <small>finds and fixes stuck work every few minutes</small></h2>
+      <ul>{status.doctor.slice(0, 5).map((run: any) => <li key={run.at} data-doctor-run={run.at} data-doctor-state={run.state}>
+        <span className="mono">{String(run.at).slice(0, 16).replace('T', ' ')}</span> <strong>{run.findings?.length ?? 0}</strong> found · <strong>{run.actions?.length ?? 0}</strong> acted · <strong>{run.filed?.length ?? 0}</strong> filed <small>{run.state === 'reported' ? String(run.detail ?? '').slice(0, 140) : run.state}</small></li>)}</ul>
+    </section>}
     {work.length === 0 ? <div className="empty"><h2>No work yet.</h2><p>Create a work item, say what must be true when it is done, and an agent will pick it up.</p>{admin && <button type="button" onClick={() => setCreating(true)}>Create the first work item</button>}</div> : <>
       <div role="group" aria-label="Filter by group" className="tiles">{groups.map(group => <button type="button" key={group} className={`tile group-${group}${only === group ? ' selected' : ''}${counts[group] === 0 ? ' empty-tile' : ''}`} aria-pressed={only === group} data-tile={group} onClick={() => setOnly(only === group ? null : group)}>
         <span className="tile-label"><GroupDot group={group}/>{groupLabel[group]}</span><strong>{counts[group]}</strong><small>{group === 'up-next' ? upNextTile(board ? board.groups['up-next'].filter(match) : []) : groupMeaning[group]}</small>

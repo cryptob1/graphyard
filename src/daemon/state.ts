@@ -4,13 +4,14 @@ import { readFile, writeFile, rename, chmod } from 'node:fs/promises';
 import { resolve, dirname, basename } from 'node:path';
 import { z } from 'zod';
 import { runRecordSchema } from '../runner/types.js';
+import { doctorRunRecordSchema, retainedDoctorRuns } from '../runner/payloads.js';
 import { type MasterConfig, assertOutsideWorktrees, writeFailure, diskExhaustionMessage, reclaimAdvice } from '../master.js';
 import { boundDetail } from './decisions.js';
 import { classified, faultClasses, faultInstanceSchema, noteActionOutcome, type FaultKind } from '../model/fault-classes.js';
 import { timingsSchema } from '../master/timings.js';
 import { emptyInvariantRecord, invariantRecordSchema } from '../model/invariants.js';
 
-export const daemonActionKinds = ['close', 'dispatch', 'review', 'refresh', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session', 'reclaim', 'decision', 'scope', 'settle', 'failover', 'capacity', 'human', 'preserve', 'fault'] as const;
+export const daemonActionKinds = ['close', 'dispatch', 'review', 'refresh', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session', 'reclaim', 'decision', 'scope', 'settle', 'failover', 'capacity', 'human', 'preserve', 'fault', 'doctor'] as const;
 export type DaemonActionKind = typeof daemonActionKinds[number];
 /** A failed action is a pipeline fault; its kind in the fault catalogue (GY-173) follows the action's kind. */
 export const daemonActionFaultKind = (kind: DaemonActionKind) => `action:${kind}` as FaultKind;
@@ -321,6 +322,11 @@ export const daemonStateSchema = z.object({
   faults: z.object({ instances: z.array(faultInstanceSchema).default([]), open: z.record(z.string(), z.string()).default({}), failing: z.record(z.string(), z.string()).default({}) }).strict()
     .default(() => ({ instances: [], open: {}, failing: {} })),
   /**
+   * The pipeline doctor's last runs (GY-711, src/daemon/doctor.ts): each with what it found, did
+   * and filed, and the runs it took. The newest is kept whole; the list is bounded below.
+   */
+  doctor: z.object({ runs: z.array(doctorRunRecordSchema).default([]) }).strict().default(() => ({ runs: [] })),
+  /**
    * The system invariants (GY-404): what the loop carries between cycles to judge them — base
    * refreshes per candidate, when each merge candidate was first seen mergeable, the builds and lease
    * losses seen — and the last cycle's report, one line per invariant, for `master status`.
@@ -386,6 +392,15 @@ export function pruneDaemonState(state: DaemonState) {
   // A watch is retired when its item moves on; this bound only catches items the loop stopped seeing.
   const watches = Object.entries(state.approvals).sort((a, b) => Date.parse(a[1].requestedAt) - Date.parse(b[1].requestedAt));
   if (watches.length > retainedClocks) for (const [key] of watches.slice(0, watches.length - retainedClocks)) delete state.approvals[key];
+  // The doctor's runs are kept newest first from the report; the oldest go past the bound, never one still running.
+  if (state.doctor.runs.length > retainedDoctorRuns) {
+    const settled = state.doctor.runs.filter(entry => entry.state !== 'running');
+    const excess = state.doctor.runs.length - retainedDoctorRuns;
+    if (settled.length >= excess) {
+      const drop = new Set(settled.slice(0, excess).map(entry => entry.at));
+      state.doctor.runs = state.doctor.runs.filter(entry => !drop.has(entry.at));
+    }
+  }
   return state;
 }
 

@@ -38,17 +38,15 @@ import { slowReportReader } from '../master/report-cache.js';
 import { repairLaneAttention } from '../master/repair-lane.js';
 
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
-// The cycle-budget measure is a daemon metric (src/daemon/metrics.ts); it is read from here,
-// as it always was, by `master status` and its tests.
+// The cycle-budget measure (src/daemon/metrics.ts), read from here as it always was.
 export { cycleBudget } from '../daemon/metrics.js';
-// `master scope` lives in its own module; it is read from here as it always was.
+// `master scope` lives in its own module; read from here as always.
 export { approveScopeRequest } from './master-scope.js';
 
 /** A merge pending past five minutes on a head GitHub reports mergeable, with no refusal (GY-344). */
 export const mergeStallAttention = (snapshot: { work: Work[]; now: string }): AttentionItem[] =>
   mergeStalls(snapshot.work, Date.parse(snapshot.now)).map(stall => ({ subject: stall.key, text: stall.text, ...agentOwner('master', stall.next) }));
-// Observation throughput and the queue head's lag live beside the observation schedule they read
-// (src/github.ts); the report reads them from here, as do the tests.
+// Observation throughput and queue lag (src/github.ts), read from here as the tests do.
 export { observationThroughputStatus };
 // The attention builders live beside each other in `status-attention.ts`; the report reads them
 // from here, as does everything that was reading them from here before the split.
@@ -197,6 +195,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     setup, administration, daemon, dispatch,
     // Each session ledger's bound, retention and the room left for live sessions (GY-131).
     ledgers: { reviews: sessionLedgerHeadroom(reviewRecords, reviewLedgerSpec), producers: sessionLedgerHeadroom(producerRecords, producerLedgerSpec) },
+    doctor: coordinator?.doctor ?? null, // GY-711 doctor runs
     // The inverted loop: what the control plane says each item needs, who is running it, and
     // every session it can be watched through.
     actions: needsHumanActions(actionReport(snapshot), owed.rows),
