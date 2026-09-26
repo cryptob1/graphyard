@@ -165,14 +165,14 @@ export class Store {
   async schema() { return Number((await this.pool.query('SELECT COALESCE(MAX(version),0) AS version FROM graphyard_schema')).rows[0].version); }
   /** Resolves once every connection of all three pools has closed (GY-483), so the database may be stopped right after. */
   async close() { await Promise.all([closePool(this.pool, 'main'), closePool(this.leasePool, 'lease'), closePool(this.reportPool, 'report')]); }
-  async transaction<T>(fn: (db: pg.PoolClient, now: Date) => Promise<T>, { lane = 'request' }: { lane?: StoreLane } = {}): Promise<T> {
+  async transaction<T>(fn: (db: pg.PoolClient, now: Date) => Promise<T>, { lane = 'request', coordinationLock: takeCoordinationLock = true }: { lane?: StoreLane; coordinationLock?: boolean } = {}): Promise<T> {
     const permit = lane === 'background' ? await this.background.acquire() : null;
     const db = await (lane === 'lease' ? this.leasePool : this.pool).connect().catch(error => { permit?.(); throw error; });
     try {
       await db.query('BEGIN');
-      // Serializes short coordination decisions across replicas, including dependency edits
-      // and cross-task workspace reservations. Never hold this lock during external I/O.
-      await db.query('SELECT pg_advisory_xact_lock($1)', [coordinationLock]);
+      // Serializes short coordination decisions across replicas, including dependency edits and cross-task workspace
+      // reservations; never held during external I/O. Reconciliation batches lock their own rows instead (GY-727).
+      if (takeCoordinationLock) await db.query('SELECT pg_advisory_xact_lock($1)', [coordinationLock]);
       const { rows } = await db.query('SELECT clock_timestamp() AS now');
       const result = await fn(db, rows[0].now);
       await db.query('COMMIT');
