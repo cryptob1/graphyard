@@ -1064,10 +1064,10 @@ export class GitHub {
    * read as `null` is re-requested up to `mergeabilityRetries` times, `mergeabilityRetryMs` apart
    * (at most 10 seconds in all). Observation runs outside any coordination transaction, so the wait
    * holds no lock. A value still unknown after that is kept as unknown, never as not mergeable, and
-   * is read again on the next observation.
+   * is read again on the next observation. `retries` is 0 for a read that must not wait again.
    */
-  private async computedMergeability(pr: any): Promise<any> {
-    for (let attempt = 0; attempt < mergeabilityRetries && pr.mergeable === null && pr.state === 'open' && !pr.merged; attempt++) {
+  private async computedMergeability(pr: any, retries = mergeabilityRetries): Promise<any> {
+    for (let attempt = 0; attempt < retries && pr.mergeable === null && pr.state === 'open' && !pr.merged; attempt++) {
       await delay(this.mergeabilityRetryMs);
       pr = await this.request(`/pulls/${pr.number}`);
     }
@@ -1099,11 +1099,13 @@ export class GitHub {
   /**
    * `peers` is every work item as the caller read it. It is what lets the landing check see other
    * items' unlanded candidates in this head's history, and name the merge that took a delivery
-   * off the base branch; without it those two answers are left out, never guessed.
+   * off the base branch; without it those two answers are left out, never guessed. `awaitMergeability`
+   * false reads mergeability once, with no re-request: `verify` passes it for its second read, so
+   * final verification waits on GitHub's computation at most once (GY-554).
    */
-  async observe(work: Work, peers?: Work[]): Promise<Observation> {
+  async observe(work: Work, peers?: Work[], { awaitMergeability = true }: { awaitMergeability?: boolean } = {}): Promise<Observation> {
     const startedAt = new Date().toISOString();
-    const pr = await this.computedMergeability(await this.request(`/pulls/${work.submission!.pr}`));
+    const pr = await this.computedMergeability(await this.request(`/pulls/${work.submission!.pr}`), awaitMergeability ? mergeabilityRetries : 0);
     demand(pr.base.repo.full_name.toLowerCase() === this.config.repository.toLowerCase() && pr.head.repo?.full_name.toLowerCase() === this.config.repository.toLowerCase(), 'MVP requires same-repository pull requests');
     demand(pr.base.ref === this.config.base, 'Pull request targets an unmanaged branch');
     const [checks, reviews, protection, files, branch] = await Promise.all([
@@ -1365,8 +1367,11 @@ export class GitHub {
     return entry.sha;
   }
   async verify(work: Work, peers?: Work[]): Promise<Observation> {
+    // The first read waits out GitHub's mergeability computation; the second only confirms it, so the
+    // wait in final verification is bounded by one observation's (GY-554). A value that settled in
+    // between differs from the first read and fails the comparison below, as any moved gate does.
     const first = await this.observe(work, peers);
-    const second = await this.observe(work, peers);
+    const second = await this.observe(work, peers, { awaitMergeability: false });
     const gates = (o: Observation) => JSON.stringify({ candidate: o.candidate, checks: o.checks, reviews: o.reviews, agentReview: o.agentReview, protected: o.protected, conversations: o.conversations, merged: o.merged, mergeable: o.mergeable, conflicting: o.conflicting || undefined, mergeabilityUnknown: o.mergeabilityUnknown || undefined, prState: o.prState, draft: o.draft, scopeFiles: o.scopeFiles, landing: o.landing });
     demand(gates(first) === gates(second), 'GitHub gates changed during final verification; retry');
     return second;
