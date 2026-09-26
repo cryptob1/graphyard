@@ -7,7 +7,7 @@ import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { abnormalTestExit, containedInstall, containmentWorks, isolatedTestEnvironment, loaderDigest, passedTestControls, reserveTestPorts, testPortEnvironment, npmCiArgs, npmCiEnvironment, repeatedRequiredTitle } from '../src/cli/test-isolation.js';
+import { abnormalTestExit, containedInstall, containmentArgs, containmentWorks, isolatedTestEnvironment, loaderDigest, passedTestControls, reserveTestPorts, testPortEnvironment, npmCiArgs, npmCiEnvironment, repeatedRequiredTitle } from '../src/cli/test-isolation.js';
 import { countProofCases, runProof } from '../src/cli/verify.js';
 import { bindEvidence, leaseCommands, testedBinding } from '../src/cli/lease.js';
 import { githubPauseReset, pauseRetry, submitThroughPause } from '../src/cli/complete.js';
@@ -512,4 +512,9 @@ test('unit:proof-and-cli-self-sufficient graphyard complete refused during a Git
   assert.ok(requests.every(request => request.path === 'work/work-1/submit' && JSON.stringify(request.data) === JSON.stringify({ epoch: 3, pr: 42 })));
   assert.equal(requests[0].key, requests[1].key);
   assert.equal(printed[0].submitted, true);
+});
+
+test('docs/install.md documents the exact bubblewrap probe containmentWorks runs', async () => {
+  const runbook = await readFile(new URL('docs/install.md', repository), 'utf8');
+  assert.ok(runbook.includes(`\`bwrap ${containmentArgs.join(' ')} -- true\``), 'a host that passes the documented check passes the real probe');
 });

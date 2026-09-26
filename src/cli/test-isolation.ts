@@ -171,9 +171,12 @@ function onPath(name: string, env: NodeJS.ProcessEnv): string | null {
   return null;
 }
 
+/** The sandbox containedInstall starts from; docs/install.md documents it as the host precondition. */
+export const containmentArgs = ['--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--unshare-all', '--share-net', '--die-with-parent'] as const;
+
 /** Whether `bwrap` runs here with the namespaces containedInstall unshares (a host can refuse unprivileged user namespaces). */
 export function containmentWorks(bwrap = 'bwrap'): boolean {
-  return spawnSync(bwrap, ['--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--unshare-all', '--share-net', '--die-with-parent', '--', 'true'], { stdio: 'ignore' }).status === 0;
+  return spawnSync(bwrap, [...containmentArgs, '--', 'true'], { stdio: 'ignore' }).status === 0;
 }
 
 export interface ContainedInstall { command: string; args: string[] }
@@ -223,7 +226,7 @@ export function containedInstall(cwd: string, env: NodeJS.ProcessEnv = process.e
   const tools = [options.node ?? process.execPath, onPath('node', env), onPath('npm', env)].flatMap(path => { try { return path ? [dirname(dirname(realpathSync(path)))] : []; } catch { return []; } });
   const readable = [...tools, ...(env.PATH ?? '').split(delimiter).filter(isAbsolute), join(home, '.npmrc'), env.npm_config_userconfig]
     .filter((path): path is string => !!path).map(path => resolve(path));
-  const args = ['--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--unshare-all', '--share-net', '--die-with-parent', '--new-session'];
+  const args: string[] = [...containmentArgs, '--new-session'];
   for (const path of hidden) args.push('--tmpfs', path); // parents first, or a later one would bury an earlier
   args.push('--setenv', 'TMPDIR', '/tmp');
   const made = new Set<string>();
