@@ -1,7 +1,7 @@
 <!-- page: Build integrations | 4 | releases and observed delivery. -->
 # Releases and observed production delivery
 
-Graphyard records which release each environment should run and verifies it only from what service-scoped observers measured.
+Graphyard records the release each environment should run and verifies it only from what service-scoped observers measured.
 
 ## Who writes what
 
@@ -30,7 +30,7 @@ Policy and approvals are `admin`'s; builds from a `producer` with a `builder` re
  "provenanceUrl":"https://ci.example.test/builds/812"}
 ```
 
-`POST /api/delivery/release` names the build and its explicit membership; each member cites its merge SHA, and a reverted change stays listed with `included: false`:
+`POST /api/delivery/release` names the build and its explicit membership; each member cites its merge SHA; a reverted change stays listed with `included: false`:
 
 ```json
 {"id":"2026.09.18-1","expectedRevision":0,"environment":{"id":"production","revision":1},
@@ -63,7 +63,7 @@ The observer submits what it measured through `POST /api/delivery/observe`:
    "instances":[{"instance":"web-1","digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222","measurement":"host-attestation","healthy":true}]}]}
 ```
 
-Only complete listings measured by `provider` or `host-attestation` can verify; a repeated `snapshotId` returns the original receipt, and `POST /api/delivery/notify` is a hint only. A sweep every two seconds (`graphyard delivery sweep` drains sooner) verifies a generation once every service shares a common interval within the freshness bound, adding a `releaseDeliveries` entry to each included item. Otherwise status reads `unobserved`, `mismatched`, `unknown`, `unhealthy`, `incomplete`, `no-common-interval`, `stale` or `degraded`. `graphyard delivery` shows the state.
+Only complete listings measured by `provider` or `host-attestation` can verify; a repeated `snapshotId` returns the original receipt, and `POST /api/delivery/notify` is a hint only. A sweep every two seconds (`graphyard delivery sweep` drains sooner) verifies a generation once every service shares a common interval within the freshness bound, adding a `releaseDeliveries` entry to each included item; otherwise status reads `unobserved`, `mismatched`, `unknown`, `unhealthy`, `incomplete`, `no-common-interval`, `stale` or `degraded`, shown by `graphyard delivery`.
 
 ## Attribution
 

@@ -9,7 +9,7 @@ Define a test case in **Settings → Test cases** or `graphyard scenario scenari
 
 ## Identities
 
-- Human operator (`admin`): defines environments and bundles, registers identities, and selects, requests, cancels and recovers candidates.
+- Human operator (`admin`): defines environments and bundles, registers identities, selects, requests, cancels and recovers candidates.
 - Runner (`worker` + runner registration): polls `dispatch`, acknowledges and heartbeats.
 - Builder and collector (`producer` + registration): attest source → artifacts, then verify and publish; a collector that attested the build is refused.
 
