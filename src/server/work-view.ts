@@ -45,13 +45,16 @@ export interface CoordinationOmissions { evidence: number; dispatchHistory: numb
 const absent = (value: unknown) => value === null || value === undefined || typeof value !== 'object';
 /**
  * A delivery nothing is owed for any more (GY-203): done, with no next action, queue entry, lease,
- * action row or running session. The loop reads such an item only for what it is — delivered, its
- * delivery record, its gates — so the view keeps none of its histories, no evidence but what binds
- * its candidate, and no finished session. The work index stores exactly this view of it at write
- * time (`settledSql` in src/store/coordination-sql.ts is the SQL form; the two must agree), so the
- * coordination snapshot serves it without reading its document.
+ * containment quarantine, action row or running session. The loop reads such an item only for what
+ * it is — delivered, its delivery record, its gates — so the view keeps none of its histories, no
+ * evidence but what binds its candidate, and no finished session. A delivered item still under
+ * quarantine is not settled: the loop's containment recovery finds the quarantined epoch's pane in
+ * its finished implementation session (`recordedPane` in src/quarantine.ts, GY-257). The work
+ * index stores exactly this view of it at write time (`settledSql` in src/store/coordination-sql.ts
+ * is the SQL form; the two must agree), so the coordination snapshot serves it without reading its
+ * document.
  */
-export const deliverySettled = (work: Work) => work.stage === 'done' && absent(work.nextAction) && absent(work.queue) && absent(work.lease)
+export const deliverySettled = (work: Work) => work.stage === 'done' && absent(work.nextAction) && absent(work.queue) && absent(work.lease) && absent(work.containmentQuarantine)
   && !(Array.isArray(work.actionQueue?.actions) && work.actionQueue.actions.length)
   && !(Array.isArray(work.sessions) && work.sessions.some(handle => handle?.state === 'running'));
 const recent = <T>(entries: T[], keep: number) => entries.slice(Math.max(0, entries.length - keep));
