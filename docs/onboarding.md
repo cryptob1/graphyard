@@ -13,7 +13,7 @@ Each concurrent session needs a worker identity and host ID: raise `install --wo
 node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST --herdr --host-id UNIQUE_MACHINE_NAME --token-stdin
 ```
 
-Commit `AGENTS.md`, `.gitignore`, `graphyard.json`; never `.graphyard/`. Without the master, `graphyard watch GY-1 EPOCH -- COMMAND` runs a worker, stopping it on lease loss.
+Commit `AGENTS.md`, `.gitignore`, `graphyard.json`; never `.graphyard/`. Without the master, `graphyard watch GY-1 EPOCH -- COMMAND` runs a worker.
 
 ### Documentation policy
 
@@ -27,7 +27,7 @@ Agents treat Herdr's bracketed paste as untrusted data (prompt injection), so wi
 
 ### Agent environments
 
-Each agent account has a login home under `~/.coding_agents`, selected by `CLAUDE_CONFIG_DIR` (Claude Code), `CODEX_HOME` (Codex), `XDG_DATA_HOME` (OpenCode) or `CURSOR_CONFIG_DIR` (Cursor). Tokens go in `~/.config/graphyard/workers/` and `producers/` (mode 0600). Then:
+Each agent account has a login home under `~/.coding_agents`, selected by `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_DATA_HOME` or `CURSOR_CONFIG_DIR`. Tokens go in `~/.config/graphyard/workers/` and `producers/` (mode 0600):
 
 ```sh
 node "$GRAPHYARD_CLI" master environments --create claude,codex --apply  # new login homes
@@ -52,8 +52,8 @@ Join a dash-led value to its flag with `=`:
 
 ```sh
 node "$GRAPHYARD_CLI" master registry runtime set aider --kind aider --arg=--yes-always \
-  --home-variable AIDER_HOME --model-flag=--model --login 'AIDER_HOME={home} aider --login' --login-file session.json \
-  --reason "Add the Aider runtime"
+  --home-variable AIDER_HOME --model-flag=--model --login 'AIDER_HOME={home} aider --login' \
+  --reason "Aider"
 ```
 
 ### Add an account
@@ -62,10 +62,10 @@ An account is one login, held by reference:
 
 ```sh
 node "$GRAPHYARD_CLI" master registry model set opus --provider Anthropic --id claude-opus-5 \
-  --input-cost 15 --output-cost 75 --tier frontier --context 1000000 --reason "Record the model and its price"
+  --input-cost 15 --output-cost 75 --tier frontier --context 1000000 --reason "Pricing"
 node "$GRAPHYARD_CLI" master registry account set claude-b --runtime claude --model opus \
-  --home ~/.coding_agents/claude-b --max-sessions 2 --reason "Second Claude subscription"
-node "$GRAPHYARD_CLI" master registry account quota opencode-a exhausted --resets-at 2026-09-22T00:00:00Z --reason "Plan cut off until Monday"
+  --home ~/.coding_agents/claude-b --max-sessions 2 --reason "Second account"
+node "$GRAPHYARD_CLI" master registry account quota opencode-a exhausted --reason "Exhausted"
 ```
 
 ### Add a role
@@ -73,8 +73,8 @@ node "$GRAPHYARD_CLI" master registry account quota opencode-a exhausted --reset
 Preferred account first; applies next launch:
 
 ```sh
-node "$GRAPHYARD_CLI" master registry role set worker claude-b,claude-c,codex-a --concurrency 4 --reason "Prefer Claude; Codex is overflow"
-node "$GRAPHYARD_CLI" master registry role set reviewer codex-a,claude-c --concurrency 2 --tool Read --model opus --reason "Read-only, frontier model"
+node "$GRAPHYARD_CLI" master registry role set worker claude-b,claude-c,codex-a --concurrency 4 --reason "Prefer Claude"
+node "$GRAPHYARD_CLI" master registry role set reviewer codex-a,claude-c --concurrency 2 --tool Read --model opus --reason "Read-only"
 ```
 
 ### Size review and proof capacity
@@ -85,7 +85,7 @@ Each candidate needs one review and one producer session per proof group; a prof
 "reviewers":[{"name":"claude-reviewer","agentName":"review-claude","kind":"claude","accounts":["claude-a","claude-b"],"concurrency":3}]
 ```
 
-Adding workers? For worker count `W` and `G` proof groups: `⌈W / 2⌉` review slots and `G × ⌈W / 2⌉` producer slots over two or more producer principals. Watch `longestWaitMs`.
+Adding workers? For worker count `W` and `G` proof groups: `⌈W / 2⌉` review slots and `G × ⌈W / 2⌉` producer slots. Watch `longestWaitMs`.
 
 ## 3. Start the master
 
@@ -96,17 +96,19 @@ node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST   # now installs th
 node "$GRAPHYARD_CLI" master start codex     # or: master start claude
 ```
 
-Run it under an OS identity whose GitHub credentials workers cannot read. `--browser-profile` is the Chrome profile signed in to GitHub as administrator, for `master browser` flows; *Confirm access* in GitHub Mobile stays human-only. Add the reviewer with `master reviewer setup` and `master reviewer add PROFILE` ([Claude](../examples/master/claude-reviewer.json) template); its manifest flow is the only App confirmation.
+Run it under an OS identity whose GitHub credentials workers cannot read. `--browser-profile` is the Chrome profile signed in to GitHub as administrator, for `master browser` flows; *Confirm access* in GitHub Mobile stays human-only. Add the reviewer with `master reviewer setup` and `master reviewer add PROFILE` ([Claude](../examples/master/claude-reviewer.json) template).
 
 ### The loop must be supervised
 
-`master init` from the coordinator checkout writes `~/.config/systemd/user/graphyard-master.service`, runs `systemctl --user enable --now` and `loginctl enable-linger`; the unit restarts on crash, reboot and hang. It is never a side effect: worker checkouts and temporary directories are refused. Move it with `master init --token-stdin --replace-supervisor` from the new checkout. `master status` reports `setup.supervisor` and the merger.
+`master init` from the coordinator checkout writes `~/.config/systemd/user/graphyard-master.service`, runs `systemctl --user enable --now` and `loginctl enable-linger`; the unit restarts on crash, reboot and hang. It is never a side effect: worker checkouts and temporary directories are refused. Move it with `master init --token-stdin --replace-supervisor`. `master status` reports `setup.supervisor`.
 
 ## 4. Prove the first PR
 
-`graphyard doctor --profile through-merge` names every missing piece. Create a small item: `master run` dispatches it; the loop merges once branch protection requires `Graphyard / merge`. `"systemDriven": false` allows [hand actions](master-agent.md#system-driven-items).
+`graphyard doctor --profile through-merge` checks readiness. Create a small item: `master run` dispatches it; the loop merges once branch protection requires `Graphyard / merge`. `"systemDriven": false` allows [hand actions](master-agent.md#system-driven-items).
 
 CI workflows should cancel superseded pull-request runs: group each by `${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}` with `cancel-in-progress: ${{ github.event_name == 'pull_request' }}`; runs on main are never cancelled. `graphyard master protection` lists each required check whose workflow lacks cancel-in-progress under `advisories`.
+
+The required `secrets` check scans a pull request's own history (its base's full history plus `base..HEAD`), and a push the pushed branch. Write a credential-shaped test fixture as an obvious non-secret, such as `test-key-not-real`; if it must keep a realistic shape, record its fingerprint in `.github/gitleaksignore.txt`, never an allowlist for a real secret.
 
 ## What stays manual
 

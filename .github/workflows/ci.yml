@@ -55,7 +55,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
-      - name: Scan full Git history for secrets
+      - name: Scan Git history for secrets
         shell: bash
         run: |
           set -euo pipefail
