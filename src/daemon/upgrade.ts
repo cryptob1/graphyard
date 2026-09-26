@@ -183,12 +183,15 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
   if (checkout.dirty === true) return refused('tracked files differ from the commit it holds; it is upgraded only clean', checkout.commit);
 
   // 4. What the move would change, then the move itself.
+  //    A restart still owed for an earlier move stays owed: a docs-only move on top of a src/ one
+  //    leaves the fleet as stale as the src/ move did.
+  const owed = state.upgrade.pending?.code === true;
   if (state.upgrade.pending) { state.upgrade.pending = null; await persist(); }
   const from = checkout.commit;
   let changed: string[], code: boolean;
   try {
     changed = (await git('diff', '--name-only', `${from}..${to}`)).split('\n').map(path => path.trim()).filter(Boolean);
-    code = upgradeTouchesCode(changed);
+    code = owed || upgradeTouchesCode(changed);
   } catch (error) { return failed(`the diff from ${shortCommit(from)} to ${shortCommit(to)} could not be read: ${message(error)}`); }
   await note(`Checking out base tip ${shortCommit(to)} (from ${shortCommit(from)}): ${changed.length} path(s) changed${code ? ', loaded code among them' : ', none of them loaded code'}`, false);
   try { await git('checkout', '--detach', '--quiet', to); }

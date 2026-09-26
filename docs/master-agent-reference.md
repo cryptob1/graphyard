@@ -49,19 +49,15 @@ A harness classifier refuses routine administration; `master harness claude --ap
 
 ## Typed actions and executors
 
-Each item has one typed action (`nextAction`): `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment` or `escalate`. Executors claim rows under their own credential; `escalate` and `request-rework` are judgements (`actions.needsHuman`). `graphyard init` starts `graphyard-executor@N` user units; `master executors restart` moves them to the current release.
+Each item has one typed action (`nextAction`): `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment` or `escalate`. Executors claim rows under their own credential; `escalate` and `request-rework` are judgements (`actions.needsHuman`). `graphyard init` starts `graphyard-executor@N` user units; `master executors restart` moves them to the current release. After a verified deployment the loop moves a clean detached checkout to the base tip between cycles (else `upgrade` attention); `src/`, `scripts/`, `bin/`, `package.json` changes restart executors (owed restarts persist), then the loop. `releaseLag` flags >1-delivery lag past 10 minutes.
 
-A `resync` completes only on a fresh observation (GY-607). The executor calls `POST /api/work/:id/resync` with `{ since }` (its claim time); the server wakes the item's observation job, answering `observed`, `observedAt` and `job`, the job's `availableAt`, `lockedUntil`, `attempts`, `error`, `heldUntil` and `heldReason`. `wake: false` only reads. It waits up to 90 seconds for a newer observation, else fails with `no observation newer than the claim was saved` and the job's condition. Three such claims in a row stall the row; `master status` names the item and condition. Claiming, renewing or settling a row is only action bookkeeping, so an observation read before it still saves; any other change since the read refuses it.
+A `resync` completes only on a fresh observation (GY-607): `POST /api/work/:id/resync` with `{ since }` (claim time) wakes the item's observation job, answering `observed`, `observedAt` and `job` (`availableAt`, `lockedUntil`, `attempts`, `error`, `heldUntil`, `heldReason`); `wake: false` only reads. Without one within 90 seconds it fails with `no observation newer than the claim was saved` and its condition; three in a row stall it (`master status`). An observation read before claiming, renewing or settling saves; any other change since refuses it.
 
 Three failures with an unchanged reason mark a row stalled rather than retrying (a fleet that looks idle): once in no count and no list, it shows in `actions.stalled` and on the item's own card; backoff, doubling from one minute, never outlives it. Eight escalate it (half-hourly); ticks requeue ownerless items (`liveness.violations`).
 
 ### Loop failure recovery
 
 A failed snapshot read retries once after 0.5–1.5 s; a failed cycle waits min(interval, 30 s), doubling to the ceiling. One item's throw fails only its `isolated:KIND:ITEM-ID` action.
-
-### Running executors under supervision
-
-`graphyard init` starts `graphyard-executor@N` user units; `master executors restart` moves them to the current release. After a verified deployment the loop checks out the base tip between cycles (clean detached checkouts; else `upgrade` attention); `src/`, `scripts/`, `bin/` or `package.json` changes restart executors, then the loop. `master status` `releaseLag` flags one >1 delivery behind 10 minutes.
 
 ## Resources and disk
 

@@ -216,6 +216,25 @@ test('unit:loop-self-upgrade — between cycles the loop checks out the verified
     assert.equal(busy.upgrade.alignedRelease, busyTip);
     assert.equal(fake.fetches, 6, 'each pass fetches the base branch it aligns with');
 
+    // A restart still owed when a newer, docs-only tip arrives stays owed: the fleet still runs the
+    // code the earlier src/ move replaced, so the docs-only move restarts it.
+    const owedTip = hex('9'), owedDocsTip = hex('8');
+    const owing = emptyDaemonState(master);
+    fake.nextTip = owedTip;
+    owing.deployment = verified(owedTip);
+    fake.diffPaths = ['src/daemon/run.ts'];
+    assert.equal((await performSelfUpgrade(master, owing, recording(fake, checkout, 'refuse').deps())).outcome, 'failed');
+    assert.equal(owing.upgrade.pending?.code, true);
+    fake.nextTip = owedDocsTip;
+    owing.deployment = verified(owedDocsTip);
+    fake.diffPaths = ['docs/operations-reference.md'];
+    const carried = recording(fake, checkout);
+    const owedDone = await performSelfUpgrade(master, owing, carried.deps());
+    assert.equal(owedDone.outcome === 'upgraded' && owedDone.code, true, 'the owed restart carried over the docs-only move');
+    assert.deepEqual(carried.calls.executors, [owedDocsTip], 'the fleet restarts against the newest tip');
+    assert.equal(carried.calls.self, 1);
+    fake.diffPaths = ['src/daemon/run.ts'];
+
     // A loop no supervisor unit runs cannot re-execute itself: it says so, names the release it
     // is stuck on, and never marks the alignment done silently.
     const alone = emptyDaemonState(master);
