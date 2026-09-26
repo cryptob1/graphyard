@@ -448,7 +448,31 @@ export class Engine {
     const work = all.find(w => w.id === id || w.key === id);
     if (!work || work.stage === 'done' || !work.workspaces.some(w => w.epoch === data.epoch)) return null;
     // Every item goes with it: the landing check reads other items' unlanded candidates (GY-97).
-    return this.submissionObserver({ ...work, submission: { epoch: data.epoch, pr: data.pr } }, all);
+    const observation = await this.submissionObserver({ ...work, submission: { epoch: data.epoch, pr: data.pr } }, all);
+    await this.reconcileLanded(observation, all);
+    return observation;
+  }
+  /**
+   * GY-744. Reconcile at once the merge of every peer an observation's landing check found already
+   * on the base branch tip while its item still records it unlanded: the peer's pull request is
+   * observed and that observation saved, so the ordinary delivery path records it merged, with its
+   * merge commit, now rather than whenever its own observation comes round — and the stale state
+   * that named it unlanded does not recur. A failure is logged and left to that later observation.
+   */
+  async reconcileLanded(observation: Observation | null, all: Work[], observer = this.submissionObserver) {
+    const reconciled: Work[] = [];
+    if (!observer) return reconciled;
+    for (const entry of observation?.landing?.landed ?? []) {
+      const peer = all.find(item => item.key === entry.key && item.stage !== 'done' && item.submission?.pr === entry.pr);
+      if (!peer) continue;
+      try {
+        const seen = await observer(peer, all);
+        if (seen.merged) reconciled.push(await this.observe(peer.id, peer.revision, seen));
+      } catch (error) {
+        console.error(`[landing] reconciling ${entry.key}'s landed pull request #${entry.pr} failed: ${(error as Error).message}`);
+      }
+    }
+    return reconciled;
   }
   /**
    * Bootstrap deferral is an operator act. It requires the explicit policy:bootstrap capability,
