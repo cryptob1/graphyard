@@ -16,7 +16,7 @@ A card stops at its first refusing gate, naming what is missing; nothing sets a 
 
 ![Bootstrap versus normal operation: one supervised worker, then a fleet with separate credentials.](diagrams/bootstrap-vs-normal.svg)
 
-Text equivalent: in bootstrap the operator supervises one worker while gates activate; normally the master dispatches to many workers, each with its own credential and worktree, judged by reviewers and producers under the same gates.
+Text equivalent: in bootstrap the human operator supervises one worker while gates activate; normally the master dispatches to many workers, each with its own credential and worktree, judged by reviewers and producers under the same gates.
 
 ## Who holds which authority
 
