@@ -44,7 +44,7 @@ Reviews and proofs bind one head, base and policy revision. The queue head's tip
 
 ### Batches
 
-`mergeQueue.batchSize` (master config, default 4; 1 disables; published via `POST /api/merge-queue`) tests entries together: a pass merges members in order, a failure halves it until the culprit is ejected; batches behind an unpassed one eject nothing. A head batch `testing` with no published tip over ten minutes dissolves; members validate singly (`queue.batch-dissolved`) until one leaves.
+`mergeQueue.batchSize` (master config, default 4; 1 disables; published via `POST /api/merge-queue`) tests entries together: a pass merges members in order, a failure halves it until the culprit is ejected; batches behind an unpassed one eject nothing. A head batch tipless over ten minutes dissolves (`queue.batch-dissolved`).
 
 ### Direct merges
 
