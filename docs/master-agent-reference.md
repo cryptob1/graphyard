@@ -59,7 +59,7 @@ A failed snapshot read retries once after 0.5–1.5 s jitter; a failed cycle wai
 
 ### Running executors under supervision
 
-`graphyard init` starts `graphyard-executor@N` user units; `master executors restart` moves them to the current release.
+`graphyard init` starts `graphyard-executor@N` user units; `master executors restart` moves them to the current release, as the loop does between cycles: a verified deployment moves its clean detached checkout to the base tip (else: `upgrade` attention); `src/`, `scripts/`, `bin/` or `package.json` changes restart the executors and the loop. `master status` `releaseLag` flags any process >1 delivery behind the tip for 10 minutes.
 
 ## Resources and disk
 
@@ -79,7 +79,7 @@ An unexplained lapsed lease raises `lease-loss` (`blocked-awaiting-operator` and
 
 ## Fault classes
 
-Faults carry `faultClass` (`master status` `faults`); recurring classes file one item (`GRAPHYARD_FAULT_CLASS_*`).
+Faults carry `faultClass` (`master status` `faults`); recurring classes file one item (`GRAPHYARD_FAULT_CLASS_*`). A section whose route fails is listed in `unavailable` (section, route, error); the report still returns.
 
 ## Pipeline speed
 

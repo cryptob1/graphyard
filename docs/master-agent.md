@@ -36,7 +36,8 @@ that host's loop. `sessions.unseen` lists stale handles. `dispatch.sessionReconc
 - **Vanished**: missing from two consecutive listings.
 - **Ended**: agentless pane or terminal state. `idle`, `done` and
   `blocked` are deliberately not terminal.
-- **Superseded**: a review or proof session for a head the item moved past (delivered items too); implementation sessions are left to the lease.
+- **Superseded**: a review or proof session for a head the item moved past; a delivered item is closed the same
+  way as any other. Implementation sessions are left to the lease.
 - **Duplicate**: the older of two sessions for one role and head.
 
 A closure decides no gate, ends no lease, and stops no process. A profile's concurrency is counted against live
@@ -64,7 +65,7 @@ The master never launches reviews or producers by hand, except `master review GY
 
 ### Proofs must exercise their criterion
 
-With a pass, the producer records `"exercise"`: the proof rerun without the criterion's behaviour.
+With a pass, the producer records `"exercise"`: the same proof run with the criterion's behaviour removed.
 
 ```json
 "exercise":{"criterion":"AC-1","behaviour":"the lease expiry check in claim()","result":"fail","executed":4}
