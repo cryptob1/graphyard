@@ -1,6 +1,6 @@
 // Concern: disk pressure, worktree dependency reclamation, managed checkouts and shared installs.
 import { createHash } from 'node:crypto';
-import { statfs, readdir, lstat, rm, mkdir, symlink, writeFile, readFile, rename, appendFile, unlink } from 'node:fs/promises';
+import { statfs, readdir, lstat, realpath, rm, mkdir, symlink, writeFile, readFile, rename, appendFile, unlink } from 'node:fs/promises';
 import { resolve, dirname, basename } from 'node:path';
 import type { ChildRun } from '../child-runner.js';
 import type { Work } from '../model.js';
@@ -191,8 +191,12 @@ export async function reclaimWorktrees(root: string, work: Work[], options: { id
 export const defaultWorktreeRemovalLimit = 50;
 export const worktreeInventoryFile = (root: string) => resolve(root, '.graphyard/worktree-inventory.json');
 export const worktreeReclaimAuditFile = (root: string) => resolve(root, '.graphyard/worktree-reclaim.jsonl');
-/** A tree the removal pass found dirty or holding unpushed commits, kept until its working tree changes again. */
-export interface HeldWorktree { path: string; activityAt: number; reason: string }
+/**
+ * A tree the removal pass found dirty or holding unpushed commits, kept until its working tree
+ * changes again or the refs that could hold its commits move: `refs` fingerprints the remote refs,
+ * the base branch and the item's candidate head as that pass saw them, so a push re-examines it.
+ */
+export interface HeldWorktree { path: string; activityAt: number; reason: string; refs?: string }
 /** The inventory the reclaim step last took, so `master status` never walks every tree itself. */
 export interface WorktreeInventoryCache { at: string; entries: WorktreeEntry[]; held: HeldWorktree[] }
 export interface WorktreeRemoval { path: string; key: string | null; reason: string; head: string | null }
@@ -202,6 +206,8 @@ export interface WorktreeRemovalReport {
   kept: { path: string; key: string | null; reason: string }[];
   /** Reclaimable trees this pass left for a later one because of the per-cycle bound. */
   backlog: number;
+  /** The kept trees not to examine again until their working tree or the refs they were judged against change. */
+  held: HeldWorktree[];
   errors: string[];
   /** The inventory after the pass, the one written to the cache. */
   entries: WorktreeEntry[];
@@ -240,17 +246,31 @@ function sessionEpoch(handle: { id: string; epoch: number | null }) {
 }
 /**
  * Why a tree may be removed, or null when it may not. A delivered or closed item's tree goes; any
- * other tree only once its attempt, review or producer session has ended and the tree has been
- * untouched for the idle bound. A live lease or a live session on the tree keeps it, whatever else holds.
+ * other tree only once its attempt, review or producer session ended at least the idle bound ago
+ * (an attempt a later epoch superseded has ended too) and the tree has been untouched as long. A
+ * live lease or a live session on the tree keeps it, whatever else holds; so does an item parked
+ * for a human on this attempt, and a tree no item registers, since no session of it ever ended.
  */
-export function worktreeRemovalReason(candidate: WorktreeReclaimCandidate, work: Work[], livePaths: ReadonlySet<string>, idleMs: number): string | null {
+export function worktreeRemovalReason(candidate: WorktreeReclaimCandidate, work: Work[], livePaths: ReadonlySet<string>, idleMs: number, now = Date.now()): string | null {
   if (candidate.disposition === 'live' || livePaths.has(candidate.path)) return null;
   const owner = candidate.key ? work.find(item => item.key === candidate.key) : undefined;
-  const liveSession = owner?.sessions?.some(handle => handle.state === 'running' && (sessionEpoch(handle) ?? candidate.epoch) === candidate.epoch);
-  if (liveSession) return null;
-  if (owner?.stage === 'done') return owner.closure ? `${owner.key} is closed` : `${owner.key} is delivered`;
+  if (!owner) return null;
+  const sessions = (owner.sessions ?? []).filter(handle => (sessionEpoch(handle) ?? candidate.epoch) === candidate.epoch);
+  if (sessions.some(handle => handle.state === 'running')) return null;
+  if (owner.stage === 'done') return owner.closure ? `${owner.key} is closed` : `${owner.key} is delivered`;
   if (candidate.idleMs < idleMs) return null;
-  return candidate.disposition === 'superseded' ? `${candidate.detail}, and the tree has been untouched for ${Math.floor(candidate.idleMs / 60_000)} minutes` : candidate.detail;
+  const minutes = (ms: number) => Math.floor(ms / 60_000);
+  if (candidate.disposition === 'superseded') return `${candidate.detail}, and the tree has been untouched for ${minutes(candidate.idleMs)} minutes`;
+  if (owner.humanRequest && candidate.epoch === owner.epoch) return null;
+  const ended = Math.max(-Infinity, ...sessions.map(handle => Date.parse(handle.endedAt ?? handle.updatedAt)).filter(Number.isFinite));
+  if (!Number.isFinite(ended) || now - ended < idleMs) return null;
+  return `${owner.key} epoch ${candidate.epoch}'s last session ended ${minutes(now - ended)} minutes ago, past the ${minutes(idleMs)}-minute idle bound; ${candidate.detail}`;
+}
+/** The worktree paths Git has registered for this repository, as `git worktree list --porcelain` names them. */
+async function registeredWorktrees(root: string, run: ChildRun): Promise<Set<string>> {
+  const listing = String(await Promise.resolve(run('git', ['-C', root, 'worktree', 'list', '--porcelain'])));
+  const paths = listing.split('\n').filter(line => line.startsWith('worktree ')).map(line => line.slice('worktree '.length));
+  return new Set((await Promise.all(paths.map(path => realpath(path).catch(() => resolve(path))))));
 }
 
 /**
@@ -268,20 +288,35 @@ export async function removeReclaimableWorktrees(root: string, work: Work[], opt
   const previous = (await readWorktreeInventoryCache(root))?.held ?? [];
   const plan = planWorktreeReclaim(entries, work, { now, idleMs: options.idleMs });
   const byPath = new Map(entries.map(entry => [entry.path, entry]));
-  const reclaimable = plan.map(candidate => ({ candidate, reason: worktreeRemovalReason(candidate, work, livePaths, options.idleMs) }))
+  const reclaimable = plan.map(candidate => ({ candidate, reason: worktreeRemovalReason(candidate, work, livePaths, options.idleMs, now) }))
     .filter((entry): entry is { candidate: WorktreeReclaimCandidate; reason: string } => entry.reason !== null)
     .sort((a, b) => b.candidate.idleMs - a.candidate.idleMs);
   const removed: WorktreeRemoval[] = [], kept: WorktreeRemovalReport['kept'] = [], errors: string[] = [], held: HeldWorktree[] = [];
   const gone = new Set<string>();
   const git = (path: string, args: string[]) => Promise.resolve(options.run('git', ['-C', path, ...args]));
+  // Once per pass: which trees Git registers, so `git -C` is never run on a directory it would
+  // resolve to an enclosing repository, and where every ref that could hold a tree's commits points.
+  let registered: Set<string> | null = null, remoteRefs = '';
+  if (reclaimable.length) {
+    try {
+      registered = await registeredWorktrees(root, options.run);
+      remoteRefs = String(await git(root, ['for-each-ref', '--format=%(objectname) %(refname)', 'refs/remotes', ...(options.baseBranch ? [`refs/heads/${options.baseBranch}`] : [])]));
+    } catch (error) { errors.push(`Listing registered worktrees and remote refs: ${failureText(error).slice(0, 400)}`); }
+  }
+  const fingerprint = (key: string | null) => createHash('sha256').update(remoteRefs).update(`\n${(key && work.find(item => item.key === key)?.candidate?.sha) ?? ''}`).digest('hex');
   let examined = 0, backlog = 0;
   for (const { candidate, reason } of reclaimable) {
-    const activityAt = byPath.get(candidate.path)!.activityAt;
-    const before = previous.find(entry => entry.path === candidate.path && entry.activityAt === activityAt);
+    const activityAt = byPath.get(candidate.path)!.activityAt, refs = fingerprint(candidate.key);
+    const before = previous.find(entry => entry.path === candidate.path && entry.activityAt === activityAt && entry.refs === refs);
     if (before) { held.push(before); kept.push({ path: candidate.path, key: candidate.key, reason: before.reason }); continue; }
+    if (!registered) { kept.push({ path: candidate.path, key: candidate.key, reason: 'Git refused: the registered worktrees could not be listed' }); continue; }
+    if (!registered.has(await realpath(candidate.path).catch(() => candidate.path))) {
+      kept.push({ path: candidate.path, key: candidate.key, reason: 'Not a registered Git worktree: its clean state cannot be judged apart from an enclosing repository' });
+      continue;
+    }
     if (examined >= limit) { backlog += 1; continue; }
     examined += 1;
-    const keep = (why: string) => { held.push({ path: candidate.path, activityAt, reason: why }); kept.push({ path: candidate.path, key: candidate.key, reason: why }); };
+    const keep = (why: string) => { held.push({ path: candidate.path, activityAt, reason: why, refs }); kept.push({ path: candidate.path, key: candidate.key, reason: why }); };
     try {
       // A shared install linked into the tree is untracked to Git (an ignore rule `node_modules/`
       // matches directories only) but is no work of the attempt's: it is unlinked before removal.
@@ -313,7 +348,7 @@ export async function removeReclaimableWorktrees(root: string, work: Work[], opt
     catch (error) { errors.push(`git worktree prune: ${failureText(error).slice(0, 400)}`); }
   }
   const remaining = entries.filter(entry => !gone.has(entry.path));
-  return { at, limit, removed, kept, backlog, errors, entries: remaining };
+  return { at, limit, removed, kept, backlog, held, errors, entries: remaining };
 }
 
 export interface DiskPressure { path: string; freeBytes: number | null; thresholdBytes: number; low: boolean; reclaimable: number; worktrees: number; unavailable: string | null }

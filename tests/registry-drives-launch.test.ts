@@ -6,7 +6,8 @@ import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { FleetClient, FleetSelection } from '../src/fleet.js';
-import { accountLaunch, launchApprover, loadMasterConfig, masterConfigSchema, selectAccount, setupMaster, type MasterConfig } from '../src/master.js';
+import { accountLaunch, launchApprover, loadMasterConfig, masterConfigSchema, saveProducerProfile, selectAccount, setupMaster, type MasterConfig } from '../src/master.js';
+import { launchProducer } from '../src/producer.js';
 import type { Work } from '../src/model.js';
 import { applyRegistryMutation, chooseSession, emptyRegistry, proposedRuntimes, supersededByRequest, type AgentRegistry, type FleetSession, type RegistryMutation } from '../src/model/registry.js';
 import { registryHeadlessLaunch } from '../src/runner/roles.js';
@@ -182,6 +183,9 @@ test('integration:registry-drives-launch — a registry role on a pi account run
     // The pure plan the runner starts from says the same.
     const account = { name: 'pi-a', kind: 'pi', home: home.pi, fleet: { runtime: 'pi', contract: proposedRuntimes.find(runtime => runtime.name === 'pi')!.launch, model: 'glm', modelId: 'zai/glm-5.3', session: 's', reason: 'r', policy: { args: ['--x'], tools: ['read'], model: null } } };
     assert.deepEqual(registryHeadlessLaunch(account), { command: 'pi', model: 'zai/glm-5.3', args: ['--x', '--tools', 'read'], environment: { PI_CODING_AGENT_DIR: home.pi } });
+    // GY-397: a tools allowlist on a runtime with no tools flag is refused here as on the Herdr path, never guessed.
+    assert.throws(() => registryHeadlessLaunch({ ...account, fleet: { ...account.fleet, contract: { ...account.fleet.contract, toolsFlag: null } } }), /names no tools flag, so the session would run with every tool/);
+    assert.deepEqual(registryHeadlessLaunch({ ...account, fleet: { ...account.fleet, contract: { ...account.fleet.contract, toolsFlag: null }, policy: { args: [], tools: [], model: null } } }).args, [], 'no allowlist needs no tools flag');
   } finally { process.env.PATH = path; }
 });
 
@@ -208,4 +212,24 @@ test('integration:registry-drives-launch — the local profile is used only for 
   assert.equal(valueOf(fromRegistry.args, '--model'), 'claude-sonnet-5');
   assert.equal(fromRegistry.environment.CLAUDE_CONFIG_DIR, home.claude);
   await chosen.release?.('test done');
+});
+
+test('integration:registry-drives-launch — a producer role on a pi account runs headless for the unit group only; any other group is refused with its registry session given back, never started as a Herdr session (GY-397)', async () => {
+  const { root, config } = await installation(), home = await homes(), registry = memoryRegistry(config.hostId);
+  fleet(registry, config.hostId, home);
+  registry.mutate('role.set', { role: { name: 'producer', accounts: ['pi-a'], concurrency: 4 }, reason: 'Producers on Pi' });
+  const producerFile = join(scratch, `producer-${crypto.randomUUID().slice(0, 8)}.token`);
+  await writeFile(producerFile, 'producer-token-'.padEnd(40, 'x'), { mode: 0o600 });
+  await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'codex', credentialFile: producerFile }, async () => ({ actor: { id: 'proof-runner', role: 'producer', proofs: ['unit:*', 'integration:*'] } }));
+  const profile = (await loadMasterConfig(root)).producers[0];
+  const H = 'c'.repeat(40), B = 'd'.repeat(40), candidate = { sha: H, baseSha: B, pr: 397, branch: 'graphyard/gy-721-1', author: 'implementer' };
+  const request = { id: 'request-GY-721-integration', kind: 'producer', sha: H, baseSha: B, policyRevision: 1, pr: 397, group: 'integration', proofs: ['integration:registry-drives-launch'], state: 'requested', requestedAt: new Date().toISOString(), reason: 'r' };
+  const work = { ...item('GY-721'), candidate, submission: { epoch: 1, pr: 397 }, implementers: ['implementer'], autoDispatch: { review: null, producers: [request], history: [] },
+    observation: { at: new Date().toISOString(), candidate, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true, files: [], scopeFiles: [], prState: 'open', draft: false } } as unknown as Work;
+  const calls: string[][] = [];
+  await assert.rejects(launchProducer(root, work, request as any, profile, [], new Date().toISOString(), { run: herdr(calls), filesystem: durable, probe: { registry: registry.client, quota: false, cacheMs: 0 } }),
+    /refuses to launch account pi-a for GY-721 integration proofs: runtime pi runs producer sessions headless for the unit group only/);
+  assert.ok(!calls.some(args => args[0] === 'tab'), 'no Herdr tab was created');
+  const session = registry.current().sessions.at(-1)!;
+  assert.equal(session.role, 'producer'); assert.ok(session.endedAt, 'the chosen registry session is given back');
 });

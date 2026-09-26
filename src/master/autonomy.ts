@@ -1,5 +1,6 @@
 // Concern: agent identities and autonomy — approver and escalation launches, and the autonomy commands.
 import { randomUUID, randomBytes } from 'node:crypto';
+import { wholeDocument } from '../model/work-summary.js';
 import { readFile, mkdir, lstat } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { z } from 'zod';
@@ -96,12 +97,35 @@ export async function agentToken(root: string, config: MasterConfig, which: 'ope
 export function decisionInput(action: string, work: Work, input: Record<string, unknown>) {
   if (['release', 'unblock', 'resolve'].includes(action)) return { expectedRevision: work.revision, ...input };
   if (action === 'requirements') return { expectedPolicyRevision: work.policyRevision, criteria: work.criteria, dependencies: work.dependencies, plannedFiles: work.plannedFiles, exclusiveResources: work.exclusiveResources ?? [], producerProofs: work.producerProofs ?? [], ...input };
-  if ((action === 'merge' || action === 'attest') && work.candidate) return { sha: work.candidate.sha, baseSha: work.candidate.baseSha, policyRevision: work.policyRevision, ...(action === 'attest' ? { result: 'pass', executed: 1, skipped: 0 } : {}), ...input };
+  if ((action === 'merge' || action === 'attest') && work.candidate) return { sha: work.candidate.sha, baseSha: work.candidate.baseSha, policyRevision: work.policyRevision, ...(action === 'attest' ? { result: 'pass', executed: 1, skipped: 0, ...attestationExercise(work, input.proof) } : {}), ...input };
   if (action === 'rework' || action === 'recover') return { previousWorkerStopped: true, ...input };
   // The repair lane (GY-406) binds the exact head it may merge.
   if (action === 'repair-merge' && work.candidate) return { sha: work.candidate.sha, ...input };
   return input;
 }
+/**
+ * GY-523. The exercise record an attestation carries: the proof run against the candidate base —
+ * the tree with the change, and so the criterion's behaviour, removed — failed. The approver
+ * confirms it by running the proof there before approving; without it the control plane records
+ * the attested pass as not exercising its criterion (GY-135), and no remedy but a second,
+ * hand-built attestation would move the item.
+ */
+export function attestationExercise(work: Pick<Work, 'criteria' | 'candidate'>, proof: unknown) {
+  const criterion = work.criteria.find(entry => typeof proof === 'string' && entry.proofs.includes(proof));
+  if (!criterion || !work.candidate) return {};
+  return { exercise: { criterion: criterion.id, behaviour: `the whole change: ${proof} run against the candidate base ${work.candidate.baseSha.slice(0, 12)}, the tree without it`, result: 'fail' as const, executed: 1 } };
+}
+/**
+ * GY-523. What an approver confirms before approving an attestation: the exercise record it carries
+ * says the proof fails against the candidate base, so the approver runs it there, and against the
+ * candidate, and approves only on both outcomes. An approved attestation is then recorded as
+ * exercising its criterion rather than as an unexercised pass.
+ */
+export const attestConfirmation = (baseSha?: string) =>
+  `An attest decision carries an exercise record (criterion, behaviour removed, executed, result fail) that is yours to confirm: before approving it, run its proof against the candidate base${baseSha ? ` ${baseSha}` : ''} — the tree without the change — and see it fail, and against the candidate and see it pass; refuse it otherwise. `;
+/** The Pi approver's prompt, with the attestation confirmation before its call to decide. */
+export const piApproverWithAttestation = (config: MasterConfig, work: Work, decision: string, repository?: string) =>
+  piApproverPrompt(config, work.key, decision, config.approver!.id, repository).replace('Then call the graphyard_decide tool', `${attestConfirmation(work.candidate?.baseSha)}Then call the graphyard_decide tool`);
 /** With automatic merging off, the guarded merge runs only for a candidate an approver agent approved. */
 export function approvedMerge<T extends { action: string; state: string; input: any; approvedBy: string | null }>(work: Work, decisions: T[]): T | null {
   return decisions.find(decision => decision.action === 'merge' && decision.state === 'applied' && !!work.candidate
@@ -275,7 +299,7 @@ async function startHeadlessApprover(root: string, config: MasterConfig, work: W
   let started: ReturnType<typeof startNarrowRun>;
   try {
     started = startNarrowRun({ runner, name, role: 'approver', work: work.key, subject: decision, checkout: checkout.directory,
-      prompt: piApproverPrompt(config, work.key, decision, config.approver!.id, root),
+      prompt: piApproverWithAttestation(config, work, decision, root),
       options: approverRunOptions(checkout.directory, decision, { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: config.approver!.credentialFile, GRAPHYARD_HOST_ID: config.hostId }, piRuntimeSchema.parse(config.run.pi ?? {}).approverTimeoutMinutes * 60_000),
       apply: async result => result.ok ? [await applyDecision(config.url, token, work, result.payload, headless.fetcher)] : [] });
   } catch (error) { await settleCheckout(root, checkout.directory); throw error; }
@@ -338,7 +362,7 @@ export async function launchApprover(root: string, work: Work, decision: string,
   catch (error) { await selected?.release(`approver launch for ${work.key} failed: ${failureText(error).slice(0, 300)}`); throw error; }
   const cli = `node ${config.cliPath}`;
   let delivery: RequestDelivery | undefined;
-  const prompt = `You are the independent Graphyard approver for ${config.repository}, acting as ${config.approver!.id}. Judge decision ${decision} on ${work.key}: run ${cli} master decisions ${work.key}, read the item with ${cli} status ${work.key}, its pull request and history, and weigh the requester's reason against the item's criteria and the operator's goals. If it is justified, run ${cli} master approve ${work.key} ${decision} "YOUR REASON". If not, record the refusal: run ${cli} master refuse ${work.key} ${decision} "YOUR REASON" — a decline is recorded, never expressed by exiting. Never approve a decision you requested, implemented, or produced evidence for; never edit, push, merge, review, or submit evidence. Stop when the decision is judged.`;
+  const prompt = `You are the independent Graphyard approver for ${config.repository}, acting as ${config.approver!.id}. Judge decision ${decision} on ${work.key}: run ${cli} master decisions ${work.key}, read the item with ${cli} status ${work.key}, its pull request and history, and weigh the requester's reason against the item's criteria and the operator's goals. ${attestConfirmation(work.candidate?.baseSha)}If it is justified, run ${cli} master approve ${work.key} ${decision} "YOUR REASON". If not, record the refusal: run ${cli} master refuse ${work.key} ${decision} "YOUR REASON" — a decline is recorded, never expressed by exiting. Never approve a decision you requested, implemented, or produced evidence for; never edit, push, merge, review, or submit evidence. Stop when the decision is judged.`;
   let pane: string | undefined, tabId: string | undefined;
   try {
     const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root, '--label', `Approver · ${work.key}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', `GRAPHYARD_TOKEN_FILE=${config.approver!.credentialFile}`, '--env', 'GRAPHYARD_APPROVER=1', '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, ...Object.entries(launch.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'], run));
@@ -611,7 +635,8 @@ export async function runAutonomyCommand(root: string, config: MasterConfig, id:
   const snapshotItem = async (key: string | undefined) => {
     if (!key) throw new Error(`Use master ${id} GY-N …`);
     const snapshot = await deps.coordinator('work-snapshot'), found = snapshot.work.find((work: Work) => work.id === key || work.key === key);
-    if (!found) throw new Error(`Unknown work item ${key}`); return { work: found as Work, now: Date.parse(snapshot.now) };
+    // A settled delivery is a summary in the snapshot (GY-422); a decision reads its whole document.
+    if (!found) throw new Error(`Unknown work item ${key}`); return { work: await wholeDocument(found, deps.coordinator), now: Date.parse(snapshot.now) };
   };
   const item = async (key: string | undefined) => (await snapshotItem(key)).work;
   const reason = (rest: string[]) => { const text = words(rest); if (!text) throw new Error(`master ${id} needs a REASON; every agent decision is attributable`); return text; };
