@@ -25,7 +25,7 @@ import type { SessionHandleInput } from '../model/sessions.js';
 import { registeredLaunch } from '../model/session-state.js';
 import { liveReviewRequest } from '../model/dispatch.js';
 import { narrowRoleRuntime, piRuntimeSchema } from '../runner/payloads.js';
-import { applyDecision, approverRunOptions, attestConfirmation, narrowRunner, piApproverPrompt, registryRunner, startNarrowRun } from '../runner/roles.js';
+import { applyDecision, approverRunOptions, narrowRunner, piApproverPrompt, registryRunner, startNarrowRun } from '../runner/roles.js';
 import type { Runner, RunRecord } from '../runner/types.js';
 import { autonomyPlan, autonomyReason, humanOnlyDecisions, masterHarness } from './harness.js';
 
@@ -114,6 +114,17 @@ export function attestationExercise(work: Pick<Work, 'criteria' | 'candidate'>, 
   if (!criterion || !work.candidate) return {};
   return { exercise: { criterion: criterion.id, behaviour: `the whole change: ${proof} run against the candidate base ${work.candidate.baseSha.slice(0, 12)}, the tree without it`, result: 'fail' as const, executed: 1 } };
 }
+/**
+ * GY-523. What an approver confirms before approving an attestation: the exercise record it carries
+ * says the proof fails against the candidate base, so the approver runs it there, and against the
+ * candidate, and approves only on both outcomes. An approved attestation is then recorded as
+ * exercising its criterion rather than as an unexercised pass.
+ */
+export const attestConfirmation = (baseSha?: string) =>
+  `An attest decision carries an exercise record (criterion, behaviour removed, executed, result fail) that is yours to confirm: before approving it, run its proof against the candidate base${baseSha ? ` ${baseSha}` : ''} — the tree without the change — and see it fail, and against the candidate and see it pass; refuse it otherwise. `;
+/** The Pi approver's prompt, with the attestation confirmation before its call to decide. */
+export const piApproverWithAttestation = (config: MasterConfig, work: Work, decision: string) =>
+  piApproverPrompt(config, work.key, decision, config.approver!.id).replace("the operator's goals. Then call", `the operator's goals. ${attestConfirmation(work.candidate?.baseSha)}Then call`);
 /** With automatic merging off, the guarded merge runs only for a candidate an approver agent approved. */
 export function approvedMerge<T extends { action: string; state: string; input: any; approvedBy: string | null }>(work: Work, decisions: T[]): T | null {
   return decisions.find(decision => decision.action === 'merge' && decision.state === 'applied' && !!work.candidate
@@ -296,7 +307,7 @@ export async function launchApprover(root: string, work: Work, decision: string,
     let started: ReturnType<typeof startNarrowRun>;
     try {
       started = startNarrowRun({ runner: headless.runner ?? registryRunner(registry.account), name, role: 'approver', work: work.key, subject: decision,
-        prompt: piApproverPrompt(config, work.key, decision, config.approver!.id),
+        prompt: piApproverWithAttestation(config, work, decision),
         options: approverRunOptions(root, decision, { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: config.approver!.credentialFile, GRAPHYARD_HOST_ID: config.hostId }, piRuntimeSchema.parse(config.run.pi ?? {}).approverTimeoutMinutes * 60_000),
         apply: async result => result.ok ? [await applyDecision(config.url, token, work, result.payload, headless.fetcher)] : [] });
     } catch (error) { await registry.release(`approver run for ${work.key} failed to start: ${failureText(error).slice(0, 300)}`); throw error; }
@@ -310,7 +321,7 @@ export async function launchApprover(root: string, work: Work, decision: string,
   if (!registry && !explicitKind && narrowRoleRuntime(config.run, 'approver') === 'pi') {
     const pi = piRuntimeSchema.parse(config.run.pi ?? {});
     const started = startNarrowRun({ runner: headless.runner ?? narrowRunner(pi), name, role: 'approver', work: work.key, subject: decision,
-      prompt: piApproverPrompt(config, work.key, decision, config.approver!.id),
+      prompt: piApproverWithAttestation(config, work, decision),
       options: approverRunOptions(root, decision, { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: config.approver!.credentialFile, GRAPHYARD_HOST_ID: config.hostId }, pi.approverTimeoutMinutes * 60_000),
       apply: async result => result.ok ? [await applyDecision(config.url, token, work, result.payload, headless.fetcher)] : [] });
     return { agentName: name, work: work.key, decision, identity: config.approver!.id, pane: null as string | null, runtime: 'pi' as const, delivery: 'request' as RequestDelivery, focusChanged: false, session: null, account: null,

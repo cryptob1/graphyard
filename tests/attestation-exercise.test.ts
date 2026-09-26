@@ -1,9 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { routineDecision, proofRework, withheldDecision } from '../src/master-daemon.js';
-import { neededDecision } from '../src/daemon/decisions.js';
-import { decisionInput } from '../src/master/autonomy.js';
-import { attestConfirmation, piApproverPrompt } from '../src/runner/roles.js';
+import { neededDecision, routineDecision, proofRework, withheldDecision } from '../src/daemon/decisions.js';
+import { attestConfirmation, decisionInput, piApproverWithAttestation } from '../src/master/autonomy.js';
 import { decisionInputs } from '../src/model/approval.js';
 import { exerciseRefusal, type Evidence, type Work } from '../src/model.js';
 
@@ -48,7 +46,8 @@ test('unit:attestation-carries-exercise — the approver prompt says to confirm 
   const confirmation = attestConfirmation(base);
   for (const phrase of ['exercise record', 'against the candidate base', base, 'fail', 'refuse'])
     assert.ok(confirmation.includes(phrase), `${phrase} appears in the approver's instruction`);
-  assert.ok(piApproverPrompt({ repository: 'owner/project', cliPath: '/bin/graphyard.mjs' }, 'GY-393', 'd1', 'approver').includes(attestConfirmation()));
+  const pi = piApproverWithAttestation({ repository: 'owner/project', cliPath: '/bin/graphyard.mjs', approver: { id: 'approver' } } as any, item(), 'd1');
+  assert.ok(pi.includes(attestConfirmation(base)) && pi.indexOf(attestConfirmation(base)) < pi.indexOf('graphyard_decide'), 'the Pi approver is told before it decides');
 });
 
 test('unit:attestation-carries-exercise — an unexercised manual proof leads to an attestation request, never to rework', () => {

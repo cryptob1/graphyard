@@ -111,18 +111,9 @@ export const producerRunOptions = (cwd: string, binding: { sha: string; baseSha:
   },
 });
 
-/**
- * GY-523. What an approver confirms before approving an attestation: the exercise record it carries
- * says the proof fails against the candidate base, so the approver runs it there, and against the
- * candidate, and approves only on both outcomes. An approved attestation is then recorded as
- * exercising its criterion rather than as an unexercised pass.
- */
-export const attestConfirmation = (baseSha?: string) =>
-  `An attest decision carries an exercise record (criterion, behaviour removed, executed, result fail) that is yours to confirm: before approving it, run its proof against the candidate base${baseSha ? ` ${baseSha}` : ''} — the tree without the change — and see it fail, and against the candidate and see it pass; refuse it otherwise. `;
 export function piApproverPrompt(config: { repository: string; cliPath: string }, key: string, decision: string, identity: string) {
   const cli = `node ${config.cliPath}`;
   return `You are the independent Graphyard approver for ${config.repository}, acting as ${identity}. Judge decision ${decision} on ${key}: run ${cli} master decisions ${key}, read the item with ${cli} status ${key}, its pull request and history, and weigh the requester's reason against the item's criteria and the operator's goals. `
-    + attestConfirmation()
     + `Then call the graphyard_decide tool exactly once with decision "${decision}", approve true if the decision is justified or false if it is not, and your reason; a decline is a call with approve false, never an exit without one. Graphyard applies your verdict as ${identity}, so do not run master approve or master refuse yourself. `
     + 'Never approve a decision you requested, implemented, or produced evidence for; never edit, push, merge, review, or submit evidence. Stop after the call.';
 }

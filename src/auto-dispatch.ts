@@ -940,7 +940,7 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
           // Evidence recorded as not exercising its criterion goes back to the worker as a rework the
           // loop requests (master-daemon.ts); no producer is launched for the head again (GY-193 AC-3).
           const unexercised = unexercisedFindings(item, request.sha, request.proofs);
-          if (unexercised.length) { tick.skipped++; wait('producer', item, request, `evidence does not exercise its criterion (${unexercised.map(entry => entry.proof).join(', ')}); the head returns to its worker through a rework decision — or, for a manual: proof, is attested again with its exercise record — and no producer is launched for it again`); continue; }
+          if (unexercised.length) { tick.skipped++; wait('producer', item, request, `evidence does not exercise its criterion (${unexercised.map(entry => entry.proof).join(', ')}); the head returns to its worker through a rework decision, and no producer is launched for it again`); continue; }
           if (!session('producer', item, request, producers)) continue;
           if (!herdr) { wait('producer', item, request, 'Herdr session inventory is unavailable'); continue; }
           if (spent('producer')) { wait('producer', item, request, capacityWait('producer')); continue; }
