@@ -146,3 +146,39 @@ export function piRunner(configured: PiRunnerOptions = {}): Runner {
     },
   };
 }
+
+export interface SmokeResult { ok: boolean; error: string | null }
+/**
+ * One prompt on a Pi account before it is trusted with a session (GY-446): Pi in JSON mode, no
+ * session, no extension and no tools, asked for one word. It passes when Pi answers — an assistant
+ * message without an error — and exits cleanly; otherwise `error` is Pi's own error (the provider's
+ * message, else its stderr, else its exit), with every `redact` value removed.
+ */
+export function piSmoke(configured: { command: string; model: string; args?: string[]; environment?: Record<string, string>; commandArgs?: string[]; spawn?: typeof spawn }, options: { cwd?: string; timeoutMs?: number; redact?: string[] } = {}): Promise<SmokeResult> {
+  const clean = (value: string) => bounded((options.redact ?? []).filter(Boolean).reduce((text, secret) => text.split(secret).join('[redacted]'), value).trim(), 480);
+  return new Promise(resolveResult => {
+    let answered = false, lastError: string | null = null, stderr = '', plain = '', buffer = '', done = false;
+    const finish = (result: SmokeResult) => { if (done) return; done = true; clearTimeout(bound); resolveResult(result.error ? { ...result, error: clean(result.error) } : result); };
+    const handle = (line: string) => {
+      let record: any; try { record = JSON.parse(line); } catch { plain = `${plain}\n${line}`.slice(-2000); return; }
+      if (record?.type === 'message_end' && record.message?.role === 'assistant') { if (record.message.errorMessage) lastError = String(record.message.errorMessage); else answered = true; }
+      if (record?.type === 'auto_retry_end' && record.success === false && record.finalError) lastError = String(record.finalError);
+    };
+    let child: ChildProcess;
+    try {
+      child = (configured.spawn ?? spawn)(configured.command, [...(configured.commandArgs ?? []), '--mode', 'json', '--no-session', '--no-extensions', '--no-skills', '--no-prompt-templates', '--no-themes', '--no-context-files', '--no-approve',
+        '--no-tools', '--model', configured.model, ...(configured.args ?? []), '--', 'Reply with the single word OK.'], { cwd: options.cwd, env: runEnvironment(process.env, configured.environment), stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (error) { finish({ ok: false, error: `${configured.command} could not be started: ${error instanceof Error ? error.message : String(error)}` }); return; }
+    const bound = setTimeout(() => { child.kill('SIGKILL'); finish({ ok: false, error: `${configured.command} gave no answer within ${Math.round((options.timeoutMs ?? 120_000) / 1000)}s` }); }, options.timeoutMs ?? 120_000);
+    bound.unref();
+    const decoder = new StringDecoder('utf8');
+    child.stdout!.on('data', (chunk: Buffer) => { buffer += decoder.write(chunk); let index: number; while ((index = buffer.indexOf('\n')) >= 0) { handle(buffer.slice(0, index).replace(/\r$/, '')); buffer = buffer.slice(index + 1); } });
+    child.stderr!.on('data', (chunk: Buffer) => { stderr = (stderr + chunk.toString('utf8')).slice(-4000); });
+    child.on('error', error => finish({ ok: false, error: `${configured.command} could not be started: ${error.message}` }));
+    child.on('close', (code, signal) => {
+      buffer += decoder.end(); if (buffer.trim()) handle(buffer.replace(/\r$/, ''));
+      if (answered && !lastError && code === 0) return finish({ ok: true, error: null });
+      finish({ ok: false, error: lastError ?? (stderr.trim() || plain.trim() || `${configured.command} exited ${signal ? `on ${signal}` : `with code ${code}`} without answering`) });
+    });
+  });
+}

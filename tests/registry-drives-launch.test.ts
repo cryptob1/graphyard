@@ -178,7 +178,8 @@ test('integration:registry-drives-launch — a registry role on a pi account run
   await writeFile(join(bin, 'pi'), `#!/bin/sh\nexec '${process.execPath}' '${join(bin, 'fake-pi.mjs')}' "$@"\n`); await chmod(join(bin, 'pi'), 0o755);
   const path = process.env.PATH; process.env.PATH = `${bin}${delimiter}${path}`;
   try {
-    const probe = { registry: registry.client, quota: false as const, cacheMs: 0 };
+    // The account's smoke test (GY-446) is its own proof's concern: here it passes without a run.
+    const probe = { registry: registry.client, quota: false as const, cacheMs: 0, smoke: async () => ({ ok: true, error: null }) };
     const first = await launchApprover(root, item('GY-711'), decision, undefined, { agents: [], available: true }, herdr([]), probe, undefined, { filesystem: durable });
     assert.equal(first.runtime, 'pi'); assert.equal(first.pane, null);
     assert.equal(first.account?.environment, 'pi-a');
