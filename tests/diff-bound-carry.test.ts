@@ -51,7 +51,16 @@ test('unit:diff-bound-carry — a patch-id from GitHub\'s compare ignores where 
   assert.notEqual(patchId(yaml('  new: 1')), patchId(yaml('new: 1')), 'a change of indentation changes the patch-id');
   assert.equal(patchId(yaml('  new: 1  \r')), patchId(yaml('  new: 1')), 'trailing whitespace and a carriage return do not');
   // A list that is not the whole change is never compared.
-  assert.equal(patchId([{ filename: 'assets/logo.png', status: 'modified', changes: 0 }]), null, 'a binary file has no patch to compare');
+  assert.equal(patchId([{ filename: 'assets/logo.png', status: 'modified', changes: 0 }]), null, 'a binary file with no blob SHA has nothing to compare');
+  // A patchless file (binary, or too large) is compared by the blob it leaves (GY-384).
+  const blob = (sha: string, status = 'modified') => [...reviewedFiles(), { filename: 'assets/logo.png', status, changes: 0, sha }];
+  const png = 'a'.repeat(40);
+  assert.match(patchId(blob(png))!, /^[0-9a-f]{40}$/, 'a binary file with a blob SHA is compared');
+  assert.equal(patchId(blob(png)), patchId([...tipFiles(), ...blob(png).slice(-1)]), 'the same blob beside a moved text change is the same change');
+  assert.notEqual(patchId(blob(png)), patchId(blob('b'.repeat(40))), 'another blob is another change');
+  assert.notEqual(patchId(blob(png)), patchId(blob(png, 'added')), 'another status is another change');
+  assert.notEqual(patchId(blob(png, 'renamed').map(file => ({ ...file, previous_filename: 'assets/old.png' }))), patchId([...reviewedFiles(), { filename: 'assets/logo.png', previous_filename: 'assets/old.png', status: 'renamed', changes: 0, sha: 'c'.repeat(40) }]), 'a binary renamed with other content is not a pure rename');
+  assert.equal(patchId([{ filename: 'big.json', status: 'modified', changes: 9000, sha: 'not-a-sha' }]), null, 'a malformed blob SHA is not compared');
   assert.equal(patchId(Array.from({ length: 300 }, (_, index) => ({ filename: `f${index}`, status: 'modified', changes: 1, patch: '@@ -1 +1 @@\n-a\n+b' }))), null, 'a truncated list');
   assert.equal(patchId(undefined), null);
   assert.match(patchId([{ filename: 'src/new.ts', previous_filename: 'src/old.ts', status: 'renamed', changes: 0 }])!, /^[0-9a-f]{40}$/, 'a pure rename has no patch to give');
