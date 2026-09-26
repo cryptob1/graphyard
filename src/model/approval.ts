@@ -22,6 +22,9 @@ export const decisionCapabilities: Record<DecisionAction, OperatorCapability> = 
   release: 'intent:ready', unblock: 'intent:unblock', requirements: 'policy:requirements', resolve: 'decision:resolve',
   attest: 'decision:attest', merge: 'decision:merge', rework: 'decision:rework', recover: 'decision:rework', grant: 'decision:grant',
   // The repair lane (GY-406): the App merges a merge-path fix past the stalled merge path.
+  // Not narrowed to the master's own identity (GY-428, declined): the server records no binding
+  // from an operator agent to a master loop, and the master requests this decision by hand, so it
+  // is no loop-owned hand action. A second, independent approver agent still has to apply it.
   'repair-merge': 'decision:merge',
   // Closing is the same capability `master close` demands of an operator agent.
   close: 'intent:create',
