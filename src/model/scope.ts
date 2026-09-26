@@ -1,4 +1,5 @@
 import { documentationGlobMatches } from './documentation-glob.js';
+import { type CollapsedScope, collapseArea, collapsePlannedFiles, describeWidening, plannedFilesCovered } from './scope-collapse.js';
 // Deliberately bounded scope syntax: exact paths or directory prefixes ending /, /*, /**.
 // Unsupported glob expressions are not interpreted as semantic dependency knowledge.
 export function pathScope(value: string) {
@@ -26,20 +27,19 @@ interface RequirementsRevision {
 const canonical = (value: unknown) => JSON.stringify(value, (_key, entry) => entry && typeof entry === 'object' && !Array.isArray(entry) ? Object.fromEntries(Object.keys(entry).sort().map(key => [key, entry[key]])) : entry);
 const unchanged = (current: readonly unknown[], next: readonly unknown[]) => current.length === next.length && current.every(entry => next.some(other => canonical(entry) === canonical(other)));
 /**
- * True when a requirements revision changes nothing but adding planned-file scope: every
- * criterion (with its proofs and any bootstrap attribution), dependency, exclusive resource
- * and producer proof is carried over unchanged, and at least one planned path is added.
- * Such a widening is non-weakening intent, so the engine may apply it while a worker holds
- * the lease — and inside a live containment quarantine — without ending the attempt.
+ * True when a requirements revision only widens planned-file scope: every criterion (proofs and bootstrap
+ * attribution included), dependency, exclusive resource and producer proof is unchanged, every planned path
+ * stays covered (kept, or folded into a directory: GY-549) and one more is. Non-weakening intent, so the
+ * engine applies it under a worker's live lease — and a live containment quarantine — keeping the attempt.
  */
 export function liveScopeWidening(current: RequirementsRevision, next: RequirementsRevision) {
   return unchanged(next.criteria, current.criteria)
     && unchanged(next.dependencies, current.dependencies)
     && unchanged(next.exclusiveResources ?? [], current.exclusiveResources ?? [])
     && unchanged(next.producerProofs ?? [], current.producerProofs ?? [])
-    && current.plannedFiles.every(path => next.plannedFiles.includes(path))
+    && plannedFilesCovered(current.plannedFiles, next.plannedFiles)
     && new Set(next.plannedFiles).size === next.plannedFiles.length
-    && next.plannedFiles.length > current.plannedFiles.length;
+    && next.plannedFiles.some(scope => !current.plannedFiles.some(planned => pathScopeContains(planned, scope)));
 }
 
 // ---------------------------------------------------------------------------
@@ -243,14 +243,14 @@ export function redecidableScopeRefusal(item: { plannedFiles?: readonly string[]
 // as it judges rework, recovery, resolution and merge. The requester is never the approver.
 // ---------------------------------------------------------------------------
 
-/** The additive widening a refused request asks the approver for, or null when there is none to route. */
-export function routableScopeRequest(item: { plannedFiles?: readonly string[]; scopeRequest?: ScopeRequestState | null; lease?: { epoch: number; expiresAt: string } | null }, now: number) {
+/** The additive widening a refused request asks the approver for, a wide ask folded into directory entries (GY-549), or null. */
+export function routableScopeRequest(item: { plannedFiles?: readonly string[]; criteria?: readonly ScopeCriterion[]; scopeRequest?: ScopeRequestState | null; lease?: { epoch: number; expiresAt: string } | null }, now: number) {
   const request = item.scopeRequest;
   if (!request || request.decision?.state !== 'refused' || request.remove?.length || request.criteria?.length) return null;
   // A request whose attempt no longer holds the lease is moot: a fresh attempt asks afresh.
   if (!item.lease || item.lease.epoch !== request.epoch || Date.parse(item.lease.expiresAt) <= now) return null;
   const paths = unplannedPaths(item.plannedFiles, request.paths);
-  return paths.length ? { request, paths, plannedFiles: [...new Set([...(item.plannedFiles ?? []), ...paths])] } : null;
+  return paths.length ? { request, paths, ...collapsePlannedFiles(item.plannedFiles ?? [], paths, collapseArea(item)) } : null;
 }
 
 /** The requested paths the item's plannedFiles do not yet cover — what is still being asked for. */
@@ -267,11 +267,11 @@ export const scopeDecisionBinding = (request: Pick<ScopeRequestState, 'epoch' | 
  * (`broad`, the text `guardBroadScope` records): the approver may grant it only with a stated
  * reason, which the control plane writes into the applied revision beside this one.
  */
-export function scopeDecisionReason(key: string, request: Pick<ScopeRequestState, 'requestedBy' | 'reason' | 'decision'>, criteria: readonly ScopeCriterion[], paths: readonly string[], broad: string | null, max = 2000) {
+export function scopeDecisionReason(key: string, request: Pick<ScopeRequestState, 'requestedBy' | 'reason' | 'decision'>, criteria: readonly ScopeCriterion[], paths: readonly string[], broad: string | null, max = 2000, collapsed: readonly CollapsedScope[] = []) {
   const cut = (text: string, room: number) => text.length <= room ? text : `${text.slice(0, Math.max(0, room - 1))}…`;
   const rules = ` The implication rule refused it and no review finding on the item's own change names it, so it is the approver's judgement: approve an additive widening the item's criteria justify (the worker keeps its lease), refuse with the reason otherwise.`;
   const exception = broad ? ` ${cut(broad, 300)} It needs the broad-scope flag (--allow-broad-scope): grant it only with a stated reason why narrower paths will not do.` : '';
-  const asked = cut(`${key}: ${request.requestedBy} asks to widen plannedFiles with ${cut(paths.join(', '), 400)} because ${request.reason}.`, 800);
+  const asked = cut(`${key}: ${request.requestedBy} asks to widen plannedFiles with ${describeWidening(paths, collapsed)} because ${request.reason}.`, 800);
   const refusal = cut(` Rule refusal: ${request.decision?.reason ?? 'none recorded'}.`, 250);
   const named = ` Criteria: ${criteria.map(criterion => `${criterion.id}: ${criterion.text}`).join(' | ')}`;
   const head = asked + rules + exception + refusal;
