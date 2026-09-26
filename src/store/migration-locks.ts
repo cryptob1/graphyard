@@ -179,9 +179,9 @@ export async function runStartupMigration(pool: Pool, options: { lockTimeoutMs?:
     if (!watching || attempt !== armed) return;
     try {
       if (lost) throw lost;
+      cancelledWaiting = true; // Marked before the cancel goes out: its 57014 can reach the migration before this query returns.
       const { rows } = await guard.query("SELECT pg_cancel_backend(pid) AS cancelled FROM pg_stat_activity WHERE pid=$1 AND wait_event_type='Lock'", [pid]);
-      if (rows[0]?.cancelled) cancelledWaiting = true;
-      else if (watching && attempt === armed) poll = setTimeout(() => { polling = watch(pid, attempt); }, 100);
+      if (!rows[0]?.cancelled) { cancelledWaiting = false; if (watching && attempt === armed) poll = setTimeout(() => { polling = watch(pid, attempt); }, 100); }
     } catch (error) {
       if (watching) abort(new Error(`Schema migration to generation ${schemaVersion} lost the connection its lock-wait watchdog needs (${(error as Error).message}) past its ${timeout} ms deadline, while waiting for ${waitingOn}; startup fails instead of outlasting the health check — retry the deploy`, { cause: error }));
     }
