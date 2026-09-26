@@ -267,11 +267,12 @@ export const masterConfigSchema = z.object({
   // The agent environments profiles may launch on, discovered or created by master environments.
   environments: z.array(agentEnvironmentSchema).max(50).optional(),
   run: masterRunSchema.prefault({}),
-  // The merge queue (GY-330): how many consecutive entries one combined tip validates (default 4;
-  // 1 validates every entry on its own tip). The loop publishes it to the control plane every change.
-  // `parallelTips` (GY-498) is how many queue positions are validated at once instead: speculative
-  // tips for the first that many positions all published and CI'd concurrently, an entry whose tip
-  // and every tip ahead of it passed merging as soon as it heads the queue (default 4).
+  // The merge queue. `parallelTips` (GY-498) is how many queue positions are validated at once:
+  // speculative tips for the first that many positions all published and CI'd concurrently, each
+  // entry on its own tip, an entry whose tip and every tip ahead of it passed merging as soon as it
+  // heads the queue (default 4). Since every entry has its own tip, `batchSize` (GY-330) no longer
+  // batches validation; it only widens the observation band and the delivery/ejection wake depth.
+  // The loop publishes both to the control plane on every change.
   mergeQueue: z.object({ batchSize: z.number().int().min(1).max(maxMergeBatchSize).optional(), parallelTips: z.number().int().min(1).max(maxParallelTips).optional() }).strict().optional(),
   // The operator's own authenticated browser profile, used only by master browser flows.
   browser: masterBrowserSchema.optional(),

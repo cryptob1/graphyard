@@ -1183,6 +1183,10 @@ export function describeGitHubQueue(work: Pick<Work, 'observation'>): string | n
 // named, while every passing prefix merges. The chain of speculative tips already makes each
 // prefix of the queue a commit of its own — an entry's tip holds every validated entry ahead of it
 // — so a batch's combined tip is its last member's tip, and each half is a prefix tip.
+// The live queue now validates under a parallel-tip window instead (GY-498, below): every entry is
+// judged on its own tip and a failure is attributed by prefix, so no bisection is needed. The
+// batch plan remains the reference model runMergeBatches drives and the fallback when no window is
+// passed; the published batch size still widens the observation band and the wake depth.
 
 /** Consecutive entries one combined tip validates when master config sets no `mergeQueue.batchSize`; 1 is one tip per entry. */
 export const defaultMergeBatchSize = 4;
