@@ -1,8 +1,8 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { open, mkdir, utimes, writeFile, type FileHandle } from 'node:fs/promises';
+import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import EmbeddedPostgres from 'embedded-postgres';
@@ -16,6 +16,9 @@ import { approverSessionName, decisionInput, masterConfigSchema, mergeExecutor, 
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { successorWidening } from '../src/model/successors.js';
 import { systemInvariants, type InvariantCheck } from '../src/model/invariants.js';
+import { reclaimResources, readReclaimReports, settleTmpReclaim } from '../src/master-resources.js';
+import { heldOpenPaths, reclaimTmpDirectories, writeTempOwner, tmpReclaimLimitPerCycle, tmpReclaimMinAgeMs, type TmpReclaimReport } from '../src/tmp-reclaim.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } from './helpers/soak-world.js';
 
 /**
@@ -26,7 +29,10 @@ import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } f
  * (src/model/invariants.ts) holds. Fifteen items pass through it: released every fifteen minutes so
  * a merge lands about every fifteen, three sent back by their reviewer, two whose worker dies, two
  * production deploys, a file split on main that re-plans an item, one pull request GitHub reports
- * CLEAN at once and one UNSTABLE, and a reviewer bot out of quota that fails over. Every one of the
+ * CLEAN at once and one UNSTABLE, a reviewer bot out of quota that fails over, and the loop's
+ * resource reclaim with its /tmp pass (GY-421) over a scratch tmp root holding a backlog past the
+ * per-pass bound, a directory held open, one a live owner keeps, and a leftover every hour that
+ * ages past the six-hour threshold during the day. Every one of the
  * fifteen must be delivered. A change to the loop that breaks an invariant fails here, in CI, before
  * it merges; a new behaviour that repeats per cycle, head or item belongs in this world.
  */
@@ -63,7 +69,7 @@ let pgServer: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<t
 before(async () => {
   // An offset no other test file takes: two files sharing a port fail in their `before` hook.
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 404;
-  pgServer = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-soak-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  pgServer = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('soak'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pgServer.initialise(); await pgServer.start(); await pgServer.createDatabase('soak_test');
   const connection = `postgres://graphyard:testing-only@127.0.0.1:${port}/soak_test`;
   // The database reads the simulated clock: its time functions are shadowed before the schema exists.
@@ -101,6 +107,38 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     [...Array.from({ length: plan.items }, (_, index) => file(index + 1)), 'README.md']);
   const herdr = new SimulatedHerdr();
   const adapter = github.adapter();
+  // ---- The host's /tmp: a scratch root the loop's reclaim step sweeps every cycle (GY-421). ----
+  // Every directory is stamped with the simulated clock, which the pass reads, so ages move with the day.
+  const reclaimRoot = await temporaryDirectory('soak-reclaim'), tmpRoot = await temporaryDirectory('soak-tmp');
+  await mkdir(join(reclaimRoot, '.graphyard'));
+  const leftover = async (name: string, ageMs: number, owner?: object) => {
+    const directory = join(tmpRoot, name), at = new Date(clock.now() - ageMs);
+    await mkdir(directory); await writeFile(join(directory, 'data'), 'x'.repeat(1024));
+    await utimes(join(directory, 'data'), at, at); await utimes(directory, at, at);
+    if (owner) await writeFile(`${directory}.owner`, JSON.stringify(owner));
+    return directory;
+  };
+  // A backlog past the per-pass bound, all stale; a dead run's marked directory, young; a young tsx cache.
+  const backlog = await Promise.all(Array.from({ length: tmpReclaimLimitPerCycle + 20 }, (_, index) => leftover(`graphyard-backlog-${index}`, tmpReclaimMinAgeMs + hour)));
+  const deadOwned = await leftover('graphyard-dead-run', 0, { pid: 2 ** 22 + 1, startedAt: 1, at: new Date(clock.now()).toISOString() });
+  const cache = await leftover('tsx-4242', 0);
+  // Stale but kept all day: one a live process holds open, one whose marked owner (this process) still runs.
+  const heldDirectory = await leftover('graphyard-held', tmpReclaimMinAgeMs + hour);
+  const holder: FileHandle = await open(join(heldDirectory, 'data'), 'r');
+  const held = await heldOpenPaths();
+  assert.ok(held.has(join(heldDirectory, 'data')), 'the open handle is visible to the holder scan');
+  const liveOwned = await leftover('graphyard-live-run', tmpReclaimMinAgeMs + hour);
+  await writeTempOwner(liveOwned);
+  const hourly: { directory: string; at: number }[] = [];
+  const tmpPasses: TmpReclaimReport[] = [];
+  let tmpInFlight = 0, tmpPeak = 0;
+  const tmpPass = async (options: Parameters<typeof reclaimTmpDirectories>[0] = {}) => {
+    tmpPeak = Math.max(tmpPeak, ++tmpInFlight);
+    // The holder set is read once above: a /proc scan per pass would time the day by the host's process count.
+    try { const report = await reclaimTmpDirectories({ ...options, held }); tmpPasses.push(report); return report; }
+    finally { tmpInFlight--; }
+  };
+
   const moveClock = async (ms: number) => { clock.advance(ms); await store.pool.query('UPDATE simulated_clock SET offset_ms=$1', [clock.offsetMs]); };
   await moveClock(0);
 
@@ -196,6 +234,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       return { source: 'endpoint', sha: production.sha, at: new Date(clock.now()).toISOString(), reason: null, deployed: serving.map(item => item.key), pending: delivered.filter(item => !serving.includes(item)).map(item => item.key) };
     },
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    reclaimResources: (work, agents) => reclaimResources(reclaimRoot, { reviewers: [], producers: [] }, { work, agents }, { closePane: pane => { herdr.close(pane); }, tmpRoot, tmpPass }),
   };
 
   // ---- The day. ----
@@ -213,6 +252,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       const commit = github.commit(`Split ${from}\n\nGraphyard-Successor: ${from} -> ${successors.join(', ')}`, [...github.files.filter(path => path !== from), ...successors]);
       github.successions.push(...successors.map(to => ({ from, to, commit: commit.sha, similarity: 70 })));
     }
+    if (elapsed > 0 && elapsed % hour === 0 && elapsed < options.hours * hour) hourly.push({ directory: await leftover(`graphyard-hour-${elapsed / hour}`, 0), at: elapsed });
     const deploying = deploys < plan.deploys.length && elapsed >= plan.deploys[deploys];
     if (deploying) { production.build = sha('build', ++deploys); production.sha = github.tip; production.deploys.push({ at: now, build: production.build, sha: production.sha }); }
     // The world moves: GitHub, then the sessions. A deploy restarts the control plane once the
@@ -239,12 +279,15 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   }
 
   const final = (await store.list()).filter(item => items.some(entry => entry.id === item.id));
-  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, state, dayStart };
+  await settleTmpReclaim(); await holder.close();
+  const tmp = { root: tmpRoot, backlog, deadOwned, cache, heldDirectory, liveOwned, hourly, passes: tmpPasses, peak: tmpPeak, reports: await readReclaimReports(reclaimRoot), left: readdirSync(tmpRoot) };
+  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, state, dayStart, tmp };
 }
 
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 180_000 }, async () => {
   const began = performance.now();
-  const { items, final, github, sessions, lost, violations, observed, failures, production, cycles, dayStart } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
+  const hours = Number(process.env.SOAK_HOURS ?? 24);
+  const { items, final, github, sessions, lost, violations, observed, failures, production, cycles, dayStart, tmp, state } = await simulateDay({ hours });
   const undelivered = final.filter(item => item.stage !== 'done' || !item.delivery);
   assert.deepEqual(undelivered.map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
@@ -266,6 +309,25 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   const reviewed = final.find(item => item.key === items[plan.exhaustedReviewer - 1].key)!;
   assert.ok(reviewed.reviewFailovers?.some(failover => failover.profile === 'claude-reviewer' && failover.exhaustion === 'usage-limit' && failover.nextProfile === 'cursor-reviewer'), `the exhausted reviewer bot failed over to the next profile: ${JSON.stringify(reviewed.reviewFailovers)}`);
   assert.ok(cycles > 24 * 6, `the loop cycled through the day (${cycles} cycles)`);
+  // The /tmp pass across the day (GY-421): never two in flight, never past its bound, and what it
+  // takes is exactly what is stale and unheld.
+  assert.equal(tmp.peak, 1, 'at most one /tmp pass is in flight, whatever the cycles do');
+  assert.ok(tmp.passes.length > 1 && tmp.passes.every(pass => pass.removed.length <= tmpReclaimLimitPerCycle && pass.errors.length === 0), `every pass stays within its bound: ${tmp.passes.map(pass => pass.removed.length).filter(Boolean).join(', ')}`);
+  assert.ok(tmp.backlog.every(directory => !existsSync(directory)), 'the backlog is cleared');
+  assert.ok(tmp.passes.filter(pass => pass.removed.some(entry => tmp.backlog.includes(entry.path))).length >= 2, 'a backlog past the bound takes more than one pass');
+  assert.ok(!existsSync(tmp.deadOwned) && !existsSync(`${tmp.deadOwned}.owner`), 'a dead run\'s directory goes at once, marker and all');
+  assert.ok(existsSync(tmp.heldDirectory), 'a directory a live process holds open is kept all day');
+  assert.ok(existsSync(tmp.liveOwned), 'a directory whose owner still runs is kept all day');
+  if (hours > 7) assert.ok(!existsSync(tmp.cache), 'a tsx cache left unwritten for six hours goes');
+  const aged = tmp.hourly.filter(entry => entry.at <= (hours - 7) * hour), young = tmp.hourly.filter(entry => entry.at >= (hours - 5) * hour);
+  assert.deepEqual(aged.filter(entry => existsSync(entry.directory)).map(entry => entry.directory), [], 'each leftover goes once it is past six hours old');
+  assert.deepEqual(young.filter(entry => !existsSync(entry.directory)).map(entry => entry.directory), [], 'no leftover goes before it is six hours old');
+  const freed = tmp.passes.reduce((total, pass) => total + pass.bytes, 0), reported = tmp.reports.reduce((total, report) => total + report.tmp.bytes, 0);
+  // The last pass may finish after the day's last cycle: its bytes are the next cycle's to record.
+  const last = tmp.passes.at(-1)!.bytes;
+  assert.ok(freed >= 1024 * (tmpReclaimLimitPerCycle + 20) && reported <= freed && reported >= freed - last, `the reclaim records carry the bytes the passes freed (${reported} of ${freed})`);
+  assert.ok(tmp.reports.length <= 50, `the reclaim record stays bounded (${tmp.reports.length})`);
+  assert.ok(Object.keys(state.actions).filter(key => key.startsWith('reclaim:resources:')).length <= tmp.passes.filter(pass => pass.removed.length).length, 'the loop records a reclaim only for a pass that freed something');
   const seconds = (performance.now() - began) / 1000;
   assert.ok(seconds < 120, `the day runs well inside the three minutes the CI test job allows it (${seconds.toFixed(1)} s)`);
 });

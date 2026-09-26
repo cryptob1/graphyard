@@ -206,10 +206,10 @@ test('unit:tmp-reclaim: the loop\'s reclaim step records the bytes the /tmp pass
   const gate = new Promise<void>(done => { release = done; });
   const freed = { at: new Date().toISOString(), scanned: 2, removed: [{ path: '/tmp/graphyard-a', bytes: 3e8 }, { path: '/tmp/graphyard-b', bytes: 2e8 }], bytes: 5e8, kept: 0, errors: [] };
   assert.equal(takeTmpReclaim(async () => { await gate; return freed; }), null, 'a pass just started has nothing to report');
-  const during = await reclaimResources(root, { reviewers: [], producers: [] }, { work: [], agents: [] });
+  const during = await reclaimResources(root, { reviewers: [], producers: [] }, { work: [], agents: [] }, { tmpRoot: root });
   assert.deepEqual(during.tmp, { removed: 0, bytes: 0 }, 'the cycle did not wait for the pass in flight');
   release(); await settleTmpReclaim();
-  const after = await reclaimResources(root, { reviewers: [], producers: [] }, { work: [], agents: [] });
+  const after = await reclaimResources(root, { reviewers: [], producers: [] }, { work: [], agents: [] }, { tmpRoot: root });
   assert.deepEqual(after.tmp, { removed: 2, bytes: 5e8 });
   assert.match(describeReclaim(after) ?? '', /freed 0\.5 GB from 2 stale \/tmp directories/);
   assert.deepEqual(after.errors, []);

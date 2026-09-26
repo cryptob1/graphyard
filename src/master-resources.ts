@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 import { agentOwner, atomicPrivateWrite, closeHerdrPane, diskThresholdBytes, isProfileSession, neverStartedReason, privateFile, profileConcurrency, worktreesDirectory, type AttentionItem, type HerdrAgent, type MasterConfig } from './master.js';
 import { pinnedSessionRecords, readReviewLedger, sessionLedgerBound, SessionLedgerFullError, sessionLedgerRefusal, terminalSessionStates, updateReviewLedger, type ReviewRecord } from './reviewer.js';
 import { readProducerLedger, saveProducerLedger, type ProducerRecord } from './producer.js';
-import { describeTmpReclaim, reclaimTmpDirectories, tmpReclaimLimitPerCycle, tmpReclaimWorkMsPerCycle, type TmpReclaimReport } from './tmp-reclaim.js';
+import { describeTmpReclaim, reclaimTmpDirectories, tmpReclaimLimitPerCycle, tmpReclaimWorkMsPerCycle, type TmpReclaimOptions, type TmpReclaimReport } from './tmp-reclaim.js';
 import type { Work } from './model.js';
 
 /**
@@ -447,6 +447,12 @@ export async function readReclaimReports(root: string): Promise<ResourceReclaimR
  * or a running session needs, and it never touches a worker's pane: the loop's first step closes
  * those once their lease ends.
  */
+/**
+ * The loop's bounds for one /tmp pass — at most `tmpReclaimLimitPerCycle` directories and
+ * `tmpReclaimWorkMsPerCycle` of removal — over `tmpRoot`, the host's temporary directory unless the
+ * caller names another (a test's scratch root, so it never sweeps the developer's real /tmp).
+ */
+export const loopTmpReclaimOptions = (tmpRoot?: string): TmpReclaimOptions => ({ limit: tmpReclaimLimitPerCycle, workMs: tmpReclaimWorkMsPerCycle, ...(tmpRoot ? { tmpRoot } : {}) });
 /** The loop's /tmp pass in flight, and the report of the last one to finish, not yet recorded. */
 let tmpPass: Promise<void> | null = null;
 let tmpFinished: TmpReclaimReport | null = null;
@@ -454,7 +460,7 @@ let tmpFinished: TmpReclaimReport | null = null;
  * Hand over the last finished /tmp pass's report, if one is waiting, and start the next pass when
  * none is running. The pass is never awaited here: its bounded work runs beside the cycle.
  */
-export function takeTmpReclaim(run: () => Promise<TmpReclaimReport> = () => reclaimTmpDirectories({ limit: tmpReclaimLimitPerCycle, workMs: tmpReclaimWorkMsPerCycle })): TmpReclaimReport | null {
+export function takeTmpReclaim(run: () => Promise<TmpReclaimReport> = () => reclaimTmpDirectories(loopTmpReclaimOptions())): TmpReclaimReport | null {
   const finished = tmpFinished;
   tmpFinished = null;
   if (!tmpPass) {
@@ -468,7 +474,7 @@ export function takeTmpReclaim(run: () => Promise<TmpReclaimReport> = () => recl
 /** Wait for the /tmp pass in flight, if any: for a caller that must see it finish. */
 export const settleTmpReclaim = async () => { await tmpPass; };
 
-export async function reclaimResources(root: string, config: Pick<ProfileSet, 'reviewers' | 'producers'>, observed: { work: Work[]; agents: HerdrAgent[] | null }, options: { now?: number; closePane?: (pane: string) => void | Promise<void> } = {}): Promise<ResourceReclaimReport> {
+export async function reclaimResources(root: string, config: Pick<ProfileSet, 'reviewers' | 'producers'>, observed: { work: Work[]; agents: HerdrAgent[] | null }, options: { now?: number; closePane?: (pane: string) => void | Promise<void>; tmpRoot?: string; tmpPass?: (options: TmpReclaimOptions) => Promise<TmpReclaimReport> } = {}): Promise<ResourceReclaimReport> {
   const now = options.now ?? Date.now();
   const close = options.closePane ?? (pane => { closeHerdrPane(pane); });
   const report: ResourceReclaimReport = { at: new Date(now).toISOString(), reaped: { review: 0, producer: 0 }, closed: [], released: [], tmp: { removed: 0, bytes: 0 }, errors: [] };
@@ -554,7 +560,9 @@ export async function reclaimResources(root: string, config: Pick<ProfileSet, 'r
   // it: a host with thousands of leftovers never stalls a cycle, and each cycle records what the
   // last finished pass freed. Ages are judged on the host's real clock, never the cycle's `now`,
   // which a caller may set anywhere: a directory is old only when it truly is.
-  const tmp = takeTmpReclaim();
+  // `tmpRoot` names the directory scanned and `tmpPass` the pass itself, for a caller that must
+  // keep the sweep off the host's /tmp or watch it run; the loop passes neither.
+  const tmp = takeTmpReclaim(() => (options.tmpPass ?? reclaimTmpDirectories)(loopTmpReclaimOptions(options.tmpRoot)));
   if (tmp) {
     report.tmp = { removed: tmp.removed.length, bytes: tmp.bytes };
     report.errors.push(...tmp.errors.map(error => `Tmp reclaim: ${error}`));

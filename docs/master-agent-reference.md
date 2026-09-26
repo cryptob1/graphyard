@@ -59,7 +59,7 @@ A failed snapshot read retries once after 0.5–1.5 s; a failed cycle waits min(
 
 ## Resources and disk
 
-`resourceRegistry` declares every bounded resource, reported under `resources` ([remedies](operations-reference.md#control-plane-resources)). The loop `git worktree remove`s finished worktrees (`run.reclaimIdleHours`; never dirty/unpushed), `run.worktreeRemovalLimit`/cycle, logging `.graphyard/worktree-reclaim.jsonl`, and stale `/tmp/graphyard-*`, `tsx-<uid>` directories (dead owner or 6h idle; unheld; ≤100/cycle); `disk` attention below `run.diskThresholdGb`. Review and proof checkouts live under `run.worktreeRoot` (default `~/.local/share/graphyard/worktrees/REPOSITORY-ID`).
+`resourceRegistry` declares every bounded resource, reported under `resources` ([remedies](operations-reference.md#control-plane-resources)). The loop `git worktree remove`s finished worktrees (`run.reclaimIdleHours`; never dirty/unpushed), `run.worktreeRemovalLimit`/cycle, logging `.graphyard/worktree-reclaim.jsonl`, and stale `/tmp/graphyard-*`, `tsx-<uid>` directories (dead owner or 6h idle; unheld; ≤100/cycle, one pass in flight beside the cycle; `tests/soak.test.ts` runs it over a simulated day); `disk` attention below `run.diskThresholdGb`. Review and proof checkouts live under `run.worktreeRoot` (default `~/.local/share/graphyard/worktrees/REPOSITORY-ID`).
 
 ## Recovery
 
