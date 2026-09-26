@@ -19,7 +19,7 @@ On the worker's machine `graphyard master settle-containment GY-N "reason"` veri
 
 ## Submitted implementation needs rework
 
-Stop the worker, then `graphyard rework GY-N --previous-worker-stopped "reason"`; the next worker resubmits.
+Stop the worker, then `graphyard rework GY-N --previous-worker-stopped "reason"`.
 
 ## Accepted evidence turns out to be wrong
 

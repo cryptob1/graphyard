@@ -13,7 +13,7 @@ The control-plane App holds (`src/github-permissions.ts`):
 | Issues | Read | receive `issue_comment` webhooks carrying review results (comment webhooks) |
 | Metadata | Read | read the managed repository (repository access) |
 | Pull requests | Read and write | read pull requests and reviews (pull request observation); post review request comments (review dispatch) |
-A reviewer App is never granted Contents: write, Checks, or Administration; worker identities are not Apps. It holds:
+A reviewer App is never granted Contents: write, Checks, or Administration; worker identities are not Apps at all. It holds:
 
 | Permission | Access | Needed to |
 | --- | --- | --- |
