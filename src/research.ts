@@ -369,6 +369,12 @@ export interface ResearchRunLine { key: string; model?: string; since?: string; 
  * recorded-but-unfinished run the loop is about to fail; `failed` are the runs that ended without
  * a brief, so their items built from the criteria alone.
  */
+// master status's research block: whether this loop researches, and its runs by state.
+export function researchReport(run: Parameters<typeof researchConfigured>[0], work: readonly Work[], now: number) {
+  const configured = researchConfigured(run);
+  return { configured, ...researchStatus(work, now, configured) };
+}
+
 export function researchStatus(work: readonly Work[], now: number, configured: boolean): { live: ResearchRunLine[]; waiting: ResearchRunLine[]; failed: ResearchRunLine[] } {
   const live: ResearchRunLine[] = [], waiting: ResearchRunLine[] = [], failed: ResearchRunLine[] = [];
   for (const item of work) {

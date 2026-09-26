@@ -49,7 +49,7 @@ another session's handle finished to free a slot.
 
 ## Research before build
 
-With `run.research` set (`model`, `timeoutMinutes` 15, `tokenBudget`), a feature (or `"research": true`) gets one read-only Pi session per requirements revision, briefing worker and reviewer. Product questions go under Needs you; build proceeds on the recommendation, a differing answer requests rework, failure never blocks. `master status` `research` counts `live`, `waiting`, `failed` runs. The loop publishes `run.research` via `POST /api/research-settings` (coordinator, `{"configured": boolean}`), returned as `research.configured` by `/api/status`, `/api/board`.
+With `run.research` set (`model`, `timeoutMinutes` 15, `tokenBudget`), a feature (or `"research": true`) gets one read-only Pi session per requirements revision, briefing worker and reviewer. Product questions go under Needs you; build proceeds on the recommendation, a differing answer requests rework, failure never blocks. `master status` `research`: `live`, `waiting`, `failed` runs. The loop posts it to `POST /api/research-settings` (`{"configured": boolean}`), served as `research.configured` by `/api/status`, `/api/board`.
 
 ## Automatic dispatch at submit
 

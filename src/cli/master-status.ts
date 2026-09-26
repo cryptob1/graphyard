@@ -20,7 +20,7 @@ import { ghCheckAnnotations, qualifyTimingFailures } from './timing-failures.js'
 import { setupHealth } from './master-setup.js';
 import { stuckRequestReport, withStuckRequests } from './stuck-requests.js';
 import { mergeStalls, nameUnresolvedThreads } from '../merge-queue.js';
-import { researchConfigured, researchStatus } from '../research.js';
+import { researchReport } from '../research.js';
 import { observationThroughputStatus } from '../github.js';
 import type { LoopSupervisorHost } from '../supervisor.js';
 import { attributeAttention, derivedAttention, faulted, ledgerRefusalAttention, resourceStatus } from '../master-status.js';
@@ -147,7 +147,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
       reports: 'bounded', reportBoundMs: dependencies.reportReadBoundMs, sections });
   // A merge pending on a head GitHub reports mergeable is named with the stalled items (GY-344).
   // A repair-lane merge stays in front of the master until a normal merge proves the merge path healthy (GY-406).
-  // The queue head going without an observation stalls the whole queue behind it (GY-492), so its lag is raised with them.
+  // An unobserved queue head stalls the queue behind it (GY-492), so its lag is raised with them.
   const observation = observationThroughputStatus(coordinator, snapshot);
   const stalledItems = [...derivedStalls, ...mergeStallAttention(snapshot), ...observation.attention, ...repairLaneAttention(snapshot.work)];
   // Exactly one component merges (GY-245): the loop, where one is installed or running, else the executors.
@@ -199,8 +199,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     // The inverted loop: what the control plane says each item needs, who is running it, and
     // every session it can be watched through.
     actions: needsHumanActions(actionReport(snapshot), owed.rows),
-    // The research step (GY-434): whether this loop researches, and its runs live, waiting and failed across the fleet.
-    research: (configured => ({ configured, ...researchStatus(snapshot.work, Date.parse(snapshot.now), configured) }))(researchConfigured(master.run)),
+    research: researchReport(master.run, snapshot.work, Date.parse(snapshot.now)),
     // Presence and supervision (GY-105) and the release each registered executor runs (GY-126).
     executors: { ...executors, ...releases, attention: [...executors.attention, ...releases.attention] }, sessions: sessionReport(snapshot),
     // Branches the queue's own pushes contaminated and the approvals its pushes cost (GY-127).
