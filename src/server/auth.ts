@@ -2,10 +2,11 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 import { demand, operatorScopeIncludes, type Principal } from '../model.js';
 import { Next, type Route, type Services } from './routes.js';
 import { leaseCommandRequest } from './routes/work.js';
+import { humanSignIn } from './routes/sign-in.js';
 
 /**
- * Resolve the bearer token to a principal: a configured credential first, then a live operator-agent
- * credential. A lease command (`method` and `pathname`) authenticates on the lease pool (GY-558), so an exhausted
+ * Resolve the bearer token to a principal: a configured credential first, then a human session a
+ * one-time sign-in link opened (GY-738, routes/sign-in.ts), then a live operator-agent credential. A lease command (`method` and `pathname`) authenticates on the lease pool (GY-558), so an exhausted
  * general pool cannot stop a renewal before it reaches its own connections.
  */
 export async function authenticate(services: Services, authorization: string | undefined, repository: string, method?: string, pathname = ''): Promise<Principal> {
@@ -14,7 +15,7 @@ export async function authenticate(services: Services, authorization: string | u
   const hash = createHash('sha256').update(token).digest();
   const configured = services.principals.find(p => timingSafeEqual(p.hash, hash));
   if (configured) await services.operatorAgents.assertConfiguredPrincipalSafe({ id: configured.actor.id, tokenHash: hash.toString('hex') }, { lease });
-  const actor = configured?.actor ?? await services.operatorAgents.authenticate(token);
+  const actor = configured?.actor ?? humanSignIn(services).authenticate(token) ?? await services.operatorAgents.authenticate(token);
   demand(actor, 'A valid Graphyard bearer token is required', 401);
   if (actor.role === 'operator-agent') demand(actor.scope?.repositories.includes(repository), 'Repository is outside operator-agent scope', 403);
   return actor;

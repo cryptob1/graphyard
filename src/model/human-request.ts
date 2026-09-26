@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { operatorCredentialRefusal, operatorOnlyDecision, refusedReconciliations, type Decision } from './approval.js';
+import { demand } from './refusal.js';
 import type { Work } from './work.js';
 
 // ---------------------------------------------------------------------------
@@ -24,6 +25,31 @@ export const humanDecisionLabel = {
   'credentials-for-people': 'issuing credentials to people',
 } as const satisfies Record<HumanDecisionKind, string>;
 
+/**
+ * One ready-made answer the requester offers (GY-738): a button on the card. `text` asks for the
+ * operator's own words beside it (a different cap); `secret` asks for a value that is sealed to
+ * the requesting host's key and never recorded in the clear.
+ */
+export const humanChoiceSchema = z.object({
+  id: z.string().regex(/^[a-z0-9][a-z0-9-]{0,39}$/),
+  label: z.string().trim().min(1).max(120),
+  outcome: z.enum(['provided', 'declined']),
+  input: z.enum(['none', 'text', 'secret']).default('none'),
+}).strict();
+export type HumanChoice = z.infer<typeof humanChoiceSchema>;
+const decline: HumanChoice = { id: 'decline', label: 'Decline', outcome: 'declined', input: 'none' };
+/** The choices a request offers when its requester named none: one per kind, always ending with Decline. */
+export function defaultChoices(kind: HumanDecisionKind, sealed = false): HumanChoice[] {
+  if (kind === 'money-or-accounts') return [{ id: 'approve', label: 'Approve', outcome: 'provided', input: 'none' }, { id: 'approve-other', label: 'Approve with a different cap…', outcome: 'provided', input: 'text' }, decline];
+  if (kind === 'credentials-for-people') return [sealed ? { id: 'provide', label: 'Provide now', outcome: 'provided', input: 'secret' } : { id: 'provided', label: 'Provided it', outcome: 'provided', input: 'text' }, decline];
+  return [{ id: 'agree', label: 'Go ahead as asked', outcome: 'provided', input: 'none' }, { id: 'differently', label: 'Go ahead differently…', outcome: 'provided', input: 'text' }, decline];
+}
+/** The choices a request carries: the requester's, with Decline added when they left it out, or the kind's defaults. */
+export function requestChoices(request: { kind: HumanDecisionKind; choices?: HumanChoice[] | null; sealTo?: string | null }): HumanChoice[] {
+  const named = request.choices?.length ? request.choices : defaultChoices(request.kind, !!request.sealTo);
+  return named.some(choice => choice.outcome === 'declined') ? named : [...named, decline];
+}
+
 export const humanRequestSchema = z.object({
   epoch: z.number().int().positive(),
   kind: z.enum(humanDecisionKinds),
@@ -31,16 +57,49 @@ export const humanRequestSchema = z.object({
   reason: z.string().trim().min(1).max(2000),
   /** The exact thing the human is asked for: the account to open, the priority to set, the credential to issue. */
   needed: z.string().trim().min(1).max(2000),
-}).strict();
+  /** The buttons the card offers, chosen by the requester; the kind's defaults when omitted. */
+  choices: z.array(humanChoiceSchema).min(1).max(6).refine(choices => new Set(choices.map(choice => choice.id)).size === choices.length, 'Choice ids must be distinct').optional(),
+  /** The requesting host's public key (PEM): a `secret` choice's value is sealed to it. */
+  sealTo: z.string().trim().min(1).max(4000).optional(),
+}).strict().refine(data => data.sealTo || !data.choices?.some(choice => choice.input === 'secret'), 'A secret choice needs sealTo, the requesting host\'s public key');
 export const humanAnswerSchema = z.object({
   request: z.string().uuid(),
-  /** `provided`: the thing asked for now exists, so the item resumes. `declined`: it will not, and the item stays parked with the answer as its blocker. */
+  /** `provided`: the thing asked for now exists, so the item resumes. `declined`: it will not, and the item stays parked with the answer as its blocker. A choice sets it. */
   outcome: z.enum(['provided', 'declined']).default('provided'),
-  answer: z.string().trim().min(1).max(4000),
-}).strict();
+  /** Free words, for a request answered without a choice. */
+  answer: z.string().trim().min(1).max(4000).optional(),
+  /** The id of the button pressed, and the operator's optional note beside it. */
+  choice: z.string().min(1).max(40).optional(),
+  note: z.string().trim().max(4000).optional(),
+  /** A `secret` choice's value: sealed before anything is written, never stored as given. */
+  secret: z.string().min(1).max(8000).optional(),
+}).strict().refine(data => data.answer || data.choice, 'Give a choice or an answer');
+export type HumanAnswerInput = z.infer<typeof humanAnswerSchema>;
+/**
+ * What an answer records: the outcome, the words the next worker reads, and the choice pressed.
+ * A choice that asks for words needs them; a secret goes only to a secret choice.
+ */
+export function resolveHumanAnswer(request: Pick<HumanRequest, 'kind' | 'choices' | 'sealTo'>, data: HumanAnswerInput) {
+  if (!data.choice) {
+    demand(!data.secret, 'A secret is sent only with the choice that asks for it', 422);
+    return { outcome: data.outcome, text: data.answer!, choice: null, note: null, secret: false };
+  }
+  const choice = requestChoices(request).find(entry => entry.id === data.choice);
+  demand(choice, `No choice ${data.choice} on this request; reload before answering`, 422);
+  const note = data.note || data.answer || null;
+  demand(choice!.input !== 'text' || note, `${choice!.label} needs your words in the note`, 422);
+  demand(choice!.input === 'secret' ? !!data.secret : !data.secret, choice!.input === 'secret' ? `${choice!.label} needs the value to seal` : 'A secret is sent only with the choice that asks for it', 422);
+  return { outcome: choice!.outcome, text: note ? `${choice!.label}: ${note}` : choice!.label, choice: { id: choice!.id, label: choice!.label }, note, secret: choice!.input === 'secret' };
+}
 
 /** `withdrawn`: nobody answered; the item was closed and the question no longer stands (model/closure.ts). */
-export interface HumanAnswer { by: string; at: string; outcome: 'provided' | 'declined' | 'withdrawn'; text: string; waitedMs: number }
+export interface HumanAnswer {
+  by: string; at: string; outcome: 'provided' | 'declined' | 'withdrawn'; text: string; waitedMs: number;
+  /** The button pressed and the note beside it (GY-738); absent on a free-text answer. */
+  choice?: { id: string; label: string } | null; note?: string | null;
+  /** A secret choice's value, sealed to the requesting host's key (server/waits.ts `sealToHost`). */
+  sealed?: string | null;
+}
 /**
  * The fields every request only a human may answer carries, whatever raised it: the exact thing
  * needed, why, who asked, and when. A `park` request is one; an approval the server will take
@@ -53,6 +112,8 @@ export interface HumanOnlyRequest {
 }
 export interface HumanRequest extends HumanOnlyRequest {
   kind: HumanDecisionKind;
+  choices?: HumanChoice[];
+  sealTo?: string | null;
   answer?: HumanAnswer | null;
 }
 export const retainedHumanRequests = 20;
@@ -73,6 +134,11 @@ export const declineCommand = (key: string, request: Pick<HumanRequest, 'id'>) =
  * the equivalent, never the way to answer: handling a credential on a command line is the defect
  * this surface exists to remove (GY-102).
  */
+/**
+ * One button on a card (GY-738): the whole body it posts, whether it asks for words or a secret,
+ * and the field an optional note goes in (null when the button takes none).
+ */
+export interface HumanOnlyChoice { label: string; input: HumanChoice['input']; declines: boolean; body: Record<string, unknown>; note: string | null }
 export interface HumanOnlyPost {
   command: string;
   body: Record<string, unknown>;
@@ -87,6 +153,8 @@ export interface HumanRequestRow {
   waitedMs: number; decision: string;
   /** What an agent identity is told when it attempts this, in the server's own words. */
   refusal: string;
+  /** The ready-made answers, one button each, posted to `answer.post.command`: the primary way to answer. */
+  choices?: HumanOnlyChoice[];
   answer: { cli: string; decline: string; dashboard: string; api: string; post: HumanOnlyPost };
 }
 /** A row as `master status` reports it: what is needed, why, who asked, how long, and where it is answered. */
@@ -102,6 +170,7 @@ export function openHumanRequests(work: readonly { id: string; key: string; titl
       rule: parkRule.kind, work: item.key, id: item.id, title: item.title, request,
       waitedMs: Math.max(0, now - Date.parse(request.at)), decision: humanDecisionLabel[request.kind],
       refusal: parkRule.refuse({ id: 'an agent identity', role: 'operator-agent', sessionKind: 'ai' })!,
+      choices: requestChoices(request).map(choice => ({ label: choice.label, input: choice.input, declines: choice.outcome === 'declined', body: { request: request.id, choice: choice.id }, note: 'note' })),
       answer: { cli: answerCommand(item.key, request), decline: declineCommand(item.key, request), dashboard: 'Work → Needs you → Answer', api: `POST /api/work/${item.key}/answer {"request":"${request.id}","answer":"…"}`,
         post: { command: 'answer', body: { request: request.id, outcome: 'provided' }, field: 'answer', submit: `Answer and resume ${item.key}`,
           decline: { body: { request: request.id, outcome: 'declined' }, submit: 'Decline' } } },
@@ -184,6 +253,7 @@ export const operatorApprovalRule: HumanOnlyRule = {
         rule: operatorApprovalRule.kind, work: work.key, id: work.id, title: work.title, request,
         waitedMs: Math.max(0, now - Date.parse(decision.requestedAt)), decision: operatorApprovalLabel,
         refusal: operatorCredentialRefusal({ id: 'an agent identity', role: 'operator-agent' })!,
+        choices: [{ label: `Approve and deliver ${work.key}`, input: 'none', declines: false, body: { decision: decision.id, reason: 'Approved by the operator' }, note: 'reason' }],
         answer: {
           cli: `GRAPHYARD_TOKEN_FILE=ADMIN_TOKEN_FILE graphyard master approve ${work.key} ${decision.id} REASON`,
           decline: `graphyard master withdraw ${work.key} ${decision.id} REASON, run by the identity that requested it`,

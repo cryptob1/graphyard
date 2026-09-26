@@ -34,19 +34,20 @@ import { statusRoutes } from './routes/status.js';
 import { actionRoutes } from './routes/actions.js';
 import { workRoutes } from './routes/work.js';
 import { interventionPolicyFromEnv, interventionRoutes } from './routes/interventions.js';
+import { signInLinkRoutes, signInRoutes } from './routes/sign-in.js';
 import { staticRoutes } from './static.js';
 
 export { principalSchema, type Credential } from './principals.js';
 
 /** Routes that answer without a bearer token. */
-export const publicRoutes: readonly RouteModule[] = [healthRoutes, githubRoutes];
+export const publicRoutes: readonly RouteModule[] = [healthRoutes, githubRoutes, signInRoutes];
 /**
  * Every authenticated `/api/` route, in matching order. A resource adds its module here;
  * the identity-administration modules precede the operator-agent guard because they
  * authorize their callers themselves.
  */
 export const apiRoutes: readonly RouteModule[] = [
-  operatorAgentRoutes, proofGrantRoutes,
+  operatorAgentRoutes, proofGrantRoutes, signInLinkRoutes,
   { name: 'operator-agent-scope', routes: [operatorAgentRouteGuard] },
   agentRegistryRoutes, delegationRoutes, validationRoutes, deliveryRoutes, shippingPulseRoutes, flowAnalyticsRoutes, attributionRoutes, scenarioRoutes, interventionRoutes, actionRoutes, statusRoutes, workRoutes,
 ];
