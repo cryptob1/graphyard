@@ -30,10 +30,10 @@ export async function triageBacklogStep(cycle: Cycle) {
       await note('followups:migration', null, 'done', result.already ? `The one-time follow-up migration already ran (${result.merged} duplicate follow-up items merged into their parent's oldest open one)` : `Merged ${result.merged} duplicate follow-up items into their parent's oldest open follow-up item and closed them as superseded by it`);
     } catch (error) { await note('followups:migration', null, 'failed', `The one-time follow-up migration could not run, and is asked again next cycle: ${message(error)}`); }
   });
-  if (!effects.recordTriage || !effects.research?.cwd || !config.run?.research) return;
+  if (!effects.recordTriage || !effects.research || !config.run?.research) return;
   await isolate('decision', null, 'triage', async () => {
     const settings = researchSettings(config.run);
-    const actions = triageStep({ work: snapshot.work, clock, settings, config, cwd: effects.research!.cwd!, runner: effects.research!.runner ?? researchRunner(settings), record: effects.recordTriage! });
+    const actions = triageStep({ work: snapshot.work, clock, settings, config, cwd: effects.research!.cwd, runner: effects.research!.runner ?? researchRunner(settings), record: effects.recordTriage! });
     for (const action of actions) {
       const item = snapshot.work.find(entry => entry.key === action.work)!;
       await note(`triage:${item.id}:${action.state}`, item.key, 'done', action.detail);

@@ -188,12 +188,12 @@ export interface DaemonEffects {
    * Research before build (GY-259): records a research run's start, brief or failure on the item as
    * the coordinator, and names the checkout the research session reads (and, in a test, its runner).
    * A loop wired without it, or whose config turns research off (`run.research.enabled: false`),
-   * researches nothing and dispatches as before. A research session never reads `cwd` itself:
-   * `checkout` gives each run a detached throwaway worktree of it (GY-401); a test may pass `cwd`
-   * alone. The triage step (GY-402) reads `cwd`, the loop's own checkout, and runs on `runner`.
+   * researches nothing and dispatches as before. `cwd` is the loop's own checkout, which
+   * the triage step (GY-402) reads; a research session never reads it when `checkout` is given, which
+   * makes each run a detached throwaway worktree of it (GY-401). A test may pass `cwd` alone.
    */
   recordResearch?: (work: Work, event: ResearchEvent) => Promise<unknown>;
-  research?: { cwd?: string; checkout?: (work: Work) => Promise<ResearchCheckout>; runner?: Runner };
+  research?: { cwd: string; checkout?: (work: Work) => Promise<ResearchCheckout>; runner?: Runner };
   /** Records a triage judgement on a machine-filed item as the coordinator (GY-402, POST work/ID/triage). */
   recordTriage?: (work: Work, body: { judgement: TriageJudgement; runtime?: string }) => Promise<unknown>;
   /** Asks the control plane for the one-time follow-up migration (GY-402, POST followups/migrate) as the operator agent. */

@@ -199,6 +199,8 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     },
   };
   const research: DaemonEffects['research'] = {
+    // The loop's own checkout, as production names it; research reads only the checkouts below.
+    cwd: researchHome,
     runner,
     checkout: async work => {
       const checkout = await allocateSessionCheckout(researchBase, 'research', work.key, sha('research', work.key), id());
