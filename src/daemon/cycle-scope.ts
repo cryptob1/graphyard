@@ -1,6 +1,7 @@
 // Concern: cycle step 2 — decide open scope requests and measure the decision budget.
 import type { Work } from '../model.js';
 import { type ScopeRequestState, pathScope, pathScopeContains, pinningTestGround, redecidableScopeRefusal, routableScopeRequest, testFile, unplannedPaths } from '../model/scope.js';
+import { barrelSuccessorGround, criterionSymbolGround, criterionSymbols, criterionTestGround, phraseCallees } from '../model/criterion-scope.js';
 import { type Successor, successorGround, successorsOf } from '../model/successors.js';
 import { findingScope, type ReviewFinding } from '../review-scope.js';
 import { guardBroadScope } from '../master.js';
@@ -12,17 +13,27 @@ import { boundDetail, detailChanged, namePaths } from './decisions.js';
 import { findingRecheckMs, record } from './effects.js';
 import type { Cycle } from './cycle.js';
 
+/** A requested path the loop grants without an approver, and the audited ground it stands on. */
+export interface ScopeGround { path: string; ground: string }
 /**
- * GY-199. What grants each requested path without an approver, or the first refusal: a trusted
- * review finding naming it (review-scope.ts findingScope), a file on the base that succeeds a
- * planned file main split or renamed (GY-394, model/scope.ts successorsOf), or — for a test file —
- * the pinning rule (model/scope.ts pinningTestGround), read from the base branch outside every
- * transaction. `successors` is read once, and only when a finding does not already ground a path.
+ * GY-199. What grants each requested path without an approver: a trusted review finding naming it
+ * (review-scope.ts findingScope), a file on the base that succeeds a planned file main split or
+ * renamed (GY-394, model/successors.ts successorsOf) or that a planned re-export barrel names
+ * (GY-438, model/criterion-scope.ts barrelSuccessorGround), a test whose quoted failing assertion a planned
+ * file holds (model/scope.ts pinningTestGround), and — GY-438 — a test that pins a label, route or
+ * CLI output a criterion changes (criterionTestGround) or a file that defines or directly calls a
+ * symbol a criterion names (criterionSymbolGround). Every file is read from the base branch
+ * outside every transaction; `successors` is read once, and only when a finding does not already
+ * ground a path, and `mentions` searches the base tree for the identifiers a phrase-spelled call
+ * would ground on. The grounded paths are returned with the refusal of the rest, so what the rules
+ * ground is granted and only what they do not goes to the approver.
  */
-export async function automaticScopeGrounds(item: Work, request: ScopeRequestState, paths: readonly string[], findings: readonly ReviewFinding[], exists: (path: string) => boolean, read?: (path: string) => Promise<string | null>, successors?: () => Promise<readonly Successor[]>): Promise<{ grounds: { path: string; ground: string }[] } | { refusal: string }> {
-  const grounds: { path: string; ground: string }[] = [];
+export async function automaticScopeGrounds(item: Work, request: ScopeRequestState, paths: readonly string[], findings: readonly ReviewFinding[], exists: (path: string) => boolean, read?: (path: string) => Promise<string | null>, successors?: () => Promise<readonly Successor[]>, mentions?: (identifier: string) => Promise<number>): Promise<{ grounds: ScopeGround[] } | { grounds?: ScopeGround[]; refusal: string }> {
+  const grounds: ScopeGround[] = [], refusals: string[] = [];
   let planned: { path: string; text: string | null }[] | null = null;
   let succeeding: readonly Successor[] | null = null;
+  const symbols = criterionSymbols(item.criteria);
+  const searched = new Map<string, number>();
   for (const path of paths) {
     const named = findingScope([path], findings, exists);
     if ('grounds' in named) { grounds.push(...named.grounds); continue; }
@@ -31,15 +42,21 @@ export async function automaticScopeGrounds(item: Work, request: ScopeRequestSta
       const successor = succeeding.find(entry => entry.path === path);
       if (successor) { grounds.push({ path, ground: successorGround(successor) }); continue; }
     }
-    if (read && testFile(path) && exists(path)) {
-      const text = await read(path);
+    if (read && !pathScope(path).prefix && !path.includes('*') && exists(path)) {
       planned ??= await Promise.all((item.plannedFiles ?? []).filter(scope => !pathScope(scope).prefix && !scope.includes('*')).slice(0, 50).map(async scope => ({ path: scope, text: await read(scope) })));
-      const ground = pinningTestGround(path, request.reason, text, planned);
-      if (ground) { grounds.push({ path, ground }); continue; }
+      const text = await read(path);
+      const barrel = barrelSuccessorGround(path, planned);
+      if (barrel) { grounds.push({ path, ground: barrel }); continue; }
+      const pinning = testFile(path) ? pinningTestGround(path, request.reason, text, planned) ?? criterionTestGround(path, text, symbols) : null;
+      if (pinning) { grounds.push({ path, ground: pinning }); continue; }
+      if (mentions) for (const identifier of phraseCallees(text, symbols).slice(0, 20)) if (!searched.has(identifier)) searched.set(identifier, await mentions(identifier));
+      const symbol = criterionSymbolGround(path, text, symbols, searched);
+      if (symbol) { grounds.push({ path, ground: symbol }); continue; }
     }
-    return named;
+    refusals.push(named.refusal);
   }
-  return { grounds };
+  if (!refusals.length) return { grounds };
+  return grounds.length ? { grounds, refusal: refusals.join('; ') } : { refusal: refusals.join('; ') };
 }
 
 /** Step 2: decide the open scope requests, and measure the decision budget over what is still waiting. */
@@ -65,13 +82,14 @@ export async function scopeStep(cycle: Cycle) {
   //     It answers with the time the control plane recorded the widening, or null when it did not widen.
   // What an automatic widening stood on, in the audit detail: the grounds it actually used.
   const widenedOn = (grounds: { ground: string }[], count: number): string => {
-    const successors = grounds.filter(entry => entry.ground.startsWith('successor of ')).length;
-    if (successors === grounds.length) return `the base branch's split or rename of a planned file`;
-    if (successors) return `a review finding and the base branch's split or rename of a planned file`;
-    return `the review finding that names ${count === 1 ? 'it' : 'them'}`;
+    const kinds = new Set(grounds.map(entry => entry.ground.startsWith('successor of ') ? 'successor' : /^review /.test(entry.ground) ? 'finding' : 'criteria'));
+    if (kinds.size === 1 && kinds.has('successor')) return `the base branch's split or rename of a planned file`;
+    if (kinds.size === 1 && kinds.has('finding')) return `the review finding that names ${count === 1 ? 'it' : 'them'}`;
+    if (kinds.size === 1) return `what the item's criteria name: a symbol a file defines or calls, or text a test pins`;
+    return [kinds.has('finding') && 'a review finding', kinds.has('successor') && `the base branch's split or rename of a planned file`, kinds.has('criteria') && `what the item's criteria name`].filter(Boolean).join(' and ');
   };
   const widenOnFindings = async (item: Work, request: ScopeRequestState): Promise<string | null> => {
-    if (!(effects.reviewFindings || effects.baseSuccessions) || !effects.widenScope || request.remove?.length || request.criteria?.length) return null;
+    if (!(effects.reviewFindings || effects.baseSuccessions || effects.baseText) || !effects.widenScope || request.remove?.length || request.criteria?.length) return null;
     if (!item.lease || item.lease.epoch !== request.epoch || Date.parse(item.lease.expiresAt) <= clock) return null;
     const paths = (request.decision?.paths?.length ? request.decision.paths : request.paths).filter(path => !(item.plannedFiles ?? []).some(planned => pathScopeContains(planned, path)));
     if (!paths.length) return null;
@@ -84,22 +102,33 @@ export async function scopeStep(cycle: Cycle) {
     try {
       const findings = await effects.reviewFindings?.(item) ?? [];
       const existing = await effects.basePaths?.(paths) ?? new Set<string>();
-      const scoped = await automaticScopeGrounds(item, request, paths, findings, path => existing.has(path), effects.baseText, baseSuccessors(effects, item));
-      if ('refusal' in scoped) {
-        const detail = boundDetail(`Not widened on a review finding or a planned file's successor: ${scoped.refusal}`);
+      const scoped = await automaticScopeGrounds(item, request, paths, findings, path => existing.has(path), effects.baseText, baseSuccessors(effects, item), effects.baseMentions);
+      // A path no rule grounds goes to the approver; the ones the rules do ground are granted now,
+      // so the approver judges only the rest (routableScopeRequest reads what is still unplanned).
+      if ('refusal' in scoped && !scoped.grounds?.length) {
+        const detail = boundDetail(`Not widened on a review finding, a planned file's successor or what the criteria name: ${scoped.refusal}`);
         const entry = await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done', detail, attempts, cycle: state.cycle }, now(), effects.persist);
         // An unchanged refusal is the same decision read again, not a new action.
         if (judged && previous.detail !== detail) performed.push(entry);
         return null;
       }
-      const grounds = scoped.grounds.map(entry => `${entry.path} (${entry.ground})`).join('; ');
-      const reason = guardBroadScope({ ...item, plannedFiles: [...new Set([...(item.plannedFiles ?? []), ...paths])] },
-        `Additive scope ${item.key}'s own change calls for — a review finding names it, it succeeds a planned file the base branch split or renamed, or a test pins text a planned file holds: ${grounds}. ${request.requestedBy} asked because ${request.reason}`.slice(0, 1900), { allow: false, command: 'the loop', existing: item.plannedFiles });
-      const widened = await effects.widenScope(item, request, paths, reason) as Work | undefined;
+      const granted = scoped.grounds!.map(entry => entry.path), rest = 'refusal' in scoped ? scoped.refusal : null;
+      const grounds = scoped.grounds!.map(entry => `${entry.path} (${entry.ground})`).join('; ');
+      const reason = guardBroadScope({ ...item, plannedFiles: [...new Set([...(item.plannedFiles ?? []), ...granted])] },
+        `Additive scope ${item.key}'s own change calls for — a review finding names it, it succeeds a planned file the base branch split, renamed or re-exports, a test pins text a planned file holds or a criterion changes, or it defines or calls a symbol a criterion names: ${grounds}. ${request.requestedBy} asked because ${request.reason}`.slice(0, 1900), { allow: false, command: 'the loop', existing: item.plannedFiles });
+      const widened = await effects.widenScope(item, request, granted, reason) as Work | undefined;
       // The time the control plane recorded the answer, never the cycle's: the worker reads it at once.
       const recorded = widened?.scopeDecision;
       const at = recorded?.epoch === request.epoch && recorded.requestedAt === request.at ? recorded.at : new Date(now()).toISOString();
-      performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done', detail: boundDetail(`Widened ${item.key} with ${namePaths(paths)} on ${widenedOn(scoped.grounds, paths.length)}: ${grounds}`), attempts, cycle: state.cycle }, now(), effects.persist));
+      if (rest) {
+        // Partly widened: the rest stays refused, for the approver, and is judged again like any
+        // refusal. The approver is asked for it against the widened item, never this cycle's
+        // snapshot, whose plannedFiles would drop what was just granted.
+        if (widened?.id === item.id) settled.set(item.id, widened);
+        performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done', detail: boundDetail(`Partly widened ${item.key} with ${namePaths(granted)} on ${widenedOn(scoped.grounds!, granted.length)}: ${grounds}. The rest goes to the approver: ${rest}`), attempts, cycle: state.cycle }, now(), effects.persist));
+        return null;
+      }
+      performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done', detail: boundDetail(`Widened ${item.key} with ${namePaths(paths)} on ${widenedOn(scoped.grounds!, paths.length)}: ${grounds}`), attempts, cycle: state.cycle }, now(), effects.persist));
       return at;
     } catch (error) {
       performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'failed', detail: boundDetail(`Could not widen ${item.key} on a review finding or a planned file's successor: ${message(error)}`), attempts, cycle: state.cycle }, now(), effects.persist));

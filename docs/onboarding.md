@@ -35,7 +35,7 @@ CLAUDE_CONFIG_DIR=~/.coding_agents/claude-a claude                       # /logi
 node "$GRAPHYARD_CLI" master environments --apply                        # report quota, write profiles
 ```
 
-Profiles default to `"approvals": "auto"`, so sessions never block on a prompt (trade-off: unattended sessions); `"prompt"` is refused at launch ([modes](master-agent-sessions.md#approval-modes)).
+Profiles default to [`"approvals": "auto"`](master-agent-sessions.md#approval-modes) (trade-off: unattended sessions); `"prompt"` is refused at launch.
 
 ### Configure the fleet
 

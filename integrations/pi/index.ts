@@ -293,12 +293,23 @@ export function guardCommand(command: string, context: GuardContext): GuardVerdi
   return { allow: true };
 }
 
-/** Directories a mktemp call printed: kept only when each is a real directory under the temporary root. */
+/**
+ * The directory a `mktemp -d` call printed. Only a command that is nothing but that one mktemp
+ * invocation counts, and only its single line of output (GY-391): a line a second command printed
+ * beside it (`mktemp -d && ls -d /tmp/*`) is not a directory the session created. The line is kept
+ * only when it is a real directory under the temporary root.
+ */
 export function mktempDirectories(command: string, output: string, root = tmpdir()): string[] {
-  if (!/\bmktemp\b/.test(command)) return [];
-  const base = resolve(root);
-  return output.split('\n').map(line => line.trim()).filter(line => isAbsolute(line) && inside(resolve(line), base) && !resolve(line).split(sep).includes('..'))
-    .filter(line => { try { return statSync(line).isDirectory(); } catch { return false; } });
+  const segments = shellWords(command);
+  if (segments.length !== 1) return [];
+  const [program, ...words] = segments[0];
+  if (program.dynamic || program.value.split('/').pop() !== 'mktemp' || words.some(word => word.dynamic)) return [];
+  if (!words.some(word => word.value === '--directory' || /^-[A-Za-z]*d[A-Za-z]*$/.test(word.value))) return [];
+  const lines = output.split('\n').map(line => line.trim()).filter(Boolean);
+  if (lines.length !== 1) return [];
+  const [line] = lines, base = resolve(root);
+  if (!isAbsolute(line) || !inside(resolve(line), base) || resolve(line).split(sep).includes('..')) return [];
+  try { return statSync(line).isDirectory() ? [line] : []; } catch { return []; }
 }
 
 // ---- The extension -----------------------------------------------------------------------------

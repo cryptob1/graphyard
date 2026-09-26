@@ -428,6 +428,9 @@ export async function reviewerBindingHealth(config: Pick<MasterConfig, 'credenti
   return { registered: app, bound: config.reviewer ? { appId: config.reviewer.appId, slug: config.reviewer.slug } : null, attention };
 }
 
+/** How old the observation of the exact requested head may be when a reviewer is launched for it (GY-710). */
+export const reviewLaunchObservationMaxAgeMs = 30 * 60_000;
+
 // A launched reviewer reads one exact candidate. Everything a verdict is bound to is verified
 // here, before a token exists: a stale or unobserved candidate never reaches a reviewer session.
 export function assertReviewCandidate(work: Work, observedAt: string) {
@@ -440,8 +443,12 @@ export function assertReviewCandidate(work: Work, observedAt: string) {
   if (!work.submission || !candidate) throw new Error(`${work.key} has no independently observed pull-request candidate to review`);
   if (work.reworkRequested) throw new Error(`${work.key} is awaiting rework; review the next submitted candidate`);
   if (!observation || observation.candidate.sha !== candidate.sha || observation.candidate.baseSha !== candidate.baseSha) throw new Error(`${work.key} GitHub observation does not match the current candidate`);
+  // The launch binds the exact head, base and policy revision the observation names, and the reviewer
+  // judges that head itself; the observation only has to be recent enough that the head has not moved
+  // unseen. Two minutes, the merge gate's bound, starved launches: with ~250 items a given item is read
+  // every several minutes, so review requests waited hours (2026-09-26, GY-710). Merges keep two minutes.
   const age = now - Date.parse(observation.at);
-  if (!(age >= 0 && age < 120_000)) throw new Error(`${work.key} GitHub observation is missing or older than two minutes`);
+  if (!(age >= 0 && age < reviewLaunchObservationMaxAgeMs)) throw new Error(`${work.key} GitHub observation is missing or older than ${reviewLaunchObservationMaxAgeMs / 60_000} minutes`);
   if (observation.prState === 'closed') throw new Error(`${work.key} pull request is closed`);
   if (observation.draft) throw new Error(`${work.key} pull request is still a draft`);
   // A head behind the base branch is reviewed as it stands when it merges cleanly: the merge queue
