@@ -461,7 +461,7 @@ export function parseLoginOutput(text: string): { url: string | null; code: stri
  * the caller runs the smoke prompt before the card turns healthy. The child is bounded: past the
  * window it is stopped and the failure is what the card shows.
  */
-export async function relaySubscriptionLogin(provider: ConnectProvider, home: string, options: { login?: { command: string; args: string[] }; pollMs?: number; loginTimeoutMs?: number } = {}): Promise<{ url: string | null; code: string | null; loggedIn: boolean; error: string | null }> {
+export async function relaySubscriptionLogin(provider: ConnectProvider, home: string, options: { login?: { command: string; args: string[] }; pollMs?: number; loginTimeoutMs?: number; onPrinted?: (printed: { url: string | null; code: string | null }) => unknown } = {}): Promise<{ url: string | null; code: string | null; loggedIn: boolean; error: string | null }> {
   const login = options.login ?? { command: provider.login!.command, args: provider.login!.args };
   const pollMs = options.pollMs ?? 2_000, timeoutMs = options.loginTimeoutMs ?? 10 * 60_000;
   const file = resolve(home, provider.loginFile ?? '');
@@ -474,13 +474,25 @@ export async function relaySubscriptionLogin(provider: ConnectProvider, home: st
     const finish = (result: { url: string | null; code: string | null; loggedIn: boolean; error: string | null }) => {
       if (settled) return;
       settled = true;
-      clearTimeout(limit); clearInterval(polling);
+      clearTimeout(limit); clearInterval(polling); clearTimeout(settle);
       try { child.kill('SIGTERM'); } catch { /* already gone */ }
       done(result);
     };
     const printed = () => { found ??= parseLoginOutput(text); return found; };
-    child.stdout?.on('data', (chunk: Buffer) => { text += chunk.toString(); });
-    child.stderr?.on('data', (chunk: Buffer) => { text += chunk.toString(); });
+    // The login blocks until the operator signs in, and the operator needs the URL to do that: hand
+    // it on the moment it is printed (with the code, once both are out or the output settles).
+    let told = false, settle: ReturnType<typeof setTimeout> | undefined;
+    const tell = () => {
+      if (told || settled) return;
+      const now = parseLoginOutput(text);
+      if (!now.url && !now.code) return;
+      clearTimeout(settle);
+      const announce = () => { if (told || settled) return; told = true; found = parseLoginOutput(text); void Promise.resolve(options.onPrinted?.(found)).catch(() => {}); };
+      if (now.url && now.code) announce(); else settle = setTimeout(announce, 500);
+    };
+    const read = (chunk: Buffer) => { text += chunk.toString(); tell(); };
+    child.stdout?.on('data', read);
+    child.stderr?.on('data', read);
     const limit = setTimeout(() => finish({ ...(found ?? { url: null, code: null }), loggedIn: false, error: `${login.command} did not finish within ${Math.round(timeoutMs / 1000)}s and was stopped` }), timeoutMs);
     const polling = setInterval(() => { if (settled) return; void seen().then(there => { if (there) finish({ ...(printed() ?? { url: null, code: null }), loggedIn: true, error: null }); }); }, pollMs);
     limit.unref?.(); polling.unref?.();

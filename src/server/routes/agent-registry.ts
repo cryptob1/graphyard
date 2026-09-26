@@ -141,7 +141,10 @@ const configurators = ['admin', 'coordinator'] as const;
 const readers = ['admin', 'coordinator', 'reader', 'slice-lead'] as const;
 /** Read a page of connect events, newest first, inside the caller's transaction. */
 const readConnectEvents = (db: Pick<pg.PoolClient, 'query'>) =>
-  db.query(`SELECT seq,actor,kind,payload,created_at FROM events WHERE work_id IS NULL AND kind LIKE '${connectEventPrefix}%' ORDER BY seq DESC LIMIT 5000`);
+  // The newest 500 requests with every event of each: a long-lived request keeps its claimed,
+  // progress and result events however many others (or host-key registrations) came after it.
+  db.query(`WITH recent AS (SELECT payload->'connect'->>'id' AS id FROM events WHERE work_id IS NULL AND kind='${connectEventPrefix}request' ORDER BY seq DESC LIMIT 500)
+    SELECT seq,actor,kind,payload,created_at FROM events WHERE work_id IS NULL AND kind LIKE '${connectEventPrefix}%' AND kind <> '${connectEventPrefix}host-key' AND payload->'connect'->>'id' IN (SELECT id FROM recent) ORDER BY seq DESC`);
 
 function connectAccountRoutes(): import('../routes.js').Route[] {
   return [
@@ -185,8 +188,8 @@ function connectAccountRoutes(): import('../routes.js').Route[] {
       const data = hostKeySchema.parse(await parseJson(context));
       return services.engine.store.transaction(async (db, now) => {
         // The newest registration per host wins; re-registering an unchanged key appends nothing.
-        const existing = (await db.query(`SELECT payload->>'host' AS host, payload->>'publicKey' AS "publicKey" FROM events WHERE work_id IS NULL AND kind='${connectEventPrefix}host-key' ORDER BY seq DESC LIMIT 1`)).rows[0];
-        if (existing?.host === data.host && existing?.publicKey === data.publicKey) return { host: data.host, registeredAt: true as const };
+        const existing = (await db.query(`SELECT payload->>'publicKey' AS "publicKey" FROM events WHERE work_id IS NULL AND kind='${connectEventPrefix}host-key' AND payload->>'host'=$1 ORDER BY seq DESC LIMIT 1`, [data.host])).rows[0];
+        if (existing?.publicKey === data.publicKey) return { host: data.host, registeredAt: true as const };
         await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, `${connectEventPrefix}host-key`, JSON.stringify(data)]);
         return { host: data.host, registeredAt: now.toISOString() };
       });
@@ -228,12 +231,14 @@ function connectAccountRoutes(): import('../routes.js').Route[] {
           await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, `${connectEventPrefix}claimed`, JSON.stringify({ connect: { id, at } })]);
           return { claimed: true };
         }
-        const working = connect.state === 'claimed' || connect.state === 'connecting' || connect.state === 'waiting-login';
-        demand(working, `The connect is ${connect.state}; claim it before working it`, 409);
         if (action === 'cancel') {
+          // Any open connect can be cancelled, a pending one too (its host's executor may be down).
+          demand(openState(connect.state), `The connect is already ${connect.state}`, 409);
           await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, `${connectEventPrefix}cancel`, JSON.stringify({ connect: { id, at } })]);
           return { id, state: 'cancelled' as const };
         }
+        const working = connect.state === 'claimed' || connect.state === 'connecting' || connect.state === 'waiting-login';
+        demand(working, `The connect is ${connect.state}; claim it before working it`, 409);
         if (action === 'progress') {
           const progress = progressSchema.parse(data);
           await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, `${connectEventPrefix}progress`, JSON.stringify({ connect: { id, at, ...progress } })]);

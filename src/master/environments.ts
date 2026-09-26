@@ -693,11 +693,9 @@ export async function runSmokePrompt(provider: ConnectProvider, home: string, op
 }
 
 /**
- * Start the provider's own login inside a fresh login home and relay what it prints: the URL and
- * code reach the UI as soon as they appear, the login file's arrival ends the wait, and the caller
- * runs the smoke prompt before the card turns healthy. The child is bounded: past the window it is
- * stopped and the failure is what the card shows. It lives in fleet.ts (as `relaySubscriptionLogin`)
- * because the loop's modules run children only through the asynchronous runner.
+ * Start the provider's own login in a fresh login home and relay what it prints (see fleet.ts's
+ * `relaySubscriptionLogin`, which lives there because the loop's modules run children only
+ * through the asynchronous runner).
  */
 export const relaySubscriptionLogin = fleetRelaySubscriptionLogin;
 
@@ -713,12 +711,14 @@ export async function ensureResearchWrapper(name: string, home: string, options:
   const bin = options.binDirectory ?? resolve(homedir(), '.local/bin');
   const file = resolve(bin, `pi-${letter}`);
   if (await access(file).then(() => true, () => false)) return null;
+  // Paths are shell-quoted: a home carrying a quote or a `$` must not break or inject into the wrapper.
+  const piDirectory = shellQuote(resolve(agentEnvironmentRoot(options.root), `pi-${letter}`));
   const script = [
     '#!/usr/bin/env bash',
-    `# pi, env ${letter}: the provider key is read at run time from ${home}; never stored here.`,
-    `mkdir -p "${resolve(agentEnvironmentRoot(options.root), `pi-${letter}`)}"`,
-    `export PI_CODING_AGENT_DIR="${resolve(agentEnvironmentRoot(options.root), `pi-${letter}`)}"`,
-    `export ZAI_API_KEY="$(node -e 'process.stdout.write(require(process.argv[1])["zai-coding-plan"].key)' "${resolve(home, 'opencode/auth.json')}")"`,
+    `# pi, env ${letter}: the provider key is read at run time from its login home; never stored here.`,
+    `mkdir -p ${piDirectory}`,
+    `export PI_CODING_AGENT_DIR=${piDirectory}`,
+    `export ZAI_API_KEY="$(node -e 'process.stdout.write(require(process.argv[1])["zai-coding-plan"].key)' ${shellQuote(resolve(home, 'opencode/auth.json'))})"`,
     'exec pi "$@"',
     '',
   ].join('\n');
@@ -779,8 +779,12 @@ export async function processConnectAccounts(config: Pick<MasterConfig, 'url' | 
         if (provider.id === 'z.ai') await ensureResearchWrapper(name, home, options).catch(() => {});
       } else {
         await fleetRequest(config, `agent-registry/connect/${connect.id}/progress`, { body: { state: 'connecting', name }, fetch: fetcher });
-        const relay = await relaySubscriptionLogin(provider, home, options);
-        if (relay.url || relay.code) await fleetRequest(config, `agent-registry/connect/${connect.id}/progress`, { body: { state: 'waiting-login', name, ...(relay.url ? { url: relay.url } : {}), ...(relay.code ? { code: relay.code } : {}) }, fetch: fetcher });
+        // The URL and code reach the card while the login is still waiting on the operator's sign-in.
+        const waiting = (printed: { url: string | null; code: string | null }) => fleetRequest(config, `agent-registry/connect/${connect.id}/progress`, { body: { state: 'waiting-login', name, ...(printed.url ? { url: printed.url } : {}), ...(printed.code ? { code: printed.code } : {}) }, fetch: fetcher });
+        const announced: Promise<unknown>[] = [];
+        const relay = await relaySubscriptionLogin(provider, home, { ...options, onPrinted: printed => announced.push(waiting(printed)) });
+        await Promise.allSettled(announced);
+        if (!announced.length && (relay.url || relay.code)) await waiting(relay);
         if (!relay.loggedIn) { await report(false, relay.error ?? 'the login did not complete'); continue; }
         const smoke = await runSmokePrompt(provider, home, options);
         await report(smoke.healthy, smoke.healthy ? null : smoke.error);

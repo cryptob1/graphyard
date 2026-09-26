@@ -1,6 +1,6 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { generateKeyPairSync, randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -22,7 +22,8 @@ const coordinator: Principal = { id: 'master', role: 'coordinator' };
 const principals = [operator, coordinator];
 const tokens = new Map(principals.map(p => [p.id, `${p.id}-${'t'.repeat(40)}`]));
 const HOST = 'connect-host-1';
-const KEY = 'sk-test-secret-key-1234567890-abcdefghijklmnop';
+/** A throwaway key made per run, so no key-shaped literal sits in the repository's history. */
+const KEY = `fixture-${randomUUID()}`;
 
 let database: EmbeddedPostgres, store: Store, engine: Engine;
 let http: ReturnType<typeof server>, url: string, scratch: string, bin: string;
@@ -40,16 +41,17 @@ before(async () => {
   http = server(engine, principals.map(p => ({ ...p, token: tokens.get(p.id)! })));
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as any).port}`;
-  // The provider CLIs this host pretends to have: `login` prints a URL and code, then writes the
-  // login file; anything else is the smoke prompt answering fine. Real spawn, real PATH — only the
-  // executables are fakes.
+  // The provider CLIs this host pretends to have: `login` prints a URL and code, then blocks — as
+  // a real device login does — until the operator signs in (the test drops `signed-in` into the
+  // login home), and only then writes the login file; anything else is the smoke prompt answering
+  // fine. Real spawn, real PATH — only the executables are fakes.
   for (const command of ['codex', 'claude', 'opencode', 'cursor-agent']) {
     await writeFile(join(bin, command), [
       '#!/bin/sh',
       'case "$1" in',
       '  login)',
       '    echo "Visit https://example.com/device and enter code ABCD-1234"',
-      '    sleep 0.2',
+      '    while [ ! -f "$CODEX_HOME/signed-in" ]; do sleep 0.05; done',
       '    printf \'{"tokens":{"access_token":"fake-token"}}\\n\' > "$CODEX_HOME/auth.json"',
       '    ;;',
       '  *) exit 0;;',
@@ -182,7 +184,23 @@ test('unit:api-key-sealed-to-host — a pasted key is sealed to the host, stored
 
 test('unit:subscription-login-relayed — the provider login runs on the host, its URL and code reach the UI, and the card turns healthy once the login file appears and the smoke passes', async () => {
   await ok('agent-registry/connect', operator, { host: HOST, provider: 'chatgpt', reason: 'Connect the ChatGPT subscription' });
-  const reports = await runWorker();
+  const working = runWorker();
+  // While the login still waits on the operator, the URL and code are already on the card.
+  let pending: ConnectView | undefined;
+  for (const deadline = Date.now() + 10_000; Date.now() < deadline; await new Promise(resolve => setTimeout(resolve, 25))) {
+    pending = (await connectViews()).find(entry => entry.provider === 'chatgpt');
+    if (pending?.state === 'waiting-login' && pending.url && pending.code) break;
+  }
+  assert.equal(pending?.state, 'waiting-login', 'the connect waits on the operator\'s sign-in');
+  assert.equal(pending!.url, 'https://example.com/device', 'the sign-in URL reaches the UI while the login is pending');
+  assert.equal(pending!.code, 'ABCD-1234', 'the code reaches the UI while the login is pending');
+  const pendingHome = join(scratch, 'agents', pending!.name!);
+  await assert.rejects(stat(join(pendingHome, 'auth.json')), 'no login file exists before the operator signs in');
+  const pendingCard = renderToStaticMarkup(createElement(ConnectCard, { connect: pending! }));
+  assert.ok(pendingCard.includes('Finish the sign-in in your own browser') && pendingCard.includes('https://example.com/device') && pendingCard.includes('ABCD-1234'), 'the pending card shows the URL and code to finish the sign-in with');
+  // The operator finishes the sign-in in their own browser; the login writes its file and exits.
+  await writeFile(join(pendingHome, 'signed-in'), '');
+  const reports = await working;
   assert.equal(reports[0].state, 'healthy', `the subscription connected: ${reports[0].detail}`);
   const view = (await connectViews()).find(entry => entry.provider === 'chatgpt')!;
   assert.equal(view.state, 'healthy');
@@ -264,4 +282,20 @@ test('connect writes — the provider auth file lands at mode 0600 merged over w
   const stored = JSON.parse(await readFile(join(home, 'opencode', 'auth.json'), 'utf8'));
   assert.equal(stored['zai-coding-plan'].key, KEY);
   assert.equal((await stat(join(home, 'opencode', 'auth.json'))).mode & 0o777, 0o600);
+});
+
+test('connect upkeep — a pending connect can be cancelled, and each host re-registers an unchanged key without appending', async () => {
+  const requested = await ok('agent-registry/connect', operator, { host: 'connect-host-down', provider: 'cursor', reason: 'Connect Cursor on a host whose executor is down' });
+  assert.equal((await ok(`agent-registry/connect/${requested.id}/cancel`, operator, {})).state, 'cancelled', 'a pending connect is cancelled from the card');
+  assert.equal((await call(`agent-registry/connect/${requested.id}/cancel`, operator, {})).status, 409, 'a finished connect cannot be cancelled again');
+  const count = async () => Number((await store.pool.query("SELECT count(*) FROM events WHERE work_id IS NULL AND kind='connect-account.host-key'")).rows[0].count);
+  const second = generateKeyPairSync('ec', { namedCurve: 'prime256v1' }).publicKey.export({ type: 'spki', format: 'der' }).toString('base64');
+  await ok('agent-registry/connect/host-key', coordinator, { host: 'connect-host-2', publicKey: second });
+  const registered = await count();
+  // Two hosts ticking in turn: each one's unchanged key is found by host, not by the newest row.
+  for (let tick = 0; tick < 3; tick++) {
+    await runWorker();
+    await ok('agent-registry/connect/host-key', coordinator, { host: 'connect-host-2', publicKey: second });
+  }
+  assert.equal(await count(), registered, 'no host-key event is appended for an unchanged key');
 });

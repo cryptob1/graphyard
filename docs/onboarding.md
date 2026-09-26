@@ -25,25 +25,26 @@ The managed `AGENTS.md` states **every session Graphyard launches receives its i
 
 ### Connect an account
 
-Accounts connect in the UI, no shell: Settings › **Agents** › **Connect an account**. Pick a provider (z.ai, Anthropic API, OpenAI API, Claude, ChatGPT/Codex or Cursor); paste its key or start its login. A pasted key is sealed to the host's public key in the browser (the server relays ciphertext only); the executor writes it into the login home's provider auth file (mode 0600), smoke-tests it, and the card turns healthy or shows the error. A subscription login shows the URL and code to finish in your own browser. The host executor registers host keys and performs connects; it must be running. Strong accounts default to worker and reviewer, cheap models (GLM, Flash-class) to research, approver and the unit producer — appended to each failover order; **change** opens the role editor.
+No shell: Settings › **Agents** › **Connect an account**. Pick a provider; paste its key or start its login. A pasted key is sealed to the host's public key in the browser (the server relays ciphertext only); the host writes it into the provider's auth file (mode 0600) and smoke-tests it; the card shows healthy or the error. A subscription login shows its URL and code while it waits; finish it in your browser. **Cancel** stops an unfinished connect. The host's executor must be running. Strong accounts default to worker and reviewer, cheap models (GLM, Flash-class) to research, approver and the unit producer — appended to each failover order; **change** opens the role editor.
 
 ### Agent environments
 
 Every account has a login home under `~/.coding_agents`, selected by `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_DATA_HOME` or `CURSOR_CONFIG_DIR`; Graphyard's tokens go in `~/.config/graphyard/` (mode 0600). `master environments --create claude` makes a fresh home; `--apply` reports quota and writes profiles.
 
-Profiles run `"approvals": "auto"`; `"prompt"` is refused at launch ([approval modes](master-agent-sessions.md#approval-modes)).
+Profiles run `"approvals": "auto"` (trade-off: unattended sessions); `"prompt"` is refused at launch ([approval modes](master-agent-sessions.md#approval-modes)).
 
 ### Configure the fleet
 
 The **agent registry** (Settings › **Agents**) records runtimes, accounts, roles and policies; **Advanced** holds its forms. A host with logged-in CLIs can propose:
 
 ```sh
+node "$GRAPHYARD_CLI" master registry propose
 node "$GRAPHYARD_CLI" master registry propose --apply
 ```
 
 ### Add a runtime
 
-Advanced, or the CLI — dash-led values onto their flags with `=`:
+Advanced, or the CLI (dash-led values take `=`):
 
 ```sh
 node "$GRAPHYARD_CLI" master registry runtime set aider --kind aider --arg=--yes-always \
@@ -81,7 +82,7 @@ node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST   # installs the ex
 node "$GRAPHYARD_CLI" master start codex
 ```
 
-Run it under an OS identity whose GitHub credentials workers cannot read. `--browser-profile` is the administrator's GitHub-signed-in Chrome profile, for `master browser` flows; *Confirm access* in GitHub Mobile stays human-only.
+Run it under an OS identity whose GitHub credentials workers cannot read. `--browser-profile` is the administrator's GitHub-signed-in Chrome profile, for `master browser` flows; *Confirm access* in GitHub Mobile stays human-only. Add the reviewer: `master reviewer setup`, `master reviewer add PROFILE` ([Claude](../examples/master/claude-reviewer.json)).
 
 ### The loop must be supervised
 

@@ -17,9 +17,9 @@ export interface ConnectView {
 export interface ConnectProviderView { id: string; label: string; kind: 'api-key' | 'subscription'; tier: string; help: string }
 export interface ConnectHostView { host: string; publicKey?: string; registeredAt: string }
 
-const openState = (state: ConnectView['state']) => state === 'pending' || state === 'claimed' || state === 'connecting';
-const stateText = (connect: ConnectView) => openState(connect.state) ? 'Connecting…'
-  : connect.state === 'waiting-login' ? 'Waiting for you to finish the sign-in'
+const openState = (state: ConnectView['state']) => state === 'pending' || state === 'claimed' || state === 'connecting' || state === 'waiting-login';
+const stateText = (connect: ConnectView) => connect.state === 'waiting-login' ? 'Waiting for you to finish the sign-in'
+  : openState(connect.state) ? 'Connecting…'
   : connect.state === 'healthy' ? 'Connected' : connect.state === 'failed' ? 'Failed' : 'Cancelled';
 
 /** One connect in flight or finished: what the provider's login printed, and why it failed when it did. */
