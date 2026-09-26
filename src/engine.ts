@@ -199,14 +199,6 @@ export async function readAttestations(db: { query: (text: string, values: unkno
   return attestationsFromLedger(rows.map(row => ({ seq: Number(row.seq), actor: row.actor, kind: row.kind, at: new Date(row.created_at).toISOString(), details: row.details ?? undefined, workEpoch: row.work_epoch ?? undefined })));
 }
 /**
- * Apply this repository's scope rule to an open request and record what it decided (GY-85).
- *
- * The verdict is recomputed from the item's own criteria and the documentation rule, never taken
- * from a caller, so it grants no authority to whoever asked. An approved widening is applied to
- * the item exactly as an operator widening would be; a refusal becomes the item's blocker, so the
- * ready gate holds it until somebody decides the scope the item does not already carry.
- */
-/**
  * A scope request belongs to the attempt that filed it (GY-597). Once that attempt has ended —
  * submitted, released, lapsed, reworked or revised away — nobody is left to act on its answer,
  * and a refusal it earned would hold every later attempt at the ready gate. Closing it lifts the
@@ -225,6 +217,14 @@ export function closeEndedScopeRequest(work: Work, now: Date, by: string) {
 }
 /** The commands that end an attempt, or clear what an ended one left behind, and so close its scope request. */
 const attemptEndingCommands = new Set<string>(['submit', 'release', 'rework', 'requirements', 'unblock']);
+/**
+ * Apply this repository's scope rule to an open request and record what it decided (GY-85).
+ *
+ * The verdict is recomputed from the item's own criteria and the documentation rule, never taken
+ * from a caller, so it grants no authority to whoever asked. An approved widening is applied to
+ * the item exactly as an operator widening would be; a refusal becomes the item's blocker, so the
+ * ready gate holds it until somebody decides the scope the item does not already carry.
+ */
 function applyScopeDecision(work: Work, request: NonNullable<Work['scopeRequest']>, now: Date): ScopeDecision {
   const verdict = decideScopeRequest(work, request);
   const decision: ScopeDecision = { state: verdict.state, reason: verdict.reason, at: now.toISOString(), decidedBy: 'graphyard',
@@ -1172,14 +1172,16 @@ export class Engine {
         // No execution is recalled: the revocation withdraws the authorization, and the next
         // observation fails the 'Graphyard / merge' check and dequeues the pull request (GY-258).
       }
-      // A widening that covers an open scope ask is the answer to it: the deterministic rule the
-      // request named has been applied, so the request closes rather than waiting on nobody.
       // A scope request belongs to the attempt that filed it (GY-597): a command that ended that
       // attempt, or an operator unblocking the item after it ended, closes it with the reason, so
-      // its refusal no longer holds the next attempt at the ready gate. The worker's own typed
-      // request is the exception: its release is the hand-off that puts the refusal to a decider.
+      // its refusal no longer holds the next attempt at the ready gate. Filing the request does not
+      // end the attempt, so a refusal holds the item only while the attempt that asked keeps its
+      // lease; once that attempt submits, releases or lapses, the request closes and the refusal
+      // is lifted like any other.
       const closedScope = attemptEndingCommands.has(command) ? closeEndedScopeRequest(work, now, command) : null;
       if (closedScope) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'scope.closed', JSON.stringify({ details: closedScope })]);
+      // A widening that covers an open scope ask is the answer to it: the deterministic rule the
+      // request named has been applied, so the request closes rather than waiting on nobody.
       if (command === 'requirements') resolveSatisfiedScopeRequests(work, path => (work!.plannedFiles ?? []).some(planned => pathScopeContains(planned, path)), now);
       retainQuarantineFence(work);
       // Delivery is an immutable snapshot. A late containment cleanup or a post-deployment fact may
