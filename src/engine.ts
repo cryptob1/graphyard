@@ -11,7 +11,7 @@ import { Refusal } from './model/refusal.js';
 import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
 import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
-import { branchContamination, nextQueueEntries, disprovedConflict, currentRestore, decideIdentityCarry, defaultMergeBatchSize, mergeBatchSizeEvent, dismissedApproval, keptTipCarry, onto, pendingRestore, reviewedFilesOf, queueHistoryLimit, queueSequencingReason, reconciliationRefusalPrefix, reconcileCheckReruns, tipReplacesHead, checkRerunLimit, type BaseRefresh, type CheckRerun, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type QueueSpeculation, type RestoredApproval } from './merge-queue.js';
+import { branchContamination, nextQueueEntries, disprovedConflict, currentRestore, decideIdentityCarry, defaultMergeBatchSize, mergeBatchSizeEvent, dismissedApproval, keptTipCarry, onto, pendingRestore, reviewedFilesOf, queueHistoryLimit, queueSequencingReason, reconciliationRefusalPrefix, reconcileCheckReruns, rerunFailedChecksEvent, tipReplacesHead, checkRerunLimit, type BaseRefresh, type CheckRerun, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type QueueSpeculation, type RestoredApproval } from './merge-queue.js';
 import { queueEjectionRecord } from './model/queue.js';
 import { githubFromEnv, mergeBandQueueDepth } from './github.js';
 import { regressionRefusals } from './regression-guard.js';
@@ -30,7 +30,7 @@ import { beginAttempt, endAttempt, endLapsedAttempt, recordIntervention, recordR
 import { foldDecisions, type Decision } from './model/approval.js';
 import { coveringWindow, directMergeAuthorization, directMergeFromEnv, directMergeWindows, sweepDirectMerges, type DirectMergeWindow } from './direct-merge.js';
 import { repairAuditEvent, repairScopeRefusal, type RepairAudit } from './master/repair-lane.js';
-import { defaultRerunFailedChecks } from './master/profiles.js';
+import { defaultRerunFailedChecks, maxRerunFailedChecks } from './master/profiles.js';
 
 const epoch = z.number().int().positive();
 const sha = z.string().regex(/^[a-f0-9]{40}$/);
@@ -337,9 +337,16 @@ export class Engine {
   }
   /**
    * How many times a required check that failed on a candidate sha is rerun before the failure
-   * counts (GY-516): the product default `mergeQueue.rerunFailedChecks` (src/master/profiles.ts); 0 disables.
+   * counts (GY-516): `mergeQueue.rerunFailedChecks` as the master publishes it, else the product
+   * default (src/master/profiles.ts); 0 disables.
    */
   rerunFailedChecks = defaultRerunFailedChecks;
+  /** `mergeQueue.rerunFailedChecks` as the master last published it (POST /api/merge-queue), read back from the installation ledger, else the default. */
+  async loadRerunFailedChecks() {
+    const row = (await this.store.pool.query('SELECT (payload->>\'rerunFailedChecks\')::int AS reruns FROM events WHERE work_id IS NULL AND kind=$1 ORDER BY seq DESC LIMIT 1', [rerunFailedChecksEvent])).rows[0];
+    this.rerunFailedChecks = Number.isSafeInteger(row?.reruns) && row.reruns >= 0 && row.reruns <= maxRerunFailedChecks ? row.reruns : defaultRerunFailedChecks;
+    return this.rerunFailedChecks;
+  }
   /**
    * Records the outcome of asking GitHub to rerun an owed check (GY-516), made by the integration
    * job outside any transaction: `requested` holds the failure until the rerun concludes,

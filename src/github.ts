@@ -1692,16 +1692,16 @@ export const headObservationSeconds = 20;
 export const idleObservationSeconds = 300;
 /** Consecutive permission refusals a job may retry at the normal cadence before it is held. */
 export const permissionRefusalLimit = 3;
-/** How often the job loop re-reads the batch size the master published (GY-330). */
+/** How often the job loop re-reads the merge-queue settings the master published (GY-330, GY-516). */
 export const mergeBatchSizeRefreshMs = 30_000;
 const batchSizeRead = new WeakMap<Engine, number>();
 export async function processJob(engine: Engine, github: GitHub) {
-  // The batch size is the master's configuration, published to the installation ledger; a
-  // restarted server reads it back here before the next evaluation it runs.
+  // The batch size and the rerun count (GY-516) are the master's configuration, published to the
+  // installation ledger; a restarted server reads them back here before the next evaluation it runs.
   const readAt = batchSizeRead.get(engine);
   if (readAt === undefined || Date.now() - readAt >= mergeBatchSizeRefreshMs) {
     batchSizeRead.set(engine, Date.now());
-    await engine.loadMergeBatchSize().catch(() => batchSizeRead.delete(engine));
+    await Promise.all([engine.loadMergeBatchSize(), engine.loadRerunFailedChecks()]).catch(() => batchSizeRead.delete(engine));
   }
   const job = await engine.store.takeJob();
   if (!job) return;

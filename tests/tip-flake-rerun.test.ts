@@ -8,7 +8,9 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { processJob, type GitHub } from '../src/github.js';
-import { checkRerunVisibilityMs, queueRef, reconcileCheckReruns, tipVerdict, type QueuePlacement, type QueueSpeculation } from '../src/merge-queue.js';
+import { server } from '../src/server.js';
+import { daemonEffects } from '../src/master-daemon.js';
+import { checkRerunVisibilityMs, queueRef, reconcileCheckReruns, rerunFailedChecksEvent, tipVerdict, type QueuePlacement, type QueueSpeculation } from '../src/merge-queue.js';
 import { defaultRerunFailedChecks, masterConfigSchema, maxRerunFailedChecks, rerunFailedChecks } from '../src/master/profiles.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 
@@ -184,17 +186,47 @@ test('unit:tip-flake-rerun-configurable — mergeQueue.rerunFailedChecks default
   assert.throws(() => masterConfigSchema.parse({ ...config, mergeQueue: { rerunFailedChecks: maxRerunFailedChecks + 1 } }));
   assert.throws(() => masterConfigSchema.parse({ ...config, mergeQueue: { rerunFailedChecks: -1 } }));
 
-  // Disabled: the first failure ejects exactly as before, and GitHub is never asked.
-  await clearQueue();
-  engine.rerunFailedChecks = 0;
+  // Disabled end to end: the master publishes `mergeQueue.rerunFailedChecks: 0` from its own config
+  // (POST /api/merge-queue), the control plane applies it and keeps it in the installation ledger,
+  // and the first failure then ejects exactly as before, with GitHub never asked.
+  const tokens = { coordinator: 'm'.repeat(32), worker: 'w'.repeat(32) };
+  const http = server(engine, [{ id: 'master', role: 'coordinator', token: tokens.coordinator }, { id: 'worker-a', role: 'worker', token: tokens.worker }]);
+  await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
+  const url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
+  const api = async (path: string, token: string, data: unknown) => {
+    const response = await fetch(`${url}/api/${path}`, { method: 'POST', body: JSON.stringify(data), headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() } });
+    return { status: response.status, body: await response.json() };
+  };
+  let configured: number | undefined = 0;
+  const posted: unknown[] = [];
+  const effects = daemonEffects(process.cwd(), () => ({ url, run: {}, mergeQueue: { rerunFailedChecks: configured } }) as any, { snapshot: async () => ({ work: [], now: new Date().toISOString() }), executor: {} as any,
+    mutate: async (path: string, data: unknown) => { posted.push(data); const response = await api(path, tokens.coordinator, data); assert.equal(response.status, 200, JSON.stringify(response.body)); return response.body; } });
   try {
+    assert.equal((await api('merge-queue', tokens.worker, { rerunFailedChecks: 0 })).status, 403, 'only the master (or an operator) sets it');
+    assert.equal((await api('merge-queue', tokens.coordinator, { rerunFailedChecks: maxRerunFailedChecks + 1 })).status, 400);
+    assert.equal((await api('merge-queue', tokens.coordinator, {})).status, 400);
+    await effects.publishMergeBatchSize!();
+    await effects.publishMergeBatchSize!();
+    assert.deepEqual(posted, [{ batchSize: 4, rerunFailedChecks: 0 }], 'published once, not every cycle');
+    assert.equal(engine.rerunFailedChecks, 0, 'the control plane applies the master\'s setting at once');
+    assert.equal(await new Engine(store).loadRerunFailedChecks(), 0, 'a restarted control plane reads it back from the installation ledger');
+    await clearQueue();
     const work = await queuedTip('No rerun', sha40('a5'), sha40('b5'));
     const step = await reconcile(work, [run('test', 51, 'failure'), run('typecheck', 52, 'success')]);
     assert.deepEqual(step.reruns, []);
     assert.equal(step.work.queue ?? null, null);
     assert.equal(step.work.queueEjection!.reason, `Required CI check test did not pass on speculative tip ${sha40('a5').slice(0, 12)}`);
     assert.equal(step.work.checkReruns ?? null, null);
-  } finally { engine.rerunFailedChecks = defaultRerunFailedChecks; }
+    // Removing the setting publishes the product default again.
+    configured = undefined;
+    await effects.publishMergeBatchSize!();
+    assert.deepEqual(posted.at(-1), { batchSize: 4, rerunFailedChecks: 1 });
+    assert.equal(await new Engine(store).loadRerunFailedChecks(), 1);
+    assert.equal((await store.pool.query('SELECT count(*)::int AS n FROM events WHERE work_id IS NULL AND kind=$1', [rerunFailedChecksEvent])).rows[0].n, 2, 'one ledger entry per change');
+  } finally {
+    engine.rerunFailedChecks = defaultRerunFailedChecks;
+    await new Promise<void>(resolve => http.close(() => resolve()));
+  }
 
   // A higher setting reruns that many times per sha and check.
   const head = sha40('a6'), base = sha40('b6');
