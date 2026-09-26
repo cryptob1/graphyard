@@ -5,7 +5,7 @@ import { type ContainmentAssessment, type HerdrAgent, type RoleCapacity, approve
 import { type ApprovalWatch, approvalWatchSchema, carriedSession, type DaemonActionKind, latencySampleSchema, message, scopeMeasurementSchema } from './state.js';
 import { decisionKey, scopeAnsweredAt, scopeKey, scopeOutcomeAnswered } from './reconcile.js';
 import { readyToRetry } from './sessions.js';
-import { approvalStep, boundDetail, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, maxApproverCloses, maxRefusalAnswers, maxApproverLaunches, maxDecisionRequests, namePaths, neededDecision, observedFrom, resolveCovers, reworkDecisionReason, refusalNamedIn, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, standingVerdict, withheldDecision } from './decisions.js';
+import { approvalStep, boundDetail, observationWakeDue, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, maxApproverCloses, maxRefusalAnswers, maxApproverLaunches, maxDecisionRequests, namePaths, neededDecision, observedFrom, resolveCovers, reworkDecisionReason, refusalNamedIn, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, standingVerdict, withheldDecision } from './decisions.js';
 import { type DaemonEffects, failoverKey, record, stoppedStates } from './effects.js';
 import { detectExhaustion } from '../model/capacity.js';
 import { capacityRefusal } from '../fleet.js';
@@ -38,8 +38,8 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   // One Herdr read serves the step, and is taken again after anything that changes the inventory.
   let inventory: { agents: HerdrAgent[]; available: boolean } | null = null;
   const sessions = async () => inventory ??= await effects.herdr?.() ?? { agents: await effects.agents(), available: true };
-  const note = async (key: string, item: Work, kind: DaemonActionKind, outcome: 'done' | 'failed', detail: string) =>
-    performed.push(await record(state, key, { kind, work: item.key, principal: null, state: outcome, detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+  const note = async (key: string, item: Work, kind: DaemonActionKind, outcome: 'done' | 'failed', detail: string, at = now()) =>
+    performed.push(await record(state, key, { kind, work: item.key, principal: null, state: outcome, detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, at, effects.persist));
   /**
    * End the agent registry session a watch's launch holds (GY-182). At a role concurrency of 1 a
    * live one refuses the next decision's approver, so it goes wherever the approver is closed or
@@ -435,6 +435,14 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     if (wait) {
       const waitKey = `wait:rework:${item.id}`;
       if (detailChanged(state.actions[waitKey], wait)) await note(waitKey, item, 'decision', 'done', wait);
+      // The refusal wakes the item's observation job at once (GY-710), and the rework is decided
+      // on the first cycle after that observation lands, not whenever the cadence reaches it. The
+      // wake is stamped on the snapshot's clock, the one the observation's time is on.
+      const wakeKey = `wake:observation:${item.id}`;
+      if (effects.wakeObservation && observationWakeDue(item, state.actions[wakeKey]?.at, clock, pause)) {
+        try { await effects.wakeObservation(item); await note(wakeKey, item, 'refresh', 'done', `Woke the observation job of ${item.key}: its rework waits for an observation newer than ${item.observation?.at ?? 'none'}`, clock); }
+        catch (error) { await note(wakeKey, item, 'refresh', 'failed', `Could not wake the observation job of ${item.key}: ${message(error)}`, clock); }
+      }
       return;
     }
     // A settled watch is supervised no more, but a registry session its close could not end still

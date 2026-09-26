@@ -96,6 +96,24 @@ export function reworkObservationWait(work: Work, now: number, pause: GitHubPaus
   return null;
 }
 
+/**
+ * GY-710. A step refused for want of a fresh observation wakes the item's observation job at once
+ * and waits for that observation to land, rather than for whatever the job's cadence brings round.
+ * One wake stands until an observation newer than it lands; a wake that brought none within this
+ * bound (the job failed, or the server lost it) is sent again. During a GitHub pause the job can
+ * observe nothing, so no wake is sent.
+ */
+export const observationWakeRetryMs = 5 * 60_000;
+export function observationWakeDue(work: Work, wokenAt: string | null | undefined, now: number, pause: GitHubPause | null): boolean {
+  if (pause || !work.submission) return false;
+  const woken = wokenAt ? Date.parse(wokenAt) : Number.NaN;
+  if (!Number.isFinite(woken)) return true;
+  const observed = work.observation ? Date.parse(work.observation.at) : Number.NaN;
+  // The woken observation landed and is already stale again: this refusal is a new one.
+  if (Number.isFinite(observed) && observed > woken) return true;
+  return now - woken >= observationWakeRetryMs;
+}
+
 export const routineDecisionActions = ['rework', 'recover', 'merge', 'resolve', 'requirements', 'close', 'attest'] as const;
 export type RoutineDecisionAction = typeof routineDecisionActions[number];
 /** `input` is what the decision names beyond what `decisionInput` derives from the item: a resolve's trigger, and the grounds binding a situated request judges (GY-407). */
