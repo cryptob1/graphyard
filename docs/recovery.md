@@ -23,7 +23,7 @@ Fencing `provider` conditions the write on the expected running release; `serial
 
 ```json
 {"environment":{"id":"production","revision":1},"target":{"id":"2026.09.17-4","revision":1},"expectedGeneration":7,
- "reason":"Generation 7 degraded: api-2 unhealthy after 2026.09.18-1","repairWorkId":"2f7d1a5e-3b8c-4d9e-8f10-1a2b3c4d5e6f"}
+ "reason":"api-2 unhealthy after 2026.09.18-1","repairWorkId":"2f7d1a5e-3b8c-4d9e-8f10-1a2b3c4d5e6f"}
 ```
 
 The executor claims via `POST /api/delivery/rollback-claim` (a retry returns the same operation):
@@ -32,7 +32,7 @@ The executor claims via `POST /api/delivery/rollback-claim` (a retry returns the
 {"rollbackId":"6c2f0e2e-5c3a-4c65-9d2b-1f1c8a3f9e01","registration":{"id":"production-rollback","revision":1},"epoch":3}
 ```
 
-It performs the provider write, reporting `applied`, `failed` or `unknown` via `POST /api/delivery/rollback-settle`:
+It writes and reports `applied`, `failed` or `unknown` via `POST /api/delivery/rollback-settle`:
 
 ```json
 {"rollbackId":"6c2f0e2e-5c3a-4c65-9d2b-1f1c8a3f9e01","operationId":"b8c9d0e1-2f3a-4b5c-8d6e-7f8091a2b3c4",
@@ -43,7 +43,7 @@ An `unknown` outcome blocks every successor until an `admin` settles it with evi
 
 ```json
 {"rollbackId":"6c2f0e2e-5c3a-4c65-9d2b-1f1c8a3f9e01","operationId":"b8c9d0e1-2f3a-4b5c-8d6e-7f8091a2b3c4","outcome":"applied",
- "reason":"Provider console shows deployment 01J8Q5 succeeded; executor host lost",
+ "reason":"Provider shows 01J8Q5 succeeded; executor host lost",
  "evidence":"https://railway.app/project/example/deployments/01J8Q5"}
 ```
 

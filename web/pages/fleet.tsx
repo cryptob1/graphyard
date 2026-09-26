@@ -114,12 +114,14 @@ export default function FleetPage({ api, status }: Pick<Dashboard, 'api' | 'stat
         <label>Audit reason<input name="reason" required placeholder="Recording the model and its price"/></label>
         <button disabled={busy}>Save model</button>
       </form>
-      <form className="grant-form" aria-label="Add or change an account" onSubmit={submit(() => 'agent-registry/accounts', form => ({ account: { name: field(form, 'name'), runtime: field(form, 'runtime'), model: field(form, 'model'), credential: { host: field(form, 'host'), home: optional(form, 'home') }, maxSessions: amount(form, 'maxSessions') }, reason: field(form, 'reason') }))}>
+      <form className="grant-form" aria-label="Add or change an account" onSubmit={submit(() => 'agent-registry/accounts', form => ({ account: { name: field(form, 'name'), runtime: field(form, 'runtime'), model: field(form, 'model'), credential: { host: field(form, 'host'), home: optional(form, 'home'), ...(optional(form, 'keyFile') ? { key: { file: field(form, 'keyFile'), variable: field(form, 'keyVariable') } } : {}) }, maxSessions: amount(form, 'maxSessions') }, reason: field(form, 'reason') }))}>
         <label>Account<input name="name" required placeholder="claude-b"/></label>
         <label>Runtime<select name="runtime" required>{fleet.runtimes.map(runtime => <option key={runtime.name}>{runtime.name}</option>)}</select></label>
         <label>Model<select name="model" required>{fleet.models.map(model => <option key={model.name}>{model.name}</option>)}</select></label>
         <label>Host that holds the login<input name="host" required defaultValue={fleet.accounts[0]?.host ?? ''} placeholder="build-host-1"/></label>
         <label>Login home on that host<input name="home" placeholder="/home/agent/.coding_agents/claude-b"/></label>
+        <label>API key file in that home (a name, never the key)<input name="keyFile" placeholder="zai.key"/></label>
+        <label>Variable the runtime reads the key from<input name="keyVariable" placeholder="ZAI_API_KEY"/></label>
         <label>Session limit<input name="maxSessions" type="number" min="1" step="1"/></label>
         <label>Audit reason<input name="reason" required placeholder="Second Claude subscription"/></label>
         <button disabled={busy}>Save account</button>

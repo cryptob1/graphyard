@@ -22,7 +22,7 @@ Text equivalent: in bootstrap the human operator supervises one worker while gat
 
 ![Who holds which authority: the operator, Graphyard, Herdr-hosted sessions, reviewer and producer.](diagrams/roles-and-authority.svg)
 
-Text equivalent: the operator sends human-only decisions to Graphyard; Herdr hosts the master (`coordinator`), slice lead and worker (epoch, worktree); the reviewer is a GitHub identity, the producer holds a grant. Merges go only through the guarded path. Colours follow the [legend](glossary.md#diagram-legend).
+Text equivalent: the operator sends human-only decisions to Graphyard; Herdr hosts the master (`coordinator`), slice lead and worker (epoch, worktree); the reviewer is a GitHub identity, the producer holds a grant. Each session uses its own credential; merges go only through the guarded path. Colours follow the [legend](glossary.md#diagram-legend).
 
 ## Correctness rules
 

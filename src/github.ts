@@ -8,7 +8,7 @@ import { readFile } from 'node:fs/promises';
 import type { Engine } from './engine.js';
 import { behindBaseHold, mechanicalHold } from './model/dispatch.js';
 import { CHECK_NAME, carriedApproval, demand, nativeReviewRequired, parseReviewerApps, reviewerProfileFor, reviewProviderOf, type Observation, type ReviewerApp, type ReviewerProfile, type ScopeFile, type TipMerge, type Work, type ReviewRequest } from './model.js';
-import { inPlannedScope } from './regression-guard.js';
+import { inPlannedScope, type LandedCandidate } from './regression-guard.js';
 import type { GitHubCacheStore } from './github-cache.js';
 import { nextAction } from './model/next-action.js';
 import { foldDecisions } from './model/approval.js';
@@ -1204,9 +1204,11 @@ export class GitHub {
     // of its own: the tip a queue republishes changes, the reviewed head under it does not.
     landing.examined = open.map(peer => `${peer.key}@${ownHeads(peer).join('+')}`).sort();
     const previous = work.observation && work.observation.candidate.sha === head ? work.observation.landing : undefined;
-    if (previous?.carried && previous.foreign && previous.base === base && JSON.stringify(previous.examined) === JSON.stringify(landing.examined) && !previous.carried.some(entry => entry.unverified)) return { ...landing, carried: previous.carried, foreign: previous.foreign };
+    // An answer recorded before landed peers were asked about (GY-744) may name one unlanded: it is asked again.
+    if (previous?.carried && previous.foreign && previous.landed && previous.base === base && JSON.stringify(previous.examined) === JSON.stringify(landing.examined) && !previous.carried.some(entry => entry.unverified)) return { ...landing, carried: previous.carried, foreign: previous.foreign, landed: previous.landed };
     const carried: CarriedCandidate[] = [];
     const foreign: ForeignCandidate[] = [];
+    const onBase: LandedCandidate[] = [];
     // The entries ahead are in a predicted base by construction, so their files standing in this
     // head as they stand there is the ordinary state of a queued tip and says nothing: two entries
     // ahead that both change one file leave it merged in the tip behind them. What such a tip would
@@ -1231,6 +1233,9 @@ export class GitHub {
     });
     for (const [index, peer] of open.entries()) {
       if (!containment[index]) continue;
+      // The owning item's record says unlanded; git decides (GY-744).
+      const merged = await this.landedOn(peer, branch.tip);
+      if (merged) { onBase.push(merged); continue; }
       foreign.push({ key: peer.key, pr: peer.candidate!.pr, head: peer.candidate!.sha });
       const entry: CarriedCandidate = { key: peer.key, pr: peer.candidate!.pr, head: peer.candidate!.sha, dropped: [] };
       for (const file of peer.observation!.scopeFiles ?? []) {
@@ -1246,7 +1251,21 @@ export class GitHub {
       }
       if (entry.dropped.length || entry.unverified) carried.push(entry);
     }
-    return { ...landing, carried, foreign };
+    return { ...landing, carried, foreign, landed: onBase };
+  }
+  /**
+   * GY-744. Whether a peer's pull request is already on the base branch tip, whatever its item
+   * records: one of its own heads is an ancestor of the tip, or GitHub reports it merged with a
+   * merge commit the tip holds (a squash or rebase merge leaves the head itself off the branch).
+   */
+  private async landedOn(peer: Work, tip: string): Promise<LandedCandidate | null> {
+    const pr = peer.candidate!.pr, head = peer.candidate!.sha;
+    let ancestor = false;
+    for (const sha of ownHeads(peer)) if (await this.contains(sha, tip)) { ancestor = true; break; }
+    const pull = await this.request(`/pulls/${pr}`);
+    const mergeSha = pull?.merged && typeof pull.merge_commit_sha === 'string' ? pull.merge_commit_sha as string : null;
+    if (!ancestor && !(mergeSha && await this.contains(mergeSha, tip))) return null;
+    return { key: peer.key, pr, head, mergeSha };
   }
   /** True when the commit took the path from the content the pull request delivered: one of its parents still holds that exact blob. */
   private async revertsDelivered(commit: string, path: string, files: any[]): Promise<boolean> {
@@ -2171,6 +2190,8 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
       const observation = await github.observe(work, all);
       work = await engine.observe(work.id, work.revision, observation, job.token);
       observed = true;
+      // A peer git shows landed while its item records it unlanded is delivered now (GY-744).
+      await engine.reconcileLanded(observation, all, peer => github.observe(peer, all));
       schedule.cadence = observationCadence(work, all.map(item => item.id === work!.id ? work! : item), now, previous, github.steadyStateMs?.(now.getTime()));
       // A branch carrying another item's unlanded commits is restored by the control plane (GY-127):
       // on its own for a tip the queue ejected, on the coordinator's request otherwise. The restored
