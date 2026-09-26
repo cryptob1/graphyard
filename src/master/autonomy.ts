@@ -26,7 +26,7 @@ import type { FilesystemProbe } from '../install/worktree-root.js';
 import { registeredLaunch } from '../model/session-state.js';
 import { liveReviewRequest } from '../model/dispatch.js';
 import { narrowRoleRuntime, piRuntimeSchema } from '../runner/payloads.js';
-import { applyDecision, approverRunOptions, narrowRunner, piApproverPrompt, registryRunner, startNarrowRun } from '../runner/roles.js';
+import { applyDecision, approverRunContext, approverRunOptions, narrowRunner, piApproverPrompt, registryRunner, startNarrowRun } from '../runner/roles.js';
 import type { Runner, RunRecord } from '../runner/types.js';
 import { autonomyPlan, autonomyReason, humanOnlyDecisions, masterHarness } from './harness.js';
 
@@ -298,9 +298,11 @@ async function startHeadlessApprover(root: string, config: MasterConfig, work: W
   const checkout = await allocateManagedCheckout(root, config, 'approval', work.key, work.candidate?.sha ?? '0'.repeat(40), randomUUID(), headless.filesystem);
   let started: ReturnType<typeof startNarrowRun>;
   try {
-    started = startNarrowRun({ runner, name, role: 'approver', work: work.key, subject: decision, checkout: checkout.directory,
+    const timeoutMs = piRuntimeSchema.parse(config.run.pi ?? {}).approverTimeoutMinutes * 60_000;
+    started = startNarrowRun({ runner, name, role: 'approver', work: work.key, subject: decision, checkout: checkout.directory, root,
+      context: approverRunContext(config.url, work.id, decision, timeoutMs, checkout.directory),
       prompt: piApproverWithAttestation(config, work, decision, root),
-      options: approverRunOptions(checkout.directory, decision, { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: config.approver!.credentialFile, GRAPHYARD_HOST_ID: config.hostId }, piRuntimeSchema.parse(config.run.pi ?? {}).approverTimeoutMinutes * 60_000),
+      options: approverRunOptions(checkout.directory, decision, { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: config.approver!.credentialFile, GRAPHYARD_HOST_ID: config.hostId }, timeoutMs),
       apply: async result => result.ok ? [await applyDecision(config.url, token, work, result.payload, headless.fetcher)] : [] });
   } catch (error) { await settleCheckout(root, checkout.directory); throw error; }
   return { ...started, settled: started.settled.finally(() => settleCheckout(root, checkout.directory)) };

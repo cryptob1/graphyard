@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { demand, operatorScopeIncludes, type Principal, type Work } from './model.js';
 import { humanOnlyRefusal, parkRule } from './model/human-request.js';
 import { defaultPiModel, piRunner } from './runner/pi.js';
+import { claimRunWatch, listRunDirectories, runsDirectory, superviseRun, writeRunOwner } from './runner/registry.js';
 import type { Run, RunResult, Runner } from './runner/types.js';
 import { save } from './store.js';
 import type { Services } from './server/routes.js';
@@ -291,6 +292,13 @@ export async function researchStep(input: ResearchStepInput): Promise<{ held: Se
     const record = currentResearch(work);
     if (record) {
       if (record.state !== 'running') continue;
+      // A run this process is not watching may be one a restart left running (GY-453): it is
+      // detached, so it is adopted from the run registry and its brief applied when it ends.
+      if (adoptResearch(input, work, revision)) {
+        held.add(work.id);
+        actions.push({ work: work.key, state: 'started', detail: `Adopted ${work.key}'s research run after a restart; dispatch waits for its brief` });
+        continue;
+      }
       if (researchHold(work, input.clock)) { held.add(work.id); continue; }
       // A run recorded as running that this process is not running and whose bound has passed:
       // the loop restarted under it. Its failure is recorded and the item is built without a brief.
@@ -308,19 +316,40 @@ export async function researchStep(input: ResearchStepInput): Promise<{ held: Se
       continue;
     }
     held.add(work.id);
+    const startedAt = new Date().toISOString();
     const run = input.runner.start(researchPrompt(input.config, work, input.settings), {
-      cwd: input.cwd, env: { GRAPHYARD_PI_ROLE: researchRole }, tool: researchTool, timeoutMs, validate: payload => researchBriefSchema.parse(payload) });
-    let streamed = 0, overBudget = false;
-    run.onEvent(event => {
-      if (event.kind !== 'message' && event.kind !== 'tool-end') return;
-      streamed += estimatedTokens(event.text);
-      if (streamed > input.settings.tokenBudget && !overBudget) { overBudget = true; run.cancel(`the run streamed about ${streamed} tokens, over its ${input.settings.tokenBudget}-token budget`); }
-    });
-    const settled = run.result().then(result => settleResearch(input, work, revision, result, overBudget)).catch(() => {}).finally(() => { if (live.get(work.id)?.run === run) live.delete(work.id); });
-    live.set(work.id, { revision, run, settled });
+      cwd: input.cwd, env: { GRAPHYARD_PI_ROLE: researchRole }, tool: researchTool, timeoutMs, validate: payload => researchBriefSchema.parse(payload), runs: runsDirectory(input.cwd) });
+    if (run.directory) {
+      try { claimRunWatch(run.directory); writeRunOwner(run.directory, { name: `research:${work.key}`, role: 'research', work: work.id, subject: revision, context: {}, startedAt }); }
+      catch { /* watched here all the same; only an adoption after a restart is lost */ }
+    }
+    followResearch(input, work, revision, run, startedAt);
     actions.push({ work: work.key, state: 'started', detail: `Researching ${work.key} on ${input.settings.model} before build (at most ${input.settings.timeoutMinutes} minutes and ${input.settings.tokenBudget} tokens); dispatch waits for its brief` });
   }
   return { held, actions };
+}
+
+/** Watch a research run — started here or adopted — against its token budget, and record how it ended, once. */
+function followResearch(input: ResearchStepInput, work: Work, revision: string, run: Run<ResearchBrief>, startedAt: string) {
+  let streamed = 0, overBudget = false;
+  run.onEvent(event => {
+    if (event.kind !== 'message' && event.kind !== 'tool-end') return;
+    streamed += estimatedTokens(event.text);
+    if (streamed > input.settings.tokenBudget && !overBudget) { overBudget = true; run.cancel(`the run streamed about ${streamed} tokens, over its ${input.settings.tokenBudget}-token budget`); }
+  });
+  const settled = superviseRun({ runner: input.runner, run, name: `research:${work.key}`, role: 'research', work: work.id, subject: revision, startedAt,
+    apply: async result => { await settleResearch(input, work, revision, result, overBudget); return [{ subject: `research ${revision}`, outcome: 'applied' as const, detail: result.ok ? 'brief recorded' : `failure recorded: ${result.failure.reason}` }]; } })
+    .then(() => {}, () => {}).finally(() => { if (live.get(work.id)?.run === run) live.delete(work.id); });
+  live.set(work.id, { revision, run, settled });
+}
+/** Adopt the research run a restart left for this revision, when the registry on disk holds one. */
+function adoptResearch(input: ResearchStepInput, work: Work, revision: string) {
+  if (!input.runner.adopt) return false;
+  const found = listRunDirectories(runsDirectory(input.cwd)).find(entry => !entry.record && entry.owner.role === 'research' && entry.owner.work === work.id && entry.owner.subject === revision);
+  if (!found || !claimRunWatch(found.directory)) return false;
+  const run = input.runner.adopt<ResearchBrief>(found.directory, { tool: researchTool, timeoutMs: input.settings.timeoutMinutes * 60_000, validate: payload => researchBriefSchema.parse(payload) });
+  followResearch(input, work, revision, run, found.owner.startedAt);
+  return true;
 }
 
 /** Record how a run ended: its brief, or its failure. Either way the item is dispatched on the next cycle. */

@@ -1,6 +1,7 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { existsSync, readdirSync } from 'node:fs';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -14,10 +15,16 @@ import { processJob } from '../src/github.js';
 import { Refusal, type Principal, type Work } from '../src/model.js';
 import { approverSessionName, decisionInput, masterConfigSchema, mergeExecutor, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { adoptHeadlessRuns } from '../src/daemon/run.js';
+import { maxApproverLaunches, maxLostApproverRuns } from '../src/daemon/decisions.js';
+import { adoptRuns, detachRuns, liveRuns, pruneRunDirectories, runDirectoryRetentionMs, runsDirectory, watchedRuns, withRunnerAgents, type Applied } from '../src/runner/registry.js';
+import { applyDecision, approverRunOptions, startNarrowRun } from '../src/runner/roles.js';
+import type { DecidePayload } from '../src/runner/payloads.js';
+import type { RunRecord, RunResult } from '../src/runner/types.js';
 import { Launcher } from '../src/daemon/cycle.js';
 import { successorWidening } from '../src/model/successors.js';
 import { systemInvariants, type InvariantCheck } from '../src/model/invariants.js';
-import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } from './helpers/soak-world.js';
+import { SimulatedGitHub, SimulatedHerdr, SimulatedPi, clock, clockSql, hour, minute, sha } from './helpers/soak-world.js';
 
 /**
  * GY-404: per-item gates cannot catch faults that emerge from interaction over time, so this runs
@@ -60,6 +67,9 @@ const plan = {
   items: 15, releaseEveryMs: 15 * minute, workMs: 20 * minute,
   rework: new Set([3, 7, 11]), deaths: new Set([5, 9]), deathAfterMs: 8 * minute,
   deploys: [2 * hour + 30 * minute, 5 * hour], split: { at: 45 * minute, item: 12 }, clean: 2, unstable: 4, slowRecompute: 8, exhaustedReviewer: 6,
+  // GY-453, the headless day: approver runs killed from outside, by item — the first four of item 5's
+  // (one more than the loop gives back), and every one of item 9's.
+  killedApprovers: new Map([[5, 4], [9, Number.POSITIVE_INFINITY]]),
 };
 const file = (n: number) => `src/soak/item-${n}.ts`;
 
@@ -99,11 +109,15 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
  * effects, standing for a change that breaks an invariant, so the soak shows it would fail.
  */
 let days = 0;
-async function simulateDay(options: { hours: number; regression?: 'approvers-left-open' }) {
+async function simulateDay(options: { hours: number; regression?: 'approvers-left-open'; headless?: boolean }) {
   const dayStart = clock.now();
   const github = new SimulatedGitHub({ repository, baseBranch: 'main', appId: 1234, ciAppId: 15368, reviewerApps, ciMs: 5 * minute, reviewMs: 3 * minute, firstPullRequest: 100 * ++days },
     [...Array.from({ length: plan.items }, (_, index) => file(index + 1)), 'README.md']);
   const herdr = new SimulatedHerdr();
+  // GY-453: approvers as headless Pi runs in the real run registry on disk, the loop restarting
+  // (detaching every run) after every other cycle a run is live, and adopting them on the next.
+  const headless = options.headless ? { pi: new SimulatedPi(), root: await mkdtemp(join(tmpdir(), 'graphyard-soak-runs-')), applied: [] as string[], submitted: [] as string[],
+    runs: new Map<string, number>(), launched: new Map<number, number>(), settling: new Map<string, Promise<RunRecord>>(), restarts: 0, adoptedLive: 0, adoptedEnded: 0 } : null;
   const adapter = github.adapter();
   const moveClock = async (ms: number) => { clock.advance(ms); await store.pool.query('UPDATE simulated_clock SET offset_ms=$1', [clock.offsetMs]); };
   await moveClock(0);
@@ -157,8 +171,33 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
 
   // ---- Approvers and producers: sessions the loop launches, each acting on the minute after. ----
   const pending: (() => Promise<void>)[] = [];
+  /** A headless approver's verdict, applied as the approver identity; each run's launch is counted once it is. */
+  const applyVerdict = (workId: string, run: string) => async (result: RunResult<DecidePayload>): Promise<Applied[]> => {
+    if (!result.ok) return [];
+    headless!.applied.push(run);
+    return [await applyDecision(url, token(principals.approver), { id: workId }, result.payload)];
+  };
   const approver: DaemonEffects['approver'] = async (work, decision) => {
-    const agentName = approverSessionName(work, decision), pane = herdr.open(agentName);
+    const agentName = approverSessionName(work, decision);
+    if (headless) {
+      const n = numberOf(work), launch = (headless.launched.get(n) ?? 0) + 1, run = `${decision}#${launch}`;
+      headless.launched.set(n, launch); headless.runs.set(decision, (headless.runs.get(decision) ?? 0) + 1);
+      const started = startNarrowRun({ runner: headless.pi, name: agentName, role: 'approver', work: work.key, subject: decision, root: headless.root, context: { workId: work.id, decision, run },
+        prompt: `Judge ${decision}`, options: approverRunOptions(headless.root, decision, {}, 30 * minute), apply: applyVerdict(work.id, run) });
+      const directory = started.run.directory!;
+      headless.settling.set(directory, started.settled);
+      // A run judges on the second minute after its launch, so a restart finds it live.
+      let judging = false;
+      const act = async () => {
+        if (!judging) { judging = true; pending.push(act); return; }
+        if (launch <= (plan.killedApprovers.get(n) ?? 0)) { headless.pi.kill(directory); return; }
+        headless.pi.submit(directory, { decision, approve: true, reason: `Approved: the loop's routine decision for ${work.key} rests on what it verified` });
+        headless.submitted.push(run);
+      };
+      pending.push(act);
+      return { agentName, pane: null, run: started.record, settled: started.settled };
+    }
+    const pane = herdr.open(agentName);
     pending.push(async () => { await api(principals.approver, 'POST', `work/${work.id}/approve`, { decision, reason: `Approved: the loop's routine ${decision} decision for ${work.key} rests on what it verified` }); herdr.status(pane, 'done'); });
     return { agentName, pane };
   };
@@ -173,7 +212,8 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
 
   // ---- Production: two deploys, each a new control-plane build serving the base tip it was cut from. ----
   const production = { build: sha('build', 0), sha: github.tip, deploys: [] as { at: number; build: string; sha: string }[] };
-  const snapshot = async () => { const read = await store.coordinationSnapshot(); return { work: read.work, now: read.now, jobs: read.jobs }; };
+  // Each day's loop sees only that day's items: an earlier day may leave some open in the shared store.
+  const snapshot = async () => { const read = await store.coordinationSnapshot(); return { work: read.work.filter(work => items.some(item => item.id === work.id)), now: read.now, jobs: read.jobs }; };
   const transport = async (path: string, data: any, key: string = id()) => {
     const match = /^work\/([^/]+)\/merge-acquire$/.exec(path);
     if (!match) throw new Error(`Unexpected mutation ${path}`);
@@ -184,8 +224,10 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   const executor = { principal: principals.coordinator.id, instance: `soak-${randomUUID()}` };
   const merge: DaemonEffects['merge'] = work => mergeExecutor(config, snapshot, transport, executor, randomUUID(), github.gh(repository))(work);
   const effects: DaemonEffects = {
-    agents: () => herdr.list(),
-    herdr: () => ({ agents: herdr.list(), available: true }),
+    agents: () => headless ? withRunnerAgents(herdr.list()) as ReturnType<SimulatedHerdr['list']> : herdr.list(),
+    herdr: () => ({ agents: headless ? withRunnerAgents(herdr.list()) as ReturnType<SimulatedHerdr['list']> : herdr.list(), available: true }),
+    ...(headless ? { adoptRuns: () => adoptRuns(headless.root, { approver: async owner => ({ options: approverRunOptions('', String(owner.context.decision), {}, 30 * minute),
+      apply: applyVerdict(String(owner.context.workId), String(owner.context.run)) }) }, { runner: headless.pi }) } : {}),
     credentials: async profiles => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])),
     snapshot, dispatch, requestProof, approver, merge,
     closeSession: pane => { if (options.regression === 'approvers-left-open' && /approver/.test(herdr.agents.get(pane)?.name ?? '')) return; herdr.close(pane); },
@@ -229,9 +271,17 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     await workersTick(now);
     if (!deploying) {
       for (const act of pending.splice(0)) await act();
+      // A watched run that ended has its verdict applied before the world moves on.
+      if (headless) await Promise.all([...headless.settling].filter(([directory]) => headless.pi.processes.get(directory)!.state !== 'live').map(([directory, settled]) => { headless.settling.delete(directory); return settled; }));
       await engine.reconcile();
       for (let guard = 0; guard < 200 && await jobsDue(); guard++) await processJob(engine, adapter);
       try {
+        if (headless) for (const run of await adoptHeadlessRuns(state, effects, () => {}, 'cycle')) {
+          headless.settling.set(run.directory, run.settled);
+          if (headless.pi.processes.get(run.directory)!.state === 'live') { headless.adoptedLive++; continue; }
+          // An adopted run that already ended is applied on adoption, before the cycle judges its decision.
+          headless.adoptedEnded++; await run.settled; headless.settling.delete(run.directory); await new Promise(resolve => setImmediate(resolve));
+        }
         const result = await runCycle(config, state, effects, clock.now, launcher); cycles++;
         reportedDispatches += result.actions.filter(action => action.kind === 'dispatch' && action.state === 'done').length;
         if (process.env.SOAK_TRACE) for (const action of result.actions) console.error(`+${Math.round(elapsed / minute)} ${action.kind} ${action.state} ${action.work ?? ''}: ${action.detail.slice(0, 300)}`);
@@ -240,6 +290,9 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       // The interval between cycles is when a hand-off launch settles; the day's clock waits for
       // them so the world never acts on a half-finished launch.
       await launcher.idle();
+      // The loop restarts after every other cycle a run is live, once its launches have settled as
+      // `runDaemon` lets them: it signals none, and the next cycle adopts them.
+      if (headless && cycles % 2 && headless.pi.live()) { detachRuns(); headless.settling.clear(); headless.restarts++; }
       for (const check of state.invariants.report as InvariantCheck[]) {
         if (check.observed) observed.add(check.invariant);
         if (!check.holds) violations.push(`${new Date(now).toISOString()} (+${Math.round(elapsed / minute)} min) ${check.line}`);
@@ -251,7 +304,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   }
 
   const final = (await store.list()).filter(item => items.some(entry => entry.id === item.id));
-  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart };
+  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, headless };
 }
 
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 180_000 }, async () => {
@@ -293,4 +346,33 @@ test('unit:soak-invariants-hold — a loop change that breaks an invariant fails
   assert.ok(violations.every(line => /lingering-sessions/.test(line)), `nothing else is violated: ${violations.filter(line => !/lingering-sessions/.test(line)).slice(0, 3).join('\n')}`);
   // The violation is a fault of its class on the loop's record, which files one item when it recurs.
   assert.equal(state.faults.instances.filter(instance => instance.kind === 'invariant:lingering-sessions' && instance.faultClass === 'session-liveness').length, 1);
+});
+
+test('unit:soak-invariants-hold — headless approver runs through loop restarts (GY-453): each adopted and applied exactly once, lost ones retried within a bound, the run registry bounded', { timeout: 120_000 }, async () => {
+  const { items, final, violations, failures, state, headless } = await simulateDay({ hours: 6, headless: true });
+  const { pi, root, applied, submitted, runs, restarts, adoptedLive, adoptedEnded } = headless!;
+  const keyOf = (n: number) => items[n - 1].key;
+  assert.deepEqual(violations, [], 'every system invariant holds after every cycle, across every restart');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  // Every item is delivered but the one whose approver is killed every time: its decision is escalated.
+  assert.deepEqual(final.filter(item => item.stage !== 'done' || !item.delivery).map(item => item.key), [keyOf(9)]);
+  // The loop restarted with runs live, and adopted both runs still live and runs that ended while unwatched.
+  assert.ok(restarts >= 3 && adoptedLive > 0 && adoptedEnded > 0, `restarts ${restarts}, adopted live ${adoptedLive}, adopted ended ${adoptedEnded}`);
+  // Exactly once: every submitted verdict applied once, whether its run was watched or adopted, and each on disk as applied.
+  assert.ok(submitted.length >= 4, `verdicts submitted: ${submitted.length}`);
+  assert.deepEqual([...applied].sort(), [...submitted].sort(), 'each submitted verdict applied exactly once');
+  // Bounded per decision, lost runs included: at most maxApproverLaunches + maxLostApproverRuns runs.
+  assert.ok([...runs.values()].every(count => count <= maxApproverLaunches + maxLostApproverRuns), `runs per decision: ${[...runs.values()].join(', ')}`);
+  const killed = Object.values(state.approvals).find(watch => watch.work === keyOf(9))!;
+  assert.equal(runs.get(killed.decision), maxApproverLaunches + maxLostApproverRuns, 'an approver killed every time is relaunched only within the bound');
+  assert.deepEqual([killed.launches, killed.lostRuns, !!killed.exhaustedAt, killed.settledAt], [maxApproverLaunches, maxLostApproverRuns, true, null], 'then its decision is escalated as unjudged');
+  assert.equal(final.find(item => item.key === keyOf(5))!.stage, 'done', 'an approver lost one time more than is given back still judges its decision');
+  // The registry is bounded: nothing left running or watched, one directory per run, each applied
+  // run recorded, and every one of them removed once past its retention.
+  assert.deepEqual([pi.live(), watchedRuns(), liveRuns().length], [0, 0, 0]);
+  const registry = runsDirectory(root);
+  assert.equal(readdirSync(registry).length, pi.started.length);
+  assert.equal(pi.started.filter(directory => existsSync(join(directory, 'record.json'))).length, pi.started.length, 'every run, lost ones included, has its record');
+  pruneRunDirectories(registry, clock.now() + runDirectoryRetentionMs + hour);
+  assert.deepEqual(readdirSync(registry), [], 'ended runs leave the registry once past their retention');
 });
