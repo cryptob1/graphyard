@@ -316,7 +316,7 @@ test('integration:registry-driven-selection — an executor\'s action runs on th
 
   // The approver's runtime comes from its role too — here a runtime with no login home and its own contract.
   const approverCalls: string[][] = [];
-  const approver = await launchApprover(root, readyWork('GY-950'), 'decision-1', undefined, [], herdr(approverCalls), probe);
+  const approver = await launchApprover(root, readyWork('GY-950'), 'decision-1', undefined, { agents: [], available: true }, herdr(approverCalls), probe);
   assert.equal(approver.account!.environment, 'muse-a');
   const started = expandTypedCommand(approverCalls.find(args => args[0] === 'pane' && args[1] === 'run')![3]);
   assert.equal(started.kind, 'muse'); assert.deepEqual(started.args.slice(0, 3), ['--approval-mode', 'never', '--trust-workspace']);
