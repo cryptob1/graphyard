@@ -625,7 +625,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       const report = await reclaimWorktrees(root, work, { idleMs, entries: trees.entries });
       const taken = new Set(report.applied ? report.removed : []);
       await writeWorktreeInventoryCache(root, { at: trees.at, entries: trees.entries.map(entry => ({ ...entry, dependencies: entry.dependencies.filter(dependency => !taken.has(dependency.path)) })),
-        held: trees.kept.filter(entry => !entry.reason.startsWith('Git refused')).map(entry => ({ path: entry.path, activityAt: trees.entries.find(tree => tree.path === entry.path)?.activityAt ?? 0, reason: entry.reason })) })
+        held: trees.held })
         .catch(error => report.errors.push(`Worktree inventory cache: ${writeFailure(error, 'Writing the worktree inventory cache').message}`));
       const withTrees = { ...report, trees };
       try { return { ...withTrees, checkouts: await reclaimCheckouts(root, config) }; }
