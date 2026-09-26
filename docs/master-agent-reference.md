@@ -79,7 +79,7 @@ An unexplained lapsed lease raises `lease-loss` (`blocked-awaiting-operator` and
 
 ## Fault classes
 
-Faults carry `faultClass` (`master status` `faults`); recurring classes file one item (`GRAPHYARD_FAULT_CLASS_*`). A section whose route fails is listed in `unavailable` (section, route, error); the report still returns.
+Faults carry `faultClass` (`master status` `faults`); recurring classes file one item (`GRAPHYARD_FAULT_CLASS_*`). A fault that keeps standing is one instance, even while its figures change (ages, counts, times, commit ids). A section whose route fails is listed in `unavailable` (section, route, error); the report still returns.
 
 ## Pipeline speed
 
