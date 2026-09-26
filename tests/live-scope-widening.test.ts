@@ -155,7 +155,9 @@ test('integration:scope-request-flow — the request surfaces to the master and 
   await engine.execute(implementer, 'release', work.id, { epoch: work.epoch }, randomUUID());
   work = await reload(work.id);
   assert.equal(scopeRequestAttention({ work: [work], now: new Date().toISOString() }).length, 0, 'a request whose lease ended is never surfaced');
-  await assert.rejects(approveScopeRequest(process.cwd(), masterScopeConfig(), [work.key], { coordinator: snapshotRead }), /no longer holds the lease/);
+  // The release ended the attempt that asked, so it closed the request (GY-597): nothing is left to approve.
+  assert.equal(work.scopeRequest, null, 'the ended attempt\'s request is closed');
+  await assert.rejects(approveScopeRequest(process.cwd(), masterScopeConfig(), [work.key], { coordinator: snapshotRead }), /no open scope request to approve/);
   work = await engine.execute(implementer, 'claim', work.id, {}, randomUUID());
   assert.equal(work.scopeRequest, null, 'a fresh attempt asks afresh');
 });
