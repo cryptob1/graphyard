@@ -2016,7 +2016,7 @@ export const idleObservationSeconds = 300;
 export const observationFreshnessMs = 120_000;
 /** Consecutive permission refusals a job may retry at the normal cadence before it is held. */
 export const permissionRefusalLimit = 3;
-/** How often the job loop re-reads the batch size the master published (GY-330). */
+/** How often the job loop re-reads the batch size and the parallel-tip window the master published (GY-330, GY-498). */
 export const mergeBatchSizeRefreshMs = 30_000;
 const batchSizeRead = new WeakMap<Engine, number>();
 /**
@@ -2125,18 +2125,21 @@ export function observationThroughputStatus(coordinator: { githubBudget?: ({ thr
  * budget (its non-304 requests), which is what the worker returns its paced slot with (GY-567).
  */
 export async function processJob(engine: Engine, github: GitHub, spent?: (charged: number) => void): Promise<boolean> {
-  // The batch size is the master's configuration, published to the installation ledger; a
-  // restarted server reads it back here before the next evaluation it runs.
+  // The batch size and the parallel-tip window are the master's configuration, published to the
+  // installation ledger; a restarted server reads them back here before the next evaluation it runs.
   const readAt = batchSizeRead.get(engine);
   if (readAt === undefined || Date.now() - readAt >= mergeBatchSizeRefreshMs) {
     batchSizeRead.set(engine, Date.now());
     await engine.loadMergeBatchSize().catch(() => batchSizeRead.delete(engine));
+    await engine.loadParallelTips().catch(() => batchSizeRead.delete(engine));
   }
   // The fleet is read before the claim, so the claim order can name it (GY-492): with a backlog
   // due, the merge-queue head's job is claimed first however recently it became due, instead of
   // waiting behind every older entry for a worker to reach it.
   const all = await engine.store.list();
-  const job = await engine.store.takeJob(observationClaimOrder(all, engine.mergeBatchSize, Date.now(), budgetTight(github.budget?.())), observationHeadCount(all, engine.mergeBatchSize));
+  // The band spans the parallel-tip window too (GY-498): every entry validated at once is claimed first.
+  const band = Math.max(engine.mergeBatchSize, engine.parallelTips);
+  const job = await engine.store.takeJob(observationClaimOrder(all, band, Date.now(), budgetTight(github.budget?.())), observationHeadCount(all, band));
   if (!job) return false;
   const startedAt = Date.now();
   let work: Work | undefined;

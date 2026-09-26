@@ -36,15 +36,15 @@ The gate requires `GITHUB_CI_APP_IDS` CI checks, current-head approval, trusted 
 
 ## Merge queue
 
-Once gated, a candidate's speculative tip (predicted base merged in), pushed onto the candidate branch and `refs/graphyard/queue/KEY`, binds every check, review and proof. A failed check, requested changes, a revoked proof, a conflict or rework ejects it to the back. One conflicting only with entries ahead of it re-enters unchanged once one lands or leaves; one leaving validation is skipped until revalidated. The App passes the check for an authorized head and merge group and asks GitHub to merge (queue, auto-merge or [direct](#direct-merges)); protection decides; withdrawal fails and dequeues; `master status` names `merge.enqueue.refused`.
+Once gated, a candidate's speculative tip (predicted base merged in), pushed onto the candidate branch and `refs/graphyard/queue/KEY`, binds all checks, reviews and proofs. Failed checks, requested changes, revoked proofs, conflicts or rework eject it to the back. One conflicting only with entries ahead of it re-enters unchanged once one lands or leaves; one leaving validation is skipped until revalidated. The App passes the check for authorized heads and merge groups, asking GitHub to merge (queue, auto-merge or [direct](#direct-merges)); protection decides; withdrawal fails and dequeues; `master status` names `merge.enqueue.refused`.
 
 ### Bindings and carry
 
 Reviews and proofs bind one head, base and policy revision. The queue head's tip merges moved bases: all carry if the clean merge kept the patch-id, else the approval if no reviewed file changed, disjoint-`scopeFiles` proofs. A republication reads the PR's reviews before force-pushing: an approval of the replaced tip carries onto a Graphyard-authored tip over the same author head and patch, and the App's own dismissal (patch unchanged) restores when observed — never a person's dismissal, moved author head or changed patch. Carried steps name their ground, carries and restores the review id and both tips; CI reruns. GitHub conflicts are test-merged; clean ones log `base.stale-mergeability`.
 
-### Batches
+### Parallel tips
 
-`mergeQueue.batchSize` (master config, default 4; 1 disables; published via `POST /api/merge-queue`) tests entries together: a pass merges members in order, a failure halves it until the culprit is ejected; batches behind an unpassed one eject nothing. A head batch tipless over ten minutes dissolves (`queue.batch-dissolved`).
+`mergeQueue.parallelTips` (master config, default 4, published via `POST /api/merge-queue`) stacked tips test at once; entries merge in order once every tip through theirs passes. A failing tip ejects its entry once those ahead pass; later tips rebuild. `master status` and Merge step list them.
 
 ### Direct merges
 

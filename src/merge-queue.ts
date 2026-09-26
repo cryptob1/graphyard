@@ -163,6 +163,12 @@ export interface QueueEntry {
    */
   batch?: MergeBatchView | null;
   /**
+   * The parallel tips this entry merges behind (GY-498): the window positions 1..position+1, each
+   * with what it holds and what CI said about it. Present only under a parallel-tip window, and
+   * only on an entry inside it; `tipValidation` reads it instead of the batch's combined tip.
+   */
+  tips?: TipView[] | null;
+  /**
    * When the entry's head batch last sat in 'testing' with no published tip (GY-506): the timer
    * the dissolution waits on. Kept on the head member's entry, dropped when the state passes.
    */
@@ -202,6 +208,27 @@ export const tipValidationPrefix = 'Merge queue is validating speculative tip ';
 export function tipValidation(work: Pick<Work, 'key' | 'candidate' | 'policyRevision'>, queue: QueueEntry | null, testReasons: string[]): string[] | null {
   const speculation = queue?.speculation, candidate = work.candidate;
   if (!speculation || !candidate || speculation.tip !== candidate.sha || speculation.base !== candidate.baseSha || speculation.policyRevision !== work.policyRevision) return null;
+  // Parallel tips (GY-498): the entry is validated by the window of tips it merges behind, each
+  // judged on its own observation. Every tip ahead of it passed and its own tip is the only one
+  // still unjudged: today's wording, naming its tip. Any earlier tip unjudged is named too, so CI
+  // runs on every tip of the window at once; an earlier failing tip is the queue resolving an
+  // inherited failure, which this entry waits out instead of being ejected for.
+  const tips = queue?.tips;
+  if (tips?.length) {
+    // A tip that is not published is not being validated: the placement's own reason says the
+    // predicted tip has not been published, and naming nothing here keeps that refusal standing.
+    const failing = tips.find(tip => tip.ci === 'fail' && tip.tip);
+    // Its own tip failed: attributed once every tip ahead passed; until then the tips ahead are
+    // still being validated and name themselves, since a failure among them would be inherited.
+    const ahead = tips.slice(0, -1).filter(tip => tip.ci !== 'pass' && tip.tip);
+    if (failing && failing === tips.at(-1) && ahead.length) return ahead.map(tip => `${tipValidationPrefix}${tip.tip?.slice(0, 12)}: speculative tip ${failing.tip?.slice(0, 12)} of ${work.key} failed ${failing.failedCheck}, and is attributed to it only once the tips ahead pass`);
+    if (failing && failing === tips.at(-1)) return testReasons.map(reason => `${tipValidationPrefix}${failing.tip?.slice(0, 12)}: ${reason}`);
+    if (failing) return [`Waiting for speculative tip ${failing.tip?.slice(0, 12)} to resolve: Required CI check ${failing.failedCheck} failed on it and ${work.key} is not the cause; its tip holds the same change and is rebuilt once the entry that caused it leaves the queue`];
+    const unjudged = tips.filter(tip => tip.ci !== 'pass' && tip.tip);
+    if (!unjudged.length) return null;
+    if (unjudged.length === 1 && unjudged[0] === tips.at(-1) && testReasons.length) return testReasons.map(reason => `${tipValidationPrefix}${unjudged[0].tip?.slice(0, 12)}: ${reason}`);
+    return unjudged.map(tip => `${tipValidationPrefix}${tip.tip?.slice(0, 12)}: the tips ahead of ${work.key}'s are still being validated`);
+  }
   const batch = queue?.batch;
   // A batch behind the head waits its turn: no CI is required of it until it heads the queue, and
   // its queue position already holds the merge. A member the plan merges is validated, and while
@@ -835,7 +862,7 @@ export function predictQueue(all: Work[], now: number): QueuePlacement[] {
  * Kept beside the messages above so a wording change is visible here.
  */
 export function queueSequencingReason(reason: string) {
-  return /^(Merge queue position \d+ of \d+: |Speculative tip on predicted base [0-9a-f]+ has not been published|Waiting for \S+ to publish its speculative tip$|Merge queue is validating speculative tip [0-9a-f]+: )/.test(reason) || !!predecessorWaitReason(reason);
+  return /^(Merge queue position \d+ of \d+: |Speculative tip on predicted base [0-9a-f]+ has not been published|Waiting for \S+ to publish its speculative tip$|Merge queue is validating speculative tip [0-9a-f]+: |Waiting for speculative tip [0-9a-f]+ to resolve: )/.test(reason) || !!predecessorWaitReason(reason);
 }
 export function queuePlacement(work: Work, all: Work[], now: number) {
   return predictQueue(all, now).find(placement => placement.id === work.id) ?? null;
@@ -881,7 +908,7 @@ export function unpublishableEntry(work: Work): { sequence: number; mergeSha: st
  * Explicit, observed failure of a queued entry's speculative validation. Missing or pending
  * inputs keep an entry queued; only a reported adverse result removes it.
  */
-export function ejectionReason(work: Work, ciAppIds: number[], all: Work[] = [], batch: MergeBatchView | null = null): string | null {
+export function ejectionReason(work: Work, ciAppIds: number[], all: Work[] = [], batch: MergeBatchView | null = null, window: TipWindowView | null = null): string | null {
   if (!work.queue || work.stage === 'done') return null;
   // A merged entry waits for its reconciliation, which delivers it and drops it from the order.
   // A refused reconciliation is a reported adverse conclusion about the entry itself (GY-94).
@@ -913,11 +940,29 @@ export function ejectionReason(work: Work, ciAppIds: number[], all: Work[] = [],
     const run = latestCheck(observation.checks.filter(entry => entry.name === name && ciAppIds.includes(entry.appId)));
     return !!run && failedConclusions.has(run.result);
   });
-  // A batch member's tip holds every member ahead of it, so a failure there is not yet its own
-  // (GY-330): it is ejected only when the batch plan isolates it — its tip fails on a prefix known
-  // to pass, or on the base — and otherwise stays queued while the bisection runs. A head that is
-  // not its published tip holds no other member, and fails on its own as ever.
+  // Under a parallel-tip window (GY-498) the prefix tips isolate the culprit in one round instead
+  // of a bisection. Outside the window nothing is required of the entry yet, and a failure on a
+  // tip it still holds is inherited from the entries ahead (the waiting batch's rule); a head that
+  // is not its published tip holds no other entry and fails on its own. Inside the window, the
+  // entry is ejected when its own tip is the FIRST failing one — the tip ahead of it passed, so
+  // the failure is what this entry's change added. An earlier failing tip, or a published tip
+  // whose prediction moved on (a predecessor landed or left; the tip is rebuilt there before it is
+  // judged again), means the failure is inherited: the entry stays queued.
   const speculation = work.queue.speculation;
+  const publishedTip = speculation?.tip === candidate!.sha && speculation.base === candidate!.baseSha;
+  if (check && window) {
+    if (!window.tips.length) return publishedTip ? null : `Required CI check ${check} did not pass on speculative tip ${tip}`;
+    const own = window.own;
+    if (!own?.tip && publishedTip) return null;
+    if (own && own.tip === candidate!.sha && window.firstFailure && window.firstFailure !== own) return null;
+    // Its own tip failing is attributed to it only once every tip ahead is a known pass (GY-471):
+    // a tip ahead still running may yet fail on the same change, and the failure is then inherited.
+    if (own && own.tip === candidate!.sha && !aheadPassed(window)) return null;
+    const passedAhead = own && own.tip === candidate!.sha && window.firstFailure === own && window.tips.length > 1
+      ? `, attributed to this entry: speculative tip ${window.tips.at(-2)!.tip?.slice(0, 12)} ahead of it passed ${check}`
+      : '';
+    return `Required CI check ${check} did not pass on speculative tip ${tip}${passedAhead}`;
+  }
   const planned = !!batch && speculation?.tip === candidate.sha && speculation.base === candidate.baseSha;
   const isolated = !planned || batch!.step.kind === 'eject' && batch!.step.member === work.key;
   if (check && isolated) return `Required CI check ${check} did not pass on speculative tip ${tip}${planned && batch!.size > 1 ? `, isolated by bisecting batch ${batch.batch} (${batch.members.join(', ')})` : ''}`;
@@ -1204,6 +1249,10 @@ export function describeGitHubQueue(work: Pick<Work, 'observation'>): string | n
 // named, while every passing prefix merges. The chain of speculative tips already makes each
 // prefix of the queue a commit of its own — an entry's tip holds every validated entry ahead of it
 // — so a batch's combined tip is its last member's tip, and each half is a prefix tip.
+// The live queue now validates under a parallel-tip window instead (GY-498, below): every entry is
+// judged on its own tip and a failure is attributed by prefix, so no bisection is needed. The
+// batch plan remains the reference model runMergeBatches drives and the fallback when no window is
+// passed; the published batch size still widens the observation band and the wake depth.
 
 /** Consecutive entries one combined tip validates when master config sets no `mergeQueue.batchSize`; 1 is one tip per entry. */
 export const defaultMergeBatchSize = 4;
@@ -1232,6 +1281,10 @@ export function sameMergeBatch(left: MergeBatchView | null | undefined, right: M
   if (left === right) return true;
   if (!left || !right) return false;
   return canonicalJson(left) === canonicalJson(right);
+}
+/** Whether a re-derived parallel-tip slice (GY-498) equals the stored one, content for content, as `sameMergeBatch` compares batch views. */
+export function sameTips(left: TipView[] | null | undefined, right: TipView[] | null | undefined): boolean {
+  return canonicalJson(left ?? null) === canonicalJson(right ?? null);
 }
 /** The installation-ledger event recording the batch size the master published (POST /api/merge-queue). */
 export const mergeBatchSizeEvent = 'merge-queue.batch-size';
@@ -1312,6 +1365,139 @@ export function tipVerdict(work: Work, ciAppIds: readonly number[] | null = null
   if (failed) return { result: 'fail', check: failed.name };
   return runs.every(entry => entry.run?.result === 'success') ? { result: 'pass' } : undefined;
 }
+
+// ---- Validating queue positions in parallel (GY-498) ---------------------------------------------
+// One combined tip at a time capped throughput: every entry waited for its predecessor's batch to
+// be judged and land, and a failure cost a bisection round per halving. As GitHub's own merge queue
+// and bors do, the queue instead validates speculative tips for the first `mergeQueue.parallelTips`
+// positions at once: tip k holds entries 1..k and is built on tip k-1 without waiting for tip k-1's
+// CI to finish, so all the window's tips run CI concurrently. An entry whose tip and every tip
+// ahead of it passed merges as soon as it heads the queue, with no CI left to wait for. When tip k
+// fails, the entries before it still merge; the failure is attributed to entry k — its tip is the
+// first failing one, so its change is what tip k-1 did not hold — and only the tips after k are
+// rebuilt on the new prediction. The verdicts come from the published tips' own observations, so
+// attribution needs no output reading: the prefix of passing tips isolates the culprit exactly as a
+// bisection would, in one round instead of log-many.
+
+/** How many queue positions are validated at once when master config sets no `mergeQueue.parallelTips`. */
+export const defaultParallelTips = 4;
+/** The largest parallel-tip window master config and the control plane accept. */
+export const maxParallelTips = 32;
+/** The installation-ledger event recording the parallel-tip window the master published (POST /api/merge-queue). */
+export const mergeParallelTipsEvent = 'merge-queue.parallel-tips';
+/** One in-flight speculative tip: what it holds, where it is published, and what CI said about it. */
+export interface TipView {
+  /** 1-based: this tip holds the first `position` validated entries. */
+  position: number;
+  /** The keys of the entries the tip holds, in queue order. */
+  entries: string[];
+  /** The published tip commit, or null while it is not published and bound for its entry. */
+  tip: string | null;
+  /** CI on the tip's required checks: `pass`, `fail`, `running` (some run reported and pending), or `none`. */
+  ci: 'pass' | 'fail' | 'running' | 'none';
+  /** The required check that failed, when `ci` is `fail`. */
+  failedCheck?: string;
+}
+/** The tips one queued entry merges behind, and what the window's verdicts mean for it. */
+export interface TipWindowView {
+  /** The entry's 0-based place in the validated chain. */
+  position: number;
+  /** The tips this entry merges behind: positions 1..position+1; empty once outside the window. */
+  tips: TipView[];
+  /** The first tip among them whose required checks failed, or null. */
+  firstFailure: TipView | null;
+  /** True when every tip this entry merges behind passed: nothing is left to wait for but its turn. */
+  validated: boolean;
+  /** The tip view of the entry's own published tip, when it is the current candidate; null otherwise. */
+  own: TipView | null;
+}
+/** True when every tip ahead of the entry's own passed: a failure on its own tip is then its change's. */
+export const aheadPassed = (view: Pick<TipWindowView, 'tips'>) => view.tips.slice(0, -1).every(tip => tip.ci === 'pass');
+/** The CI a published tip's required checks are at, read from the observation of exactly that commit. */
+function tipCi(work: Work, ciAppIds: readonly number[] | null): { ci: TipView['ci']; failedCheck?: string } {
+  const observation = work.observation, candidate = work.candidate;
+  if (!observation || !candidate || observation.candidate.sha !== candidate.sha) return { ci: 'none' };
+  const runs = (work.policy?.checks ?? []).map(name => ({ name, run: latestCheck(observation.checks.filter(entry => entry.name === name && (!ciAppIds || ciAppIds.includes(entry.appId)))) }));
+  const failed = runs.find(entry => !!entry.run && failedConclusions.has(entry.run.result));
+  if (failed) return { ci: 'fail', failedCheck: failed.name };
+  if (runs.length > 0 && runs.every(entry => entry.run?.result === 'success')) return { ci: 'pass' };
+  return { ci: runs.some(entry => !!entry.run) ? 'running' : 'none' };
+}
+/**
+ * The parallel-tip window (GY-498) over the validated chain, per queued entry: the first
+ * `parallelTips` positions' tips, and for every entry the slice of them it merges behind. Entries
+ * outside the window get an empty `tips` slice: nothing is required of them until the entries
+ * ahead land, exactly as a waiting batch required nothing.
+ */
+export function describeTipWindow(all: Work[], placements: QueuePlacement[], parallelTips: number, ciAppIds: readonly number[] | null = null): Map<string, TipWindowView> {
+  const size = Math.max(1, Math.floor(parallelTips));
+  const tips = tipWindowStatus(all, placements, size, ciAppIds);
+  const views = new Map<string, TipWindowView>();
+  for (const [index, placement] of validatedChain(placements).entries()) {
+    if (index >= size) { views.set(placement.key, { position: index, tips: [], firstFailure: null, validated: false, own: null }); continue; }
+    const mine = tips.slice(0, index + 1);
+    views.set(placement.key, { position: index, tips: mine, firstFailure: mine.find(tip => tip.ci === 'fail') ?? null, validated: mine.every(tip => tip.ci === 'pass'), own: mine.at(-1) ?? null });
+  }
+  return views;
+}
+/** The placements the window validates, in queue order: every entry not passed over. */
+const validatedChain = (placements: QueuePlacement[]) => placements.filter(placement => !placement.passedOver).sort((a, b) => a.position - b.position || a.sequence - b.sequence);
+/**
+ * The in-flight tips (GY-498): the window's tips with what they hold and what CI said. Master
+ * status reports exactly these, and `describeTipWindow` slices them per entry for the gates, so
+ * the two never diverge.
+ */
+export function tipWindowStatus(all: Work[], placements: QueuePlacement[], parallelTips: number, ciAppIds: readonly number[] | null = null): TipView[] {
+  const size = Math.max(1, Math.floor(parallelTips)), chain = validatedChain(placements);
+  const byKey = new Map(all.map(work => [work.key, work]));
+  return chain.slice(0, size).map((placement, index) => {
+    const work = byKey.get(placement.key);
+    const published = !!placement.tip && !!work?.candidate && work.candidate.sha === placement.tip;
+    return { position: index + 1, entries: chain.slice(0, index + 1).map(entry => entry.key), tip: published ? placement.tip : null,
+      ...(published && work ? tipCi(work, ciAppIds) : { ci: 'none' as const }) };
+  });
+}
+/**
+ * The window as a batch view (GY-330 shape), recorded on the queue entry so the gates' existing
+ * readers — the dashboard's Merge step, status rows — show the window without a second display
+ * model. The summary names each in-flight tip with its position, its entries and its CI state.
+ */
+export function windowBatchView(key: string, view: TipWindowView, parallelTips: number): MergeBatchView {
+  const unjudged = view.tips.filter(tip => tip.ci !== 'pass');
+  const failing = view.firstFailure;
+  // An own failing tip behind an unjudged one is not attributed yet: the entry waits on the tip ahead.
+  const attributed = !!failing && failing === view.own && aheadPassed(view);
+  const pendingAhead = !!failing && failing === view.own && !attributed ? unjudged.find(tip => tip !== failing) ?? null : null;
+  const state: MergeBatchView['state'] = view.tips.length === 0 ? 'waiting' : attributed ? 'ejecting' : failing ? 'waiting' : unjudged.length ? 'testing' : 'merging';
+  const step: BatchStep = view.tips.length === 0 ? { kind: 'test', combination: [] }
+    : attributed ? { kind: 'eject', member: key, check: failing!.failedCheck! }
+      : pendingAhead ? { kind: 'test', combination: pendingAhead.entries }
+      : failing ? { kind: 'test', combination: failing.entries }
+      : unjudged.length ? { kind: 'test', combination: unjudged.at(-1)!.entries } : { kind: 'merge', members: view.tips.at(-1)!.entries };
+  const underTest = unjudged.length ? { members: unjudged.at(-1)!.entries, tip: unjudged.at(-1)!.tip } : null;
+  const said = (tip: TipView) => tip.ci === 'pass' ? 'passed' : tip.ci === 'fail' ? `failed ${tip.failedCheck}` : tip.ci === 'running' ? 'running' : 'not validated';
+  const summary = view.tips.length === 0 ? `outside the window of ${Math.max(1, Math.floor(parallelTips))} parallel tips; waits for the entries ahead to land`
+    : `${view.tips.map(tip => `tip ${tip.position} (${tip.entries.join(', ')}) ${said(tip)}`).join('; ')}`;
+  return { batch: 1, size: view.tips.length || 1, members: view.tips.at(-1)?.entries ?? [], tip: view.tips.at(-1)?.tip ?? null, underTest, state, step, summary };
+}
+/**
+ * Merges and queue waits as master status reports them (GY-498): merges in the trailing hour, by
+ * GitHub's merge time (the delivery's, else the observation's), and the median wait so far of the
+ * entries queued now. Insights reports the same two figures over its window from the flow facts.
+ */
+export interface MergeThroughput { mergesPerHour: number; medianQueueWaitMs: number | null }
+export function mergeThroughput(all: Work[], now: number): MergeThroughput {
+  const hourAgo = now - 3_600_000;
+  const mergedAt = (work: Work) => Date.parse(work.delivery?.mergedAt ?? (work.observation?.merged ? work.observation.mergedAt ?? '' : ''));
+  const mergesPerHour = all.filter(work => { const at = mergedAt(work); return at >= hourAgo && at <= now; }).length;
+  const waits = predictQueue(all, now).map(placement => placement.waitMs).sort((a, b) => a - b);
+  const median = waits.length ? waits.length % 2 ? waits[(waits.length - 1) / 2] : (waits[waits.length / 2 - 1] + waits[waits.length / 2]) / 2 : null;
+  return { mergesPerHour, medianQueueWaitMs: median };
+}
+/** What master status reports about the running queue (GY-498): the throughput Insights and the in-flight tips. */
+export function mergeQueueInsights(all: Work[], now: number, parallelTips: number, ciAppIds: readonly number[] | null = null) {
+  return { ...mergeThroughput(all, now), tips: tipWindowStatus(all, predictQueue(all, now), parallelTips, ciAppIds) };
+}
 /** One batch as master status and the dashboard show it: a substate of the Merge step, never a return to Test. */
 export interface MergeBatchView {
   /** 1 for the batch at the head of the queue. */
@@ -1386,3 +1572,4 @@ export function queueBatch(work: Pick<Work, 'key'>, all: Work[], now: number, ba
 export function nextQueueEntries<W extends { id: string; stage: string; queue?: { sequence: number } | null }>(all: readonly W[], exclude: string, depth: number): W[] {
   return all.filter(other => other.id !== exclude && other.stage !== 'done' && other.queue).sort((a, b) => a.queue!.sequence - b.queue!.sequence).slice(0, depth);
 }
+
