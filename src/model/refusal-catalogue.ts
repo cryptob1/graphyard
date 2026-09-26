@@ -87,7 +87,8 @@ export const gateRefusalCatalogue: RefusalShape[] = [
   { gate: 'merge', id: 'stale-observation', match: /^GitHub observation missing or older than two minutes$/, example: 'GitHub observation missing or older than two minutes', kinds: ['resync'] },
   { gate: 'merge', id: 'unprotected', match: /branch protection have not been verified$/, kinds: ['escalate'],
     example: 'Required Graphyard check and merge-queue branch protection have not been verified' },
-  { gate: 'merge', id: 'not-mergeable', match: /^Pull request is not mergeable against the current base$/, example: 'Pull request is not mergeable against the current base', kinds: ['resync'] },
+  // The same shape covers GitHub's not-yet-computed mergeability (GY-548), worded apart from a refusal.
+  { gate: 'merge', id: 'not-mergeable', match: /^(Pull request is not mergeable against the current base$|GitHub is computing mergeability against the current base)/, example: 'Pull request is not mergeable against the current base', kinds: ['resync'] },
   { gate: 'merge', id: 'escalation', match: /^Unresolved .+ escalation requires operator resolution: /, kinds: ['escalate'],
     example: 'Unresolved security-concern escalation requires operator resolution: the candidate ships a credential' },
   { gate: 'merge', id: 'lead-hold', match: /^Slice lead .+ ruled .+ under rule .+; delivery is blocked until the authorized recovery: /, kinds: ['escalate'],
