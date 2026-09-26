@@ -14,6 +14,7 @@ import { isConfirmedCoordinationRefusal } from '../src/quarantine.js';
 import { definiteRenewalRefusal, supervise } from '../src/supervisor.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { unknownWorkCode } from '../src/model/refusal.js';
 
 // Each test is named for the proof it produces (GY-274): a transient renewal failure never stops a
 // worker, the first reconcile after boot cannot starve renewals, and a deploy loses no worker.
@@ -107,6 +108,12 @@ test('unit:renewal-transient-tolerated only a server refusal is definite', () =>
   assert.equal(definiteRenewalRefusal(refusal(401, 'A valid Graphyard bearer token is required')), false);
   assert.equal(definiteRenewalRefusal(refusal(403, 'Worker or operator required')), false);
   assert.equal(definiteRenewalRefusal(Object.assign(new Error('x'), { status: 404 })), false);
+  assert.equal(definiteRenewalRefusal(refusal(404, 'Not Found')), false, 'a plain 404, as a mis-routed proxy answers, stays transient');
+  // GY-448: the server's own refusal of an unknown item carries a code and ends the attempt at once.
+  const gone = { error: 'Work item not found', code: unknownWorkCode };
+  assert.equal(definiteRenewalRefusal(Object.assign(new Error(JSON.stringify(gone)), { status: 404, confirmedRefusal: isConfirmedCoordinationRefusal(404, gone) })), true);
+  assert.equal(definiteRenewalRefusal(Object.assign(new Error('x'), { status: 404, confirmedRefusal: true, body: gone })), true);
+  assert.equal(definiteRenewalRefusal(Object.assign(new Error(JSON.stringify({ code: unknownWorkCode })), { status: 404, confirmedRefusal: false })), false, 'a code on an unconfirmed body is not an answer');
   assert.equal(definiteRenewalRefusal(Object.assign(new Error('x'), { confirmedRefusal: true })), true, 'without a status the client classification stands');
   assert.equal(definiteRenewalRefusal(refusal(503, 'unavailable')), false);
   assert.equal(definiteRenewalRefusal(refusal(429, 'slow down')), false);
@@ -230,5 +237,40 @@ test('integration:worker-survives-deploy a worker keeps running through a 60 s s
   await writeFile(marker, '');
   assert.equal(await supervising, 0, 'the worker finished on its own');
   await shutdown(running);
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('integration:renewal-unknown-work-definite a renewal for an item the server does not have stops the worker at once', async () => {
+  const dir = await scratch(); const marker = join(dir, 'never');
+  const credentials = [operator, engineer].map(principal => ({ ...principal, token: tokens[principal.id] }));
+  const store = new Store(connection);
+  const engine = new Engine(store, [15368], 120, 'owner/project');
+  engine.principals = [operator, engineer];
+  const http: Server = server(engine, credentials);
+  await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
+  const url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
+  const work = await claimed(engine, 'renewal-gone');
+  let renewals = 0; const missing = randomUUID();
+  // The CLI's renewal, as `graphyard watch` makes it; after the launch renewal it names an item the server does not have.
+  const renew = async () => {
+    const id = renewals++ === 0 ? work.id : missing;
+    const response = await fetch(`${url}/api/work/${id}/heartbeat`, { method: 'POST', headers: { Authorization: `Bearer ${tokens[engineer.id]}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, body: JSON.stringify({ epoch: work.epoch }), signal: AbortSignal.timeout(30_000) });
+    const body = await response.json();
+    if (!response.ok) throw Object.assign(new Error(JSON.stringify(body)), { status: response.status, confirmedRefusal: isConfirmedCoordinationRefusal(response.status, body) });
+    return body;
+  };
+  const [command, args] = worker(marker);
+  const started = performance.now();
+  // A 120 s lease: a transient classification would keep retrying for over 100 s.
+  const code = await supervise(command, [...args], work.epoch, renew, { intervalMs: 200, retryMs: 100, retryMaxMs: 2000, graceMs: 50, session: quiet });
+  assert.equal(code, 1, 'the supervisor stopped the worker');
+  assert.equal(renewals, 2, 'the refusal was not retried');
+  assert.ok(performance.now() - started < 10_000, `stopped at once, after ${Math.round(performance.now() - started)} ms`);
+  const refused = await fetch(`${url}/api/work/${missing}/heartbeat`, { method: 'POST', headers: { Authorization: `Bearer ${tokens[engineer.id]}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, body: JSON.stringify({ epoch: 1 }) });
+  assert.equal(refused.status, 404);
+  assert.deepEqual(await refused.json(), { error: 'Work item not found', code: unknownWorkCode });
+  http.closeAllConnections();
+  await new Promise<void>(resolve => http.close(() => resolve()));
+  await store.close();
   await rm(dir, { recursive: true, force: true });
 });
