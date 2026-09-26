@@ -4,5 +4,7 @@
 export * from './store/tables.js';
 export * from './store/schema.js';
 export * from './store/store.js';
+export * from './store/bounded-snapshot.js';
+export { advisoryLocks } from './store/locks.js';
 // The pulse's delivery-instant expressions are declared beside the indexes that use them.
 export { DELIVERY_EVENT_PREDICATE, DELIVERY_REPOSITORY_INSTANT } from './store/tables/production.js';

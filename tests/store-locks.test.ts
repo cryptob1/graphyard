@@ -241,7 +241,7 @@ test('integration:index-matches-documents — the index equals the documents aft
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   try {
     const read = async (headers: Record<string, string> = {}) => {
-      const response = await fetch(`http://127.0.0.1:${(http.address() as AddressInfo).port}/api/work-snapshot`, { headers: { ...headers, Authorization: `Bearer ${token}` } });
+      const response = await fetch(`http://127.0.0.1:${(http.address() as AddressInfo).port}/api/work-snapshot${Object.keys(headers).length ? '' : '?view=full'}`, { headers: { ...headers, Authorization: `Bearer ${token}` } });
       const text = await response.text(); assert.equal(response.status, 200, text.slice(0, 300));
       return { body: JSON.parse(text), bytes: Buffer.byteLength(text) };
     };

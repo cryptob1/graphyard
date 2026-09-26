@@ -7,9 +7,10 @@ import { releaseInfo, schemaVersion } from '../release.js';
 import { appendSave, resolvedPayloadSql } from './snapshot-delta.js';
 import { advisoryLocks } from './locks.js';
 import { coordinationDocumentSql, coordinationRelevance, coordinationTail, coordinationTrimSql, detoasted, type CoordinationTrim } from './coordination-sql.js';
+import { namedStatements } from './statements.js';
+import { closePool, reserve, trackedPool } from './pools.js';
 
 export * from './snapshot-delta.js';
-export { advisoryLocks } from './locks.js';
 export type { CoordinationTrim } from './coordination-sql.js';
 
 /**
@@ -27,20 +28,6 @@ export const migrationLockTimeoutMs = 30_000;
 const migrationPrelude = migration.slice(0, migration.indexOf(tables[0].ddl));
 const literal = (text: string) => `'${text.replace(/'/g, "''")}'`;
 const newerSchema = (current: number) => new Error(`Database schema generation ${current} is newer than this release supports (${schemaVersion}); deploy the release that migrated it, or restore a backup taken at generation ${schemaVersion} or earlier`);
-
-/** How long a migrating release waits for its watchdog's connection; a database at its limit refuses at once. */
-const watchdogConnectMs = 5_000;
-/** A pool connection, or an error after `watchdogConnectMs` without one (sooner than the pool's own `storeConnectionTimeoutMs`). */
-async function reserve(pool: pg.Pool) {
-  let timer: NodeJS.Timeout | undefined;
-  const connecting = pool.connect();
-  try {
-    return await Promise.race([connecting, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`no connection within ${watchdogConnectMs} ms`)), watchdogConnectMs); })]);
-  } catch (error) {
-    connecting.then(late => late.release(), () => {});
-    throw error;
-  } finally { clearTimeout(timer); }
-}
 
 /**
  * Which connections a transaction may use (GY-274). Lease renewals run on a reserved pool, so a
@@ -65,8 +52,8 @@ export class Store {
   leasePool: pg.Pool; readonly background: BackgroundLane;
   constructor(url: string, options: { max?: number } = {}) {
     const max = Math.max(2, Math.floor(options.max ?? 12));
-    this.pool = new pg.Pool({ connectionString: url, max, connectionTimeoutMillis: storeConnectionTimeoutMs, statement_timeout: storeStatementTimeoutMs });
-    this.leasePool = new pg.Pool({ connectionString: url, max: leaseLaneConnections, connectionTimeoutMillis: storeConnectionTimeoutMs, statement_timeout: storeStatementTimeoutMs });
+    this.pool = trackedPool(namedStatements(new pg.Pool({ connectionString: url, max, connectionTimeoutMillis: storeConnectionTimeoutMs, statement_timeout: storeStatementTimeoutMs })));
+    this.leasePool = trackedPool(new pg.Pool({ connectionString: url, max: leaseLaneConnections, connectionTimeoutMillis: storeConnectionTimeoutMs, statement_timeout: storeStatementTimeoutMs }));
     this.background = new BackgroundLane(Math.max(1, Math.floor(max / 2)));
   }
   /**
@@ -176,7 +163,8 @@ export class Store {
     return { version: Number(rows[0].version), digest: rows[0].digest };
   }
   async schema() { return Number((await this.pool.query('SELECT COALESCE(MAX(version),0) AS version FROM graphyard_schema')).rows[0].version); }
-  async close() { await Promise.all([this.pool.end(), this.leasePool.end()]); }
+  /** Resolves once every connection of both pools has closed (GY-483), so the database may be stopped right after. */
+  async close() { await Promise.all([closePool(this.pool, 'main'), closePool(this.leasePool, 'lease')]); }
   async transaction<T>(fn: (db: pg.PoolClient, now: Date) => Promise<T>, { lane = 'request' }: { lane?: StoreLane } = {}): Promise<T> {
     const permit = lane === 'background' ? await this.background.acquire() : null;
     const db = await (lane === 'lease' ? this.leasePool : this.pool).connect().catch(error => { permit?.(); throw error; });
@@ -230,15 +218,15 @@ export class Store {
     return (await this.pool.query(`SELECT seq, work_id, actor, kind, ${resolvedPayloadSql()} AS payload, created_at FROM events WHERE ($1::uuid IS NULL OR work_id=$1) ORDER BY seq DESC LIMIT 300`, [id ?? null])).rows;
   }
   /**
-   * Claim the next due job. `woken` says the claim follows a webhook delivery (the generation
-   * moved since the job was last claimed) rather than the schedule its last run set: a woken job
-   * is observed at once whatever its cadence and whatever is left of the GitHub budget.
+   * Claim the next due job. `order` names work ids in claim-priority order (GY-492) — the
+   * merge-queue head and its batch, then items whose next action waits on an observation; the
+   * unnamed keep the available_at order. `woken` says the claim follows a webhook delivery, observed at once.
    */
-  async takeJob() {
+  async takeJob(order: string[] = []) {
     const token = randomUUID();
-    const result = await this.pool.query(`WITH picked AS (SELECT work_id, generation<>claimed_generation AS woken FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now()) ORDER BY available_at FOR UPDATE SKIP LOCKED LIMIT 1)
-      UPDATE jobs SET token=$1, locked_until=now()+interval '90 seconds', attempts=attempts+1,claimed_generation=generation
-      FROM picked WHERE jobs.work_id=picked.work_id RETURNING jobs.*, picked.woken`, [token]);
+    const result = await this.pool.query(`WITH picked AS (SELECT work_id, generation<>claimed_generation AS woken FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now()) ORDER BY array_position($1::uuid[], work_id), available_at FOR UPDATE SKIP LOCKED LIMIT 1)
+      UPDATE jobs SET token=$2, locked_until=now()+interval '90 seconds', attempts=attempts+1,claimed_generation=generation
+      FROM picked WHERE jobs.work_id=picked.work_id RETURNING jobs.*, picked.woken`, [order.length ? order : null, token]);
     return result.rows[0] as { work_id: string; token: string; attempts: number; woken: boolean } | undefined;
   }
   /**
