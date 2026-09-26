@@ -19,7 +19,7 @@ A person is asked for exactly four things: **Which provider** (and `--workspace`
 
 Node 24; a checkout of `OWNER/REPO`; `export GRAPHYARD_CLI=/abs/path/graphyard/bin/graphyard.mjs`; `gh auth status` logged in as a repository admin with `repo,admin:repo_hook`.
 
-Workers and non-Actions unit-proof hosts install dependencies only under bubblewrap: `bwrap --unshare-all --ro-bind / / -- true` must succeed (Ubuntu 24.04: `sysctl kernel.apparmor_restrict_unprivileged_userns=0`).
+Worker and non-Actions unit-proof hosts need bubblewrap: `bwrap --unshare-all --ro-bind / / -- true` succeeding (Ubuntu 24.04: `sysctl kernel.apparmor_restrict_unprivileged_userns=0`).
 
 ### Providers
 
@@ -85,7 +85,7 @@ Confirm `doctor` shows `appPermissions.missing` empty; a re-run fixes `delegatio
 | `The GitHub App confirmation did not complete in time` | rerun `--apply`; it resumes |
 | `webhook.delivered` `false`, 401 | rerun `--apply`; it rewrites both secrets |
 | `Branch protection could not be applied` | `gh auth login` as a repository admin, rerun |
-| worktree dependencies `failed` | install [bubblewrap](#preconditions) |
+| worktree dependencies `failed` | [bubblewrap](#preconditions) |
 | `Refusing to store installation credentials inside the managed repository` | point `GRAPHYARD_CONFIG_HOME` outside every worktree |
 
 ## Agent execution contract
