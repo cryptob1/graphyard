@@ -23,8 +23,11 @@ import type { ProfileRegistration } from './index.js';
  * password, and one login home per agent account. The operator's machine keeps only the install
  * record (fingerprints, never values). The cloud provisioning token is used by the installer on the
  * operator's machine and never reaches the host. Agent accounts are connected from the dashboard
- * (GY-409): a pasted API key is sealed to the host, a subscription runs the runtime's own device-code
- * or setup-token login there — the operator never logs into the machine.
+ * (Settings › Agents › Connect an account, GY-409): a pasted API key is sealed in the browser to the
+ * host's own key and opened only by the host's executor; a subscription runs the runtime's own login
+ * there and the dashboard shows its URL and code — the operator never logs into the machine. The
+ * executors create each connected account's login home under `<install>/accounts`, because the
+ * graphyard user manager carries GRAPHYARD_AGENT_ENVIRONMENTS pointing there.
  */
 
 export const HOST_USER = 'graphyard';
@@ -68,6 +71,13 @@ export function hostLayout(installId: string, workdir: string, dataPath: string)
 }
 
 export const hostTokenFile = (layout: HostLayout, principal: string) => `${layout.tokensDirectory}/${principal}.token`;
+/**
+ * The graphyard user manager's environment: GRAPHYARD_AGENT_ENVIRONMENTS puts every login home the
+ * executors create for a dashboard connect under `<install>/accounts`, and GRAPHYARD_CONFIG_HOME
+ * keeps the credentials `master init` and the reviewer setup write inside `<install>/` too.
+ */
+export const hostEnvironmentFile = (layout: HostLayout) => `${layout.home}/.config/environment.d/graphyard.conf`;
+export const hostEnvironment = (layout: HostLayout) => ({ GRAPHYARD_AGENT_ENVIRONMENTS: layout.accountsDirectory, GRAPHYARD_CONFIG_HOME: layout.configDirectory });
 export const hostDatabasePasswordFile = (layout: HostLayout) => `${layout.configDirectory}/database.password`;
 
 // ---------------------------------------------------------------------------
@@ -75,21 +85,25 @@ export const hostDatabasePasswordFile = (layout: HostLayout) => `${layout.config
 // ---------------------------------------------------------------------------
 
 /**
- * How the dashboard connects an account (GY-409): `api-key` is pasted once and sealed to the host
- * (encrypted at rest, never returned by any API); `device-code` and `setup-token` run the runtime's
- * own login on the host and show its URL and code in the dashboard.
+ * How the dashboard connects an account: a provider of GY-409's Settings › Agents connect flow, by
+ * its id there. `api-key` is pasted once, sealed in the browser to the host's public key, relayed as
+ * ciphertext and opened by the host's executor only; `login` runs the runtime's own sign-in on the
+ * host and shows its URL and device or one-time code in the dashboard. `file` is where, inside the
+ * account's login home, the host writes the credential (mode 0600).
  */
-export interface HostConnection { provider: string; label: string; method: 'api-key' | 'device-code' | 'setup-token'; dashboard: string }
+export interface HostConnection { provider: string; label: string; method: 'api-key' | 'login'; file: string; dashboard: string }
 export interface HostRuntime { kind: 'claude' | 'codex' | 'opencode' | 'pi'; program: string; package: string; connections: HostConnection[] }
 
-const dashboardPath = (label: string) => `Agents → Connect an account → ${label}`;
-const connection = (provider: string, label: string, method: HostConnection['method']): HostConnection => ({ provider, label, method, dashboard: dashboardPath(label) });
+export const CONNECT_PATH = 'Settings › Agents › Connect an account';
+const connection = (provider: string, label: string, method: HostConnection['method'], file: string): HostConnection => ({ provider, label, method, file, dashboard: `${CONNECT_PATH} › ${label}` });
+const zai = connection('z.ai', 'z.ai (GLM coding plan)', 'api-key', 'opencode/auth.json');
 
+/** Pi runs from the z.ai key of an OpenCode account, through the wrapper the host's executor writes when that key is connected (GY-409). */
 export const hostRuntimes: readonly HostRuntime[] = [
-  { kind: 'claude', program: 'claude', package: '@anthropic-ai/claude-code', connections: [connection('claude', 'Claude (subscription)', 'setup-token'), connection('anthropic-api', 'Anthropic API', 'api-key')] },
-  { kind: 'codex', program: 'codex', package: '@openai/codex', connections: [connection('chatgpt', 'ChatGPT / Codex (subscription)', 'device-code'), connection('openai-api', 'OpenAI API', 'api-key')] },
-  { kind: 'opencode', program: 'opencode', package: 'opencode-ai', connections: [connection('z.ai', 'z.ai (GLM coding plan)', 'api-key'), connection('anthropic-api', 'Anthropic API', 'api-key')] },
-  { kind: 'pi', program: 'pi', package: '@mariozechner/pi-coding-agent', connections: [connection('z.ai', 'z.ai (GLM coding plan)', 'api-key'), connection('anthropic-api', 'Anthropic API', 'api-key')] },
+  { kind: 'claude', program: 'claude', package: '@anthropic-ai/claude-code', connections: [connection('claude', 'Claude (subscription)', 'login', '.credentials.json'), connection('anthropic-api', 'Anthropic API', 'api-key', 'settings.json')] },
+  { kind: 'codex', program: 'codex', package: '@openai/codex', connections: [connection('chatgpt', 'ChatGPT / Codex (subscription)', 'login', 'auth.json'), connection('openai-api', 'OpenAI API', 'api-key', 'auth.json')] },
+  { kind: 'opencode', program: 'opencode', package: 'opencode-ai', connections: [zai] },
+  { kind: 'pi', program: 'pi', package: '@mariozechner/pi-coding-agent', connections: [zai] },
 ];
 
 const contractFor = (kind: string): FleetRuntime => {
@@ -109,7 +123,11 @@ export interface HostAccount {
   moved: boolean;
 }
 
-/** One account per runtime for a fresh installation: `claude-a`, `codex-a`, `opencode-a`, `pi-a`. */
+/**
+ * The first account of each runtime a fresh installation connects: `claude-a`, `codex-a`,
+ * `opencode-a` — the name and login home the host's executor gives the first connect of that runtime
+ * under `<install>/accounts` — and `pi-a`, the Pi directory of the wrapper over `opencode-a`'s key.
+ */
 export const defaultAccountName = (kind: string) => `${kind}-a`;
 
 /**
@@ -124,7 +142,9 @@ export function hostAccounts(layout: HostLayout, registry: Pick<AgentRegistry, '
     const runtime = hostRuntimes.find(candidate => candidate.kind === entry.runtime)!;
     const contract = contractFor(runtime.kind).launch;
     const home = `${layout.accountsDirectory}/${entry.name}`;
-    return { ...entry, home, homeVariable: contract.homeVariable!, credentialFile: `${home}/${contract.loginFile}`, connections: runtime.connections };
+    // A fresh Pi account reads the z.ai key the OpenCode account holds; every other account holds its own.
+    const credentialFile = runtime.kind === 'pi' && !entry.moved ? `${layout.accountsDirectory}/${defaultAccountName('opencode')}/${runtime.connections[0].file}` : `${home}/${contract.loginFile}`;
+    return { ...entry, home, homeVariable: contract.homeVariable!, credentialFile, connections: runtime.connections };
   });
 }
 
@@ -133,7 +153,7 @@ export function hostAccounts(layout: HostLayout, registry: Pick<AgentRegistry, '
  * every account at its new login home, and — for a registry with no roles yet — the proposed roles.
  * Pi is proposed for the approver and producer roles only, as everywhere else (GY-169).
  */
-export function hostRegistryChange(current: Pick<AgentRegistry, 'runtimes' | 'models' | 'accounts' | 'roles'>, accounts: HostAccount[], host: string, workers: number) {
+export function hostRegistryChange(current: Pick<AgentRegistry, 'runtimes' | 'models' | 'accounts' | 'roles'>, accounts: (HostAccount & { login?: HostLogin })[], host: string, workers: number) {
   const kinds = [...new Set(accounts.map(account => account.runtime))];
   const runtimes = kinds.filter(kind => !current.runtimes.some(runtime => runtime.name === kind)).map(contractFor);
   const models: FleetModel[] = [];
@@ -144,7 +164,11 @@ export function hostRegistryChange(current: Pick<AgentRegistry, 'runtimes' | 'mo
   }
   const placed: FleetAccountInput[] = accounts.map(account => {
     const before = current.accounts.find(entry => entry.name === account.name);
-    return { name: account.name, runtime: account.runtime, model: modelFor(account), credential: { host, home: account.home }, enabled: before?.enabled ?? true, maxSessions: before?.maxSessions ?? null, ...(before?.note ? { note: before.note } : {}) };
+    // A moved account whose login could not come along stays registered (its history and roles
+    // keep their name) but is disabled until it is connected again from the dashboard.
+    const reconnect = account.login === 'connect';
+    const note = reconnect ? `Moved to ${host}; its login was not on the installing machine — connect it again in ${CONNECT_PATH}` : before?.note;
+    return { name: account.name, runtime: account.runtime, model: modelFor(account), credential: { host, home: account.home }, enabled: reconnect ? false : before?.enabled ?? true, maxSessions: before?.maxSessions ?? null, ...(note ? { note: note.slice(0, 500) } : {}) };
   });
   const narrow: Partial<Record<string, readonly FleetRoleName[]>> = { pi: ['approver', 'producer'] };
   const roles: FleetRole[] = current.roles.length ? [] : (['worker', 'reviewer', 'producer', 'approver', 'escalation-handler'] as FleetRoleName[]).map(role => ({
@@ -208,7 +232,12 @@ export interface HostSettings {
   localNode: string;
   /** The operator machine's install directory, for the migration's backup file. */
   localDirectory: string;
+  /** This machine's executor host id: a moved account whose login home is here brings its login along. */
+  localHost: string;
 }
+
+/** How a moved account's login reached the host: copied from this machine, or to be connected again from the dashboard. */
+export type HostLogin = 'copied' | 'connect';
 
 export const claimHash = (claim: string) => createHash('sha256').update(claim).digest('hex');
 export const newClaim = () => randomBytes(24).toString('base64url');
@@ -274,7 +303,7 @@ export function bootstrapScript(layout: HostLayout) {
     'command -v git >/dev/null || apt-get install -y git',
     `id -u ${HOST_USER} >/dev/null 2>&1 || useradd --create-home --shell /bin/bash ${HOST_USER}`,
     `loginctl enable-linger ${HOST_USER}`,
-    `install -d -m 0700 -o ${HOST_USER} -g ${HOST_USER} ${[`${HOST_HOME}/.config`, `${HOST_HOME}/.config/graphyard`, layout.configDirectory, layout.tokensDirectory, layout.accountsDirectory, layout.migrationDirectory, layout.profilesDirectory, layout.userUnitDirectory, `${HOST_HOME}/code`].map(q).join(' ')}`,
+    `install -d -m 0700 -o ${HOST_USER} -g ${HOST_USER} ${[`${HOST_HOME}/.config`, `${HOST_HOME}/.config/environment.d`, `${HOST_HOME}/.config/graphyard`, layout.configDirectory, layout.tokensDirectory, layout.accountsDirectory, layout.migrationDirectory, layout.profilesDirectory, layout.userUnitDirectory, `${HOST_HOME}/code`].map(q).join(' ')}`,
     `install -d -m 0755 ${q(layout.workdir)} ${q(`${layout.dataPath}/postgres`)}`,
   ].join('\n');
 }
@@ -296,6 +325,7 @@ export function hostFiles(ctx: AdapterContext, values: EnvValue[], owner: string
   return [
     ...composeBundle(ctx, environment, 'proxy', { databasePort: HOST_DATABASE_PORT }),
     ...hostUnitFiles(ctx.installId, layout, owner),
+    { path: hostEnvironmentFile(layout), content: `${Object.entries(hostEnvironment(layout)).map(([name, value]) => `${name}=${value}`).join('\n')}\n`, mode: 0o644, owner },
     ...host.principals.map(principal => ({ path: hostTokenFile(layout, principal.id), content: `${host.tokens.get(principal.id) ?? ''}\n`, mode: 0o600, owner })),
     { path: hostDatabasePasswordFile(layout), content: `${ctx.databasePassword}\n`, mode: 0o600, owner },
   ];
@@ -306,12 +336,13 @@ export function hostFiles(ctx: AdapterContext, values: EnvValue[], owner: string
 // ---------------------------------------------------------------------------
 
 export const migrationSteps = [
-  { id: 'migrate.freeze', title: 'Stop the old master loop and its executors on this machine, so nothing writes to the old ledger after the backup' },
+  { id: 'migrate.freeze', title: 'Stop the old master loop and its executors on this machine' },
+  { id: 'migrate.fence', title: `Fence the old database named by ${MIGRATE_SOURCE_VARIABLE} (graphyard db fence): new sessions are read-only and every open one is ended, so the old server, its webhooks and any session still running against it can no longer write after the backup` },
   { id: 'migrate.backup', title: `Take a verified logical backup of the old database named by ${MIGRATE_SOURCE_VARIABLE} (graphyard db backup, then db verify)` },
   { id: 'migrate.copy', title: 'Copy the backup to the host (mode 0600, graphyard account)' },
   { id: 'migrate.restore', title: 'Restore it into the host Postgres before the server starts (graphyard db restore)' },
   { id: 'migrate.cutover', title: 'Start the server on the restored ledger with credentials generated on the host: the old coordinator token is not among them, so the old loop is refused every lease' },
-  { id: 'migrate.reregister', title: 'Re-register executors (they register on start) and move every registry account onto the host' },
+  { id: 'migrate.reregister', title: 'Re-register executors (they register on start) and move every registry account onto the host, with its login when it is on this machine' },
 ] as const;
 
 const restoredMarker = (layout: HostLayout) => `${layout.migrationDirectory}/restored`;
@@ -335,8 +366,11 @@ async function migrateLedger(ctx: AdapterContext, remote: Transport) {
   const migration = `${host.localDirectory}/migration`;
   const file = `${migration}/backup-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
   await local.exec('mkdir', ['-p', '-m', '0700', migration], { timeout: 60_000 });
-  // The connection string reaches `db backup` on standard input, never as an argument.
+  // The connection string reaches `db fence` and `db backup` on standard input, never as an argument.
   const withDatabase = (command: string) => `DATABASE_URL="$(cat)"; export DATABASE_URL; exec "$0" "$1" ${command} "$2"`;
+  // Every old writer is fenced before the snapshot, wherever it runs: the old server keeps serving
+  // reads (and errors on writes) until its operator retires it, and nothing it accepts is lost.
+  await local.exec('sh', ['-c', `DATABASE_URL="$(cat)"; export DATABASE_URL; exec "$0" "$1" db fence`, host.localNode, host.localCli], { input: host.migrationSource, timeout: 300_000 });
   await local.exec('sh', ['-c', withDatabase('db backup'), host.localNode, host.localCli, file], { input: host.migrationSource, timeout: 1_800_000 });
   await local.exec('sh', ['-c', withDatabase('db verify'), host.localNode, host.localCli, file], { input: host.migrationSource, timeout: 600_000 });
   const backup = await local.exec('cat', [file], { timeout: 600_000 });
@@ -447,11 +481,16 @@ function hostActions(ctx: AdapterContext, observation: AdapterObservation): Plan
     ...(host.migrate ? migrationSteps.map(step => ({ id: step.id, target: 'host' as const, state: 'create' as const, title: step.title })) : []),
     { id: 'host.runtimes', target: 'host', state, title: `Install the agent runtimes: ${plan.runtimes.map(runtime => `${runtime.kind} (${runtime.package})`).join(', ')}`, command: `npm install -g ${plan.runtimes.map(runtime => runtime.package).join(' ')}` },
     { id: 'host.herdr', target: 'host', state, title: `Install Herdr for ${HOST_USER}, supervise its server with the user unit ${host.layout.userUnitDirectory}/graphyard-herdr.service, and create the workspace ${plan.herdr.workspace}` },
-    { id: 'host.checkout', target: 'host', state, title: `Clone ${ctx.repository} into ${plan.checkout}, the loop's working directory` },
+    { id: 'host.checkout', target: 'host', state, title: `Clone ${ctx.repository} into ${plan.checkout}, the loop's working directory, with a one-hour GitHub App installation token passed on standard input (never stored)` },
+    { id: 'host.environment', target: 'host', state, title: `Point the ${HOST_USER} user manager at ${host.layout.accountsDirectory} for login homes and ${host.layout.configDirectory} for credentials (${hostEnvironmentFile(host.layout)})` },
     { id: 'host.master', target: 'host', state, title: `Configure the master loop with the coordinator credential (master init --token-stdin) and supervise it as ${host.layout.userUnitDirectory}/graphyard-master.service` },
-    { id: 'host.executors', target: 'host', state, title: `Supervise ${host.executors} executor slot(s) as graphyard-executor@N.service user units` },
-    ...plan.accounts.map(account => ({ id: `host.account.${account.name}`, target: 'host' as const, state, title: `Create the ${account.runtime} login home ${account.home} (mode 0700) and register account ${account.name} on this host in the agent registry; its credential will be ${account.credentialFile}` })),
-    ...hostRuntimes.map(runtime => ({ id: `dashboard.connect.${runtime.kind}`, target: 'graphyard' as const, state: 'create' as const, title: `Connect ${runtime.kind} from the dashboard: ${runtime.connections.map(entry => `${entry.dashboard} (${entry.method === 'api-key' ? 'paste the key once; it is sealed to the host' : entry.method === 'device-code' ? 'device-code sign-in shown in the dashboard' : 'setup-token sign-in shown in the dashboard'})`).join('; ')}`, human: 'Connected in the dashboard after install; nobody logs into the host.' })),
+    { id: 'host.executors', target: 'host', state, title: `Supervise ${host.executors} executor slot(s) as graphyard-executor@N.service user units; the resident executor registers the host's connect key and serves every dashboard connect` },
+    ...(host.migrate
+      ? [{ id: 'host.accounts', target: 'host' as const, state, title: `Move every registry account of an installed runtime onto this host at ${host.layout.accountsDirectory}/<account> (mode 0700), copying its login (0600) when it is on this machine; any other is disabled until connected again in ${CONNECT_PATH}` }]
+      : [{ id: 'host.accounts', target: 'host' as const, state, title: `Create ${host.layout.accountsDirectory} (mode 0700): each account connected from the dashboard gets its login home there (${plan.accounts.map(account => account.home).join(', ')} first) and is registered in the agent registry when its smoke prompt passes` }]),
+    ...hostRuntimes.map(runtime => ({ id: `dashboard.connect.${runtime.kind}`, target: 'graphyard' as const, state: 'create' as const,
+      title: `Connect ${runtime.kind} in ${CONNECT_PATH}: ${runtime.connections.map(entry => `${entry.label} (${entry.method === 'api-key' ? 'paste the key once; the browser seals it to the host, the server keeps only ciphertext and never returns it' : 'the host runs the provider\'s own sign-in and the dashboard shows its URL and code'}; the host writes ${entry.file}, mode 0600)`).join('; ')}${runtime.kind === 'pi' ? ' — Pi runs through the wrapper the host writes over that key' : ''}`,
+      human: 'Connected in the dashboard after install; nobody logs into the host.' })),
     { id: 'host.session-viewer', target: 'host', state: 'satisfied', title: 'Session viewer: Herdr runs on the same machine as the dashboard, so sessions are reached locally and no relay is provisioned' },
     { id: 'host.signin', target: 'graphyard', state: 'create', title: 'Print one single-use dashboard sign-in link for the admin; only its SHA-256 is stored on the host' },
   ];
@@ -460,6 +499,8 @@ function hostActions(ctx: AdapterContext, observation: AdapterObservation): Plan
 
 export interface HostFleetRequest {
   url: string; adminToken: string; coordinatorToken: string; reviewer: string | null;
+  /** A one-hour GitHub App installation token for cloning the managed repository; used on standard input, never stored. */
+  cloneToken: string;
   fetch: typeof fetch; log: (line: string) => void;
 }
 
@@ -467,10 +508,30 @@ export interface HostFleetResult {
   host: string;
   units: (HostUnit & { active: string })[];
   runtimes: { kind: string; path: string | null }[];
-  accounts: HostAccount[];
+  accounts: (HostAccount & { login: HostLogin | null })[];
   herdrWorkspace: string | null;
   sessionViewer: 'local';
   profiles: ProfileRegistration;
+}
+
+/** The last lines of a failed host command, with every known secret cut out. */
+const failure = (ctx: AdapterContext, result: { stdout: string; stderr: string }) => ctx.vault.scrub((result.stderr || result.stdout).trim().split('\n').slice(-3).join(' '));
+
+/**
+ * A moved account's login, brought along when its home is on this machine: only the runtime's own
+ * login file (never the rest of the home), read here and written on the host at mode 0600.
+ */
+async function copyLogin(ctx: AdapterContext, remote: Transport, account: HostAccount, source: { host: string; home: string | null } | undefined, owner: string): Promise<HostLogin> {
+  const host = ctx.host!;
+  const file = account.credentialFile.slice(account.home.length + 1);
+  if (!source?.home || source.host !== host.localHost) return 'connect';
+  const read = await ctx.transport.exec('cat', [`${source.home}/${file}`], { allowFailure: true, timeout: 60_000 }).catch(() => ({ stdout: '', stderr: '', code: 1 }));
+  if (read.code !== 0 || !read.stdout.trim()) return 'connect';
+  ctx.vault.add(read.stdout.trim());
+  const directory = account.credentialFile.slice(0, account.credentialFile.lastIndexOf('/'));
+  if (directory !== account.home) await remote.exec('install', ['-d', '-m', '0700', '-o', HOST_USER, '-g', HOST_USER, directory], { timeout: 60_000 });
+  await remote.putFile(account.credentialFile, read.stdout, 0o600, owner);
+  return 'copied';
 }
 
 /**
@@ -505,24 +566,48 @@ export async function installHostFleet(ctx: AdapterContext, request: HostFleetRe
   let herdrWorkspace = workspaceIn((await asUser(remote, HOST_HOME, layout.herdr, ['workspace', 'list'], { allowFailure: true })).stdout);
   if (!herdrWorkspace) herdrWorkspace = workspaceIn((await asUser(remote, HOST_HOME, layout.herdr, ['workspace', 'create', '--cwd', layout.checkout, '--label', label], { allowFailure: true })).stdout);
 
-  await asUser(remote, HOST_HOME, 'sh', ['-c', `[ -d ${shellQuote(`${layout.checkout}/.git`)} ] || git clone ${shellQuote(`https://github.com/${ctx.repository}.git`)} ${shellQuote(layout.checkout)}`]);
+  // A private repository needs a credential the graphyard account does not hold: the App's
+  // installation token arrives on standard input and reaches git through a one-shot credential
+  // helper, so it is never an argument, never in the remote URL and never written to disk.
+  const clone = `[ -d "$1/.git" ] || { GIT_TOKEN="$(cat)"; export GIT_TOKEN; git -c credential.helper= -c 'credential.helper=!f() { echo username=x-access-token; echo "password=$GIT_TOKEN"; }; f' clone --quiet "$2" "$1"; }`;
+  const cloned = await asUser(remote, HOST_HOME, 'sh', ['-c', clone, 'managed-checkout', layout.checkout, `https://github.com/${ctx.repository}.git`], { input: request.cloneToken, allowFailure: true });
+  if (cloned.code !== 0) throw new Error(`Cloning ${ctx.repository} into ${layout.checkout} on ${hostName} failed: ${failure(ctx, cloned)}`);
 
-  // The installation's registry decides the accounts: the ones it already has move here.
+  // The user manager's environment: login homes under <install>/accounts, credentials under <install>/.
+  const environment = Object.entries(hostEnvironment(layout)).map(([name, value]) => `${name}=${value}`);
+  await asUser(remote, HOST_HOME, 'systemctl', ['--user', 'set-environment', ...environment]);
+  await remote.exec('install', ['-d', '-m', '0700', '-o', HOST_USER, '-g', HOST_USER, layout.accountsDirectory], { timeout: 60_000 });
+
+  // The installation's registry decides the accounts: the ones it already has move here, with their
+  // login when it is on this machine. A fresh installation registers none: each account joins the
+  // registry when it is connected from the dashboard and its smoke prompt passes (GY-409).
   const api = async (path: string, init: RequestInit = {}) => {
     const response = await request.fetch(`${request.url}${path}`, { ...init, headers: { Authorization: `Bearer ${request.adminToken}`, 'Content-Type': 'application/json', ...(init.headers ?? {}) }, signal: AbortSignal.timeout(60_000) });
     if (!response.ok) throw new Error(`${init.method ?? 'GET'} ${path} answered ${response.status}`);
     return response.json() as Promise<any>;
   };
   const current: AgentRegistry = await api('/api/agent-registry/document');
-  const accounts = hostAccounts(layout, current);
-  for (const account of accounts) await remote.exec('install', ['-d', '-m', '0700', '-o', HOST_USER, '-g', HOST_USER, account.home], { timeout: 60_000 });
-  const change = hostRegistryChange(current, accounts, hostName, host.workers);
-  await api('/api/agent-registry/apply', { method: 'POST', body: JSON.stringify(change), headers: { 'Idempotency-Key': `install-host-${fingerprint(JSON.stringify(change))}` } });
+  const moved = current.accounts.some(account => hostRuntimes.some(runtime => runtime.kind === account.runtime));
+  const accounts: HostFleetResult['accounts'] = [];
+  for (const account of hostAccounts(layout, current)) {
+    if (!account.moved) { accounts.push({ ...account, login: null }); continue; }
+    await remote.exec('install', ['-d', '-m', '0700', '-o', HOST_USER, '-g', HOST_USER, account.home], { timeout: 60_000 });
+    const before = current.accounts.find(entry => entry.name === account.name)?.credential;
+    accounts.push({ ...account, login: await copyLogin(ctx, remote, account, before ? { host: before.host, home: before.home ?? null } : undefined, owner) });
+  }
+  if (moved) {
+    const change = hostRegistryChange(current, accounts.map(account => ({ ...account, login: account.login ?? undefined })), hostName, host.workers);
+    await api('/api/agent-registry/apply', { method: 'POST', body: JSON.stringify(change), headers: { 'Idempotency-Key': `install-host-${fingerprint(JSON.stringify(change))}` } });
+  }
 
-  // The loop: master init writes .graphyard/master.json and the supervised user unit (GY-114).
-  const masterInit = await asUser(remote, layout.checkout, 'node', [layout.cli, 'master', 'init', '--url', request.url, '--token-stdin', '--host-id', hostName, '--cli-path', layout.cli, ...(herdrWorkspace ? ['--herdr-workspace', herdrWorkspace] : [])], { input: request.coordinatorToken, allowFailure: true });
-  await asUser(remote, layout.checkout, 'systemctl', ['--user', 'enable', '--now', 'graphyard-master.service'], { allowFailure: true });
-  await asUser(remote, layout.checkout, 'node', [`${layout.graphyard}/scripts/graphyard-executor.mjs`, '--install', '--count', String(host.executors)], { allowFailure: true });
+  // The loop: master init writes .graphyard/master.json and the supervised user unit (GY-114), and
+  // keeps its copy of the coordinator credential inside <install>/ (GRAPHYARD_CONFIG_HOME). A loop
+  // that cannot be set up fails the install rather than reporting success.
+  const masterInit = await asUser(remote, layout.checkout, 'env', [...environment, 'node', layout.cli, 'master', 'init', '--url', request.url, '--token-stdin', '--host-id', hostName, '--cli-path', layout.cli, ...(herdrWorkspace ? ['--herdr-workspace', herdrWorkspace] : [])], { input: request.coordinatorToken, allowFailure: true });
+  if (masterInit.code !== 0) throw new Error(`master init did not complete on ${hostName}: ${failure(ctx, masterInit)}`);
+  await asUser(remote, layout.checkout, 'systemctl', ['--user', 'enable', '--now', 'graphyard-master.service']);
+  const executors = await asUser(remote, layout.checkout, 'env', [...environment, 'node', `${layout.graphyard}/scripts/graphyard-executor.mjs`, '--install', '--count', String(host.executors)], { allowFailure: true });
+  if (executors.code !== 0) throw new Error(`Installing ${host.executors} executor unit(s) on ${hostName} failed: ${failure(ctx, executors)}`);
 
   // One worker profile per worker principal, each with its own credential file on the host.
   const workers: ProfileRegistration['workers'] = [];
@@ -549,7 +634,7 @@ export async function installHostFleet(ctx: AdapterContext, request: HostFleetRe
     host: hostName, units, runtimes, accounts, herdrWorkspace, sessionViewer: 'local',
     profiles: {
       repository: { connected: true, herdr: !!herdrWorkspace, detail: herdrWorkspace ? `Herdr workspace ${herdrWorkspace} on ${hostName}` : 'Herdr is installed but no workspace could be created' },
-      master: { configured: masterInit.code === 0, kind: null, detail: masterInit.code === 0 ? `the loop runs as graphyard-master.service on ${hostName}` : `master init did not complete on ${hostName}: ${ctx.vault.scrub((masterInit.stderr || masterInit.stdout).trim().split('\n').slice(-3).join(' '))}` },
+      master: { configured: true, kind: null, detail: `the loop runs as graphyard-master.service on ${hostName}` },
       workers, reviewers: [],
     },
   };

@@ -159,7 +159,7 @@ export interface HarnessOptions {
   selfContained?: boolean;
   /** The remote host's files, to reuse a previous harness's host on a re-run. */
   hostFiles?: Map<string, BundleFileRecord>;
-  /** Transcript lines consulted before the provider's own (first match wins). */
+  /** Transcript lines consulted before the fixture host's and the provider's own (first match wins). */
   extraResponses?: { match: string; result: string | { stdout: string; stderr: string; code: number } | ((line: string, input?: string) => string | { stdout: string; stderr: string; code: number }) }[];
   /** The agent registry the fake server holds (GET /api/agent-registry/document). */
   registry?: any;
@@ -177,7 +177,7 @@ export async function harness(options: HarnessOptions): Promise<Harness> {
   // One file store per remote host, shared with its fixture responses, so a host reads back what was written to it.
   const hostFiles = options.hostFiles ?? new Map<string, BundleFileRecord>();
   const selfContained = options.provider === 'host' || !!options.selfContained;
-  const responses = [...(selfContained ? hostResponses(hostFiles, { installed: state.installed }) : []), ...(options.extraResponses ?? []), ...providerResponses(options.provider === 'host' ? 'docker-host' : options.provider, { installed: state.installed, workdir, service, envFile: options.envFile, workspaces: options.workspaces }), ...githubResponses(state, repository)];
+  const responses = [...(options.extraResponses ?? []), ...(selfContained ? hostResponses(hostFiles, { installed: state.installed }) : []), ...providerResponses(options.provider === 'host' ? 'docker-host' : options.provider, { installed: state.installed, workdir, service, envFile: options.envFile, workspaces: options.workspaces }), ...githubResponses(state, repository)];
   const transport = fakeTransport({ responses });
   const remotes = new Map<string, ReturnType<typeof fakeTransport>>();
   const ssh = (host: string) => {

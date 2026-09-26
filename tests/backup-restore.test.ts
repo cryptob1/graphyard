@@ -41,7 +41,7 @@ before(async () => {
   scratch = await mkdtemp(join(tmpdir(), 'graphyard-backup-'));
   pg = new EmbeddedPostgres({ databaseDir: join(scratch, 'data'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start();
-  for (const name of ['source', 'restored', 'occupied', 'cli_restored', 'newer', 'authority', 'seeded']) await pg.createDatabase(name);
+  for (const name of ['source', 'restored', 'occupied', 'cli_restored', 'newer', 'authority', 'seeded', 'fenced']) await pg.createDatabase(name);
 });
 after(async () => { if (pg) await pg.stop(); });
 
@@ -288,4 +288,39 @@ test('the shipped db backup, verify and restore commands perform the exercise en
   await assert.rejects(run(process.execPath, [launcher, 'db', 'restore', file], { env: target, cwd: scratch }), /Restore requires an empty database/);
   await assert.rejects(run(process.execPath, [launcher, 'db', 'status'], { env: { ...env, DATABASE_URL: undefined }, cwd: scratch }), /Set DATABASE_URL/);
   await source.close();
+});
+
+test('db fence ends every open writer and leaves the database read-only for new sessions, still backed up, until --release', async () => {
+  const store = new Store(url('fenced')); await store.init();
+  await populate(store);
+  await store.close();
+  const { default: pgModule } = await import('pg');
+  const write = (pool: import('pg').Pool) => pool.query(`INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,'old-server','test.fence','{}')`);
+  // The old server: a session that is open when the migration fences the database.
+  const writer = new pgModule.Client({ connectionString: url('fenced') });
+  writer.on('error', () => {});
+  await writer.connect();
+  await writer.query(`INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,'old-server','test.fence','{}')`);
+  const launcher = resolve('bin/graphyard.mjs');
+  const env = { ...process.env, DATABASE_URL: url('fenced'), GRAPHYARD_URL: undefined, GRAPHYARD_TOKEN: undefined } as Record<string, string | undefined>;
+  const fenced = JSON.parse((await run(process.execPath, [launcher, 'db', 'fence'], { env, cwd: scratch })).stdout);
+  assert.deepEqual({ fenced: fenced.fenced, readOnly: fenced.readOnlyForNewSessions }, { fenced: true, readOnly: true });
+  assert.ok(fenced.ended >= 1, 'the open writer session was ended');
+  await assert.rejects(writer.query('SELECT 1'), 'the old writer lost its session');
+  await writer.end().catch(() => {});
+  // A reconnecting writer is read-only: its write fails instead of landing after the backup.
+  const reconnected = new Store(url('fenced'));
+  await assert.rejects(write(reconnected.pool), /read-only transaction/);
+  const before = (await ledgerCounts(reconnected.pool)).events;
+  await reconnected.close();
+  // The backup still runs (a read-only snapshot) and a second fence is harmless.
+  const file = join(scratch, 'fenced.json');
+  assert.equal(JSON.parse((await run(process.execPath, [launcher, 'db', 'backup', file], { env, cwd: scratch })).stdout).rows.events, before);
+  assert.equal(JSON.parse((await run(process.execPath, [launcher, 'db', 'fence'], { env, cwd: scratch })).stdout).fenced, true);
+  // An abandoned migration lifts the fence.
+  const released = JSON.parse((await run(process.execPath, [launcher, 'db', 'fence', '--release'], { env, cwd: scratch })).stdout);
+  assert.deepEqual({ fenced: released.fenced, readOnly: released.readOnlyForNewSessions }, { fenced: false, readOnly: false });
+  const after = new Store(url('fenced'));
+  await write(after.pool);
+  await after.close();
 });

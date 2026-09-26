@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { discover } from '../onboarding.js';
 import { adapterFor, carriesCredential, isProviderReference, quotedPrice, variableMarker, type AdapterContext, type AdapterObservation, type ProviderAdapter, DEFAULT_IMAGE } from './adapters.js';
 import { existingMachineAdapter, generateHostSecrets, hostLayout, hostPlan, hostTokenFile, installHostFleet, readHostSecrets, selfContainedAdapter, MIGRATE_SOURCE_VARIABLE, type HostFleetResult } from './host.js';
-import { applyProtection, appClient, configureWebhook, detectCiAppIds, effectiveReviewCount, headSha, githubCli, installationClient, protectionSatisfied, readProtection, readWebhookConfig, triggerDelivery, verifyDelivery, webhookUrlFor, CHECK_NAME, type AppFacts, type DeliveryProof } from './github.js';
+import { applyProtection, appClient, configureWebhook, detectCiAppIds, effectiveReviewCount, headSha, githubCli, installationClient, installationToken, protectionSatisfied, readProtection, readWebhookConfig, triggerDelivery, verifyDelivery, webhookUrlFor, CHECK_NAME, type AppFacts, type DeliveryProof } from './github.js';
 import { detectHerdr, detectRuntimes, masterRuntime, reviewerProfiles, workerProfiles, type DetectedRuntime, type HerdrState, type ReviewerProfileDraft, type WorkerProfileDraft } from './runtimes.js';
 import { generatedFilesAssignment, generatedManifestScript, type GeneratedFilesAssignment } from './generated-files.js';
 import { delegationLimitAssignments, delegationLimitVariables } from './limits.js';
@@ -142,7 +142,7 @@ export async function prepareInstall(cwd: string, rawInputs: InstallInputs, depe
       layout: hostLayout(installId, workdir, dataPath ?? `/var/lib/graphyard/${installId}`), local: !!inputs.local, workers, executors: 2,
       migrate: !!inputs.migrate, migrationSource, tokens, principals, claim: null, owner: null,
       ref: dependencies.graphyardRef ?? sourceCommit(dependencies.sourceRoot ?? fileURLToPath(new URL('../..', import.meta.url))),
-      localCli: dependencies.cliPath ?? fileURLToPath(new URL('../../bin/graphyard.mjs', import.meta.url)), localNode: process.execPath, localDirectory: directory,
+      localCli: dependencies.cliPath ?? fileURLToPath(new URL('../../bin/graphyard.mjs', import.meta.url)), localNode: process.execPath, localDirectory: directory, localHost: dependencies.hostId ?? hostname(),
     } : null,
     spend: { maxMonthly: inputs.maxMonthly ?? null, confirmPrice: inputs.confirmPrice ?? null },
     wait: dependencies.wait ?? ((ms: number) => new Promise(accept => setTimeout(accept, ms))),
@@ -494,6 +494,7 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
     ? await (adapter as ProviderAdapter & { installFleet: typeof installHostFleet }).installFleet(context, {
       url, adminToken: session.tokens.get(principalOfRole(session.principals, 'admin').id)!, coordinatorToken: session.tokens.get(principalOfRole(session.principals, 'coordinator').id)!,
       reviewer: session.inputs.reviewer ?? null, fetch: deps.fetch, log,
+      cloneToken: vault.add((await installationToken(facts, deps.fetch)).token),
     })
     : null;
   const profiles = fleet ? fleet.profiles : await registerProfiles(session, url);

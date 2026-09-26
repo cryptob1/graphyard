@@ -53,6 +53,7 @@ On each new serving commit (`GRAPHYARD_BUILD_SHA`) unserved merges are recorded 
 ```sh
 node bin/graphyard.mjs db backup ./graphyard.json   # with DATABASE_URL set
 node bin/graphyard.mjs db verify FILE
+node bin/graphyard.mjs db fence       # before moving; --release undoes
 ```
 
 **Upgrade:** back up, deploy, confirm `/healthz` names the new commit, run any [App-permission migration](install.md#upgrading-an-existing-installation). **Rollback** only to a same-schema-generation image. **Restore:** `graphyard db migrate` an empty database, then `graphyard db restore FILE`.

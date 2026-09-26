@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { parseEnv } from 'node:util';
 import { applyInstall, buildPlan, prepareInstall, type InstallInputs } from '../src/install/index.js';
-import { claimHash, hostRuntimes, HOST_USER, MIGRATE_SOURCE_VARIABLE, SIGNIN_CLAIM_VARIABLE } from '../src/install/host.js';
+import { claimHash, hostRuntimes, CONNECT_PATH, HOST_USER, MIGRATE_SOURCE_VARIABLE, SIGNIN_CLAIM_VARIABLE } from '../src/install/host.js';
 import { hostSizing, recommendServerType, parseServerTypes } from '../src/install/pricing.js';
 import { ensureTokens, fingerprint, installDirectory, plannedPrincipals, Vault, writeInstallRecord } from '../src/install/secrets.js';
 import { principalSchema } from '../src/server/principals.js';
@@ -97,14 +97,22 @@ test('unit:host-install-plan — apply provisions the fixture host: units, runti
     assert.ok(lines.some(line => line.includes('graphyard-executor.mjs --install --count 2')));
     assert.ok(lines.some(line => line.includes('systemctl --user enable --now graphyard-master.service')));
 
-    // Accounts come from the installation's registry: each gets a 0700 home here and is registered on this host.
-    for (const kind of ['claude', 'codex', 'opencode', 'pi']) assert.ok(lines.includes(`install -d -m 0700 -o graphyard -g graphyard ${CONFIG}/accounts/${kind}-a`), kind);
-    const registryApply = fixture.requests.find(request => request.url.endsWith('/api/agent-registry/apply'))!;
-    const change = JSON.parse(registryApply.body!);
-    assert.deepEqual(change.accounts.map((account: any) => [account.name, account.credential.host, account.credential.home]),
-      ['claude', 'codex', 'opencode', 'pi'].map(kind => [`${kind}-a`, 'graphyard-host', `${CONFIG}/accounts/${kind}-a`]));
-    assert.deepEqual(change.roles.find((role: any) => role.name === 'approver').accounts, ['claude-a', 'codex-a', 'opencode-a', 'pi-a']);
-    assert.ok(!change.roles.find((role: any) => role.name === 'worker').accounts.includes('pi-a'), 'Pi is proposed for the narrow roles only');
+    // master init keeps its copy of the coordinator credential inside <install>/, and the executors
+    // create every connected account's login home under <install>/accounts.
+    assert.ok(master.args.includes(`GRAPHYARD_CONFIG_HOME=${CONFIG}`), master.args.join(' '));
+    assert.ok(lines.some(line => line.includes(`systemctl --user set-environment GRAPHYARD_AGENT_ENVIRONMENTS=${CONFIG}/accounts GRAPHYARD_CONFIG_HOME=${CONFIG}`)));
+    assert.match(files.get('/home/graphyard/.config/environment.d/graphyard.conf')!.content, new RegExp(`^GRAPHYARD_AGENT_ENVIRONMENTS=${CONFIG}/accounts$`, 'm'));
+    assert.ok(lines.includes(`install -d -m 0700 -o graphyard -g graphyard ${CONFIG}/accounts`));
+    // A fresh registry gets no placeholder accounts: each joins when it is connected from the dashboard.
+    assert.ok(!fixture.requests.some(request => request.url.endsWith('/api/agent-registry/apply')), 'no account is registered before it is connected');
+    assert.deepEqual(summary.host!.accounts.map(account => [account.name, account.login]), ['claude', 'codex', 'opencode', 'pi'].map(kind => [`${kind}-a`, null]));
+
+    // The managed repository is cloned with the App's installation token on standard input: never an argument, never stored.
+    const clone = hostOf(fixture).commands.find(command => command.args.some(arg => arg.includes('clone --quiet')))!;
+    assert.equal(clone.input, 'installation-token-for-tests');
+    assert.ok(clone.args.includes('https://github.com/owner/project.git'));
+    assert.ok(!clone.args.some(arg => arg.includes('installation-token-for-tests')));
+    assert.ok(![...files.values()].some(file => file.content.includes('installation-token-for-tests')), 'the clone token is written nowhere on the host');
 
     assert.deepEqual(summary.host!.units.filter(unit => unit.active !== 'active'), []);
     assert.equal(summary.host!.sessionViewer, 'local');
@@ -117,6 +125,23 @@ test('unit:host-install-plan — apply provisions the fixture host: units, runti
     for (const token of session.tokens.values()) assert.ok(!replanned.includes(token));
     assert.ok(!replanned.includes(session.context.databasePassword));
     assert.match(replanned, /"fingerprint":"[0-9a-f]{12}"/);
+  } finally { await fixture.cleanup(); }
+});
+
+test('unit:host-install-plan — a loop that cannot be set up on the host fails the install instead of reporting success', async () => {
+  const fixture = await harness({ provider: 'host', serverUrl: 'https://graphyard.example.test',
+    extraResponses: [{ match: 'master init', result: { stdout: '', stderr: 'master init: Herdr workspace w1 is not reachable', code: 1 } }] });
+  try {
+    await assert.rejects(applyHost(fixture, hostInputs()), /master init did not complete on graphyard-host: master init: Herdr workspace w1 is not reachable/);
+    assert.ok(!hostLines(fixture).some(line => line.includes('graphyard-executor.mjs --install')), 'nothing is supervised after the failure');
+  } finally { await fixture.cleanup(); }
+});
+
+test('unit:host-install-plan — a private managed repository that cannot be cloned fails the install with the reason', async () => {
+  const fixture = await harness({ provider: 'host', serverUrl: 'https://graphyard.example.test',
+    extraResponses: [{ match: 'clone --quiet', result: { stdout: '', stderr: "remote: Repository not found.\nfatal: repository 'https://github.com/owner/project.git/' not found", code: 128 } }] });
+  try {
+    await assert.rejects(applyHost(fixture, hostInputs()), /Cloning owner\/project into \/home\/graphyard\/code\/owner-project on graphyard-host failed: .*not found/);
   } finally { await fixture.cleanup(); }
 });
 
@@ -152,17 +177,19 @@ test('unit:self-contained-auth-plan — no provisioning token on the host, princ
 
     // (c) GitHub is connected through the existing App-manifest flow.
     assert.equal(plan.actions.find(action => action.id === 'github.app')?.state, 'create');
-    // (d) Every runtime the host installs has a dashboard connection path; API keys are sealed, subscriptions use device-code or setup-token.
+    // (d) Every runtime the host installs has a dashboard connection path, with a sealed key or the runtime's own login.
     for (const runtime of hostRuntimes) {
       const action = plan.actions.find(entry => entry.id === `dashboard.connect.${runtime.kind}`)!;
       assert.ok(action, runtime.kind);
-      assert.match(action.title, /Agents → Connect an account/);
+      assert.ok(action.title.includes(CONNECT_PATH), action.title);
       assert.match(action.human!, /nobody logs into the host/);
+      assert.ok(runtime.connections.length, runtime.kind);
+      for (const entry of runtime.connections) assert.ok(entry.dashboard.startsWith(CONNECT_PATH) && entry.file, entry.provider);
     }
-    assert.match(plan.actions.find(action => action.id === 'dashboard.connect.claude')!.title, /setup-token/);
-    assert.match(plan.actions.find(action => action.id === 'dashboard.connect.codex')!.title, /device-code/);
-    assert.match(plan.actions.find(action => action.id === 'dashboard.connect.pi')!.title, /sealed to the host/);
-    for (const account of plan.host!.accounts) assert.ok(account.connections.length && account.connections.every(entry => entry.dashboard.startsWith('Agents → Connect an account')), account.name);
+    assert.deepEqual(hostRuntimes.find(runtime => runtime.kind === 'claude')!.connections.map(entry => entry.method), ['login', 'api-key']);
+    assert.match(plan.actions.find(action => action.id === 'dashboard.connect.pi')!.title, /seals it to the host, the server keeps only ciphertext and never returns it/);
+    assert.match(plan.actions.find(action => action.id === 'dashboard.connect.codex')!.title, /shows its URL and code/);
+    for (const account of plan.host!.accounts) assert.ok(account.credentialFile.startsWith(`${CONFIG}/accounts/`), account.credentialFile);
   } finally {
     if (previous === undefined) delete process.env.HCLOUD_TOKEN; else process.env.HCLOUD_TOKEN = previous;
     await fixture.cleanup();
@@ -192,21 +219,24 @@ test('unit:self-contained-auth-plan — the sign-in claim is spent once and refu
   assert.equal((await call(code)).status, 410, 'a spent claim is refused');
 });
 
-test('unit:host-migration — --migrate freezes the old loop, backs up, restores before the server starts, and re-registers', async () => {
+test('unit:host-migration — --migrate freezes the old loop, fences every old writer, backs up, restores before the server starts, and re-registers', async () => {
   const OLD_DATABASE = 'postgres://graphyard:old-database-password-0123456789@old.example.test:5432/graphyard';
   const BACKUP = JSON.stringify({ format: 'graphyard-backup-v1', digest: `sha256:${'b'.repeat(64)}`, tables: [], sequences: [] });
   const oldRegistry = { version: 1, revision: 7, updatedAt: null, sessions: [], refusals: [], lastMutation: null,
     runtimes: [{ name: 'claude', launch: { kind: 'claude', args: [], environment: {}, homeVariable: 'CLAUDE_CONFIG_DIR', modelFlag: '--model', login: null, loginFile: '.credentials.json' } }, { name: 'cursor', launch: { kind: 'cursor', args: [], environment: {}, homeVariable: null, modelFlag: null, login: null, loginFile: null } }],
     models: [{ name: 'opus', id: 'claude-opus', cost: { inputPerMTok: null, outputPerMTok: null }, capability: { tier: 'frontier', contextTokens: null } }],
     accounts: [
-      { name: 'claude-primary', runtime: 'claude', model: 'opus', credential: { host: 'workstation', home: '/home/operator/.coding_agents/claude-a' }, enabled: true, maxSessions: 2 },
+      { name: 'claude-primary', runtime: 'claude', model: 'opus', credential: { host: 'install-test-host', home: '/home/operator/.coding_agents/claude-a' }, enabled: true, maxSessions: 2 },
+      { name: 'claude-laptop', runtime: 'claude', model: 'opus', credential: { host: 'laptop', home: '/home/operator/.coding_agents/claude-b' }, enabled: true, maxSessions: null },
       { name: 'cursor-primary', runtime: 'cursor', model: 'opus', credential: { host: 'workstation', home: null }, enabled: true, maxSessions: null },
     ],
-    roles: [{ name: 'worker', accounts: ['claude-primary', 'cursor-primary'], concurrency: 4 }] };
+    roles: [{ name: 'worker', accounts: ['claude-primary', 'claude-laptop', 'cursor-primary'], concurrency: 4 }] };
+  const LOGIN = JSON.stringify({ claudeAiOauth: { accessToken: 'old-machine-access-token-0123456789', refreshToken: 'old-machine-refresh-token-0123456789' } });
   const fixture = await harness({ provider: 'host', serverUrl: 'https://graphyard.example.test', registry: oldRegistry,
     extraResponses: [
       { match: 'is-active graphyard-master.service', result: { stdout: 'inactive\n', stderr: '', code: 3 } },
       { match: '/migration/backup-', result: BACKUP },
+      { match: 'cat /home/operator/.coding_agents/claude-a/.credentials.json', result: LOGIN },
     ] });
   try {
     // The installation being moved: Railway, with its own credentials on this machine.
@@ -220,7 +250,7 @@ test('unit:host-migration — --migrate freezes the old loop, backs up, restores
     const deps = { ...fixture.deps, environment: { [MIGRATE_SOURCE_VARIABLE]: OLD_DATABASE } };
     const inputs = hostInputs({ migrate: true });
     const plan = await buildPlan(await prepareInstall(fixture.root, inputs, deps, 'plan'));
-    assert.deepEqual(plan.host!.migration!.map(step => step.id), ['migrate.freeze', 'migrate.backup', 'migrate.copy', 'migrate.restore', 'migrate.cutover', 'migrate.reregister']);
+    assert.deepEqual(plan.host!.migration!.map(step => step.id), ['migrate.freeze', 'migrate.fence', 'migrate.backup', 'migrate.copy', 'migrate.restore', 'migrate.cutover', 'migrate.reregister']);
     assert.ok(!plan.drift.some(entry => entry.field === 'provider'), 'moving the provider is the migration, not drift');
     assert.ok(!JSON.stringify(plan).includes('old-database-password'), 'the old connection string never reaches the plan');
 
@@ -233,9 +263,12 @@ test('unit:host-migration — --migrate freezes the old loop, backs up, restores
     ];
     const local = timeline.map(entry => [entry.command.program, ...entry.command.args].join(' '));
     const freeze = local.findIndex(line => line === 'systemctl --user disable --now graphyard-master.service');
+    const fence = local.findIndex(line => line.includes(' db fence'));
     const backup = local.findIndex(line => line.includes(' db backup '));
     const verify = local.findIndex(line => line.includes(' db verify '));
-    assert.ok(freeze >= 0 && freeze < backup && backup < verify, local.join('\n'));
+    // The old server, its webhooks and any session still calling it are fenced before the snapshot.
+    assert.ok(freeze >= 0 && freeze < fence && fence < backup && backup < verify, local.join('\n'));
+    assert.equal(fixture.transport.commands[fence].input, OLD_DATABASE, 'the old database reaches db fence on standard input');
     assert.ok(local.some(line => line === 'systemctl --user stop graphyard-executor@*.service'), 'the old executors are stopped');
     const backupCommand = fixture.transport.commands[backup];
     assert.equal(backupCommand.input, OLD_DATABASE, 'the old database reaches db backup on standard input');
@@ -264,10 +297,15 @@ test('unit:host-migration — --migrate freezes the old loop, backs up, restores
     // Executors re-register from the host's units; registry accounts of installed runtimes move onto the host.
     assert.ok(remote.some(line => line.includes('graphyard-executor.mjs --install --count 2')));
     const change = JSON.parse(fixture.requests.find(request => request.url.endsWith('/api/agent-registry/apply'))!.body!);
-    assert.deepEqual(change.accounts.map((account: any) => [account.name, account.model, account.credential.host, account.credential.home, account.maxSessions]),
-      [['claude-primary', 'opus', 'graphyard-host', `${CONFIG}/accounts/claude-primary`, 2]]);
+    assert.deepEqual(change.accounts.map((account: any) => [account.name, account.model, account.credential.host, account.credential.home, account.maxSessions, account.enabled]),
+      [['claude-primary', 'opus', 'graphyard-host', `${CONFIG}/accounts/claude-primary`, 2, true], ['claude-laptop', 'opus', 'graphyard-host', `${CONFIG}/accounts/claude-laptop`, null, false]]);
+    assert.match(change.accounts[1].note, /connect it again in Settings › Agents › Connect an account/);
     assert.deepEqual(change.roles, [], 'existing roles are kept as they are');
-    assert.deepEqual(summary.host!.accounts.map(account => [account.name, account.moved]), [['claude-primary', true]]);
+    assert.deepEqual(summary.host!.accounts.map(account => [account.name, account.moved, account.login]), [['claude-primary', true, 'copied'], ['claude-laptop', true, 'connect']]);
+    // A login on this machine comes along: only the login file, 0600, owned by the graphyard account, never in any output.
+    const copied = fixture.hostFiles.get(`${CONFIG}/accounts/claude-primary/.credentials.json`)!;
+    assert.deepEqual([copied.content, copied.mode, copied.owner], [LOGIN, 0o600, '1001:1001']);
+    assert.ok(!JSON.stringify(summary).includes('old-machine-access-token'));
 
     // The record says where the installation came from, by fingerprint only.
     const { readInstallRecord } = await import('../src/install/secrets.js');

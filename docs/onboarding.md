@@ -23,11 +23,11 @@ Commit `AGENTS.md`, `.gitignore`, `graphyard.json`; never `.graphyard/`. Without
 
 The managed `AGENTS.md` section states that **every session Graphyard launches receives its instruction as the session's own first request, on the runtime's command line, never as pasted text**; the only later paste (the loop's single re-prompt, or the reviewer's reminder) comes from the same launcher and is acted on without confirmation.
 
-Agents treat Herdr's bracketed paste as untrusted data (prompt injection), so with the request on the command line sessions start without anybody sending `go`; Claude Code gets the statement through `--append-system-prompt-file`. The role files under `.graphyard/harness/` hold permissions, not instructions.
+Herdr's bracketed paste is untrusted data (prompt injection): sessions start without anybody sending `go`; Claude Code gets it through `--append-system-prompt-file`; role files under `.graphyard/harness/` hold permissions, not instructions.
 
 ### Agent environments
 
-Each agent account's login home under `~/.coding_agents` is selected by `CLAUDE_CONFIG_DIR` (Claude Code), `CODEX_HOME` (Codex), `XDG_DATA_HOME` (OpenCode) or `CURSOR_CONFIG_DIR` (Cursor). Tokens go in `~/.config/graphyard/workers/` and `producers/` (mode 0600). Then:
+Each agent account's login home under `~/.coding_agents` (`GRAPHYARD_AGENT_ENVIRONMENTS`) is selected by `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_DATA_HOME` or `CURSOR_CONFIG_DIR`; tokens go in `~/.config/graphyard/` (0600). Then:
 
 ```sh
 node "$GRAPHYARD_CLI" master environments --create claude,codex --apply  # new login homes
@@ -98,10 +98,10 @@ Run it as an OS identity whose GitHub credentials workers cannot read. `--browse
 
 ### The loop must be supervised
 
-`master init` from the coordinator checkout writes `~/.config/systemd/user/graphyard-master.service`, runs `systemctl --user enable --now` and `loginctl enable-linger`; the unit restarts on crash, reboot and hang. It is never a side effect: worker checkouts and temporary directories are refused. Move it with `master init --token-stdin --replace-supervisor` from the new checkout; `master status` reports `setup.supervisor` and the merger.
+`master init` from the coordinator checkout writes `~/.config/systemd/user/graphyard-master.service`, runs `systemctl --user enable --now` and `loginctl enable-linger`; the unit restarts on crash, reboot and hang, and is never a side effect: worker checkouts and temporary directories are refused. Move it with `master init --token-stdin --replace-supervisor`. `master status` reports `setup.supervisor` and the merger.
 
 ## 4. Prove the first PR
 
-`graphyard doctor --profile through-merge` names every missing piece. Create a small item: `master run` dispatches it; the loop merges once branch protection requires `Graphyard / merge`. `"systemDriven": false` allows [hand actions](master-agent.md#system-driven-items).
+`graphyard doctor --profile through-merge` names every missing piece. Create a small item: `master run` dispatches it; the loop merges once protection requires `Graphyard / merge`. `"systemDriven": false` allows [hand actions](master-agent.md#system-driven-items).
 
 CI workflows should cancel superseded pull-request runs: group each by `${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}` with `cancel-in-progress: ${{ github.event_name == 'pull_request' }}`; runs on main are never cancelled. `graphyard master protection` lists each required check whose workflow lacks cancel-in-progress under `advisories`.
