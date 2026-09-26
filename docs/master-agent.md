@@ -9,7 +9,7 @@ Only three decisions are human-only: goals and priorities, spending money or ope
 
 ## Operate
 
-Keep cycling: status, dispatch, review, merge, deployment verification. Stop only when every in-scope item is Done or has a genuinely external blocker recorded in Graphyard, and every merged change is verified against the exact deployed release or has a recorded deployment blocker.
+Keep cycling. Stop only when every in-scope item is Done or has an external blocker recorded in Graphyard, and every merged change is verified against the deployed release or has a recorded deployment blocker.
 
 1. `master status`.
 2. `master run` dispatches ready work in `schedule.order`.
@@ -61,7 +61,7 @@ A candidate passing the build gate gets, in `autoDispatch`, one producer request
 
 **Every role, approvers too, fails over on spent quota** or waits as one `capacity` line.
 
-The master never launches reviews or producers by hand, except `master review GY-N [PROFILE]` once the loop stops relaunching that review.
+The master never launches reviews or producers by hand, except `master review GY-N [PROFILE]` once the loop stops relaunching it.
 
 ### Proofs must exercise their criterion
 
@@ -79,6 +79,6 @@ A pass is trusted only when that stripped run failed with a case executed; other
 
 ### Repair lane
 
-The sole exception to the no-admin-bypass rule: once a `"repair": "merge-path"` item (`mergePath` files only) stalls 15 minutes with checks passed and an approver agent's `master decide GY-N repair-merge REASON` naming the fault, the App's ruleset bypass merges its head, audited (`repair.merged`) and flagged until a normal merge.
+The one admin bypass: once a `"repair": "merge-path"` item (`mergePath` files only) stalls 15 minutes with checks passed and an approver agent's `master decide GY-N repair-merge REASON` naming the fault, the App's ruleset bypass merges its head, audited (`repair.merged`) and flagged until a normal merge.
 
 Unresolved review threads are the reviewer's inputs, not merge blockers (`reviewThreads`); its approval names each on `Resolved threads:`, `Follow-up threads:` or `Overridden threads:` ([rules](coordination.md#review-gate-verdicts-not-threads)).

@@ -12,9 +12,12 @@ import { type DaemonEffects, record } from './effects.js';
 import { loopAttention } from './liveness.js';
 import { daemonSummary } from './run.js';
 import type { Cycle } from './cycle.js';
+import { docsTrimItem, openDocsTrimItem, type DocsHeadroom } from '../model/documentation.js';
 
 /** The attention `master status` adds after buildMasterStatus, and its final attribution over the whole list. */
-export interface ReportedAttention { items: AttentionItem[]; attribute?: (status: { work: any[]; attentionItems: AttentionItem[] }) => AttentionItem[] }
+export interface ReportedAttention { items: AttentionItem[]; attribute?: (status: { work: any[]; attentionItems: AttentionItem[] }) => AttentionItem[];
+  /** The documentation word budget's headroom on the base branch (GY-574), when it could be counted. */
+  docs?: { base: string; headroom: DocsHeadroom } | null }
 /** What the cycle already read that faults are derived from, beside the items' own records. */
 export interface FaultSources {
   config?: MasterConfig; agents?: HerdrAgent[]; credentials?: Record<string, { available: boolean; reason: string | null }>;
@@ -149,6 +152,30 @@ export async function fileRecurringFaultClasses(state: DaemonState, effects: Dae
     }
   }
 }
+/** The loop's action key for the documentation trim item (GY-574). */
+export const docsTrimActionKey = 'fault:docs-headroom';
+/**
+ * The documentation within 3% of its word budget on the base branch files one trim item (GY-574),
+ * as the operator-agent, naming the largest pages; while that item is open nothing more is filed.
+ * A set with its headroom files nothing, and neither does a loop without the operator-agent identity.
+ */
+export async function fileDocsTrim(state: DaemonState, effects: Pick<DaemonEffects, 'fileFaultClass' | 'persist'>, work: Work[], docs: ReportedAttention['docs'], now: () => number, performed: DaemonAction[]) {
+  if (!docs?.headroom.saturated || !effects.fileFaultClass || openDocsTrimItem(work)) return;
+  const previous = state.actions[docsTrimActionKey];
+  if (previous && previous.state !== 'done' && !readyToRetry(previous, state.cycle)) return;
+  const attempts = previous?.state === 'done' ? 1 : (previous?.attempts ?? 0) + 1;
+  // One key per base and total, so a retry after a lost reply returns the item already filed.
+  const idempotency = `docs-headroom:${docs.base}:${docs.headroom.total}`;
+  await record(state, docsTrimActionKey, { kind: 'fault', work: null, principal: null, state: 'started', detail: `Filing one item to restore documentation headroom: ${docs.headroom.total} of ${docs.headroom.budget} words on ${docs.base}`, attempts, cycle: state.cycle }, now(), effects.persist);
+  try {
+    // The trim item goes through the same operator-agent intent route as a fault-class item; it names no class.
+    const filed = await effects.fileFaultClass(docsTrimItem(docs.headroom, docs.base) as unknown as ReturnType<typeof faultClassItem>, idempotency);
+    work.push(filed);
+    performed.push(await record(state, docsTrimActionKey, { kind: 'fault', work: filed.key, principal: null, state: 'done', detail: `Filed ${filed.key} to restore documentation headroom (${docs.headroom.total} of ${docs.headroom.budget} words on ${docs.base}); nothing more is filed while it is open`, attempts, cycle: state.cycle }, now(), effects.persist));
+  } catch (error) {
+    performed.push(await record(state, docsTrimActionKey, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `Could not file the documentation trim item: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist));
+  }
+}
 /** The recurrences `master status` reports under daemon.faults: per class, the window's count and the item standing for it. */
 export function faultRecurrenceReport(state: Pick<DaemonState, 'faults'>, policy: FaultClassPolicy, now: number) {
   const instances = state.faults.instances;
@@ -183,4 +210,5 @@ export async function faultStep(cycle: Cycle, assessments: Record<string, Contai
   trackFaults(state.faults, cycleFaults(state, snapshot.work, clock, { config, agents: seen, credentials, containment: assessments, status: controlPlane, jobs: snapshot.jobs, reported: reported?.items, attribute: reported?.attribute, loop, herdrUnavailable: !herdrRead.available }),
     new Date(clock).toISOString(), partial || (herdrRead.available ? false : herdrFaultKinds));
   await fileRecurringFaultClasses(state, effects, snapshot.work, clock, now, performed);
+  await fileDocsTrim(state, effects, snapshot.work, reported?.docs, now, performed);
 }

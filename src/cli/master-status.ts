@@ -34,6 +34,8 @@ import { throughputStatus } from '../throughput.js';
 import { Timings, timedApi, timedStep, withTimings } from '../master/timings.js';
 import { slowReportReader } from '../master/report-cache.js';
 import { repairLaneAttention } from '../master/repair-lane.js';
+import { spawnSync } from 'node:child_process';
+import { budgetedPage, docsHeadroom, docsHeadroomText, docsWords, type DocsHeadroom, type DocsWordCount } from '../model/documentation.js';
 
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
 // The cycle-budget measure is a daemon metric (src/daemon/metrics.ts); it is read from here,
@@ -41,6 +43,42 @@ export { actionReport, agentRequestAttention, agentRequestReport, sessionReport 
 export { cycleBudget } from '../daemon/metrics.js';
 // `master scope` lives in its own module; it is read from here as it always was.
 export { approveScopeRequest } from './master-scope.js';
+
+/**
+ * Words per budgeted page (README.md and docs/**\/*.md) at `ref` in the checkout at `root`, read
+ * from Git so the count is the base branch's whatever the checkout has out; null when unreadable.
+ */
+export function docsWordCountAt(root: string, ref: string): DocsWordCount | null {
+  const git = (args: string[], input?: string) => spawnSync('git', args, { cwd: root, input: input === undefined ? undefined : Buffer.from(input, 'utf8'), maxBuffer: 64 * 1024 * 1024, timeout: 30_000 });
+  const listed = git(['ls-tree', '-r', '--name-only', ref, '--', 'README.md', 'docs']);
+  if (listed.status !== 0) return null;
+  const pages = listed.stdout.toString('utf8').split('\n').filter(budgetedPage);
+  if (!pages.length) return null;
+  // One cat-file for every page: `<sha> blob <size>` then exactly that many bytes, then a newline.
+  const blobs = git(['cat-file', '--batch'], pages.map(page => `${ref}:${page}`).join('\n') + '\n');
+  if (blobs.status !== 0) return null;
+  const count: DocsWordCount = {}, out = blobs.stdout;
+  let at = 0;
+  for (const page of pages) {
+    const end = out.indexOf(10, at), header = out.subarray(at, end).toString('utf8').split(' ');
+    if (header[1] !== 'blob') return null;
+    const size = Number(header[2]);
+    count[page] = docsWords(out.subarray(end + 1, end + 1 + size).toString('utf8'));
+    at = end + 1 + size + 1;
+  }
+  return count;
+}
+/**
+ * The documentation word budget's headroom on the base branch (GY-574): its origin copy when the
+ * checkout has one, else the local branch. A set within 3% of the budget is an attention line for the
+ * master; the loop files the one trim item for it (daemon/faults.ts fileDocsTrim).
+ */
+export function docsHeadroomStatus(root: string, baseBranch: string, count: (root: string, ref: string) => DocsWordCount | null = docsWordCountAt): { docs: { base: string; headroom: DocsHeadroom } | null; attention: AttentionItem[] } {
+  const base = [`origin/${baseBranch}`, baseBranch].map(ref => ({ ref, pages: count(root, ref) })).find(entry => entry.pages);
+  if (!base) return { docs: null, attention: [] };
+  const headroom = docsHeadroom(base.pages!), text = docsHeadroomText(headroom, base.ref);
+  return { docs: { base: base.ref, headroom }, attention: text ? [{ subject: 'docs', text, kind: 'resource-bound', faultClass: 'resources', ...agentOwner('master', 'The loop files one trim item for it (a docs-trim bug naming the largest pages); dispatch it ahead of items that add documentation') }] : [] };
+}
 
 /** A merge pending past five minutes on a head GitHub reports mergeable, with no refusal (GY-344). */
 export const mergeStallAttention = (snapshot: { work: Work[]; now: string }): AttentionItem[] =>
@@ -140,7 +178,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const actionless = actionlessItems(snapshot.work, new Date(snapshot.now));
   const liveness = livenessStatus(snapshot); // GY-201: open items holding no obligation, with ages
   // Requests, conflicts, stalls, executors and owed judgments come from derivedAttention, which the loop reads too.
-  const { generatedFiles, overflow, interventions, releases, decisions, throughput, resources, derived: { scopeRequests, stalledItems: derivedStalls, actorless, executors, conflicted, stalled, owed, budget, overlong } } = await reportedAttention(root, master, masterApi, coordinator, snapshot,
+  const { generatedFiles, docsBudget, docs, overflow, interventions, releases, decisions, throughput, resources, derived: { scopeRequests, stalledItems: derivedStalls, actorless, executors, conflicted, stalled, owed, budget, overlong } } = await reportedAttention(root, master, masterApi, coordinator, snapshot,
     { reviews: reviewRecords, producers: producerRecords, runtime, commit: cli.commit, approvals: cycling?.approvals ?? [], loop: cycling?.liveness ?? null, rows: status.work, trees,
       // The intervention report takes the server a minute: status reads the loop's copy, or a bounded live read.
       reports: 'bounded', reportBoundMs: dependencies.reportReadBoundMs, sections });
@@ -159,7 +197,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   attentionItems.unshift(...loopItems, ...dispatchItems, ...executors.attention, ...merger.attention);
   // Setup that stops every launch, or leaves the loop unsupervised, is the master's to repair.
   attentionItems.push(...setupItems);
-  attentionItems.push(...generatedFiles, ...overflow); attentionItems.push(...interventions.attentionItems, ...releases.attention, ...(throughput.attention ? [throughput.attention] : []));
+  attentionItems.push(...generatedFiles, ...docsBudget, ...overflow); attentionItems.push(...interventions.attentionItems, ...releases.attention, ...(throughput.attention ? [throughput.attention] : []));
   attentionItems.splice(loopItems.length + dispatchItems.length, 0, ...resources.attention);
   // Everything the control plane takes from the operator's own credential alone, from the
   // human-only rule table, answered on the dashboard's Needs you page (GY-102).
@@ -171,11 +209,13 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
       // Items with no action, split the way a reader has to read them: one waiting on another
       // item is the pipeline working, one with nothing moving it is the pipeline stopped.
       actionless: actionless.length, actorless: actorless.length, livenessViolations: liveness.violations, waitingOnAnother: actionless.filter(entry => entry.outcome === 'waiting-on').length, stalled: stalledItems.length,
-      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + conflicted.length + stuck.attentionItems.length + stalledItems.length + actorless.length + stalled.length + overlong.length + loopItems.length + dispatchItems.length + executors.attention.length + merger.attention.length + releases.attention.length + overflow.length + budget.length + (throughput.attention ? 1 : 0) + observation.attention.length + owed.counted + resources.attention.length } }, snapshot.work);
+      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + conflicted.length + stuck.attentionItems.length + stalledItems.length + actorless.length + stalled.length + overlong.length + loopItems.length + dispatchItems.length + executors.attention.length + merger.attention.length + releases.attention.length + docsBudget.length + overflow.length + budget.length + (throughput.attention ? 1 : 0) + observation.attention.length + owed.counted + resources.attention.length } }, snapshot.work);
   return { ...directMergeLine(coordinator), ...status, ...attributed, ...faulted(attributeAttention(attributed.attentionItems, resources.readings)), resources: resources.report,
     // The board (GY-200): what the master owes first, with commands, then the rest.
     board: await timedStep('board', () => masterBoard(masterApi, snapshot, coordinator, decisions.unanswered)),
     unavailable: sections.unavailable,
+    // The documentation word budget on the base branch and its headroom (GY-574).
+    docsBudget: docs,
     humanOnly: humanOnly.map(humanOnlyStatusRow),
     // Every open item the control plane names no action for, with the account it names instead
     // and how long it has held its failing gate; the bound the stalled ones were judged against.
@@ -236,8 +276,9 @@ export async function reportedAttention(root: string, master: MasterConfig, mast
   const resources = await timedStep('attention: resources', () => resourceStatus(root, master, { reviews: observed.reviews, producers: observed.producers, agents: observed.runtime.available ? observed.runtime.agents : null, work: snapshot.work, loop: observed.loop }));
   const derived = await timedStep('attention: derived', () => derivedAttention(root, master, masterApi, coordinator, snapshot, { ...observed, reviews: observed.reviews ?? [], producers: observed.producers ?? [], runtime: { available: observed.runtime.available, agents: observed.runtime.available ? observed.runtime.agents : [] } }));
   if (!derived.executors.presence.available && /^GET \/api\/actions failed/.test(derived.executors.presence.reason)) sections.mark('executors', 'GET /api/actions', derived.executors.presence.reason);
-  const items = [...resources.attention, ...generatedFiles, ...overflow, ...interventions.attentionItems, ...releases.attention, ...(throughput.attention ? [throughput.attention] : []), ...decisions.attentionItems, ...derived.items];
+  const docs = await timedStep('attention: docs budget', async () => docsHeadroomStatus(root, master.baseBranch));
+  const items = [...resources.attention, ...generatedFiles, ...docs.attention, ...overflow, ...interventions.attentionItems, ...releases.attention, ...(throughput.attention ? [throughput.attention] : []), ...decisions.attentionItems, ...derived.items];
   // The report's last step over the whole list, which the loop runs too: a cause named once, in place of its symptoms.
   const attribute = (status: { work: any[]; attentionItems: AttentionItem[] }) => attributeAttention(ledgerRefusalAttention(status, snapshot.work).attentionItems, resources.readings);
-  return { generatedFiles, overflow, interventions, releases, decisions, throughput, resources, derived, items, attribute, unavailable: sections.unavailable };
+  return { generatedFiles, docsBudget: docs.attention, docs: docs.docs, overflow, interventions, releases, decisions, throughput, resources, derived, items, attribute, unavailable: sections.unavailable };
 }
