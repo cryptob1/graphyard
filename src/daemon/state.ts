@@ -9,6 +9,7 @@ import { boundDetail } from './decisions.js';
 import { classified, faultClasses, faultInstanceSchema, type FaultKind } from '../model/fault-classes.js';
 import { noteActionOutcome } from '../model/fault-tracking.js';
 import { timingsSchema } from '../master/timings.js';
+import { emptyInvariantRecord, invariantRecordSchema } from '../model/invariants.js';
 
 export const daemonActionKinds = ['close', 'dispatch', 'review', 'refresh', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session', 'reclaim', 'decision', 'scope', 'settle', 'failover', 'capacity', 'human', 'preserve', 'fault'] as const;
 export type DaemonActionKind = typeof daemonActionKinds[number];
@@ -320,6 +321,12 @@ export const daemonStateSchema = z.object({
     /** The first cycle that read every source (GY-374): what stood before it is `baseline`, not a recurrence. */
     since: z.string().nullable().optional() }).strict()
     .default(() => ({ instances: [], open: {}, failing: {} })),
+  /**
+   * The system invariants (GY-404): what the loop carries between cycles to judge them — base
+   * refreshes per candidate, when each merge candidate was first seen mergeable, the builds and lease
+   * losses seen — and the last cycle's report, one line per invariant, for `master status`.
+   */
+  invariants: invariantRecordSchema.default(emptyInvariantRecord),
 }).strict();
 export type DaemonState = z.infer<typeof daemonStateSchema>;
 

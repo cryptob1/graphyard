@@ -1,4 +1,5 @@
 import type { FaultInstance, FaultObservation } from './fault-classes.js';
+import { wording } from './fault-wording.js';
 
 // ---------------------------------------------------------------------------
 // Tracking (GY-173): what the loop observes each cycle, as instances with a start and an end.
@@ -19,9 +20,6 @@ function retain(record: FaultRecord) { // drops the oldest past the bound: first
     if (excess > 0) record.instances.splice(0, record.instances.length, ...record.instances.filter(entry => excess <= 0 || spare.has(entry.id) || excess-- <= 0)); }
   const kept = new Set(record.instances.map(entry => entry.id)); for (const refs of [record.open, record.failing]) for (const key of Object.keys(refs)) if (!kept.has(refs[key])) delete refs[key];
 }
-// A commit (7-40 hex digits, one at least a figure) is a figure too: a split fleet names the coordinator's release, which every merge moves (GY-374).
-const wording = (text: string) => (text.toLowerCase().replace(/\b(?=[0-9a-f]*\d)[0-9a-f]{7,40}\b/g, '#').replace(/\d+/g, '#').match(/[a-z]+|#/g) ?? []).map(word => word.replace(/s$/, ''))
-  .filter(word => !/^(|i|are|wa|were|ha|have|m|h|d|w|second|minute|hour|day|week)$/.test(word)).join(' ').replace(/#( #)+/g, '#').slice(0, 300);
 /**
  * One cycle's observations against the record. A fault that stood last cycle and still stands is
  * the same instance (its `lastSeenAt` moves); one not seen before, or seen again after it cleared,
