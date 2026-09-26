@@ -72,7 +72,8 @@ export default function FleetPage({ api, status }: Pick<Dashboard, 'api' | 'stat
     event.preventDefault();
     const target = event.currentTarget, form = new FormData(target);
     // The registry holds references, never secrets: a pasted credential is refused before it leaves the browser.
-    if ([...form.values()].some(value => typeof value === 'string' && value.split(/[\s,]+/).some(looksLikeSecret))) { setFormError('That looks like a credential. The registry stores where a login lives (host and home), never the secret itself; log the account in on its host instead.'); return; }
+    // The audit reason is prose, not launch data, so it may name a token prefix without being refused (GY-397).
+    if ([...form.entries()].some(([name, value]) => name !== 'reason' && typeof value === 'string' && value.split(/[\s,]+/).some(looksLikeSecret))) { setFormError('That looks like a credential. The registry stores where a login lives (host and home), never the secret itself; log the account in on its host instead.'); return; }
     setBusy(true); setFormError('');
     try { await api(path(form), body(form)); target.reset(); await load(); }
     catch (error) { setFormError((error as Error).message); }
