@@ -9,7 +9,7 @@ import { actionJudgment, type NextActionKind } from './model/next-action.js';
 import { describeObservationJob, resyncUnobservedPrefix } from './model/action-kinds.js';
 import type { SessionHandleInput } from './model/sessions.js';
 import { registeredLaunch } from './model/session-state.js';
-import { independentProducerProfiles } from './producer.js';
+import { answeredByPendingSession, independentProducerProfiles } from './producer.js';
 import { daemonSummary, profileHealth, readDaemonState, type DaemonState, type DeploymentObservation } from './master-daemon.js';
 import { launchedSessionHandle, selectReviewerProfile, type ExecutorEffects, type ExecutorHandler } from './auto-dispatch.js';
 import type { ExecutorRelease } from './executor-fleet.js';
@@ -139,8 +139,17 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
     const credentials = await effects.producerCredentials(independent);
     const usable = independent.filter(profile => credentials[profile.name]?.available !== false && !agents.some(agent => agent.name === profile.agentName));
     if (!usable.length) throw new Error(`every independent producer profile is busy or unavailable (${independent.map(profile => `${profile.name}: ${credentials[profile.name]?.available === false ? credentials[profile.name].reason : 'busy'}`).join('; ')})`);
-    await registeredLaunch(record(work), launchedSessionHandle('proof', request, `${work.key}: ${group} proofs on ${request.sha.slice(0, 12)} (${proofs.join(', ')})`, config().hostId, undefined, usable[0].kind, config().herdrWorkspace, usable[0].principal),
-      () => effects.launchProducer(work, request, usable[0], agents, observedAt).catch(error => { throw attributeRefusal(error, agentNameReadings({ producers: [usable[0]] }, agents)); }), launched => launched, attachTo);
+    try {
+      await registeredLaunch(record(work), launchedSessionHandle('proof', request, `${work.key}: ${group} proofs on ${request.sha.slice(0, 12)} (${proofs.join(', ')})`, config().hostId, undefined, usable[0].kind, config().herdrWorkspace, usable[0].principal),
+        () => effects.launchProducer(work, request, usable[0], agents, observedAt).catch(error => { throw attributeRefusal(error, agentNameReadings({ producers: [usable[0]] }, agents)); }), launched => launched, attachTo);
+    } catch (error) {
+      // The loop's tick launches producers beside the executors (GY-415): a session already pending
+      // on this head is the request being answered, as a worker launch another dispatcher holds is
+      // left to it (GY-273), not a failure to repeat until the session ends.
+      const pending = answeredByPendingSession(error, request);
+      if (!pending) throw error;
+      return `${work.key}'s ${group} proofs on ${request.sha.slice(0, 12)} are left to producer session ${pending.agentName} already pending on that head; master status reconciles its evidence`;
+    }
     return `launched producer ${usable[0].name} for ${proofs.join(', ')} on ${request.sha.slice(0, 12)}`;
   };
 

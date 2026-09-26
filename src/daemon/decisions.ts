@@ -1,7 +1,7 @@
 // Concern: routine decisions — standing verdicts, decision reasons and the approver step.
 import { type Work, type AgentReview, reviewProviderOf, standingEscalations, leaseLossEpoch, RefusedResponse } from '../model.js';
 import { routableScopeRequest, scopeDecisionBinding, scopeDecisionReason } from '../model/scope.js';
-import { baseRefreshConflict, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, restoringAfterEjectionPrefix, speculativeConflictReason, type ReviewThread, describeThread } from '../merge-queue.js';
+import { baseRefreshConflict, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, restoringAfterEjectionPrefix, speculativeConflict, type ReviewThread, describeThread } from '../merge-queue.js';
 import { mechanicalFailure, mechanicalVerdicts } from '../model/mechanical-proofs.js';
 import { unexercisedFindings } from '../auto-dispatch.js';
 import { decisionBindingMax } from '../model/approval.js';
@@ -130,11 +130,11 @@ export function scopeRoutineDecision(work: Work, now: number, judged: boolean): 
   if (!judged || work.stage === 'done') return null;
   const routable = routableScopeRequest(work, now);
   if (!routable) return null;
-  const { request, paths, plannedFiles } = routable;
+  const { request, paths, plannedFiles, collapsed } = routable;
   let broad: string | null = null;
   try { guardBroadScope({ ...work, plannedFiles }, request.reason, { allow: false, command: 'the loop', existing: work.plannedFiles }); }
   catch (error) { broad = `${guardBroadScope({ ...work, plannedFiles }, 'the approver grants it only with a stated reason', { allow: true, command: 'the loop', existing: work.plannedFiles })} (${message(error)})`; }
-  return { action: 'requirements', binding: scopeDecisionBinding(request), input: { plannedFiles, answers: { epoch: request.epoch, at: request.at } }, reason: scopeDecisionReason(work.key, request, work.criteria, paths, broad),
+  return { action: 'requirements', binding: scopeDecisionBinding(request), input: { plannedFiles, answers: { epoch: request.epoch, at: request.at } }, reason: scopeDecisionReason(work.key, request, work.criteria, paths, broad, undefined, collapsed),
     scope: { epoch: request.epoch, at: request.at, requestedBy: request.requestedBy, paths: paths.slice(0, 50).map(path => path.slice(0, 500)) } };
 }
 /**
@@ -313,7 +313,7 @@ export function syncConflict(work: Work): { reason: string; binding: string } | 
   if (observation.conflicting && !work.queue)
     return { reason: `GitHub reports that candidate ${candidate.sha.slice(0, 12)} conflicts with base branch tip ${tip.slice(0, 12)}`, binding: `${candidate.sha}:sync:${tip}` };
   const ejection = work.queueEjection;
-  if (ejection && !work.queue && ejection.sha === candidate.sha && ejection.policyRevision === work.policyRevision && speculativeConflictReason.test(ejection.reason) && !ejection.predecessors?.length && !pendingBaseRefresh(work))
+  if (ejection && !work.queue && ejection.sha === candidate.sha && ejection.policyRevision === work.policyRevision && speculativeConflict(ejection) && !ejection.predecessors?.length && !pendingBaseRefresh(work))
     return { reason: `the merge queue ejected candidate ${candidate.sha.slice(0, 12)}: ${ejection.reason} (base branch tip ${tip.slice(0, 12)})`, binding: `${candidate.sha}:queue-conflict:${ejection.sequence}:${tip}` };
   return null;
 }
