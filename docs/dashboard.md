@@ -28,7 +28,7 @@ Rows show the steps **Build, Validate, Test, Review, Prove, Merge, Deploy** (`we
 
 ## An item page
 
-Below the summary: **What is left** (unmet requirements and who clears each), **Requirements** (✓ or ○ per criterion), **Pull request**, **Test cases**, **Activity**. **Technical details** holds gates, sessions, evidence and overlaps (`Shares files with GY-166, GY-167 (tests/)`).
+Below the summary: **What is left** (unmet requirements and who clears each), **Requirements** (✓ or ○ each), **Pull request**, **Test cases**, **Activity**. **Technical details** holds gates, sessions, evidence and overlaps (`Shares files with GY-166, GY-167 (tests/)`).
 
 ## Insights
 
