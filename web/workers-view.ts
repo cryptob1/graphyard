@@ -1,7 +1,7 @@
 import type { Work } from '../src/model';
 import type { SessionHandle } from '../src/model/sessions';
 import { sessionObservationFreshMs, sessionView, type SessionView } from '../src/model/session-state';
-import { leftFlowAt, noRelease, type ReleaseView } from './release';
+import { leftFlowAt, noRelease, type ReleaseView } from '../src/model/release';
 
 /**
  * The Workers tab (GY-116): every handle across the graph in one table, read for triage.
