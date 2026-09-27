@@ -67,6 +67,8 @@ A candidate passing the build gate gets, in `autoDispatch`, one producer request
 
 **Every role, approvers too, fails over on spent quota** or waits as one `capacity` line.
 
+**An approver launch refused for capacity** — every account spent, or the role's slots full — counts against no launch bound: the decision waits, `master status` names it as waiting for a slot, and the loop relaunches it itself as soon as an account or slot frees, oldest waiting decision first, one per cycle. No decision is left for a hand relaunch.
+
 The master never launches reviews or producers by hand, except `master review GY-N [PROFILE]` once the loop stops relaunching.
 
 ### Proofs must exercise their criterion

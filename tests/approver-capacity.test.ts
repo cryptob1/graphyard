@@ -1,7 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { approvalWatchSchema } from '../src/master-daemon.js';
+import { approvalWatchSchema, emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { approverLaunchAttention } from '../src/cli/status-attention.js';
+import { routineDecision } from '../src/daemon/decisions.js';
+import { decisionKey } from '../src/daemon/reconcile.js';
+import { Launcher } from '../src/daemon/cycle.js';
+import type { HerdrAgent, MasterConfig } from '../src/master.js';
+import type { Work } from '../src/model.js';
 
 // GY-849: approver-relaunch-on-capacity and approver-capacity-named
 // These tests verify that:
@@ -154,4 +159,126 @@ test('unit:approver-capacity-named — status display distinguishes capacity wai
   // This proves the capacity field is essential to the correct behavior
   const hasCriticalCheck = capacityAttention!.text.includes('waiting for approver capacity') && !failureAttention!.text.includes('waiting for approver capacity');
   assert.ok(hasCriticalCheck, 'approverLaunchAttention must check capacity field to produce correct status text');
+});
+
+// GY-849 at the loop itself: a decision whose approver launch is refused for capacity is not
+// counted against its bound, its wait is persisted for the cycle after a restart, and once an
+// account frees, the waiting decisions are relaunched oldest-first — one per cycle on the
+// launcher, so a newer decision never races an older one for the freed capacity. No hand action
+// of any kind appears: the loop alone takes the decision from refusal to a running approver.
+
+const config = { hostId: 'machine-a', autoMerge: true, mergeMethod: 'merge', workers: [], reviewers: [], producers: [], repository: 'owner/project', baseBranch: 'main',
+  url: 'https://graphyard.example', credentialFile: '/dev/null', cliPath: 'graphyard', githubAppId: 1234, run: { intervalSeconds: 20 } } as unknown as MasterConfig;
+type Watch = ReturnType<typeof approvalWatchSchema.parse>;
+const headOf = (key: string) => `head-${key.toLowerCase()}`.padEnd(40, '0'), baseOf = 'base'.padEnd(40, '0');
+/** A submitted item whose reviewer requested changes: the loop owes it a rework decision. */
+function verdictItem(key: string, reviewer: string): Work {
+  const head = headOf(key);
+  return {
+    id: `work-${key}`, key, title: 'Approver capacity', description: '', type: 'bug', priority: 0, dependencies: [],
+    criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:approver-relaunch-on-capacity'] }], policy: { checks: ['test'], review: true }, plannedFiles: [],
+    stage: 'test', revision: 4, policyRevision: 1, createdAt: iso(-7_200_000), updatedAt: iso(), stageEnteredAt: iso(-3_600_000), ready: true, epoch: 1,
+    lease: null, workspaces: [], candidate: { sha: head, baseSha: baseOf, pr: 7, branch: `graphyard/${key.toLowerCase()}-1`, author: 'implementer' },
+    submission: { epoch: 1, pr: 7 }, reworkRequested: false, scenarioRequirements: [], evidence: [], blocker: null, gates: [], violations: [],
+    observation: { candidate: { sha: head, baseSha: baseOf, pr: 7, branch: `graphyard/${key.toLowerCase()}-1`, author: 'implementer' }, checks: [],
+      reviews: [{ id: 41, reviewer, sha: head, state: 'CHANGES_REQUESTED', submittedAt: iso(-60_000) }], protected: true, mergeable: true, merged: false, prState: 'open', draft: false,
+      at: iso(-10_000), baseTip: baseOf, baseTree: 'tree-0', files: [], scopeFiles: [] },
+  } as unknown as Work;
+}
+const capacityError = () => Object.assign(new Error('No healthy agent account for the approver: every approver account is spent until its quota resets'), { capacityExhausted: true });
+
+test('unit:approver-relaunch-on-capacity — a refused launch is persisted uncounted, the wait survives a restart, and freed capacity is taken oldest-first one decision per cycle with no hand action', async () => {
+  const older = verdictItem('GY-301', 'graphyard-reviewer[bot]'), newer = verdictItem('GY-302', 'graphyard-reviewer[bot]');
+  const decisionOf: Record<string, string> = { 'GY-301': 'a1a1a1a1-4cb5-4f21-9b0e-0f2a6c8d4e15', 'GY-302': 'b2b2b2b2-4cb5-4f21-9b0e-0f2a6c8d4e15' };
+  const keyOf: Record<string, string> = {};
+  for (const item of [older, newer]) {
+    const decision = routineDecision(item, config, clock)!;
+    assert.equal(decision.action, 'rework', `${item.key} owes a rework decision`);
+    keyOf[item.key] = decisionKey(item, decision);
+  }
+  const agents: HerdrAgent[] = [], launches: { decision: string; cycle: number }[] = [], persists: Record<string, Watch>[] = [];
+  const persistLog: { capacityA: boolean; launchRecorded: boolean }[] = [];
+  const requested: string[] = [];
+  let capacityFree = false, cycleNo = 0, state = emptyDaemonState(config);
+  const effects: DaemonEffects = {
+    agents: () => agents,
+    herdr: async () => ({ agents, available: true }),
+    credentials: async () => ({}),
+    snapshot: async () => ({ work: cycleNo === 1 ? [older] : [older, newer], now: iso(cycleNo * 20_000) }),
+    closeSession: () => {},
+    dispatch: async () => {},
+    requestProof: () => {},
+    merge: async () => ({ result: 'merged', merged: true }),
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(cycleNo * 20_000), reason: 'not configured', deployed: [], pending: [] }),
+    recordDeployment: async () => {},
+    requestSmoke: () => {},
+    persist: async current => {
+      persistLog.push({
+        capacityA: !!current.approvals[keyOf['GY-301']]?.capacity,
+        launchRecorded: current.actions[`launch:approver:${decisionOf['GY-301']}`]?.state === 'done',
+      });
+      persists.push(JSON.parse(JSON.stringify(current.approvals)));
+    },
+    decisions: async item => ({ decisions: requested.includes(decisionOf[item.key]) ? [{ id: decisionOf[item.key], action: 'rework', state: 'requested', input: {}, approvedBy: null }] : [] }),
+    decide: async (item, action) => { assert.equal(action, 'rework'); requested.push(decisionOf[item.key]); return { id: decisionOf[item.key] }; },
+    approver: async (_item, decision) => {
+      launches.push({ decision, cycle: cycleNo });
+      if (!capacityFree) throw capacityError();
+      const name = `approver-${decision.slice(0, 8)}`;
+      agents.push({ name, pane_id: `pane-${name}`, agent_status: 'working' });
+      return { agentName: name, pane: `pane-${name}` };
+    },
+  };
+  const launcher = new Launcher();
+  const run = async () => { cycleNo += 1; await runCycle(config, state, effects, () => clock + cycleNo * 20_000, launcher); await launcher.idle(); };
+
+  // Cycle one: the older item's decision is requested, and its launch waits for capacity. The wait
+  // is on the record before the cycle ends: the state the loop last persisted carries it, so a
+  // restart reloads a capacity-waiting watch rather than a plain never-launched one.
+  await run();
+  assert.deepEqual(requested, [decisionOf['GY-301']], 'the decision was requested by the loop itself');
+  assert.deepEqual(launches, [{ decision: decisionOf['GY-301'], cycle: 1 }]);
+  const watch = state.approvals[keyOf['GY-301']];
+  assert.equal(watch.capacity, 'No healthy agent account for the approver: every approver account is spent until its quota resets');
+  assert.equal(watch.launches, 0, 'a capacity refusal is not counted against the launch bound');
+  assert.equal(watch.agentName, null);
+  assert.ok(persists.at(-1)![keyOf['GY-301']]?.capacity, 'the persisted state the next process loads carries the capacity wait');
+  // The refusal itself put the wait on the record: before the launcher recorded the launch's
+  // outcome, more than one write already carried the wait — the write the refusal made, and the
+  // cycle's own. The wait is on the disk however far the launcher got, crash or queue included.
+  const beforeOutcome = persistLog.filter(entry => entry.capacityA && !entry.launchRecorded).length;
+  assert.ok(beforeOutcome >= 2, `the refused launch persisted the wait itself, before the launcher recorded anything: ${JSON.stringify(persistLog)}`);
+
+  // A restart: the loop reloads the cursor it last persisted and keeps waiting. The second item's
+  // review lands and its decision waits too, both refusals still uncounted.
+  state = emptyDaemonState(config);
+  state.approvals = { ...persists.at(-1)! } as typeof state.approvals;
+  await run();
+  assert.deepEqual(requested, [decisionOf['GY-301'], decisionOf['GY-302']]);
+  assert.equal(state.approvals[keyOf['GY-301']].launches, 0, 'still uncounted after the restart');
+  assert.equal(state.approvals[keyOf['GY-302']].launches, 0);
+  const reloaded = persists.at(-1)!;
+  assert.ok(reloaded[keyOf['GY-301']]?.capacity && reloaded[keyOf['GY-302']]?.capacity, 'both waits are on the record');
+  const waiting = approverLaunchAttention({ approvals: Object.entries(state.approvals).map(([key, entry]) => ({ ...entry, key })), actions: [] });
+  assert.equal(waiting.length, 2, 'both waiting decisions are named as waiting, not stalled');
+  assert.match(waiting[0].text, /waiting for approver capacity/);
+
+  // An account frees: the oldest waiting decision takes it this cycle, on the launcher, and the
+  // newer one waits for the next cycle rather than racing it. No decide, no hand command, nothing
+  // but the loop's own next cycle.
+  state = emptyDaemonState(config);
+  state.approvals = { ...reloaded } as typeof state.approvals;
+  capacityFree = true;
+  await run();
+  assert.deepEqual(launches.filter(entry => entry.cycle === 3), [{ decision: decisionOf['GY-301'], cycle: 3 }],
+    `the oldest waiting decision alone met the freed capacity: ${JSON.stringify(launches)}`);
+  assert.equal(state.approvals[keyOf['GY-301']].launches, 1, 'the successful launch is the first one counted');
+  assert.equal(state.approvals[keyOf['GY-301']].capacity, null, 'the wait cleared with the launch');
+
+  // The next cycle is the newer decision's turn: each in its own cycle, oldest first, both judged.
+  await run();
+  assert.deepEqual(launches.filter(entry => entry.cycle >= 3), [{ decision: decisionOf['GY-301'], cycle: 3 }, { decision: decisionOf['GY-302'], cycle: 4 }],
+    `the waiting decisions were relaunched oldest-first, one per cycle: ${JSON.stringify(launches)}`);
+  assert.equal(state.approvals[keyOf['GY-302']].launches, 1);
+  assert.equal(requested.length, 2, 'no decision was requested twice: nothing waited past its answer');
 });

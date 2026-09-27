@@ -82,6 +82,20 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   const approverCapacity = capacities.find(capacity => capacity.role === 'approver');
   const capacityWait = () => `every approver account is spent, so no approver is launched before ${approverCapacity?.retryAt ?? 'an account reports quota again'}`;
   /**
+   * GY-849: whether another capacity-waiting decision's relaunch is still queued or running on the
+   * launcher, and whether one was handed off already this cycle. The launcher runs session launches
+   * beside the cycle (GY-616), so two handed off in one cycle could race for the one freed slot or
+   * account and let the newer decision take it — and one that settles mid-cycle clears its wait
+   * before the item after it is reached. Holding each capacity-waiting relaunch until the previous
+   * waiter's settles keeps the oldest waiting decision first in line, whatever the timing.
+   */
+  let capacityRelaunchHanded = false;
+  const capacityRelaunchInFlight = (decision: string) =>
+    Object.values(state.approvals).some(other => other.capacity && !other.settledAt && other.decision !== decision
+      && cycle.launcher.busy(approverLaunchKey(other.decision)));
+  const capacityRelaunchWaits = (watch: ApprovalWatch) =>
+    !!watch.capacity && (capacityRelaunchHanded || capacityRelaunchInFlight(watch.decision));
+  /**
    * Put a watched decision to an approver session. The launch is counted before it is made; one
    * refused because every account is spent is no launch at all (GY-182), and is not counted.
    */
@@ -118,7 +132,9 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     let launched: Awaited<ReturnType<NonNullable<DaemonEffects['approver']>>>;
     try { launched = await effects.approver!(item, watch.decision); }
     catch (error) {
-      if ((error as { capacityExhausted?: boolean })?.capacityExhausted) { Object.assign(watch, { launches: watch.launches - 1, agentName: null, pane: null, account: null, runtime: null, session: null, capacity: message(error).slice(0, 500) }); return `the decision waits for approver capacity: ${message(error)}`; }
+      // A launch no account could take (GY-182) ran no session either: the watch keeps why, persisted
+      // now so the wait survives a restart, and `master status` names it as waiting for a slot.
+      if ((error as { capacityExhausted?: boolean })?.capacityExhausted) { Object.assign(watch, { launches: watch.launches - 1, agentName: null, pane: null, launchedAt: null, account: null, runtime: null, session: null, capacity: message(error).slice(0, 500) }); await effects.persist(state); return `the decision waits for approver capacity: ${message(error)}`; }
       // A role at its concurrency limit is a wait for a slot, not a failed session (GY-190): the
       // launch is not counted against the decision's bound, and the next cycle makes it again, so
       // the approver starts on the first cycle after a slot frees without anybody asking.
@@ -393,8 +409,11 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     // closed its name is still taken, and the step is taken again next cycle.
     if (!await closeApprover(item, watch, step.detail) && watch.closeAttempts < maxApproverCloses) return;
     // A launch waiting for a slot, or refused outright (GY-551), never ran a session, so there is no
-    // ending to record: it is only made again.
+    // ending to record: it is only made again. A capacity wait relaunches one at a time (GY-849):
+    // while another waiter's relaunch is still on the launcher, this one waits for a later cycle.
     if (step.step === 'relaunch' && !watch.agentName) {
+      if (capacityRelaunchWaits(watch)) return;
+      if (watch.capacity) capacityRelaunchHanded = true;
       const waited = watch.capacity ? 'waited for an approver slot' : 'had its last approver launch refused';
       try { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'done', `${item.key}'s ${watch.action} decision ${watch.decision} ${waited}; ${await launch(item, watch, false)}`); }
       catch (error) { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'failed', `${item.key}'s ${watch.action} decision ${watch.decision} ${waited}; its approver session could not be launched: ${message(error)}`); }
@@ -429,35 +448,23 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     const judged = state.actions[`${scopeKey(item, request)}:finding:${item.policyRevision}`];
     return judged?.state === 'done' && !/^Widened /.test(judged.detail);
   };
-  // GY-849: When capacity frees, relaunch capacity-refused decisions in order (oldest first).
-  // Collect all decisions waiting for capacity, sorted by age.
-  const capacityWaiting: Array<{ item: Work; watch: ApprovalWatch; key: string; age: number }> = [];
-  for (const [key, watch] of Object.entries(state.approvals)) {
+  // GY-849: when capacity frees, the capacity-refused decisions are relaunched oldest first. The
+  // items a waiting decision belongs to move to the front of the step in age order, and their
+  // relaunches enter the launcher one at a time (`capacityRelaunchInFlight`), so the oldest waiting
+  // decision is the one that meets the freed slot, not the first the snapshot happened to list.
+  const capacityRank = new Map<string, number>();
+  if (!approversSpent) for (const watch of Object.values(state.approvals)) {
     if (!watch.capacity || watch.settledAt) continue;
-    const item = snapshot.work.find(c => c.key === watch.work);
-    if (!item || approversSpent) continue;
     const age = Date.parse(watch.requestedAt);
-    capacityWaiting.push({ item, watch, key, age });
+    if (!Number.isFinite(age)) continue;
+    const held = capacityRank.get(watch.work);
+    if (held === undefined || age < held) capacityRank.set(watch.work, age);
   }
-  // Process items in order, but prioritize older capacity-refused decisions when capacity frees
-  const workToProcess = [...snapshot.work];
-  if (!approversSpent && capacityWaiting.length) {
-    // Sort capacity-waiting by age (oldest first) and reorder to process them first
-    capacityWaiting.sort((a, b) => a.age - b.age);
-    const capacityItems = new Set(capacityWaiting.map(c => c.item.key));
-    // Reorder work: put capacity-waiting items first, in age order
-    workToProcess.sort((a, b) => {
-      const aWaiting = capacityItems.has(a.key);
-      const bWaiting = capacityItems.has(b.key);
-      if (aWaiting !== bWaiting) return aWaiting ? -1 : 1;
-      if (aWaiting && bWaiting) {
-        const aAge = capacityWaiting.find(c => c.item.key === a.key)?.age ?? 0;
-        const bAge = capacityWaiting.find(c => c.item.key === b.key)?.age ?? 0;
-        return aAge - bAge;
-      }
-      return 0;
-    });
-  }
+  const waitingRank = (item: Work) => capacityRank.get(item.key) ?? Number.POSITIVE_INFINITY;
+  const workToProcess = capacityRank.size ? [...snapshot.work].sort((a, b) => {
+    const aRank = waitingRank(a), bRank = waitingRank(b);
+    return aRank === bRank ? 0 : aRank < bRank ? -1 : 1;
+  }) : snapshot.work;
   for (const item of workToProcess) await isolate('decision', item, item.key, async () => {
     const assessment = assessments[item.id];
     // A request step 2 refused this cycle is read as it was decided, not as the snapshot saw it.
@@ -645,7 +652,10 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
         // replacement, so the step is taken again next cycle.
         if (!await closeApprover(item, watch, step.detail) && watch.closeAttempts < maxApproverCloses) continue;
         // A launch that waited for a slot or was refused ran no session: it is only made again.
+        // A capacity wait relaunches one at a time (GY-849), oldest waiting decision first.
         if (step.step === 'relaunch' && !watch.agentName) {
+          if (capacityRelaunchWaits(watch)) continue;
+          if (watch.capacity) capacityRelaunchHanded = true;
           const waited = watch.capacity ? 'waited for an approver slot' : 'had its last approver launch refused';
           try { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'done', `${watch.work}'s ${watch.action} decision ${watch.decision} ${waited}; ${await launch(item, watch, false)}`); }
           catch (error) { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'failed', `${watch.work}'s ${watch.action} decision ${watch.decision} ${waited}; its approver session could not be launched: ${message(error)}`); }

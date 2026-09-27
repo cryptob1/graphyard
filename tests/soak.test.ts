@@ -103,9 +103,11 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
 /**
  * One simulated day of the loop against this world. `regression` injects a fault into the loop's own
  * effects, standing for a change that breaks an invariant, so the soak shows it would fail.
+ * `capacityWait` refuses every approver launch with `capacityExhausted` between `from` and `to`,
+ * and records what waited, what was refused and what launched once the window closed (GY-849).
  */
 let days = 0;
-async function simulateDay(options: { hours: number; regression?: 'approvers-left-open'; handApprovers?: boolean }) {
+async function simulateDay(options: { hours: number; regression?: 'approvers-left-open'; handApprovers?: boolean; capacityWait?: { from: number; to: number } }) {
   const dayStart = clock.now();
   const github = new SimulatedGitHub({ repository, baseBranch: 'main', appId: 1234, ciAppId: 15368, reviewerApps, ciMs: 5 * minute, reviewMs: 3 * minute, firstPullRequest: 100 * ++days },
     [...Array.from({ length: plan.items }, (_, index) => file(index + 1)), 'README.md']);
@@ -142,7 +144,10 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     await engine.execute(principal, 'workspace', work.id, { epoch, host: 'soak-host', path: `/tmp/soak/${key.toLowerCase()}-${epoch}`, branch }, id());
     const attempt = (attempts.get(key) ?? 0) + 1; attempts.set(key, attempt);
     const pane = herdr.open(profile.agentName);
-    sessions.push({ work: work.id, key, branch, profile, epoch, pane, pushAt: clock.now() + plan.workMs, diesAt: plan.deaths.has(n) && attempt === 1 ? clock.now() + plan.deathAfterMs : null, state: 'working' });
+    // The capacity-wait day has no deaths: a lease-loss resolve decision requested inside the
+    // window would still be bound to the revision it was requested at when the window closed,
+    // which is this scenario's other fault class, not the one it exercises (GY-849).
+    sessions.push({ work: work.id, key, branch, profile, epoch, pane, pushAt: clock.now() + plan.workMs, diesAt: !options.capacityWait && plan.deaths.has(n) && attempt === 1 ? clock.now() + plan.deathAfterMs : null, state: 'working' });
     return { key, epoch };
   };
   const workersTick = async (now: number) => {
@@ -168,8 +173,18 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   // sessions all end without judging: the first vanishes or stops, each relaunch the loop makes
   // stops `done`, and one relaunch is refused by a registry timeout.
   const hand = new Map<string, { key: string; launches: number; refused: number }>();
+  // GY-849: approver launches the capacity window refused, the launches that succeeded once it
+  // closed, and the watches still waiting when it did, each with its request's age.
+  const capacityRefused: { decision: string; key: string; elapsed: number }[] = [];
+  const capacityLaunched: { decision: string; key: string; elapsed: number }[] = [];
+  let capacityWaiters: { decision: string; key: string; requestedAt: string }[] | null = null;
   const approver: DaemonEffects['approver'] = async (work, decision) => {
+    if (options.capacityWait && clock.now() - dayStart >= options.capacityWait.from && clock.now() - dayStart < options.capacityWait.to) {
+      capacityRefused.push({ decision, key: work.key, elapsed: clock.now() - dayStart });
+      throw Object.assign(new Error('No healthy agent account for the approver: every approver account is spent until its quota resets'), { capacityExhausted: true });
+    }
     const unjudged = hand.get(decision);
+    if (!unjudged) capacityLaunched.push({ decision, key: work.key, elapsed: clock.now() - dayStart });
     if (unjudged) {
       unjudged.launches += 1;
       if (unjudged.key === items[plan.items - 1].key && unjudged.launches === 1) { unjudged.refused += 1; throw new Error('the agent registry for the approver role is unreachable: timeout'); }
@@ -303,6 +318,9 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       for (const act of pending.splice(0)) await act();
       await engine.reconcile();
       for (let guard = 0; guard < 200 && await jobsDue(); guard++) await processJob(engine, adapter);
+      // GY-849: what still waited for capacity when the window closed, each with its request's age.
+      if (options.capacityWait && !capacityWaiters && elapsed >= options.capacityWait.to)
+        capacityWaiters = Object.values(state.approvals).filter(watch => watch.capacity).map(watch => ({ decision: watch.decision, key: watch.work, requestedAt: watch.requestedAt }));
       try {
         const result = await runCycle(config, state, effects, clock.now, launcher); cycles++;
         reportedDispatches += result.actions.filter(action => action.kind === 'dispatch' && action.state === 'done').length;
@@ -331,7 +349,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   }
 
   const final = (await store.list()).filter(item => items.some(entry => entry.id === item.id));
-  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, herdr, hand, escalations, spent, upgrades, refusalSamples, checkout };
+  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, herdr, hand, escalations, spent, upgrades, refusalSamples, checkout, capacityRefused, capacityLaunched, capacityWaiters };
 }
 
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 180_000 }, async () => {
@@ -411,6 +429,41 @@ test('unit:soak-invariants-hold — hand-launched approvers that vanish or stop 
   assert.equal([...hand.values()].reduce((total, entry) => total + entry.refused, 0), 1, 'one relaunch was refused by a registry timeout, and retried');
 });
 
+test('unit:soak-invariants-hold — approver launches refused for capacity wait uncounted and relaunch oldest-first within two cycles of capacity freeing, with no hand action and every invariant holding', { timeout: 120_000 }, async () => {
+  // GY-849: between minute 50 and minute 130 no approver account is eligible, which spans the
+  // rework rounds of items three and seven (requested about minutes 58 and 118), so both decisions
+  // sit waiting when the window closes. The loop must relaunch them — uncounted against the launch
+  // bound, one at a time on the launcher, the older request taking the freed capacity first, each
+  // within a couple of cycles of the window closing — with no hand action, and both items delivered.
+  const began = performance.now();
+  const window = { from: 50 * minute, to: 130 * minute };
+  const { items, final, violations, failures, escalations, capacityRefused, capacityLaunched, capacityWaiters } =
+    await simulateDay({ hours: 6, capacityWait: window });
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
+  assert.deepEqual(violations, [], 'every system invariant holds across the capacity waits and the ordered relaunches');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  // Both rework decisions were refused inside the window and both still waited when it closed.
+  assert.ok(capacityWaiters && capacityWaiters.length === 2, `both rework decisions waited at window close: ${JSON.stringify(capacityWaiters)}`);
+  const waiters = [...(capacityWaiters ?? [])].sort((a, b) => Date.parse(a.requestedAt) - Date.parse(b.requestedAt));
+  assert.ok(waiters.every(entry => [...capacityRefused].some(refusal => refusal.decision === entry.decision && refusal.elapsed >= window.from && refusal.elapsed < window.to)),
+    `each waiting decision was refused for capacity inside the window: ${JSON.stringify(capacityRefused.slice(0, 4))}…`);
+  assert.ok(waiters.every(entry => entry.key === items[2].key || entry.key === items[6].key), `the waiters are the rework rounds of items three and seven: ${JSON.stringify(waiters)}`);
+  // Once capacity freed, the oldest waiting decision launched first, then the next: one at a time,
+  // each in its own cycle, so a newer decision never races an older one for the freed capacity.
+  const recovered = capacityLaunched.filter(entry => waiters.some(waiter => waiter.decision === entry.decision)).sort((a, b) => a.elapsed - b.elapsed);
+  assert.deepEqual(recovered.map(entry => entry.decision), waiters.map(entry => entry.decision),
+    `capacity freed took the waiting decisions in age order: ${JSON.stringify({ launched: recovered, waited: waiters })}`);
+  assert.ok(recovered.length >= 2 && recovered[0].elapsed < recovered[1].elapsed,
+    `the relaunches went one at a time, never two in one cycle: ${JSON.stringify(recovered)}`);
+  for (const entry of recovered)
+    assert.ok(entry.elapsed >= window.to && entry.elapsed <= window.to + 2 * minute, `${entry.decision} launched within two cycles of capacity freeing (+${Math.round((entry.elapsed - window.to) / minute)} min)`);
+  // Neither decision was left unanswered: neither escalated as unjudged, and both rework rounds ran.
+  for (const waiter of waiters)
+    assert.ok(!escalations.some(detail => detail.includes(waiter.decision) && /approver session\(s\)/.test(detail)), `${waiter.key}: the capacity wait never escalated as unjudged`);
+  for (const n of [3, 7]) assert.equal(final.find(item => item.key === items[n - 1].key)!.pipeline?.reworkRounds ?? 0, 1, `item ${n}'s rework round ran after its capacity wait`);
+  const seconds = (performance.now() - began) / 1000;
+  assert.ok(seconds < 120, `the capacity-wait day runs inside its budget (${seconds.toFixed(1)} s)`);
+});
 test('unit:soak-invariants-hold — a loop change that breaks an invariant fails the soak: approver sessions the loop no longer closes are named within the hour', { timeout: 120_000 }, async () => {
   // The regression GY-403 was: approvers finished, nobody closed them. Here the loop's close reports
   // success and closes nothing, which no per-item gate of any change would notice.
@@ -420,3 +473,4 @@ test('unit:soak-invariants-hold — a loop change that breaks an invariant fails
   // The violation is a fault of its class on the loop's record, which files one item when it recurs.
   assert.equal(state.faults.instances.filter(instance => instance.kind === 'invariant:lingering-sessions' && instance.faultClass === 'session-liveness').length, 1);
 });
+
