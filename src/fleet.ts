@@ -10,7 +10,7 @@ import { shellQuote } from './master/dispatch.js';
 import { sessionName } from './session-name.js';
 import { smokeRegistryAccount } from './runner/roles.js';
 import type { SmokeResult } from './runner/pi.js';
-import { accountIneligibility, fleetRoles, liveSessions, proposedConcurrency, proposedRuntimeRoles, proposedRuntimes, rolePolicy, type AccountKey, type AgentRegistry, type RolePolicy, type FleetAccount, type FleetAccountInput, type FleetModel, type FleetRole, type FleetRoleName, type FleetRuntime, type FleetSession, type LaunchContract, type QuotaObservation, type RunOutcome, type SessionSkip, type SmokeObservation } from './model/registry.js';
+import { accountIneligibility, fleetRoles, liveSessions, proposedConcurrency, proposedRuntimeRoles, proposedRuntimes, rolePolicy, smokeRetestMs, type AccountKey, type AgentRegistry, type RolePolicy, type FleetAccount, type FleetAccountInput, type FleetModel, type FleetRole, type FleetRoleName, type FleetRuntime, type FleetSession, type LaunchContract, type QuotaObservation, type RunOutcome, type SessionSkip, type SmokeObservation } from './model/registry.js';
 
 /**
  * The executor's side of the agent registry (GY-91).
@@ -29,7 +29,7 @@ export interface FleetProbe extends EnvironmentProbe { work?: string; principal?
   runtime?: RuntimeInventory;
   /** Runs the one-prompt smoke test of an account (GY-446); replaced by tests. */
   smoke?: (account: FleetLaunchAccount) => Promise<SmokeResult>;
-  smokeTimeoutMs?: number }
+  /** The smoke test's own bound; `smokeDefaultTimeoutMs` when unset (GY-703). */ smokeTimeoutMs?: number }
 /** What Herdr listed on the executor's own host, and whether it could be read at all. */
 export interface RuntimeInventory { agents: { name?: string | null }[]; available: boolean }
 /** The three calls an executor makes. */
@@ -184,11 +184,58 @@ export async function observeAccount(account: FleetAccount, runtime: FleetRuntim
 }
 
 /**
- * Whether an account is smoke-tested before a session is chosen on it: an account of a headless
- * runtime (Pi, the narrow roles' runner) with no result since it last changed. An interactive
- * runtime's session is its own check — a session that cannot start fails its launch.
+ * The runtime kinds whose sessions the launcher runs headless — a one-prompt JSON-mode run on the
+ * account's own login, no pane (GY-169). This one list is what the smoke gate and the launcher's
+ * headless path both read (GY-703): a runtime added here is smoke-tested and launched headless by
+ * the same edit, so the gate can no longer silently trail the launcher. A runtime whose sessions
+ * stay interactive never joins it — its session is its own check: a session that cannot start
+ * fails its launch.
  */
-export const needsSmoke = (account: FleetAccount, runtime: FleetRuntime) => runtime.launch.kind === 'pi' && account.enabled && !account.smoke;
+export const headlessRunKinds: readonly string[] = ['pi'];
+export const runsHeadless = (kind: string) => headlessRunKinds.includes(kind);
+/**
+ * Whether an account is smoke-tested before a session is chosen on it: an account of a headless
+ * runtime (`runsHeadless`) with no result since it last changed, and a failed account once its
+ * failure is `smokeRetestMs` old, so a transient failure — a 429, a provider outage — is retried
+ * on a backoff instead of barring the account until an operator edits it (GY-703).
+ */
+export const needsSmoke = (account: FleetAccount, runtime: FleetRuntime, now: number) => runsHeadless(runtime.launch.kind) && account.enabled
+  && (!account.smoke || (account.smoke.result === 'fail' && now - Date.parse(account.smoke.at) >= smokeRetestMs));
+
+/** The bound on one account's smoke test unless the probe names another: a one-prompt run that outlasts this is a hanging provider, and a launch waits on no provider that long (GY-703). */
+export const smokeDefaultTimeoutMs = 30_000;
+/**
+ * One smoke test in flight per account, shared by every selection this process makes while it
+ * runs: concurrent selections — the loop's roles ask within the same cycle — test an untested
+ * account once, not once each (GY-703). An executor only tests the accounts on its own host, so
+ * the account name keys it.
+ */
+const smokeInFlight = new Map<string, Promise<SmokeObservation>>();
+/**
+ * The result of a smoke test this process ran, held until a select the control plane accepted
+ * carried it: the result is only persisted folded into that request, so a select that throws
+ * would lose a test the account paid for and pay for it again on every retry (GY-703). Held only
+ * for the registry revision it was tested against — an account changed since says nothing about
+ * the changed login — and a held failure only for the backoff, so the retest it is due is run.
+ */
+const smokeHeld = new Map<string, { revision: number; at: number; observation: SmokeObservation }>();
+/** Run or join the account's smoke test, and hold its result for the select that reports it. */
+async function accountSmoke(account: string, revision: number, now: number, target: FleetLaunchAccount, probe: FleetProbe): Promise<SmokeObservation> {
+  const held = smokeHeld.get(account);
+  if (held?.revision === revision && (held.observation.result === 'pass' || now - held.at < smokeRetestMs)) return held.observation;
+  const joined = smokeInFlight.get(account);
+  if (joined) return joined;
+  const run = (async () => {
+    let result: SmokeResult;
+    try { result = await (probe.smoke ?? (target => smokeRegistryAccount(target, { timeoutMs: probe.smokeTimeoutMs ?? smokeDefaultTimeoutMs })))(target); }
+    catch (error) { result = { ok: false, error: error instanceof Error ? error.message : String(error) }; }
+    const observation: SmokeObservation = { result: result.ok ? 'pass' : 'fail', reason: result.ok ? null : (result.error?.replace(/[\u0000-\u001f\u007f\s]+/g, ' ').trim() || 'the smoke test failed without an error').slice(0, 500) };
+    smokeHeld.set(account, { revision, at: now, observation });
+    return observation;
+  })();
+  smokeInFlight.set(account, run);
+  try { return await run; } finally { smokeInFlight.delete(account); }
+}
 
 /**
  * The session a launch runs on, chosen by the control plane — or null when the registry does not
@@ -207,30 +254,32 @@ export async function selectFleetSession(config: FleetConfig, role: FleetRoleNam
     return runtime ? { account: account.name, ...await observeAccount(account, runtime, { ...probe, ceilingPercent: ceiling }) } : null;
   }));
   const observations: { account: string; quota: QuotaObservation; health: EnvironmentHealth | null; smoke?: SmokeObservation }[] = observed.filter((entry): entry is NonNullable<typeof entry> => !!entry);
-  // An account is smoke-tested before it is first chosen and again after any registry change to it
-  // (the change clears its result), so a login that cannot answer is ineligible with the runtime's
-  // own error before any session launches on it (GY-446).
+  const now = probe.now?.() ?? Date.now();
+  // An account is smoke-tested before it is first chosen, again after any registry change to it
+  // (the change clears its result), and again when a failure is smokeRetestMs old (GY-703), so a
+  // login that cannot answer is ineligible with the runtime's own error before any session
+  // launches on it (GY-446).
   await Promise.all(local.map(async account => {
     const runtime = registry.runtimes.find(entry => entry.name === account.runtime), model = registry.models.find(entry => entry.name === account.model);
     const observation = observations.find(entry => entry.account === account.name);
-    if (!runtime || !model || !needsSmoke(account, runtime) || observation?.quota.loggedIn === false) return;
+    if (!runtime || !model || observation?.quota.loggedIn === false) return;
+    // A result the document carries is the registry's; nothing this process held for the account outlives it.
+    if (!needsSmoke(account, runtime, now)) { smokeHeld.delete(account.name); return; }
     const target: FleetLaunchAccount = { name: account.name, kind: runtime.launch.kind, home: account.credential.home, key: account.credential.key ?? null,
       fleet: { runtime: runtime.name, contract: runtime.launch, model: model.name, modelId: model.id, session: 'smoke', reason: 'smoke test', role, revision: registry.revision } };
-    let result: SmokeResult;
-    try { result = await (probe.smoke ?? (target => smokeRegistryAccount(target, { timeoutMs: probe.smokeTimeoutMs })))(target); }
-    catch (error) { result = { ok: false, error: error instanceof Error ? error.message : String(error) }; }
-    const smoke: SmokeObservation = { result: result.ok ? 'pass' : 'fail', reason: result.ok ? null : (result.error?.replace(/[\u0000-\u001f\u007f\s]+/g, ' ').trim() || 'the smoke test failed without an error').slice(0, 500) };
+    const smoke = await accountSmoke(account.name, registry.revision, now, target, probe);
     if (observation) observation.smoke = smoke;
     else observations.push({ account: account.name, quota: { loggedIn: null, state: 'unknown', usage: [], resetsAt: null, reason: null }, health: null, smoke });
   }));
   // A session of this role whose runtime session is gone is ended before the choice, so the role's
   // count is of sessions that actually run and a finished approver never refuses the next one.
-  const now = probe.now?.() ?? Date.now();
   for (const session of liveSessions(registry).filter(entry => entry.role === role)) {
     const gone = runtimeSessionGone(session, probe.runtime, host, now);
     if (gone) await client.end(session.id, gone).catch(() => {});
   }
   const chosen = await client.select({ role, host, work: probe.work ?? null, group: probe.group ?? null, principal: probe.principal ?? profile.principal ?? null, observations: observations.map(({ account, quota, smoke }) => ({ account, quota, ...(smoke ? { smoke } : {}) })) });
+  // The accepted select folded every observation it carried: what this process held for them is the registry's now.
+  for (const entry of observations) smokeHeld.delete(entry.account);
   const at = new Date(now).toISOString();
   const skipped: AccountSkip[] = chosen.skipped.map(entry => ({ at, role: role as AccountSkip['role'], profile: profile.name, environment: entry.account, reason: entry.reason, work: probe.work ?? null, cause: skipCause(entry.reason) }));
   if (!chosen.selected || !chosen.account || !chosen.runtime || !chosen.model || !chosen.session)

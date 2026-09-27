@@ -6,7 +6,7 @@ import { consentAnswerSchema } from './consent-prompt.js';
 import { LaunchRefusedError } from './harness.js';
 import { defaultChildRun, type ChildRun } from './child-runner.js';
 import { closeFailedLaunch, launchStartMs, withLaunchClose, accountLaunch, acknowledgeLaunch, acknowledgementMs, allocateManagedCheckout, atomicPrivateWrite, autonomousSession, closeHerdrPane, createdHerdrTab, deliverPrompt, destructivePromptGuidance, herdrJson, loadMasterConfig, markReprompted, neverStarted, onSelectedSession, prepareSessionHarness, privateFile, profileAtLimit, profileSessions, registrySessionOf, readProducerCredential, readSessionScreen, repromptText, selectAccount, selectRegistryAccount, sessionActivity, sessionAgentName, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, writeFailure, type PromptDelivery, type StartBounds, type HerdrAgent, type MasterConfig, type ProducerProfile, type RequestDelivery, type SessionRetryReport } from './master.js';
-import type { FleetProbe, selectFleetSession } from './fleet.js';
+import { runsHeadless, type FleetProbe, type selectFleetSession } from './fleet.js';
 import { implementerIdentities, type Work } from './model.js';
 import type { DispatchRequest } from './model/dispatch.js';
 import { reclaimSessionCheckouts, removeSessionCheckout, sessionCheckout, worktreeRoot, type CheckoutReclaimReport, type FilesystemProbe, type SessionCheckout } from './install/worktree-root.js';
@@ -287,12 +287,12 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
   // session on a `pi` account runs headless on that account, and any other group on one is refused
   // below; `run.runtimes` covers only a producer role the registry does not define.
   const registry = await selectRegistryAccount(config, 'producer', profile, { ...dependencies.probe, work: work.key, group: binding.group });
-  if (registry ? registry.account.kind === 'pi' && binding.group === 'unit' : narrowRoleRuntime(config.run, 'producer', binding.group) === 'pi')
+  if (registry ? runsHeadless(registry.account.kind) && binding.group === 'unit' : narrowRoleRuntime(config.run, 'producer', binding.group) === 'pi')
     return launchHeadlessProducer(root, config, work, binding, request, profile, { id, agentName, credential, attempt: prior.length + 1 }, { ...dependencies, now, registry });
-  // Pi runs a producer headless for the unit group only; a Pi account chosen for any other group is
-  // refused, its session given back, rather than started as a Herdr terminal session no launch path
-  // supervises for Pi (GY-397).
-  if (registry?.account.kind === 'pi') {
+  // Pi runs a producer headless for the unit group only; a headless-runtime account chosen for any
+  // other group is refused, its session given back, rather than started as a Herdr terminal session
+  // no launch path supervises for it (GY-397).
+  if (registry && runsHeadless(registry.account.kind)) {
     const reason = `Graphyard refuses to launch account ${registry.account.name} for ${work.key} ${binding.group} proofs: runtime ${registry.account.fleet.runtime} runs producer sessions headless for the unit group only. Name an account of a terminal runtime ahead of it in the producer role (master registry role set producer ACCOUNT[,ACCOUNT…] --reason R).`;
     await registry.release(reason.slice(0, 400));
     throw new LaunchRefusedError('pi', reason);
@@ -395,8 +395,10 @@ async function launchHeadlessProducer(root: string, config: MasterConfig, work: 
     throw error;
   }
   // A registry session is the run: its slot is given back the moment the run ends.
+  // A run whose `settled` rejects crashed without a result, so it is released as one (GY-703):
+  // released without an outcome it would never reach the account's unjudged-run count.
   const settled = started.settled.then(async run => { await registry?.release(`the headless producer run for ${binding.key} ended`, runOutcome(run)); return run; },
-    async error => { await registry?.release(`the headless producer run for ${binding.key} ended`); throw error; }).then(run => updateProducerRecord(root, session.id, entry => ({ ...entry, run })).then(() => run));
+    async error => { await registry?.release(`the headless producer run for ${binding.key} ended without a result: ${(error instanceof Error ? error.message : String(error)).slice(0, 300)}`, 'no-result'); throw error; }).then(run => updateProducerRecord(root, session.id, entry => ({ ...entry, run })).then(() => run));
   settled.catch(() => { /* reconciliation settles the record on its expiry */ });
   return { producer: record.id, requestId: request.id, attempt: record.attempt, work: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, group: binding.group, proofs: binding.proofs,
     profile: profile.name, principal: profile.principal, agentName: session.agentName, pane: null, checkout: checkout.directory, expiresAt: record.expiresAt, runtime: 'pi' as const, delivery: 'request' as const,
