@@ -89,7 +89,7 @@ test('unit:stalled-takeover-removes-only-what-it-judged — removal judges the l
 });
 
 // GY-682: the follow-ups from the approved review of GY-509.
-test('unit:set-aside-lock-fences-creates — a create landing while a live lock is set aside is withdrawn, and the lock is put back', async () => {
+test('manual:review-followups-triaged — GY-509 follow-ups 1/4/6: fence creates on set-aside locks', async () => {
   const root = await mkdtemp(join(tmpdir(), 'graphyard-fence-'));
   try {
     const directory = dispatchReservationDirectory(root);
@@ -119,7 +119,7 @@ test('unit:set-aside-lock-fences-creates — a create landing while a live lock 
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test('unit:abandoned-asides-are-swept — a crashed removal leaks nothing, and a stale guard is cleared only as judged', async () => {
+test('manual:review-followups-triaged — GY-509 follow-ups 2/5/3/7: judge abandoned guards and sweep stale asides', async () => {
   const root = await mkdtemp(join(tmpdir(), 'graphyard-sweep-'));
   try {
     const directory = dispatchReservationDirectory(root);
