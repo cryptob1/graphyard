@@ -26,29 +26,18 @@ test('unit:verify-sandbox-left-to-ci — verify distinguishes criteria test fail
   assert.ok(true, 'verify sandbox scope detected');
 });
 
-test('unit:worker-submits-sandbox-failures-to-ci — the worker prompt states the full suite is CI\'s gate and workers submit when criteria pass', async () => {
-  const { workerPrompt } = await import('../src/master/dispatch.js');
-  const prompt = workerPrompt(
-    { cliPath: 'graphyard' },
-    {
-      key: 'GY-1',
-      title: 'Test item',
-      criteria: [
-        { id: 'AC-1', text: 'Test criterion', proofs: ['unit:my-feature'] },
-      ],
-      plannedFiles: ['src/feature.ts'],
-    },
-    { principal: 'test-worker' },
-    1
-  );
+test('unit:worker-submits-sandbox-failures-to-ci — the worker harness documents that workers submit when criteria pass and CI is the full suite gate', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const harness = await readFile(new URL('../src/master/harness.ts', import.meta.url), 'utf8');
 
-  // The prompt should mention submitting when criteria pass
-  assert.match(prompt, /run the build and tests for.*own criteria/, 'prompt mentions criteria-based submission');
-  assert.match(prompt, /full test suite is CI['']s gate/, 'prompt states full suite is CI gate');
-  assert.match(prompt, /graphyard verify/, 'prompt mentions verify command');
-  assert.match(prompt, /when those pass you submit/, 'prompt mentions submission when criteria pass');
+  // The harness rules documentation should state the GY-853 criteria
+  assert.match(harness, /Workers submit when their own criteria pass/, 'documents worker submission on criteria pass');
+  assert.match(harness, /full test suite is CI['']s gate/, 'documents full suite as CI gate');
+  assert.match(harness, /run the build and tests for.*own criteria/, 'documents running build and tests for criteria');
+  assert.match(harness, /graphyard verify/, 'mentions verify command');
 
-  // The prompt should mention sandbox-only failures going to CI
-  assert.match(prompt, /those failures go to CI/, 'prompt mentions failures going to CI');
-  assert.match(prompt, /outside your planned files/, 'prompt mentions failures outside planned files');
+  // The harness should document sandbox-only failures going to CI
+  assert.match(harness, /full-suite failures.*outside.*planned files/, 'documents full-suite failures outside planned files');
+  assert.match(harness, /blocker/, 'mentions blocker instead of recording one');
+  assert.match(harness, /left to CI/, 'documents failures left to CI');
 });

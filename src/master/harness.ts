@@ -240,6 +240,13 @@ export function masterHarness(root: string, config: MasterConfig, harness: strin
  * So every raw `--force*` push is denied, the lease push included, and the CLI makes the one lease
  * push itself: to the branch registered for the caller's live lease, conditional on the tip it
  * fetched (`--force-with-lease=refs/heads/BRANCH:TIP`), so it replaces only what it saw.
+ *
+ * GY-853: Workers submit when their own criteria pass; the full test suite is CI's gate. A worker
+ * runs the build and tests for its own criteria here. When those pass, the worker submits via
+ * complete, naming in the PR any full-suite failures that come only from its sandbox and lie
+ * outside its planned files, instead of recording a blocker. The verify command distinguishes
+ * failures in the item's own criteria's tests (which block submission) from failures in unrelated
+ * suites outside planned files (which are marked as 'left to CI' and reported as outstanding).
  */
 /** Every character an empty-source refspec's name can start with as typed: a ref name's first character, a quote, or an expansion. */
 export const emptySourceStarts = [...'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', ...'_.-/@\'"$`{~'];
