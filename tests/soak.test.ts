@@ -13,11 +13,14 @@ import { server } from '../src/server.js';
 import { processJob } from '../src/github.js';
 import { Refusal, type Principal, type Work } from '../src/model.js';
 import { approverSessionName, decisionInput, masterConfigSchema, mergeExecutor, type MasterConfig, type WorkerProfile } from '../src/master.js';
+import { mergeBatchSize, mergeParallelTips, optimisticExcludeGlobs, optimisticMergeEnabled, rerunFailedChecks } from '../src/master/profiles.js';
 import { emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { Launcher } from '../src/daemon/cycle.js';
 import { successorWidening } from '../src/model/successors.js';
 import { systemInvariants, type InvariantCheck } from '../src/model/invariants.js';
 import { performSelfUpgrade, type SelfUpgradeOutcome } from '../src/daemon/upgrade.js';
+import { defaultOptimisticExclude } from '../src/optimistic-merge.js';
+import { queuePlacement } from '../src/merge-queue.js';
 import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } from './helpers/soak-world.js';
 
 /**
@@ -37,7 +40,11 @@ import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } f
  * cycle — and the invariants hold on that detached path. Optimistic merge (GY-500) is on, as by
  * default: disjoint items land past the queue, two that change shared infrastructure queue, and one
  * breaks main after its optimistic merge, so the main guard reads the post-merge runs, reverts it
- * and reopens it. A change to the loop that breaks an invariant fails here, in CI, before it merges;
+ * and reopens it. The loop publishes its merge-queue configuration every cycle it changes (GY-330,
+ * GY-498, GY-500, GY-516), and a second, queue-only day runs the parallel-tip window (GY-498) over
+ * every item: several tips validated at once, a failing tip ejecting only its own entry once the
+ * tips ahead pass while the suffix rebuilds without it, and the window reconfigured mid-day and
+ * republished. A change to the loop that breaks an invariant fails here, in CI, before it merges;
  * a new behaviour that repeats per cycle, head or item belongs in this world.
  */
 const repository = 'owner/project';
@@ -50,12 +57,15 @@ const principals = {
   producer: { id: 'proof-runner', role: 'producer', proofs: [PROOF] },
 } satisfies Record<string, Principal>;
 const workers: WorkerProfile[] = ['one', 'two', 'three'].map(name => ({ name, principal: `worker-${name}`, agentName: `soak-worker-${name}`, mode: 'launch', kind: 'claude', credentialFile: `/outside/${name}.token`, agentArgs: [], approvals: 'auto', environment: {} }) as WorkerProfile);
-const everyone: Principal[] = [...Object.values(principals), ...workers.map(profile => ({ id: profile.principal, role: 'worker' as const }))];
+// The queue-only day's roster (GY-498): worker capacity enough to fill the parallel-tip window,
+// which three workers' push rate can never deepen past two tips in flight.
+const queueWorkers: WorkerProfile[] = ['four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve'].map(name => ({ name, principal: `worker-${name}`, agentName: `soak-worker-${name}`, mode: 'launch', kind: 'claude', credentialFile: `/outside/${name}.token`, agentArgs: [], approvals: 'auto', environment: {} }) as WorkerProfile);
+const everyone: Principal[] = [...Object.values(principals), ...[...workers, ...queueWorkers].map(profile => ({ id: profile.principal, role: 'worker' as const }))];
 const credentials = everyone.map(principal => ({ ...principal, token: `${principal.id}-token-${'x'.repeat(32)}` }));
 const token = (principal: Principal) => credentials.find(entry => entry.id === principal.id)!.token;
 const reviewerApps = [{ id: 'claude-reviewer', runtime: 'claude', appId: 55_001, botUserId: 55_002 }, { id: 'cursor-reviewer', runtime: 'cursor', appId: 66_001, botUserId: 66_002 }];
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
-const config: MasterConfig = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: launcher, repository, baseBranch: 'main', githubAppId: 1234,
+const soakConfig: MasterConfig = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: launcher, repository, baseBranch: 'main', githubAppId: 1234,
   hostId: 'soak-host', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers,
   operatorAgent: { id: principals.operatorAgent.id, credentialFile: '/outside/operator.token' }, approver: { id: principals.approver.id, credentialFile: '/outside/approver.token' },
   run: { proofWorkflow: 'acceptance.yml', intervalSeconds: 60 } });
@@ -64,12 +74,22 @@ const config: MasterConfig = masterConfigSchema.parse({ version: 1, url: 'https:
 const start = Date.parse('2031-06-02T08:00:00Z');
 const plan = {
   items: 15, releaseEveryMs: 15 * minute, workMs: 20 * minute,
+  // GY-842: review panes of a previous day, standing agentless with their worktrees deleted.
+  leftovers: 8,
   rework: new Set([3, 7, 11]), deaths: new Set([5, 9]), deathAfterMs: 8 * minute,
   deploys: [2 * hour + 30 * minute, 5 * hour], dirtyCheckout: { from: 4 * hour + 50 * minute, to: 6 * hour }, split: { at: 45 * minute, item: 12 }, clean: 2, unstable: 4, slowRecompute: 8, exhaustedReviewer: 6,
   /** GY-500: the item whose first head breaks main after its optimistic merge, and the items that change shared infrastructure and so queue. */
   breaksMain: 10, infrastructure: new Set([13, 14]),
   // GY-516: a flake on a speculative tip whose one rerun passes, and one whose rerun fails again.
   flaky: { rerunPasses: 13, rerunFails: 14 },
+  // GY-839: for one stretch of the day GitHub answers every open candidate's compares without a
+  // usable merge base, so the landing comparison keeps the two-way endpoint diff and the base's
+  // own new changes read as reverts — the reading this item fixes. The window covers the NOTICE
+  // commit on main, which moves the base under candidates still unqueued: their false landing
+  // refusals hold only the build gate and clear on the same heads when the window closes, before
+  // a worker could even react to them.
+  blind: { from: 96 * minute, to: 98 * minute },
+  notice: 96 * minute,
 };
 const file = (n: number) => `src/soak/item-${n}.ts`;
 const files = (n: number) => plan.infrastructure.has(n) ? [file(n), `tests/helpers/soak-item-${n}.ts`] : [file(n)];
@@ -107,19 +127,27 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
 
 /**
  * One simulated day of the loop against this world. `regression` injects a fault into the loop's own
- * effects, standing for a change that breaks an invariant, so the soak shows it would fail.
+ * effects, standing for a change that breaks an invariant, so the soak shows it would fail. `queued`
+ * runs the day with the optimistic lane off, so every item goes through the merge queue under the
+ * parallel-tip window (GY-498): `window` is the configured `mergeQueue.parallelTips`, `reconfigure`
+ * rewrites master config mid-day the way an operator's edit does (the next cycle republishes it),
+ * and `failTip` names the item whose first speculative tip fails and keeps failing after its rerun.
  */
 let days = 0;
-async function simulateDay(options: { hours: number; regression?: 'approvers-left-open'; handApprovers?: boolean }) {
+async function simulateDay(options: { hours: number; regression?: 'approvers-left-open'; handApprovers?: boolean; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number } }) {
   const dayStart = clock.now();
+  const config: MasterConfig = options.queued
+    ? masterConfigSchema.parse({ ...soakConfig, workers: [...workers, ...queueWorkers], mergeQueue: { optimistic: false, parallelTips: options.queued.window } })
+    : soakConfig;
   const github = new SimulatedGitHub({ repository, baseBranch: 'main', appId: 1234, ciAppId: 15368, reviewerApps, ciMs: 5 * minute, reviewMs: 3 * minute, firstPullRequest: 100 * ++days },
     [...Array.from({ length: plan.items }, (_, index) => file(index + 1)), 'README.md']);
-  const herdr = new SimulatedHerdr();
+  const herdr = new SimulatedHerdr(() => clock.now());
   const adapter = github.adapter();
   const moveClock = async (ms: number) => { clock.advance(ms); await store.pool.query('UPDATE simulated_clock SET offset_ms=$1', [clock.offsetMs]); };
   await moveClock(0);
 
   // ---- The fifteen items, created in the backlog and released one every fifteen minutes. ----
+  const releaseEveryMs = options.queued?.releaseEveryMs ?? plan.releaseEveryMs;
   const items: Work[] = [];
   for (let n = 1; n <= plan.items; n++) {
     let work = await engine.execute(principals.operator, 'create', null, { title: `Soak item ${n}`, plannedFiles: files(n), criteria: [{ id: 'AC-1', text: `Item ${n} behaves`, proofs: [PROOF] }] }, id());
@@ -127,14 +155,29 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       reviewerProfiles: [{ name: 'claude-reviewer', runtime: 'claude', reviewerApp: 'claude-reviewer' }, { name: 'cursor-reviewer', runtime: 'cursor', reviewerApp: 'cursor-reviewer' }] }, id());
     items.push(work);
   }
+  // ---- The backlog a previous day left (GY-842): panes of review sessions whose worktrees the
+  // ---- reclaim removed while the panes stood on. Enough of them that the sweep's per-pass bound
+  // ---- is what paces the drain, and one pane Graphyard never launched that it must never touch.
+  // Pane ids are this simulated world's own, so two days on one control plane never collide.
+  const world = `w${days}:`, leftovers = plan.leftovers, foreignPane = `${world}operator`;
+  for (let index = 0; index < leftovers; index++) {
+    const work = items[index], pane = `${world}left${index}`;
+    herdr.shell(pane, `/tmp/soak/leftover-${index} (deleted)`);
+    await api(principals.coordinator, 'POST', `work/${work.id}/session`, { id: `review-leftover-${index}`, kind: 'review', runtime: 'claude', host: 'soak-host',
+      subject: `${work.key}: review (previous day)`, state: 'running', pane, attach: `herdr pane attach ${pane}` });
+  }
+  herdr.shell(foreignPane, '/home/vish');
   const numberOf = (work: Pick<Work, 'key'>) => items.findIndex(item => item.key === work.key) + 1;
   for (const n of plan.rework) github.verdicts.set(items[n - 1].key, ['CHANGES_REQUESTED']);
   github.unstable.add(items[plan.unstable - 1].key); github.slowRecompute.add(items[plan.slowRecompute - 1].key);
   github.exhaustedProfiles.add('claude-reviewer');
   github.flaky.set(items[plan.flaky.rerunPasses - 1].key, 'rerun-passes'); github.flaky.set(items[plan.flaky.rerunFails - 1].key, 'rerun-fails');
+  // GY-498: in the queue-only day one item's first tip fails and keeps failing after its rerun, so
+  // the window has to attribute the failure to it and rebuild the tips behind it without it.
+  if (options.queued?.failTip) github.flaky.set(items[options.queued.failTip - 1].key, 'rerun-fails');
 
   // ---- Workers: the loop dispatches, the simulated session claims, works, pushes and submits (or dies). ----
-  interface Session { work: string; key: string; branch: string; profile: WorkerProfile; epoch: number; attempt: number; pane: string; pushAt: number; diesAt: number | null; state: 'working' | 'submitted' | 'dead' }
+  interface Session { work: string; key: string; branch: string; profile: WorkerProfile; epoch: number; attempt: number; pane: string; pushAt: number; diesAt: number | null; state: 'working' | 'submitted' | 'dead'; syncs: number; syncedFor?: string; refusedSince?: number }
   const sessions: Session[] = [], lost: string[] = [];
   const attempts = new Map<string, number>();
   const principalOf = (profile: WorkerProfile): Principal => ({ id: profile.principal, role: 'worker' });
@@ -144,10 +187,11 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     const epoch = claimed.epoch, key = work.key, n = numberOf(work);
     // A rework attempt pushes to the pull request already linked, from a fresh workspace.
     const branch = work.candidate?.branch ?? `graphyard/${key.toLowerCase()}-${epoch}`;
-    await engine.execute(principal, 'workspace', work.id, { epoch, host: 'soak-host', path: `/tmp/soak/${key.toLowerCase()}-${epoch}`, branch }, id());
+    const path = `/tmp/soak/${key}-${epoch}`;
+    await engine.execute(principal, 'workspace', work.id, { epoch, host: 'soak-host', path, branch }, id());
     const attempt = (attempts.get(key) ?? 0) + 1; attempts.set(key, attempt);
-    const pane = herdr.open(profile.agentName);
-    sessions.push({ work: work.id, key, branch, profile, epoch, attempt, pane, pushAt: clock.now() + plan.workMs, diesAt: plan.deaths.has(n) && attempt === 1 ? clock.now() + plan.deathAfterMs : null, state: 'working' });
+    const pane = herdr.open(profile.agentName, 'working', path);
+    sessions.push({ work: work.id, key, branch, profile, epoch, attempt, pane, pushAt: clock.now() + plan.workMs, diesAt: plan.deaths.has(n) && attempt === 1 ? clock.now() + plan.deathAfterMs : null, state: 'working', syncs: 0 });
     return { key, epoch };
   };
   const workersTick = async (now: number) => {
@@ -165,7 +209,29 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       const pr = github.push(session.key, session.branch, principal.id, head, files(numberOf(session)));
       await engine.execute(principal, 'submit', session.work, { epoch: session.epoch, pr: pr.number, documentation: 'A simulated item: it changes no documented behaviour' }, id());
       session.state = 'submitted';
-      herdr.status(session.pane, 'done');
+      // Its work done, the runtime exits and leaves the pane behind (GY-842); the loop's session
+      // end closes it in the same step, or the sweep reclaims it as the backstop.
+      herdr.kill(session.pane);
+    }
+    // GY-839: a worker whose candidate was refused on landing does what that refusal asks —
+    // graphyard sync, restore what the base changed, push again. Under a fault window long enough
+    // for a worker to react, this is the worker round the false refusal costs; while GitHub answers
+    // merge bases truly the landing comparison clears on its own and no worker is woken at all.
+    // The same remedy is what a queue ejection for a landing revert instructs, whose wording names
+    // the work rather than a count of files.
+    for (const session of sessions.filter(entry => entry.state === 'submitted')) {
+      const current = (await store.list()).find(item => item.id === session.work);
+      const refused = (current?.gates ?? []).flatMap(gate => gate.passed ? [] : gate.reasons)
+        .some(reason => /would revert (?:\d+ files?|work) outside its planned files/.test(reason));
+      const candidate = current?.candidate?.sha;
+      // A sync answers one candidate; a later refusal of a new candidate is synced again, exactly
+      // as a worker runs graphyard sync each time a landing refusal names its current head.
+      if (!refused || !candidate || session.syncedFor === candidate) { session.refusedSince = undefined; continue; }
+      const since = session.refusedSince ?? now;
+      session.refusedSince = since;
+      if (now - since < 3 * minute) continue;
+      session.syncs += 1; session.syncedFor = candidate; session.refusedSince = undefined;
+      github.push(session.key, session.branch, principalOf(session.profile).id, sha('head', session.key, session.epoch, 'sync', session.syncs), files(numberOf(session)));
     }
   };
 
@@ -202,7 +268,11 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   const snapshot = async () => { const read = await store.coordinationSnapshot(); return { work: read.work, now: read.now, jobs: read.jobs }; };
   const transport = async (path: string, data: any, key: string = id()) => {
     const match = /^work\/([^/]+)\/merge-acquire$/.exec(path);
-    if (!match) throw new Error(`Unexpected mutation ${path}`);
+    if (!match) {
+      // The loop's own configuration publication (GY-330, GY-498, GY-500, GY-516) goes the same way.
+      if (path === 'merge-queue') return await api(principals.coordinator, 'POST', 'merge-queue', data);
+      throw new Error(`Unexpected mutation ${path}`);
+    }
     try { return await engine.requestEnqueue(principals.coordinator, match[1], data, key); }
     catch (error) { if (error instanceof Refusal) throw Object.assign(new Error(JSON.stringify({ error: error.message })), { confirmedRefusal: error.status >= 400 && error.status < 500 }); throw error; }
   };
@@ -212,6 +282,8 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   const effects: DaemonEffects = {
     agents: () => herdr.list(),
     herdr: () => ({ agents: herdr.list(), available: true }),
+    panes: async () => ({ panes: herdr.paneList(), available: true }),
+    recordSession: (work, handle) => api(principals.coordinator, 'POST', `work/${work.id}/session`, handle),
     credentials: async profiles => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])),
     snapshot, dispatch, requestProof, approver, merge,
     closeSession: pane => { if (options.regression === 'approvers-left-open' && /approver/.test(herdr.agents.get(pane)?.name ?? '')) return; herdr.close(pane); },
@@ -226,6 +298,18 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       return { source: 'endpoint', sha: production.sha, at: new Date(clock.now()).toISOString(), reason: null, deployed: serving.map(item => item.key), pending: delivered.filter(item => !serving.includes(item)).map(item => item.key) };
     },
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+  };
+  // The loop publishes the master's merge-queue settings each cycle they change (GY-330, GY-498,
+  // GY-500, GY-516), exactly as daemonEffects wires it; the day records what was published, when.
+  let publishedMergeQueue: string | null = null;
+  const mergeQueuePosts: { at: number; settings: Record<string, number | boolean | readonly string[]> }[] = [];
+  effects.publishMergeBatchSize = async () => {
+    const settings = { batchSize: mergeBatchSize(config), optimistic: optimisticMergeEnabled(config), parallelTips: mergeParallelTips(config), rerunFailedChecks: rerunFailedChecks(config), optimisticExclude: optimisticExcludeGlobs(config) };
+    const published = JSON.stringify(settings);
+    if (published === publishedMergeQueue) return;
+    mergeQueuePosts.push({ at: clock.now(), settings });
+    await api(principals.coordinator, 'POST', 'merge-queue', settings);
+    publishedMergeQueue = published;
   };
 
   // ---- The coordinator checkout the loop runs from, and its supervisor (GY-437). ----
@@ -278,18 +362,40 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   // handed it over — here, before the simulated clock moves on.
   const launcher = new Launcher();
   const violations: string[] = [], observed = new Set<string>(), failures: string[] = [], escalations: string[] = [], spent = new Set<string>();
-  let released = 0, split = false, deploys = 0, cycles = 0, reportedDispatches = 0;
+  // GY-839: every false landing refusal the fault window produces, first seen per candidate head.
+  const landingRefusals: { key: string; sha: string; elapsed: number }[] = [];
+  // GY-498: the parallel-tip window as the day saw it — how many entries held a published tip at
+  // once, which successor tips were chained onto a predecessor's, and every tip per entry, so the
+  // test can watch the window fill, a failure isolate its entry, and the suffix rebuild without it.
+  const windowSamples: { at: number; concurrent: number; keys: string[] }[] = [];
+  const tipPublications: { key: string; tip: string; at: number; position: number }[] = [];
+  const chainedTips = new Set<string>();
+  let peakWindow = 0;
+  const seenTips = new Set<string>();
+  let released = 0, split = false, noticed = false, deploys = 0, cycles = 0, reportedDispatches = 0;
   const jobsDue = async () => Number((await store.pool.query('SELECT count(*) AS due FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now())')).rows[0].due);
   for (let elapsed = 0; elapsed <= options.hours * hour;) {
     const now = clock.now();
-    // Scheduled events: releases, the file split on main, the deploys.
-    while (released < plan.items && elapsed >= released * plan.releaseEveryMs) await engine.execute(principals.operator, 'ready', items[released++].id, {}, id());
-    if (!split && elapsed >= plan.split.at) {
+    // Scheduled events: releases, the file split on main, the deploys. The queue-only day runs with
+    // the split past its end: the re-plan and its stale-tip flush are the main day's scenario, and
+    // a queue of tips built before the split only ejects in a cascade the day cannot recover from.
+    while (released < plan.items && elapsed >= released * releaseEveryMs) await engine.execute(principals.operator, 'ready', items[released++].id, {}, id());
+    const splitAt = options.queued ? options.hours * hour + hour : plan.split.at;
+    if (!split && elapsed >= splitAt) {
       split = true;
       const from = file(plan.split.item), successors = [`src/soak/item-${plan.split.item}-a.ts`, `src/soak/item-${plan.split.item}-b.ts`];
       const commit = github.commit(`Split ${from}\n\nGraphyard-Successor: ${from} -> ${successors.join(', ')}`, [...github.files.filter(path => path !== from), ...successors]);
       github.successions.push(...successors.map(to => ({ from, to, commit: commit.sha, similarity: 70 })));
     }
+    // GY-839: while the window stands, GitHub answers every open candidate's compares without a
+    // usable merge base; afterwards its answers carry the true one again. The queue-only day runs
+    // with the window past its end: its fault is the bound candidates' recovery, which the main
+    // day exercises, and a queue full of false landing refusals would only churn sync rounds.
+    const blind = options.queued ? { from: options.hours * hour + hour, to: options.hours * hour + 2 * hour } : plan.blind;
+    github.staleMergeBase = elapsed >= blind.from && elapsed < blind.to
+      ? new Set([...github.prs.values()].filter(pr => pr.open).map(pr => pr.head)) : new Set<string>();
+    // A change landed on main outside Graphyard, moving the base under candidates already pushed.
+    if (!noticed && elapsed >= plan.notice) { noticed = true; github.commit('Add NOTICE to the base branch', [...github.files, 'NOTICE']); }
     // GY-551: twenty minutes in, the master requests a release of the last two items by hand and
     // puts each to an approver session it launches itself; neither session judges it.
     if (options.handApprovers && elapsed === 20 * minute) for (const [n, ending] of [[plan.items, 'vanishes'], [plan.items - 1, 'stops']] as const) {
@@ -310,6 +416,34 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       for (const act of pending.splice(0)) await act();
       await engine.reconcile();
       for (let guard = 0; guard < 200 && await jobsDue(); guard++) await processJob(engine, adapter);
+      for (const item of await store.list()) {
+        const sha = item.candidate?.sha, refused = (item.gates ?? []).flatMap(gate => gate.passed ? [] : gate.reasons)
+          .find(reason => /would revert \d+ files? outside its planned files/.test(reason));
+        if (sha && refused && !landingRefusals.some(entry => entry.key === item.key && entry.sha === sha)) landingRefusals.push({ key: item.key, sha, elapsed });
+      }
+      // GY-498: sample the window after the pass's publications, then apply a mid-day master-config
+      // edit, which the cycle about to run publishes the way an operator's edit is published.
+      if (options.queued) {
+        const all = await store.list();
+        const tipped = all.filter(item => item.stage !== 'done' && item.queue?.speculation && item.candidate
+          && item.queue.speculation.tip === item.candidate.sha && item.queue.speculation.base === item.candidate.baseSha);
+        if (tipped.length >= 2) {
+          windowSamples.push({ at: elapsed, concurrent: tipped.length, keys: tipped.map(item => item.key) });
+          for (const ahead of tipped) for (const behind of tipped) {
+            if (ahead.key !== behind.key && github.contains(behind.queue!.speculation!.tip, ahead.queue!.speculation!.tip)) chainedTips.add(`${ahead.key}->${behind.key}`);
+          }
+        }
+        for (const item of tipped) {
+          if (seenTips.has(`${item.key}:${item.queue!.speculation!.tip}`)) continue;
+          seenTips.add(`${item.key}:${item.queue!.speculation!.tip}`);
+          const placement = queuePlacement(item, all.map(entry => entry.id === item.id ? item : entry), clock.now());
+          tipPublications.push({ key: item.key, tip: item.queue!.speculation!.tip, at: elapsed, position: placement?.position ?? -1 });
+        }
+        if (options.queued.reconfigure && elapsed >= options.queued.reconfigure.at) {
+          config.mergeQueue!.parallelTips = options.queued.reconfigure.window;
+        }
+        peakWindow = Math.max(peakWindow, tipped.length);
+      }
       try {
         const result = await runCycle(config, state, effects, clock.now, launcher); cycles++;
         reportedDispatches += result.actions.filter(action => action.kind === 'dispatch' && action.state === 'done').length;
@@ -338,12 +472,14 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   }
 
   const final = (await store.list()).filter(item => items.some(entry => entry.id === item.id));
-  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, herdr, hand, escalations, spent, upgrades, refusalSamples, checkout };
+  if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
+  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, herdr, hand, escalations, spent, upgrades, refusalSamples, checkout, landingRefusals, foreignPane,
+    mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config };
 }
 
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 180_000 }, async () => {
   const began = performance.now();
-  const { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, state, upgrades, refusalSamples, checkout } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
+  const { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, state, upgrades, refusalSamples, checkout, herdr, landingRefusals, foreignPane, mergeQueuePosts } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
   const undelivered = final.filter(item => item.stage !== 'done' || !item.delivery);
   assert.deepEqual(undelivered.map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
@@ -387,6 +523,14 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.equal((await ledger('optimistic.revert.merged')).length, 1, 'one merged revert on the ledger');
   assert.equal((await ledger('optimistic.revert.merged')).filter(row => row.details?.reopened?.source === 'optimistic-revert').length, 1, 'one reopen, with the failure attached');
   assert.ok(!github.commits.get(github.tip)!.broken, 'main is green at the end of the day');
+  // The loop published its merge-queue settings exactly once for the whole day — on a change, not
+  // every cycle (GY-330, GY-498, GY-500, GY-516) — and each setting reached the installation ledger.
+  assert.equal(mergeQueuePosts.length, 1, `one publication, not one per cycle: ${JSON.stringify(mergeQueuePosts)}`);
+  assert.deepEqual(mergeQueuePosts[0].settings, { batchSize: 4, optimistic: true, optimisticExclude: [...defaultOptimisticExclude], parallelTips: 4, rerunFailedChecks: 1 });
+  const published = await store.pool.query(`SELECT kind, payload FROM events WHERE kind LIKE 'merge-queue.%' AND created_at >= $1 ORDER BY seq`, [new Date(dayStart).toISOString()]);
+  assert.deepEqual(published.rows.map(row => [row.kind, row.payload.previous]), [
+    ['merge-queue.batch-size', null], ['merge-queue.parallel-tips', null], ['merge-queue.rerun-failed-checks', null], ['merge-queue.optimistic', null], ['merge-queue.optimistic-exclude', null],
+  ], `each setting recorded once: ${JSON.stringify(published.rows)}`);
   assert.deepEqual(await ledger('optimistic.guard.failed'), [], 'the main guard never failed');
   const guardWrites = (await ledger('optimistic.guard')).length;
   assert.ok(guardWrites <= 2 * optimistic.length + 4, `the main guard writes its state only on a change (${guardWrites} rows for ${optimistic.length} optimistic merges)`);
@@ -397,10 +541,31 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   const flaky = { passes: items[plan.flaky.rerunPasses - 1].key, fails: items[plan.flaky.rerunFails - 1].key };
   assert.deepEqual(github.reruns.map(entry => entry.key).sort(), Object.values(flaky).sort(), `one rerun per flaky tip: ${JSON.stringify(github.reruns)}`);
   const passed = github.reruns.find(entry => entry.key === flaky.passes)!, failed = github.reruns.find(entry => entry.key === flaky.fails)!;
-  assert.ok(github.contains(github.merges.find(entry => entry.key === flaky.passes)!.sha, passed.sha), 'the tip whose rerun passed is the one that landed');
+  // The tip whose rerun passed is the one that lands, or the reviewed head it carried is what the
+  // landed tip was rebuilt from: a republication resets the branch to that head (GY-568) and its
+  // CI passes afresh on the same patch, so the flake still costs no rework round.
+  const rerunTipFrom = (final.find(item => item.key === flaky.passes)!.queueHistory ?? []).find(entry => entry.tip === passed.sha)?.from ?? passed.sha;
+  assert.ok(github.contains(github.merges.find(entry => entry.key === flaky.passes)!.sha, rerunTipFrom), 'the tip whose rerun passed, or the reviewed head under it, is what landed');
   assert.equal(final.find(item => item.key === flaky.passes)!.pipeline?.reworkRounds ?? 0, 0, 'a flake whose rerun passed costs no rework round');
   assert.equal(final.find(item => item.key === flaky.fails)!.pipeline?.reworkRounds, 1, 'a tip that failed again after its rerun returned to its worker once');
   assert.ok(!github.contains(github.merges.find(entry => entry.key === flaky.fails)!.sha, failed.sha), 'and a new head, not the failed tip, landed');
+  // GY-839: the landing check ran in the loop all day, over bases that moved under open candidates.
+  // The three-way comparison from the merge base is what a candidate bound behind the tip was
+  // judged by, and the fault window's blind answers are the only source of false landing refusals
+  // the day has. Each held only the build gate and cleared on the exact head it named, before any
+  // worker could react: no ejection, no sync round, no rework.
+  assert.ok(github.landingChecks > 0, 'the landing check ran during the simulated day');
+  assert.ok(github.landingBases.size >= plan.items, `the landing check judged moving bases (${github.landingBases.size})`);
+  assert.ok(github.ancestorCompares > 0, `candidates bound behind the tip were compared from their merge base (${github.ancestorCompares} ancestor compares)`);
+  assert.ok(github.blindCompares > 0, `the fault window answered compares without a usable merge base (${github.blindCompares} blind compares)`);
+  assert.ok(landingRefusals.length >= 2, `the fault window caught every candidate bound behind it (${JSON.stringify(landingRefusals)})`);
+  assert.ok(landingRefusals.every(entry => entry.elapsed >= plan.blind.from - minute && entry.elapsed <= plan.blind.to + minute),
+    `a false landing refusal stood only inside the fault window: ${JSON.stringify(landingRefusals)}`);
+  for (const entry of landingRefusals) {
+    const landed = github.merges.find(merge => merge.key === entry.key);
+    assert.ok(landed && github.contains(landed.sha, entry.sha), `${entry.key} landed the exact head its false refusal named (${entry.sha.slice(0, 12)})`);
+  }
+  assert.ok(sessions.every(session => session.syncs === 0), 'no worker was woken to sync what was never wrong');
   assert.ok(cycles > 24 * 6, `the loop cycled through the day (${cycles} cycles)`);
   // GY-437: the between-cycles self-upgrade ran after every cycle of the day. Each deploy aligned
   // the checkout once, and restarted the fleet and the loop once (every merge touches src/); the
@@ -419,8 +584,93 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.equal(state.upgrade.alignedRelease, production.deploys[1].sha, 'the loop stands aligned with the last deployed release');
   assert.equal(state.release?.commit, checkout.head, 'the re-executed loop reports the release the checkout holds');
   assert.ok(Object.keys(state.actions).filter(key => key.startsWith('upgrade:')).length <= production.deploys.length + 1, `the cursor holds one upgrade action per deploy and one refusal: ${Object.keys(state.actions).filter(key => key.startsWith('upgrade:')).join(', ')}`);
+  // GY-842 across the day: every pane the day's launches opened went somewhere — closed once, by
+  // the step that ended its session or by the bounded sweep — the operator's own pane was never
+  // touched, the previous day's backlog drained over successive bounded passes, and the drain
+  // itself is what stands on the cursor.
+  assert.equal(new Set(herdr.closed).size, herdr.closed.length, `no pane was closed twice: ${herdr.closed.join(', ')}`);
+  assert.ok(!herdr.closed.includes(foreignPane), 'the pane Graphyard never launched is never closed');
+  const reclaimed = herdr.closed.filter(pane => pane.includes(':left'));
+  assert.equal(reclaimed.length, plan.leftovers, 'every leftover pane of the previous day is reclaimed');
+  const passes = [...new Set(reclaimed.map(pane => herdr.closedAt.get(pane)))];
+  assert.ok(passes.length >= 2, `the backlog drained over successive passes, not in one burst (${passes.length})`);
+  // The bound paces every pass: however the backlog interleaves with the day's other panes, no
+  // pass carries more than six of the leftovers, and the eight take several passes.
+  const perPass = [...new Set(reclaimed.map(pane => herdr.closedAt.get(pane)))].map(at => reclaimed.filter(pane => herdr.closedAt.get(pane) === at).length);
+  assert.ok(perPass.every(count => count <= 6), `a pass closes at most the bound of six (${perPass.join(', ')})`);
+  const sweepStatus = state.actions['sweep:panes:status'];
+  assert.match(sweepStatus?.detail ?? '', /0 standing agentless; the backlog has drained/, `the drain is what stands on the record (${sweepStatus?.detail?.slice(0, 200)})`);
+  assert.doesNotMatch(sweepStatus?.detail ?? '', /the oldest is pane/, 'no oldest pane outlives the drained day');
+  assert.ok(!state.actions['sweep:panes:attention'], 'the day never stood past the agentless attention bound');
   const seconds = (performance.now() - began) / 1000;
   assert.ok(seconds < 120, `the day runs well inside the three minutes the CI test job allows it (${seconds.toFixed(1)} s)`);
+});
+
+test('unit:soak-invariants-hold — the parallel-tip window validates several queue positions at once, a failing tip ejects only its own entry while the suffix rebuilds without it, and a mid-day window change is republished, with every system invariant holding', { timeout: 180_000 }, async () => {
+  // GY-498: a queue-only day (the optimistic lane off, so every item goes through the queue),
+  // released three minutes apart so the queue stays deeper than the window, with the window
+  // reconfigured from 4 to 2 an hour and a quarter in. Item four is the one whose first tip fails
+  // and keeps failing after its rerun, so the window must attribute the failure to it once the
+  // tips ahead pass, eject it alone, and rebuild the tips behind it without it. The main day's
+  // other faults (the blind compare window, the file split) stay out of this day: their recovery
+  // is exercised there, and here they would only cascade ejections the queue re-queues in a loop.
+  // This is the real loop, the real reconciliation job and the real guarded merge across the whole
+  // day, so the window's behaviour is exercised as it repeats per cycle, head and entry — not as a
+  // one-shot unit fixture.
+  const began = performance.now();
+  const reconfigure = { at: 75 * minute, window: 2 };
+  const failTip = 4;
+  const { items, final, github, sessions, violations, failures, lost, mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, dayStart } =
+    await simulateDay({ hours: 4, queued: { window: 4, reconfigure, failTip, releaseEveryMs: 3 * minute } });
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
+  assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.deepEqual(lost, [], 'no worker lost its lease');
+  // The window held several published tips at once, and a successor's tip was chained onto the tip
+  // of the entry ahead of it — the positions validate concurrently, not one head at a time.
+  assert.ok(peakWindow >= 3, `several tips validated at once: ${JSON.stringify(windowSamples)}`);
+  assert.ok(chainedTips.size >= 1, `successor tips built on the tip ahead: ${[...chainedTips].join(', ')}`);
+  // The failing tip ejected its own entry, named the check, and is not the tip that landed: the
+  // entry re-entered and was validated again on a rebuilt tip.
+  const ejectee = final.find(item => item.key === items[failTip - 1].key)!;
+  const ejection = (ejectee.queueHistory ?? []).find(entry => entry.event === 'ejected' && /Required CI check test did not pass on speculative tip [0-9a-f]{12}/.test(entry.reason ?? ''));
+  assert.ok(ejection, `the failing tip ejected its entry: ${JSON.stringify((ejectee.queueHistory ?? []).map(entry => [entry.event, entry.reason]))}`);
+  assert.match(ejection!.reason!, /rerun/, 'the rerun is named in the ejection');
+  const failedTip = ejection!.tip!;
+  assert.ok((ejectee.queueHistory ?? []).some((entry, index) => entry.event === 'enqueued' && index > (ejectee.queueHistory ?? []).indexOf(ejection!)), 'the ejected entry re-entered the queue');
+  const landed = github.merges.filter(merge => merge.key === ejectee.key);
+  assert.ok(landed.length >= 1 && landed.every(merge => !github.contains(merge.sha, failedTip)), 'what landed is a rebuilt tip, not the failed one');
+  assert.ok(github.merges.every(merge => !github.contains(merge.sha, failedTip)), 'the failed tip never landed');
+  // The suffix rebuilt: an entry that held a tip chained onto the failed tip later held — and
+  // landed — a tip that does not contain it, so the tips behind the culprit were rebuilt without it.
+  const successor = [...chainedTips].find(chaining => chaining.startsWith(`${ejectee.key}->`))?.split('->')[1];
+  assert.ok(successor, `an entry behind the ejectee held a tip chained onto the failed tip: ${[...chainedTips].join(', ')}`);
+  const successorTips = tipPublications.filter(publication => publication.key === successor).map(publication => publication.tip);
+  assert.ok(successorTips.some(tip => github.contains(tip, failedTip)), 'its first tip was chained onto the failed tip');
+  const successorLanded = github.merges.find(merge => merge.key === successor);
+  assert.ok(successorLanded && !github.contains(successorLanded.sha, failedTip), 'the entry behind landed a tip rebuilt without the ejected entry');
+  // The mid-day master-config edit was published once the loop next cycled, applied at once, and a
+  // restarted control plane reads it back from the installation ledger; no tip after it was
+  // published outside the narrowed window.
+  assert.deepEqual(mergeQueuePosts.map(post => post.settings), [
+    { batchSize: 4, optimistic: false, optimisticExclude: [...defaultOptimisticExclude], parallelTips: 4, rerunFailedChecks: 1 },
+    { batchSize: 4, optimistic: false, optimisticExclude: [...defaultOptimisticExclude], parallelTips: 2, rerunFailedChecks: 1 },
+  ], `the reconfiguration was published once, on its change: ${JSON.stringify(mergeQueuePosts)}`);
+  assert.ok(mergeQueuePosts[1].at - dayStart >= reconfigure.at, 'the reconfiguration was published after the config edit');
+  // The reconfiguration reached the installation ledger (a value the ledger already holds — the
+  // default 4, published by an earlier day in this file — is not re-recorded, only applied).
+  const tips = await store.pool.query(`SELECT payload FROM events WHERE kind='merge-queue.parallel-tips' ORDER BY seq`);
+  assert.deepEqual(tips.rows.at(-1)!.payload.parallelTips, reconfigure.window, 'the narrowed window reached the installation ledger');
+  assert.deepEqual(tips.rows.at(-1)!.payload.previous, 4, 'the ledger records the window it moved from');
+  const late = tipPublications.filter(publication => publication.at >= reconfigure.at + 2 * minute);
+  assert.ok(late.length >= 1, `the queue kept publishing under the narrowed window: ${JSON.stringify(tipPublications)}`);
+  assert.ok(late.every(publication => publication.position < reconfigure.window), `every publication after the change sat inside the narrowed window: ${JSON.stringify(late)}`);
+  assert.equal(engine.parallelTips, reconfigure.window, 'the control plane applies the master\'s window at once');
+  assert.equal(await new Engine(store).loadParallelTips(), reconfigure.window, 'a restarted control plane reads the window back from the installation ledger');
+  const status = await api(principals.coordinator, 'GET', 'status');
+  assert.equal(status.mergeQueue.parallelTips, reconfigure.window, 'status reports the narrowed window');
+  const seconds = (performance.now() - began) / 1000;
+  assert.ok(seconds < 150, `the queue-only day runs inside its budget (${seconds.toFixed(1)} s)`);
 });
 
 test('unit:soak-invariants-hold — hand-launched approvers that vanish or stop without judging are relaunched within the bound, a refused relaunch is retried, and the spent watches keep every invariant holding', { timeout: 120_000 }, async () => {
