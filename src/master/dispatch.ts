@@ -12,6 +12,7 @@ import { documentationWorkerSection } from '../model/documentation.js';
 import type { Work } from '../model.js';
 import { type ConsentAnswer, type ConsentHold, consentHoldAttention, consentHoldMs, writeConsentHold } from '../consent-prompt.js';
 import type { MasterConfig, WorkerProfile } from './profiles.js';
+import { effectiveConfinementRefusal } from './profiles.js';
 import { loadMasterConfig, readCredentialFile, readWorkerCredential } from './config.js';
 import { accountLaunch, agentLaunchPlan, type EnvironmentProbe, onSelectedSession, selectAccount, sharedGitDirectory } from './environments.js';
 import { closeFailedLaunch, launchStartMs, type PromptDelivery, PromptNotAcceptedError, type RequestDelivery, SessionStartError, startAgentSession, type StartBounds, withLaunchClose } from './launch.js';
@@ -102,6 +103,9 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
       const chosen = selected;
       const launch = await onSelectedSession(chosen, `worker launch for ${work.key} failed`, async () => accountLaunch(profile, chosen.account));
       launched = launch;
+      // GY-865: validate the effective launch configuration against worker confinement, accounting for registry-selected accounts.
+      const confinementRefusal = effectiveConfinementRefusal(launch.kind, launch.args, launch.environment);
+      if (confinementRefusal) throw new Error(confinementRefusal);
       // A prompt the runtime never accepted closes the session and releases the claim; the launch is
       // then made once more from a fresh claim, rather than leaving an idle session holding the item.
       for (let attempt = 1; ; attempt++) {

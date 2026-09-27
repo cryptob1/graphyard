@@ -90,13 +90,30 @@ export function workerConfinementRefusal(profile: { kind?: string; agentArgs?: r
   }
   return null;
 }
+
+export function effectiveConfinementRefusal(kind: string | undefined, args: string[], environment: Record<string, string>): string | null {
+  const bypass = args.find(arg => ['--dangerously-skip-permissions', '--dangerously-bypass-approvals-and-sandbox', '--yolo'].includes(arg));
+  if (bypass) return `The effective launch for worker carries ${bypass}: it turns the runtime's approval and write confinement off, and every worker is launched with writes confined to its assigned worktree. This comes from the registry account or its contract; verify the registry configuration does not override worker confinement.`;
+  if (kind === 'codex') {
+    for (let index = 0; index < args.length; index++) {
+      const [flag, inline] = args[index].split(/=(.*)/s);
+      if (flag !== '--sandbox' && flag !== '-s') continue;
+      const value = inline ?? args[index + 1] ?? '';
+      if (value !== 'workspace-write') return `The effective launch for codex worker sets ${flag} ${value}: only the workspace-write sandbox confines the session's writes to its assigned worktree and the Git directories granted beside it. This comes from the registry account or its contract; verify the registry does not override worker confinement.`;
+    }
+  }
+  if (kind === 'opencode' && !openCodeExternalDenied(environment.OPENCODE_PERMISSION)) {
+    return `The effective launch for opencode worker allows external_directory access: Graphyard requires that OPENCODE_PERMISSION deny all external directories to confine the session to its assigned worktree. This comes from the registry account or its contract; verify the registry does not override worker confinement.`;
+  }
+  return null;
+}
 /** Whether an OPENCODE_PERMISSION document denies every external directory: absent, unparseable, `allow`, or an `ask` leaf all count as not denied. */
 function openCodeExternalDenied(raw: string | undefined): boolean {
   if (raw === undefined) return false;
   let document: unknown;
   try { document = JSON.parse(raw); } catch { return false; }
   const external = (document && typeof document === 'object' && !Array.isArray(document) ? (document as Record<string, unknown>).external_directory : undefined);
-  const denied = (node: unknown): boolean => node === 'deny' || (!!node && typeof node === 'object' && !Array.isArray(node) && Object.values(node).every(denied));
+  const denied = (node: unknown): boolean => node === 'deny' || (!!node && typeof node === 'object' && !Array.isArray(node) && Object.values(node).length > 0 && Object.values(node).every(denied));
   return denied(external);
 }
 

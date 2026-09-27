@@ -184,6 +184,17 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
       }
     } else do {
       let phase: 'reload' | 'cycle' = 'reload', wait: number;
+      // GY-865: recheck the checkout before every cycle, since it may have become dirty during the idle delay.
+      let cycleRefusal = await escalate(await checkoutOf());
+      if (cycleRefusal) {
+        log(`[graphyard-master] the checkout became dirty during the idle delay; the loop cycles nothing until it is cleaned`);
+        cycleRefusal = null;
+        while (!stopping && !options.once) {
+          if (watchdog.supervised) { try { await effects.notify?.('alive'); } catch (error) { log(`[graphyard-master] supervisor notification failed: ${message(error)}`); } }
+          try { await delay(interval(), undefined, { signal: waking.signal }); } catch { /* woken to stop */ }
+        }
+        break;
+      }
       try {
         if (options.reload) {
           for (const action of await noteConfigReload(state, await options.reload().then(reload => { config = reload.config; return reload; }), effects.persist)) log(`[graphyard-master] ${action.kind} ${action.state}: ${action.detail}`);

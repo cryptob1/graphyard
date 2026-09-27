@@ -110,7 +110,11 @@ const executorCheckout = (root: string): ReturnType<typeof parseCoordinatorCheck
   const commit = git(['rev-parse', 'HEAD']);
   if (commit === null) return { root, commit: null, modified: [], untracked: [] };
   const status = git(['status', '--porcelain', '-z', '--untracked-files=normal']);
-  return status === null ? { root, commit: commit.trim() || null, modified: [], untracked: [] } : parseCoordinatorCheckout(root, commit, status);
+  if (status === null) {
+    const trimmedCommit = commit.trim() || null;
+    return { root, commit: trimmedCommit, modified: trimmedCommit ? ['<unreadable>'] : [], untracked: [] };
+  }
+  return parseCoordinatorCheckout(root, commit, status);
 };
 /** An executor holds no cool-off state of its own: a failed attempt backs off on its own action row. */
 const statelessProfiles = { profiles: {} } as unknown as DaemonState;
