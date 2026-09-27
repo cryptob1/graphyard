@@ -44,17 +44,20 @@ test('unit:coordinator-write-blocked-for-shell — every runtime kind launches c
         assert.equal(confinement.mechanism, 'runtime-sandbox', 'the codex workspace-write sandbox is the confinement');
         assert.deepEqual(confinement.wrapper, [], 'the runtime sandbox needs no wrapper words');
       } else {
-        assert.equal(confinement.mechanism, 'read-only-mount');
-        assert.ok(confinement.wrapper.includes('--ro-bind') && confinement.wrapper.includes(root), `${kind} binds the coordinator checkout read-only`);
-        assert.ok(confinement.wrapper.includes('--bind') && confinement.wrapper.includes(worktree), `${kind} re-exposes the session's own worktree writable`);
-        assert.ok(confinement.wrapper.at(-1) === '--', `${kind}'s wrapper leaves the runtime command itself in place`);
+        assert.equal(confinement.mechanism, 'read-only-mount', `${kind} uses read-only-mount mechanism`);
+        const roIdx = confinement.wrapper.indexOf('--ro-bind');
+        assert.ok(roIdx >= 0 && confinement.wrapper[roIdx + 1] === root && confinement.wrapper[roIdx + 2] === root, `${kind} binds ${root} read-only with correct arguments`);
+        const worktreeIdx = confinement.wrapper.indexOf(worktree);
+        assert.ok(worktreeIdx > 0 && confinement.wrapper[worktreeIdx - 1] === '--bind', `${kind} re-exposes ${worktree} with --bind`);
+        assert.equal(confinement.wrapper.at(-1), '--', `${kind}'s wrapper ends with --`);
       }
     }
     // A codex runtime without its workspace-write sandbox carries the mount namespace instead: it is never launched unconfined.
     const unconfinedCodex = await coordinatorConfinement({ kind: 'codex', args: ['--sandbox', 'danger-full-access'], coordinatorRoot: root, sessionDirectory: worktree, platform: 'linux', mountNamespaceWorks: true });
     assert.equal(unconfinedCodex?.mechanism, 'read-only-mount', 'a codex sandbox turned off falls back to the read-only mount');
     // On Linux with the namespaces available, run a shell command inside the confinement itself.
-    if (process.platform !== 'linux' || !(await sessionMountNamespaceWorks())) return;
+    if (process.platform !== 'linux') return;
+    assert.ok(await sessionMountNamespaceWorks(), 'mount namespaces work on this Linux host');
     const confinement = await coordinatorConfinement({ kind: 'claude', args: [], coordinatorRoot: root, sessionDirectory: worktree });
     assert.equal(confinement?.mechanism, 'read-only-mount');
     const probe = [
@@ -65,10 +68,16 @@ test('unit:coordinator-write-blocked-for-shell — every runtime kind launches c
     ].join('\n');
     const run = spawnSync(confinement.wrapper[0], [...confinement.wrapper.slice(1, -1), '/bin/sh', '-c', probe, 'sh', root, worktree],
       { encoding: 'utf8', timeout: 60_000, killSignal: 'SIGKILL' });
-    assert.equal(run.status, 0, `the confined shell ran and its session worktree worked: ${run.stderr}`);
-    for (const marker of ['WRITE-BLOCKED', 'COMMIT-BLOCKED', 'CHECKOUT-BLOCKED', 'SESSION-WROTE']) assert.ok(run.stdout.includes(marker), `${marker} was expected: ${run.stdout}`);
-    for (const marker of ['WRITE-ALLOWED', 'COMMIT-ALLOWED', 'CHECKOUT-ALLOWED']) assert.ok(!run.stdout.includes(marker), `${marker} must never happen: ${run.stdout}`);
-    assert.match(run.stdout, /Read-only file system/, `writing the checkout is refused by the mount itself: ${run.stdout}`);
+    assert.equal(run.status, 0, `the confined shell ran successfully: ${run.stderr}`);
+    const output = run.stdout + '\n' + run.stderr;
+    assert.ok(run.stdout.includes('WRITE-BLOCKED'), 'write to coordinator checkout is blocked');
+    assert.ok(run.stdout.includes('COMMIT-BLOCKED'), 'git commit in coordinator checkout is blocked');
+    assert.ok(run.stdout.includes('CHECKOUT-BLOCKED'), 'git checkout in coordinator checkout is blocked');
+    assert.ok(run.stdout.includes('SESSION-WROTE'), 'session worktree is writable');
+    assert.ok(!run.stdout.includes('WRITE-ALLOWED'), 'write to coordinator is never allowed');
+    assert.ok(!run.stdout.includes('COMMIT-ALLOWED'), 'commit in coordinator is never allowed');
+    assert.ok(!run.stdout.includes('CHECKOUT-ALLOWED'), 'checkout in coordinator is never allowed');
+    assert.match(output, /Read-only file system/, 'operations fail with read-only filesystem error');
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
@@ -78,20 +87,46 @@ test('unit:unconfined-launch-refused — a launch that cannot apply the confinem
   const confined = { kind: 'claude', args: [] as string[], coordinatorRoot: '/coordinator', sessionDirectory: '/coordinator/wt' };
   // No mount namespace without Linux, without bubblewrap, or on a host that refuses the namespaces.
   const darwin = await coordinatorConfinementRefusal({ ...confined, platform: 'darwin' });
-  assert.match(darwin!, /never starts a session unconfined/);
-  assert.match(darwin!, /darwin/);
+  assert.ok(darwin !== null, 'darwin platform must be refused');
+  assert.match(darwin!, /never starts a session unconfined/, 'refusal message includes confinement requirement');
+  assert.match(darwin!, /darwin/, 'refusal message identifies platform');
+
   const noBwrap = await coordinatorConfinementRefusal({ ...confined, platform: 'linux', bwrap: null });
-  assert.match(noBwrap!, /bubblewrap/);
+  assert.ok(noBwrap !== null, 'missing bubblewrap must be refused');
+  assert.match(noBwrap!, /bubblewrap/, 'refusal message mentions bubblewrap');
+  assert.match(noBwrap!, /not installed/, 'refusal message says bubblewrap is not installed');
+
   const refusedNamespaces = await coordinatorConfinementRefusal({ ...confined, platform: 'linux', mountNamespaceWorks: false });
-  assert.match(refusedNamespaces!, /namespaces/);
+  assert.ok(refusedNamespaces !== null, 'refused mount namespaces must be refused');
+  assert.match(refusedNamespaces!, /namespaces/, 'refusal message mentions namespaces');
+  assert.match(refusedNamespaces!, /refuses/, 'refusal message indicates the host refuses namespaces');
+
   // The builder carries the same refusal: it never returns an unconfined launch.
   await assert.rejects(() => coordinatorConfinement({ ...confined, platform: 'darwin', mountNamespaceWorks: true }), /never starts a session unconfined/);
+
   // A runtime with a workspace-write sandbox of its own needs neither Linux nor bubblewrap.
-  assert.equal(await coordinatorConfinementRefusal({ kind: 'codex', args: ['--sandbox', 'workspace-write'], coordinatorRoot: '/coordinator', sessionDirectory: '/coordinator/wt', platform: 'darwin' }), null);
+  const sandboxedCodex = await coordinatorConfinementRefusal({ kind: 'codex', args: ['--sandbox', 'workspace-write'], coordinatorRoot: '/coordinator', sessionDirectory: '/coordinator/wt', platform: 'darwin' });
+  assert.equal(sandboxedCodex, null, 'codex with workspace-write sandbox is not refused on darwin');
+
   // A worker profile that would turn its runtime's own confinement off is still refused at the launch (GY-857).
-  assert.match(workerConfinementRefusal({ kind: 'claude', agentArgs: ['--dangerously-skip-permissions'] })!, /--dangerously-skip-permissions/);
-  assert.match(workerConfinementRefusal({ kind: 'codex', agentArgs: ['--sandbox', 'danger-full-access'] })!, /workspace-write/);
-  assert.match(workerConfinementRefusal({ kind: 'opencode', environment: { OPENCODE_PERMISSION: '{"edit":"allow","external_directory":"allow"}' } })!, /external_directory/);
-  assert.equal(workerConfinementRefusal({ kind: 'claude', agentArgs: [] }), null);
-  assert.equal(workerConfinementRefusal({ kind: 'codex', agentArgs: ['--sandbox', 'workspace-write'] }), null);
+  const claudeBypass = workerConfinementRefusal({ kind: 'claude', agentArgs: ['--dangerously-skip-permissions'] });
+  assert.ok(claudeBypass !== null, 'claude with --dangerously-skip-permissions must be refused');
+  assert.match(claudeBypass!, /--dangerously-skip-permissions/, 'refusal message names the flag');
+  assert.match(claudeBypass!, /confinement/, 'refusal message explains it disables confinement');
+
+  const codexUnsandboxed = workerConfinementRefusal({ kind: 'codex', agentArgs: ['--sandbox', 'danger-full-access'] });
+  assert.ok(codexUnsandboxed !== null, 'codex without workspace-write sandbox must be refused');
+  assert.match(codexUnsandboxed!, /workspace-write/, 'refusal message identifies correct sandbox mode');
+  assert.match(codexUnsandboxed!, /danger-full-access/, 'refusal message names the incorrect setting');
+
+  const opencodeUndanied = workerConfinementRefusal({ kind: 'opencode', environment: { OPENCODE_PERMISSION: '{"edit":"allow","external_directory":"allow"}' } });
+  assert.ok(opencodeUndanied !== null, 'opencode with external_directory allow must be refused');
+  assert.match(opencodeUndanied!, /external_directory/, 'refusal message identifies the permission');
+  assert.match(opencodeUndanied!, /"deny"/, 'refusal message specifies correct setting');
+
+  const claudeSafe = workerConfinementRefusal({ kind: 'claude', agentArgs: [] });
+  assert.equal(claudeSafe, null, 'claude with no flags is allowed');
+
+  const codexSafe = workerConfinementRefusal({ kind: 'codex', agentArgs: ['--sandbox', 'workspace-write'] });
+  assert.equal(codexSafe, null, 'codex with workspace-write is allowed');
 });
