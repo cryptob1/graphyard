@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 import { z } from 'zod';
 import { defaultMergeBatchSize, maxMergeBatchSize } from '../merge-queue.js';
-import { defaultOptimisticMerge } from '../optimistic-merge.js';
+import { defaultOptimisticMerge, defaultOptimisticExclude } from '../optimistic-merge.js';
 import { narrowRoleRuntimeSchema, piRuntimeSchema } from '../runner/payloads.js';
 import { researchSettingsSchema } from '../research.js';
 import { sessionNameField, sessionNameLimit, assertSessionName, sessionNameDigestLength, SessionNameRefusedError } from '../session-name.js';
@@ -284,7 +284,16 @@ export const masterConfigSchema = z.object({
   // `optimistic` (GY-500, default on): an entry whose files are disjoint from everything merged since
   // its base, touching no shared infrastructure, merges at once past the queue, and main is guarded
   // after the merge with automatic revert. false sends every entry through the queue.
-  mergeQueue: z.object({ batchSize: z.number().int().min(1).max(maxMergeBatchSize).optional(), optimistic: z.boolean().optional(), rerunFailedChecks: z.number().int().min(0).max(maxRerunFailedChecks).optional() }).strict().optional(),
+  // `optimisticExclude` (GY-503): the repository's own shared-infrastructure globs, master init
+  // written with the product defaults; a change to an excluded path never merges optimistically.
+  mergeQueue: z.object({
+    batchSize: z.number().int().min(1).max(maxMergeBatchSize).optional(),
+    optimistic: z.boolean().optional(),
+    rerunFailedChecks: z.number().int().min(0).max(maxRerunFailedChecks).optional(),
+    optimisticExclude: z.array(z.string().trim().min(1).max(200)
+      .refine(glob => !glob.startsWith('/') && !/[\s\u0000-\u001f]/.test(glob) && !glob.split('/').some(segment => segment === '.' || segment === '..'),
+        'Exclude globs are repository-relative, without . or .. segments, whitespace or control characters')).max(100).optional(),
+  }).strict().optional(),
   // The operator's own authenticated browser profile, used only by master browser flows.
   browser: masterBrowserSchema.optional(),
   // The master's own operator-agent identity, and the separate approver identity whose session
@@ -308,6 +317,11 @@ export function optimisticMergeEnabled(config: Pick<MasterConfig, 'mergeQueue'> 
 /** Reruns of a failed required check per sha under this master config: `mergeQueue.rerunFailedChecks`, or the product default of 1. */
 export function rerunFailedChecks(config: Pick<MasterConfig, 'mergeQueue'> | null | undefined): number {
   return config?.mergeQueue?.rerunFailedChecks ?? defaultRerunFailedChecks;
+}
+
+/** The repository's shared-infrastructure globs under this master config: `mergeQueue.optimisticExclude`, or the product defaults (GY-503). */
+export function optimisticExcludeGlobs(config: Pick<MasterConfig, 'mergeQueue'> | null | undefined): string[] {
+  return config?.mergeQueue?.optimisticExclude ?? [...defaultOptimisticExclude];
 }
 
 export function assertMasterBinding(config: MasterConfig, status: any) {

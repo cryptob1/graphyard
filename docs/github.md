@@ -48,7 +48,7 @@ Reviews and proofs bind one head, base and policy revision. The queue head's tip
 
 ### Optimistic merges
 
-`mergeQueue.optimistic` (default on, independent of `mergeQueue.rerunFailedChecks`): a green entry disjoint from base changes and shared infrastructure lands head-bound, unqueued; a main guard [reverts](master-agent.md#repair-lane) and reopens culprits (`master status`: `optimisticMerge`).
+`mergeQueue.optimistic` (default on, independent of `mergeQueue.rerunFailedChecks`): a green entry disjoint from base changes and shared infrastructure lands head-bound, unqueued; a main guard [reverts](master-agent.md#repair-lane) and reopens culprits (`master status`: `optimisticMerge`). Shared infrastructure is per repository: the master config's `mergeQueue.optimisticExclude` globs — written by onboarding with product defaults (manifests and lockfiles, CI config, test helpers, schema and migration directories) and kept on re-runs — replace them wholesale, so a change to an excluded path never merges optimistically, and neither does anything whose base changed one since its own run. `optimistic: false` turns the lane off for the repository.
 
 ### Direct merges
 
