@@ -46,13 +46,9 @@ test('unit:coordinator-write-blocked-for-shell — shell commands cannot write t
         writeFailed = true;
         writeError = e.stderr ? e.stderr.toString() : e.stdout ? e.stdout.toString() : String(e);
       }
-      if (!writeFailed) {
-        throw new Error('touch command must fail on read-only directory but succeeded');
-      }
+      assert(writeFailed, 'touch command must fail on read-only directory');
       // assertion that write operations to read-only mounted coordinator checkout fail with Permission denied or Read-only error
-      if (!writeError.includes('Permission denied') && !writeError.includes('Read-only')) {
-        throw new Error(`Write operation error must include "Permission denied" or "Read-only" but got: ${writeError}`);
-      }
+      assert(writeError.includes('Permission denied') || writeError.includes('Read-only'), `Write operation error must include "Permission denied" or "Read-only" but got: ${writeError}`);
 
       // Test 2: Writing via cd should also fail
       let cdWriteFailed = false;
@@ -61,9 +57,7 @@ test('unit:coordinator-write-blocked-for-shell — shell commands cannot write t
       } catch {
         cdWriteFailed = true;
       }
-      if (!cdWriteFailed) {
-        throw new Error('write via cd must fail on read-only coordinator but succeeded');
-      }
+      assert(cdWriteFailed, 'write via cd must fail on read-only coordinator');
 
       // Test 3: Git operations must fail (commit in particular)
       let gitFailed = false;
@@ -74,12 +68,8 @@ test('unit:coordinator-write-blocked-for-shell — shell commands cannot write t
         gitFailed = true;
         gitError = e.stderr ? e.stderr.toString() : e.stdout ? e.stdout.toString() : String(e);
       }
-      if (!gitFailed) {
-        throw new Error('git operations must fail on read-only coordinator but succeeded');
-      }
-      if (!gitError.includes('Permission denied') && !gitError.includes('Read-only') && !gitError.includes('fatal:')) {
-        throw new Error(`Git error must include failure indicator but got: ${gitError}`);
-      }
+      assert(gitFailed, 'git operations must fail on read-only coordinator');
+      assert(gitError.includes('Permission denied') || gitError.includes('Read-only') || gitError.includes('fatal:'), `Git error must include failure indicator but got: ${gitError}`);
     } finally {
       // Restore write permissions for cleanup
       execSync(`chmod -R u+w "${roCoordinator}"`, { stdio: 'pipe' });
@@ -96,70 +86,45 @@ test('unit:unconfined-launch-refused — launches without proper confinement are
   // Test 1: Codex without workspace-write sandbox must be refused
   const codexNoSandbox = workerProfileSchema.parse({ ...base, name: 'codex-worker', agentName: 'graphyard-codex-1', kind: 'codex' as const, agentArgs: ['--sandbox', 'danger-full-access'] });
   const codexRefusal = workerConfinementRefusal(codexNoSandbox);
-  if (codexRefusal === null) {
-    throw new Error('Codex without workspace-write sandbox must be refused');
-  }
-  if (!codexRefusal.includes('workspace-write')) {
-    throw new Error(`Codex refusal must mention workspace-write but got: ${codexRefusal}`);
-  }
+  assert(codexRefusal !== null, 'Codex without workspace-write sandbox must be refused');
+  assert(codexRefusal.includes('workspace-write'), `Codex refusal must mention workspace-write but got: ${codexRefusal}`);
 
   // Test 2: Claude with bypass permissions must be refused
   const claudeBypass = workerProfileSchema.parse({ ...base, name: 'claude-worker', agentName: 'graphyard-claude-1', kind: 'claude' as const, agentArgs: ['--dangerously-skip-permissions'] });
   const claudeRefusal = workerConfinementRefusal(claudeBypass);
-  if (claudeRefusal === null) {
-    throw new Error('Claude with bypass permissions must be refused');
-  }
-  if (!claudeRefusal.includes('--dangerously-skip-permissions')) {
-    throw new Error(`Claude refusal must mention --dangerously-skip-permissions but got: ${claudeRefusal}`);
-  }
+  assert(claudeRefusal !== null, 'Claude with bypass permissions must be refused');
+  assert(claudeRefusal.includes('--dangerously-skip-permissions'), `Claude refusal must mention --dangerously-skip-permissions but got: ${claudeRefusal}`);
 
   // Test 3: OpenCode without external_directory deny must be refused
   const opencodeNoRestriction = workerProfileSchema.parse({ ...base, name: 'opencode-worker', agentName: 'graphyard-opencode-1', kind: 'opencode' as const, environment: { OPENCODE_PERMISSION: '{"edit":"allow","external_directory":"allow"}' } });
   const opencodeRefusal = workerConfinementRefusal(opencodeNoRestriction);
-  if (opencodeRefusal === null) {
-    throw new Error('OpenCode with external_directory allow must be refused');
-  }
-  if (!opencodeRefusal.includes('external_directory')) {
-    throw new Error(`OpenCode refusal must mention external_directory but got: ${opencodeRefusal}`);
-  }
+  assert(opencodeRefusal !== null, 'OpenCode with external_directory allow must be refused');
+  assert(opencodeRefusal.includes('external_directory'), `OpenCode refusal must mention external_directory but got: ${opencodeRefusal}`);
 
   // Test 4: Valid configurations must NOT be refused
   const claudeValid = workerProfileSchema.parse({ ...base, name: 'claude-worker', agentName: 'graphyard-claude-1', kind: 'claude' as const });
   const claudeOk = workerConfinementRefusal(claudeValid);
-  if (claudeOk !== null) {
-    throw new Error(`Claude with default args must not be refused but got: ${claudeOk}`);
-  }
+  assert(claudeOk === null, `Claude with default args must not be refused but got: ${claudeOk}`);
 
   const codexValid = workerProfileSchema.parse({ ...base, name: 'codex-worker', agentName: 'graphyard-codex-1', kind: 'codex' as const, agentArgs: ['--sandbox', 'workspace-write'] });
   const codexOk = workerConfinementRefusal(codexValid);
-  if (codexOk !== null) {
-    throw new Error(`Codex with workspace-write must not be refused but got: ${codexOk}`);
-  }
+  assert(codexOk === null, `Codex with workspace-write must not be refused but got: ${codexOk}`);
 
   const opencodeValid = workerProfileSchema.parse({ ...base, name: 'opencode-worker', agentName: 'graphyard-opencode-1', kind: 'opencode' as const, environment: { OPENCODE_PERMISSION: '{"edit":"allow","bash":"allow","webfetch":"allow","external_directory":"deny"}' } });
   const opencodeOk = workerConfinementRefusal(opencodeValid);
-  if (opencodeOk !== null) {
-    throw new Error(`OpenCode with external_directory deny must not be refused but got: ${opencodeOk}`);
-  }
+  assert(opencodeOk === null, `OpenCode with external_directory deny must not be refused but got: ${opencodeOk}`);
 
   // Test 5: Verify the runtime sandbox mode detection works correctly
+  // assertions that launch configurations without proper confinement are refused by workerConfinementRefusal: Codex without workspace-write sandbox, Claude with --dangerously-skip-permissions, OpenCode with external_directory allow
   const codexWSMode = runtimeSandboxes.codex?.mode(['--sandbox', 'workspace-write']);
-  if (codexWSMode !== 'workspace-write') {
-    throw new Error(`Codex must correctly identify workspace-write mode but got: ${codexWSMode}`);
-  }
+  assert(codexWSMode === 'workspace-write', `Codex must correctly identify workspace-write mode but got: ${codexWSMode}`);
   const codexFullMode = runtimeSandboxes.codex?.mode(['--sandbox', 'danger-full-access']);
-  if (codexFullMode !== null) {
-    throw new Error(`Codex must correctly identify unrestricted mode but got: ${codexFullMode}`);
-  }
+  assert(codexFullMode === null, `Codex must correctly identify unrestricted mode but got: ${codexFullMode}`);
   const codexShortMode = runtimeSandboxes.codex?.mode(['-s', 'workspace-write']);
-  if (codexShortMode !== 'workspace-write') {
-    throw new Error(`Codex must recognize -s shorthand but got: ${codexShortMode}`);
-  }
+  assert(codexShortMode === 'workspace-write', `Codex must recognize -s shorthand but got: ${codexShortMode}`);
 
   // Test 6: Multiple bypass flags must be refused
   const multiBypass = workerProfileSchema.parse({ ...base, name: 'claude-worker', agentName: 'graphyard-claude-1', kind: 'claude' as const, agentArgs: ['--dangerously-skip-permissions', '--permission-mode', 'auto'] });
   const multiRefusal = workerConfinementRefusal(multiBypass);
-  if (multiRefusal === null) {
-    throw new Error('Claude with bypass flag must be refused even with other args');
-  }
+  assert(multiRefusal !== null, 'Claude with bypass flag must be refused even with other args');
 });
