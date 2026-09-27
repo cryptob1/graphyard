@@ -117,6 +117,44 @@ export function producerGroupDecisions(work: Work, all: Work[], now: Date, outco
   });
 }
 
+/**
+ * The producer's finding that a proof on this head does not exercise its criterion (GY-135): the
+ * pass also held with the change removed. Such evidence is the worker's to fix, so the request is
+ * never launched again for the head and the loop requests the rework instead (GY-193 AC-3). Each
+ * finding carries the criteria the run was held to and the behaviour whose removal — the mutation —
+ * left the proof passing, so the planner's rework names all three (GY-817).
+ */
+export interface UnexercisedFinding { proof: string; finding: string; criteria: string[]; behaviour: string | null }
+export function unexercisedFindings(work: Work, sha: string | undefined = work.candidate?.sha, proofs?: readonly string[]): UnexercisedFinding[] {
+  if (!sha) return [];
+  const findings = new Map<string, UnexercisedFinding>();
+  for (const entry of work.evidence ?? []) {
+    if (!entry.unexercised || entry.sha !== sha || entry.policyRevision !== work.policyRevision || (proofs && !proofs.includes(entry.proof))) continue;
+    const criteria = entry.exercise?.criterion ? [entry.exercise.criterion] : work.criteria.filter(criterion => criterion.proofs.includes(entry.proof)).map(criterion => criterion.id);
+    findings.set(entry.proof, { proof: entry.proof, finding: entry.unexercised, criteria, behaviour: entry.exercise?.behaviour ?? null });
+  }
+  // A trusted pass recorded since answers the finding: the proof is proven on this head after all.
+  return [...findings.values()].filter(({ proof }) => !(sha === work.candidate?.sha && currentEvidence(work, proof)?.result === 'pass'));
+}
+/** One finding as a rework names it: the proof, the criterion, and the mutation that survived. */
+export const unexercisedDetail = (entry: UnexercisedFinding, sha: string) =>
+  `${entry.proof} was recorded as not exercising ${entry.criteria.length ? entry.criteria.join(', ') : 'its criterion'} on ${short(sha)}: ${entry.behaviour ? `the mutation removing "${entry.behaviour}" survived` : 'no surviving-mutation run was recorded'} — ${entry.finding.length > 400 ? `${entry.finding.slice(0, 399)}…` : entry.finding}`;
+
+/**
+ * The rework detail for a head one of whose unit or integration groups has nothing left but proofs
+ * the producer recorded as not exercising their criterion, or null (GY-817). Such a group's request
+ * is never launched again for the head (auto-dispatch.ts); on 2026-09-26 GY-421 was named a proof
+ * dispatch nobody would run for 51 minutes, until a master requested the rework by hand.
+ */
+export function unexercisedRework(work: Work, decisions: ProducerGroupDecision[]): string | null {
+  if (!work.candidate) return null;
+  const findings = unexercisedFindings(work).filter(entry => mechanicalProof(entry.proof));
+  const groups = decisions.filter(decision => decision.state === 'request' && decision.group !== 'manual' && decision.unproven.length
+    && decision.unproven.every(proof => findings.some(entry => entry.proof === proof)));
+  if (!groups.length) return null;
+  return findings.filter(entry => groups.some(decision => decision.unproven.includes(entry.proof))).map(entry => unexercisedDetail(entry, work.candidate!.sha)).join('; ');
+}
+
 /** The live producer request bound to the current head for one group, or null. */
 export function openProducerRequest(work: Work, group: ProducerGroup): DispatchRequest | null {
   return (work.autoDispatch?.producers ?? []).find(request => request.group === group && request.state === 'requested' && !!work.candidate
