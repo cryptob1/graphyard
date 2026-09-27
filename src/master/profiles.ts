@@ -2,7 +2,9 @@
 import { createHash } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 import { z } from 'zod';
-import { defaultMergeBatchSize, maxMergeBatchSize } from '../merge-queue.js';
+import { defaultMergeBatchSize, defaultParallelTips, maxMergeBatchSize, maxParallelTips, mergeQueueInsights } from '../merge-queue.js';
+import { defaultOptimisticExclude, defaultOptimisticMerge } from '../optimistic-merge.js';
+import type { Work } from '../model/work.js';
 import { narrowRoleRuntimeSchema, piRuntimeSchema } from '../runner/payloads.js';
 import { researchSettingsSchema } from '../research.js';
 import { sessionNameField, sessionNameLimit, assertSessionName, sessionNameDigestLength, SessionNameRefusedError } from '../session-name.js';
@@ -251,6 +253,13 @@ export const masterBrowserSchema = z.object({
 export type MasterBrowser = z.infer<typeof masterBrowserSchema>;
 
 export const agentIdentitySchema = z.object({ id: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$/), credentialFile: z.string().min(1).max(1000) }).strict();
+/**
+ * GY-516: the product default for `mergeQueue.rerunFailedChecks`, so every installation reruns a
+ * failed required check once on the same sha before the failure ejects the entry; 0 disables it.
+ */
+export const defaultRerunFailedChecks = 1;
+/** The most reruns per sha and check master config and the control plane accept. */
+export const maxRerunFailedChecks = 3;
 export const masterConfigSchema = z.object({
   version: z.literal(1),
   url: z.string(),
@@ -271,9 +280,26 @@ export const masterConfigSchema = z.object({
   // The agent environments profiles may launch on, discovered or created by master environments.
   environments: z.array(agentEnvironmentSchema).max(50).optional(),
   run: masterRunSchema.prefault({}),
-  // The merge queue (GY-330): how many consecutive entries one combined tip validates (default 4;
-  // 1 validates every entry on its own tip). The loop publishes it to the control plane every change.
-  mergeQueue: z.object({ batchSize: z.number().int().min(1).max(maxMergeBatchSize).optional() }).strict().optional(),
+  // The merge queue. `parallelTips` (GY-498) is how many queue positions are validated at once:
+  // speculative tips for the first that many positions all published and CI'd concurrently, each
+  // entry on its own tip, an entry whose tip and every tip ahead of it passed merging as soon as it
+  // heads the queue (default 4). Since every entry has its own tip, `batchSize` (GY-330) no longer
+  // batches validation; it only widens the observation band and the delivery/ejection wake depth.
+  // `optimistic` (GY-500, default on): an entry whose files are disjoint from everything merged since
+  // its base, touching no shared infrastructure, merges at once past the queue, and main is guarded
+  // after the merge with automatic revert. false sends every entry through the queue.
+  // The loop publishes all of these to the control plane on every change.
+  // `optimisticExclude` (GY-503): the repository's own shared-infrastructure globs, master init
+  // written with the product defaults; a change to an excluded path never merges optimistically.
+  mergeQueue: z.object({
+    batchSize: z.number().int().min(1).max(maxMergeBatchSize).optional(),
+    optimistic: z.boolean().optional(),
+    parallelTips: z.number().int().min(1).max(maxParallelTips).optional(),
+    rerunFailedChecks: z.number().int().min(0).max(maxRerunFailedChecks).optional(),
+    optimisticExclude: z.array(z.string().trim().min(1).max(200)
+      .refine(glob => !glob.startsWith('/') && !/[\s\u0000-\u001f]/.test(glob) && !glob.split('/').some(segment => segment === '.' || segment === '..'),
+        'Exclude globs are repository-relative, without . or .. segments, whitespace or control characters')).max(100).optional(),
+  }).strict().optional(),
   // The operator's own authenticated browser profile, used only by master browser flows.
   browser: masterBrowserSchema.optional(),
   // The master's own operator-agent identity, and the separate approver identity whose session
@@ -288,6 +314,41 @@ export type MasterConfig = z.infer<typeof masterConfigSchema>;
 /** The merge queue's batch size under this master config: `mergeQueue.batchSize`, or the default of 4. */
 export function mergeBatchSize(config: Pick<MasterConfig, 'mergeQueue'> | null | undefined): number {
   return config?.mergeQueue?.batchSize ?? defaultMergeBatchSize;
+}
+/** Whether optimistic merge is on under this master config: `mergeQueue.optimistic`, on by default (GY-500). */
+export function optimisticMergeEnabled(config: Pick<MasterConfig, 'mergeQueue'> | null | undefined): boolean {
+  return config?.mergeQueue?.optimistic ?? defaultOptimisticMerge;
+}
+
+/** The parallel-tip window under this master config: `mergeQueue.parallelTips`, or the default of 4 (GY-498). */
+export function mergeParallelTips(config: Pick<MasterConfig, 'mergeQueue'> | null | undefined): number {
+  return config?.mergeQueue?.parallelTips ?? defaultParallelTips;
+}
+
+/**
+ * The merge queue as the control plane runs it (GY-330, GY-498): the batch size and parallel-tip
+ * window the server reports it evaluates by (`/api/status` mergeQueue), else this master's own
+ * configuration before the server reports one; the in-flight tips; throughput Insights.
+ */
+export function mergeQueueWindow(master: MasterConfig, coordinator?: any) {
+  const running = coordinator?.mergeQueue;
+  return { batchSize: Number.isSafeInteger(running?.batchSize) ? running.batchSize as number : mergeBatchSize(master),
+    parallelTips: Number.isSafeInteger(running?.parallelTips) ? running.parallelTips as number : mergeParallelTips(master) };
+}
+export function mergeQueueStatus(master: MasterConfig, snapshot: { work: Work[]; now: string }, coordinator?: any) {
+  const window = mergeQueueWindow(master, coordinator);
+  return { ...window, configured: { batchSize: mergeBatchSize(master), parallelTips: mergeParallelTips(master) },
+    ...mergeQueueInsights(snapshot.work, Date.parse(snapshot.now), window.parallelTips, Array.isArray(coordinator?.ciAppIds) ? coordinator.ciAppIds : null) };
+}
+
+/** Reruns of a failed required check per sha under this master config: `mergeQueue.rerunFailedChecks`, or the product default of 1. */
+export function rerunFailedChecks(config: Pick<MasterConfig, 'mergeQueue'> | null | undefined): number {
+  return config?.mergeQueue?.rerunFailedChecks ?? defaultRerunFailedChecks;
+}
+
+/** The repository's shared-infrastructure globs under this master config: `mergeQueue.optimisticExclude`, or the product defaults (GY-503). */
+export function optimisticExcludeGlobs(config: Pick<MasterConfig, 'mergeQueue'> | null | undefined): string[] {
+  return config?.mergeQueue?.optimisticExclude ?? [...defaultOptimisticExclude];
 }
 
 export function assertMasterBinding(config: MasterConfig, status: any) {
