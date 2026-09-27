@@ -15,7 +15,9 @@ A lease expires 120 seconds after the last heartbeat, or one further lease perio
 
 ## Supervisor died leaving a containment quarantine
 
-On the worker `graphyard master settle-containment GY-N "reason"` verifies nothing survives; only the loop excuses an idle pane shell (childless, parent `herdr server`). If refused, confirm the stop, then `rework` or `recover-containment` once delivered ([recipes](operations.md#recovery-recipes)).
+The loop automatically settles a lapsed, verified-dead quarantine. Before assessing containment, it measures the local clock against the control plane with a light timed read (HEAD / to the control plane, answered from a static file) whose round trip bounds the clock offset. This replaces the multi-second work snapshot and often allows settlement to proceed. If the timed read cannot bound the offset tightly enough (or fails), settlement is refused naming the measured round trip — "settlement waits on a faster control-plane read" — rather than claiming a clock disagreement.
+
+On the worker, `graphyard master settle-containment GY-N "reason"` verifies the supervisor is gone; only the loop excuses an idle pane shell (childless, parent `herdr server`). If refused, confirm the stop, then `rework` or `recover-containment` once delivered ([recipes](operations.md#recovery-recipes)).
 
 ## Submitted implementation needs rework
 
