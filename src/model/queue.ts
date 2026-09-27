@@ -30,7 +30,7 @@ export function placeInQueue(work: Work, all: Work[], now: Date, ciAppIds: numbe
   const candidate = work.candidate;
   let queue = work.queue ?? null, queueSequence = work.queueSequence ?? 0, ejection = work.queueEjection ?? null;
   const record = (event: QueueHistoryEntry['event'], reason?: string, tip?: string) => {
-    history.push({ at: now.toISOString(), event, sequence: queueSequence, ...(reason ? { reason } : {}), ...(tip ? { tip } : {}) });
+    history.push({ at: now.toISOString(), event, sequence: queueSequence, ...(reason ? { reason } : {}), ...(tip ? { tip } : {}), ...(event === 'ejected' ? { conflict: null } : {}) });
     if (history.length > queueHistoryLimit) history.splice(0, history.length - queueHistoryLimit);
   };
   const probe = { ...work, queue, queueSequence, gates: [], violations: work.violations } as Work;
@@ -134,7 +134,7 @@ export function queueEjectionRecord(work: Work, all: Work[], reason: string, now
   const predecessors = conflict ? placement?.predecessors ?? [] : null;
   const ejection: QueueEjection = { at, sequence, reason, sha: work.candidate?.sha ?? null, policyRevision: work.policyRevision,
     conflict: conflict ? { base: placement?.predictedBase ?? null } : null, ...(predecessors ? { predecessors } : {}) };
-  const history = [...(work.queueHistory ?? []), { at, event: 'ejected' as const, sequence, reason, ...(work.queue!.speculation ? { tip: work.queue!.speculation.tip } : {}), ...(predecessors ? { predecessors } : {}) }].slice(-queueHistoryLimit);
+  const history = [...(work.queueHistory ?? []), { at, event: 'ejected' as const, sequence, reason, conflict: ejection.conflict, ...(work.queue!.speculation ? { tip: work.queue!.speculation.tip } : {}), ...(predecessors ? { predecessors } : {}) }].slice(-queueHistoryLimit);
   return { ejection, history };
 }
 
