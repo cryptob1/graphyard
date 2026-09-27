@@ -1,10 +1,9 @@
-import { test } from '../../../helpers/temp-dirs.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { fileURLToPath } from 'node:url';
 import { classifyReworkReason, outsideItemReworkCauses, recentDelivered, reworkRoundsByCause, summarizeReworkSplit, type ReworkRound } from '../src/flow-analytics.js';
 import type { Work } from '../src/model.js';
@@ -131,8 +130,8 @@ test('unit:rework-rounds-split-by-cause — the split excludes causes outside th
 
   // Master status wiring: the report carries the split under speed.reworkRounds.ownChange,
   // read from the same ledger rows, with the raw figure untouched beside it.
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-rework-causes-'));
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-rework-causes-repo-'));
+  const directory = await temporaryDirectory('rework-causes');
+  const root = await temporaryDirectory('rework-causes-repo');
   execFileSync('git', ['init', '-q', root]);
   const credentialFile = join(directory, 'coordinator.token');
   await writeFile(credentialFile, 'c'.repeat(32), { mode: 0o600 });

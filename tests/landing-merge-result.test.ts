@@ -89,12 +89,14 @@ test('unit:landing-merge-result-per-file — the landing check judges each file 
     assert.equal(record.mergeSha, record.baseSha, 'the guard judged the merged result, and it is the base\'s version');
     // The refusing shape: a head that restores X over Z is still refused, and the build gate holds.
     const r = await fixture(true);
-    const refused = await r.github.observe(r.work);
-    const text = regressionRefusals(r.work, refused, []).join('\n');
-    assert.match(text, /Landing the candidate/, text);
-    assert.match(text, /state\.ts/, text);
-    assert.equal(build(r.work, refused).passed, false, build(r.work, refused).reasons.join('; '));
-  } finally { f.clean(); }
+    try {
+      const refused = await r.github.observe(r.work);
+      const text = regressionRefusals(r.work, refused, []).join('\n');
+      assert.match(text, /Landing the candidate/, text);
+      assert.match(text, /state\.ts/, text);
+      assert.equal(build(r.work, refused).passed, false, build(r.work, refused).reasons.join('; '));
+    } finally { await r.clean(); }
+  } finally { await f.clean(); }
 });
 
 test('unit:landing-gy472-fixture — the fixture reproduces GY-472\'s three commits, and the guard\'s verdict agrees with git\'s own merge', async () => {
@@ -114,7 +116,7 @@ test('unit:landing-gy472-fixture — the fixture reproduces GY-472\'s three comm
     assert.equal(record.baseSha, f.blob(f.base, 'state.ts'));
     assert.equal(record.mergeSha, record.baseSha, 'the merged result the guard judged is the base version');
     assert.deepEqual(regressionRefusals(f.work, seen, []), []);
-  } finally { f.clean(); }
+  } finally { await f.clean(); }
 });
 
 test('manual:gy472-refusal-cleared — a landing refusal recorded before the fix, in GY-472\'s shape, clears on the next observation without a new head', async () => {
@@ -131,5 +133,5 @@ test('manual:gy472-refusal-cleared — a landing refusal recorded before the fix
     assert.equal(f.head(), stale.candidate.sha, 'no push or sync');
     assert.deepEqual(regressionRefusals(work, next, []), [], 'the refusal cleared without a new head');
     assert.equal(build(work, next).passed, true, build(work, next).reasons.join('; '));
-  } finally { f.clean(); }
+  } finally { await f.clean(); }
 });
