@@ -55,7 +55,7 @@ function driveParallelTips(parallelTips: number, failing: string | null, count =
   const observe = (item: Work, checks: Work['observation'] extends infer O ? O extends { checks: infer C } ? C : never : never) => {
     item.observation = { ...item.observation!, candidate: item.candidate!, baseTip: base.sha, baseTree: trees.get(base.sha)!, checks, at: new Date(clock).toISOString() };
   };
-  const windowed = (item: Work) => evaluate(item, items, new Date(clock), [CI_APP], 1, parallelTips);
+  const windowed = (item: Work) => evaluate(item, items, new Date(clock), [CI_APP], { batchSize: 1, parallelTips });
   // The control plane publishing each tip the queue asks for: the entry's own head merged onto its
   // predicted base. Publishing never waits for CI, so the whole chain builds at once.
   const publish = () => {
@@ -177,12 +177,12 @@ test('unit:parallel-tips-failure-rebuild — a later tip failing while the tip a
   // Evaluated directly: tip 2 failed while tip 1 runs, so entry 2 stays queued and its merge gate
   // names tip 1 as still being validated; once tip 1 passes, entry 2's failure is its own.
   const head = entry(0, [running]), second = entry(1, [failing]);
-  const held = evaluate(second, [head, second], new Date(now), [CI_APP], 1, 4);
+  const held = evaluate(second, [head, second], new Date(now), [CI_APP], { batchSize: 1, parallelTips: 4 });
   assert.ok(held.queue && !held.queueEjection, `entry 2 stays queued while tip 1 runs: ${JSON.stringify(held.queueEjection)}`);
   const reasons = held.gates.find(gate => gate.name === 'merge')!.reasons;
   assert.ok(reasons.some(reason => reason.startsWith(`${tipValidationPrefix}${tip(0).slice(0, 12)}: speculative tip ${tip(1).slice(0, 12)} of GY-2 failed test`)), `the merge gate waits on tip 1: ${JSON.stringify(reasons)}`);
   assert.equal(held.queue!.batch!.state, 'waiting', 'the Merge step shows the entry waiting on the tip ahead, not ejecting');
-  const judged = evaluate(second, [entry(0, [pass]), second], new Date(now), [CI_APP], 1, 4);
+  const judged = evaluate(second, [entry(0, [pass]), second], new Date(now), [CI_APP], { batchSize: 1, parallelTips: 4 });
   assert.match(judged.queueEjection?.reason ?? '', /attributed to this entry: speculative tip [0-9a-f]{12} ahead of it passed test$/, 'with tip 1 passed, entry 2 is ejected as the cause');
 });
 
@@ -280,10 +280,15 @@ test('unit:parallel-tips-visible — the flow report behind Insights counts merg
   const report = computeFlow(dataset, { days: 7 });
   assert.deepEqual([report.mergeQueue.merges, report.mergeQueue.mergesPerHour, report.mergeQueue.queueWait.n, report.mergeQueue.queueWait.medianMs], [3, 0.018, 3, 2 * hour], 'three merges over seven days, median wait two hours');
   assert.ok(report.definitions.mergeQueue, 'the metric is defined with the report');
-  // Insights renders both figures beside what landed; an unmeasured figure reads Unavailable, never zero.
-  const page = renderToStaticMarkup(createElement(LandedPerDay, { report }));
-  assert.match(page, /data-pace="merges-per-hour"[^>]*><dt[^>]*>Merges per hour<\/dt><dd[^>]*>0.018<\/dd>/);
-  assert.match(page, /data-pace="median-queue-wait"[^>]*><dt[^>]*>Median queue wait<\/dt><dd[^>]*>2h/);
+  // Insights renders both figures beside what landed; an unmeasured figure reads Unavailable, never
+  // zero, and a figure from fewer than five merges reads '—' with its sample count (sparse data).
+  const sparsePage = renderToStaticMarkup(createElement(LandedPerDay, { report }));
+  assert.match(sparsePage, /data-pace="merges-per-hour"[^>]*><dt[^>]*>Merges per hour<\/dt><dd[^>]* data-sparse="true"[^>]*>—<\/dd><small[^>]*>3 merges<\/small>/);
+  assert.match(sparsePage, /data-pace="median-queue-wait"[^>]*><dt[^>]*>Median queue wait<\/dt><dd[^>]* data-sparse="true"[^>]*>—<\/dd><small[^>]*>3 merged<\/small>/);
+  const denseReport = { ...report, mergeQueue: { ...report.mergeQueue, merges: 6, mergesPerHour: 0.036, queueWait: { ...report.mergeQueue.queueWait, n: 6, sparse: false } } };
+  const densePage = renderToStaticMarkup(createElement(LandedPerDay, { report: denseReport }));
+  assert.match(densePage, /data-pace="merges-per-hour"[^>]*><dt[^>]*>Merges per hour<\/dt><dd[^>]*>0.036<\/dd>/);
+  assert.match(densePage, /data-pace="median-queue-wait"[^>]*><dt[^>]*>Median queue wait<\/dt><dd[^>]*>2h[^<]*<small> of 6 merged<\/small>/);
   const empty = renderToStaticMarkup(createElement(LandedPerDay, { report: { ...report, mergeQueue: { merges: 0, mergesPerHour: null, queueWait: { n: 0, medianMs: null } } } }));
   assert.match(empty, /Merges per hour<\/dt><dd[^>]*>Unavailable/);
   assert.match(empty, /Median queue wait<\/dt><dd[^>]*>Unavailable/);
@@ -308,7 +313,7 @@ test('unit:parallel-speculative-tips — the master publishes mergeQueue.paralle
       const response = await fetch(`${url}${path}`, { ...init, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() } });
       return { status: response.status, body: await response.json() };
     };
-    assert.deepEqual((await api('/api/status', tokens.coordinator)).body.mergeQueue, { batchSize: 4, parallelTips: 4, rerunFailedChecks: 1 }, 'status reports the window the control plane runs');
+    assert.deepEqual((await api('/api/status', tokens.coordinator)).body.mergeQueue, { batchSize: 4, optimistic: true, parallelTips: 4, rerunFailedChecks: 1 }, 'status reports the window the control plane runs');
     const post = (token: string, body: object) => api('/api/merge-queue', token, { method: 'POST', body: JSON.stringify(body) });
     assert.equal((await post(tokens.worker, { parallelTips: 2 })).status, 403, 'only the master (or an operator) sets it');
     assert.equal((await post(tokens.coordinator, { parallelTips: 0 })).status, 400);
@@ -362,9 +367,9 @@ test('unit:parallel-tips-failure-rebuild — a failed check held for rerun is ru
   assert.equal(view.own!.ci, 'running');
   assert.equal(view.firstFailure, null);
   assert.equal(view.validated, false);
-  const held = evaluate(second, all, new Date(now), [CI_APP], 1, 4);
+  const held = evaluate(second, all, new Date(now), [CI_APP], { batchSize: 1, parallelTips: 4 });
   assert.ok(held.queue);
   assert.equal(held.queueEjection, null);
   second.checkReruns![0].state = 'failed';
-  assert.match(evaluate(second, all, new Date(now), [CI_APP], 1, 4).queueEjection?.reason ?? '', /attributed to this entry/);
+  assert.match(evaluate(second, all, new Date(now), [CI_APP], { batchSize: 1, parallelTips: 4 }).queueEjection?.reason ?? '', /attributed to this entry/);
 });

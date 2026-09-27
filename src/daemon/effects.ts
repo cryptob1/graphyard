@@ -11,7 +11,7 @@ import type { SessionHandleInput } from '../model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from '../request-settlement.js';
 import { type ResourceReclaimReport, reclaimResources, dispatchRefusal } from '../master-resources.js';
 import { RefusedResponse } from '../model/refusal.js';
-import { mergeBatchSize, mergeParallelTips, rerunFailedChecks } from '../master/profiles.js';
+import { mergeBatchSize, mergeParallelTips, optimisticMergeEnabled, rerunFailedChecks } from '../master/profiles.js';
 import type { CapacityRole, PartialWork } from '../model/capacity.js';
 import { readProducerLedger, saveProducerLedger, independentProducerProfiles, launchProducer, reclaimCheckouts } from '../producer.js';
 import { followUpThreadIds, readReviewLedger, updateReviewLedger, launchReview } from '../reviewer.js';
@@ -103,9 +103,11 @@ export interface DaemonEffects {
    */
   publishProductionEnvironment?: () => Promise<unknown>;
   /**
-   * Publishes `mergeQueue.batchSize` (GY-330) and `mergeQueue.parallelTips` (GY-498) to the
-   * control plane, whose merge queue batches and validates its window by them; sent only on a
-   * change, and read at the start of every cycle so a reconfiguration applies before the next merge.
+   * Publishes `mergeQueue.batchSize` (GY-330), `mergeQueue.parallelTips` (GY-498),
+   * `mergeQueue.rerunFailedChecks`, and `mergeQueue.optimistic` (GY-500) to the control plane,
+   * whose merge queue batches and validates its window by the first two and lets disjoint entries
+   * past it by the last; sent only on a change, and read at the start of every cycle so a
+   * reconfiguration applies before the next merge.
    */
   publishMergeBatchSize?: () => Promise<unknown>;
   /** Asks the provider to run the trusted smoke workflow against the observed deployment. */
@@ -620,7 +622,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       publishedEnvironment = environment;
     },
     publishMergeBatchSize: async () => {
-      const config = { batchSize: mergeBatchSize(current()), parallelTips: mergeParallelTips(current()), rerunFailedChecks: rerunFailedChecks(current()) };
+      const config = { batchSize: mergeBatchSize(current()), optimistic: optimisticMergeEnabled(current()), parallelTips: mergeParallelTips(current()), rerunFailedChecks: rerunFailedChecks(current()) };
       const published = JSON.stringify(config);
       if (published === publishedMergeQueue) return;
       await mutate('merge-queue', config);

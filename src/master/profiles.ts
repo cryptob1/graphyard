@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 import { z } from 'zod';
 import { defaultMergeBatchSize, defaultParallelTips, maxMergeBatchSize, maxParallelTips, mergeQueueInsights } from '../merge-queue.js';
+import { defaultOptimisticMerge } from '../optimistic-merge.js';
 import type { Work } from '../model/work.js';
 import { narrowRoleRuntimeSchema, piRuntimeSchema } from '../runner/payloads.js';
 import { researchSettingsSchema } from '../research.js';
@@ -284,8 +285,11 @@ export const masterConfigSchema = z.object({
   // entry on its own tip, an entry whose tip and every tip ahead of it passed merging as soon as it
   // heads the queue (default 4). Since every entry has its own tip, `batchSize` (GY-330) no longer
   // batches validation; it only widens the observation band and the delivery/ejection wake depth.
-  // The loop publishes both to the control plane on every change.
-  mergeQueue: z.object({ batchSize: z.number().int().min(1).max(maxMergeBatchSize).optional(), parallelTips: z.number().int().min(1).max(maxParallelTips).optional(), rerunFailedChecks: z.number().int().min(0).max(maxRerunFailedChecks).optional() }).strict().optional(),
+  // `optimistic` (GY-500, default on): an entry whose files are disjoint from everything merged since
+  // its base, touching no shared infrastructure, merges at once past the queue, and main is guarded
+  // after the merge with automatic revert. false sends every entry through the queue.
+  // The loop publishes all of these to the control plane on every change.
+  mergeQueue: z.object({ batchSize: z.number().int().min(1).max(maxMergeBatchSize).optional(), optimistic: z.boolean().optional(), parallelTips: z.number().int().min(1).max(maxParallelTips).optional(), rerunFailedChecks: z.number().int().min(0).max(maxRerunFailedChecks).optional() }).strict().optional(),
   // The operator's own authenticated browser profile, used only by master browser flows.
   browser: masterBrowserSchema.optional(),
   // The master's own operator-agent identity, and the separate approver identity whose session
@@ -300,6 +304,10 @@ export type MasterConfig = z.infer<typeof masterConfigSchema>;
 /** The merge queue's batch size under this master config: `mergeQueue.batchSize`, or the default of 4. */
 export function mergeBatchSize(config: Pick<MasterConfig, 'mergeQueue'> | null | undefined): number {
   return config?.mergeQueue?.batchSize ?? defaultMergeBatchSize;
+}
+/** Whether optimistic merge is on under this master config: `mergeQueue.optimistic`, on by default (GY-500). */
+export function optimisticMergeEnabled(config: Pick<MasterConfig, 'mergeQueue'> | null | undefined): boolean {
+  return config?.mergeQueue?.optimistic ?? defaultOptimisticMerge;
 }
 
 /** The parallel-tip window under this master config: `mergeQueue.parallelTips`, or the default of 4 (GY-498). */
