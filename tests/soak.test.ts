@@ -19,6 +19,7 @@ import { successorWidening } from '../src/model/successors.js';
 import { systemInvariants, type InvariantCheck } from '../src/model/invariants.js';
 import { performSelfUpgrade, type SelfUpgradeOutcome } from '../src/daemon/upgrade.js';
 import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } from './helpers/soak-world.js';
+import { readControlPlaneClock, assessContainment, type ControlPlaneClock } from '../src/master/containment.js';
 
 /**
  * GY-404: per-item gates cannot catch faults that emerge from interaction over time, so this runs
@@ -66,6 +67,8 @@ const plan = {
   deploys: [2 * hour + 30 * minute, 5 * hour], dirtyCheckout: { from: 4 * hour + 50 * minute, to: 6 * hour }, split: { at: 45 * minute, item: 12 }, clean: 2, unstable: 4, slowRecompute: 8, exhaustedReviewer: 6,
   // GY-516: a flake on a speculative tip whose one rerun passes, and one whose rerun fails again.
   flaky: { rerunPasses: 10, rerunFails: 14 },
+  // GY-795: one item gets a containment quarantine to test the timed clock read.
+  quarantine: 8,
 };
 const file = (n: number) => `src/soak/item-${n}.ts`;
 
@@ -139,8 +142,25 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     const epoch = claimed.epoch, key = work.key, n = numberOf(work);
     // A rework attempt pushes to the pull request already linked, from a fresh workspace.
     const branch = work.candidate?.branch ?? `graphyard/${key.toLowerCase()}-${epoch}`;
-    await engine.execute(principal, 'workspace', work.id, { epoch, host: 'soak-host', path: `/tmp/soak/${key.toLowerCase()}-${epoch}`, branch }, id());
+    const path = `/tmp/soak/${key.toLowerCase()}-${epoch}`;
+    await engine.execute(principal, 'workspace', work.id, { epoch, host: 'soak-host', path, branch }, id());
+    // GY-795: one item gets a containment quarantine to test the timed clock read.
     const attempt = (attempts.get(key) ?? 0) + 1; attempts.set(key, attempt);
+    if (n === plan.quarantine && attempt === 1) {
+      const now = clock.now();
+      const leaseExpiresAt = new Date(now - 1000).toISOString(); // Lease already lapsed
+      const launchExpiresAt = new Date(now - 500).toISOString();  // Launch deadline also passed
+      const quarantineData = {
+        at: new Date(now - 5000).toISOString(),
+        epoch, owner: principal.id, leaseExpiresAt, launchExpiresAt,
+        scope: { unit: 'test-scope', pid: 99999 },
+        settlementHash: 'test-hash'
+      };
+      await store.pool.query(
+        'UPDATE work SET containment_quarantine=$1 WHERE id=$2',
+        [JSON.stringify(quarantineData), work.id]
+      );
+    }
     const pane = herdr.open(profile.agentName);
     sessions.push({ work: work.id, key, branch, profile, epoch, pane, pushAt: clock.now() + plan.workMs, diesAt: plan.deaths.has(n) && attempt === 1 ? clock.now() + plan.deathAfterMs : null, state: 'working' });
     return { key, epoch };
@@ -219,6 +239,21 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       return { source: 'endpoint', sha: production.sha, at: new Date(clock.now()).toISOString(), reason: null, deployed: serving.map(item => item.key), pending: delivered.filter(item => !serving.includes(item)).map(item => item.key) };
     },
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+  };
+  // GY-795: wire the control-plane clock and containment assessment effects for soak coverage
+  effects.controlPlaneClock = async (): Promise<ControlPlaneClock> => {
+    // In soak, simulate a timed read with a small fixed round trip
+    return { clockOffset: { min: -100, max: 100 }, roundTripMs: 50, source: 'timed read' };
+  };
+  effects.containment = async (work, observed) => {
+    // In soak, all containment assessments are settleable (the supervisor is never actually running)
+    return assessContainment(work, {
+      hostId: config.hostId,
+      observedAt: observed.now,
+      clockOffset: observed.clockOffset,
+      clockRoundTripMs: observed.clockRoundTripMs,
+      clockSource: observed.clockSource,
+    });
   };
 
   // ---- The coordinator checkout the loop runs from, and its supervisor (GY-437). ----
@@ -339,6 +374,9 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   const { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, state, upgrades, refusalSamples, checkout } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
   const undelivered = final.filter(item => item.stage !== 'done' || !item.delivery);
   assert.deepEqual(undelivered.map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
+  // GY-795: verify the quarantined item was settled and delivered.
+  const quarantined = final.find(item => item.key === items[plan.quarantine - 1].key);
+  assert.ok(quarantined && quarantined.stage === 'done', `the quarantined item (${plan.quarantine}) is settled and delivered`);
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
   assert.deepEqual(failures, [], 'no cycle failed');
   assert.deepEqual(lost, [], 'no worker lost its lease: a dead worker lapses, it is not refused');
