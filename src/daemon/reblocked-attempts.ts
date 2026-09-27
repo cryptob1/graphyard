@@ -1,8 +1,8 @@
 // Concern: an attempt that blocks again after its blocker was cleared (GY-867) — ended and handed on.
 // GY-885: an attempt that runs past its role's maximum time box — ended and retried fresh with backoff.
 import type { Work } from '../model.js';
+import type { ExhaustionRecord } from '../model/capacity.js';
 import type { DaemonState } from './state.js';
-import { roleSessionMaximumMs } from '../model/sessions.js';
 
 /**
  * GY-867. Unblocking an attempt only re-prompts the same session (cycle-sessions 1e). When what
@@ -32,12 +32,13 @@ export const reblockedMarker = 'blocked again on epoch ';
 
 /**
  * The runtime the next attempt should avoid: the runtime of the attempt that was just ended as
- * reblocked, when that is the item's latest worker end. A session-local cause (a sandbox's file
- * ownership, a runtime's permission model) is likeliest to recur on the same runtime.
+ * reblocked or as overlong, when that is the item's latest worker end. Both are session-local
+ * causes (a sandbox's file ownership, a runtime's permission model, a runtime that hung) and are
+ * likeliest to recur on the same runtime.
  */
 export function runtimeToAvoid(item: Pick<Work, 'capacity'>): string | null {
   const last = item.capacity?.exhaustions.filter(entry => entry.role === 'worker').at(-1);
-  return last?.cause === 'interrupted' && last.reason.startsWith(reblockedMarker) ? last.runtime ?? null : null;
+  return last?.cause === 'interrupted' && (last.reason.startsWith(reblockedMarker) || last.reason.startsWith(overlongMarker)) ? last.runtime ?? null : null;
 }
 
 /**
@@ -51,21 +52,35 @@ export function preferOtherRuntime<T extends { profile: { kind?: string | null; 
 }
 
 /**
- * GY-885: An attempt that has run past its role's time box is ended and retried with backoff.
- * Returns the number of failed attempts (ended without submitting) in sequence before this one,
- * capped at maxFailedAttempts.
+ * GY-885: the consecutive attempts of this item that ended without submitting, each past its
+ * role's time box — the trailing run of worker ends whose cause is an interruption and whose
+ * reason carries the overlong marker. The run stops at the first end that is not an overlong
+ * ending (a reblocked or idle hand-over breaks the row), at any attempt at or before the one
+ * that submitted (a submission is what "in a row" is counted from), and at ends the item's
+ * applied cap decision already approved through (older than `resumeApprovedAt`): those belong
+ * to the round the approver let start, not to this one. Every one of these facts is read from
+ * the item's own record, so the ladder survives a daemon restart and reads the same from any
+ * host — no local cursor holds it.
  */
-export function failedAttemptCount(item: Pick<Work, 'capacity' | 'submission'>): number {
-  if (!item.capacity?.exhaustions) return 0;
-  let count = 0;
-  for (const exhaustion of [...item.capacity.exhaustions].reverse()) {
-    if (exhaustion.role !== 'worker') continue;
-    if (exhaustion.cause !== 'interrupted') break;
-    if (!exhaustion.reason.startsWith('overlong attempt')) break;
-    count++;
-    if (count >= maxFailedAttempts) return maxFailedAttempts;
+export function attemptEndsNeedingRetry(item: Pick<Work, 'capacity' | 'submission'>, resumeApprovedAt = 0): ExhaustionRecord[] {
+  const submitted = item.submission?.epoch ?? 0;
+  const run: ExhaustionRecord[] = [];
+  for (const end of [...(item.capacity?.exhaustions ?? [])].reverse()) {
+    if (end.role !== 'worker' || end.cause !== 'interrupted') break;
+    if ((end.epoch ?? 0) <= submitted) break;
+    if (!end.reason.startsWith(overlongMarker)) break;
+    if (Date.parse(end.at) <= resumeApprovedAt) break;
+    run.unshift(end);
   }
-  return count;
+  return run;
+}
+
+/**
+ * GY-885: how many consecutive attempts ended without submitting, capped at
+ * `maxFailedAttempts`, so a reason can name the retry the next attempt stands for.
+ */
+export function failedAttemptCount(item: Pick<Work, 'capacity' | 'submission'>, resumeApprovedAt = 0): number {
+  return Math.min(attemptEndsNeedingRetry(item, resumeApprovedAt).length, maxFailedAttempts);
 }
 
 /** The backoff durations for retries: 5 min, 15 min, 45 min. Cap at 3 attempts. */
@@ -74,23 +89,73 @@ export const retryBackoffMs = [5 * 60_000, 15 * 60_000, 45 * 60_000];
 /** The maximum number of failed attempts before holding the item. */
 export const maxFailedAttempts = 3;
 
+/** One named cause per ended attempt, oldest first: what `master status` shows for why attempts die. */
+export function attemptHoldCauses(ends: ExhaustionRecord[]): string[] {
+  return ends.map(end => `attempt ${end.epoch} on ${end.profile} ended at ${end.at}: ${end.reason}`);
+}
+
+/** The binding a cap-resolution decision carries: the run it judged, by item and third failure. */
+export const capBindingPrefix = 'overlong-cap:';
+export const capBinding = (item: Pick<Work, 'key'>, boundAt: number) => `${capBindingPrefix}${item.key}:${new Date(boundAt).toISOString()}`;
+
+/** What the dispatch step holds an item for while its retry ladder runs, or null to dispatch as usual. */
+export interface AttemptRetryHold {
+  /** `backoff`: dispatch waits for the next window. `held`: the cap is reached and only an approver's decision resumes it. */
+  kind: 'backoff' | 'held';
+  /** The consecutive failed attempts this hold counts, after the submission and applied-decision boundaries. */
+  count: number;
+  /** One named cause per ended attempt, oldest first. */
+  causes: string[];
+  /** The ends the count is taken from, oldest first. */
+  ends: ExhaustionRecord[];
+  /** Epoch time dispatch may resume at (backoff), or null while held. */
+  resumeAt: number | null;
+  /** Epoch time of the failure that reached the cap (held), or null in a backoff. */
+  boundAt: number | null;
+}
+
+/**
+ * GY-885: the hold an item's retry ladder puts on dispatch right now, or null. Each retry waits
+ * a backoff (5, then 15 minutes) after the failure before it; when three attempts in a row have
+ * ended without submitting, the item is held instead of redispatched again, with every cause
+ * named, until the cap decision an independent approver judges is applied — the fresh round it
+ * approves then still waits the longest backoff (45 minutes) before it dispatches.
+ */
+export function attemptRetryHold(item: Pick<Work, 'capacity' | 'submission'>, clock: number, resumeApprovedAt = 0): AttemptRetryHold | null {
+  const ends = attemptEndsNeedingRetry(item, resumeApprovedAt);
+  if (ends.length >= maxFailedAttempts) {
+    const boundAt = Date.parse(ends[ends.length - 1].at);
+    return { kind: 'held', count: ends.length, causes: attemptHoldCauses(ends), ends, resumeAt: null, boundAt };
+  }
+  if (ends.length) {
+    const lastAt = Date.parse(ends[ends.length - 1].at), backoffMs = retryBackoffMs[ends.length - 1];
+    return clock - lastAt < backoffMs
+      ? { kind: 'backoff', count: ends.length, causes: attemptHoldCauses(ends), ends, resumeAt: lastAt + backoffMs, boundAt: null }
+      : null;
+  }
+  // No failed attempt stands since the resume: an applied cap decision starts the approved round
+  // itself, and that round waits the longest backoff before it dispatches.
+  if (resumeApprovedAt) {
+    const backoffMs = retryBackoffMs[retryBackoffMs.length - 1];
+    return clock - resumeApprovedAt < backoffMs
+      ? { kind: 'backoff', count: 0, causes: [], ends: [], resumeAt: resumeApprovedAt + backoffMs, boundAt: null }
+      : null;
+  }
+  return null;
+}
+
 /** Why an attempt is ended for running past its role's time box. */
 export function overlongReason(item: Pick<Work, 'key'>, epoch: number, ageMs: number, maximumMs: number, failedCount: number) {
   const hours = (ms: number) => Math.floor(ms / 3_600_000);
   const minutes = (ms: number) => Math.floor((ms % 3_600_000) / 60_000);
   const elapsed = `${hours(ageMs)}h${minutes(ageMs)}m`;
   const limit = `${hours(maximumMs)}h${minutes(maximumMs)}m`;
-  const cause = failedCount > 0 ? `; retry ${failedCount + 1} of ${maxFailedAttempts}` : '';
+  const cause = failedCount > 0 ? `; retry ${Math.min(failedCount + 1, maxFailedAttempts)} of ${maxFailedAttempts}` : '';
   return `overlong attempt on epoch ${epoch}: ran ${elapsed}, past the ${limit} maximum for its role${cause}`;
 }
-
-/** The key under which a session's overlong detection is tracked. */
-export const overlongKey = (item: Pick<Work, 'id'>, epoch: number) => `session:overlong:${item.id}:${epoch}`;
 
 /** The marker an overlong attempt's end carries in its capacity record, read back by dispatch. */
 export const overlongMarker = 'overlong attempt';
 
-/** Whether dispatch should hold the item because it has failed 3 times in a row. */
-export function shouldHoldForMaxRetries(item: Pick<Work, 'capacity' | 'submission'>): boolean {
-  return failedAttemptCount(item) >= maxFailedAttempts;
-}
+/** The key under which a session's overlong detection is tracked. */
+export const overlongKey = (item: Pick<Work, 'id'>, epoch: number) => `session:overlong:${item.id}:${epoch}`;

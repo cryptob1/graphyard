@@ -11,7 +11,7 @@ import { message, orphanObservationSchema } from './state.js';
 import { closeKey } from './reconcile.js';
 import { boundDetail } from './decisions.js';
 import { clearProfileFailure, orphanedSupervisors, readyToRetry } from './sessions.js';
-import { clearedBefore, clearedBlockerKey, failedAttemptCount, maxFailedAttempts, overlongKey, overlongReason, reblockedKey, reblockedMarker, reblockedReason, retryBackoffMs, shouldHoldForMaxRetries } from './reblocked-attempts.js';
+import { clearedBefore, clearedBlockerKey, failedAttemptCount, overlongKey, overlongReason, reblockedKey, reblockedMarker, reblockedReason } from './reblocked-attempts.js';
 import { paneAlreadyGone } from '../request-settlement.js';
 import { blockedPromptAnswers, blockedPromptFailMs, blockedPromptSettleMs, failoverKey, handlerSettleMs, launchAppearanceMs, launcherRetry, promptDigest, type LaunchedSession, preserveInterruptedAttempt, record, stoppedStates } from './effects.js';
 import type { Cycle } from './cycle.js';
@@ -518,7 +518,9 @@ async function resumeStep(cycle: Cycle, failedOver: Set<string>) {
             const attempts = (previous?.attempts ?? 0) + 1;
             await entry(key, 'started', `${profile.agentName} on ${item.key} ${reason}; ending the attempt`, attempts);
             try {
-              const next = await endWorkerAttempt(cycle, item, profile, epoch, pane, reason, `ended without submitting: its session ${profile.agentName} was ${reason}`);
+              // The reason itself is what the capacity record keeps: it carries the overlong marker
+              // the retry ladder reads back, and names the runtime and run the item's history shows.
+              const next = await endWorkerAttempt(cycle, item, profile, epoch, pane, reason, reason);
               performed.push(await entry(key, 'done', `${profile.agentName} on ${item.key} ${reason}; ${next}`, attempts));
               await drop(keys.blocker, keys.idle);
             } catch (error) {
