@@ -1118,7 +1118,7 @@ export class GitHub {
     // A dismissed review is recorded with GitHub's reason for dismissing it and the head it was
     // given on (GY-127): the review list alone cannot tell a reviewer withdrawing a verdict from
     // GitHub withdrawing an approval because the merge base moved under an unchanged head.
-    const dismissals = [...latest.values()].some(r => r.state === 'DISMISSED') ? await this.reviewDismissals(pr.number) : { read: new Map<number, ReviewDismissal>(), unread: null as string | null, forcePushes: [] as HeadForcePush[] };
+    const dismissals = [...latest.values()].some(r => r.state === 'DISMISSED') ? await this.reviewDismissals(pr.number) : { read: new Map<number, ReviewDismissal>(), unread: null as string | null, forcePushes: [] as HeadForcePush[], actorsUnread: undefined as string | undefined };
     const dismissalOf = (id: number): ReviewDismissal | undefined => dismissals.read.get(id) ?? (dismissals.unread ? { reason: null, mergeBase: false, verdict: null, commit: null, at: null, by: null, unread: dismissals.unread } : undefined);
     // A published speculative tip carries its own validated base. The candidate stays bound to
     // that exact commit while the managed branch advances underneath it through queue merges. A
@@ -1177,6 +1177,7 @@ export class GitHub {
       baseTip: branch.tip, baseTree: branch.tree, baseTipContained, baseTipAncestor: contained, scopeFiles,
       ...(landing ? { landing } : {}), ...(revertedDelivery ? { revertedDelivery } : {}),
       ...(dismissals.forcePushes.length ? { headForcePushes: dismissals.forcePushes } : {}),
+      ...(dismissals.actorsUnread ? { headForcePushActorsUnread: dismissals.actorsUnread } : {}),
     };
   }
   /**
@@ -1454,11 +1455,12 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
    * rather than failing the observation: the review gate already refuses a dismissed approval, and
    * nothing is inferred from a reason nobody could read.
    */
-  async reviewDismissals(pr: number): Promise<{ read: Map<number, ReviewDismissal>; unread: string | null; forcePushes: HeadForcePush[] }> {
+  async reviewDismissals(pr: number): Promise<{ read: Map<number, ReviewDismissal>; unread: string | null; forcePushes: HeadForcePush[]; actorsUnread?: string }> {
     const read = new Map<number, ReviewDismissal>();
     const forcePushes: HeadForcePush[] = [];
-    let login: string | null = null;
-    try { login = await this.controlPlaneLogin(); } catch { login = null; }
+    let login: string | null = null, actorsUnread: string | undefined;
+    try { login = await this.controlPlaneLogin(); }
+    catch (error) { actorsUnread = `the control-plane App's login could not be read, so no dismissal or force-push is attributed to it: ${error instanceof Error ? error.message : String(error)}`; }
     const byApp = (actor: unknown) => typeof actor === 'string' && !!login && actor.toLowerCase() === login.toLowerCase();
     try {
       for (const event of await this.pages(`/issues/${pr}/timeline`)) {
@@ -1474,9 +1476,9 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
           before: typeof event.before === 'string' ? event.before : null, after: typeof event.after === 'string' ? event.after : null });
       }
     } catch (error) {
-      return { read, unread: error instanceof Error ? error.message : 'the pull request timeline could not be read', forcePushes };
+      return { read, unread: error instanceof Error ? error.message : 'the pull request timeline could not be read', forcePushes, ...(actorsUnread ? { actorsUnread } : {}) };
     }
-    return { read, unread: null, forcePushes };
+    return { read, unread: null, forcePushes, ...(actorsUnread ? { actorsUnread } : {}) };
   }
   /**
    * The item's own reviewed head under a branch head (GY-127): the last commit a worker pushed or
@@ -1655,8 +1657,8 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     // approval, and republishing without reading it would dismiss a review of the very patch the
     // new tip re-shows. The carry decided at publication carries it exactly as an observed
     // approval, so a head ejection costs the entries behind it no review round.
-    const observedApproval = work.policy.review && reviewProviderOf(work.policy) === 'github'
-      ? await this.approvalOnHead(work, pr) : null;
+    const { approval: observedApproval, unread: observedApprovalUnread } = work.policy.review && reviewProviderOf(work.policy) === 'github'
+      ? await this.approvalOnHead(work, pr) : { approval: null, unread: null };
     await beforeWrite();
     // The branch is moved by a forced ref update after the head was read above, not compared and
     // swapped in one request. A worker push landing in that window is overwritten; the window is
@@ -1675,18 +1677,19 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     // between the replaced tip's bound base and the predicted base, listed here from GitHub.
     const baseChanges = merged || tip === work.candidate!.sha ? undefined : await this.changedFiles(work.candidate!.baseSha, placement.predictedBase!);
     return { ref, tip, tipTree: await this.tipTree(tip), base: placement.predictedBase!, baseTree, predecessors: placement.predecessors, policyRevision: work.policyRevision, publishedAt: new Date().toISOString(), merge, reviewedHead, trigger: 'queue-head',
-      ...(observedApproval ? { observedApproval } : {}),
+      ...(observedApproval ? { observedApproval } : {}), ...(observedApprovalUnread ? { observedApprovalUnread } : {}),
       ...(baseChanges !== undefined ? { baseChanges } : {}) };
   }
   /**
    * The approval of the pull request's current head from its reviews as GitHub holds them right
    * now (GY-519): the record's last observation can be older than the approval, and this read is
    * what lets the republication carry it instead of dismissing it. See `approvalOfHead` for the
-   * identity rule.
+   * identity rule. A failed read carries nothing and says why (GY-606), so a lost carry is
+   * diagnosable from the speculation rather than silent.
    */
-  private async approvalOnHead(work: Work, pr: { number: number; head: { sha: string }; user: { login: string } }): Promise<ObservedApproval | null> {
-    try { return approvalOfHead(await this.pages(`/pulls/${pr.number}/reviews`), pr.head.sha, pr.user.login, pr.number, work); }
-    catch { return null; }
+  private async approvalOnHead(work: Work, pr: { number: number; head: { sha: string }; user: { login: string } }): Promise<{ approval: ObservedApproval | null; unread: string | null }> {
+    try { return { approval: approvalOfHead(await this.pages(`/pulls/${pr.number}/reviews`), pr.head.sha, pr.user.login, pr.number, work), unread: null }; }
+    catch (error) { return { approval: null, unread: `the pull request's reviews could not be read before the tip was replaced, so no approval of it was carried: ${error instanceof Error ? error.message : String(error)}` }; }
   }
   /**
    * Restores a pull-request branch that carries another item's unlanded commits (GY-127): moves it

@@ -46,6 +46,11 @@ export interface QueueSpeculation {
    * being republished. The carry decided at publication carries it exactly as an observed approval.
    */
   observedApproval?: ObservedApproval | null;
+  /**
+   * Why the pre-push read of the pull request's reviews failed (GY-606): the publication then
+   * carries no observed approval, and this names the lost carry instead of leaving it silent.
+   */
+  observedApprovalUnread?: string;
   /** Why the tip was built (GY-375): the queue head is the one candidate brought onto the base unasked. */
   trigger?: 'queue-head';
 }
@@ -56,6 +61,11 @@ export interface ObservedApproval { reviewer: string; reviewId?: number; sha: st
  * between which commits. `byApp` is true only when GitHub named the control-plane App's own bot
  * identity as the actor — the fact that separates a republication the control plane made itself
  * from a push by anyone else.
+ */
+/**
+ * `headForcePushActorsUnread` on an observation (GY-606) says why the control-plane App's own login
+ * could not be read while the timeline was: every force-push then records `byApp: false`, so no
+ * replaced tip's approval is restored, and the observation names why rather than failing silently.
  */
 export interface HeadForcePush { at: string | null; by: string | null; byApp: boolean; before: string | null; after: string | null }
 /**
@@ -77,7 +87,7 @@ export interface ReviewThread { id?: string; author: string; bot?: boolean; path
  * before threads were observed.
  */
 export interface ConversationResolution { required: boolean; unresolved: ReviewThread[] }
-declare module './model/work.js' { interface Observation { conversations?: ConversationResolution; headForcePushes?: HeadForcePush[] } }
+declare module './model/work.js' { interface Observation { conversations?: ConversationResolution; headForcePushes?: HeadForcePush[]; headForcePushActorsUnread?: string } }
 
 /** `author on path:line`, the way every refusal and attention line names a thread. */
 export const describeThread = (thread: ReviewThread) => `${thread.author} on ${thread.path}${thread.line === null ? '' : `:${thread.line}`}${thread.outdated ? ' (outdated)' : ''}`;
