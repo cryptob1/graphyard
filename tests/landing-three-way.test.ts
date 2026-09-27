@@ -51,7 +51,7 @@ function fixture() {
 const build = (work: Work, observation: Observation) => evaluate({ ...work, candidate: observation.candidate, observation }, [], new Date(), []).gates.find(gate => gate.name === 'build')!;
 
 test('unit:landing-check-three-way — base-only edits survive, but a candidate restoring old A is refused', async () => {
-  const f = fixture();
+  const f = await fixture();
   try {
     const seen = await f.github.observe(f.work);
     const merged = f.git('merge-tree', '--write-tree', f.base, f.head());
@@ -71,7 +71,7 @@ test('unit:landing-check-three-way — base-only edits survive, but a candidate 
 });
 
 test('unit:landing-refusal-clears — the next observation clears an old refusal without changing the head', async () => {
-  const f = fixture();
+  const f = await fixture();
   try {
     const clean = await f.github.observe(f.work);
     const stale = { ...clean, landing: { ...clean.landing!, files: [{ path: 'A', status: 'modified' as const, sha: f.blob(f.root, 'A'), baseSha: f.blob(f.base, 'A'), additions: 1, deletions: 1, binary: false }], carried: [], foreign: [], landed: [], examined: [] } };

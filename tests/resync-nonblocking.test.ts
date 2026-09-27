@@ -1,4 +1,5 @@
-import { test } from 'node:test';
+import { test } from '../../../helpers/temp-dirs.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
