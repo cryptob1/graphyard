@@ -11,7 +11,7 @@ import { broadScopeRefusals } from '../coordination.js';
 import { writeHarnessPermissions } from '../harness.js';
 import { type Work, escalationTriggers } from '../model.js';
 import { branchContamination, pendingRestore } from '../merge-queue.js';
-import { type FleetLaunchAccount, type FleetProbe, selectFleetSession } from '../fleet.js';
+import { runsHeadless, type FleetLaunchAccount, type FleetProbe, selectFleetSession } from '../fleet.js';
 import { capacityRetryAt } from '../model/capacity.js';
 import { type EscalationContext, contextFingerprint, escalationAction, handleEscalation, followPrecedent } from '../model/escalation-context.js';
 import { type AgentEnvironment, agentKindSchema, type EnvironmentKind, environmentKinds, type MasterConfig, masterConfigSchema, type WorkerProfile } from './profiles.js';
@@ -328,14 +328,16 @@ export async function launchApprover(root: string, work: Work, decision: string,
   // account of a `pi` runtime runs headless with that account's home, model and the role's policy,
   // and `run.runtimes`/`run.pi` configure only an approver the registry does not define.
   const registry = explicitKind ? null : await selectFleetSession(config, 'approver', { name: approverProfile, principal: config.approver!.id }, await heldAwareProbe(config, { runtime: herdr, ...probe, work: work.key }));
-  if (registry && registry.account.kind === 'pi') {
+  if (registry && runsHeadless(registry.account.kind)) {
     let started: Awaited<ReturnType<typeof startHeadlessApprover>>;
     try { started = await startHeadlessApprover(root, config, work, decision, name, token, headless.runner ?? registryRunner(registry.account), headless); }
     catch (error) { await registry.release(`approver run for ${work.key} failed to start: ${failureText(error).slice(0, 300)}`); throw error; }
     // The run is the session: the registry's slot is given back the moment it ends.
-    // Its outcome counts toward the account's runs without a result (GY-446).
+    // Its outcome counts toward the account's runs without a result (GY-446) — a run whose
+    // `settled` rejects crashed without a result, so it is released as one (GY-703): released
+    // without an outcome it would never reach the account's unjudged-run count.
     const settled = started.settled.then(async run => { await registry.release(`the headless approver run for ${work.key} ended`, runOutcome(run)); return run; },
-      async error => { await registry.release(`the headless approver run for ${work.key} ended`); throw error; });
+      async error => { await registry.release(`the headless approver run for ${work.key} ended without a result: ${failureText(error).slice(0, 300)}`, 'no-result'); throw error; });
     settled.catch(() => { /* the run's own record carries its failure */ });
     return { agentName: name, work: work.key, decision, identity: config.approver!.id, pane: null as string | null, runtime: 'pi' as const, delivery: 'request' as RequestDelivery, focusChanged: false, session: registry.account.fleet.session,
       account: { environment: registry.account.name, kind: registry.account.kind, quota: registry.health?.quota ?? null, skipped: registry.skipped },

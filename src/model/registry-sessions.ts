@@ -79,6 +79,13 @@ export function supersededByRequest(registry: Pick<AgentRegistry, 'sessions'>, r
 
 const until = (iso: string | null) => iso ? ` until ${iso}` : '';
 /**
+ * How long a failed smoke test keeps an account out before an executor tests it again (GY-703): a
+ * transient failure — a 429, a provider outage — must not bar the account until an operator edits
+ * it, so the failure is retried on this cadence until it passes, exactly as an exhausted quota is
+ * retried at its reset. Any change to the account still clears the result and is tested at once.
+ */
+export const smokeRetestMs = 10 * 60_000;
+/**
  * Why an account cannot take a session right now, whatever role asks — null when it can. `host`
  * is the executor asking: an account is placed where its login lives, so every other host is
  * refused it. Without a host the placement is not judged (a report has no single asking host).
@@ -89,7 +96,7 @@ export function accountIneligibility(registry: AgentRegistry, account: FleetAcco
   if (!registry.models.some(model => model.name === account.model)) return `${account.name} runs ${account.model}, which is not a registered model`;
   if (host && account.credential.host !== host) return `${account.name} is placed on ${account.credential.host}; this executor is ${host}`;
   if (account.quota.loggedIn === false) return `${account.name} is not logged in`;
-  if (account.smoke?.result === 'fail') return `${account.name} failed its smoke test${account.smoke.reason ? `: ${account.smoke.reason}` : ''}; change the account (master registry account set) once it is fixed, and it is tested again`;
+  if (account.smoke?.result === 'fail') return `${account.name} failed its smoke test${account.smoke.reason ? `: ${account.smoke.reason}` : ''}; it is tested again at ${new Date(Date.parse(account.smoke.at) + smokeRetestMs).toISOString()}, or change the account (master registry account set) to test it at once`;
   if (account.quota.state === 'exhausted' && (!account.quota.resetsAt || Date.parse(account.quota.resetsAt) > now)) return `${account.name} quota is exhausted${until(account.quota.resetsAt)}${account.quota.reason ? ` (${account.quota.reason})` : ''}`;
   const running = liveSessions(registry).filter(session => session.account === account.name).length;
   if (account.maxSessions !== null && running >= account.maxSessions) return `${account.name} is at its session limit (${running} of ${account.maxSessions} live)`;
