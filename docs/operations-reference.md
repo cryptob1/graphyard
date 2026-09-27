@@ -3,11 +3,11 @@
 
 ## Master coordination loop
 
-Restart `graphyard master run` freely; it never dispatches twice. `master status` (cached interventions) → `daemon` gives health and `cycleTime` (30-minute p50/p95); `journalctl --user -u graphyard-master`, the log. `daemon.metrics.timings` time steps and calls over 1s; cycles over 60 s raise `loop` attention naming three slowest. Launches run beside cycles, `run.launchConcurrency` (default 3) at once. Failed requests log route and SQL.
+Restart `graphyard master run` freely; it never dispatches twice. `master status` (cached interventions) → `daemon` gives health and `cycleTime` (30-minute p50/p95); `journalctl --user -u graphyard-master`, the log. `daemon.metrics.timings` time steps and calls over 1s; cycles over 60 s raise `loop` attention naming three slowest. Launches run beside cycles (`run.launchConcurrency`, default 3). Failed requests log route and SQL.
 
 ### Perpetual master loop
 
-`master verify-deployment GY-N` refuses a release *unobserved*, *stale* (rerun), not serving the merge (keep cycling), or *already recording deployment* (use a follow-up item).
+`master verify-deployment GY-N` refuses a release *unobserved*, *stale* (rerun), not serving the merge (keep cycling), or *already recording deployment* (follow-up item).
 
 ## Lost worker before submission
 
@@ -15,11 +15,11 @@ A lease expires 120 seconds after the last heartbeat, or one further lease perio
 
 ## Supervisor died leaving a containment quarantine
 
-On the worker's machine `graphyard master settle-containment GY-N "reason"` verifies nothing survives; only the loop excuses an idle pane shell (childless, parent `herdr server`). If refused, confirm the stop, then `rework`, or `recover-containment` once delivered ([recipes](operations.md#recovery-recipes)). The loop bounds the host clock for automatic settlement with a timed `HEAD /` of the plane (its `Date` header, no database read), not the slow work-snapshot read, falling back to the snapshot if that fails. A read too slow to bound the offset within 5 s is refused naming its round trip: settlement waits on a faster control-plane read, not on a clock disagreement.
+On the worker `graphyard master settle-containment GY-N "reason"` verifies nothing survives; only the loop excuses an idle pane shell (childless, parent `herdr server`). If refused, confirm the stop, then `rework` or `recover-containment` once delivered ([recipes](operations.md#recovery-recipes)). The loop bounds the host clock for automatic settlement with a timed `HEAD /` of the plane (its `Date` header, no database read; only a direct successful answer is measured), not the slow work-snapshot read, falling back to the snapshot if that fails. A read too slow to bound the offset within 5 s is refused naming its round trip: settlement waits on a faster control-plane read, not on a clock disagreement.
 
 ## Submitted implementation needs rework
 
-Stop the worker, then `graphyard rework GY-N --previous-worker-stopped "reason"`; the next worker resubmits.
+Stop the worker, then `graphyard rework GY-N --previous-worker-stopped "reason"`; the next worker resubmits. `scripts/rework-causes.mjs` classifies the last 100 deliveries' rework rounds by ledger reason; `master status` reports the split (`speed.reworkRounds.ownChange`): median excluding causes outside the item's own change.
 
 ## Flaky CI check
 
@@ -27,7 +27,7 @@ A required check failing on a tip or head reruns once per sha (*rerun failed job
 
 ## Accepted evidence turns out to be wrong
 
-`graphyard revoke GY-N revoke.json` ([body](protocol/evidence.md#revocation)) closes the gate; the queue ejects the entry.
+`graphyard revoke GY-N revoke.json` ([body](protocol/evidence.md#revocation)) closes the gate; the queue ejects it.
 
 ## GitHub request budget
 
@@ -37,12 +37,12 @@ A required check failing on a tip or head reruns once per sha (*rerun failed job
 
 ### Observation cadence by state
 
-| Band | State | Cadence |
-| --- | --- | --- |
-| `merge` | within two of the queue head, gates passing | 20 seconds |
-| `active` | waiting on a check, review, base refresh or rework | 1 minute |
-| `steady` | unchanged since last observed | 5 minutes, stretched by the fleet bound |
-| `idle` | next action is dispatch or escalation | 5 minutes, stretched when unchanged |
+| Band | Cadence |
+| --- | --- |
+| `merge` | within two of the queue head, gates passing: 20 seconds |
+| `active` | awaiting a check, review, base refresh or rework: 1 minute |
+| `steady` | unchanged since last observed: 5 minutes, stretched by the fleet bound |
+| `idle` | next action dispatch or escalation: 5 minutes, stretched when unchanged |
 
 Unchanged non-merge candidates spend **at most 40%** (`steadyStateShare`) of the limit.
 
@@ -50,7 +50,7 @@ Unchanged non-merge candidates spend **at most 40%** (`steadyStateShare`) of the
 
 Below **500 requests** by default, `GRAPHYARD_GITHUB_RESERVE`, non-merge observations wait for the reset (`githubBudget.deferrals`).
 
-Budgets are per token (`githubBudget.tokens`); one projected below the reserve at its reset raises `github`.
+Budgets are per token (`githubBudget.tokens`); one projected below the reserve at reset raises `github`.
 
 ### What an observation costs
 
@@ -62,7 +62,7 @@ A rate-limit `403`/`429` pauses requests; gates read stale until it lifts: nothi
 
 ### Reading the budget
 
-`graphyard status` (or `GET /api/status`) → `githubBudget`; `master status` attention items with subject `github`.
+`graphyard status` (or `GET /api/status`) → `githubBudget`; `master status` raises `github` attention.
 
 ### Webhook liveness
 
@@ -95,12 +95,11 @@ Rotate `GRAPHYARD_PRINCIPALS` and redeploy. Operator agents hold only listed cap
 ## Proof authority grants
 
 ```sh
-graphyard grants                                   # live authority
 graphyard grants grant ci "integration:*,unit:*" "CI proofs"
 graphyard grants revoke ci "integration:claim-safety" "Runner decommissioned"
 ```
 
-Only an `admin` grants, only to `producer` principals. Patterns: an exact name, `kind:*`, or a prefix (`manual:gy-43/*`).
+Only an `admin` grants, only to `producer` principals. Patterns: exact name, `kind:*`, prefix (`manual:gy-43/*`).
 
 ## Setup proposals and drift
 
@@ -108,7 +107,7 @@ Only an `admin` grants, only to `producer` principals. Patterns: an exact name, 
 
 ## Scale limits
 
-`GRAPHYARD_RECONCILE_BATCH_MS` (default 250) sizes reconcile batches; `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (default 4, ≤ half pool) share one pace per token: budget above reserve, minus others' spend, paced to reset. Claims: head band, in-flight merges, never-observed submissions, jobs due over five minutes, review/rework waits, running sessions (earlier if tight), `available_at`; tight, idle items await webhooks. `observationThroughput` reports budget, pace, head lag, oldest unobserved submission; `master status` raises `github` past two minutes. Heartbeat, claim, `complete` and `blocked` own the lease pool; `leaseHealth` (`GET /api/status`) reports heartbeat p50/p95 and failures (raised past 5 s).
+`GRAPHYARD_RECONCILE_BATCH_MS` (default 250) sizes reconcile batches; `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (default 4, ≤ half pool) share one pace per token: budget above reserve, minus others' spend, paced to reset. Claims: head `max(2,batchSize,parallelTips)` band, in-flight merges, never-observed submissions, jobs due over five minutes, review/rework waits, running sessions (earlier if tight), `available_at`; tight, idle items await webhooks. `observationThroughput` reports budget, pace, head lag, oldest unobserved submission; `master status` raises `github` past two minutes. Heartbeat, claim, `complete` and `blocked` own the lease pool; `leaseHealth` (`GET /api/status`) reports heartbeat p50/p95 and failures (raised past 5 s).
 
 ### Concurrent reconciliation
 

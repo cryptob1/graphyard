@@ -1,10 +1,11 @@
 import { createHash } from 'node:crypto';
-import type { GitHub } from '../../src/github.js';
+import { landingCheck, scopeLookupBudget, type GitHub, type LandingGitHub } from '../../src/github.js';
 import type { HerdrAgent } from '../../src/master.js';
 import type { Observation, Work } from '../../src/model.js';
 import type { AgentReview, ReviewRequest } from '../../src/model/review.js';
-import { mergeableNow, queueRef, type BaseRefresh, type GitHubMergeQueueState, type QueuePlacement, type QueueSpeculation } from '../../src/merge-queue.js';
+import { heldBase, mergeableNow, queueRef, type BaseRefresh, type GitHubMergeQueueState, type LandingCheck, type QueuePlacement, type QueueSpeculation } from '../../src/merge-queue.js';
 import type { Succession } from '../../src/model/successors.js';
+import { revertRefusal, type OptimisticMerge, type OptimisticRevert } from '../../src/optimistic-merge.js';
 
 // The outside world of the soak test (GY-404), simulated deterministically: one clock that both the
 // test process and the test Postgres read, a GitHub repository with pull requests, CI, a reviewer and
@@ -51,8 +52,13 @@ export const clockSql = [
 // ---------------------------------------------------------------------------
 // GitHub.
 // ---------------------------------------------------------------------------
-/** A commit: on the base branch, a worker's head, or a queue tip Graphyard published; `files` is its whole tree's file list. */
-export interface Commit { sha: string; tree: string; parents: string[]; files: string[]; at: number; message: string }
+/**
+ * A commit: on the base branch, a worker's head, or a queue tip Graphyard published; `files` is its
+ * whole tree's file list, `contents` the content identity of every path it holds. A base-branch
+ * commit also names the files it `changed` against its first parent, and whether the required suite
+ * fails on it (`broken`: it holds a head that breaks main).
+ */
+export interface Commit { sha: string; tree: string; parents: string[]; files: string[]; contents: Map<string, string>; at: number; message: string; changed?: string[]; broken?: boolean }
 export interface PullRequest {
   number: number; key: string; branch: string; author: string; head: string;
   /** The base-branch commit the head contains (its merge base with the base branch). */
@@ -91,6 +97,12 @@ export class SimulatedGitHub {
   unstable = new Set<string>(); slowRecompute = new Set<string>();
   /** Successions (renames and splits) recorded on the base branch. */
   successions: Succession[] = [];
+  /** Heads that break the required suite on the base branch once merged (GY-500): every base commit holding one fails until it is reverted. */
+  breaking = new Set<string>();
+  /** The revert pull requests the main guard opened, and the base commit each landed as. */
+  reverts: { pr: number; key: string; head: string; files: string[]; merged: string | null; openedAt: number; mergedAt: number | null }[] = [];
+  /** GitHub reads the main guard and the observation make for optimistic merges, per simulated minute. */
+  reads = { commitChecks: new Map<number, number>(), baseChanges: 0 };
   /**
    * Items whose first speculative tip hits an infrastructure flake (GY-516): its `test` run fails,
    * and the one rerun the control plane asks for passes (`rerun-passes`) or fails again (`rerun-fails`).
@@ -102,9 +114,17 @@ export class SimulatedGitHub {
   reruns: { key: string; sha: string; checkRunId: number; at: number }[] = [];
   /** Each item's first speculative tip, the one its flake hits. */
   private flakeTips = new Map<string, string>();
+  /**
+   * GY-839. Heads whose compares GitHub answers without a usable merge base while they are listed
+   * here, so the landing check keeps the two-way endpoint diff and the base's own new changes read
+   * as reverts — the reading this item fixes, staged as a fault the simulated day must recover from.
+   */
+  staleMergeBase = new Set<string>();
+  /** How many times the landing check ran in the loop, the bases it judged, and the two compare kinds it asked. */
+  landingChecks = 0; landingBases = new Set<string>(); ancestorCompares = 0; blindCompares = 0;
   private serial = 0;
   constructor(readonly options: WorldOptions, files: string[]) {
-    const root: Commit = { sha: sha('root'), tree: sha('tree', 'root'), parents: [], files, at: clock.now(), message: 'root' };
+    const root: Commit = { sha: sha('root'), tree: sha('tree', 'root'), parents: [], files, contents: new Map(files.map(path => [path, sha('content', path, 'root')])), at: clock.now(), message: 'root' };
     this.commits.set(root.sha, root); this.tip = root.sha;
   }
   get tree() { return this.commits.get(this.tip)!.tree; }
@@ -115,11 +135,43 @@ export class SimulatedGitHub {
     while (queue.length) { const at = queue.pop()!; if (at === ancestor) return true; if (seen.has(at)) continue; seen.add(at); queue.push(...(this.commits.get(at)?.parents ?? [])); }
     return false;
   }
-  /** A commit off the base branch: a worker's head or a published tip. */
-  record(commit: Commit) { this.commits.set(commit.sha, commit); return commit; }
-  /** A commit onto the base branch: a merged pull request, or a change landed outside Graphyard (a file split). */
-  commit(message: string, files: string[], at = clock.now(), parents = [this.tip], tree?: string) {
-    const commit = this.record({ sha: sha('commit', ...parents, message), tree: tree ?? sha('tree', ...parents, message), parents, files, at, message });
+  /**
+   * A commit off the base branch: a worker's head or a published tip. Content identity is inherited from the first parent and changed only where the file list changes, so a path's blob is stable until its content actually changes — as GitHub's blob ids are. `contents` overrides the inheritance, the way a merge commit's tree is really built.
+   */
+  record(commit: Omit<Commit, 'contents'>, contents?: Map<string, string>) {
+    const inherited = contents ?? (() => {
+      const first = commit.parents[0] ? this.commits.get(commit.parents[0])?.contents : undefined;
+      const contents = first ? new Map(first) : new Map<string, string>();
+      const had = first ? new Set(first.keys()) : new Set<string>();
+      for (const path of commit.files) if (!had.has(path)) contents.set(path, sha('content', path, commit.sha));
+      for (const path of [...contents.keys()]) if (!commit.files.includes(path)) contents.delete(path);
+      return contents;
+    })();
+    const stored = { ...commit, contents: inherited };
+    this.commits.set(stored.sha, stored);
+    return stored;
+  }
+  /**
+   * What merging `own` with `base` produces: the base's tree, with the paths `own` actually
+   * owns (its planned scope, plus paths the base lacks) taken from `own`. A tip or a branch
+   * restore merges the base into the item's head, so the result must hold the base's current
+   * content for every path the item never touched — a stale copy there reads as a revert.
+   */
+  mergedContents(ownSha: string, baseSha: string, planned: readonly string[]): Map<string, string> {
+    const own = this.commits.get(ownSha)!, base = this.commits.get(baseSha)!, contents = new Map(base.contents);
+    for (const [path, blob] of own.contents) if (planned.includes(path) || !base.contents.has(path)) contents.set(path, blob);
+    for (const path of [...contents.keys()]) if (!own.files.includes(path) && !base.files.includes(path)) contents.delete(path);
+    return contents;
+  }
+  /**
+   * A commit onto the base branch: a merged pull request, or a change landed outside Graphyard (a file
+   * split). It changed `changed` (default: the files added or removed) and fails the required suite
+   * when `broken` (default: as its first parent does).
+   */
+  commit(message: string, files: string[], at = clock.now(), parents = [this.tip], tree?: string, change: { changed?: string[]; broken?: boolean } = {}) {
+    const parent = this.commits.get(parents[0]), before = new Set(parent?.files ?? []), after = new Set(files);
+    const changed = change.changed ?? [...files.filter(path => !before.has(path)), ...[...before].filter(path => !after.has(path))];
+    const commit = this.record({ sha: sha('commit', ...parents, message), tree: tree ?? sha('tree', ...parents, message), parents, files, at, message, changed, broken: change.broken ?? !!parent?.broken });
     this.tip = commit.sha;
     return commit;
   }
@@ -138,6 +190,81 @@ export class SimulatedGitHub {
     return pr;
   }
   pr(work: Pick<Work, 'submission' | 'candidate'>) { const number = work.candidate?.pr ?? work.submission?.pr; const pr = number ? this.prs.get(number) : undefined; if (!pr) throw new Error(`No pull request #${number}`); return pr; }
+
+  // The reads the production landing check makes of GitHub, answered from this repository's commit
+  // graph. Nothing here decides anything: the shared `landingCheck` (src/github.ts) judges.
+
+  /** The commits `head` holds that `base` does not, breadth first: the compare endpoint's commit list. */
+  between(from: string, to: string): string[] {
+    const seen = new Set<string>(), out: string[] = [], queue = [to];
+    while (queue.length) { const at = queue.shift()!; if (at === from || seen.has(at) || !this.commits.has(at)) continue; seen.add(at); out.push(at); queue.push(...this.commits.get(at)!.parents); }
+    return out;
+  }
+  /** The most recent commit both sides hold: this graph's merge base. */
+  mergeBase(a: string, b: string): string {
+    const ancestors = (start: string) => { const seen = new Set<string>(), queue = [start]; while (queue.length) { const at = queue.pop()!; if (seen.has(at)) continue; seen.add(at); queue.push(...(this.commits.get(at)?.parents ?? [])); } return seen; };
+    const left = ancestors(a), right = ancestors(b);
+    const common = [...left].filter(commit => right.has(commit)).map(commit => this.commits.get(commit)!);
+    if (!common.length) throw new Error(`no common ancestor of ${a.slice(0, 12)} and ${b.slice(0, 12)}`);
+    return common.sort((x, y) => y.at - x.at)[0].sha;
+  }
+  /** Blob identity of a path at a commit, or null when that commit holds no file there. */
+  blobAt(path: string, ref: string): string | null {
+    return this.commits.get(ref)?.contents.get(path) ?? null;
+  }
+  /** The endpoint diff GitHub's compare answers: every path the two trees disagree on, two-way — the listing that also shows the base's own new changes in reverse. */
+  private diff(from: string, to: string) {
+    const before = new Set(this.commits.get(from)!.files), after = new Set(this.commits.get(to)!.files);
+    return [...new Set([...before, ...after])].filter(path => before.has(path) !== after.has(path) || this.blobAt(path, from) !== this.blobAt(path, to)).sort()
+      .map(path => ({ filename: path, status: !after.has(path) ? 'removed' : !before.has(path) ? 'added' : 'modified', sha: this.blobAt(path, to), additions: 1, deletions: 1, patch: '@@ -1 +1 @@' }));
+  }
+  /** GitHub's compare answer, as the landing check and its ancestry helpers read it. A head in `staleMergeBase` gets no usable merge base, which keeps the two-way listing in play. */
+  compare(from: string, to: string, query = '') {
+    const params = new URLSearchParams(query), perPage = Number(params.get('per_page') ?? 30), page = Number(params.get('page') ?? 1);
+    const truth = this.mergeBase(from, to), blind = this.staleMergeBase.has(to) && truth !== from;
+    if (!params.get('per_page')) { if (blind) this.blindCompares += 1; if (truth === from && from !== to) this.ancestorCompares += 1; }
+    const commits = this.between(from, to);
+    return {
+      status: from === to ? 'identical' : this.contains(to, from) ? 'ahead' : this.contains(from, to) ? 'behind' : 'diverged',
+      ahead_by: commits.length, total_commits: commits.length,
+      merge_base_commit: { sha: blind ? from : truth },
+      files: this.diff(from, to),
+      commits: commits.slice((page - 1) * perPage, page * perPage).map(commit => ({ sha: commit })),
+    };
+  }
+  /** A pull request's file list as GitHub's files endpoint answers it: the head's changes since its merge base with the pull request's base. */
+  prFiles(pr: PullRequest) { return this.diff(this.mergeBase(pr.base, pr.head), pr.head); }
+  /** The pull request as `GET /pulls/:number` answers what the landing check's `landedOn` reads of it. */
+  pull(pr: number) {
+    const record = this.prs.get(pr);
+    return record ? { merged: !!record.merged, merge_commit_sha: record.merged?.sha ?? null, state: record.open ? 'open' : 'closed' } : null;
+  }
+  /**
+   * The production landing check over this repository, exactly as the real observer computes it
+   * for an open candidate: the commit it would land on, the head's changes since its merge base
+   * with that commit, and the open peers the landing commit does not hold. The world counts the
+   * runs and the bases so the soak can assert the changed path was exercised.
+   */
+  async landing(work: Work, peers: Work[] | undefined): Promise<LandingCheck> {
+    const pr = this.pr(work), speculation = work.queue?.speculation;
+    const speculative = speculation && speculation.tip === pr.head && speculation.policyRevision === work.policyRevision ? speculation.base : null;
+    const holding = speculative || this.contains(pr.head, this.tip) ? null : heldBase(work, pr.head, this.tip);
+    const bound = speculative ?? (holding && this.contains(this.tip, holding) ? holding : this.tip);
+    const landing = await landingCheck(this.port(), work, pr.head, this.prFiles(pr), bound, speculative, { tip: this.tip, tree: this.tree }, peers, { remaining: scopeLookupBudget });
+    this.landingChecks += 1; this.landingBases.add(landing.base);
+    return landing;
+  }
+  /** The landing check's view of this repository, as `LandingGitHub` spells it. The production `contains(base, head)` asks whether `head` contains `base`, which this graph spells `contains(head, base)`. */
+  private port(): LandingGitHub {
+    const world = this;
+    return {
+      compare: async (from, to, query = '') => world.compare(from, to, query),
+      pull: async pr => world.pull(pr),
+      blobAt: (path, ref) => Promise.resolve(world.blobAt(path, ref)),
+      contains: (base, head) => Promise.resolve(world.contains(head, base)),
+      historySince: (base, head) => Promise.resolve(new Set(world.between(base, head))),
+    };
+  }
 
   /** The CI runs that have reported on `pr`'s head by `now`: every attempt, as GitHub keeps them. */
   checks(pr: PullRequest, now: number) {
@@ -194,9 +321,30 @@ export class SimulatedGitHub {
     const state = this.mergeState(pr, now);
     // A head that already contains the base tip lands its own tree, as GitHub's merge commit does.
     const head = this.commits.get(pr.head)!, landsTree = this.contains(pr.head, this.tip);
-    const commit = this.commit(`Merge pull request #${pr.number} from ${pr.branch}`, [...new Set([...this.files, ...head.files])], now, [this.tip, pr.head], landsTree ? head.tree : undefined);
+    // The merge breaks main when it lands a breaking head, itself or inside a speculative tip built on it; a revert restores what it broke.
+    const broken = !!this.commits.get(this.tip)!.broken || this.breaking.has(pr.head) || head.parents.some(parent => this.breaking.has(parent));
+    const commit = this.commit(`Merge pull request #${pr.number} from ${pr.branch}`, [...new Set([...this.files, ...head.files])], now, [this.tip, pr.head], landsTree ? head.tree : undefined, { changed: pr.files, broken });
     pr.merged = { sha: commit.sha, at: now }; pr.open = false; pr.autoMerge = false;
     this.merges.push({ key: pr.key, pr: pr.number, sha: commit.sha, at: now, state, mode });
+  }
+
+  /** The files the base branch changed from `base` to `tip`, along first parents; null when `base` is not on that line (the real adapter's incomplete compare). */
+  baseChangesSince(base: string, tip = this.tip): string[] | null {
+    this.reads.baseChanges++;
+    const changed = new Set<string>();
+    for (let at: string | undefined = tip; at; at = this.commits.get(at)?.parents[0]) {
+      if (at === base) return [...changed].sort();
+      for (const path of this.commits.get(at)?.changed ?? []) changed.add(path);
+    }
+    return null;
+  }
+  /** The required suite on a base-branch commit, as CI's push run reports it `ciMs` after the commit landed. */
+  commitChecks(commit: string, now: number) {
+    const minuteOf = Math.floor(now / minute);
+    this.reads.commitChecks.set(minuteOf, (this.reads.commitChecks.get(minuteOf) ?? 0) + 1);
+    const found = this.commits.get(commit);
+    if (!found || now - found.at < this.options.ciMs) return [];
+    return ['test', 'typecheck'].map((name, index) => ({ name, result: name === 'test' && found.broken ? 'failure' : 'success', appId: this.options.ciAppId, id: Number.parseInt(commit.slice(0, 8), 16) * 2 + index }));
   }
 
   /** The adapter `processJob` drives, answering exactly what the real one reads from GitHub. */
@@ -205,8 +353,13 @@ export class SimulatedGitHub {
     const adapter = {
       config: { repository: options.repository, base: options.baseBranch, appId: options.appId, installationId: 1, reviewerApps: options.reviewerApps },
       reviewerAppFor: (profile: { reviewerApp?: string; runtime?: string } | null | undefined) => profile ? options.reviewerApps.find(app => app.id === profile.reviewerApp && app.runtime === profile.runtime) : undefined,
-      async observe(work: Work): Promise<Observation> {
+      async observe(work: Work, peers?: Work[]): Promise<Observation> {
         const pr = world.pr(work), now = clock.now();
+        // The landing judgement runs where production runs it, over the same simulated repository:
+        // every observation of an open candidate recomputes what landing on the live base would
+        // revert, from the head's merge base with that commit, so a stale refusal clears on an
+        // unchanged head (GY-839).
+        const landing = pr.open && !pr.merged ? await world.landing(work, peers) : undefined;
         return {
           clockOffset: { min: 0, max: 0 }, prState: pr.open ? 'open' : 'closed', draft: false, prCreatedAt: new Date(pr.createdAt).toISOString(),
           candidate: { sha: pr.head, baseSha: pr.base, pr: pr.number, branch: pr.branch, author: pr.author, createdAt: new Date(pr.createdAt).toISOString() },
@@ -217,17 +370,46 @@ export class SimulatedGitHub {
           ...(pr.agentReview && work.reviewRequest?.commentId === pr.agentReview.requestId ? { agentReview: { ...pr.agentReview } } : {}),
           merged: !!pr.merged, mergeSha: pr.merged?.sha ?? null, mergedAt: pr.merged ? new Date(pr.merged.at).toISOString() : null,
           mergeable: pr.open, conflicting: false, baseTip: world.tip, baseTree: world.tree, baseTipContained: world.contains(pr.head, world.tip),
-          protected: true, files: pr.files, scopeFiles: [], at: new Date(now).toISOString(),
+          protected: true, files: pr.files, scopeFiles: [], ...(landing ? { landing } : {}), at: new Date(now).toISOString(),
+          // What the base changed since the bound base, which an optimistic merge (GY-500) needs disjoint from the head's files.
+          ...(pr.open ? { baseChanges: world.baseChangesSince(pr.base) } : {}),
         };
+      },
+      // The main guard (GY-500): CI's verdict on base-branch commits, and the revert pull requests it opens and lands head-bound.
+      async baseBranch() { return { tip: world.tip, tree: world.tree }; },
+      async commitChecks(commit: string) { return world.commitChecks(commit, clock.now()); },
+      async openRevert(work: Work, merge: OptimisticMerge): Promise<{ pr: number; head: string } | { refusal: string }> {
+        const refusal = revertRefusal(merge, world.baseChangesSince(merge.mergeSha));
+        if (refusal) return { refusal };
+        const open = world.reverts.find(entry => entry.key === work.key && !entry.merged);
+        if (open) return { pr: open.pr, head: open.head };
+        const head = world.record({ sha: sha('revert', merge.mergeSha), tree: sha('tree', 'revert', merge.mergeSha), parents: [world.tip], files: world.files, at: clock.now(), message: `Revert optimistic merge of ${work.key}` });
+        const pr = 90_000 + options.firstPullRequest + world.reverts.length;
+        world.reverts.push({ pr, key: work.key, head: head.sha, files: merge.lane.files, merged: null, openedAt: clock.now(), mergedAt: null });
+        return { pr, head: head.sha };
+      },
+      async mergeRevert(_work: Work, revert: Pick<OptimisticRevert, 'pr' | 'head'>): Promise<string | null> {
+        const entry = world.reverts.find(candidate => candidate.pr === revert.pr && candidate.head === revert.head);
+        if (!entry) throw new Error(`No revert pull request #${revert.pr} at ${revert.head}`);
+        if (entry.merged) return entry.merged;
+        // The revert restores the culprit's files: the base branch holds no breaking change after it.
+        entry.merged = world.commit(`Merge pull request #${entry.pr} from graphyard-revert/${entry.key.toLowerCase()}`, world.files, clock.now(), [world.tip, entry.head], undefined, { changed: entry.files, broken: false }).sha;
+        entry.mergedAt = clock.now();
+        return entry.merged;
       },
       async publishSpeculativeTip(work: Work, placement: QueuePlacement): Promise<QueueSpeculation> {
         const pr = world.pr(work), predicted = placement.predictedBase!;
         const base = { ref: queueRef(work.key), base: predicted, baseTree: world.commits.get(predicted)!.tree, predecessors: placement.predecessors, policyRevision: work.policyRevision, publishedAt: new Date(clock.now()).toISOString(), trigger: 'queue-head' as const };
-        // A head that already contains its predicted base is its own tip; otherwise the base is merged in, as GitHub's /merges does.
-        if (world.contains(pr.head, predicted)) return { ...base, tip: pr.head, tipTree: world.commits.get(pr.head)!.tree, reviewedHead: pr.head };
-        const from = pr.head, bound = pr.base, tip = sha('tip', from, predicted), onto = world.commits.get(predicted)!;
+        // A republication resets the branch to the item's own reviewed head first (GY-568), so a
+        // rebuilt tip never carries an entry that left the queue unlanded.
+        const speculation = work.queue?.speculation;
+        const reviewedHead = (speculation && speculation.tip === pr.head ? speculation.reviewedHead : undefined) ?? pr.head;
+        // A reviewed head that already contains its predicted base is the tip itself; otherwise the base is merged in, as GitHub's /merges does.
+        if (world.contains(reviewedHead, predicted)) return { ...base, tip: reviewedHead, tipTree: world.commits.get(reviewedHead)!.tree, reviewedHead };
+        const from = reviewedHead, bound = pr.base, tip = sha('tip', from, predicted), onto = world.commits.get(predicted)!;
         const changed = onto.files.filter(file => !world.commits.get(bound)!.files.includes(file));
-        world.record({ sha: tip, tree: sha('tree', tip), parents: [from, predicted], files: [...new Set([...world.commits.get(from)!.files, ...onto.files])], at: clock.now(), message: `Graphyard speculative tip for ${work.key}` });
+        world.record({ sha: tip, tree: sha('tree', tip), parents: [from, predicted], files: [...new Set([...world.commits.get(from)!.files, ...onto.files])], at: clock.now(), message: `Graphyard speculative tip for ${work.key}` },
+          world.mergedContents(from, predicted, work.plannedFiles ?? []));
         pr.head = tip; pr.base = predicted; pr.pushed.set(tip, clock.now());
         if (!world.flakeTips.has(work.key)) world.flakeTips.set(work.key, tip);
         return { ...base, tip, tipTree: sha('tree', tip), reviewedHead: from,
@@ -239,7 +421,22 @@ export class SimulatedGitHub {
         return { from: { sha: pr.head, baseSha: pr.base }, base: world.tip, baseTree: world.tree, policyRevision: work.policyRevision, at, head: pr.head, conflict: null, merge: null, carry: null,
           stale: { head: pr.head, base: world.tip, policyRevision: work.policyRevision, at, reading: `GitHub reported ${pr.head.slice(0, 12)} conflicting, but a test merge is clean` } } as BaseRefresh;
       },
-      async restoreBranch(): Promise<BaseRefresh> { throw new Error('No branch in this world carries another item\'s commits'); },
+      // Restores a branch that carries another item's unlanded commits (GY-127): back to the item's
+      // own reviewed head, then the base branch merged onto it, exactly as production moves it.
+      async restoreBranch(work: Work, restore: { contaminated: string; foreign: string[]; own: string | null; cause: string; requested: unknown; reason: string }): Promise<BaseRefresh> {
+        const pr = world.pr(work), at = new Date(clock.now()).toISOString();
+        const base = (fields: object, outcome: string, own: string | null, head = own ?? pr.head) => ({
+          from: { sha: own ?? pr.head, baseSha: pr.base }, base: world.tip, baseTree: world.tree, policyRevision: work.policyRevision, at, head, conflict: null, merge: null, carry: null,
+          trigger: restore.cause === 'repair' ? 'repair' : 'ejection restore', ...fields, restore: { ...restore, own, performedAt: at, outcome } }) as BaseRefresh;
+        const own = restore.own;
+        if (!own || own === pr.head) return base({}, 'unrepairable', own);
+        pr.head = own; pr.pushed.set(own, clock.now());
+        const onto = world.commits.get(world.tip)!;
+        const merged = world.record({ sha: sha('restore', own, world.tip), tree: sha('tree', 'restore', own, world.tip), parents: [own, world.tip], files: [...new Set([...world.commits.get(own)!.files, ...onto.files])], at: clock.now(), message: `Graphyard branch restore for ${work.key} onto ${world.options.baseBranch}` },
+          world.mergedContents(own, world.tip, work.plannedFiles ?? []));
+        pr.head = merged.sha; pr.base = world.tip; pr.pushed.set(merged.sha, clock.now());
+        return base({ head: merged.sha }, 'restored', own, merged.sha);
+      },
       async requestAgentReview(work: Work, profile: { name: string; reviewerApp: string; runtime: string }): Promise<ReviewRequest> {
         const pr = world.pr(work), request: ReviewRequest = { commentId: ++world.serial, sha: pr.head, baseSha: pr.base, policyRevision: work.policyRevision, body: `review ${profile.name}`, createdAt: new Date(clock.now()).toISOString(),
           provider: 'agent', profile: profile.name, reviewerApp: profile.reviewerApp, marker: uuid(sha('marker', world.serial)) };
@@ -292,13 +489,31 @@ export class SimulatedGitHub {
 // ---------------------------------------------------------------------------
 export class SimulatedHerdr {
   agents = new Map<string, HerdrAgent>();
+  /** Panes whose runtime has exited: the bare shells GY-842 reclaims, with the worktree they sit in. */
+  shells = new Map<string, string | undefined>();
   closed: string[] = [];
+  /** When each close was made, on the simulated clock: the drain, pass by pass. */
+  closedAt = new Map<string, number>();
   private panes = 0;
-  open(name: string, status = 'working') { const pane = `w1:p${++this.panes}`; this.agents.set(pane, { name, pane_id: pane, agent: 'claude', agent_status: status }); return pane; }
+  constructor(now: () => number = () => Date.now()) { this.now = now; }
+  private now: () => number;
+  open(name: string, status = 'working', cwd?: string) { const pane = `w1:p${++this.panes}`; this.agents.set(pane, { name, pane_id: pane, agent: 'claude', agent_status: status, cwd }); return pane; }
+  /** A pane with no agent in it that no session of this day's launched: the backlog a previous day left. */
+  shell(pane: string, cwd?: string) { this.shells.set(pane, cwd); }
   status(pane: string, status: string) { const agent = this.agents.get(pane); if (agent) agent.agent_status = status; }
-  /** A session that died: its pane is gone without anybody closing it. */
-  kill(pane: string) { this.agents.delete(pane); }
-  close(pane: string) { if (!this.agents.delete(pane)) throw new Error(`pane_not_found: ${pane}`); this.closed.push(pane); }
-  list(): HerdrAgent[] { return [...this.agents.values()].map(agent => ({ ...agent })); }
+  /** A runtime that died: its pane is left behind as a bare shell in the worktree it ran in. */
+  kill(pane: string) { const agent = this.agents.get(pane); this.shells.set(pane, agent?.cwd); this.agents.delete(pane); }
+  close(pane: string) {
+    if (!this.agents.has(pane) && !this.shells.has(pane)) throw Object.assign(new Error(`Herdr refused the operation: pane_not_found`), { herdrCode: 'pane_not_found' });
+    this.agents.delete(pane); this.shells.delete(pane); this.closed.push(pane); this.closedAt.set(pane, this.now());
+  }
+  /** The agent inventory: every session with its agent, and every bare shell with none. */
+  list(): HerdrAgent[] {
+    const named = [...this.agents.values()].map(agent => ({ ...agent }));
+    const bare = [...this.shells.keys()].map(pane => ({ pane_id: pane, agent: null as string | null, agent_status: 'unknown', cwd: this.shells.get(pane) }));
+    return [...named, ...bare];
+  }
+  /** The pane inventory (`herdr pane list`): every pane, with or without an agent in it. */
+  paneList(): { pane_id: string }[] { return [...new Set([...this.agents.keys(), ...this.shells.keys()])].map(pane_id => ({ pane_id })); }
   byName(name: string) { return [...this.agents.values()].find(agent => agent.name === name); }
 }
