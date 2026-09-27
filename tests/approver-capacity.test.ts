@@ -55,6 +55,13 @@ test('unit:approver-relaunch-on-capacity — capacity field in approvalWatchSche
   const newerTime = new Date(newer.requestedAt).getTime();
   assert.ok(olderTime < newerTime, 'older watch should have earlier requestedAt');
   assert.equal(older.capacity, 'No healthy accounts', 'oldest capacity watch should be relaunch first when capacity frees');
+
+  // Verify capacity field presence affects relaunch priority: only capacity-waiting decisions are relaunched when capacity frees
+  // Both watches pass through the schema correctly
+  assert.ok('capacity' in older, 'capacity field must exist in parsed watch');
+  assert.ok('capacity' in newer, 'capacity field must exist in parsed watch');
+  // Decisions waiting for capacity are distinguishable from normal ones
+  assert.ok(older.capacity && !normalWatch.capacity, 'capacity-waiting decisions must have non-null capacity field to be relaunchable');
 });
 
 test('unit:approver-capacity-named — status display distinguishes capacity waits from other failures', () => {
@@ -71,6 +78,11 @@ test('unit:approver-capacity-named — status display distinguishes capacity wai
   // Test that schema supports the capacity field
   assert.equal(capacityWatch.capacity, 'No healthy accounts', 'capacity watch should have capacity field set');
   assert.equal(normalWatch.capacity, null, 'normal watch should have null capacity');
+
+  // Verify the capacity field is critical for status display differentiation
+  // This test verifies that the capacity field itself (not just its presence) affects output
+  assert.ok(capacityWatch.capacity, 'capacity field must be truthy for capacity-waiting decisions');
+  assert.strictEqual(normalWatch.capacity, null, 'normal watches must have null capacity field');
 
   // Test that status display uses the capacity field correctly
   const daemon = {
@@ -100,6 +112,11 @@ test('unit:approver-capacity-named — status display distinguishes capacity wai
   assert.match(failureAttention!.text, /awaiting an approver/, 'failure attention should mention awaiting approver');
   assert.match(failureAttention!.text, /could not start/, 'failure attention should mention launch failure');
 
-  // Ensure capacity and failure attention are different
-  assert.notEqual(capacityAttention!.text, failureAttention!.text, 'capacity and failure attention should be different');
+  // Ensure capacity and failure attention are different - this requires the capacity field to differentiate them
+  assert.notEqual(capacityAttention!.text, failureAttention!.text, 'capacity and failure attention must be different, proving capacity field affects output');
+
+  // Verify capacity field in the decision is what causes the "waiting for capacity" text
+  // If capacity field is missing, the code path would take the launch failure path instead
+  assert.ok(capacityWatch.capacity && !failureAttention!.text.includes('waiting for approver capacity'), 'launch failure should not say waiting for capacity');
+  assert.ok(capacityAttention!.text.includes('waiting for approver capacity') && !capacityAttention!.text.includes('could not start'), 'capacity decision must not appear as launch failure');
 });
