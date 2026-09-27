@@ -14,6 +14,7 @@ import { clearProfileFailure, profileHealth, recordProfileFailure } from './sess
 import { detailChanged, routineDecision } from './decisions.js';
 import { capacityKey, record, stoppedStates } from './effects.js';
 import type { Cycle } from './cycle.js';
+import { preferOtherRuntime, runtimeToAvoid } from './reblocked-attempts.js';
 import { researchHold, researchRunner, researchSettings, researchStep } from '../research.js';
 
 /** Step 4: dispatch claimable work under capacity, and report base refreshes of in-flight candidates. */
@@ -145,7 +146,9 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
     const key = dispatchKey(item);
     if (cycle.launcher.busy(key) || (state.actions[key] && state.actions[key].state !== 'failed')) return;
     const free = await effects.agents();
-    const pick = () => health.find(entry => entry.healthy && !taken.has(entry.profile.name) && !free.some(agent => agent.name === entry.profile.agentName));
+    // After an attempt ended as reblocked (GY-867), a profile on another runtime is tried first.
+    const order = preferOtherRuntime(health, runtimeToAvoid(item));
+    const pick = () => order.find(entry => entry.healthy && !taken.has(entry.profile.name) && !free.some(agent => agent.name === entry.profile.agentName));
     let choice = pick();
     if (!choice) {
       // Every launch profile working is capacity, not a decision for anyone. Escalate only when no
