@@ -113,7 +113,7 @@ test('unit:every-role-carries-autonomy-contract — worker, reviewer, producer, 
 
     // Worker on OpenCode, under the supervisor.
     stub = herdr();
-    const profile: WorkerProfile = { name: 'worker-oc', principal: 'worker-a', agentName: 'eng-oc', mode: 'launch', kind: 'opencode', credentialFile: await token('worker'), agentArgs: [], approvals: 'auto', environment: {} };
+    const profile: WorkerProfile = { name: 'worker-oc', principal: 'worker-a', agentName: 'eng-oc', mode: 'launch', kind: 'opencode', credentialFile: await token('worker'), agentArgs: [], approvals: 'auto', environment: { OPENCODE_PERMISSION: JSON.stringify({ edit: 'allow', bash: 'allow', webfetch: 'allow', external_directory: 'deny' }) } };
     await dispatchWork(root, ready(), profile, [], stub.run, [ready()], async () => ({ epoch: 4, path: join(root, 'assigned'), base: 'c'.repeat(40) }), async () => {}, 5_000);
     capture('worker', stub);
 
