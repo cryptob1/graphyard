@@ -298,7 +298,9 @@ export async function heldAwareProbe(config: Pick<MasterConfig, 'credentialFile'
 /** The registry's choice for a role it defines, recorded in the environment log; null when the registry does not define the role. */
 export async function selectRegistryAccount(config: Pick<MasterConfig, 'credentialFile' | 'run'> & Partial<Pick<MasterConfig, 'url' | 'hostId'>>, role: LaunchRole, profile: { name: string; principal?: string }, probe: FleetProbe = {}) {
   const fleet = await selectFleetSession(config, role, profile, await heldAwareProbe(config, probe));
-  if (fleet) await recordEnvironmentLog(config, fleet.health ? [fleet.health] : [], fleet.skipped).catch(() => {});
+  // The choice is recorded like a profile's own (GY-713): the live session view names the account from it.
+  if (fleet) await recordEnvironmentLog(config, fleet.health ? [fleet.health] : [], fleet.skipped,
+    { key: selectionKey(role, profile.name), environment: fleet.account.name, kind: fleet.account.kind, at: new Date(probe.now?.() ?? Date.now()).toISOString(), work: probe.work ?? null }).catch(() => {});
   return fleet;
 }
 export async function selectAccount(config: Pick<MasterConfig, 'environments' | 'credentialFile' | 'run'> & Partial<Pick<MasterConfig, 'url' | 'hostId'>>, role: LaunchRole, profile: { name: string; accounts?: string[]; principal?: string; kind?: string; environment?: Record<string, string> }, probe: FleetProbe = {}): Promise<LaunchSelection> {

@@ -6,6 +6,7 @@ import { releaseView, type ReleaseView } from '../../src/model/release';
 import type { Dashboard } from './dashboard';
 import DeliverySlices from '../components/delivery-slices';
 import { shortShas } from '../candidate';
+import { LiveSessions } from '../session-viewer';
 
 /**
  * The Workers tab (GY-116, redrawn to the design in GY-161): every agent session across every item
@@ -154,7 +155,7 @@ function Accounts({ principals, setSelected }: { principals: PrincipalSummary[];
  * open now — the agent, its role in plain words, the item it works on, what it is doing, since
  * when, and its health — with the sessions that ended and the per-account summary folded below.
  */
-export default function WorkersPage({ work, observedAt, setSelected, status }: Pick<Dashboard, 'work' | 'observedAt' | 'setSelected'> & { status?: Dashboard['status'] }) {
+export default function WorkersPage({ work, observedAt, setSelected, status, api }: Pick<Dashboard, 'work' | 'observedAt' | 'setSelected'> & { status?: Dashboard['status']; api?: Dashboard['api'] }) {
   const now = useLiveNow(observedAt);
   const release = releaseView(status);
   const view = workersView(work, new Date(now), undefined, release);
@@ -164,6 +165,7 @@ export default function WorkersPage({ work, observedAt, setSelected, status }: P
   return <>
     <div className="page-heading"><div><h1>Workers</h1><p className="summary">{open} agent {open === 1 ? 'session' : 'sessions'} open.{stale ? ` ${stale} not seen recently.` : ''} {view.finished.length} ended.</p></div></div>
     {view.running.length ? <Table rows={view.running} label="Agent sessions" work={work} now={now} release={release} setSelected={setSelected}/> : <p className="muted">No agent session is open.</p>}
+    {api && <LiveSessions api={api}/>}
     <p className="muted workers-note">Roles: builds code · reviews code · proves requirements · approves decisions. An agent never reviews or approves its own work. A session not seen for {Math.round(sessionStaleThresholdMs / 60_000)} minutes is marked, never shown as live.</p>
     <details className="finished-sessions"><summary>Ended <span className="count">{view.finished.length}</span></summary>
       {view.finished.length ? <Table rows={view.finished} label="Ended sessions" work={work} now={now} release={release} setSelected={setSelected}/> : <p className="muted">No session has ended yet.</p>}

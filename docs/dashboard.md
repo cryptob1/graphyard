@@ -22,6 +22,12 @@ Running rows offer:
 - **Copy local**, on the launching host: `herdr agent attach w1V:pJD`.
 - **Copy remote**: `herdr --help` documents `herdr --machine <label-or-id> <command>` and `herdr --remote <ssh-target>`, and interactive attachment is not forwarded by `--machine`, so the form focuses the pane then attaches remotely: `herdr --machine vishrog agent focus w1V:pJD && herdr --remote vishrog`.
 
+## Watching a session live
+
+**Watch live**, in an item's **Sessions** panel and under **Live sessions** on **Workers**, opens a read-only view (`web/session-viewer.tsx`) of any running session the loop launched: worker, reviewer, producer, approver, doctor or research. Each row names its role, runtime, account, state and age; the view follows the last 200 lines and shows the transcript path and the Herdr attach command. The launching host's loop publishes the tail, redacted like evidence, every 3 s while watched and every 30 s otherwise; Herdr panes are read through Herdr and headless runs from their log under `.graphyard/runs`. Nothing typed reaches a session: attach locally to act.
+
+`run.approver.surface`, `run.producer.surface` and `run.research.surface` in `.graphyard/master.json` take `headless` (default) or `herdr`, which runs that role inside a Herdr pane; the view works either way.
+
 ## The status sentence
 
 Rows show **Build, Validate, Test, Review, Prove, Merge, Deploy** (`src/model/pr-steps.ts`). A merged item reads *Merged*, then *Live* once production serves it (counted this week). Moving and Blocked rows past thirty minutes read `1h 12m overdue`.

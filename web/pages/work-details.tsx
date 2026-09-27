@@ -24,6 +24,7 @@ import StatusBadge from '../components/status-badge';
 import { StepsDetail } from '../components/steps-bar';
 import { RequestCard } from './human-requests';
 import type { Dashboard } from './dashboard';
+import { LiveSessions } from '../session-viewer';
 
 const marker: Record<string, { symbol: string; word: string; tone: string }> = {
   passed: { symbol: '✓', word: 'passed', tone: 'pass' }, failed: { symbol: '×', word: 'failed', tone: 'fail' }, revoked: { symbol: '×', word: 'withdrawn', tone: 'fail' },
@@ -128,6 +129,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
       {!item.ready && admin && <button type="button" disabled={busy} onClick={() => action(item.id, 'ready')}>Release to ready</button>}
       {failedDelivery && postDeployment}
     </section>
+    <LiveSessions api={api} work={item.id} title="Sessions"/>
     <section className="panel" aria-label="What is left"><h2>What is left <small>{leftCount ? `${leftCount} ${leftCount === 1 ? 'thing' : 'things'}` : 'nothing blocks it'}</small></h2>
       {currentLeft ? leftGroup(currentLeft) : <p className="muted">When something blocks a step it is listed here in plain words, with who clears it.</p>}
       {laterLeft.length > 0 && <details className="later-steps"><summary>Later steps ({laterLeft.length})</summary>{laterLeft.map(leftGroup)}</details>}</section>

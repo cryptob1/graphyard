@@ -17,6 +17,8 @@ import { narrowRoleRuntime, piRuntimeSchema } from './runner/payloads.js';
 import { liveRun, liveRunCheckouts, registeredRun } from './runner/registry.js';
 import { narrowRunner, piProducerPrompt, producerRunOptions, registryRunner, runOutcome, startNarrowRun, submitEvidence } from './runner/roles.js';
 import { runRecordSchema, type RunRecord, type Runner } from './runner/types.js';
+import { commandAccount } from './session-tail.js';
+import { headlessSurface } from './runner/surface.js';
 
 /**
  * Producer sessions launched for the control plane's producer requests (model/dispatch.ts).
@@ -365,7 +367,7 @@ async function launchHeadlessProducer(root: string, config: MasterConfig, work: 
   // The runner and the name evidence is attributed to come from the registry's choice when it made one.
   // A launch the registry's contract refuses (a tools allowlist with no tools flag) gives its session back.
   let runner: Runner;
-  try { runner = dependencies.runner ?? (registry ? registryRunner(registry.account) : narrowRunner(pi)); }
+  try { runner = dependencies.runner ?? (registry ? registryRunner(registry.account, headlessSurface(root, config, 'producer', session.agentName)) : narrowRunner(pi, headlessSurface(root, config, 'producer', session.agentName))); }
   catch (error) { await registry?.release(`producer run for ${binding.key} was refused before it started: ${error instanceof Error ? error.message : String(error)}`.slice(0, 400)); throw error; }
   const via = registry ? `${registry.account.fleet.runtime} ${registry.account.fleet.modelId ?? registry.account.fleet.model} on ${registry.account.name}` : `pi ${pi.model} via ${pi.command}`;
   let checkout: Awaited<ReturnType<typeof allocateManagedCheckout>>;
@@ -384,7 +386,7 @@ async function launchHeadlessProducer(root: string, config: MasterConfig, work: 
   const environment = { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: profile.credentialFile, GRAPHYARD_HOST_ID: config.hostId, GRAPHYARD_PRODUCER: `${binding.key}@${binding.sha}` };
   let started: ReturnType<typeof startNarrowRun>;
   try {
-    started = startNarrowRun({ runner, name: session.agentName, role: 'producer', work: binding.key, subject: session.id,
+    started = startNarrowRun({ runner, name: session.agentName, role: 'producer', work: binding.key, subject: session.id, account: registry ? registry.account.name : commandAccount(pi.command),
       prompt: piProducerPrompt(config, binding, work.criteria, checkout, root),
       options: producerRunOptions(checkout.directory, binding, environment, timeoutMs),
       apply: async result => { const applied = []; for (const payload of result.payloads) applied.push(await submitEvidence(config.url, session.credential, { id: binding.id }, payload, via, dependencies.fetcher)); return applied; } });

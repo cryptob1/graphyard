@@ -53,6 +53,8 @@ export interface Run<T> {
   readonly id: string;
   /** Every event so far, oldest first. */
   readonly events: readonly RunEvent[];
+  /** The per-run log its stdout and stderr are written to, when the runner keeps one (GY-713). */
+  readonly log?: string | null;
   /** Streams every event: the ones already seen, then each as it arrives. Returns the unsubscribe. */
   onEvent(listener: (event: RunEvent) => void): () => void;
   /** Stops the run; its result resolves as a `cancelled` failure unless it had already settled. */
