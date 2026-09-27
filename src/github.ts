@@ -2286,6 +2286,10 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
     if (held) await engine.store.holdJob(job.work_id, job.token, held, permissionHoldMs, heldOn(), observed);
     // An item with no submission has nothing to observe: the job says so and is not counted as starved.
     else if (work && !work.submission && work.stage !== 'done') await engine.store.deferJob(job.work_id, job.token, new Date(Date.now() + idleObservationSeconds * 1000).toISOString(), 'no submission to observe', null);
+    // Nor has a job whose item the fleet read did not hold (GY-723): deleted, or created after the
+    // read. It is deferred with that reason and not counted as starved; an unobserved count on it
+    // would be one `starvedJobs` hides only by its join to work_items.
+    else if (!work) await engine.store.deferJob(job.work_id, job.token, new Date(Date.now() + idleObservationSeconds * 1000).toISOString(), 'item not found when the job ran', null);
     else await engine.store.finishJob(job.work_id, job.token, undefined, false, cadence?.ms ?? (head ? headObservationSeconds : idleObservationSeconds) * 1000, observed);
   } catch (error) {
     const message = error instanceof Error ? error.message : 'GitHub reconciliation failed';

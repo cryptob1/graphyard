@@ -169,8 +169,11 @@ export interface QueueEntry {
   batchStall?: { since: string } | null;
   /**
    * The dissolved stuck batch (GY-506): its members validate as single-entry batches in their
-   * existing order until one of them leaves the queue, which ends the dissolution and lets the
-   * ordinary batch plan resume. Recorded on the head member's entry with the queue history.
+   * existing order until every one still queued has published a tip, which ends the dissolution
+   * and lets the ordinary batch plan resume. Recorded on the head member's entry with the queue
+   * history, and copied onto each other member's entry as its batch view names it (GY-723), so
+   * the head merging does not take the dissolution with it and re-batch the survivors into the
+   * same tipless state.
    */
   batchDissolved?: { at: string; members: string[] } | null;
 }
@@ -1342,6 +1345,8 @@ export interface MergeBatchView {
   state: 'testing' | 'bisecting' | 'merging' | 'ejecting' | 'waiting';
   step: BatchStep;
   summary: string;
+  /** The live stuck-batch dissolution (GY-506) this entry validates singly under; absent when none. */
+  dissolved?: { at: string; members: string[] };
 }
 /**
  * The batches of the live queue (GY-330): the chain of validated entries in `batchSize` groups.
@@ -1349,20 +1354,24 @@ export interface MergeBatchView {
  * each half a bisection tests is the tip of the half's last member, and a verdict is the required
  * checks as observed on that tip. The head batch acts; the batches behind it wait their turn.
  * Entries named by a live stuck-batch dissolution (GY-506) are validated one at a time: each is
- * its own batch, in the chain's existing order, and no batch spans one of them.
+ * its own batch, in the chain's existing order, and no batch spans one of them. A dissolution
+ * holds while any member it named is still queued without a published tip (GY-723): a member
+ * leaving, normally the head merging, no longer ends it, so the survivors do not re-batch into
+ * the tipless 'testing' state and wait out another stall before a second dissolution.
  */
 export function describeMergeBatches(all: Work[], placements: QueuePlacement[], batchSize: number, ciAppIds: readonly number[] | null = null): Map<string, MergeBatchView> {
   const size = Math.max(1, Math.floor(batchSize));
   const chain = placements.filter(placement => !placement.passedOver).sort((a, b) => a.position - b.position || a.sequence - b.sequence);
   const byKey = new Map(all.map(work => [work.key, work]));
   const placed = new Map(chain.map(placement => [placement.key, placement]));
-  // The dissolutions on record that still hold: every member they named is still a live queued entry.
-  const live = new Set(chain.map(placement => placement.key));
-  const singles = new Set<string>();
+  // The dissolutions on record that still hold: some member they named is still queued with no
+  // published tip. Each is recorded on the head member and copied to the others, so any copy on a
+  // live entry is enough; the first one found for a member names it.
+  const singles = new Map<string, { at: string; members: string[] }>();
   for (const work of all) {
     const dissolved = work.queue?.batchDissolved;
-    if (!dissolved || !dissolved.members.every(key => live.has(key))) continue;
-    for (const key of dissolved.members) if (live.has(key)) singles.add(key);
+    if (!dissolved || !dissolved.members.some(key => placed.has(key) && !placed.get(key)!.tip)) continue;
+    for (const key of dissolved.members) if (placed.has(key) && !singles.has(key)) singles.set(key, { at: dissolved.at, members: [...dissolved.members] });
   }
   const views = new Map<string, MergeBatchView>();
   let start = 0, batch = 1;
@@ -1386,7 +1395,8 @@ export function describeMergeBatches(all: Work[], placements: QueuePlacement[], 
       : state === 'ejecting' ? `${named}: ${(step as { member: string }).member} is isolated as failing ${(step as { check: string }).check} and is ejected; the rest stay queued`
       : state === 'bisecting' ? `${named}: the combined tip failed; bisecting on the tip of ${underTest!.members.join(', ')}${underTest!.tip ? ` (${underTest!.tip.slice(0, 12)})` : ''}`
       : `${named}: validating combined tip ${tip?.slice(0, 12) ?? '(not yet published)'}`;
-    for (const key of members) views.set(key, { batch, size: members.length, members, tip, underTest, state, step, summary });
+    const dissolved = singles.get(members[0]);
+    for (const key of members) views.set(key, { batch, size: members.length, members, tip, underTest, state, step, summary, ...(dissolved ? { dissolved } : {}) });
     start += width; batch++;
   }
   return views;
