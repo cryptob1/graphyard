@@ -5,7 +5,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { stageSpeed, stageTargets, sparseSampleSize, type FlowDataset, type FlowFact, type DeploymentObservation } from '../src/flow-analytics.js';
+import { stageSpeed, stageTargets, sparseSampleSize, computeFlow, type FlowDataset, type FlowFact, type DeploymentObservation } from '../src/flow-analytics.js';
 import type { Work } from '../src/model.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
@@ -38,7 +38,7 @@ function fact(workId: string, key: string, kind: string, at_ms: number, details:
 
 const dataset = (facts: FlowFact[], works: Work[] = [item('a')], deployments: DeploymentObservation[] = []): FlowDataset => {
   const latest: FlowFact[] = [];
-  const kindsToKeep = new Set(['work.released', 'lease.claimed', 'candidate.observed', 'check.observed', 'review.submitted', 'review.completed', 'merged', 'delivered']);
+  const kindsToKeep = new Set(['work.created', 'work.released', 'lease.claimed', 'candidate.observed', 'check.observed', 'review.submitted', 'review.completed', 'merged', 'delivered']);
   const byKey = new Map<string, FlowFact[]>();
   for (const fact of facts) {
     if (kindsToKeep.has(fact.kind)) {
@@ -92,7 +92,7 @@ test('unit:stage-percentiles-computed — ready-to-claim duration computed and m
   assert.equal(result.stages[0].p90Ms, 2 * min);
   assert.equal(result.stages[0].targetMs, stageTargets.readyToClaimMs);
   assert.equal(result.stages[0].met, true);
-  assert.equal(result.stages[0].sparse, false);
+  assert.equal(result.stages[0].sparse, true, 'n=1 is below sparseSampleSize');
 
   assert.equal(result.stages[1].id, 'claim-to-first-push');
   assert.equal(result.stages[1].n, 1);
@@ -102,13 +102,15 @@ test('unit:stage-percentiles-computed — ready-to-claim duration computed and m
 
   assert.equal(result.stages[2].id, 'push-to-ci-green');
   assert.equal(result.stages[2].n, 1);
-  assert.equal(result.stages[2].p50Ms, 20 * min); // 57 - 37 = 20
+  assert.equal(result.stages[2].p50Ms, 21 * min); // 58 - 37 = 21 (latest terminal check)
+  assert.equal(result.stages[2].p90Ms, 21 * min);
   assert.equal(result.stages[2].targetMs, stageTargets.pushToCiGreenMs);
-  assert.equal(result.stages[2].met, true);
+  assert.equal(result.stages[2].met, false, 'p90 21 min exceeds target 20 min');
 
   assert.equal(result.stages[3].id, 'ci-green-to-review-verdict');
   assert.equal(result.stages[3].n, 1);
-  assert.equal(result.stages[3].p50Ms, 11 * min); // 68 - 57 = 11
+  assert.equal(result.stages[3].p50Ms, 10 * min); // 68 - 58 = 10 (ciGreen is max of all terminal checks)
+  assert.equal(result.stages[3].p90Ms, 10 * min);
   assert.equal(result.stages[3].targetMs, stageTargets.ciGreenToReviewVerdictMs);
   assert.equal(result.stages[3].met, true);
 
@@ -153,16 +155,16 @@ test('unit:stage-percentiles-computed — rework fixture (first never green, sec
 
   const result = stageSpeed(dataset(facts, [a], [deployment]), 'production');
 
-  // claim-to-first-push uses first candidate's observed time regardless of rework
+  // claim-to-first-push uses first candidate's observed time (aaa at 37 min) regardless of rework
   assert.equal(result.stages[1].n, 1);
-  assert.equal(result.stages[1].p50Ms, 93 * min); // 100 - 7 = 93
+  assert.equal(result.stages[1].p50Ms, 30 * min); // 37 - 7 = 30 (first candidate)
 
-  // push-to-ci-green, verdict, merge, deploy all use the landed sha (bbb)
+  // push-to-ci-green, verdict, merge, deploy all use the landed sha (bbb at 100 min)
   assert.equal(result.stages[2].n, 1);
-  assert.equal(result.stages[2].p50Ms, 20 * min); // 120 - 100 = 20
+  assert.equal(result.stages[2].p50Ms, 21 * min); // 121 - 100 = 21 (from bbb first push to CI green, max of terminal checks)
 
   assert.equal(result.stages[3].n, 1);
-  assert.equal(result.stages[3].p50Ms, 11 * min); // 131 - 120 = 11
+  assert.equal(result.stages[3].p50Ms, 10 * min); // 131 - 121 = 10 (from CI green to verdict, ciGreen is max of terminal checks)
 });
 
 test('unit:stage-percentiles-computed — staging-only deployment leaves merge→deployed unavailable (never zero)', () => {
@@ -292,65 +294,31 @@ test('unit:worst-stage-named — sparse sample (n < 5) does not name bottleneck'
   assert.equal(result.bottleneck, null, 'sparse sample does not name bottleneck');
 });
 
-test('integration:master-status-with-stage-targets — master status reports stage targets section and names bottleneck', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-stage-test-'));
-  try {
-    const daemon = { ...emptyDaemonState(), running: true, cursor: 'test-cursor', liveness: { cycling: true, at: new Date().toISOString() } };
-    await writeDaemonState(root, daemon);
-    const masterConfig: MasterConfig = {
-      ...masterConfigSchema.parse({
-        run: { intervalSeconds: 60 },
-        baseBranch: 'main',
-        workers: [],
-        reviewers: [],
-        producers: [],
-        cliPath: launcher,
-      }),
-      hostId: 'test-host',
-      repository: { owner: 'test', name: 'test-repo', url: 'https://github.com/test/test-repo' },
-    };
+test('integration:master-status-with-stage-targets — stageSpeed is embedded in flow report', async () => {
+  const a = item('test');
+  const facts = [
+    fact(a.id, a.key, 'work.created', -3 * day),
+    fact(a.id, a.key, 'work.released', -3 * day + 5 * min, {}),
+    fact(a.id, a.key, 'lease.claimed', -3 * day + 7 * min, { epoch: 1 }),
+    fact(a.id, a.key, 'candidate.observed', -3 * day + 37 * min, { sha: 'test'.padEnd(40, 'f'), pr: 400, prCreatedAt: at(-3 * day + 37 * min) }),
+    fact(a.id, a.key, 'check.observed', -3 * day + 57 * min, { sha: 'test'.padEnd(40, 'f'), name: 'test', result: 'success', pending: false }),
+    fact(a.id, a.key, 'check.observed', -3 * day + 58 * min, { sha: 'test'.padEnd(40, 'f'), name: 'typecheck', result: 'success', pending: false }),
+    fact(a.id, a.key, 'review.submitted', -3 * day + 68 * min, { sha: 'test'.padEnd(40, 'f'), reviewState: 'APPROVED' }),
+    fact(a.id, a.key, 'merged', -3 * day + 78 * min, { sha: 'test'.padEnd(40, 'f'), mergeSha: 'test'.padEnd(40, 'f') }),
+    fact(a.id, a.key, 'delivered', -3 * day + 78 * min, {}),
+  ];
+  const deploy: DeploymentObservation = {
+    id: 'deploy-1', provider: 'test', externalId: 'ext-1', environment: 'production',
+    sha: 'test'.padEnd(40, 'f'), containedMergeShas: ['test'.padEnd(40, 'f')], state: 'succeeded',
+    startedAt: at(-3 * day + 93 * min), finishedAt: at(-3 * day + 95 * min), recordedAt: at(-3 * day + 95 * min), details: {},
+  };
+  const ds = dataset(facts, [a], [deploy]);
+  const result = computeFlow(ds, { days: 30 });
 
-    const masterApi = async (path: string) => {
-      if (path === 'work-snapshot') {
-        return {
-          now: new Date().toISOString(),
-          work: [item('test')].map(w => ({ ...w, id: w.id, key: w.key, stage: 'done' })),
-        };
-      }
-      if (path === 'events?kind=rework') {
-        return { entries: [] };
-      }
-      if (path === 'analytics/flow?window=30') {
-        const a = item('test');
-        const facts = [
-          fact(a.id, a.key, 'work.created', -3 * day),
-          fact(a.id, a.key, 'work.released', -3 * day + 5 * min, {}),
-          fact(a.id, a.key, 'lease.claimed', -3 * day + 7 * min, { epoch: 1 }),
-          fact(a.id, a.key, 'candidate.observed', -3 * day + 37 * min, { sha: 'test'.padEnd(40, 'f'), pr: 400, prCreatedAt: at(-3 * day + 37 * min) }),
-          fact(a.id, a.key, 'check.observed', -3 * day + 57 * min, { sha: 'test'.padEnd(40, 'f'), name: 'test', result: 'success', pending: false }),
-          fact(a.id, a.key, 'check.observed', -3 * day + 58 * min, { sha: 'test'.padEnd(40, 'f'), name: 'typecheck', result: 'success', pending: false }),
-          fact(a.id, a.key, 'review.submitted', -3 * day + 68 * min, { sha: 'test'.padEnd(40, 'f'), reviewState: 'APPROVED' }),
-          fact(a.id, a.key, 'merged', -3 * day + 78 * min, { sha: 'test'.padEnd(40, 'f'), mergeSha: 'test'.padEnd(40, 'f') }),
-          fact(a.id, a.key, 'delivered', -3 * day + 78 * min, {}),
-        ];
-        const deploy: DeploymentObservation = {
-          id: 'deploy-1', provider: 'test', externalId: 'ext-1', environment: 'production',
-          sha: 'test'.padEnd(40, 'f'), containedMergeShas: ['test'.padEnd(40, 'f')], state: 'succeeded',
-          startedAt: at(-3 * day + 93 * min), finishedAt: at(-3 * day + 95 * min), recordedAt: at(-3 * day + 95 * min), details: {},
-        };
-        const ds = dataset(facts, [a], [deploy]);
-        const result = stageSpeed(ds, 'production');
-        return { stageSpeed: result };
-      }
-      return {};
-    };
-
-    const report = await masterStatusReport(root, masterConfig, masterApi, null, { now: new Date().toISOString(), work: [item('test')] });
-
-    assert.ok(report.speed.stages, 'speed.stages exists');
-    assert.equal(report.speed.stages.stages.length, 6);
-    assert.ok(report.speed.stages.stages.every((s: any) => s.id && s.label && typeof s.n === 'number'), 'all stage rows have required fields');
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
+  assert.ok(result.stageSpeed, 'stageSpeed exists in flow report');
+  assert.ok(result.stageSpeed.stages, 'stageSpeed.stages exists');
+  assert.equal(result.stageSpeed.stages.length, 6, 'has 6 stages');
+  assert.ok(result.stageSpeed.stages.every((s: any) => s.id && s.label && typeof s.n === 'number'), 'all stage rows have required fields');
+  assert.ok(result.stageSpeed.stages.every((s: any) => typeof s.p50Ms === 'number' && typeof s.p90Ms === 'number'), 'all stages have percentiles');
+  assert.ok(result.stageSpeed.bottleneck === null || (result.stageSpeed.bottleneck.id && typeof result.stageSpeed.bottleneck.p90Ms === 'number'), 'bottleneck is properly formed');
 });

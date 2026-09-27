@@ -831,8 +831,9 @@ export function stageSpeed(dataset: FlowDataset, productionEnvironment: string =
     }
 
     if (firstCandidate && mergedSha) {
-      const sha = firstCandidate.details.sha;
-      const checkedFacts = itemFacts(item.id, 'check.observed').filter(fact => matches(fact, sha) && scanRead(fact));
+      // Push-to-ci-green and later stages bind to the episode that landed (the merged sha)
+      const landedCandidate = candidateFacts.find(c => c.details.sha === mergedSha) ?? firstCandidate;
+      const checkedFacts = itemFacts(item.id, 'check.observed').filter(fact => matches(fact, mergedSha) && scanRead(fact));
       const checksByName = new Map<string, FlowFact[]>();
       for (const fact of checkedFacts) {
         (checksByName.get(fact.details.name) ?? checksByName.set(fact.details.name, []).get(fact.details.name)!).push(fact);
@@ -851,7 +852,7 @@ export function stageSpeed(dataset: FlowDataset, productionEnvironment: string =
         }
       }
 
-      const candidateTime = time(firstCandidate.recordedAt)!;
+      const candidateTime = landedCandidate.details.prCreatedAt ? time(landedCandidate.details.prCreatedAt)! : time(landedCandidate.recordedAt)!;
       if (ciGreenAt !== null && ciGreenAt > candidateTime) {
         const ms = ciGreenAt - candidateTime;
         if (ms >= 0) stages['push-to-ci-green'].push({ key: item.key, durationMs: ms });
@@ -865,8 +866,8 @@ export function stageSpeed(dataset: FlowDataset, productionEnvironment: string =
           if (ms >= 0) stages['ci-green-to-review-verdict'].push({ key: item.key, durationMs: ms });
         }
 
-        if (mergedFact && time(mergedFact.observedAt)! > ciGreenAt) {
-          const ms = time(mergedFact.observedAt)! - ciGreenAt;
+        if (approval && mergedFact && time(mergedFact.observedAt)! > time(approval.observedAt)!) {
+          const ms = time(mergedFact.observedAt)! - time(approval.observedAt)!;
           if (ms >= 0) stages['review-to-merge'].push({ key: item.key, durationMs: ms });
         }
       }
