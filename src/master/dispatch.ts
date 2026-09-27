@@ -101,8 +101,14 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
       // The Git directories the worker writes are granted once its worktree exists (launchWorker).
       // A launch refused for its effective arguments gives the chosen session back at once (GY-184).
       const chosen = selected;
+      // GY-865: Ensure OpenCode worker profiles have OPENCODE_PERMISSION set to deny external_directory.
+      // Workers must be confined to their assigned worktree, so if the profile doesn't specify permissions,
+      // apply the confinement-restricted default.
+      const workerProfile = profile.kind === 'opencode' && !profile.environment?.OPENCODE_PERMISSION
+        ? { ...profile, environment: { ...profile.environment, OPENCODE_PERMISSION: JSON.stringify({ edit: 'allow', bash: 'allow', webfetch: 'allow', external_directory: 'deny' }) } }
+        : profile;
       const launch = await onSelectedSession(chosen, `worker launch for ${work.key} failed`, async () => {
-        const launchResult = await accountLaunch(profile, chosen.account);
+        const launchResult = await accountLaunch(workerProfile, chosen.account);
         // GY-865: validate the effective launch configuration against worker confinement, accounting for registry-selected accounts.
         const confinementRefusal = effectiveConfinementRefusal(launchResult.kind, launchResult.args, launchResult.environment);
         if (confinementRefusal) throw new Error(confinementRefusal);
