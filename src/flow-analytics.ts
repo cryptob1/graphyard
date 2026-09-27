@@ -270,12 +270,12 @@ export function deriveFacts(event: LedgerEvent, state: ProjectionState): FlowFac
 
 // Incremental, bounded projection of the ledger into normalized durable facts.
 // A second replica skips silently instead of duplicating work; inserts are idempotent.
-export async function projectFlow(store: Store, options: { batch?: number; batches?: number } = {}) {
+export async function projectFlow(store: Store, options: { batch?: number; batches?: number; pool?: pg.Pool } = {}) {
   const batch = Math.min(options.batch ?? flowLimits.batch, flowLimits.batch);
   const rounds = Math.min(options.batches ?? flowLimits.batches, flowLimits.batches);
   let processed = 0, inserted = 0, checkpoint = 0;
   for (let round = 0; round < rounds; round++) {
-    const db = await store.pool.connect();
+    const db = await (options.pool ?? store.pool).connect();
     try {
       await db.query('BEGIN');
       if (!(await db.query('SELECT pg_try_advisory_xact_lock($1) AS ok', [advisoryLocks.flowProjection])).rows[0].ok) { await db.query('ROLLBACK'); break; }
@@ -466,10 +466,10 @@ function rowToFact(row: any): FlowFact {
   return { id: Number(row.id), workId: row.work_id, workKey: row.work_key, kind: row.kind, observedAt: iso(row.observed_at), recordedAt: iso(row.recorded_at), source: row.source, sourceEvent: Number(row.source_event), stage: row.stage, workType: row.work_type, slices: row.slices ?? [], details: row.details ?? {}, dedupe: row.dedupe };
 }
 
-// Bounded, indexed reads. Every query is limited by window, by the selected work items,
-// and by an explicit row cap whose exhaustion is reported rather than hidden.
+// Bounded, indexed reads on the report pool (GY-491). Every query is limited by window, by the
+// selected work items, and by an explicit row cap whose exhaustion is reported rather than hidden.
 export async function readFlow(store: Store, query: FlowQuery): Promise<FlowDataset> {
-  const clock = iso((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now);
+  const clock = iso((await store.reportPool.query('SELECT clock_timestamp() AS now')).rows[0].now);
   const observedAt = query.asOf && time(query.asOf) !== null && time(query.asOf)! <= time(clock)! ? new Date(time(query.asOf)!).toISOString() : clock;
   const to = observedAt, from = new Date(time(observedAt)! - query.days * day).toISOString();
   // The watch's report is what production serves now; a report as of an earlier instant has none.
@@ -477,21 +477,21 @@ export async function readFlow(store: Store, query: FlowQuery): Promise<FlowData
   // One extra work item and one extra deployment probe their own scan bounds, so an
   // exhausted bound is reported as partial coverage instead of silently dropping the
   // newest records.
-  const workRows: Work[] = (await store.pool.query('SELECT document FROM work_items ORDER BY number LIMIT $1', [flowLimits.work + 1])).rows.map(r => r.document);
+  const workRows: Work[] = (await store.reportPool.query('SELECT document FROM work_items ORDER BY number LIMIT $1', [flowLimits.work + 1])).rows.map(r => r.document);
   const workTruncated = workRows.length > flowLimits.work;
   const work: Work[] = workRows.slice(0, flowLimits.work);
   const included = work.filter(item => (!query.type || item.type === query.type) && (!query.slice || workSlices(item).slices.includes(query.slice)));
   const ids = included.map(item => item.id);
   const stateIds = work.map(item => item.id);
   const empty = { observedAt, from, to, days: query.days, work, included, facts: [], latest: [], carryIn: [], deployments: [], mergedForDeployments: [], scanned: 0, truncated: false, workTruncated, deploymentsTruncated: false, deploymentMergesTruncated: false, covered: fullyCovered(from, to), production };
-  const projectionRow = (await store.pool.query('SELECT last_event,updated_at FROM flow_projection WHERE id=1')).rows[0];
+  const projectionRow = (await store.reportPool.query('SELECT last_event,updated_at FROM flow_projection WHERE id=1')).rows[0];
   const lastEvent = Number(projectionRow?.last_event ?? 0);
   // Lag counts exactly the events the projector consumes; ledger entries without a work
   // item are skipped by the projection and must not hold the report permanently stale.
-  const pending = (await store.pool.query('SELECT count(*)::int AS pending FROM (SELECT 1 FROM events WHERE seq>$1 AND work_id IS NOT NULL LIMIT 1001) probe', [lastEvent])).rows[0].pending as number;
+  const pending = (await store.reportPool.query('SELECT count(*)::int AS pending FROM (SELECT 1 FROM events WHERE seq>$1 AND work_id IS NOT NULL LIMIT 1001) probe', [lastEvent])).rows[0].pending as number;
   const projection = { lastEvent, updatedAt: projectionRow ? iso(projectionRow.updated_at) : null, pendingEvents: Math.min(pending, 1000), pendingCapped: pending > 1000 };
   const scanLimit = Math.min(Math.max(1, query.limit ?? flowLimits.scan), flowLimits.scan);
-  const scan = ids.length ? await store.pool.query(
+  const scan = ids.length ? await store.reportPool.query(
     `SELECT * FROM flow_facts WHERE work_id=ANY($1) AND observed_at>=$2 AND observed_at<$3 ORDER BY observed_at,id LIMIT $4`,
     [ids, from, to, scanLimit + 1]) : { rows: [], rowCount: 0 };
   const truncated = scan.rowCount! > scanLimit;
@@ -503,7 +503,7 @@ export async function readFlow(store: Store, query: FlowQuery): Promise<FlowData
   // same instant is counted as unread, and an unreturned sibling still is. The boundary instant is
   // read back by id so it keeps the column's precision. The count is itself bounded and says so.
   const lastFact = facts.at(-1);
-  const remainingProbe = truncated && lastFact ? await store.pool.query(
+  const remainingProbe = truncated && lastFact ? await store.reportPool.query(
     `SELECT count(*)::int AS remaining FROM (SELECT 1 FROM flow_facts WHERE work_id=ANY($1) AND observed_at<$2
        AND (observed_at,id) > ((SELECT observed_at FROM flow_facts WHERE id=$3), $3::bigint) LIMIT $4) probe`,
     [ids, to, lastFact.id, flowLimits.remainingProbe + 1]) : null;
@@ -515,7 +515,7 @@ export async function readFlow(store: Store, query: FlowQuery): Promise<FlowData
   if (truncated && lastFact) {
     const separate: FlowFact[] = [];
     for (const kind of separateKinds) {
-      const rows = (await store.pool.query(
+      const rows = (await store.reportPool.query(
         `SELECT * FROM flow_facts WHERE kind=$1 AND work_id=ANY($2) AND observed_at<$3
            AND (observed_at,id) > ((SELECT observed_at FROM flow_facts WHERE id=$4), $4::bigint) ORDER BY observed_at,id LIMIT $5`,
         [kind, ids, to, lastFact.id, scanLimit + 1])).rows;
@@ -532,22 +532,22 @@ export async function readFlow(store: Store, query: FlowQuery): Promise<FlowData
   // One indexed lookup per bounded work/kind pair avoids scanning an item's lifetime.
   // Latest state covers the bounded repository population so filtered dependency paths
   // can still recognize an out-of-scope dependency that has already been delivered.
-  const latest = stateIds.length ? (await store.pool.query(
+  const latest = stateIds.length ? (await store.reportPool.query(
     `SELECT fact.* FROM unnest($1::uuid[]) selected_work(work_id) CROSS JOIN unnest($2::text[]) selected_kind(kind)
        CROSS JOIN LATERAL (SELECT * FROM flow_facts WHERE flow_facts.work_id=selected_work.work_id AND flow_facts.kind=selected_kind.kind AND observed_at<=$3 ORDER BY observed_at DESC,id DESC LIMIT 1) fact`,
     [stateIds, carryKinds, to])).rows.map(rowToFact) : [];
-  const carryIn = ids.length ? (await store.pool.query(
+  const carryIn = ids.length ? (await store.reportPool.query(
     `SELECT fact.* FROM unnest($1::uuid[]) selected_work(work_id) CROSS JOIN unnest($2::text[]) selected_kind(kind)
        CROSS JOIN LATERAL (SELECT * FROM flow_facts WHERE flow_facts.work_id=selected_work.work_id AND flow_facts.kind=selected_kind.kind AND observed_at<$3 ORDER BY observed_at DESC,id DESC LIMIT 1) fact`,
     [ids, carryKinds, from])).rows.map(rowToFact) : [];
   // Where an item stood when the window opened is a step it may have entered long before: read
   // back through its earlier gate facts, bounded per item, to the move that put it there.
   const inFlow = carryIn.filter(fact => fact.kind === 'gates.changed' && gateFactStep(fact.details)).map(fact => fact.workId);
-  const entryFacts = inFlow.length ? (await store.pool.query(
+  const entryFacts = inFlow.length ? (await store.reportPool.query(
     `SELECT fact.* FROM unnest($1::uuid[]) selected_work(work_id)
        CROSS JOIN LATERAL (SELECT * FROM flow_facts WHERE flow_facts.work_id=selected_work.work_id AND flow_facts.kind='gates.changed' AND observed_at<$2 ORDER BY observed_at DESC,id DESC LIMIT $3) fact`,
     [inFlow, from, stepEntryScan])).rows.map(rowToFact) : [];
-  const deploymentRows = (await store.pool.query(
+  const deploymentRows = (await store.reportPool.query(
     `SELECT d.*, COALESCE(array_agg(dm.merge_sha ORDER BY dm.merge_sha) FILTER (WHERE dm.merge_sha IS NOT NULL), '{}') AS contained_merge_shas
        FROM deployment_observations d LEFT JOIN deployment_merge_observations dm ON dm.deployment_id=d.id
       WHERE d.started_at>=$1 AND d.started_at<$2 GROUP BY d.id ORDER BY d.started_at,d.id LIMIT $3`, [from, to, flowLimits.deployments + 1])).rows;
@@ -556,11 +556,58 @@ export async function readFlow(store: Store, query: FlowQuery): Promise<FlowData
     .map(row => ({ id: row.id, provider: row.provider, externalId: row.external_id, environment: row.environment, sha: row.sha, containedMergeShas: row.contained_merge_shas, state: row.state, startedAt: iso(row.started_at), finishedAt: row.finished_at ? iso(row.finished_at) : null, recordedAt: iso(row.recorded_at), details: row.details ?? {} }));
   const mergeShas = [...new Set(deployments.flatMap(d => d.containedMergeShas))];
   const mergeRows = mergeShas.length
-    ? (await store.pool.query(`SELECT * FROM flow_facts WHERE kind='merged' AND details->>'mergeSha'=ANY($1) ORDER BY observed_at,id LIMIT $2`, [mergeShas, flowLimits.deploymentMerges + 1])).rows : [];
+    ? (await store.reportPool.query(`SELECT * FROM flow_facts WHERE kind='merged' AND details->>'mergeSha'=ANY($1) ORDER BY observed_at,id LIMIT $2`, [mergeShas, flowLimits.deploymentMerges + 1])).rows : [];
   const deploymentMergesTruncated = mergeRows.length > flowLimits.deploymentMerges;
   const mergedForDeployments = mergeRows.slice(0, flowLimits.deploymentMerges).map(rowToFact);
   const scanEnd = truncated && lastFact ? { observedAt: lastFact.observedAt, id: lastFact.id! } : undefined;
   return { observedAt, from, to, days: query.days, work, included, facts, latest, carryIn, deployments, mergedForDeployments, scanned, truncated, workTruncated, deploymentsTruncated, deploymentMergesTruncated, covered, kindCovered, scanEnd, production, stepEntries: stepEntries(carryIn, entryFacts), projection };
+}
+
+/**
+ * The flow report cache (GY-705): each store's last computed flow report per window and filter
+ * set, kept with the dataset it was computed from, so `GET /api/analytics/flow` and its
+ * drill-downs answer from memory instead of re-reading a week of facts (about 6 s at 250 open
+ * items). A report is served for at most `flowReportFreshMs`, and at once recomputed when the
+ * flow moved under it: a new flow fact (every step change — a stage, gate, merge or delivery —
+ * records one), a new deployment observation (`invalidateFlowReports`) or a new production-watch
+ * pass.
+ */
+export const flowReportFreshMs = 60_000;
+/** How many window-and-filter reports one store keeps; each holds its own bounded dataset. */
+export const flowReportPoolLimit = 8;
+export interface PooledFlowReport { dataset: FlowDataset; report: ReturnType<typeof computeFlow> }
+interface PoolEntry { read: Promise<PooledFlowReport>; at: number; lastFact: number }
+const reportPools = new WeakMap<Store, Map<string, PoolEntry>>();
+/**
+ * What a pooled report stands for: every query field `readFlow` and `computeFlow` read, and the
+ * production watch's hold as of its last pass (a pass runs at most once a minute).
+ */
+export function flowReportKey(query: FlowQuery): string {
+  const hold = productionHold(query.production ?? null);
+  return JSON.stringify([query.days, query.type ?? null, query.stage ?? null, query.slice ?? null, query.asOf ?? null, query.limit ?? null,
+    query.productionEnvironment ?? null, hold.observedAt, [...hold.unserved].sort(), [...hold.failed].sort()]);
+}
+/** Drop every pooled report of `store`, so the next read recomputes: a flow input the fact projection does not record has changed. */
+export function invalidateFlowReports(store: Store) { reportPools.get(store)?.clear(); }
+/**
+ * The flow report for `query` from the cache, computed on a miss. The bounded projection
+ * catch-up runs first on every read — on the report pool (GY-491), like the read itself — so a
+ * step event recorded since the cached report was computed becomes a newer flow fact and the
+ * read recomputes; an idle flow is served from the cache. Concurrent misses share one
+ * computation, and a failed one is never cached.
+ */
+export async function pooledFlowReport(store: Store, query: FlowQuery): Promise<PooledFlowReport> {
+  await projectFlow(store, { batches: 3, pool: store.reportPool });
+  const lastFact = Number((await store.reportPool.query('SELECT COALESCE(max(id),0) AS id FROM flow_facts')).rows[0].id);
+  const pool = reportPools.get(store) ?? reportPools.set(store, new Map()).get(store)!;
+  const key = flowReportKey(query);
+  const hit = pool.get(key);
+  if (hit && hit.lastFact === lastFact && Date.now() - hit.at < flowReportFreshMs) return hit.read;
+  const entry: PoolEntry = { at: Date.now(), lastFact, read: readFlow(store, query).then(dataset => ({ dataset, report: computeFlow(dataset, query) })) };
+  pool.delete(key); pool.set(key, entry);
+  while (pool.size > flowReportPoolLimit) pool.delete(pool.keys().next().value!);
+  entry.read.catch(() => { if (pool.get(key) === entry) pool.delete(key); });
+  return entry.read;
 }
 
 export type WaitCategory = 'delivered' | 'backlog' | 'blocked' | 'dependency' | 'implementation' | 'review' | 'evidence' | 'merge-blocked' | 'merge-ready';
@@ -612,6 +659,22 @@ export function mergeReadyIntervals(gateFacts: FlowFact[], mergedAt: number | nu
   if (readyAt !== null) close(readyAt, mergedAt ?? to, mergedAt !== null ? 'merged' : 'open');
   return intervals;
 }
+/**
+ * How long one merged entry waited in the merge queue (GY-498): from the gate fact that recorded it
+ * queued, in the unbroken run of queued gate facts that ended at its merge, to the merge. An entry
+ * ejected and re-queued waits from its last entry. Null when no gate fact recorded it queued.
+ */
+export function queueWait(gateFacts: FlowFact[], mergedAt: number): number | null {
+  const ordered = [...gateFacts].sort((a, b) => time(a.observedAt)! - time(b.observedAt)! || (a.id ?? 0) - (b.id ?? 0));
+  let queuedAt: number | null = null;
+  for (const fact of ordered) {
+    const at = time(fact.observedAt)!;
+    if (at >= mergedAt) break;
+    if (fact.details.queued === true) queuedAt ??= at;
+    else queuedAt = null;
+  }
+  return queuedAt === null ? null : mergedAt - queuedAt;
+}
 // Classification is read back from the durable gate fact, never from a live client claim.
 export function classifyWait(gate: Record<string, any> | undefined, delivered: boolean): WaitCategory | null {
   if (delivered) return 'delivered';
@@ -657,6 +720,7 @@ export const metricDefinitions: Record<string, { label: string; formula: string;
   leadTime: { label: 'Lead time', formula: 'Delivered observation time minus the work-created time, per delivered item in the window.', sources: ['flow_facts:work.created', 'flow_facts:delivered'] },
   queueVsActive: { label: 'Queue versus active work time', formula: 'Active time is the union of lease intervals clipped to the window. Queue time is released, undelivered time in the window with no active lease.', sources: ['flow_facts:lease.claimed', 'flow_facts:lease.released', 'flow_facts:lease.lost'] },
   mergeReadyDwell: { label: 'Merge-ready dwell', formula: 'Interval from the gate fact where the candidate became merge ready (no gate refuses, or only merge-queue sequencing remains) to the next refusing gate fact, to the observed merge, or to the observation time for items still merge ready, clipped to the window. Gate facts observed after the merge never open an interval, and an interval that ended before the window is excluded rather than measured.', sources: ['flow_facts:gates.changed', 'flow_facts:merged'] },
+  mergeQueue: { label: 'Merge queue pace', formula: 'Merges per hour: merged facts in the window divided by the hours of the window the merged facts were read for. Queue wait: for each entry merged in the window, the merge time minus the gate fact that recorded it queued, in the unbroken run of queued gate facts that ended at the merge; an entry with no such fact is left out.', sources: ['flow_facts:merged', 'flow_facts:gates.changed'] },
   phases: { label: 'Phase durations', formula: 'Per candidate episode (one commit under review), the interval between consecutive milestones. A milestone uses the independently observed provider timestamp when the provider supplies one. The production milestone is the earliest successful deployment of the configured production environment (report.productionEnvironment) that contains the merge commit; a deployment to any other environment never ends the phase.', sources: ['flow_facts:candidate.observed', 'flow_facts:review.submitted', 'flow_facts:review.completed', 'flow_facts:gates.changed', 'flow_facts:merge.authorized', 'flow_facts:merged', 'deployment_observations'] },
   ci: { label: 'CI duration, failure and retry', formula: 'Per check name and commit, the interval between the first pending observation and the first terminal observation. Durations are bounded by Graphyard observation intervals, not by provider start timestamps.', sources: ['flow_facts:check.observed'] },
   evidence: { label: 'Evidence wait, expiry and staleness', formula: 'Wait is review completion to the gate fact where acceptance stops refusing. Expiry counts recorded evidence whose expiry precedes the observation time; staleness counts evidence bound to a superseded commit.', sources: ['flow_facts:evidence.recorded', 'flow_facts:gates.changed'] },
@@ -851,6 +915,18 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
     }
   }
   const mergeReadyDwell = { ...distribution(mergeReadyValues), current: mergeReadyCurrent.sort((a, b) => b.sinceMs - a.sinceMs).slice(0, flowLimits.distinct) };
+
+  // The merge queue's pace (GY-498): merges per hour over the part of the window the merged facts
+  // were read for, and how long each entry merged in the window waited in the queue.
+  const mergedUntil = time(coveredUntil(dataset, 'merged')) ?? to;
+  const mergedInWindow = scopedFacts.filter(fact => fact.kind === 'merged' && time(fact.observedAt)! >= from && time(fact.observedAt)! < mergedUntil);
+  const queueWaits = mergedInWindow.map(fact => {
+    const gateFacts = [...(carry.get(`${fact.workId}:gates.changed`) ? [carry.get(`${fact.workId}:gates.changed`)!] : []), ...itemFacts(fact.workId, 'gates.changed')];
+    return queueWait(gateFacts, time(fact.observedAt)!);
+  }).filter((ms): ms is number => ms !== null);
+  const coveredHours = Math.max(0, mergedUntil - from) / 3_600_000;
+  const mergeQueue = { merges: mergedInWindow.length, mergesPerHour: coveredHours > 0 ? Number((mergedInWindow.length / coveredHours).toFixed(3)) : null, queueWait: distribution(queueWaits) };
+  if (!mergedInWindow.length) unavailable.push({ metric: 'mergeQueue', reason: 'No merge was observed during this window.' });
 
   // Candidate episodes. One episode is one commit under review; a new candidate supersedes
   // the previous one so a later push never silently extends an earlier measurement.
@@ -1140,7 +1216,7 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
       statement: 'Flow analytics describe observed work, queueing, and capacity. No metric is keyed by a person, and no principal, provider login, or producer identity is stored in a flow fact or returned by this API.',
     },
     coverage, exclusions, unavailable,
-    stageDwell, stepDwell, wip, cumulativeFlow, throughput, leadTime, queueVsActive, mergeReadyDwell, phases, ci, evidence, operations, bottleneck,
+    stageDwell, stepDwell, wip, cumulativeFlow, throughput, leadTime, queueVsActive, mergeReadyDwell, mergeQueue, phases, ci, evidence, operations, bottleneck,
   };
 }
 export type FlowReport = ReturnType<typeof computeFlow>;

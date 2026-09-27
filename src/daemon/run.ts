@@ -2,16 +2,21 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import type { ConfigReload, MasterConfig } from '../master.js';
 import { acquireDaemonLock, type DaemonAction, type DaemonState, message, storeAction } from './state.js';
-import { faultClassPolicyFromEnv } from '../model/fault-classes.js';
+import { faultClassPolicyFromEnv, type FaultClassPolicy } from '../model/fault-classes.js';
 import { faultRecurrenceReport } from './faults.js';
 import { latencyBudget, silenceReport } from './metrics.js';
 import { boundedPersist, cycleCost, cycleTimes, cycleDelay, cycleFailureCeiling, describeFailingCall, loopLiveness, namedEffects, noteCycleFailure, noteCycleSuccess, noteUnhandled, watchdogPlan } from './liveness.js';
 import type { DaemonEffects } from './effects.js';
 import { Launcher, defaultLaunchConcurrency, runCycle } from './cycle.js';
+import { describeSelfUpgrade } from './upgrade.js';
 import { describeTimings } from '../master/timings.js';
 
-/** The compact daemon view `master status` joins onto Graphyard truth. */
-export function daemonSummary(state: DaemonState, now: number, intervalMs: number, hostId?: string) {
+/**
+ * The compact daemon view `master status` joins onto Graphyard truth. `faultPolicy` is the recurrence
+ * rule the faults are reported under: the loop passes the one it files by (effects.faultClassPolicy),
+ * so the reported window and threshold are the filing ones; absent, the environment's.
+ */
+export function daemonSummary(state: DaemonState, now: number, intervalMs: number, hostId?: string, faultPolicy: FaultClassPolicy = faultClassPolicyFromEnv(process.env)) {
   const lastCycleAt = state.lastCycleAt ? Date.parse(state.lastCycleAt) : Number.NaN;
   const lagMs = Number.isFinite(lastCycleAt) ? now - lastCycleAt : null;
   const recent = Object.entries(state.actions).map(([key, action]) => ({ key, ...action })).sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
@@ -38,14 +43,17 @@ export function daemonSummary(state: DaemonState, now: number, intervalMs: numbe
     // The cycle's usual wall time, p50 and p95 over the last 30 minutes (GY-616).
     cycleTime: cycleTimes(state.metrics, now),
     deployment: state.deployment,
+    // The release this process loaded, and what the between-cycles self-upgrade has done (GY-437).
+    release: state.release,
+    upgrade: state.upgrade,
     profiles: state.profiles,
     config: state.config,
     reclaim: state.reclaim,
     // Every decision the loop has put to an approver and not yet seen applied and retired.
     approvals: Object.entries(state.approvals).map(([key, watch]) => ({ key, ...watch })),
     // Fault instances by class in the recurrence window, and the item each recurring class filed (GY-173).
-    faults: faultRecurrenceReport(state, faultClassPolicyFromEnv(process.env), now),
-    // The system invariants as the last cycle judged them (GY-404): one line per invariant, with its threshold and reading.
+    faults: faultRecurrenceReport(state, faultPolicy, now),
+    // The system invariants as the last observation judged them (GY-404): one line per invariant, with its threshold and reading.
     invariants: { at: state.invariants.at, violated: state.invariants.report.filter(check => !check.holds).length, lines: state.invariants.report.map(check => check.line), checks: state.invariants.report },
   };
 }
@@ -104,6 +112,9 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
   const interval = () => typeof options.intervalMs === 'function' ? options.intervalMs() : options.intervalMs;
   const effects = boundedPersist(namedEffects(raw)), host = options.process ?? process;
   acquireDaemonLock(state, options.identity, now(), interval());
+  // GY-437: the release is this process's, never the cursor's: a loop re-executed onto a moved
+  // checkout must not report the release the process before it loaded.
+  state.release = raw.loadedRelease ?? null;
   await effects.persist(state);
   // Under a supervisor that watches for keep-alives, a hung cycle is a restart rather than a
   // silent pipeline; a window that would restart a healthy loop is recorded and left to the
@@ -158,6 +169,15 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
         failed.push({ cycle: failure.cycle, call: failure.call, reason: failure.reason, delayMs: failure.delayMs });
         log(`[graphyard-master] cycle ${failure.cycle} failed in ${describeFailingCall(failure)}: ${failure.reason}; ${state.failures.consecutive} consecutive failure(s), the next cycle runs in ${Math.round(failure.delayMs / 1000)}s at ${failure.nextAt}`);
         wait = failure.delayMs;
+      }
+      // GY-437: between cycles — never mid-cycle — align this checkout with the verified deployed
+      // release. An alignment that re-executes the loop through its supervisor ends this process
+      // here: the supervisor starts the next one on the code the checkout now holds.
+      if (effects.selfUpgrade && !stopping) {
+        try {
+          const upgraded = await effects.selfUpgrade(state);
+          if (upgraded.outcome !== 'skipped') log(`[graphyard-master] upgrade ${describeSelfUpgrade(upgraded)}`);
+        } catch (error) { log(`[graphyard-master] upgrade failed: ${message(error)}`); }
       }
       // The keep-alive says the process is alive, which a failed cycle leaves true: the watchdog
       // is for a cycle that hangs, and a thrown one has just proved it did not.

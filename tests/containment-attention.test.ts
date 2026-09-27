@@ -156,8 +156,8 @@ test('unit:idle-pane-shell-not-a-worker the pane\'s childless interactive shell 
   const work = stranded();
   assert.deepEqual(refusals(work, paneShellProbe()), [], 'an idle pane shell beside a not-found scope is no worker');
   assert.deepEqual(refusals(work, paneShellProbe({ activeState: 'inactive' })), [], 'an inactive (ended) scope is ended too');
-  for (const command of ['/usr/bin/bash', '-bash', 'bash -i', '/bin/zsh -l', 'fish', 'bash -il', 'bash --login', 'bash --noprofile --norc -i']) assert.equal(isInteractiveShell(command), true, command);
-  for (const command of ['bash -c sleep 100', 'bash -lc watch', '/usr/bin/bash script.sh', 'node server.js', 'claude', 'bash --rcfile x', 'bash --init-file x', 'bash --rcfile=x', 'bash --init-file=/tmp/rc', 'bash -O extglob', 'bash -o vi', 'zsh -x', 'bash --debugger', 'bash -s', 'bash -is', 'sh -', 'zsh -s arg']) assert.equal(isInteractiveShell(command), false, command);
+  for (const command of ['/usr/bin/bash', '-bash', 'bash -i', '/bin/zsh -l', 'fish', 'bash -il', 'bash --login', 'bash --noprofile --norc -i', 'bash --noediting', 'bash --norc --noediting', 'zsh --no-rcs', 'zsh --no-globalrcs', 'fish --private', 'fish --no-config', 'fish --private --no-config']) assert.equal(isInteractiveShell(command), true, command);
+  for (const command of ['bash -c sleep 100', 'bash -lc watch', '/usr/bin/bash script.sh', 'node server.js', 'claude', 'bash --rcfile x', 'bash --init-file x', 'bash --rcfile=x', 'bash --init-file=/tmp/rc', 'bash -O extglob', 'bash -o vi', 'zsh -x', 'bash --debugger', 'bash -s', 'bash -is', 'sh -', 'zsh -s arg', 'bash --posix', 'dash --private', 'fish --noediting', 'sh --noediting', 'zsh --no-global-rcs']) assert.equal(isInteractiveShell(command), false, command);
 
   // One cycle: the pane is closed, the item re-probed with the pane gone, and the quarantine settled.
   let probes = 0;
@@ -307,4 +307,16 @@ test('unit:ended-worker-pane-closed settlement after a close comes only from a p
   const next = await loop(work, { containment: sequenced }, first.state);
   assert.deepEqual(next.settled, []);
   assert.match(next.state.actions[`escalation:containment:${work.id}:1`]?.detail ?? '', still, 'the survivor is escalated on the next cycle, not settled');
+});
+
+test('unit:containment-settle-probe-time a probe run late in a long cycle is judged at the control-plane time it ran at, so a lapsed quarantine settles; a skewed host clock is still refused', async () => {
+  // The lease lapsed long past the grace window; the cycle read its snapshot at observedAt and probed 40 s later.
+  const lapsed = launched(at(-600_000), at(-3_600_000));
+  const assess = (clockOffset: { min: number; max: number }) => assessContainment([lapsed], { hostId: 'coordinator-host', observedAt, clockOffset, localNow: new Date(Date.parse(observedAt) + 40_000), probe: () => clean } as any);
+  const settled = (await assess({ min: -300, max: 500 }))[lapsed.id];
+  assert.deepEqual(settled.refusals, [], 'a probe 40 s into the cycle is not dated after the control-plane clock');
+  assert.equal(settled.settleable, true);
+  const skewed = (await assess({ min: 9_000, max: 9_400 }))[lapsed.id];
+  assert.equal(skewed.settleable, false, 'a host clock 9 s ahead of the control plane still disagrees');
+  assert.ok(skewed.refusals.some(reason => /clocks disagree/.test(reason)));
 });
