@@ -267,6 +267,14 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   // handed it over — here, before the simulated clock moves on.
   const launcher = new Launcher();
   const violations: string[] = [], observed = new Set<string>(), failures: string[] = [], escalations: string[] = [], spent = new Set<string>();
+  // GY-723: the GY-506 churn paths, sampled after every cycle — a starved observation job, and a
+  // stall timer written on a single-entry head batch — so a regression into either fails here.
+  const churn: string[] = [];
+  // A stall timer lives only until the head's tip is published, often within the same minute, so
+  // it is sampled after the reconcile pass and after every job, not once per cycle.
+  const singleStalls = async (now: number) => {
+    for (const item of await store.list()) if (item.queue?.batchStall && (item.queue.batch?.size ?? 1) === 1) churn.push(`${new Date(now).toISOString()} ${item.key} timed a single-entry head batch as stuck`);
+  };
   let released = 0, split = false, deploys = 0, cycles = 0, reportedDispatches = 0;
   const jobsDue = async () => Number((await store.pool.query('SELECT count(*) AS due FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now())')).rows[0].due);
   for (let elapsed = 0; elapsed <= options.hours * hour;) {
@@ -298,7 +306,8 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     if (!deploying) {
       for (const act of pending.splice(0)) await act();
       await engine.reconcile();
-      for (let guard = 0; guard < 200 && await jobsDue(); guard++) await processJob(engine, adapter);
+      await singleStalls(now);
+      for (let guard = 0; guard < 200 && await jobsDue(); guard++) { await processJob(engine, adapter); await singleStalls(now); }
       try {
         const result = await runCycle(config, state, effects, clock.now, launcher); cycles++;
         reportedDispatches += result.actions.filter(action => action.kind === 'dispatch' && action.state === 'done').length;
@@ -320,6 +329,8 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
         if (check.observed) observed.add(check.invariant);
         if (!check.holds) violations.push(`${new Date(now).toISOString()} (+${Math.round(elapsed / minute)} min) ${check.line}`);
       }
+      const at = `${new Date(now).toISOString()} (+${Math.round(elapsed / minute)} min)`;
+      for (const job of await store.starvedJobs()) churn.push(`${at} observation-starved ${job.key}: ${job.unobserved} runs without an observation; ${job.error ?? job.deferred_reason ?? ''}`);
     }
     const open = (await store.list()).filter(item => item.stage !== 'done').length;
     const step = open ? minute : 10 * minute;
@@ -327,17 +338,22 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   }
 
   const final = (await store.list()).filter(item => items.some(entry => entry.id === item.id));
-  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, herdr, hand, escalations, spent, upgrades, refusalSamples, checkout };
+  const dissolutions = Number((await store.pool.query("SELECT count(*) FROM events WHERE kind='queue.batch-dissolved' AND work_id=ANY($1::uuid[])", [items.map(item => item.id)])).rows[0].count);
+  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, herdr, hand, escalations, spent, upgrades, refusalSamples, checkout, churn, dissolutions };
 }
 
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 180_000 }, async () => {
   const began = performance.now();
-  const { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, state, upgrades, refusalSamples, checkout } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
+  const { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, state, upgrades, refusalSamples, checkout, churn, dissolutions } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
   const undelivered = final.filter(item => item.stage !== 'done' || !item.delivery);
   assert.deepEqual(undelivered.map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
   assert.deepEqual(failures, [], 'no cycle failed');
   assert.deepEqual(lost, [], 'no worker lost its lease: a dead worker lapses, it is not refused');
+  // GY-723: a healthy day holds none of the GY-438/GY-506 churn: no observation job starves, no
+  // single-entry head is timed as a stuck batch, and no batch is dissolved.
+  assert.deepEqual(churn, [], 'no observation-starved job and no stall timer on a single-entry head batch');
+  assert.equal(dissolutions, 0, 'no queue.batch-dissolved event in a healthy day');
   assert.deepEqual([...observed].sort(), [...systemInvariants].sort(), 'every invariant was observed, not merely left unread');
   // The day held what it was meant to: a merge about every fifteen minutes, the rework rounds, the deaths,
   // the deploys, the split, both merge states, auto-merge, and the failover.

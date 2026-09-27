@@ -44,8 +44,11 @@ export function placeInQueue(work: Work, all: Work[], now: Date, ciAppIds: numbe
     // A head batch sitting in 'testing' with no published tip is the GY-506 deadlock: nothing
     // names CI to wait for, so the queue can only advance by a tip being published. The head
     // member times the state; after `stuckBatchMs` the batch dissolves and its members validate
-    // as single-entry batches, in their existing order, each re-predicted in turn.
-    const stuck = !!batch && batch.batch === 1 && batch.state === 'testing' && batch.tip === null && batch.members.length > 0;
+    // as single-entry batches, in their existing order, each re-predicted in turn. A single-entry
+    // head is not timed (GY-723): dissolving it changes nothing, and every head sits tipless until
+    // its tip is published, so timing it wrote and then cleared `batchStall` on every head — two
+    // saves, each of which could make an in-flight observation lose its revision race.
+    const stuck = !!batch && batch.batch === 1 && batch.state === 'testing' && batch.tip === null && batch.members.length > 1;
     if (batch && batch.members[0] === work.key) {
       if (stuck) {
         if (!queue.batchStall) { queue = { ...queue, batchStall: { since: now.toISOString() } }; mutated = true; }
@@ -61,15 +64,16 @@ export function placeInQueue(work: Work, all: Work[], now: Date, ciAppIds: numbe
         queue = entry; mutated = true;
       }
     }
-    // The dissolution holds while every member it named is still queued; one that left (merged,
-    // or ejected) ends it and the ordinary batch plan resumes for the rest.
-    if (queue.batchDissolved) {
-      const members = queue.batchDissolved.members;
-      const live = (key: string) => key === work.key ? !!queue : all.some(item => item.id !== work.id && item.queue && item.stage !== 'done' && item.key === key);
-      if (!members.every(live)) {
-        const { batchDissolved: _dissolved, ...entry } = queue;
-        queue = entry; mutated = true;
-      }
+    // The dissolution holds while any member it named is still queued without a published tip
+    // (GY-723); the batch plan says whether it does. Every member keeps its own copy, so the head
+    // merging does not end it for the survivors. A copy the plan no longer names is dropped, and
+    // the ordinary batch plan resumes; one recorded in this very evaluation waits for the next.
+    const named = batch?.dissolved ?? null;
+    if (named && JSON.stringify(named) !== JSON.stringify(queue.batchDissolved ?? null)) {
+      queue = { ...queue, batchDissolved: named }; mutated = true;
+    } else if (!named && batch && queue.batchDissolved && work.queue?.batchDissolved) {
+      const { batchDissolved: _dissolved, ...entry } = queue;
+      queue = entry; mutated = true;
     }
     // The derived view replaces the stored one only when it differs in content. Postgres jsonb
     // stores object keys shortest-first and the derived view names `batch` last, so rewriting an

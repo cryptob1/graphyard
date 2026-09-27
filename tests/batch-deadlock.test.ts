@@ -283,24 +283,70 @@ test('unit:stuck-batch-dissolved — a batch in testing with no published tip fo
   assert.deepEqual(members.map(key => views.get(key)!.members), members.map(key => [key]), 'each member validates alone');
   assert.deepEqual(members.map(key => views.get(key)!.batch), [1, 2, 3, 4], 'in their existing queue order');
   assert.match(views.get(first.key)!.summary, /dissolved from a stuck batch/);
-  // The head then publishes its own tip, and the entries behind theirs, one at a time: each
-  // publication is followed by the observation that makes the tip the next entry's predicted base.
+  // GY-723: the next pass copies the dissolution onto every other member's entry, so the head
+  // merging cannot take it with it; the ledger records the dissolution once, on the head.
+  await engine.reconcile();
+  for (const item of items) assert.deepEqual((await reload(item)).queue!.batchDissolved, dissolved.queue!.batchDissolved, `${item.key} carries the dissolution`);
+  for (const item of items.slice(1)) assert.equal((await events(item, 'queue.batch-dissolved')).length, 0, `${item.key}'s copy is not a second dissolution on the ledger`);
+  // The head publishes its own tip and merges, before the entries behind it have published theirs.
+  await cycle(github, await reload(first));
+  assert.ok((await cycle(github, await reload(first))).queue!.speculation?.tip, 'the head published its own tip');
+  await store.pool.query("UPDATE work_items SET document=(document-'queue')||'{\"stage\":\"done\"}' WHERE id=$1", [first.id]);
+  // A member leaving no longer ends the dissolution (GY-723): the survivors, still tipless, stay
+  // single rather than re-batching into the tipless 'testing' state that stalled the batch.
+  let rest = (await store.list()).filter(item => item.stage !== 'done');
+  const survivors = describeMergeBatches(rest, predictQueue(rest, Date.now()), engine.mergeBatchSize, engine.ciAppIds);
+  assert.deepEqual([second, third, fourth].map(item => survivors.get(item.key)!.members), [[second.key], [third.key], [fourth.key]], 'the survivors still validate alone');
+  assert.match(survivors.get(second.key)!.summary, /dissolved from a stuck batch/);
+  // Each survivor publishes its own tip in turn: each publication is followed by the observation
+  // that makes the tip the next entry's predicted base.
   const published: (string | null)[] = [];
-  for (const item of items) {
+  for (const item of [second, third, fourth]) {
     await cycle(github, await reload(item));
     const after = await cycle(github, await reload(item));
     published.push(after.queue!.speculation?.tip ?? null);
     assert.ok(after.queue!.speculation?.tip, `${item.key} published its own tip`);
   }
-  assert.equal(new Set(published).size, members.length, 'every member was re-predicted onto its own tip');
-  // One member leaving the queue ends the dissolution: the marker goes with the delivery that
-  // takes it, no live entry keeps validating singly because of it, and the surviving batch is a
-  // plain one again.
-  await store.pool.query("UPDATE work_items SET document=(document-'queue')||'{\"stage\":\"done\"}' WHERE id=$1", [first.id]);
-  const rest = (await store.list()).filter(item => item.stage !== 'done');
+  assert.equal(new Set(published).size, 3, 'every survivor was re-predicted onto its own tip');
+  // Once every member still queued has published a tip the dissolution ends: the next pass drops
+  // each copy, and the surviving batch is a plain one again.
+  await engine.reconcile();
+  rest = (await store.list()).filter(item => item.stage !== 'done');
   assert.ok(rest.every(item => !item.queue?.batchDissolved), 'no live entry still carries the dissolution');
   const resumed = describeMergeBatches(rest, predictQueue(rest, Date.now()), engine.mergeBatchSize, engine.ciAppIds);
   assert.doesNotMatch(resumed.get(second.key)!.summary, /dissolved from a stuck batch/, 'the surviving batch is a plain one again');
+});
+
+test('unit:single-head-not-timed — a single-entry head batch in testing with no published tip is not timed as a stuck batch, so reconciling it writes no stall timer', async () => {
+  await clearQueue();
+  const repo = new Repo(), github = repo.adapter();
+  const main = repo.commit([], 'main'); repo.refs.set('heads/main', main);
+  let work = await validated(repo, github, await submitted(repo, 'Single head', () => repo.change([main], 'feat: single', ['src/single.ts'])));
+  await engine.reconcile();
+  work = await reload(work);
+  assert.deepEqual([work.queue!.batch?.size, work.queue!.batch?.state, work.queue!.batch?.tip], [1, 'testing', null], 'the head batch is a single entry testing with no published tip');
+  assert.equal(work.queue!.batchStall, undefined, 'no stall timer is written on a single-entry head');
+  const revision = work.revision;
+  await engine.reconcile(); await engine.reconcile();
+  assert.equal((await reload(work)).revision, revision, 'no reconcile pass re-saved it');
+});
+
+test('unit:orphan-job-deferred — a job whose item the fleet read did not hold is deferred with that reason and is not counted as a finish without an observation', async () => {
+  await clearQueue();
+  const repo = new Repo(), github = repo.adapter();
+  const main = repo.commit([], 'main'); repo.refs.set('heads/main', main);
+  const work = await submitted(repo, 'Orphan job', () => repo.change([main], 'feat: orphan', ['src/orphan.ts']));
+  const list = engine.store.list.bind(engine.store);
+  engine.store.list = async () => { engine.store.list = list; return (await list()).filter(item => item.id !== work.id); };
+  try {
+    await onlyJob(work);
+    await processJob(engine, github);
+  } finally { engine.store.list = list; }
+  const job = await jobRow(work);
+  assert.equal(job.deferred_reason, 'item not found when the job ran');
+  assert.equal(job.error, null);
+  assert.equal(job.unobserved, 0, 'the run is not counted as starved');
+  assert.ok(job.available_at.getTime() > Date.now(), 'the job is deferred, not retried at once');
 });
 
 test('unit:batch-view-stable — a re-derived batch view equal in content keeps the stored queue entry, so reconciling a queued entry no longer rewrites its document', { timeout: 60_000 }, async () => {
