@@ -119,6 +119,7 @@ export async function retryLockFailures(
       if (!transient(error) || !retryable()) throw error;
       await rollback();
       await backoff(attempt);
+      if (!retryable()) throw error;
     }
   }
 }
@@ -184,6 +185,12 @@ export async function runStartupMigration(pool: Pool, options: { lockTimeoutMs?:
     if (!watching || attempt !== armed) return;
     try {
       if (lost) throw lost;
+      if (Date.now() < attemptDeadline) {
+        // GY-824: the attempt's budget was refreshed after work that waited on no lock: keep
+        // polling, cancelling nothing, until the refreshed deadline arrives.
+        if (watching && attempt === armed) poll = setTimeout(() => { polling = watch(pid, attempt); }, 100);
+        return;
+      }
       cancelledWaiting = true; // Marked before the cancel goes out: its 57014 can reach the migration before this query returns.
       const { rows } = await guard.query("SELECT pg_cancel_backend(pid) AS cancelled FROM pg_stat_activity WHERE pid=$1 AND wait_event_type='Lock'", [pid]);
       if (!rows[0]?.cancelled) { cancelledWaiting = false; if (watching && attempt === armed) poll = setTimeout(() => { polling = watch(pid, attempt); }, 100); }
@@ -198,11 +205,10 @@ export async function runStartupMigration(pool: Pool, options: { lockTimeoutMs?:
     const arm = () => {
       const attempt = ++armed;
       attemptDeadline = Math.min(deadline, Date.now() + attemptTimeout);
+      cancelledWaiting = false;
       poll = setTimeout(() => { polling = watch(pid, attempt); }, Math.max(0, attemptDeadline - Date.now()));
     };
     const disarm = async () => { armed++; clearTimeout(poll); await polling.catch(() => {}); };
-    const unchangedPrelude = recorded?.prelude === digests.prelude;
-    const unchangedTable = (name: string) => recorded?.tables?.[name] === digests.tables[name];
     // A failed attempt is judged once the watchdog's cancel, if one is in flight, has recorded what it did.
     const migrate = () => migrateOnce().catch(async error => { await polling.catch(() => {}); throw error; });
     const migrateOnce = async () => {
@@ -211,12 +217,26 @@ export async function runStartupMigration(pool: Pool, options: { lockTimeoutMs?:
       await db.query('BEGIN'); await db.query('SET LOCAL statement_timeout = 0');
       // The migration's own lock, never the coordination lock (GY-203): two migrations serialize beside live coordination.
       await step(waitingOn, 'SELECT pg_advisory_xact_lock($1)', [advisoryLocks.migration]);
+      const { rows: tableCheck } = await step('check if graphyard_schema exists', 'SELECT to_regclass(\'graphyard_schema\') AS oid');
+      let recordedInTxn;
+      if (tableCheck[0].oid === null) {
+        recordedInTxn = { version: 0, migration: null, prelude: null, tables: null };
+      } else {
+        const { rows: schemaRows } = await step('a lock on table graphyard_schema', 'SELECT COALESCE((SELECT MAX(version) FROM graphyard_schema),0) AS version, obj_description(to_regclass(\'graphyard_schema\'),\'pg_class\') AS digest');
+        recordedInTxn = { version: Number(schemaRows[0].version), ...recordedMigrationDigests(schemaRows[0].digest) };
+      }
+      const unchangedPrelude = recordedInTxn?.prelude === digests.prelude;
+      const unchangedTable = (name: string) => recordedInTxn?.tables?.[name] === digests.tables[name];
+      if (recordedInTxn.version > schemaVersion) throw newerSchema(recordedInTxn.version);
       if (!unchangedPrelude) await step('a lock on the migration\'s shared function graphyard_immutable', migrationPrelude);
       for (const { name, ddl } of tables) {
         if (unchangedTable(name)) continue;
         const waiting = `a lock on table ${name} (or an object its migration touches)`;
         await lockRebuiltTriggerTables(step, waiting, ddl); await step(waiting, ddl);
       }
+      // GY-824: the budget bounds lock waits, never this migration's own work: DDL that ran without
+      // waiting may outlast one attempt's budget, so the steps that remain wait on a fresh one.
+      attemptDeadline = Math.min(deadline, Date.now() + attemptTimeout);
       const current = Number((await step('a lock on table graphyard_schema', 'SELECT COALESCE(MAX(version),0) AS version FROM graphyard_schema')).rows[0].version);
       if (current > schemaVersion) throw newerSchema(current);
       if (current < schemaVersion) await step(waitingOn, 'INSERT INTO graphyard_schema(version, graphyard_version) VALUES($1,$2)', [schemaVersion, releaseInfo().version]);

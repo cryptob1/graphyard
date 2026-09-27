@@ -11,7 +11,7 @@ import type { SessionHandleInput } from '../model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from '../request-settlement.js';
 import { type ResourceReclaimReport, reclaimResources, dispatchRefusal } from '../master-resources.js';
 import { RefusedResponse } from '../model/refusal.js';
-import { mergeBatchSize, rerunFailedChecks } from '../master/profiles.js';
+import { mergeBatchSize, mergeParallelTips, optimisticExcludeGlobs, optimisticMergeEnabled, rerunFailedChecks } from '../master/profiles.js';
 import type { CapacityRole, PartialWork } from '../model/capacity.js';
 import { readProducerLedger, saveProducerLedger, independentProducerProfiles, launchProducer, reclaimCheckouts } from '../producer.js';
 import { followUpThreadIds, readReviewLedger, updateReviewLedger, launchReview } from '../reviewer.js';
@@ -22,6 +22,7 @@ import { registeredLaunch } from '../model/session-state.js';
 import { readApproverLaunches } from '../master/autonomy.js';
 import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type ContainmentAssessment, type EscalationSession, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, type MergeExecutor, agentToken, approverRoleHealth, decisionInput, escalationRoleHealth, launchApprover, launchEscalationHandler, readApproverLaunch, readEscalationSessions, saveEscalationSession, verifiedContext, listHerdrAgents, readEnvironmentLog, selectionKey, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, mergeExecutor, reclaimWorktrees, removeReclaimableWorktrees, writeWorktreeInventoryCache, reclaimIdleMs, writeFailure, assessContainment, herdrJson } from '../master.js';
 import { annotatePaneShell } from '../quarantine.js';
+import { listHerdrPanes } from '../master/herdr.js';
 import { probeSupervisorAbsence } from '../containment-probe.js';
 import { httpFleetClient, reconcileFleetSessions, settledRecordSessions } from '../fleet.js';
 import { type ContainmentRetention, type DaemonAction, type DaemonState, type LoopRelease, storeAction, type DeploymentObservation, message, writeDaemonState } from './state.js';
@@ -111,9 +112,11 @@ export interface DaemonEffects {
    */
   publishProductionEnvironment?: () => Promise<unknown>;
   /**
-   * Publishes `mergeQueue.batchSize` (GY-330) and `mergeQueue.rerunFailedChecks` (GY-516) to the
-   * control plane, whose merge queue batches by the one and reruns failed required checks by the
-   * other; sent only on a change, and read at the start of every cycle so a reconfiguration applies
+   * Publishes `mergeQueue.batchSize` (GY-330), `mergeQueue.parallelTips` (GY-498),
+   * `mergeQueue.rerunFailedChecks`, `mergeQueue.optimistic` (GY-500) and `mergeQueue.optimisticExclude`
+   * (GY-503) to the control plane, whose merge queue batches and validates its window by the first
+   * two, lets disjoint entries past it by the third and judges shared infrastructure by the last;
+   * sent only on a change, and read at the start of every cycle so a reconfiguration applies
    * before the next merge.
    */
   publishMergeBatchSize?: () => Promise<unknown>;
@@ -248,6 +251,12 @@ export interface DaemonEffects {
   roleHealth?: () => Promise<Partial<Record<'reviewer' | 'producer' | 'approver' | 'escalation-handler', { profiles: { name: string }[]; health: Record<string, { available: boolean; reason: string | null; accounts?: ProfileAccountHealth[] }> }>>>;
   /** Herdr's agent inventory, read asynchronously: an empty list when Herdr cannot be read. */
   agents: () => HerdrAgent[] | Promise<HerdrAgent[]>;
+  /**
+   * The host's pane inventory (`herdr pane list`, GY-842): every pane this host's runtime holds,
+   * with or without an agent in it, for the pane count the agent inventory cannot give. A loop
+   * wired without it reports no pane count; the sweep judges presence from the agent inventory.
+   */
+  panes?: () => Promise<{ panes: { pane_id?: string }[]; available: boolean }>;
   /**
    * The same session inventory with whether it could be read at all. A Herdr that cannot be
    * reached reports no sessions, and stopping a supervisor on that would kill live work, so the
@@ -507,6 +516,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   const persistLoop = (state: DaemonState) => writeDaemonState(current(), state);
   return {
     agents: () => listHerdrAgents(run).catch(() => []),
+    panes: async () => { try { return { panes: await listHerdrPanes(run), available: true }; } catch { return { panes: [], available: false }; } },
     // A reviewer or producer session ends with its ledger record (GY-205): its Herdr name is not one the registry session determines.
     reconcileSessions: async (runtime, finished) => {
       const settled = new Map(finished);
@@ -628,11 +638,11 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       publishedEnvironment = environment;
     },
     publishMergeBatchSize: async () => {
-      const settings = { batchSize: mergeBatchSize(current()), rerunFailedChecks: rerunFailedChecks(current()) };
-      const key = JSON.stringify(settings);
-      if (key === publishedMergeQueue) return;
-      await mutate('merge-queue', settings);
-      publishedMergeQueue = key;
+      const config = { batchSize: mergeBatchSize(current()), optimistic: optimisticMergeEnabled(current()), parallelTips: mergeParallelTips(current()), rerunFailedChecks: rerunFailedChecks(current()), optimisticExclude: optimisticExcludeGlobs(current()) };
+      const published = JSON.stringify(config);
+      if (published === publishedMergeQueue) return;
+      await mutate('merge-queue', config);
+      publishedMergeQueue = published;
     },
     recordDeployment: (work, observation) => mutate(`work/${work.id}/deployment`, { sha: observation.sha, mergeSha: work.delivery!.mergeSha, source: observation.source, observedAt: observation.observedAt }),
     requestSmoke: async work => {

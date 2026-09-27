@@ -10,6 +10,7 @@ import { message, orphanObservationSchema } from './state.js';
 import { closeKey } from './reconcile.js';
 import { boundDetail } from './decisions.js';
 import { clearProfileFailure, orphanedSupervisors, readyToRetry } from './sessions.js';
+import { paneAlreadyGone } from '../request-settlement.js';
 import { blockedPromptAnswers, blockedPromptFailMs, blockedPromptSettleMs, failoverKey, handlerSettleMs, launchAppearanceMs, launcherRetry, promptDigest, type LaunchedSession, preserveInterruptedAttempt, record, stoppedStates } from './effects.js';
 import type { Cycle } from './cycle.js';
 
@@ -640,8 +641,10 @@ async function resumeStep(cycle: Cycle, failedOver: Set<string>, listingLive: bo
  * 1g. An implementation session over while its handle still says running (GY-524): its item has
  * left build, the stage it was launched for, or Herdr detects no agent in its pane — the runtime is
  * no longer the pane's foreground process. The pane is matched on its own coordinate, never on the
- * profile's agent name, which the profile's next session reuses in another pane. The handle is
- * closed with the reason, so no reader counts it running.
+ * profile's agent name, which the profile's next session reuses in another pane. The session ends
+ * with the reason, so no reader counts it running, and its pane is closed in the same step — the
+ * runtime already left, so the pane is a bare shell holding a pty — and the close is recorded with
+ * the end (GY-842). A pane that is already gone is recorded as such, not as a failure.
  */
 async function closeExitedWorkerSessions(cycle: Cycle, runtime: { agents: HerdrAgent[]; available: boolean } | null) {
   const { config, state, effects, snapshot, clock, now, performed, isolate } = cycle;
@@ -663,8 +666,15 @@ async function closeExitedWorkerSessions(cycle: Cycle, runtime: { agents: HerdrA
     await isolate('close', item, handle.id, async () => {
       const entry = (outcome: 'done' | 'failed', detail: string) => record(state, key, { kind: 'close', work: item.key, principal: handle.principal, state: outcome, detail, attempts, cycle: state.cycle }, now(), effects.persist);
       try {
-        await effects.recordSession!(item, { id: handle.id, kind: 'implementation', runtime: handle.runtime, host: handle.host, subject: handle.subject, state: 'finished', outcome: `closed by the loop: ${found}`.slice(0, 500) });
-        performed.push(await entry('done', `Closed implementation session ${handle.id} of ${item.key}${handle.pane ? ` (pane ${handle.pane})` : ''}: ${found}`));
+        // The pane goes first, so the record never says finished beside a pane still standing. A
+        // close that fails leaves the handle running: the step is retried whole on a later cycle.
+        let closed = '';
+        if (handle.pane) {
+          try { await effects.closeSession(handle.pane); closed = `; pane ${handle.pane} closed`; }
+          catch (error) { if (!paneAlreadyGone(error)) throw error; closed = `; pane ${handle.pane} was already gone`; }
+        }
+        await effects.recordSession!(item, { id: handle.id, kind: 'implementation', runtime: handle.runtime, host: handle.host, subject: handle.subject, state: 'finished', outcome: `closed by the loop: ${found}${closed}`.slice(0, 500) });
+        performed.push(await entry('done', `Closed implementation session ${handle.id} of ${item.key}${handle.pane ? ` (pane ${handle.pane})` : ''}: ${found}${closed}`));
       } catch (error) {
         performed.push(await entry('failed', `Could not close implementation session ${handle.id} of ${item.key}: ${message(error)}`));
       }
