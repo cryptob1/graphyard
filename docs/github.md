@@ -7,6 +7,7 @@ The control-plane App holds (`src/github-permissions.ts`):
 
 | Permission | Access | Needed to |
 | --- | --- | --- |
+| Actions | Read and write | rerun failed workflow jobs on the unchanged candidate (failed CI reruns) |
 | Administration | Read | inspect branch protection (pull request observation) |
 | Checks | Read and write | read CI check runs (pull request observation); publish `Graphyard / merge` on the exact candidate commit (the required check) |
 | Contents | Read and write | read commits, trees and pull request files (pull request observation); publish speculative merge-queue tips: the merge commit on the candidate branch and the `refs/graphyard/queue/*` ref that binds it (the merge queue) |
@@ -35,6 +36,8 @@ On the base branch require `Graphyard / merge` bound to this App, `strict` **off
 The gate requires `GITHUB_CI_APP_IDS` CI checks, current-head approval, trusted passing evidence, a mergeable non-draft PR and the queue head. Unknown mergeability (`null`) is re-read 3 times in 10 s, then refused as computing; queued tips decide.
 
 ## Merge queue
+
+A failed required check is rerun on the unchanged head before it triggers rework or queue ejection. The test gate and rework decisions use the newest check-run ID from the configured CI Apps, ignoring same-named checks from other Apps and workflow attempt ordering. Master status includes the owed or running rerun and its failed, refused or expired outcome even before the head enters the queue. An owed or accepted rerun expires after 15 minutes without a new check run; a visible running check is allowed to finish. The control-plane App needs Actions: write; preflight diagnoses a missing grant and holds rerun requests until the permission is accepted.
 
 Once gated, a candidate's speculative tip (predicted base merged in), pushed onto the candidate branch and `refs/graphyard/queue/KEY`, binds every check, review and proof. A failed check, requested changes, a revoked proof, a conflict or rework ejects it to the back. One conflicting only with entries ahead of it re-enters unchanged once one lands or leaves; one leaving validation is skipped until revalidated. The App passes the check for an authorized head and merge group and asks GitHub to merge (queue, auto-merge or [direct](#direct-merges)); protection decides; withdrawal fails and dequeues; `master status` names `merge.enqueue.refused`.
 

@@ -865,6 +865,24 @@ export function latestCheck(checks: Observation['checks']): Observation['checks'
   }, undefined);
 }
 
+declare module './model/work.js' {
+  interface Gate {
+    /** The server's trusted CI Apps, recorded on the test gate for downstream decisions. */
+    ciAppIds?: number[];
+  }
+}
+
+/**
+ * Select exactly the run the test gate uses, including its configured App trust boundary.
+ * Legacy snapshots without that metadata use the engine's historical GitHub Actions default;
+ * the next gate evaluation records the installation's actual configuration, including [].
+ */
+export function requiredCheck(work: Pick<Work, 'candidate' | 'observation' | 'gates'>, name: string, ciAppIds: readonly number[] = work.gates.find(gate => gate.name === 'test')?.ciAppIds ?? [15368]) {
+  const observation = work.observation, candidate = work.candidate;
+  if (!candidate || !observation || observation.candidate.sha !== candidate.sha || observation.candidate.baseSha !== candidate.baseSha) return undefined;
+  return latestCheck(observation.checks.filter(run => run.name === name && ciAppIds.includes(run.appId)));
+}
+
 /**
  * The violation an observed, unauthorized merge records when a two-party reconciliation of it was
  * refused; the engine writes it as `<prefix><decision id> refused: <reasons>`. Read here because
@@ -1444,7 +1462,7 @@ export interface CheckRerun {
 }
 /** The installation-ledger event recording the rerun count the master published (POST /api/merge-queue). */
 export const rerunFailedChecksEvent = 'merge-queue.rerun-failed-checks';
-/** A rerun GitHub accepted but that no new check run shows after this long no longer holds the failure. */
+/** An owed or accepted rerun with no new check run after this long no longer holds the failure. */
 export const checkRerunVisibilityMs = 15 * 60_000;
 /** Rerun records kept on an item; older ones remain on the ledger. */
 export const checkRerunLimit = 20;
@@ -1463,10 +1481,10 @@ export function holdingCheckRerun(work: Pick<Work, 'checkReruns'>, sha: string, 
  * owed or requested rerun: the loop's decisions and the test gate's next action then wait for the
  * rerun instead of returning the head to its worker, which would cost the bindings the rerun keeps.
  */
-export function checkRerunHeld(work: Pick<Work, 'checkReruns' | 'candidate' | 'observation'>, check: string): boolean {
+export function checkRerunHeld(work: Pick<Work, 'checkReruns' | 'candidate' | 'observation' | 'gates'>, check: string): boolean {
   const observation = work.observation, sha = work.candidate?.sha;
   if (!observation || !sha || observation.candidate.sha !== sha) return false;
-  return !!holdingCheckRerun(work, sha, check, latestCheck((observation.checks ?? []).filter(run => run.name === check)));
+  return !!holdingCheckRerun(work, sha, check, requiredCheck(work, check));
 }
 /** The required check whose newest trusted run failed on the observed candidate and is not held by a rerun. */
 function failedRequiredCheck(work: Work, observation: Observation, ciAppIds: readonly number[] | null): string | undefined {
@@ -1500,8 +1518,8 @@ export function reconcileCheckReruns(work: Work, ciAppIds: readonly number[], li
       if (entry.state === 'owed') { const started = { ...entry, state: 'requested' as const, rerunId: run.id }; transitions.push({ kind: 'check.rerun.requested', rerun: started }); return started; }
       return entry.rerunId === run.id ? entry : { ...entry, rerunId: run.id };
     }
-    if (entry.state === 'requested' && now.getTime() - Date.parse(entry.at) >= checkRerunVisibilityMs) {
-      const expired = { ...entry, state: 'expired' as const, detail: `GitHub accepted the rerun but no new ${entry.check} run appeared within ${checkRerunVisibilityMs / 60_000} minutes`, resolvedAt: at };
+    if (now.getTime() - Date.parse(entry.at) >= checkRerunVisibilityMs) {
+      const expired = { ...entry, state: 'expired' as const, detail: `${entry.state === 'owed' ? 'The rerun remained owed' : 'GitHub accepted the rerun'} but no new ${entry.check} run appeared within ${checkRerunVisibilityMs / 60_000} minutes`, resolvedAt: at };
       transitions.push({ kind: 'check.rerun.expired', rerun: expired }); return expired;
     }
     return entry;
@@ -1530,6 +1548,18 @@ function rerunOutcome(work: Work, sha: string, check: string): string {
   return !last ? '' : last.state === 'failed' ? ', again after one rerun of its failed jobs'
     : last.state === 'refused' ? `; its rerun was refused: ${last.detail ?? 'no reason given'}`
     : last.state === 'expired' ? `; ${last.detail}` : '';
+}
+/** The test gate exposes the rerun even when this candidate has never entered the queue. */
+export function checkRerunStatus(work: Work, check: string): string {
+  const sha = work.candidate?.sha;
+  const last = checkReruns(work).filter(entry => entry.sha === sha && entry.check === check).at(-1);
+  if (!last) return '';
+  const state = last.state === 'owed' ? 'one rerun of its failed jobs is owed'
+    : last.state === 'requested' ? `its failed jobs are rerunning${last.runId ? ` (workflow run ${last.runId})` : ''}`
+    : last.state === 'failed' ? 'failed again after rerunning its failed jobs'
+    : last.state === 'passed' ? 'passed'
+    : `${last.state}: ${last.detail ?? 'no reason given'}`;
+  return `; rerun: ${state}`;
 }
 /** The reruns on the current candidate that still hold a failure, as `<sha>: <what is awaited>` lines. */
 export function pendingCheckReruns(work: Work): string[] {

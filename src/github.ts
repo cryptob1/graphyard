@@ -2214,6 +2214,8 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
       // observation recorded the rerun as owed, holding the entry's position; GitHub is asked here,
       // outside any transaction, and its answer recorded. A refusal lets the failure stand at once.
       for (const owed of owedCheckReruns(work, engine.ciAppIds)) {
+        const rerunHold = hold('check-rerun');
+        if (rerunHold) { held ??= rerunHold; break; }
         let outcome: { state: 'requested' | 'refused'; runId?: number; detail?: string };
         if (typeof github.rerunFailedJobs !== 'function') outcome = { state: 'refused', detail: 'This GitHub adapter cannot rerun failed jobs' };
         else try { outcome = { state: 'requested', runId: (await github.rerunFailedJobs(owed.failedRunId)).runId }; }
