@@ -16,7 +16,7 @@ import { approverSessionName, decisionInput, masterConfigSchema, mergeExecutor, 
 import { emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { Launcher } from '../src/daemon/cycle.js';
 import { successorWidening } from '../src/model/successors.js';
-import { systemInvariants, type InvariantCheck } from '../src/model/invariants.js';
+import { checkInvariants, emptyInvariantRecord, systemInvariants, type InvariantCheck } from '../src/model/invariants.js';
 import { performSelfUpgrade, type SelfUpgradeOutcome } from '../src/daemon/upgrade.js';
 import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } from './helpers/soak-world.js';
 
@@ -435,4 +435,29 @@ test('unit:soak-invariants-hold — a loop change that breaks an invariant fails
   assert.ok(violations.every(line => /lingering-sessions/.test(line)), `nothing else is violated: ${violations.filter(line => !/lingering-sessions/.test(line)).slice(0, 3).join('\n')}`);
   // The violation is a fault of its class on the loop's record, which files one item when it recurs.
   assert.equal(state.faults.instances.filter(instance => instance.kind === 'invariant:lingering-sessions' && instance.faultClass === 'session-liveness').length, 1);
+});
+
+test('unit:soak-invariants-hold — an unwatched approver is known by the launcher\'s whole naming rule: a look-alike session is not one, and a key too long for a decision fragment is still recognised', () => {
+  // GY-441: the lingering approver the regression above names is recognised by its name. The name is judged whole, as
+  // `approverSessionName` builds it, so neither a configured session that only begins like an approver nor a long key's
+  // shortened, digested name leaves the invariant wrong.
+  const now = Date.parse('2031-06-02T12:00:00Z'), decision = '4cb51514-4cb5-4f21-9b0e-0f2a6c8d4e15';
+  const item = (key: string, deliveredAgoMs: number | null) => ({ id: `work-${key}`, key, title: key, description: '', type: 'feature', priority: 2, dependencies: [], criteria: [],
+    policy: { checks: ['test'], review: true }, plannedFiles: [], stage: deliveredAgoMs === null ? 'build' : 'done', revision: 1, policyRevision: 1,
+    createdAt: new Date(now - hour).toISOString(), updatedAt: new Date(now).toISOString(), stageEnteredAt: new Date(now - hour).toISOString(), ready: true, epoch: 0, lease: null, workspaces: [],
+    candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [], violations: [], sessions: [],
+    delivery: deliveredAgoMs === null ? null : { mergedAt: new Date(now - deliveredAgoMs).toISOString(), mergeSha: sha('d'), authorizationRevision: 1 } }) as unknown as Work;
+  const lingering = (work: Work[], names: string[]) => checkInvariants(emptyInvariantRecord(), { work, now, agents: names.map(name => ({ name })) }).find(check => check.invariant === 'lingering-sessions')!;
+  assert.equal(lingering([item('GY-5', 41 * minute)], ['graphyard-approver-gy-5-worker', 'graphyard-approver-gy-5-0a1b2c3d-x']).holds, true, 'a session named like an approver, with no decision fragment, is not one');
+  for (const key of ['GY-1', 'GY-999', 'GY-1000', 'GY-12345678', 'ACME_ops.42', `GY-${'9'.repeat(13)}`, `GY-${'9'.repeat(37)}`]) {
+    const name = approverSessionName({ key }, decision), check = lingering([item(key, 41 * minute)], [name]);
+    assert.equal(check.holds, false, `${key}: its lingering approver ${name} is named`);
+    assert.match(check.reading, new RegExp(`approver session ${name} on ${key.replace('.', '\\.')}, 41 min after`));
+  }
+  // A shortened name two long keys both claim lingers only once neither item can still be judged.
+  const [shared, sibling] = [`GY-${'9'.repeat(13)}`, `GY-${'9'.repeat(12)}8`], claimed = approverSessionName({ key: shared }, decision);
+  assert.equal(lingering([item(shared, 41 * minute), item(sibling, null)], [claimed]).holds, true, 'the other claimant is still open');
+  assert.match(lingering([item(shared, 41 * minute), item(sibling, 45 * minute)], [claimed]).reading, new RegExp(`approver session ${claimed} on ${shared} or ${sibling}, 41 min after`));
+  // A short key's approver is not claimed by a key that merely extends it.
+  assert.equal(lingering([item('GY-12', 41 * minute)], [approverSessionName({ key: 'GY-1' }, decision)]).holds, true);
 });

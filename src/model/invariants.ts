@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { mergeableNow } from '../merge-queue.js';
-import { isApproverSessionName } from '../session-name.js';
+import { sessionName, sessionNameDigestLength, sessionNameDistinguisher, sessionNameDistinguisherLimit, sessionNameLimit } from '../session-name.js';
 import { isClosed } from './closure.js';
 import { standingEscalations } from './escalation.js';
 import type { FaultClass, FaultKind, FaultObservation } from './fault-classes.js';
@@ -106,6 +106,29 @@ export function followUpParent(work: Pick<Work, 'criteria' | 'dependencies' | 't
 /** Filed by the product rather than a person: a follow-up of an approval, a recurring fault class, or an intervention pattern. */
 export const machineFiled = (work: Pick<Work, 'criteria' | 'dependencies' | 'title' | 'origin'>) => followUpParent(work) !== null || !!work.origin?.faultClass || !!work.origin?.pattern;
 
+/**
+ * Whether `name` is an approver session master/autonomy.ts `approverSessionName` builds for `key`:
+ * `distinctSessionName` over one of its two role words, the key and a decision's UUID. The whole
+ * name is judged by that rule, rebuilt from session-name.ts rather than copied: the head
+ * `sessionName(role, key)`, then a hexadecimal decision fragment of the length the limit leaves,
+ * so a configured session that only begins like one (`graphyard-approver-gy-5-worker`) is not one;
+ * or, for a key too long to leave a fragment, `sessionName`'s shortened head and digest of the
+ * whole identity. That shortened head is all such a name can be known by without its decision, so
+ * two long keys that agree on it both claim the name.
+ */
+function isApproverSessionName(key: string, name: string) {
+  const hex = (value: string) => /^[0-9a-f]+$/.test(value);
+  return ['graphyard-approver', 'gy-approver'].some(role => {
+    const head = sessionName(role, key), room = Math.min(sessionNameLimit - head.length - 1, sessionNameDistinguisherLimit);
+    if (room >= sessionNameDistinguisher) {
+      const tail = name.startsWith(`${head}-`) ? name.slice(head.length + 1) : '';
+      return tail.length >= sessionNameDistinguisher && tail.length <= room && hex(tail);
+    }
+    // The fallback keeps the first characters of role, key and decision; with no room for a fragment they are all role and key.
+    const shortened = sessionName(role, key, '0'.repeat(sessionNameDistinguisher)).slice(0, -(sessionNameDigestLength + 1));
+    return name.length === shortened.length + 1 + sessionNameDigestLength && name.startsWith(`${shortened}-`) && hex(name.slice(shortened.length + 1));
+  });
+}
 const open = (work: Work) => work.stage !== 'done' && !isClosed(work);
 const time = (value: string | null | undefined) => { const parsed = value ? Date.parse(value) : Number.NaN; return Number.isFinite(parsed) ? parsed : null; };
 const minutes = (ms: number) => `${Math.round(ms / 60_000)} min`;
@@ -151,7 +174,7 @@ export function checkInvariants(record: InvariantRecord, input: InvariantInput):
       if (settled !== null && now - settled > bound && listed(watch.agentName, watch.pane)) { lingering.push({ subject: watch.work, detail: `approver session ${watch.agentName ?? watch.pane} on ${watch.work}, ${minutes(now - settled)} after its decision settled` }); if (watch.agentName) named.add(watch.agentName); }
     }
     // An approver the loop no longer watches — launched by hand (`master approver`, GY-403), or its watch retired — is
-    // known by its name, judged by the rule the launcher names it with (session-name.ts `isApproverSessionName`). A
+    // known by its name, judged by the rule the launcher names it with (`isApproverSessionName`). A
     // name shortened past its key can be claimed by more than one item; it lingers only once every claimant is settled.
     for (const agent of input.agents) {
       if (!agent.name || named.has(agent.name)) continue;
