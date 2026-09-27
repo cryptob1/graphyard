@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { existsSync } from 'node:fs';
 import { mkdir, readdir, readFile, stat, utimes, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -151,10 +152,12 @@ test('unit:tmp-reclaim: the loop\'s reclaim pass removes an old, unheld director
   await backdate(join(old, 'data.bin'), 8); await backdate(old, 8);
   // Old but held: a live process works inside it, as an embedded Postgres does while its suite runs.
   const held = join(root, 'graphyard-held');
+  // Every entry is as old as the unheld one, so only the live holder can keep it.
   await mkdir(held); await writeFile(join(held, 'data.bin'), Buffer.alloc(4096, 1));
-  await backdate(held, 8);
+  await backdate(join(held, 'data.bin'), 8); await backdate(held, 8);
   const holder = spawn('sleep', ['120'], { cwd: held, stdio: 'ignore' });
   t.after(() => { holder.kill('SIGKILL'); });
+  await once(holder, 'spawn');
   // Young: too new for the age bound, whatever its holders.
   const young = join(root, 'graphyard-young');
   await mkdir(young);
@@ -184,6 +187,12 @@ test('unit:tmp-reclaim: the loop\'s reclaim pass removes an old, unheld director
   assert.equal(existsSync(mine), true, 'a directory whose owning process still runs stays, however old');
   assert.ok(report.bytes >= 4096 + 'export {};\n'.length, `the report carries the bytes freed (${report.bytes})`);
   assert.match(describeTmpReclaim(report.removed.length, report.bytes) ?? '', /^freed .+ from 3 stale \/tmp directories$/);
+
+  // The holder alone kept it: once the process that held it exits, the next pass takes it.
+  holder.kill('SIGKILL'); await once(holder, 'exit');
+  const released = await reclaimTmpDirectories({ now: Date.now(), tmpRoot: root });
+  assert.deepEqual(released.removed.map(entry => entry.path), [held], 'the same directory goes once no live process holds it');
+  assert.equal(existsSync(held), false);
 
   // The bound: one pass removes at most its limit, whatever the backlog, so a reclaim never stalls a cycle.
   const backlog = await temporaryDirectory('reclaim-bound-root');
