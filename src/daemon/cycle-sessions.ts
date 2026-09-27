@@ -584,13 +584,13 @@ async function resumeStep(cycle: Cycle, failedOver: Set<string>, listingLive: bo
 
     // 1f. Idle with a live lease and nothing open.
     if (!agent || !pane || !['idle', 'done'].includes(status ?? '')) {
-      // The attempt's own pane is gone from the runtime while it holds the lease (GY-852, AC-2):
-      // it cannot be re-prompted, and the profile's agent name — which another item's session may
-      // now hold — is no address. Past the idle bound the attempt ends and is redispatched, and
-      // nothing is closed: a pane the name resolves to, if any, is not this attempt's. Only a
-      // runtime that answered the listing may say the pane is gone; an unreadable one is believed
-      // by nobody here.
-      if (own && !agent && listingLive) {
+      // The attempt's own pane is gone from the runtime — or the runtime lists no agent in it any
+      // more, which is the same exit — while it holds the lease (GY-852, AC-2): it cannot be
+      // re-prompted, and the profile's agent name — which another item's session may now hold —
+      // is no address. Past the idle bound the attempt ends and is redispatched, and nothing is
+      // closed: a pane the name resolves to, if any, is not this attempt's. Only a runtime that
+      // answered the listing may say the pane is gone; an unreadable one is believed by nobody here.
+      if (own && (!agent || !agent.agent) && listingLive) {
         const idle = state.actions[keys.idle];
         if (!idle) return;
         const reprompted = state.actions[`resume:idle:${item.id}:${epoch}:${idle.at}`];

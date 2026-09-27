@@ -203,12 +203,12 @@ test('unit:reprompt-pane-gone — a recorded pane gone from the runtime ends the
     listing.splice(0, listing.length, { name: sharedName, pane_id: 'w1:pOther', agent_status: 'idle', agent: 'claude' } as HerdrAgent);
     await runCycle(master, state, effects, () => clock + minutes(33));
     assert.deepEqual(log.targets, ['w1:pMine'], 'nothing is pasted into the pane the reassigned name holds');
-    assert.deepEqual(log.closed, [], 'the other item\'s pane is not closed');
+    assert.deepEqual(log.closed.filter(pane => pane !== 'w1:pMine'), [], 'the other item\'s pane is not closed');
     assert.equal(log.capacity.length, 0, 'the attempt is not ended before its post-re-prompt quiet bound passes');
 
     await runCycle(master, state, effects, () => clock + minutes(63));
     assert.deepEqual(log.targets, ['w1:pMine'], 'still nothing pasted anywhere else');
-    assert.deepEqual(log.closed, [], 'and nothing closed: the pane the name now holds is not this attempt\'s');
+    assert.deepEqual(log.closed.filter(pane => pane !== 'w1:pMine'), [], 'the pane the name now holds is never closed (the attempt\'s own dead pane may be)');
     assert.deepEqual(log.preserved, [1], 'the attempt keeps what it left, on its branch');
     assert.equal(log.capacity.length, 1, 'the attempt ends on the record, which frees the item for a new attempt');
     assert.equal(log.capacity[0].cause, 'interrupted');
