@@ -106,7 +106,7 @@ test('unit:rework-round-causes-classified — the classifier reads a fixture led
   assert.throws(() => parseArguments(['--unknown']), /Unknown argument/);
 });
 
-test('unit:rework-rounds-split-by-cause — the split excludes causes outside the item\'s own change from the median, master status reports it beside the raw figure, and docs/ states it', async () => {
+test('unit:rework-rounds-split-by-cause — the split excludes causes outside the item\'s own change from the median, and master status reports it beside the raw figure', async () => {
   // The split itself: raw counts keep every round; the own-change counts drop base breakage,
   // conflict, docs budget, lost approval or proof, and CI flakes.
   const round = (cause: string): ReworkRound => ({ workId: A, key: 'GY-901', seq: '1', at: submittedAt, cause: cause as ReworkRound['cause'], marker: null });

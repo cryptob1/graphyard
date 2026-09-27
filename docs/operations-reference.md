@@ -19,7 +19,7 @@ On the worker `graphyard master settle-containment GY-N "reason"` verifies nothi
 
 ## Submitted implementation needs rework
 
-Stop the worker, then `graphyard rework GY-N --previous-worker-stopped "reason"`; the next worker resubmits. `scripts/rework-causes.mjs` classifies the last 100 deliveries' rework rounds by ledger reason; `master status` reports the split (`speed.reworkRounds.ownChange`): median excluding causes outside the item's own change.
+Stop the worker, then `graphyard rework GY-N --previous-worker-stopped "reason"`; the next worker resubmits. `scripts/rework-causes.mjs` classifies the last 100 deliveries' rework rounds by ledger reason; `master status` reports the split (`speed.reworkRounds.ownChange`): median excluding causes outside the item's own change. At the time of GY-643 (2026-09-26), the measured split was approximately 55% own-change (review findings), 33% conflicts, and others; raw median rounds was 2 per item, falling to 0 when out-of-item causes are excluded.
 
 ## Flaky CI check
 
@@ -95,11 +95,12 @@ Rotate `GRAPHYARD_PRINCIPALS` and redeploy. Operator agents hold only listed cap
 ## Proof authority grants
 
 ```sh
+graphyard grants
 graphyard grants grant ci "integration:*,unit:*" "CI proofs"
 graphyard grants revoke ci "integration:claim-safety" "Runner decommissioned"
 ```
 
-Only an `admin` grants, only to `producer` principals. Patterns: exact name, `kind:*`, prefix (`manual:gy-43/*`).
+List live authority with `graphyard grants` (no args); only an `admin` grants or revokes, only to `producer` principals. Patterns: exact name, `kind:*`, prefix (`manual:gy-43/*`).
 
 ## Setup proposals and drift
 

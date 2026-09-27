@@ -1665,7 +1665,7 @@ export const reworkCauseRules: ReworkCauseRule[] = [
   // the lookbehinds keep the rule from firing on the word alone, so the round falls through to
   // the own-change rules the text may name instead of being excluded from the split (GY-643).
   { cause: 'ci-flake', marker: 'an unnegated flake named in the reason', pattern: /\b(?<!\bnot\b[^.\n]{0,20})(?<!\bnever\b[^.\n]{0,15})(?<!\bno\b[^.\n]{0,10})(?<!non-)(flake|flaky)s?\b/i },
-  { cause: 'ci-flake', marker: 'CI job hangs', pattern: /\bhangs\b/i },
+  { cause: 'ci-flake', marker: 'CI job hangs', pattern: /\b(?<!\bnot\b[^.\n]{0,20})(?<!\bnever\b[^.\n]{0,15})(?<!\bno\b[^.\n]{0,10})hangs\b/i },
   { cause: 'ci-flake', marker: 'transient failure', pattern: /\btransient(ly)? (fail|blocked|refus)/i },
   { cause: 'ci-flake', marker: 'launch-readiness flake', pattern: /\blaunch readiness\b/i },
   { cause: 'ci-flake', marker: 'CI infrastructure named', pattern: /\bCI (infrastructure|runner|infra)\b/i },

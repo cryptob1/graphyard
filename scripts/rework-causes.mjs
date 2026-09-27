@@ -17,11 +17,11 @@ import { pathToFileURL } from 'node:url';
 export const fixItemKeywords = {
   'own-change': ['review finding'],
   'base-breakage': ['base breakage'],
-  'conflict': ['conflict'],
+  'conflict': ['merge conflict', 'stale candidate'],
   'docs-budget': ['docs budget'],
-  'lost-approval-or-proof': ['lost approval', 'proof'],
-  'ci-flake': ['flake'],
-  'other': [],
+  'lost-approval-or-proof': ['lost approval', 'proof expired', 'evidence fail'],
+  'ci-flake': ['ci flake', 'ci-flake'],
+  'other': ['rework round'],
 };
 
 export function parseArguments(argv) {
@@ -90,7 +90,6 @@ export function render(report) {
   for (const entry of report.largest) lines.push(`  ${String(Math.round((entry.share ?? 0) * 100)).padStart(3)}%  ${entry.label}: ${entry.count} round${entry.count === 1 ? '' : 's'}`);
   for (const fix of report.fix) {
     if (fix.item) lines.push(`  fix item for ${fix.cause}: ${fix.item.key} — ${fix.item.title}`);
-    else if (fix.filing) lines.push(`  no open fix item for ${fix.cause}; file with POST /api/work: ${JSON.stringify(fix.filing)}`);
     else if (fix.filed) lines.push(`  filed fix item for ${fix.cause}: ${fix.filed.key ?? `refused (${fix.filed.reason})`}`);
   }
   return lines.join('\n');
