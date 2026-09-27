@@ -70,6 +70,14 @@ const plan = {
   breaksMain: 10, infrastructure: new Set([13, 14]),
   // GY-516: a flake on a speculative tip whose one rerun passes, and one whose rerun fails again.
   flaky: { rerunPasses: 13, rerunFails: 14 },
+  // GY-839: for one stretch of the day GitHub answers every open candidate's compares without a
+  // usable merge base, so the landing comparison keeps the two-way endpoint diff and the base's
+  // own new changes read as reverts — the reading this item fixes. The window covers the NOTICE
+  // commit on main, which moves the base under candidates still unqueued: their false landing
+  // refusals hold only the build gate and clear on the same heads when the window closes, before
+  // a worker could even react to them.
+  blind: { from: 96 * minute, to: 98 * minute },
+  notice: 96 * minute,
 };
 const file = (n: number) => `src/soak/item-${n}.ts`;
 const files = (n: number) => plan.infrastructure.has(n) ? [file(n), `tests/helpers/soak-item-${n}.ts`] : [file(n)];
@@ -134,7 +142,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   github.flaky.set(items[plan.flaky.rerunPasses - 1].key, 'rerun-passes'); github.flaky.set(items[plan.flaky.rerunFails - 1].key, 'rerun-fails');
 
   // ---- Workers: the loop dispatches, the simulated session claims, works, pushes and submits (or dies). ----
-  interface Session { work: string; key: string; branch: string; profile: WorkerProfile; epoch: number; attempt: number; pane: string; pushAt: number; diesAt: number | null; state: 'working' | 'submitted' | 'dead' }
+  interface Session { work: string; key: string; branch: string; profile: WorkerProfile; epoch: number; attempt: number; pane: string; pushAt: number; diesAt: number | null; state: 'working' | 'submitted' | 'dead'; synced?: boolean; refusedSince?: number }
   const sessions: Session[] = [], lost: string[] = [];
   const attempts = new Map<string, number>();
   const principalOf = (profile: WorkerProfile): Principal => ({ id: profile.principal, role: 'worker' });
@@ -166,6 +174,21 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       await engine.execute(principal, 'submit', session.work, { epoch: session.epoch, pr: pr.number, documentation: 'A simulated item: it changes no documented behaviour' }, id());
       session.state = 'submitted';
       herdr.status(session.pane, 'done');
+    }
+    // GY-839: a worker whose candidate was refused on landing does what that refusal asks —
+    // graphyard sync, restore what the base changed, push again. Under a fault window long enough
+    // for a worker to react, this is the worker round the false refusal costs; while GitHub answers
+    // merge bases truly the landing comparison clears on its own and no worker is woken at all.
+    for (const session of sessions.filter(entry => entry.state === 'submitted' && !entry.synced)) {
+      const current = (await store.list()).find(item => item.id === session.work);
+      const refused = (current?.gates ?? []).flatMap(gate => gate.passed ? [] : gate.reasons)
+        .some(reason => /would revert \d+ files? outside its planned files/.test(reason));
+      if (!refused) { session.refusedSince = undefined; continue; }
+      const since = session.refusedSince ?? now;
+      session.refusedSince = since;
+      if (now - since < 3 * minute) continue;
+      session.synced = true; session.refusedSince = undefined;
+      github.push(session.key, session.branch, principalOf(session.profile).id, sha('head', session.key, session.epoch, 'sync'), files(numberOf(session)));
     }
   };
 
@@ -278,7 +301,9 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   // handed it over — here, before the simulated clock moves on.
   const launcher = new Launcher();
   const violations: string[] = [], observed = new Set<string>(), failures: string[] = [], escalations: string[] = [], spent = new Set<string>();
-  let released = 0, split = false, deploys = 0, cycles = 0, reportedDispatches = 0;
+  // GY-839: every false landing refusal the fault window produces, first seen per candidate head.
+  const landingRefusals: { key: string; sha: string; elapsed: number }[] = [];
+  let released = 0, split = false, noticed = false, deploys = 0, cycles = 0, reportedDispatches = 0;
   const jobsDue = async () => Number((await store.pool.query('SELECT count(*) AS due FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now())')).rows[0].due);
   for (let elapsed = 0; elapsed <= options.hours * hour;) {
     const now = clock.now();
@@ -290,6 +315,12 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       const commit = github.commit(`Split ${from}\n\nGraphyard-Successor: ${from} -> ${successors.join(', ')}`, [...github.files.filter(path => path !== from), ...successors]);
       github.successions.push(...successors.map(to => ({ from, to, commit: commit.sha, similarity: 70 })));
     }
+    // GY-839: while the window stands, GitHub answers every open candidate's compares without a
+    // usable merge base; afterwards its answers carry the true one again.
+    github.staleMergeBase = elapsed >= plan.blind.from && elapsed < plan.blind.to
+      ? new Set([...github.prs.values()].filter(pr => pr.open).map(pr => pr.head)) : new Set<string>();
+    // A change landed on main outside Graphyard, moving the base under candidates already pushed.
+    if (!noticed && elapsed >= plan.notice) { noticed = true; github.commit('Add NOTICE to the base branch', [...github.files, 'NOTICE']); }
     // GY-551: twenty minutes in, the master requests a release of the last two items by hand and
     // puts each to an approver session it launches itself; neither session judges it.
     if (options.handApprovers && elapsed === 20 * minute) for (const [n, ending] of [[plan.items, 'vanishes'], [plan.items - 1, 'stops']] as const) {
@@ -310,6 +341,11 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       for (const act of pending.splice(0)) await act();
       await engine.reconcile();
       for (let guard = 0; guard < 200 && await jobsDue(); guard++) await processJob(engine, adapter);
+      for (const item of await store.list()) {
+        const sha = item.candidate?.sha, refused = (item.gates ?? []).flatMap(gate => gate.passed ? [] : gate.reasons)
+          .find(reason => /would revert \d+ files? outside its planned files/.test(reason));
+        if (sha && refused && !landingRefusals.some(entry => entry.key === item.key && entry.sha === sha)) landingRefusals.push({ key: item.key, sha, elapsed });
+      }
       try {
         const result = await runCycle(config, state, effects, clock.now, launcher); cycles++;
         reportedDispatches += result.actions.filter(action => action.kind === 'dispatch' && action.state === 'done').length;
@@ -338,12 +374,13 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   }
 
   const final = (await store.list()).filter(item => items.some(entry => entry.id === item.id));
-  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, herdr, hand, escalations, spent, upgrades, refusalSamples, checkout };
+  if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
+  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, herdr, hand, escalations, spent, upgrades, refusalSamples, checkout, landingRefusals };
 }
 
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 180_000 }, async () => {
   const began = performance.now();
-  const { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, state, upgrades, refusalSamples, checkout } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
+  const { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, state, upgrades, refusalSamples, checkout, landingRefusals } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
   const undelivered = final.filter(item => item.stage !== 'done' || !item.delivery);
   assert.deepEqual(undelivered.map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
@@ -401,6 +438,23 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.equal(final.find(item => item.key === flaky.passes)!.pipeline?.reworkRounds ?? 0, 0, 'a flake whose rerun passed costs no rework round');
   assert.equal(final.find(item => item.key === flaky.fails)!.pipeline?.reworkRounds, 1, 'a tip that failed again after its rerun returned to its worker once');
   assert.ok(!github.contains(github.merges.find(entry => entry.key === flaky.fails)!.sha, failed.sha), 'and a new head, not the failed tip, landed');
+  // GY-839: the landing check ran in the loop all day, over bases that moved under open candidates.
+  // The three-way comparison from the merge base is what a candidate bound behind the tip was
+  // judged by, and the fault window's blind answers are the only source of false landing refusals
+  // the day has. Each held only the build gate and cleared on the exact head it named, before any
+  // worker could react: no ejection, no sync round, no rework.
+  assert.ok(github.landingChecks > 0, 'the landing check ran during the simulated day');
+  assert.ok(github.landingBases.size >= plan.items, `the landing check judged moving bases (${github.landingBases.size})`);
+  assert.ok(github.ancestorCompares > 0, `candidates bound behind the tip were compared from their merge base (${github.ancestorCompares} ancestor compares)`);
+  assert.ok(github.blindCompares > 0, `the fault window answered compares without a usable merge base (${github.blindCompares} blind compares)`);
+  assert.ok(landingRefusals.length >= 2, `the fault window caught every candidate bound behind it (${JSON.stringify(landingRefusals)})`);
+  assert.ok(landingRefusals.every(entry => entry.elapsed >= plan.blind.from - minute && entry.elapsed <= plan.blind.to + minute),
+    `a false landing refusal stood only inside the fault window: ${JSON.stringify(landingRefusals)}`);
+  for (const entry of landingRefusals) {
+    const landed = github.merges.find(merge => merge.key === entry.key);
+    assert.ok(landed && github.contains(landed.sha, entry.sha), `${entry.key} landed the exact head its false refusal named (${entry.sha.slice(0, 12)})`);
+  }
+  assert.ok(sessions.every(session => !session.synced), 'no worker was woken to sync what was never wrong');
   assert.ok(cycles > 24 * 6, `the loop cycled through the day (${cycles} cycles)`);
   // GY-437: the between-cycles self-upgrade ran after every cycle of the day. Each deploy aligned
   // the checkout once, and restarted the fleet and the loop once (every merge touches src/); the
