@@ -456,11 +456,17 @@ function scopeChange(item: Work) {
 /**
  * Check if the pane recorded for an item's session still belongs to this item/epoch.
  * Returns null if the pane is valid, or a reason string if it should be refused.
+ * If no sessions are recorded yet, returns null (the pane is valid until sessions exist).
  */
 function checkPaneStillBelongs(item: Work, epoch: number, pane: string | undefined): string | null {
   if (!pane) return 'no pane recorded';
-  const session = item.sessions?.find(s => s.kind === 'implementation' && s.epoch === epoch && s.pane === pane);
-  if (!session) return `pane ${pane} no longer belongs to ${item.key} epoch ${epoch} (pane reassigned or session ended)`;
+  // If no sessions are recorded yet, the pane is valid (no conflict detected).
+  if (!item.sessions?.length) return null;
+  const session = item.sessions.find(s => s.kind === 'implementation' && s.epoch === epoch && s.pane === pane);
+  // Only fail if other sessions exist but this pane doesn't match any of them.
+  if (!session && item.sessions.some(s => s.kind === 'implementation' && s.epoch === epoch)) {
+    return `pane ${pane} no longer belongs to ${item.key} epoch ${epoch} (pane reassigned or session ended)`;
+  }
   return null;
 }
 
