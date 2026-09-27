@@ -212,8 +212,14 @@ export async function runStartupMigration(pool: Pool, options: { lockTimeoutMs?:
       // The migration's own lock, never the coordination lock (GY-203): two migrations serialize beside live coordination.
       await step(waitingOn, 'SELECT pg_advisory_xact_lock($1)', [advisoryLocks.migration]);
       if (Date.now() >= deadline) throw new Error(`Schema migration to generation ${schemaVersion} exceeded its ${timeout} ms deadline after acquiring the migration advisory lock, while waiting for ${waitingOn}; startup fails instead of outlasting the health check — retry the deploy when traffic decreases`, { cause: undefined });
-      const { rows: schemaRows } = await step('a lock on table graphyard_schema', 'SELECT COALESCE(MAX(version),0) AS version, obj_description(to_regclass(\'graphyard_schema\'),\'pg_class\') AS digest FROM graphyard_schema');
-      const recordedInTxn = { version: Number(schemaRows[0].version), ...recordedMigrationDigests(schemaRows[0].digest) };
+      const { rows: tableCheck } = await step('check if graphyard_schema exists', 'SELECT to_regclass(\'graphyard_schema\') AS oid');
+      let recordedInTxn;
+      if (tableCheck[0].oid === null) {
+        recordedInTxn = { version: 0, migration: null, prelude: null, tables: null };
+      } else {
+        const { rows: schemaRows } = await step('a lock on table graphyard_schema', 'SELECT COALESCE((SELECT MAX(version) FROM graphyard_schema),0) AS version, obj_description(to_regclass(\'graphyard_schema\'),\'pg_class\') AS digest');
+        recordedInTxn = { version: Number(schemaRows[0].version), ...recordedMigrationDigests(schemaRows[0].digest) };
+      }
       const unchangedPrelude = recordedInTxn?.prelude === digests.prelude;
       const unchangedTable = (name: string) => recordedInTxn?.tables?.[name] === digests.tables[name];
       if (recordedInTxn.version > schemaVersion) throw newerSchema(recordedInTxn.version);
