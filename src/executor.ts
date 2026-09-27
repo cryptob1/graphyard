@@ -151,6 +151,8 @@ export function startConnectAccountWorker(config: () => MasterConfig, options: {
  * session and walk away. Every kind whose judgment happens in the step itself is absent by
  * construction, and `judgmentInExecutorLoop` below is what keeps that true as kinds are added.
  */
+/** The checkout refusal a dirty-checkout replacement handler carries (GY-865), read by the claim guard. */
+const checkoutRefusalTag = Symbol('graphyard.executor.checkoutRefusal');
 export function controlPlaneHandlers(config: () => MasterConfig, effects: ControlPlaneEffects): Partial<Record<NextActionKind, ExecutorHandler>> {
   // GY-857: an executor runs the modules it imported from the coordinator checkout once, at
   // startup. When that checkout holds uncommitted work, no claim may run it — the modules are
@@ -321,8 +323,11 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
       return `observed the release serving ${observation.sha.slice(0, 12)} for ${work.key}`;
     },
   };
+  // GY-865: the replacement handler carries its refusal, so the claim guard in front of every
+  // claim (loopMergeGuardedEffects) can see that this handler set is the refusal itself and stand
+  // the executor down instead of letting it claim rows to settle them failed.
   if (checkoutRefusal) for (const kind of Object.keys(handlers) as NextActionKind[]) {
-    handlers[kind] = (async () => { throw new Error(checkoutRefusal); }) as ExecutorHandler;
+    handlers[kind] = Object.assign((async () => { throw new Error(checkoutRefusal); }) as ExecutorHandler, { [checkoutRefusalTag]: checkoutRefusal });
   }
   return handlers;
 }
@@ -458,15 +463,26 @@ export const loopMergeRefusal = (loop: Pick<LoopMerger, 'name'>) =>
   `${loop.name} merges on this installation, so this executor refuses merge rows: two mergers defeat each other's revision check (GY-245); remove merge from the executors' kinds with node scripts/graphyard-executor.mjs --install`;
 
 /**
- * The same effects, refusing `merge` at the claim while a live loop merges. The refusal is made
- * before the claim, never after it: a claim writes the item, and that write is what makes the
- * loop's merge fail its revision check. Said once each time the loop appears.
+ * The same effects, refusing `merge` at the claim while a live loop merges, and refusing every
+ * claim while the checkout the handlers came from is dirty (GY-865): a dirty checkout hands the
+ * executor handlers that are the checkout refusal itself, so a claim would only consume the row
+ * to settle it failed — driving attempts and stall backoff long after the checkout is cleaned.
+ * Both refusals are made before the claim, never after it: a claim writes the item, and that
+ * write is what makes the loop's merge fail its revision check or a row carry the refusal. Each
+ * is said once each time it appears.
  */
 export function loopMergeGuardedEffects<E extends ExecutorEffects>(effects: E, loop: () => Promise<LoopMerger | null>, log: (line: string) => void = () => {}): E {
-  let refusing: string | null = null;
+  let refusing: string | null = null, standing: string | null = null;
   return {
     ...effects,
     claim: async request => {
+      const standDown = Object.values(effects.handlers).find(handler => !!((handler as (ExecutorHandler & { [checkoutRefusalTag]?: string }) | undefined)?.[checkoutRefusalTag])) as (ExecutorHandler & { [checkoutRefusalTag]?: string }) | undefined;
+      if (standDown) {
+        const why = standDown[checkoutRefusalTag]!;
+        if (why !== standing) { standing = why; log(`[graphyard-executor] ${request.executor}: claims nothing while its coordinator checkout is dirty: ${why}`); }
+        return { action: null, open: 0 };
+      }
+      standing = null;
       if (!request.kinds.includes('merge')) return effects.claim(request);
       const merger = await loop().catch(() => null);
       if (!merger?.live) { refusing = null; return effects.claim(request); }

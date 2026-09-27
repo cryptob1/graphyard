@@ -91,6 +91,16 @@ export function workerConfinementRefusal(profile: { kind?: string; agentArgs?: r
   return null;
 }
 
+/**
+ * The same judgment as `workerConfinementRefusal`, made on the launch a worker would actually run
+ * (GY-865). A registry-selected account replaces the profile's own arguments and environment with
+ * its runtime contract (GY-170), so the profile-level judgment at the harness install never sees
+ * what actually runs; the dispatcher judges this against the effective launch instead, and a
+ * contract that would start the worker outside its assigned worktree is refused, naming the
+ * registry as the source. `--permission-mode` pairs are deliberately not judged: they select an
+ * approval mode, and a mode that asks is refused at the plan, while write confinement for those
+ * runtimes comes from the harness rules and the granted directories, not the mode.
+ */
 export function effectiveConfinementRefusal(kind: string | undefined, args: string[], environment: Record<string, string>): string | null {
   const bypassArgs = ['--dangerously-skip-permissions', '--dangerously-bypass-approvals-and-sandbox'];
   if (kind !== 'gemini' && kind !== 'qwen') bypassArgs.push('--yolo');
@@ -453,14 +463,19 @@ export function parseCoordinatorCheckout(root: string, commitRead: string, statu
   return { root, commit, modified, untracked };
 }
 const checkoutGitRun: CheckoutRun = (command, args) => defaultChildRun(command, args).then(output => String(output));
-/** Reads how the checkout at `root` stands, through the asynchronous runner. An unreadable checkout (no git, no commit) is never dirty: it cannot be read as code either. */
+/** Reads how the checkout at `root` stands, through the asynchronous runner. A checkout with no readable commit is never dirty: it cannot be read as code either; a commit whose status cannot be read fails closed (GY-865), holding a path no clean checkout has. */
 export async function readCoordinatorCheckout(root: string, run: CheckoutRun = checkoutGitRun): Promise<CoordinatorCheckout> {
   const git = async (args: string[]) => String(await run('git', ['-C', root, ...args]));
   let commitRead: string;
   try { commitRead = await git(['rev-parse', 'HEAD']); }
   catch { return { root, commit: null, modified: [], untracked: [] }; }
   try { return parseCoordinatorCheckout(root, commitRead, await git(['status', '--porcelain', '-z', '--untracked-files=normal'])); }
-  catch { return { root, commit: commitRead.trim() || null, modified: [], untracked: [] }; }
+  catch {
+    // GY-865: an unreadable status is not a clean checkout — the guard exists so unverified
+    // working-tree contents never run — so it is refused rather than read as empty.
+    const commit = commitRead.trim() || null;
+    return { root, commit, modified: commit ? ['<unreadable>'] : [], untracked: [] };
+  }
 }
 /** Every path that makes the checkout dirty: what a refusal names and what a lease match is judged on. */
 export const dirtyCheckoutPaths = (checkout: CoordinatorCheckout) => checkout.commit ? [...checkout.modified, ...checkout.untracked] : [];
