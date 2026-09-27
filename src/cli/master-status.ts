@@ -1,6 +1,7 @@
 import { leaseHealthStatus } from './lease-health-attention.js';
 import { probeCandidateConflicts } from '../conflicts.js';
 import { mergeBatchSize } from '../master.js';
+import { landingAttention, optimisticStatus } from '../master/optimistic-attention.js';
 import { humanOnlyStatusRow, type HumanRequestRow } from '../model/human-request.js';
 import { agentOwner, assessContainment, branchReport, buildMasterStatus, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, humanOwner, inspectWorkerCredentials, installationOwner, statusWorktreeInventory, managedRootStatus, mergeProtocolSkew, observeHerdrAgents, planWorktreeReclaim, profileConcurrency, reclaimIdleMs, snapshotWithClock, worktreesDirectory, type AttentionItem, type MasterConfig } from '../master.js';
 import { impliedScopeRequests, type Work } from '../model/work.js';
@@ -36,7 +37,6 @@ import { releaseLagStatus } from '../master/release-lag.js';
 import { throughputStatus } from '../throughput.js';
 import { Timings, timedApi, timedStep, withTimings } from '../master/timings.js';
 import { slowReportReader } from '../master/report-cache.js';
-import { repairLaneAttention } from '../master/repair-lane.js';
 
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
 // The cycle-budget measure is a daemon metric (src/daemon/metrics.ts); it is read from here,
@@ -146,9 +146,10 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
       // The intervention report is slow: status reads the loop's copy, or a bounded live read.
       reports: 'bounded', reportBoundMs: dependencies.reportReadBoundMs, sections });
   const lag = await timedStep('release lag', () => releaseLagStatus(root, master.baseBranch, snapshot.work, { cliCommit: cli.commit, loop: cycling, executors: releases.executors }));
-  // Stalls: a mergeable pending merge (GY-344), a repair-lane merge (GY-406), queue-head lag (GY-492), slow renewals (GY-558).
+  // Stalls: a mergeable pending merge (GY-344), a repair-lane merge (GY-406), a main red after optimistic merges (GY-500),
+  // queue-head lag (GY-492), slow renewals (GY-558).
   const observation = observationThroughputStatus(coordinator, snapshot), health = leaseHealthStatus(coordinator);
-  const stalledItems = [...derivedStalls, ...mergeStallAttention(snapshot), ...observation.attention, ...repairLaneAttention(snapshot.work), ...health.attention];
+  const stalledItems = [...derivedStalls, ...mergeStallAttention(snapshot), ...observation.attention, ...landingAttention(snapshot.work), ...health.attention];
   // Exactly one component merges (GY-245): the loop, where one is installed or running, else the executors.
   const merger = installationMerger({ loop: { configured: !!setup.supervisor.installed, running: !!cycling?.running, autoMerge: master.autoMerge },
     declaration: executors.supervision.declaration, served: executors.presence.served });
@@ -187,7 +188,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     terminalDecisions: decisions.listed, throughput, unansweredDecisions: decisions.unanswered,
     // The commits no reviewer session has ever obtained a verdict on, with the dismissed review.
     unobtainableReviews: unobtainable.map(item => ({ work: item.subject, ...item.review })),
-    merger: { merger: merger.merger, detail: merger.detail }, autoMerge: master.autoMerge, mergeQueue: { batchSize: mergeBatchSize(master) }, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'each merge needs an approved merge decision: graphyard master decide GY-N merge REASON, approved by the approver agent',
+    merger: { merger: merger.merger, detail: merger.detail }, autoMerge: master.autoMerge, ...optimisticStatus(master, snapshot.work), mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'each merge needs an approved merge decision: graphyard master decide GY-N merge REASON, approved by the approver agent',
     // What the observation workers achieve and how far the queue head has drifted (GY-492).
     observationThroughput: observation, leaseHealth: health.report,
     versionSkew: mergeProtocolSkew(coordinator, cli), cli,

@@ -21,6 +21,10 @@ Ordinary review findings, rework, idle workers, and proof setup are not stopping
 
 `master run` runs this loop under the `graphyard-master.service` unit ([supervision](onboarding.md#the-loop-must-be-supervised)); restart it (`systemctl --user restart graphyard-master`) when `daemon.liveness` is `stalled` or `absent`.
 
+### System-driven items
+
+Unless created `"systemDriven": false`, an item refuses hand `dispatch`, `merge`, `review` and `decide attest|merge`, except stopped-loop recovery, unproduced `manual:` attestations, and `decide merge` of unauthorized merges or with no operator agent.
+
 ### Session liveness is reconciled, not trusted
 
 **The control plane reconciles session liveness; closing finished sessions is not the master's
@@ -47,7 +51,7 @@ Each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `linge
 
 ## Automatic dispatch at submit
 
-A candidate passing the build gate gets one producer request per proof group (`unit`, `integration`, `manual`) and a review request once unit and integration pass. **The loop launches within 30 seconds**: every `dispatchIntervalSeconds` it starts the reviewer profile (`run.reviewerProfile`) and one producer session on a `master producer add FILE` profile ([template](../examples/master/claude-producer.json)). Sessions are recorded in `.graphyard/reviews.json` and `.graphyard/producers.json`.
+A candidate passing the build gate gets, in `autoDispatch`, one producer request per proof group (`unit`, `integration`, `manual` for `producerProofs`), then a review request once its unit and integration proofs pass (`proofs-pending` until then; failure returns it to its worker). **The loop launches each request within 30 seconds**: every `dispatchIntervalSeconds` it starts the reviewer profile (`run.reviewerProfile`) and one producer session per proof group on a `master producer add FILE` profile ([template](../examples/master/claude-producer.json)), recorded in `.graphyard/reviews.json` and `.graphyard/producers.json`. A reviewer launch awaits the head's bot reviews (`run.awaitReviewers`) for `awaitReviewersMinutes` (default 8, 0 disables), skipping one that last posted a usage-limit notice until it next reviews (`skipped: <bot> exhausted since <time>`; `dispatch.botReviewers`).
 
 **Concurrency is per role.** A profile's `concurrency` (1–20, default 1) caps simultaneous sessions, each with a name unique to its request. It applies without restart; lowering it drains sessions first (`longestWaitMs`); a role starved ten minutes counts in `counts.concurrencyStarved`.
 
@@ -87,6 +91,6 @@ The loop continues this autonomous recovery process on every cycle (`daemon.live
 
 The first of two no-admin-bypass exceptions: a `"repair": "merge-path"` item (`mergePath` files only) stalled 15 minutes, checks passed, given an approver's `master decide GY-N repair-merge REASON` naming the fault, merges through the App's ruleset bypass, audited (`repair.merged`) and flagged until a normal merge.
 
-The main guard's revert is the second: on a confirmed required-suite failure on main traced to the culprit it lands a revert built on the base tip — refused when a later merge touched the culprit's files — head-bound through the same bypass, recorded `optimistic.revert.*` not `repair.merged`, the item reopened as rework.
+The main guard's revert ([optimistic merges](github.md#optimistic-merges)) is the second: on a confirmed required-suite failure on main traced to the culprit it lands a revert built on the base tip — refused when a later merge touched the culprit's files — head-bound through the same bypass, recorded `optimistic.revert.*` not `repair.merged`, the item reopened as rework.
 
 Unresolved review threads are the reviewer's inputs, not merge blockers (`reviewThreads`); its approval names each on `Resolved threads:`, `Follow-up threads:` or `Overridden threads:` ([rules](coordination.md#review-gate-verdicts-not-threads)).

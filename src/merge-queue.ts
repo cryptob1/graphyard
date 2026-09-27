@@ -662,9 +662,10 @@ export function currentBaseRefreshCarry(work: Pick<Work, 'candidate' | 'baseRefr
  * actually land on — the live base-branch tip, or the predicted base of a tip published behind
  * entries that have not landed yet:
  *
- * - `files`: every out-of-scope file of the pull request's diff, which the provider recomputes
- *   against the moving base, compared with that commit. Present only when it differs by tree from
- *   the bound base, where `scopeFiles` already is this comparison.
+ * - `files`: the head's changes since its merge base with the landing commit, compared with
+ *   that commit. Files only the base changed are inherited by a three-way merge, not reverted.
+ *   Recomputed on every observation, including unchanged heads previously refused. Present when
+ *   the landing tree differs from the bound base, or a predicted base needs its own diff.
  * - `carried`: other items' unlanded candidates whose commits this head has in its history — a
  *   speculative tip pushed onto its branch leaves them there — while its tree holds their files as
  *   the landing commit does. Merging such a head makes the provider record the other pull request
