@@ -349,6 +349,8 @@ const restoredMarker = (layout: HostLayout) => `${layout.migrationDirectory}/res
 
 async function freezeOldLoop(ctx: AdapterContext) {
   const local = ctx.transport;
+  // Stop the old server first to prevent new writes via webhooks and API calls after the backup.
+  await local.exec('systemctl', ['stop', 'graphyard-server.service'], { allowFailure: true, timeout: 180_000 });
   await local.exec('systemctl', ['--user', 'disable', '--now', 'graphyard-master.service'], { allowFailure: true, timeout: 180_000 });
   await local.exec('systemctl', ['--user', 'stop', 'graphyard-executor@*.service'], { allowFailure: true, timeout: 900_000 });
   const state = await local.exec('systemctl', ['--user', 'is-active', 'graphyard-master.service'], { allowFailure: true, timeout: 60_000 });
