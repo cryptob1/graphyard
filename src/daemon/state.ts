@@ -30,6 +30,8 @@ export const daemonActionSchema = z.object({
   at: z.string(),
   /** Set on a failed or indeterminate action: the fault class that failure is an instance of (GY-173). */
   faultClass: z.enum(faultClasses).optional(),
+  /** Set on a refused merge (GY-831): when the guarded merge first gave the refusal this detail names, unchanged since. */
+  since: z.string().optional(),
 }).strict();
 export type DaemonAction = z.infer<typeof daemonActionSchema>;
 

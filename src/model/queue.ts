@@ -1,4 +1,4 @@
-import { baseRefreshConflict, defaultMergeBatchSize, ejectedTipRestore, ejectionReason, nextQueueSequence, pendingBaseRefresh, pendingRestore, predecessorWait, predecessorWaitText, queueHistoryLimit, queueBatch, queuePlacement, sameMergeBatch, stuckBatchMs } from '../merge-queue.js';
+import { baseRefreshConflict, defaultMergeBatchSize, ejectedTipRestore, ejectionReason, mergeRefusalEjectionPrefix, standingMergeRefusal, nextQueueSequence, pendingBaseRefresh, pendingRestore, predecessorWait, predecessorWaitText, queueHistoryLimit, queueBatch, queuePlacement, sameMergeBatch, stuckBatchMs } from '../merge-queue.js';
 import type { QueueEjection, QueueHistoryEntry, QueuePlacement } from '../merge-queue.js';
 import type { Work } from './work.js';
 import { behindBaseHold } from './behind-base.js';
@@ -29,7 +29,9 @@ export function placeInQueue(work: Work, all: Work[], now: Date, ciAppIds: numbe
     ejection = { at: now.toISOString(), sequence: queue.sequence, reason, sha: candidate?.sha ?? null, policyRevision: work.policyRevision, conflict: null };
     record('ejected', reason, queue.speculation?.tip ?? candidate?.sha);
     queue = null;
-  } else if (!queue && eligible && (!(ejection && candidate && ejection.sha === candidate.sha && ejection.policyRevision === work.policyRevision) || predecessorReentry(work, all))) {
+  } else if (!queue && eligible && (!(ejection && candidate && ejection.sha === candidate.sha && ejection.policyRevision === work.policyRevision) || predecessorReentry(work, all)
+    // A candidate ejected for a merge refusal a fresh approval has since answered re-enters (GY-831).
+    || ejection!.reason.startsWith(mergeRefusalEjectionPrefix) && !standingMergeRefusal(work))) {
     queueSequence = nextQueueSequence(all);
     queue = { sequence: queueSequence, enqueuedAt: now.toISOString(), policyRevision: work.policyRevision, speculation: null };
     ejection = null;
