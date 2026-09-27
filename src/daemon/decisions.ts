@@ -97,6 +97,27 @@ export function reworkObservationWait(work: Work, now: number, pause: GitHubPaus
 }
 
 /**
+ * Why a review launch must wait for an observation, or null when the one on the item may be
+ * decided from. Unlike rework which requires a two-minute-old observation, review launches bind to
+ * the head itself, not the observation's age (GY-710). But we still need an observation of the
+ * current head to bind to, so we wait if the observation is of a different head or missing entirely.
+ * The reason names the stale observation — its time and head — and never its age.
+ */
+export function reviewLaunchObservationWait(work: Work, now: number, pause: GitHubPause | null): string | null {
+  const candidate = work.candidate, observation = work.observation;
+  if (!observation) return `${work.key}: review launch waits for a GitHub observation of the item; there is none to decide from`;
+  if (!candidate) return null; // No candidate, review is not applicable
+  // The observation must be of the current head, but need not be fresh by age
+  if (observation.candidate.sha !== candidate.sha || observation.candidate.baseSha !== candidate.baseSha) {
+    const seen = `the last GitHub observation (taken at ${observation.at} of head ${observation.candidate.sha.slice(0, 12)})`;
+    return `${work.key}: review launch waits for a GitHub observation of the current head — ${seen} is of an earlier head ${observation.candidate.sha.slice(0, 12)}, which the branch may have moved past`;
+  }
+  // Observation matches the current head. But if GitHub is paused, the observation may not reflect the current state
+  if (pause) return `${work.key}: review launch waits for an observation — GitHub requests are paused until ${pause.until}, so the current observation (taken at ${observation.at}) may be stale`;
+  return null;
+}
+
+/**
  * GY-710. A step refused for want of a fresh observation wakes the item's observation job at once
  * and waits for that observation to land, rather than for whatever the job's cadence brings round.
  * One wake stands until an observation newer than it lands; a wake that brought none within this
