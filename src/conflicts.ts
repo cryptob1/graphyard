@@ -129,13 +129,14 @@ export function gitConflictProbe(root: string, run: Run = gitRun): ConflictProbe
   };
 }
 
-/** What `master status` reports: the conflict sets probed in memory over the fetched PR heads; an unfetchable head is unprobed, never conflict-free. */
-export function probeCandidateConflicts(root: string, work: Work[], run: Run = gitRun) {
-  const fetched = fetchCandidateHeads(root, work, run);
-  return { report: candidateConflicts(work, gitConflictProbe(root, run)), available: fetched.fetched, reason: fetched.reason };
-}
-
-/** Like probeCandidateConflicts, but with disk caching per head pair and a wall-clock budget for probing. */
+/**
+ * What `master status` reports: the conflict sets probed in memory over the fetched PR heads; an
+ * unfetchable head is unprobed, never conflict-free. Each overlapping pair's result is cached on
+ * disk by its two head shas and reused until either head changes. A `null` result — a head that
+ * was not present when probed — is held only in memory for this call and never persisted: the
+ * head may arrive with the next fetch, and a persisted null would pin the pair as unprobed until
+ * one of its heads changed.
+ */
 export async function probeCandidateConflictsWithBudget(root: string, work: Work[], dataDir: string, run: Run = gitRun, timeoutMs: number = 10_000) {
   const fetched = fetchCandidateHeads(root, work, run);
   const base = gitConflictProbe(root, run);
@@ -164,7 +165,7 @@ export async function probeCandidateConflictsWithBudget(root: string, work: Work
       const left = candidates[i], right = candidates[j];
       const key = getCacheKey(left.candidate!.sha, right.candidate!.sha);
       const cached = await readCache(cacheDir, left.candidate!.sha, right.candidate!.sha);
-      if (cached !== undefined) {
+      if (cached !== undefined && cached !== null) {
         cache.set(key, cached);
       }
     }
@@ -181,7 +182,7 @@ export async function probeCandidateConflictsWithBudget(root: string, work: Work
       const left = candidates[i], right = candidates[j];
       const key = getCacheKey(left.candidate!.sha, right.candidate!.sha);
       const result = cache.get(key);
-      if (result !== undefined) {
+      if (result !== undefined && result !== null) {
         await writeCache(cacheDir, left.candidate!.sha, right.candidate!.sha, result);
       }
     }

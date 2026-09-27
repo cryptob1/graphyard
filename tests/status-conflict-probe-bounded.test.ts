@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, readdir } from 'node:fs/promises';
+import { mkdtemp, rm, readdir, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -68,7 +68,7 @@ test('unit:conflict-probe-overlap-only-cached: the probe runs for overlapping pa
       }
       if (cmd === 'git' && args[2] === 'merge-tree') {
         firstCallProbes++;
-        throw { status: 0, stdout: '' }; // Simulate successful clean merge
+        return ''; // Successful clean merge (no throw, so the probe returns [])
       }
       return '';
     };
@@ -84,7 +84,7 @@ test('unit:conflict-probe-overlap-only-cached: the probe runs for overlapping pa
       }
       if (cmd === 'git' && args[2] === 'merge-tree') {
         secondCallProbes++;
-        throw { status: 0, stdout: '' };
+        return '';
       }
       return '';
     };
@@ -141,6 +141,63 @@ test('unit:conflict-probe-budgeted: the probe respects wall-clock budget and rep
     assert.ok(totalUnprobed > 0, `Expected some unprobed pairs due to budget timeout, got ${totalUnprobed} unprobed`);
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('unit:conflict-probe-null-uncached: an unavailable head is probed again once it becomes available', async () => {
+  const dataRoot = await mkdtemp(join(tmpdir(), 'conflict-null-'));
+  const gitRoot = await mkdtemp(join(tmpdir(), 'conflict-null-git-'));
+  try {
+    execFileSync('git', ['init', '-q', gitRoot]);
+    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: gitRoot });
+    execFileSync('git', ['config', 'user.email', 'test@test.invalid'], { cwd: gitRoot });
+
+    const shaA = '1'.repeat(40);
+    const shaB = '2'.repeat(40);
+    const work = [
+      workWithFiles('GY-1', ['src/a.ts'], shaA),
+      workWithFiles('GY-2', ['src/a.ts'], shaB),
+    ];
+
+    const cacheFile = join(dataRoot, 'conflict-probes', [shaA, shaB].sort().join('-') + '.json');
+    let headBPresent = false;
+    let mergeTreeCalls = 0;
+    const mockRun = (cmd: string, args: string[]) => {
+      if (cmd === 'git' && args[2] === 'cat-file') {
+        if (args[4] === `${shaB}^{commit}` && !headBPresent) throw new Error('missing head');
+        return '';
+      }
+      if (cmd === 'git' && args[2] === 'merge-tree') {
+        mergeTreeCalls++;
+        return '';
+      }
+      return '';
+    };
+
+    // Head B is unavailable: the pair is unprobed and no result is persisted for it.
+    const first = await probeCandidateConflictsWithBudget(gitRoot, work, dataRoot, mockRun);
+    assert.equal(mergeTreeCalls, 0, 'an unavailable head must not reach merge-tree');
+    assert.deepEqual(first.report['GY-1'].unprobed, ['GY-2']);
+    assert.equal(first.report['GY-1'].conflicts.length, 0);
+    await assert.rejects(readFile(cacheFile, 'utf8'), 'an unprobed (null) result must not be written to the disk cache');
+
+    // Head B becomes available: the pair is probed for real and its result is persisted.
+    headBPresent = true;
+    const second = await probeCandidateConflictsWithBudget(gitRoot, work, dataRoot, mockRun);
+    assert.equal(mergeTreeCalls, 1, 'the pair must be probed once the head arrives');
+    assert.deepEqual(second.report['GY-1'].unprobed, []);
+    assert.equal(second.report['GY-1'].conflicts.length, 0);
+    await assert.doesNotReject(readFile(cacheFile, 'utf8'));
+
+    // The persisted result is reused: neither head changed, so no new probe runs.
+    headBPresent = false;
+    mergeTreeCalls = 0;
+    const third = await probeCandidateConflictsWithBudget(gitRoot, work, dataRoot, mockRun);
+    assert.equal(mergeTreeCalls, 0, 'a cached pair must not be probed again while its heads are unchanged');
+    assert.deepEqual(third.report['GY-1'].unprobed, []);
+  } finally {
+    await rm(dataRoot, { recursive: true, force: true });
+    await rm(gitRoot, { recursive: true, force: true });
   }
 });
 
