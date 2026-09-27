@@ -429,7 +429,36 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     const judged = state.actions[`${scopeKey(item, request)}:finding:${item.policyRevision}`];
     return judged?.state === 'done' && !/^Widened /.test(judged.detail);
   };
-  for (const item of snapshot.work) await isolate('decision', item, item.key, async () => {
+  // GY-849: When capacity frees, relaunch capacity-refused decisions in order (oldest first).
+  // Collect all decisions waiting for capacity, sorted by age.
+  const capacityWaiting: Array<{ item: Work; watch: ApprovalWatch; key: string; age: number }> = [];
+  for (const [key, watch] of Object.entries(state.approvals)) {
+    if (!watch.capacity || watch.settledAt) continue;
+    const item = snapshot.work.find(c => c.key === watch.work);
+    if (!item || !approversSpent) continue;
+    const age = Date.parse(watch.requestedAt);
+    capacityWaiting.push({ item, watch, key, age });
+  }
+  // Process items in order, but prioritize older capacity-refused decisions when capacity frees
+  const workToProcess = [...snapshot.work];
+  if (!approversSpent && capacityWaiting.length) {
+    // Sort capacity-waiting by age (oldest first) and reorder to process them first
+    capacityWaiting.sort((a, b) => a.age - b.age);
+    const capacityItems = new Set(capacityWaiting.map(c => c.item.key));
+    // Reorder work: put capacity-waiting items first, in age order
+    workToProcess.sort((a, b) => {
+      const aWaiting = capacityItems.has(a.key);
+      const bWaiting = capacityItems.has(b.key);
+      if (aWaiting !== bWaiting) return aWaiting ? -1 : 1;
+      if (aWaiting && bWaiting) {
+        const aAge = capacityWaiting.find(c => c.item.key === a.key)?.age ?? 0;
+        const bAge = capacityWaiting.find(c => c.item.key === b.key)?.age ?? 0;
+        return aAge - bAge;
+      }
+      return 0;
+    });
+  }
+  for (const item of workToProcess) await isolate('decision', item, item.key, async () => {
     const assessment = assessments[item.id];
     // A request step 2 refused this cycle is read as it was decided, not as the snapshot saw it.
     const scoped = settled.get(item.id) ?? item;

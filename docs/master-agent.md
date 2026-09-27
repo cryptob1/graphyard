@@ -65,9 +65,9 @@ A candidate passing the build gate gets, in `autoDispatch`, one producer request
 
 **Requests always settle.** A gone pane (`pane_not_found`) is closed. No request outlives its own token: expired, unreported by Herdr, it settles `expired`; one still pending counts in `dispatch.sessionReconcile.stuck`. Unanswered sessions relaunch elsewhere (12 per request, then `dispatch.abandoned`); an unposted reviewer is reminded first. A proof row whose group has a session pending on its head completes on it; one pending on another head is refused until reconciled.
 
-**Every role, approvers too, fails over on spent quota** or waits as one `capacity` line.
+**Every role, approvers too, fails over on spent quota** or waits as one `capacity` line. GY-849: A decision whose approver launch fails due to capacity (all accounts spent, role concurrency limit reached, registry timeout) is not counted against the launch bound; the loop retries it as soon as capacity frees, oldest decision first (by request time). This keeps unjudged decisions from expiring while capacity is exhausted.
 
-**Unjudged approvers relaunch** (hand-launched too): 3 per decision, timeouts uncounted, then escalate (`session N:` ends).
+**Unjudged approvers relaunch** (hand-launched too): 3 per decision, timeouts uncounted (capacity refusals never count), then escalate (`session N:` ends).
 
 The master never launches reviews or producers by hand, except `master review GY-N [PROFILE]` once the loop stops relaunching.
 
