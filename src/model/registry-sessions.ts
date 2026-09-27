@@ -235,10 +235,29 @@ export function fleetView(registry: AgentRegistry, now: number, host: string | n
     const blocked = host ? (choice!.account ? null : choice!.reason) : running >= role.concurrency ? `role ${role.name} is at its concurrency limit (${running} of ${role.concurrency} live)` : first ? null : `no eligible account for ${role.name}`;
     return { role: role.name, accounts: role.accounts, concurrency: role.concurrency, live: running, next: blocked ? null : first, blocked, policy: rolePolicy(role) };
   });
-  const unassigned = accounts.filter(account => !account.roles.length).map(account => `${account.name} serves no role; name it in a role or remove it`);
-  const missing = registry.accounts.length ? fleetRoles.filter(name => !registry.roles.some(role => role.name === name)).map(name => `role ${name} is not configured; its sessions launch from local profiles until it is`) : [];
+  const unassigned = accounts.filter(account => !account.roles.length);
+  const missingRoles = registry.accounts.length ? fleetRoles.filter(name => !registry.roles.some(role => role.name === name)) : [];
+  const attention: string[] = [];
+  const blockedRoles = roles.filter(role => role.blocked);
+  if (blockedRoles.length === 1) attention.push(blockedRoles[0].blocked!);
+  else if (blockedRoles.length > 1) {
+    const byReason = new Map<string, string[]>();
+    for (const role of blockedRoles) {
+      const reason = role.blocked!;
+      if (!byReason.has(reason)) byReason.set(reason, []);
+      byReason.get(reason)!.push(role.role);
+    }
+    for (const [reason, roleNames] of byReason) {
+      if (roleNames.length === 1) attention.push(reason);
+      else attention.push(`${roleNames.length} roles (${roleNames.join(', ')}) ${reason.replace(/^role \S+ /, '')}`);
+    }
+  }
+  if (unassigned.length === 1) attention.push(`${unassigned[0].name} serves no role; name it in a role or remove it`);
+  else if (unassigned.length > 1) attention.push(`${unassigned.length} accounts (${unassigned.map(a => a.name).join(', ')}) serve no role; name each in a role or remove it`);
+  if (missingRoles.length === 1) attention.push(`role ${missingRoles[0]} is not configured; its sessions launch from local profiles until it is`);
+  else if (missingRoles.length > 1) attention.push(`${missingRoles.length} roles (${missingRoles.join(', ')}) are not configured; their sessions launch from local profiles until they are`);
   return { revision: registry.revision, updatedAt: registry.updatedAt, configured: registry.roles.length > 0, host, runtimes: registry.runtimes, models: registry.models, accounts, roles,
     sessions: registry.sessions.slice(-30), refusals: registry.refusals, lastMutation: registry.lastMutation,
-    attention: [...roles.filter(role => role.blocked).map(role => role.blocked!), ...unassigned, ...missing] };
+    attention };
 }
 
