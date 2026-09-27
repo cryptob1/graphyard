@@ -7,7 +7,7 @@ Add a worker with `master worker add FILE` from a template ([Codex](../examples/
 
 Add reviewers with `master reviewer setup` and `master reviewer add FILE` ([Claude](../examples/master/claude-reviewer.json), [opencode](../examples/master/opencode-reviewer.json)).
 
-`master producer replace FILE`, `master producer remove NAME` and `master reviewer remove NAME` apply next tick; `setup.attention` reports launch-stopping setup.
+`master producer replace|remove FILE|NAME` and `master reviewer remove NAME` apply next tick; `setup.attention` reports launch-stopping setup.
 
 ### Session handles
 
@@ -15,11 +15,11 @@ Add reviewers with `master reviewer setup` and `master reviewer add FILE` ([Clau
 
 ### Approval modes
 
-Sessions run in no-approval mode (`"approvals": "auto"`): `--permission-mode bypassPermissions`, `.claude.json` trust (Claude Code); `--ask-for-approval never --sandbox workspace-write`, network, `--add-dir` (Codex); `--force --trust` (Cursor); allow-all `OPENCODE_PERMISSION` (opencode); `--yolo` (Gemini, Qwen); `--allow-all-tools --allow-all-paths` (Copilot); `--approval-mode never --trust-workspace` (Muse); none (Pi). `"prompt"`, `refusedLaunchKinds` and runtimes lacking command-line requests never start; [registry](onboarding.md#configure-the-fleet) runtimes need `{request}` in their arguments. Codex's sandbox gets `.git/worktrees/GY-N-E` and shared `.git` via `--add-dir`, probed first (`Worker launch failed: the codex sandbox cannot write PATH`).
+Sessions run in no-approval mode (`"approvals": "auto"`): `--permission-mode bypassPermissions`, `.claude.json` trust (Claude Code); `--ask-for-approval never --sandbox workspace-write`, network, `--add-dir` (Codex); `--force --trust` (Cursor); allow-all `OPENCODE_PERMISSION` (opencode); `--yolo` (Gemini, Qwen); `--allow-all-tools --allow-all-paths` (Copilot); `--approval-mode never --trust-workspace` (Muse); none (Pi). `"prompt"`, `refusedLaunchKinds` and runtimes lacking command-line requests never start; [registry](onboarding.md#configure-the-fleet) runtimes need `{request}` in their arguments. Codex's sandbox gets `.git/worktrees/GY-N-E` and shared `.git` via `--add-dir`, probed first.
 
 ### Workers are write-confined to their worktree
 
-A worker writes its assigned worktree and Git directories (GY-857): codex keeps `--sandbox workspace-write`, `--add-dir` for those; an opencode worker profile sets `OPENCODE_PERMISSION` with `"external_directory":"deny"`; Claude worker rules deny `Edit`/`Write` of the coordinator checkout; a profile turning confinement off is refused at launch. The loop and executors never start, self-upgrade or restart from a checkout holding uncommitted work: a dirty loop cycles nothing, executor claims refused, the escalation names the paths and matching live leases.
+A worker writes only its assigned worktree and its Git directories (GY-857): codex keeps `--sandbox workspace-write`; an opencode profile sets `OPENCODE_PERMISSION` `"external_directory":"deny"`; Claude worker rules deny `Edit`/`Write` of the coordinator checkout; a profile turning confinement off is refused at launch. Neither the loop nor an executor starts, self-upgrades or restarts from a checkout holding uncommitted work; the escalation names the dirty paths and the live leases they match.
 
 ## Accounts and failover
 
@@ -45,11 +45,11 @@ The typed line is bounded at **512 bytes** whatever the request is.
 
 #### The start bound reads the pane
 
-The runtime is **ready** when Herdr reports it active with no prompt, or its banner shows (`the claude runtime is on screen while Herdr reports it unknown`). Ready within **60 seconds** (`run.launchStartSeconds`) is started; one still starting gets **120 seconds** (`started.extended`). Otherwise it is refused with the case and the pane's last non-empty line, never Herdr's own `agent_not_found`: `the claude runtime never started within 60 s in pane w1V:pR6 (command still echoing)`, `… was still starting after 120 s` or `… is blocked before it is ready`; retried as `Automatic producer launch for GY-N refused 1 time(s): …`. A failed launch stops its supervisor, closes its pane, releases its claim.
+The runtime is **ready** when Herdr reports it active with no prompt, or its banner shows. Ready within **60 seconds** (`run.launchStartSeconds`) is started; one still starting gets **120 seconds** (`started.extended`). Otherwise it is refused with the case and the pane's last non-empty line, never Herdr's own `agent_not_found`; retried as `Automatic producer launch for GY-N refused 1 time(s): …`. A failed launch stops its supervisor, closes its pane, releases its claim.
 
 #### First-run consent prompts
 
-A runtime stopped on a first-run prompt is **`awaiting consent`**. The launcher answers only `hooks-continue-untrusted` (**Continue without trusting**) and `telemetry-decline`, with the least-privilege option, never one that grants hook execution or a sandbox escape; everything else, above all a **credential** or **payment** prompt, is escalated. A worker is held in `.graphyard/launch/NAME.consent` (attach: `herdr pane attach`); after **15 minutes** the supervisor stops renewing and stops the session, so the item is dispatchable again.
+A runtime stopped on a first-run prompt is **`awaiting consent`**. The launcher answers only `hooks-continue-untrusted` (**Continue without trusting**) and `telemetry-decline`, with the least-privilege option, never one that grants hook execution or a sandbox escape; everything else, above all a **credential** or **payment** prompt, is escalated. A worker is held in `.graphyard/launch/NAME.consent`; after **15 minutes** the supervisor stops renewing and stops the session, so the item is dispatchable again.
 
 ### Acknowledgement, the one re-prompt, and never started
 
@@ -61,7 +61,7 @@ When a live attempt's blocker or scope request resolves, its inactive session is
 
 ### Panes are closed and reclaimed
 
-Every launch records its pane on the item's session handle; when the loop ends that session — finished, failed, ended by the loop, or a lead it cannot keep — it closes the pane in the same step and records the close. Research and triage runs are headless and open no pane. A per-cycle sweep is the backstop: it closes agentless panes Graphyard launched **on this host** (by recorded pane id, matched only against the handles this host's launchers recorded) whose session has ended or whose worktree no longer exists, once they have stood agentless past the launch bound (**120 s**; a runtime that has not started yet looks the same), at most **6** per pass. It never touches a pane Graphyard did not launch, a pane with an agent in it, or a pane whose worktree holds a live lease. Each pass records the host's pane count, the agentless Graphyard panes and the oldest on the loop cursor (`master status` `daemon.actions`), and raises attention there once agentless panes exceed **20** (`daemon.escalations`). A host that once held a backlog records the drain: when the count reaches zero the standing status reads `0 standing agentless; the backlog has drained`, instead of leaving a stale backlog and oldest pane on the cursor.
+Every launch records its pane on the item's session handle; when the loop ends that session — finished, failed, ended by the loop, or a lead it cannot keep — it closes the pane in the same step and records the close. Research and triage runs are headless and open no pane. A per-cycle sweep is the backstop: it closes agentless panes Graphyard launched **on this host** (by recorded pane id, matched only against the handles this host's launchers recorded) whose session has ended or whose worktree no longer exists, once they have stood agentless past the launch bound (**120 s**; a runtime that has not started yet looks the same), at most **6** per pass. It never touches a pane Graphyard did not launch, a pane with an agent in it, or a pane whose worktree holds a live lease. Each pass records the host's pane count, the agentless Graphyard panes and the oldest on the loop cursor (`master status` `daemon.actions`), and raises attention there once agentless panes exceed **20** (`daemon.escalations`). A host that once held a backlog records the drain when the count reaches zero, instead of leaving a stale backlog and oldest pane on the cursor.
 
 ### The dispatcher's own state
 

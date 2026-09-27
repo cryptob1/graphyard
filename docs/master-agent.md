@@ -19,7 +19,7 @@ Keep cycling: status, dispatch, review, merge, deployment verification. Stop onl
 
 Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions. `controlPlane.production` flags main ahead of production.
 
-`master run` runs this loop under the `graphyard-master.service` unit ([supervision](onboarding.md#the-loop-must-be-supervised)); restart it (`systemctl --user restart graphyard-master`) when `daemon.liveness` is `stalled` or `absent`, never from a dirty checkout: neither the loop nor an executor runs uncommitted work (GY-857; [sessions](master-agent-sessions.md#workers-are-write-confined-to-their-worktree)).
+`master run` runs this loop under the `graphyard-master.service` unit ([supervision](onboarding.md#the-loop-must-be-supervised)); restart it (`systemctl --user restart graphyard-master`) when `daemon.liveness` is `stalled` or `absent`, never from a dirty checkout (GY-857; [sessions](master-agent-sessions.md#workers-are-write-confined-to-their-worktree)).
 
 ### System-driven items
 
@@ -41,8 +41,7 @@ that host's loop. `sessions.unseen` lists stale handles. `dispatch.sessionReconc
 
 A closure decides no gate, ends no lease, and stops no process. A profile's concurrency is counted against live sessions only, and a name is busy only while a live session has it. A session past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) raises attention, is never closed.
 
-**So what an operator or a master does instead of closing sessions by hand:** nothing, for a session
-that finished or died (loop stopped: `graphyard master run --once` sweeps); for an overlong one, attach to it with the command on the handle. Never mark
+**Closing sessions by hand:** nothing, for one that finished or died (loop stopped: `graphyard master run --once` sweeps); for an overlong one, attach with the command on the handle. Never mark
 another session's handle finished to free a slot.
 
 ### System invariants
