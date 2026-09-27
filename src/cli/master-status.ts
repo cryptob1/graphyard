@@ -127,6 +127,9 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   // Rework rounds by cause (GY-643), out-of-item causes removed; a failed read marks the section.
   try { status.speed.reworkRounds = await reworkRoundsWithOwnCauses(status.speed.reworkRounds, masterApi, snapshot); }
   catch (error) { sections.mark('rework causes', 'GET /api/events?kind=rework', error); }
+  // Per-stage speed targets (GY-880): p50/p90 for every pipeline stage against target.
+  try { status.speed.stages = (await timedStep('stage targets', () => masterApi('analytics/flow?window=30'))).stageSpeed; }
+  catch (error) { sections.mark('stage targets', 'GET /api/analytics/flow', error); }
   // A waiting sudo prompt is the operator confirming their own GitHub credential on their device.
   const sudo = administration.sudo;
   // A request whose session settled without satisfying its gate: nothing runs for it, nothing
