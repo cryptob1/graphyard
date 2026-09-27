@@ -4,6 +4,7 @@ import { reviewProviderOf } from './model/review.js';
 import { pathScopesOverlap } from './model/scope.js';
 import { queuedRegressions, staleTipRegressions } from './regression-guard.js';
 import { missingAncestryReason, missingBaseAncestry } from './merge-base-ancestry.js';
+import { evaluateLandability } from './model/landability.js';
 
 // Graphyard publishes speculative tips outside refs/heads and refs/tags: the namespace is
 // owned by the App, is never a branch a worker can push, and never appears as a PR head.
@@ -939,6 +940,10 @@ export function ejectionReason(work: Work, ciAppIds: number[], all: Work[] = [],
   if (!candidate || !observation || observation.candidate.sha !== candidate.sha || observation.candidate.baseSha !== candidate.baseSha) return null;
   const tip = candidate.sha.slice(0, 12);
   if (observation.prState === 'closed') return 'Pull request was closed without merging';
+  // Regression and acceptance families derive from the unified landability verdict. Query it once
+  // at the top level for consistency with build/acceptance gate logic and bootstrap requirements.
+  const now = new Date();
+  const verdict = evaluateLandability(work, all, now);
   // A tip still built behind an entry that left without landing (GY-568) is not reverting anything
   // of its own: when its tree shows a refused conclusion — the unlanded work of the entries it was
   // built behind — it leaves the queue so the control plane restores it, and the reason says so.
@@ -953,8 +958,11 @@ export function ejectionReason(work: Work, ciAppIds: number[], all: Work[] = [],
   // file and the item that owns it; a file the observation could not compare ejects nothing, and
   // a file carried from another item's commits on this head is excused exactly as the build gate
   // excuses it (GY-871), so nothing that passed build is ejected over the same files.
-  const regressions = queuedRegressions(work, observation, all);
-  if (regressions.length) return `Landing speculative tip ${tip} on ${regressions[0].base.slice(0, 12)} would revert work outside its planned files: ${regressions.map(entry => entry.text).join('; ')}`;
+  // Derive from the verdict's build-gate refusals.
+  if (verdict.verdict === 'refused') {
+    const buildRefusals = verdict.reasons.filter(r => r.gate === 'build');
+    if (buildRefusals.length) return `Landing speculative tip ${tip} would fail: ${buildRefusals[0].reason}`;
+  }
   // Observations retain every run, including superseded ones; only the newest trusted run
   // for a required check decides, exactly as the test gate does, so a successful retry
   // never leaves an entry ejected by the failure it replaced.
@@ -990,14 +998,11 @@ export function ejectionReason(work: Work, ciAppIds: number[], all: Work[] = [],
   // requires conversation resolution (protection drift) makes a merge GitHub cannot land.
   const threads = conversationProtectionRefusal(work);
   if (threads) return threads;
-  // Evidence binds the tip exactly or carried across a Graphyard-authored tip; either way a
-  // failure or a withdrawal of it is an adverse conclusion about this tip.
-  const proof = work.evidence.find(item => item.trusted && item.result === 'fail' && evidenceBindsCandidate(work, item) && item.policyRevision === work.policyRevision);
-  if (proof) return `Proof ${proof.proof} failed on speculative tip ${tip}`;
-  // A withdrawn proof is an explicit adverse conclusion, not a missing one: the entry leaves the
-  // queue instead of holding its position while everything behind it waits.
-  const revoked = work.evidence.find(item => item.trusted && !!item.revocation && evidenceBindsCandidate(work, item) && item.policyRevision === work.policyRevision);
-  if (revoked) return `Proof ${revoked.proof} was revoked on speculative tip ${tip}: ${revoked.revocation!.reason}`;
+  // Acceptance gate refusals (proof failures/revocations) derive from the verdict.
+  if (verdict.verdict === 'refused') {
+    const acceptanceRefusals = verdict.reasons.filter(r => r.gate === 'acceptance');
+    if (acceptanceRefusals.length) return `Proof requirements not met on speculative tip ${tip}: ${acceptanceRefusals[0].reason}`;
+  }
   return null;
 }
 

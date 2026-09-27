@@ -7,12 +7,28 @@ import { currentEvidence } from './evidence.js';
 import { exactApproval } from './review.js';
 import { requiredProofs } from './bootstrap.js';
 import { defaultOptimisticMerge, defaultOptimisticExclude, optimisticEligibility, type OptimisticEligibility } from '../optimistic-merge.js';
+import { evaluateLandability } from './landability.js';
 
 /** The master's merge-queue settings as the control plane applies them: `mergeQueue.batchSize`, `mergeQueue.parallelTips` (GY-498), `mergeQueue.optimistic` and `mergeQueue.optimisticExclude`. */
 export interface MergeQueueSettings { batchSize?: number; optimistic?: boolean; optimisticExclude?: readonly string[]; parallelTips?: number }
 export const queueSettings = (settings: number | MergeQueueSettings | undefined) => typeof settings === 'object'
   ? { batchSize: settings.batchSize ?? defaultMergeBatchSize, optimistic: settings.optimistic ?? defaultOptimisticMerge, optimisticExclude: settings.optimisticExclude ?? defaultOptimisticExclude, parallelTips: settings.parallelTips }
   : { batchSize: settings ?? defaultMergeBatchSize, optimistic: defaultOptimisticMerge, optimisticExclude: defaultOptimisticExclude, parallelTips: undefined };
+
+/**
+ * GY-878 AC-5. Whether a stored ejection for a landability-family refusal can be overridden by
+ * re-evaluating the verdict: once the candidate would be landable under the current verdict,
+ * it re-enters the queue without needing a new head. Non-landability ejections keep sha stickiness
+ * to avoid eject/re-enter churn.
+ */
+function verdictGatedReentry(work: Work, all: Work[], now: Date): boolean {
+  const ejection = work.queueEjection;
+  if (!ejection || !work.candidate || ejection.sha !== work.candidate.sha || ejection.policyRevision !== work.policyRevision) {
+    return false;
+  }
+  const verdict = evaluateLandability(work, all, now);
+  return verdict.verdict === 'landable';
+}
 
 /**
  * Queue membership is derived, never asserted: no command, operator, or administrator can
@@ -47,7 +63,7 @@ export function placeInQueue(work: Work, all: Work[], now: Date, ciAppIds: numbe
     ejection = { at: now.toISOString(), sequence: queue.sequence, reason, sha: candidate?.sha ?? null, policyRevision: work.policyRevision, conflict: null };
     record('ejected', reason, queue.speculation?.tip ?? candidate?.sha);
     queue = null;
-  } else if (!queue && eligible && (!(ejection && candidate && ejection.sha === candidate.sha && ejection.policyRevision === work.policyRevision) || predecessorReentry(work, all))) {
+  } else if (!queue && eligible && (!(ejection && candidate && ejection.sha === candidate.sha && ejection.policyRevision === work.policyRevision) || predecessorReentry(work, all) || verdictGatedReentry(work, all, now))) {
     queueSequence = nextQueueSequence(all);
     queue = { sequence: queueSequence, enqueuedAt: now.toISOString(), policyRevision: work.policyRevision, speculation: null };
     ejection = null;
