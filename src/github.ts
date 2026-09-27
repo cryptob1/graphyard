@@ -934,6 +934,7 @@ export class GitHub {
    * A commit by SHA or a compare of two exact SHAs (GY-806): asked of GitHub once, then served from
    * the immutable cache with no request, however many observations ask. Concurrent first reads of
    * the same path share one request. A cached answer needs no token, so it is served through a pause.
+   * On hot-cache miss, consult the persisted layer before fetching (AC-1).
    */
   private async immutableRequest(path: string): Promise<any> {
     await this.warm();
@@ -945,14 +946,23 @@ export class GitHub {
     }
     let reading = this.immutableReads.get(path);
     if (!reading) {
-      reading = this.send(path, 'GET', undefined, false).then(value => {
+      reading = (async () => {
+        // Cold-cache lookup: if the persistent store has this immutable read, use it without fetching (GY-806)
+        if (this.persisted) {
+          const stored = await this.persisted.lookup('immutable', path);
+          if (stored !== undefined) {
+            this.immutable.set(path, structuredClone(stored));
+            return structuredClone(stored);
+          }
+        }
+        const value = await this.send(path, 'GET', undefined, false);
         if (value !== null && value !== undefined) {
           this.immutable.set(path, structuredClone(value));
           this.persisted?.put('immutable', path, value);
           if (this.immutable.size > immutableEntries) this.immutable.delete(this.immutable.keys().next().value!);
         }
         return value;
-      }).finally(() => this.immutableReads.delete(path));
+      })().finally(() => this.immutableReads.delete(path));
       this.immutableReads.set(path, reading);
     }
     return structuredClone(await reading);
@@ -1103,8 +1113,8 @@ export class GitHub {
   /** The last verified webhook delivery this adapter was told of. */
   private webhookSeenAt: number | null = null;
   private webhookLive(now: number) { return this.webhookSeenAt !== null && now - this.webhookSeenAt <= webhookLiveMs && now >= this.webhookSeenAt; }
-  /** How long a shared read is kept: `ms` while the webhook is live, otherwise only while it is in flight. */
-  private shareMs(ms: number, now: number) { return this.webhookLive(now) ? ms : 0; }
+  /** How long a shared read is kept: per-cycle or per-protection-interval sharing always applies (GY-806 AC-2); webhook just enables early invalidation. */
+  private shareMs(ms: number, now: number) { return ms; }
   /**
    * The base branch's protection as GitHub returns it, read at most every `protectionShareMs` and
    * shared by every observation (GY-806); a protection or repository webhook ends the share early.

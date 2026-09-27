@@ -92,6 +92,14 @@ ORDER BY updated_at, key`, [prefix, caps.etag, caps.ancestry, caps.blob, caps.hi
     this.pending.set(id, 'touch');
     this.schedule();
   }
+  /** Look up a single entry from the persistent store, or undefined if not found. Never throws. */
+  async lookup(kind: GitHubCacheKind, key: string): Promise<any> {
+    try {
+      const id = this.key(kind, key);
+      const row = (await this.pool.query('SELECT value FROM github_cache WHERE key = $1', [id])).rows[0];
+      return row?.value;
+    } catch { return undefined; }
+  }
   private schedule() {
     if (this.timer) return;
     this.timer = setTimeout(() => { this.timer = null; void this.flush(); }, this.flushMs);
