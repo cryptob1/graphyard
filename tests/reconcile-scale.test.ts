@@ -261,6 +261,7 @@ test('unit:reconcile-reads-open-items-once — sustained contention defers a bat
   onLocked = async id => {
     if (id === written.id) {
       attempts++;
+      assert.ok(attempts <= engine.reconcileMaxAttempts, 'sustained contention must not retry forever');
       await store.pool.query(`UPDATE work_items SET document = jsonb_set(document, '{title}', $2::jsonb) WHERE id = $1`, [peer.id, JSON.stringify(`Continuous mutation ${attempts}`)]);
     }
   };

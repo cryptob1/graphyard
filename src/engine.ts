@@ -1930,7 +1930,7 @@ export class Engine {
    * batch is deferred to the next tick and this pass continues with its remaining candidates,
    * so sustained writes cannot starve the server steps that follow reconciliation.
    * Between batches the locks are released and the event loop runs, so a renewal waits at most one
-   * batch however long the whole pass takes. One item always completes per batch.
+   * batch however long the whole pass takes. Every batch attempts at least one item.
    */
   async reconcile() {
     const tickStarted = performance.now();
