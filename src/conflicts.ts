@@ -22,8 +22,17 @@ export type ConflictProbe = (a: string, b: string) => string[] | null;
 export const openCandidates = (work: Work[]) => work.filter(item => item.stage !== 'done' && !!item.submission && !!item.candidate?.sha);
 
 function filesOverlap(filesA: readonly string[], filesB: readonly string[]): boolean {
-  const setB = new Set(filesB);
-  return filesA.some(file => setB.has(file));
+  const isDirPrefix = (path: string) => path.endsWith('/');
+  const pathMatches = (pattern: string, path: string): boolean => {
+    if (pattern === path) return true;
+    if (isDirPrefix(pattern)) return path.startsWith(pattern);
+    return false;
+  };
+  return filesA.some(fileA =>
+    filesB.some(fileB =>
+      pathMatches(fileA, fileB) || pathMatches(fileB, fileA)
+    )
+  );
 }
 
 export interface ProbeBudget { timeoutMs?: number; elapsedMs?: () => number }
@@ -62,23 +71,23 @@ export function candidateConflicts(work: Work[], probe: ConflictProbe, budget?: 
 
   for (let i = 0; i < candidates.length; i++) {
     for (let j = i + 1; j < candidates.length; j++) {
-      if (budget?.elapsedMs) {
-        const elapsed = budget.elapsedMs() - startTime;
-        if (elapsed > timeoutMs) {
-          const left = candidates[i], right = candidates[j];
-          report[left.key].unprobed.push(right.key);
-          report[right.key].unprobed.push(left.key);
-          continue;
-        }
-      }
-
       const left = candidates[i], right = candidates[j];
 
-      // Skip pairs with no file overlap
+      // Skip pairs with no file overlap (always, regardless of budget)
       const leftFiles = left.plannedFiles ?? [];
       const rightFiles = right.plannedFiles ?? [];
       if (leftFiles.length && rightFiles.length && !filesOverlap(leftFiles, rightFiles)) {
         continue;
+      }
+
+      // Check budget after overlap check, so non-overlapping pairs never appear in unprobed
+      if (budget?.elapsedMs) {
+        const elapsed = budget.elapsedMs() - startTime;
+        if (elapsed > timeoutMs) {
+          report[left.key].unprobed.push(right.key);
+          report[right.key].unprobed.push(left.key);
+          continue;
+        }
       }
 
       const files = probe(left.candidate!.sha, right.candidate!.sha);
@@ -134,7 +143,11 @@ export async function probeCandidateConflictsWithBudget(root: string, work: Work
   const getCacheKey = (a: string, b: string) => [a, b].sort().join('-');
 
   const cacheDir = join(dataDir, 'conflict-probes');
-  await mkdir(cacheDir, { recursive: true });
+  try {
+    await mkdir(cacheDir, { recursive: true });
+  } catch {
+    // Cache directory creation failure is non-fatal; caching is a best-effort optimization
+  }
 
   const probeWithCache: ConflictProbe = (a, b) => {
     const key = getCacheKey(a, b);
