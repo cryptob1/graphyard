@@ -179,7 +179,26 @@ export const statusRoutes = defineRoutes('status', [
         const visibleWork = operatorVisible(snapshot.work);
         return { ...snapshot, work: visibleWork, jobs: actor.role === 'operator-agent' ? snapshot.jobs.filter(job => visibleWork.some(work => work.id === job.work_id)) : snapshot.jobs };
       };
-      if (view === 'bounded') return { ...scope(await boundedSnapshot(services.engine.store.pool)), view };
+      // Paging support for bounded and full views: cursor is work item number, pageSize limits results
+      const cursor = url.searchParams.get('cursor') ? Number(url.searchParams.get('cursor')) : undefined;
+      const pageSize = url.searchParams.get('pageSize') ? Math.min(Number(url.searchParams.get('pageSize')), 1000) : 100;
+      if (view === 'bounded') {
+        const full = await boundedSnapshot(services.engine.store.pool);
+        const scoped = scope(full);
+        let items = scoped.work;
+        // Apply cursor-based paging: filter items after the cursor, then take pageSize items
+        if (cursor !== undefined) {
+          items = items.filter((w: any) => w.number !== undefined && w.number > cursor);
+        }
+        const hasMore = items.length > pageSize;
+        const paged = items.slice(0, pageSize);
+        const result: any = { ...scoped, work: paged, view };
+        if (hasMore && paged.length > 0) {
+          result.nextCursor = (paged[paged.length - 1] as any).number;
+          result.hasMore = true;
+        }
+        return result;
+      }
       if (view === 'full') return scope(await services.engine.store.workSnapshot());
       // The coordination view is trimmed in the database (GY-185): the histories it bounds never
       // leave it whole, and what the SQL cut is added to what the view says it left out.
