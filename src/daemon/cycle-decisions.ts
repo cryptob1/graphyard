@@ -19,6 +19,24 @@ export const handWatchPrefix = 'hand:';
 /** The name prefixes every approver session for `key` starts with (see `approverSessionName`). */
 const approverPrefixes = (key: string) => ['graphyard-approver', 'gy-approver'].map(prefix => `${sessionName(prefix, key)}-`);
 
+/** Network error codes a launch can meet that say nothing about whether the next try succeeds. */
+const transientCodes = new Set(['ETIMEDOUT', 'ECONNREFUSED', 'ECONNRESET', 'ECONNABORTED', 'EPIPE', 'EHOSTUNREACH', 'ENETUNREACH', 'ENETDOWN', 'EAI_AGAIN', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT', 'UND_ERR_SOCKET']);
+/**
+ * Whether an approver launch was refused for a reason the next cycle may not meet (GY-706): a
+ * timeout, an unreachable registry or control plane, a 408, 429 or 5xx, or a Herdr inventory that
+ * could not be read. Anything else — a missing runtime, a bad credential, a 4xx refusal — is the
+ * same answer every time it is asked, so it is not retried without bound.
+ */
+export function transientLaunchRefusal(error: unknown): boolean {
+  for (let cause = error, depth = 0; cause && typeof cause === 'object' && depth < 4; cause = (cause as { cause?: unknown }).cause, depth += 1) {
+    const { name, code, status } = cause as { name?: unknown; code?: unknown; status?: unknown };
+    if (name === 'AbortError' || name === 'TimeoutError') return true;
+    if (typeof code === 'string' && transientCodes.has(code)) return true;
+    if (typeof status === 'number') return status === 408 || status === 429 || status >= 500;
+  }
+  return /\btime(?:d)?[ -]?out\b|\bunreachable\b|\bE(?:TIMEDOUT|CONNREFUSED|CONNRESET|AI_AGAIN|HOSTUNREACH|NETUNREACH)\b|fetch failed|socket hang up|inventory could not be read|\b(?:HTTP|status)[ :]*(?:408|429|5\d\d)\b/i.test(message(error));
+}
+
 /** Step 4c: request and supervise the routine decisions. */
 export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, assessments: Record<string, ContainmentAssessment>, { capacities, approversSpent }: { capacities: RoleCapacity[]; approversSpent: boolean }) {
   const { config, state, effects, now, snapshot, clock, performed, isolate, agents, open } = cycle;
@@ -125,11 +143,16 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       const full = capacityRefusal(error);
       if (!full) {
         // A registry session the failed launch could not end stays on the watch, so the next launch ends it first.
-        // The launch made no session, so it is taken back like a capacity refusal (GY-551): a
-        // registry or server timeout is retried next cycle within the bound, never spends it, and
-        // the escalation past the bound counts only the sessions that ran.
         const orphan = (error as { registrySession?: string })?.registrySession;
-        Object.assign(watch, { launches: watch.launches - 1, agentName: null, pane: null, launchedAt: null, account: null, runtime: null, session: orphan ?? null });
+        // A transient refusal — a registry or server timeout, an unreachable registry or Herdr — made
+        // no session and says nothing about the next try, so it is taken back like a capacity
+        // refusal (GY-551): retried next cycle, never spending the bound. Any other refusal (a
+        // misconfigured approver profile, a bad credential) is answered the same way every time, so
+        // it spends its launch and is kept among the decision's end reasons (GY-706): past the
+        // bound the decision is escalated naming it, rather than retried every cycle without end.
+        const transient = transientLaunchRefusal(error);
+        Object.assign(watch, { launches: transient ? watch.launches - 1 : watch.launches, agentName: null, pane: null, launchedAt: null, account: null, runtime: null, session: orphan ?? null });
+        if (!transient) recordEnded(watch, `launch ${watch.launches} refused: ${message(error)}`);
         await effects.persist(state);
         throw error;
       }
@@ -193,6 +216,32 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   const escalateUnjudged = async (item: Work, watch: ApprovalWatch, detail: string) => {
     watch.exhaustedAt = stamp;
     await note(`escalation:decision-unjudged:${watch.decision}`, item, 'escalation', 'failed', `${detail}. ${watch.launches} approver session(s) and ${watch.requests} request(s) have not produced a judgement${watch.ended.length ? ` (${watch.ended.join('; ')})` : ''}, so the loop has stopped spending sessions on it: read it with graphyard master decisions ${item.key}, then put it to a fresh approver with graphyard master approver ${item.key} ${watch.decision}, or take the request back and decide what the item needs instead`);
+  };
+  /**
+   * Move on a decision whose approver ended without judging it: the one step the loop's own watches
+   * and the hand-launched ones (GY-551) share, so the two cannot drift apart (GY-706). The ended
+   * session is closed first — while it cannot be, its name or registry slot still refuses a
+   * replacement, so the step is taken again next cycle — then a launch that never ran a session is
+   * only made again, and a session that ran has its end kept before the decision is requested
+   * again (`rerequest`, the loop's own watches only), escalated past the bound, or relaunched.
+   */
+  const replaceApprover = async (item: Work, watch: ApprovalWatch, step: { step: 'relaunch' | 'rerequest' | 'exhausted'; detail: string }, rerequest?: () => Promise<void>) => {
+    if (!await closeApprover(item, watch, step.detail) && watch.closeAttempts < maxApproverCloses) return;
+    const base = `approver:${watch.decision}`;
+    // A launch waiting for a slot, or refused outright (GY-551), never ran a session, so there is no
+    // ending to record: it is only made again.
+    if (step.step === 'relaunch' && !watch.agentName) {
+      const waited = watch.capacity ? 'waited for an approver slot' : 'had its last approver launch refused';
+      try { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'done', `${item.key}'s ${watch.action} decision ${watch.decision} ${waited}; ${await launch(item, watch, false)}`); }
+      catch (error) { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'failed', `${item.key}'s ${watch.action} decision ${watch.decision} ${waited}; its approver session could not be launched: ${message(error)}`); }
+      return;
+    }
+    // A bound spent on refused launches (GY-706) kept each refusal as it was made; no session ended.
+    if (watch.agentName || step.step !== 'exhausted') recordEnded(watch, step.detail);
+    if (step.step === 'rerequest') { await rerequest?.(); return; }
+    if (step.step === 'exhausted') { await escalateUnjudged(item, watch, step.detail); return; }
+    try { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'done', `${step.detail}; ${await launch(item, watch, false)}`); }
+    catch (error) { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'failed', `${step.detail}; a replacement approver session could not be launched: ${message(error)}`); }
   };
   /** Request the decision (or adopt the one already standing) and put it to an approver. */
   const request = async (item: Work, decision: RoutineDecision, key: string, carried: ApprovalWatch | null) => {
@@ -389,19 +438,8 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       await note(`escalation:decision-refused:${watch.decision}`, item, 'escalation', 'done', `${step.detail}. The loop does not request it again or launch another approver; answer the refusal: read it with graphyard master decisions ${item.key}, then request what the item needs with a reason that cites ${watch.decision} and gives what the refused request lacked, or act on the refusal instead`);
       return;
     }
-    // Every other step replaces the session, so the one that ended goes first. While it cannot be
-    // closed its name is still taken, and the step is taken again next cycle.
-    if (!await closeApprover(item, watch, step.detail) && watch.closeAttempts < maxApproverCloses) return;
-    // A launch waiting for a slot, or refused outright (GY-551), never ran a session, so there is no
-    // ending to record: it is only made again.
-    if (step.step === 'relaunch' && !watch.agentName) {
-      const waited = watch.capacity ? 'waited for an approver slot' : 'had its last approver launch refused';
-      try { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'done', `${item.key}'s ${watch.action} decision ${watch.decision} ${waited}; ${await launch(item, watch, false)}`); }
-      catch (error) { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'failed', `${item.key}'s ${watch.action} decision ${watch.decision} ${waited}; its approver session could not be launched: ${message(error)}`); }
-      return;
-    }
-    recordEnded(watch, step.detail);
-    if (step.step === 'rerequest') {
+    // Every other step replaces the session.
+    await replaceApprover(item, watch, step, async () => {
       // The server settled it some other way — failed on a precondition, stale, withdrawn — and
       // the item still needs the decision, so it is asked again: a bounded number of times, and on
       // the same widening interval as any refused action. The watch stays until a new request
@@ -410,11 +448,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       if (state.actions[key]?.state === 'failed' && !readyToRetry(state.actions[key], state.cycle)) return;
       if (!state.actions[`${base}:ended`]) await note(`${base}:ended`, item, 'decision', 'failed', `${step.detail}; ${item.key} still needs it, so it is requested again`);
       await request(item, decision, key, watch);
-      return;
-    }
-    if (step.step === 'exhausted') { await escalateUnjudged(item, watch, step.detail); return; }
-    try { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'done', `${step.detail}; ${await launch(item, watch, false)}`); }
-    catch (error) { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'failed', `${step.detail}; a replacement approver session could not be launched: ${message(error)}`); }
+    });
   };
 
   const needed = new Set<string>(), unattestable = new Set<string>();
@@ -607,25 +641,13 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
           Object.assign(watch, { exhaustedAt: null, launches: 1, closeAttempts: 0, pane: agent.pane_id, launchedAt: fresh?.launchedAt ?? stamp, account: fresh?.account ?? null, runtime: fresh?.runtime ?? null, session: fresh?.session ?? watch.session, capacity: null, reportedExhaustion: null, heldExhaustion: null });
           await note(`approver:${watch.decision}:rewatched:${watch.launchedAt}`, item, 'decision', 'done', `Watching approver session ${agent.name}, put to ${item.key} decision ${watch.decision} again after its earlier sessions were spent`);
         }
+        // Its replacement is still being launched (GY-616): there is no session to judge yet.
+        if (cycle.launcher.busy(approverLaunchKey(watch.decision))) continue;
         if ((!judged || judged.state === 'requested') && await approverExhausted(item, watch)) continue;
         const step = approvalStep({ ...watch, launchedAt: watch.launchedAt ?? watch.requestedAt }, judged, seen, clock);
-        if (step.step === 'wait') continue;
+        if (step.step === 'wait' || step.step === 'settled' || step.step === 'refused') continue;
         if (step.step === 'relaunch' && !watch.agentName && approversSpent) continue;
-        const base = `approver:${watch.decision}`;
-        // While the ended session cannot be put down, its name or registry slot still refuses a
-        // replacement, so the step is taken again next cycle.
-        if (!await closeApprover(item, watch, step.detail) && watch.closeAttempts < maxApproverCloses) continue;
-        // A launch that waited for a slot or was refused ran no session: it is only made again.
-        if (step.step === 'relaunch' && !watch.agentName) {
-          const waited = watch.capacity ? 'waited for an approver slot' : 'had its last approver launch refused';
-          try { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'done', `${watch.work}'s ${watch.action} decision ${watch.decision} ${waited}; ${await launch(item, watch, false)}`); }
-          catch (error) { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'failed', `${watch.work}'s ${watch.action} decision ${watch.decision} ${waited}; its approver session could not be launched: ${message(error)}`); }
-          continue;
-        }
-        recordEnded(watch, step.detail);
-        if (step.step === 'exhausted') { await escalateUnjudged(item, watch, step.detail); continue; }
-        try { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'done', `${step.detail}; ${await launch(item, watch, false)}`); }
-        catch (error) { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'failed', `${step.detail}; a replacement approver session could not be launched: ${message(error)}`); }
+        await replaceApprover(item, watch, step);
         continue;
       }
       if (listed && !why) continue;
