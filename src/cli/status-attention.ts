@@ -8,6 +8,20 @@ import { elapsed } from '../model/sessions.js';
 export { nameOrphanSupervisors, orphanSupervisorAttention, supervisorReclaimCommand } from './orphan-supervisors.js';
 
 /**
+ * Coordinator checkout drift: when HEAD is not the commit the loop runs or the tree is dirty.
+ * GY-866: the loop refuses to self-upgrade and does not restart from a dirty or detached coordinator.
+ */
+export function coordinatorCheckoutDriftAttention(daemon: { upgrade?: { refused?: { reason: string; commit: string | null; at: string } | null } }): AttentionItem[] {
+  const refused = daemon.upgrade?.refused;
+  if (!refused) return [];
+  return [{
+    subject: null,
+    text: `The coordinator checkout has drifted (${refused.reason}): at ${refused.commit ?? 'unknown'}, the loop will not self-upgrade or restart from it. Clean the checkout or check it out to a valid state.`,
+    ...agentOwner('master', 'git -C <coordinator_root> status; clean the working tree and check out a valid commit')
+  }];
+}
+
+/**
  * One attention item per requested decision whose approver could not be launched (GY-101). A
  * decision changes nothing until a session judges it, and a launch the runtime refuses — for a
  * name it will not take, a credential it cannot read, a workspace that is gone — leaves the watch

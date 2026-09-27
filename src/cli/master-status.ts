@@ -14,7 +14,7 @@ import { readReviewLedger, reconcileReviews, reviewLedgerSpec, sessionLedgerHead
 import { producerLedgerSpec, readProducerLedger, reconcileProducers, sessionRetries, summarizeProducers } from '../producer.js';
 import { defaultAwaitReviewers, dispatchFailureAttention, dispatchSummary, readDispatchCursor } from '../auto-dispatch.js';
 import { actionlessItems, stallBoundMs } from '../model/action-account.js';
-import { approverLaunchAttention, directMergeLine, nameOrphanSupervisors } from './status-attention.js';
+import { approverLaunchAttention, coordinatorCheckoutDriftAttention, directMergeLine, nameOrphanSupervisors } from './status-attention.js';
 import { nameUnobtainableReviews, type SettledReviewSession } from '../model/dispatch.js';
 import { unansweredRequestAttention, unobtainableReviewAttention } from './unanswered-requests.js';
 import { readAdministrationLedger, readSudoState, summarizeAdministration } from '../master-browser.js';
@@ -217,7 +217,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
 export async function reportedAttention(root: string, master: MasterConfig, masterApi: (path: string, credential?: string, timeoutMs?: number) => Promise<any>, coordinator: any, snapshot: { work: Work[]; now: string },
   observed: Omit<Parameters<typeof resourceStatus>[2], 'work' | 'agents'> & Pick<Parameters<typeof terminalDecisions>[2], 'approvals' | 'runtime'> & Pick<Parameters<typeof derivedAttention>[5], 'rows' | 'trees' | 'standalone' | 'approvals'> & { commit: string | null;
     /** How the slow intervention report is read (report-cache.ts): the loop's `background`, status's `bounded`, or live. */
-    reports?: 'background' | 'bounded'; reportBoundMs?: number; sections?: ReportSections }) {
+    reports?: 'background' | 'bounded'; reportBoundMs?: number; sections?: ReportSections; upgrade?: any }) {
   const generatedFiles: AttentionItem[] = [];
   try {
     const deployed = coordinator?.delegationLimits?.deployed?.[generatedFilesVariable];
@@ -241,7 +241,7 @@ export async function reportedAttention(root: string, master: MasterConfig, mast
   const resources = await timedStep('attention: resources', () => resourceStatus(root, master, { reviews: observed.reviews, producers: observed.producers, agents: observed.runtime.available ? observed.runtime.agents : null, work: snapshot.work, loop: observed.loop }));
   const derived = await timedStep('attention: derived', () => derivedAttention(root, master, masterApi, coordinator, snapshot, { ...observed, reviews: observed.reviews ?? [], producers: observed.producers ?? [], runtime: { available: observed.runtime.available, agents: observed.runtime.available ? observed.runtime.agents : [] } }));
   if (!derived.executors.presence.available && /^GET \/api\/actions failed/.test(derived.executors.presence.reason)) sections.mark('executors', 'GET /api/actions', derived.executors.presence.reason);
-  const items = [...resources.attention, ...generatedFiles, ...overflow, ...interventions.attentionItems, ...releases.attention, ...(throughput.attention ? [throughput.attention] : []), ...decisions.attentionItems, ...derived.items];
+  const items = [...resources.attention, ...generatedFiles, ...overflow, ...interventions.attentionItems, ...releases.attention, ...(throughput.attention ? [throughput.attention] : []), ...decisions.attentionItems, ...derived.items, ...coordinatorCheckoutDriftAttention({ upgrade: observed.upgrade })];
   // The report's last step, which the loop runs too: a cause named once, in place of its symptoms.
   const attribute = (status: { work: any[]; attentionItems: AttentionItem[] }) => attributeAttention(ledgerRefusalAttention(status, snapshot.work).attentionItems, resources.readings);
   return { generatedFiles, overflow, interventions, releases, decisions, throughput, resources, derived, items, attribute, unavailable: sections.unavailable };

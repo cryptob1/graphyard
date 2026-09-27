@@ -565,19 +565,21 @@ export async function launchEscalationHandler(root: string, config: MasterConfig
   let launch: ReturnType<typeof accountLaunch>;
   try { launch = accountLaunch({ kind: runtime, approvals: 'auto', agentArgs: [], environment: {} }, selected?.account ?? null); }
   catch (error) { await selected?.release(`escalation handler launch for ${context.key} failed: ${failureText(error).slice(0, 300)}`); throw error; }
+  const checkout = await allocateManagedCheckout(root, config, 'approval', context.key, context.item.candidate?.sha ?? '0'.repeat(40), randomUUID());
   const cli = `node ${config.cliPath}`;
   const prompt = `You are a Graphyard escalation handler spawned for the ${context.escalation.trigger} escalation on ${context.key} in ${config.repository}, acting as ${config.operatorAgent!.id}. Your entire input is the file ${file}: the context the control plane assembled for this decision — the repository's own operating rules and policy, the current goals and priorities, the item (requirements, the standing refusal, the candidate, its typed history) and precedent (earlier ${escalationAction} decisions with their reasons and outcomes). Read that file and nothing else: do not run status, events or any other read, do not open the repository, and hold no state beyond it. Decide whether the ${context.escalation.trigger} escalation should be resolved, following the precedent that applies and saying which. If it should, run ${cli} master decide ${context.key} ${escalationAction} '{"trigger":"${context.escalation.trigger}"}' --precedent DECISION_ID[,DECISION_ID] --context ${context.fingerprint} "YOUR REASON" exactly once, citing only ids listed in precedent.detail; when precedent.detail lists no decision that applies, leave out --precedent and the control plane records that no precedent was available — never invent an id. An independent approver judges it. If it should not, request nothing and state the reason in this tab. Never edit, push, merge, review, approve or submit evidence. Stop when the decision is recorded or declined.`;
   let pane: string | undefined, tabId: string | undefined, delivery: RequestDelivery | undefined;
   try {
-    const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root, '--label', `Escalation · ${context.key}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', 'GRAPHYARD_ESCALATION_HANDLER=1', '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, ...Object.entries(launch.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'], run));
+    const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', checkout.directory, '--label', `Escalation · ${context.key}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', 'GRAPHYARD_ESCALATION_HANDLER=1', '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, ...Object.entries(launch.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'], run));
     pane = created.pane; tabId = created.tab;
     // The instruction is the session's own first request (GY-93), never pasted into it: a handler
     // that refused a pasted prompt would record no decision and leave the escalation standing.
     // Registered first, like every launched session (GY-172 AC-2).
     ({ delivery } = await registeredLaunch(register, { id: `escalation:${context.escalation.trigger}:${context.fingerprint.slice(0, 12)}`, kind: 'coordination', role: 'escalation', principal: config.operatorAgent!.id, runtime, host: config.hostId,
       agentName: name, pane: created.pane, attach: herdrAttach(created.pane, config.herdrWorkspace), ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}),
-      subject: `${context.key}: handle the ${context.escalation.trigger} escalation`, state: 'running' }, () => startAgentSession(name, runtime, created.pane, launch.args, prompt, run, { directory: root, retry: escalationRetry, environment: launch.environment, timeoutMs: launchStartMs(config) }), () => undefined));
+      subject: `${context.key}: handle the ${context.escalation.trigger} escalation`, state: 'running' }, () => startAgentSession(name, runtime, created.pane, launch.args, prompt, run, { directory: checkout.directory, retry: escalationRetry, environment: launch.environment, timeoutMs: launchStartMs(config) }), () => undefined));
   } catch (error) {
+    await settleCheckout(root, checkout.directory);
     const failure = await abandonLaunch(error, pane, tabId, selected, `escalation handler launch for ${context.key} failed: ${failureText(error).slice(0, 300)}`, run);
     // A registry session that could not be ended is kept on a record due now: the loop ends it
     // before it launches the escalation again, so the role's slot is never left orphaned.
@@ -592,7 +594,7 @@ export async function launchEscalationHandler(root: string, config: MasterConfig
   // The record is part of the launch: it is how the loop finds a handler that stopped on a limit
   // notice and ends its registry session, so a launch whose record cannot be written is closed and fails.
   try { await saveEscalationSession(root, context.key, context.escalation.trigger, { agentName: name, pane: pane!, work: context.key, trigger: context.escalation.trigger, kind, account: selected?.account.name ?? null, runtime, launchedAt: new Date().toISOString(), session: selected?.account.fleet.session ?? null, waiting: null }); }
-  catch (error) { throw await abandonLaunch(error, pane, tabId, selected, `escalation handler record for ${context.key} could not be written: ${failureText(error).slice(0, 300)}`, run); }
+  catch (error) { await settleCheckout(root, checkout.directory); throw await abandonLaunch(error, pane, tabId, selected, `escalation handler record for ${context.key} could not be written: ${failureText(error).slice(0, 300)}`, run); }
   return { agentName: name, work: context.key, trigger: context.escalation.trigger, fingerprint: context.fingerprint, context: file, identity: config.operatorAgent!.id, pane: pane!, delivery, focusChanged: false, account: selected?.account.name ?? null };
 }
 

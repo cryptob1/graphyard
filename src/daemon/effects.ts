@@ -681,7 +681,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
         runtime: { available: observed.available ?? true, agents: observed.agents }, commit: null, approvals: observed.approvals, loop: observed.loop, standalone: true,
         // The intervention report takes the server close to a minute (GY-377): the cycle uses the
         // cached copy and refreshes it detached from itself, which is also the copy master status reads.
-        reports: 'background', reportBoundMs: deps.reportReadBoundMs });
+        reports: 'background', reportBoundMs: deps.reportReadBoundMs, upgrade: raw.state?.upgrade });
       // A required check red on the clock is named as master status names it, after buildMasterStatus.
       return { ...reported, items: [...reported.items, ...await timingFaultAttention(work, current().repository, annotations)] };
     },
