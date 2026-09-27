@@ -12,7 +12,7 @@ import { Refusal, demandWork } from './model/refusal.js';
 import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
 import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
-import { branchContamination, nextQueueEntries, disprovedConflict, currentRestore, decideIdentityCarry, defaultMergeBatchSize, mergeBatchSizeEvent, dismissedApproval, keptTipCarry, onto, pendingRestore, reviewedFilesOf, queueHistoryLimit, queueSequencingReason, reconciliationRefusalPrefix, reconcileCheckReruns, rerunFailedChecksEvent, tipReplacesHead, checkRerunLimit, type BaseRefresh, type CheckRerun, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type QueueSpeculation, type RestoredApproval } from './merge-queue.js';
+import { branchContamination, nextQueueEntries, disprovedConflict, currentRestore, decideIdentityCarry, defaultMergeBatchSize, defaultParallelTips, mergeParallelTipsEvent, mergeBatchSizeEvent, dismissedApproval, keptTipCarry, onto, pendingRestore, reviewedFilesOf, queueHistoryLimit, queueSequencingReason, reconciliationRefusalPrefix, reconcileCheckReruns, rerunFailedChecksEvent, tipReplacesHead, checkRerunLimit, type BaseRefresh, type CheckRerun, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type QueueSpeculation, type RestoredApproval } from './merge-queue.js';
 import { queueEjectionRecord } from './model/queue.js';
 import { githubFromEnv, mergeBandQueueDepth } from './github.js';
 import { regressionRefusals } from './regression-guard.js';
@@ -441,6 +441,18 @@ export class Engine {
    */
   optimisticMerge = defaultOptimisticMerge;
   /**
+   * How many queue positions are validated at once (GY-498): the master's `mergeQueue.parallelTips`
+   * as it last published it, read back from the installation ledger by `loadParallelTips`, else
+   * the default of 4. Every evaluation validates the first that many speculative tips at once.
+   */
+  parallelTips = defaultParallelTips;
+  /** Reads the parallel-tip window the master last published from the installation ledger. */
+  async loadParallelTips() {
+    const row = (await this.store.pool.query('SELECT (payload->>\'parallelTips\')::int AS tips FROM events WHERE work_id IS NULL AND kind=$1 ORDER BY seq DESC LIMIT 1', [mergeParallelTipsEvent])).rows[0];
+    this.parallelTips = Number.isSafeInteger(row?.tips) && row.tips >= 1 ? row.tips : defaultParallelTips;
+    return this.parallelTips;
+  }
+  /**
    * How many times a required check that failed on a candidate sha is rerun before the failure
    * counts (GY-516): `mergeQueue.rerunFailedChecks` as the master publishes it, else the product
    * default (src/master/profiles.ts); 0 disables.
@@ -492,7 +504,7 @@ export class Engine {
     if (queuedBefore === null || work.queue || work.queueEjection?.sequence !== queuedBefore) return;
     await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'queue.ejected',
       JSON.stringify({ details: { sequence: queuedBefore, reason: work.queueEjection.reason, ...extra, at: now.toISOString() } })]);
-    for (const behind of nextQueueEntries(all, work.id, Math.max(mergeBandQueueDepth, this.mergeBatchSize))) await wakeJob(db, behind.id);
+    for (const behind of nextQueueEntries(all, work.id, Math.max(mergeBandQueueDepth, this.mergeBatchSize, this.parallelTips))) await wakeJob(db, behind.id);
   }
   // The launch fence is a deployment-independent safety default; only tests shorten it.
   constructor(public store: Store, public ciAppIds: number[] = [15368], public leaseSeconds = 120, public repository = process.env.GITHUB_REPOSITORY ?? '', public launchFence = launchFenceMs) {}
@@ -1608,6 +1620,9 @@ export class Engine {
         ...(kept !== undefined && speculation.carriedBase ? { carriedBase: speculation.carriedBase } : {}),
         ...(carry ? { carry: { approval: carry.approval.carried ? 'carried' : 'required', evidence: Object.fromEntries(carry.evidence.map(entry => [entry.proof, entry.carried ? 'carried' : 'required'])) } } : {}) });
       await wakeJob(db, work.id);
+      // Publication makes the next prediction buildable before this tip's CI finishes.
+      // Each successor publishes under its own integration lease and request budget.
+      for (const behind of nextQueueEntries(all, work.id, Math.max(mergeBandQueueDepth, this.parallelTips))) await wakeJob(db, behind.id);
       return work;
     });
   }
@@ -1734,6 +1749,9 @@ export class Engine {
         ...(refresh.conflict ? { conflict: refresh.conflict } : {}),
         ...(carry ? { carry: { approval: carry.approval.carried ? 'carried' : 'required', evidence: Object.fromEntries(carry.evidence.map(entry => [entry.proof, entry.carried ? 'carried' : 'required'])) } } : {}) });
       await wakeJob(db, work.id);
+      // Publication makes the next prediction buildable before this tip's CI finishes.
+      // Each successor publishes under its own integration lease and request budget.
+      for (const behind of nextQueueEntries(all, work.id, Math.max(mergeBandQueueDepth, this.parallelTips))) await wakeJob(db, behind.id);
       return work;
     });
   }
@@ -1895,7 +1913,11 @@ export class Engine {
     // One request, one verdict (GY-124): two verdicts from one identity on one head for one request
     // are recorded as a conflict and withheld from the observation before any gate reads it.
     this.conflictTransitions.set(work, [...(this.conflictTransitions.get(work) ?? []), ...reconcileReviewConflict(work, now)]);
-    const result = evaluate(work, all, now, this.ciAppIds, { batchSize: this.mergeBatchSize, optimistic: this.optimisticMerge, optimisticExclude: this.optimisticExclude });
+    // The queue is validated by the parallel-tip window (GY-498): entries carry the tips they merge
+    // behind, ejection is decided by prefix attribution, and the test and merge gates read the
+    // window's validation instead of the batch's combined tip. An entry eligible past all of it
+    // (GY-500) evaluates with the optimistic lane instead.
+    const result = evaluate(work, all, now, this.ciAppIds, { batchSize: this.mergeBatchSize, optimistic: this.optimisticMerge, optimisticExclude: this.optimisticExclude, parallelTips: this.parallelTips });
     if (work.stage !== result.stage) work.stageEnteredAt = now.toISOString();
     Object.assign(work, result);
     // The optimistic lane (GY-500) the merge gate just passed on: an unqueued candidate authorized
@@ -2293,7 +2315,7 @@ export class Engine {
           settleDelivered(work, all, now);
           // The queue shifted. The entries that can land next (the head and its batch) are woken now; the rest are observed on
           // their own schedule and re-predict their base when they near the head.
-          for (const behind of nextQueueEntries(all, work.id, Math.max(mergeBandQueueDepth, this.mergeBatchSize))) await wakeJob(db, behind.id);
+          for (const behind of nextQueueEntries(all, work.id, Math.max(mergeBandQueueDepth, this.mergeBatchSize, this.parallelTips))) await wakeJob(db, behind.id);
         } else {
           if (!work.violations.includes(violation)) work.violations.push(violation);
           if (refusedReconciliation) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'merge.reconciliation.refused',
