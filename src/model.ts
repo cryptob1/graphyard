@@ -10,7 +10,6 @@ export * from './model/escalation.js';
 export * from './model/delegation.js';
 export * from './model/delivery.js';
 export * from './model/bootstrap.js';
-export * from './model/landability.js';
 export * from './model/gates.js';
 export * from './model/queue.js';
 export * from './model/carry.js';
