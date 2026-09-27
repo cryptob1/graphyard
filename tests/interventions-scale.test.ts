@@ -169,7 +169,7 @@ function counted(pool: pg.Pool) {
 }
 
 /** The report routes: the interventions ledger, the flow analytics (Insights) and the shipping pulse. */
-const reportRoutes = ['interventions?window=7', 'analytics/flow?window=30', 'analytics/flow/drilldown?window=30', 'shipping-pulse'];
+const reportRoutes = ['interventions?window=7', 'analytics/flow?window=30', 'analytics/flow/drilldown?window=30', 'analytics/attribution?window=30', 'analytics/attribution/drilldown?window=30', 'shipping-pulse'];
 /**
  * Records every statement and checkout on the report pool and on the coordination pools until
  * restored. The request's own authentication (the operator-agent credential check) is not the
@@ -300,4 +300,17 @@ test('unit:report-pool-isolated — the report routes run on their own small poo
     await assert.rejects(strict.reportPool.query('SELECT pg_sleep(2)'), /statement timeout/);
     await strict.pool.query('SELECT pg_sleep(0.6)');
   } finally { await strict.close(); }
+});
+
+test('manual:review-followups-triaged — the attribution analytics read is isolated on the report pool; the flow read\'s bounded projection catch-up is documented to write there', async () => {
+  // Finding 2: the attribution read (readAttribution) now runs on the report pool, isolated like flow and interventions.
+  for (const path of ['analytics/attribution?window=30', 'analytics/attribution/drilldown?window=30']) {
+    const { report, coordination, restore } = poolTraffic();
+    try {
+      const attribution = await read(path, tokens.operator);
+      assert.equal(attribution.status, 200, `GET /api/${path}: ${JSON.stringify(attribution.body)}`);
+    } finally { restore(); }
+    assert.ok(report.length > 0, `GET /api/${path} reads through the report pool`);
+    assert.deepEqual(coordination, [], `GET /api/${path} took no coordination connection`);
+  }
 });

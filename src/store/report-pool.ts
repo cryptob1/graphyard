@@ -3,10 +3,17 @@ import { namedStatements } from './statements.js';
 import { trackedPool } from './pools.js';
 
 /**
- * The report pool (GY-491): the read-only reports — interventions, flow analytics, the shipping
- * pulse — run on their own few connections under a shorter statement timeout, so a slow report
- * waits for its own connections and fails on its own clock, and never takes a connection an
- * observation job, a lease renewal or a merge needs.
+ * The report pool (GY-491): the reports — interventions, flow and attribution analytics, the
+ * shipping pulse — run on their own few connections under a shorter statement timeout, so a slow
+ * report waits for its own connections and fails on its own clock, and never takes a connection
+ * an observation job, a lease renewal or a merge needs.
+ *
+ * One write runs here by design (GY-718): the flow read's bounded projection catch-up
+ * (`pooledFlowReport` → `projectFlow`) inserts flow_facts and advances flow_projection. Its
+ * batches are advisory-locked, idempotent and transactional, so one that times out under this
+ * pool's clock rolls back whole and the next read, or the background tick on the coordination
+ * pool, resumes from the same checkpoint. Keeping it here keeps a read's catch-up off the
+ * coordination pool; no other report writes.
  */
 export const reportPoolConnections = 3, reportStatementTimeoutMs = 20_000;
 export interface ReportPoolOptions { reportMax?: number; reportStatementTimeoutMs?: number }

@@ -16,6 +16,7 @@ const name = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._/-]*$/).max(150);
  * Attribution reads: the analytics section, its drill-downs, a release's manifest and one
  * work item's attribution history. Every route is a read; the ledger these serve is written
  * only by validation and observation ingest, so no client can move a state through here.
+ * The bounded analytics read runs on the report pool (GY-718), isolated like flow and interventions.
  */
 export const attributionRoutes = defineRoutes('attribution', [
   {

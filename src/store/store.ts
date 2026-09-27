@@ -44,7 +44,7 @@ export class BackgroundLane {
 
 export class Store {
   pool: pg.Pool;
-  /** Lease commands only (pools.ts `leaseCommands`); `background` bounds the tick to half the main pool; `reportPool` serves report reads only (report-pool.ts). */
+  /** Lease commands only (pools.ts `leaseCommands`); `background` bounds the tick to half the main pool; `reportPool` serves report reads and the flow read's catch-up (report-pool.ts). */
   leasePool: pg.Pool; readonly background: BackgroundLane; reportPool: pg.Pool;
   constructor(url: string, options: { max?: number; leaseMax?: number } & ReportPoolOptions = {}) {
     const max = Math.max(2, Math.floor(options.max ?? 12));
