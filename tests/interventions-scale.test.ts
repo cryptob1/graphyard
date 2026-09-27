@@ -169,7 +169,7 @@ function counted(pool: pg.Pool) {
 }
 
 /** The report routes: the interventions ledger, the flow analytics (Insights) and the shipping pulse. */
-const reportRoutes = ['interventions?window=7', 'analytics/flow?window=30', 'analytics/flow/drilldown?window=30', 'shipping-pulse'];
+const reportRoutes = ['interventions?window=7', 'analytics/flow?window=30', 'analytics/flow/drilldown?window=30', 'analytics/attribution?window=30', 'analytics/attribution/drilldown?window=30', 'shipping-pulse'];
 /**
  * Records every statement and checkout on the report pool and on the coordination pools until
  * restored. The request's own authentication (the operator-agent credential check) is not the
