@@ -1,4 +1,4 @@
-import { baseRefreshConflict, defaultMergeBatchSize, ejectedTipRestore, ejectionReason, nextQueueSequence, pendingBaseRefresh, pendingRestore, predecessorWait, predecessorWaitText, queueHistoryLimit, queueBatch, queuePlacement, sameMergeBatch, stuckBatchMs } from '../merge-queue.js';
+import { baseRefreshConflict, defaultMergeBatchSize, describeTipWindow, ejectedTipRestore, ejectionReason, nextQueueSequence, pendingBaseRefresh, pendingRestore, predictQueue, predecessorWait, predecessorWaitText, queueHistoryLimit, queueBatch, queuePlacement, sameMergeBatch, sameTips, stuckBatchMs, windowBatchView } from '../merge-queue.js';
 import type { QueueEjection, QueueHistoryEntry, QueuePlacement } from '../merge-queue.js';
 import type { Work } from './work.js';
 import { behindBaseHold } from './behind-base.js';
@@ -6,13 +6,26 @@ import { carriedApproval, currentCarry, describeGround } from './carry.js';
 import { currentEvidence } from './evidence.js';
 import { exactApproval } from './review.js';
 import { requiredProofs } from './bootstrap.js';
+import { defaultOptimisticMerge, defaultOptimisticExclude, optimisticEligibility, type OptimisticEligibility } from '../optimistic-merge.js';
+
+/** The master's merge-queue settings as the control plane applies them: `mergeQueue.batchSize`, `mergeQueue.parallelTips` (GY-498), `mergeQueue.optimistic` and `mergeQueue.optimisticExclude`. */
+export interface MergeQueueSettings { batchSize?: number; optimistic?: boolean; optimisticExclude?: readonly string[]; parallelTips?: number }
+export const queueSettings = (settings: number | MergeQueueSettings | undefined) => typeof settings === 'object'
+  ? { batchSize: settings.batchSize ?? defaultMergeBatchSize, optimistic: settings.optimistic ?? defaultOptimisticMerge, optimisticExclude: settings.optimisticExclude ?? defaultOptimisticExclude, parallelTips: settings.parallelTips }
+  : { batchSize: settings ?? defaultMergeBatchSize, optimistic: defaultOptimisticMerge, optimisticExclude: defaultOptimisticExclude, parallelTips: undefined };
 
 /**
  * Queue membership is derived, never asserted: no command, operator, or administrator can
  * place, reorder, or hold a position. An entry leaves only by merging or by an explicit,
  * observed validation failure, and a re-entry always starts a new sequence at the back.
+ *
+ * The one entry that never joins is an optimistic one (GY-500): not queued, every gate passing on
+ * its own head, and its files disjoint from everything the base changed since its bound base (see
+ * optimisticEligibility). It merges head-bound at once, with no queue reason on its merge gate;
+ * main is guarded after the merge instead. An entry that stops being eligible joins as any other.
  */
-export function placeInQueue(work: Work, all: Work[], now: Date, ciAppIds: number[], eligible: boolean, batchSize = defaultMergeBatchSize) {
+export function placeInQueue(work: Work, all: Work[], now: Date, ciAppIds: number[], eligible: boolean, settings: number | MergeQueueSettings = defaultMergeBatchSize) {
+  const { batchSize, optimistic: optimisticMode, optimisticExclude, parallelTips } = queueSettings(settings);
   const history = [...(work.queueHistory ?? [])];
   const candidate = work.candidate;
   let queue = work.queue ?? null, queueSequence = work.queueSequence ?? 0, ejection = work.queueEjection ?? null;
@@ -22,9 +35,14 @@ export function placeInQueue(work: Work, all: Work[], now: Date, ciAppIds: numbe
   };
   const probe = { ...work, queue, queueSequence, gates: [], violations: work.violations } as Work;
   // The batch plan (GY-330) decides which failed tip ejects: it is read from the queue as it
-  // stands, with this entry's own record as just observed.
-  const batchOf = (subject: Work) => queueBatch(subject, all.map(item => item.id === subject.id ? subject : item), now.getTime(), batchSize, ciAppIds);
-  const reason = queue ? ejectionReason(probe, ciAppIds, all, batchOf(probe)) : null;
+  // stands, with this entry's own record as just observed. Under a parallel-tip window (GY-498)
+  // the window's prefix verdicts decide instead: the first failing tip isolates its own entry.
+  const peersOf = (subject: Work) => all.map(item => item.id === subject.id ? subject : item);
+  const batchOf = (subject: Work) => queueBatch(subject, peersOf(subject), now.getTime(), batchSize, ciAppIds);
+  const windowOf = (subject: Work) => parallelTips ? describeTipWindow(peersOf(subject), predictQueue(peersOf(subject), now.getTime()), parallelTips, ciAppIds).get(subject.key) ?? null : null;
+  const reason = queue ? ejectionReason(probe, ciAppIds, all, parallelTips ? null : batchOf(probe), windowOf(probe)) : null;
+  const optimistic: OptimisticEligibility | null = !queue && eligible ? optimisticEligibility(work, all, { enabled: optimisticMode, gatesPass: eligible, exclude: optimisticExclude }) : null;
+  if (optimistic?.eligible) return { queue: null, queueSequence, ejection, history, reasons: [] as string[], placement: null, optimistic };
   if (queue && reason) {
     ejection = { at: now.toISOString(), sequence: queue.sequence, reason, sha: candidate?.sha ?? null, policyRevision: work.policyRevision, conflict: null };
     record('ejected', reason, queue.speculation?.tip ?? candidate?.sha);
@@ -40,26 +58,39 @@ export function placeInQueue(work: Work, all: Work[], now: Date, ciAppIds: numbe
   const placement = queue ? queuePlacement(shadow, all.map(item => item.id === work.id ? shadow : item), now.getTime()) : null;
   let stalledAfterDissolution: string | null = null;
   if (queue) {
-    const batch = batchOf(shadow);
-    let mutated = false;
-    // A head batch sitting in 'testing' with no published tip is the GY-506 deadlock: nothing
-    // names CI to wait for, so the queue can only advance by a tip being published. The head
-    // member times the state; after `stuckBatchMs` the batch dissolves and its members validate
-    // as single-entry batches, in their existing order, each re-predicted in turn.
-    const stuck = !!batch && batch.batch === 1 && batch.state === 'testing' && batch.tip === null && batch.members.length > 0;
-    if (batch && batch.members[0] === work.key) {
-      if (stuck) {
-        if (!queue.batchStall) { queue = { ...queue, batchStall: { since: now.toISOString() } }; mutated = true; }
-        const since = Date.parse(queue.batchStall!.since);
-        if (!queue.batchDissolved && now.getTime() - since >= stuckBatchMs) {
-          const members = [...batch.members];
-          queue = { ...queue, batchDissolved: { at: now.toISOString(), members } };
-          mutated = true;
-          record('dissolved', `batch 1 (${members.join(', ')}) sat in testing with no published tip for ${Math.round((now.getTime() - since) / 60_000)} minutes (GY-506); its members return to single-entry queue positions in their existing order and are re-predicted`);
+    if (parallelTips) {
+      // Under the parallel-tip window (GY-498) every entry validates on its own tip, so there is
+      // no combined batch tip to wedge (GY-506's dissolution belongs to the batch plan). The view
+      // is replaced only when it differs in content, for the same jsonb key-order reason as below.
+      const view = windowOf(shadow);
+      const batch = view ? windowBatchView(work.key, view, parallelTips) : null;
+      const tips = view?.tips ?? null;
+      if (!sameMergeBatch(queue.batch ?? null, batch) || !sameTips(queue.tips ?? null, tips)) {
+        const { batch: _previous, tips: _previousTips, ...entry } = queue;
+        queue = { ...entry, ...(batch ? { batch } : {}), ...(tips ? { tips } : {}) } as typeof queue;
+      }
+    } else {
+      const batch = batchOf(shadow);
+      let mutated = false;
+      // A head batch sitting in 'testing' with no published tip is the GY-506 deadlock: nothing
+      // names CI to wait for, so the queue can only advance by a tip being published. The head
+      // member times the state; after `stuckBatchMs` the batch dissolves and its members validate
+      // as single-entry batches, in their existing order, each re-predicted in turn.
+      const stuck = !!batch && batch.batch === 1 && batch.state === 'testing' && batch.tip === null && batch.members.length > 0;
+      if (batch && batch.members[0] === work.key) {
+        if (stuck) {
+          if (!queue.batchStall) { queue = { ...queue, batchStall: { since: now.toISOString() } }; mutated = true; }
+          const since = Date.parse(queue.batchStall!.since);
+          if (!queue.batchDissolved && now.getTime() - since >= stuckBatchMs) {
+            const members = [...batch.members];
+            queue = { ...queue, batchDissolved: { at: now.toISOString(), members } };
+            mutated = true;
+            record('dissolved', `batch 1 (${members.join(', ')}) sat in testing with no published tip for ${Math.round((now.getTime() - since) / 60_000)} minutes (GY-506); its members return to single-entry queue positions in their existing order and are re-predicted`);
+          }
+        } else if (queue.batchStall) {
+          const { batchStall: _stall, ...entry } = queue;
+          queue = entry; mutated = true;
         }
-      } else if (queue.batchStall) {
-        const { batchStall: _stall, ...entry } = queue;
-        queue = entry; mutated = true;
       }
       // Dissolution happens once per stuck batch. A head that is then a single-entry batch and
       // still sits in testing with no tip has nothing left to dissolve, so it is escalated instead
@@ -94,7 +125,7 @@ export function placeInQueue(work: Work, all: Work[], now: Date, ciAppIds: numbe
     : waiting?.length ? [predecessorWaitText(work, waiting)]
     : ejection ? [`Ejected from the merge queue: ${ejection.reason}; a new candidate re-enters at the back of the queue`]
     : eligible ? ['Candidate has not entered the merge queue'] : [];
-  return { queue, queueSequence, ejection, history, reasons, placement };
+  return { queue, queueSequence, ejection, history, reasons, placement, optimistic };
 }
 
 /**
