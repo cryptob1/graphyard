@@ -7,6 +7,7 @@ import { formatDuration } from '../../src/model/duration';
 import { readStepRows } from '../step-moves';
 import { ShippingPulse, usePulse, type PulseRead } from '../shipping-pulse';
 import FlowAnalytics from '../flow-analytics';
+import OptimisticMerges from '../optimistic-merges';
 import type { Work } from '../../src/model';
 import type { HumanRequestRow } from '../../src/model/human-request';
 import type { Dashboard } from './dashboard';
@@ -111,7 +112,30 @@ export function LandedPerDay({ report }: { report: any }) {
       : <div key={entry.bucket} className="landed-day uncovered" data-bucket={entry.bucket} data-uncovered="true" title={`${entry.bucket.slice(0, 10)} was not read`}>
         <span>—</span><small>{new Date(entry.bucket).toISOString().slice(5, 10)} not read</small>
       </div>)}</div> : <p className="muted">{report ? coverage ? 'No day of this window was read.' : 'Nothing landed in this window.' : 'Reading the recorded deliveries…'}</p>}
+    <MergeQueuePace report={report}/>
   </section>;
+}
+
+/**
+ * The merge queue's pace (GY-498), from the flow report's `mergeQueue`: merges per hour over the
+ * window the merges were read for, and the median time a merged entry waited in the queue. An
+ * unmeasured figure reads Unavailable, never zero; a figure from fewer than `sparseSamples` merges
+ * reads '—' with its sample count, the report's sparse-data convention, so a quiet repository never
+ * shows a rate or median drawn from two samples as if it were the week's.
+ */
+export function MergeQueuePace({ report }: { report: any }) {
+  const pace = report?.mergeQueue;
+  if (!report) return null;
+  const sparse = (n: number | undefined) => typeof n === 'number' && n < sparseSamples;
+  const rateSparse = sparse(pace?.merges) && typeof pace?.mergesPerHour === 'number';
+  const perHour = typeof pace?.mergesPerHour === 'number' ? (rateSparse ? '—' : String(pace.mergesPerHour)) : 'Unavailable';
+  const waitSparse = sparse(pace?.queueWait?.n) && typeof pace?.queueWait?.medianMs === 'number';
+  const wait = typeof pace?.queueWait?.medianMs === 'number' ? (waitSparse ? '—' : minutes(pace.queueWait.medianMs)) : 'Unavailable';
+  const figure = { display: 'flex', flexDirection: 'column', gap: '2px' } as const, value = { margin: 0, fontWeight: 600 } as const;
+  return <dl className="merge-pace" data-flow="merge-queue" aria-label="Merge queue pace" style={{ display: 'flex', gap: '24px', margin: '12px 0 0' }}>
+    <div data-pace="merges-per-hour" style={figure}><dt className="muted">Merges per hour</dt><dd style={value} data-sparse={rateSparse || undefined} title={rateSparse ? `Fewer than ${sparseSamples} merges` : undefined}>{perHour}</dd>{rateSparse && <small className="muted step-sparse" data-sparse="sparse">{pace.merges} merges</small>}</div>
+    <div data-pace="median-queue-wait" style={figure}><dt className="muted">Median queue wait</dt><dd style={value} data-sparse={waitSparse || undefined} title={waitSparse ? `Fewer than ${sparseSamples} merges` : undefined}>{wait}{typeof pace?.queueWait?.n === 'number' && pace.queueWait.n > 0 && !waitSparse && <small> of {pace.queueWait.n} merged</small>}</dd>{waitSparse && <small className="muted step-sparse" data-sparse="sparse">{pace.queueWait.n} merged</small>}</div>
+  </dl>;
 }
 
 /** Fewer samples than this make a step's median sparse (src/flow-analytics.ts `sparseSampleSize`). */
@@ -393,6 +417,7 @@ export default function InsightsPage({ work, status, api, token, observedAt, set
       <LandedPerDay report={report}/>
       <WhereTimeGoes report={report}/>
     </div>
+    <OptimisticMerges work={work} enabled={status?.mergeQueue?.optimistic}/>
     <details className="insight-details" onToggle={event => { if (event.currentTarget.open) setDetailed(true); }}><summary>Show details</summary>
       {detailed && <div className="insight-details-body"><InsightsDetails pulse={pulse} repository={status?.repository} api={api} token={token} canAudit={['admin', 'coordinator', 'producer'].includes(status?.actor?.role)}/></div>}
     </details>
