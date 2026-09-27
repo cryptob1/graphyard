@@ -82,11 +82,28 @@ export const observedFrom = (work: Work) => work.observation
   ? `[Decided from the GitHub observation taken at ${work.observation.at} of candidate ${work.observation.candidate.sha}; if the item has moved since, this request no longer describes it.]`
   : '[Decided with no GitHub observation of the item.]';
 /**
+ * Whether the rework decision is specifically for a merge conflict (sync rework). For GY-807: a
+ * conflict detection is decisive regardless of observation age, because a GitHub-reported conflict
+ * on the current head stays valid even in a stale observation; the loop should request a fresh
+ * observation and make the rework decision, not wait passively on the assumption the conflict
+ * may have resolved.
+ */
+export function isSyncConflictBinding(binding: string): boolean {
+  return /^[a-f0-9]{40}:sync:/.test(binding) || /^[a-f0-9]{40}:queue-conflict:/.test(binding);
+}
+/**
  * Why a rework request must wait for a fresh observation, or null when the one on the item may be
  * decided from. The reason names the stale observation — its time and head — and never its age,
  * so it reads the same on every cycle it stands.
+ *
+ * GY-807: For sync conflicts detected by syncConflict, skip the freshness check. The conflict is
+ * reported by GitHub and won't resolve itself without a sync by the worker, so a stale observation
+ * that shows the conflict is still actionable. Waiting passively for a fresh observation allows
+ * items to become actorless and stalled.
  */
-export function reworkObservationWait(work: Work, now: number, pause: GitHubPause | null): string | null {
+export function reworkObservationWait(work: Work, now: number, pause: GitHubPause | null, binding?: string): string | null {
+  const effectiveBinding = binding ?? work.nextAction?.binding;
+  if (effectiveBinding && isSyncConflictBinding(effectiveBinding)) return null;
   const observation = work.observation;
   if (!observation) return `${work.key}: rework waits for a GitHub observation of the item; there is none to decide from`;
   const seen = `the last GitHub observation (taken at ${observation.at} of head ${observation.candidate.sha.slice(0, 12)})`;
