@@ -223,7 +223,8 @@ export async function probeSupervisorAbsence(target: SupervisorProbeTarget, deps
         if (owner !== 'target' && membership !== 'inside' && (owner === 'other' || assignmentOf(pid) === 'other')) attributed.push(pid);
         else { holding.push(pid); describe(pid, unit); }
       }
-      scopes.push({ unit, activeState, processes: holding, attributed });
+      const truncated = holding.length > 200 || attributed.length > 200;
+      scopes.push({ unit, activeState, processes: holding.slice(0, 200), processesCount: truncated ? holding.length : undefined, attributed: attributed.slice(0, 200), attributedCount: truncated ? attributed.length : undefined, truncated: truncated ? true : undefined });
     } catch (error) { unverifiable.push(`Containment scope ${unit} could not be inspected: ${detail(error)}`); }
   }
   return record();

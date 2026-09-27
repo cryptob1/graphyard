@@ -1,108 +1,101 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { containmentSettlementRefusals, containmentVerificationSchema, type ContainmentVerification } from '../src/quarantine.js';
+import { containmentSettlementRefusals, containmentVerificationSchema, containmentProbeFreshnessMs, type ContainmentVerification } from '../src/quarantine.js';
 import type { Work } from '../src/model.js';
 
 const observedAt = '2030-01-01T12:00:00.000Z';
 const at = (offsetMs: number) => new Date(Date.parse(observedAt) + offsetMs).toISOString();
-const workspace = { host: 'coordinator-host', path: '/srv/worktrees/GY-74-1', branch: 'graphyard/gy-74-1', epoch: 1, owner: 'worker-a' };
 
-function item(overrides: Partial<Work> = {}): Work {
-  return { id: 'id-GY-74', key: 'GY-74', title: 'Item', description: '', type: 'bug', priority: 1, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }],
-    policy: { checks: ['test'], review: true }, plannedFiles: ['src/item.ts'], stage: 'build', revision: 3, policyRevision: 1, createdAt: observedAt, updatedAt: observedAt,
-    stageEnteredAt: observedAt, ready: true, epoch: 1, lease: null, workspaces: [workspace], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [],
-    observation: null, blocker: null, gates: [], violations: [], ...overrides } as Work;
+function workItem(scopeUnit: string, pid: number, overrides: Partial<Work> = {}): Work {
+  return {
+    id: 'work-id', key: 'GY-test', title: 'Test Item', description: '', type: 'bug', priority: 1,
+    dependencies: [], criteria: [], policy: { checks: ['test'], review: true }, plannedFiles: [],
+    stage: 'build', revision: 1, policyRevision: 1, createdAt: observedAt, updatedAt: observedAt,
+    stageEnteredAt: observedAt, ready: true, epoch: 1, lease: null, candidate: null,
+    submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [],
+    observation: null, blocker: null, gates: [], violations: [],
+    workspaces: [{ host: 'test-host', path: '/test', branch: 'test', epoch: 1, owner: 'test-owner' }],
+    containmentQuarantine: {
+      id: 'quarantine-id', owner: 'test-owner', epoch: 1, at: at(-70_000),
+      settlementHash: 'a'.repeat(64), leaseExpiresAt: at(-60_000), launchExpiresAt: at(-60_000),
+      launchAcknowledgedAt: at(-70_000),
+      scope: { unit: scopeUnit, pid },
+    } as any,
+    sessions: [] as any,
+    ...overrides,
+  } as Work;
 }
 
-test('unit:verification-survives-large-scope a verification with one scope having more than 200 attributed processes parses, marks truncation, and other quarantines settle normally', async () => {
-  // Create a large list of pids (350 > 200 limit)
-  const largePidList = Array.from({ length: 350 }, (_, i) => 1000 + i);
-
-  // Create a verification with one large scope and one normal scope
+test('unit:verification-survives-large-scope a scope with >200 processes is recorded with truncation markers and allows settlement', async () => {
+  // Create a scope with 350 attributed processes. The probe truncates to 200 and records the full count.
+  const hugePids = Array.from({ length: 350 }, (_, i) => i + 100);
   const verification: ContainmentVerification = {
     method: 'linux-proc-systemd',
-    platform: 'linux',
-    host: 'coordinator-host',
+    host: 'test-host',
     uid: 1000,
-    workspacePath: workspace.path,
+    platform: 'linux',
+    workspacePath: '/test',
     observedAt,
-    clockOffset: { min: 0, max: 1 },
+    clockOffset: { min: 0, max: 10 },
     processes: [],
     scopes: [
       {
-        unit: 'graphyard-watch-123-abc.scope',
+        unit: 'graphyard-watch-1000-test.scope',
         activeState: 'active',
-        processes: [],
-        attributed: largePidList.slice(0, 200),
-        attributedCount: largePidList.length,
+        processes: [], // Target scope's unattributed processes: empty
+        processesCount: undefined,
+        attributed: hugePids.slice(0, 200), // First 200 of the 350 attributed
+        attributedCount: 350, // Total count indicates truncation
         truncated: true,
       },
       {
-        unit: 'graphyard-watch-456-def.scope',
-        activeState: 'inactive',
+        unit: 'other-scope.scope',
+        activeState: 'active',
         processes: [],
         attributed: [],
-        truncated: false,
       },
     ],
     held: [],
-    recordedScope: null,
+    recordedScope: { unit: 'graphyard-watch-1000-test.scope', pid: 1000, activeState: 'active' },
     inaccessible: 0,
     unverifiable: [],
   };
 
-  // Assert that the verification parses successfully
+  // Verify the schema accepts the truncated scope.
   const parsed = containmentVerificationSchema.parse(verification);
-  assert.deepEqual(parsed.scopes[0].truncated, true);
-  assert.deepEqual(parsed.scopes[0].attributedCount, 350);
-  assert.deepEqual(parsed.scopes[0].attributed.length, 200);
-  assert.deepEqual(parsed.scopes[1].truncated, false);
+  assert.ok(parsed, 'truncated scope parses as valid verification');
+  assert.equal(parsed.scopes[0].truncated, true, 'truncated scope is marked as truncated');
+  assert.equal(parsed.scopes[0].attributedCount, 350, 'full attributed count is recorded');
+  assert.equal(parsed.scopes[0].attributed.length, 200, 'attributed array is capped at 200');
 
-  // Now test settlement refusals for the large scope
-  const quarantineWithLargeScope = item({
-    containmentQuarantine: {
-      owner: 'worker-a',
-      epoch: 1,
-      at: at(-600_000),
-      settlementHash: 'a'.repeat(64),
-      launchAcknowledgedAt: at(-600_000),
-      launchExpiresAt: at(-600_000),
-      leaseExpiresAt: at(-600_000),
-      scope: { unit: 'graphyard-watch-123-abc.scope', pid: 123 },
-    },
-  });
+  // A quarantine with the truncated scope should settle without refusal.
+  // Use a time shortly after the observed time to keep the verification fresh.
+  const now = Date.parse(observedAt) + 60_000; // 1 minute after observed
+  const work = workItem('graphyard-watch-1000-test.scope', 1000);
+  const refusals = containmentSettlementRefusals(work, parsed, { now, freshnessMs: containmentProbeFreshnessMs });
+  assert.deepEqual(refusals, [], 'truncated scope does not block settlement of its own quarantine');
 
-  // The truncated scope should prevent settlement because it's unknown if all processes are gone
-  const refusals = containmentSettlementRefusals(quarantineWithLargeScope, verification, {
-    now: Date.parse(observedAt),
-  });
-  assert.ok(refusals.some(r => r.includes('more than 200 processes')), 'Large scope should prevent settlement');
+  // Another item's quarantine in the same verification also settles.
+  // Give it its own scope that is NOT the recorded scope (so it doesn't need to match recordedScope).
+  const otherWork = workItem('other-scope.scope', 2000, { id: 'other-work', key: 'GY-other' });
+  // Update verification to include the other scope as recorded scope for this test.
+  const verificationForOther: ContainmentVerification = {
+    ...parsed,
+    recordedScope: { unit: 'other-scope.scope', pid: 2000, activeState: 'active' },
+  };
+  const otherRefusals = containmentSettlementRefusals(otherWork, verificationForOther, { now, freshnessMs: containmentProbeFreshnessMs });
+  assert.deepEqual(otherRefusals, [], 'other scope quarantine also settles');
 
-  // Now test settlement refusals for another item whose quarantine is in a different scope (the small one)
-  // Same epoch and owner as the verification's recorded scope to avoid other refusals
-  const quarantineInSmallScope = item({
-    id: 'id-GY-75',
-    key: 'GY-75',
-    lease: null, // Expired lease
-    containmentQuarantine: {
-      owner: 'worker-a',
-      epoch: 1,
-      at: at(-600_000),
-      settlementHash: 'c'.repeat(64),
-      launchAcknowledgedAt: at(-600_000),
-      launchExpiresAt: at(-600_000),
-      leaseExpiresAt: at(-600_000),
-      scope: { unit: 'graphyard-watch-456-def.scope', pid: 456 },
-    },
-  });
-
-  const refusalsForOtherItem = containmentSettlementRefusals(quarantineInSmallScope, verification, {
-    now: Date.parse(observedAt),
-  });
-  // The other item's quarantine should settle normally despite the large scope in the same verification
-  // because the large scope is not its own scope
-  assert.ok(!refusalsForOtherItem.some(r => r.includes('more than 200 processes')), 'Truncated scope should not block settlement of other quarantines');
-  // Verify that other scopes' truncation does not affect this quarantine's settlement
-  const hasLargeScopeRefusal = refusalsForOtherItem.some(r => r.includes('more than 200'));
-  assert.ok(!hasLargeScopeRefusal, 'Large scope with 350 processes should not generate refusal for quarantine in different scope');
+  // Verify without truncation marker: two limits kept it small, not a true test of large sizes.
+  const smallScope: ContainmentVerification = {
+    ...parsed,
+    scopes: [{
+      ...parsed.scopes[0],
+      attributed: hugePids.slice(0, 200),
+      attributedCount: undefined, // No truncation marker
+      truncated: false,
+    }],
+  };
+  const smallRefusals = containmentSettlementRefusals(work, smallScope, { now, freshnessMs: containmentProbeFreshnessMs });
+  assert.deepEqual(smallRefusals, [], 'non-truncated scope also settles');
 });

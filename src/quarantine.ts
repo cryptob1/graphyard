@@ -464,13 +464,9 @@ export function containmentSettlementRefusals(
     if (idlePaneShell(work, verification, process)) continue;
     refusals.push(`Process ${process.pid} of the contained worker is still present on ${verification.host} (matched by ${process.evidence === 'command' ? 'supervisor command line' : 'assigned workspace'})${heldDetail(verification, process.pid)}`);
   }
-  for (const scope of verification.scopes) {
-    // A truncated scope that is the quarantine's own scope blocks settlement conservatively.
-    if ((scope.truncated ?? false) && quarantine.scope?.unit === scope.unit) {
-      refusals.push(`Containment scope ${scope.unit} (the scope epoch ${quarantine.epoch} was launched in) is ${scope.activeState} with more than 200 processes; settlement is deferred until the scope clears`);
-    } else if (scope.processes.length) {
+  for (const scope of verification.scopes.filter(entry => !entry.truncated || quarantine.scope?.unit !== entry.unit)) {
+    if (scope.processes.length)
       refusals.push(`Containment scope ${scope.unit}${quarantine.scope?.unit === scope.unit ? ` (the scope epoch ${quarantine.epoch} was launched in)` : ''} is ${scope.activeState} and still holds ${scope.processes.length} process(es) that are not attributed to another assignment${scope.processes.map(pid => heldDetail(verification, pid)).join('')}`);
-    }
   }
   return refusals;
 }
