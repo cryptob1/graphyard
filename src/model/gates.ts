@@ -107,9 +107,10 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[],
     const revoked = work.evidence.some(e => e.proof === proof && e.trusted && !!e.revocation && evidenceBindsCandidate(work, e) && e.policyRevision === work.policyRevision);
     return `${proof} needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy${scenario ? `; scenario v${scenario.revision} in ${scenario.environment}` : ''}${revoked && !currentEvidence(work, proof, now) ? '; previously accepted evidence was revoked' : ''}`;
   };
-  // Low-lane items skip producer-runnable proofs (unit and integration); high and medium lanes require all
+  // Low-lane items skip producer-runnable proofs (unit and integration) and manual attestations
   const isProducerRunnable = (proof: string) => /^(unit|integration):/.test(proof);
-  const isRequiredProof = (proof: string) => lane !== 'low' || !isProducerRunnable(proof);
+  const isManualAttestation = (proof: string) => /^manual:/.test(proof);
+  const isRequiredProof = (proof: string) => lane !== 'low' || (!isProducerRunnable(proof) && !isManualAttestation(proof));
   // A bootstrap criterion's proofs are deferred here and required of the next change that
   // touches the same contract; review, CI and every other criterion still gate this one.
   for (const ac of work.criteria.filter(criterion => !criterion.bootstrap)) for (const proof of ac.proofs) {

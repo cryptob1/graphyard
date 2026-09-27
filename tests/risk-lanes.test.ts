@@ -37,7 +37,7 @@ test('AC-1: risk-lane-assigned - determineLane classifies paths correctly', () =
 
 // AC-2: In src/model/gates.ts a low-lane item is landable with its required CI checks green and one approving review
 test('AC-2: lane-sets-required-gates - gates reflect lane requirements', () => {
-  const createWork = (lane: Lane, files: string[]): Omit<Work, keyof typeof gate> & { observation?: any } => ({
+  const createWork = (files: string[]) => ({
     id: 'test-id',
     key: 'TEST-1',
     type: 'feature' as const,
@@ -51,7 +51,7 @@ test('AC-2: lane-sets-required-gates - gates reflect lane requirements', () => {
     ready: true,
     epoch: 1,
     lease: null,
-    workspaces: [],
+    workspaces: [{ host: 'local', path: '/tmp/test', branch: 'feature', epoch: 1, owner: 'test' }],
     candidate: { sha: 'abc123', baseSha: 'def456', pr: 1, branch: 'feature', author: 'test' },
     observation: {
       candidate: { sha: 'abc123', baseSha: 'def456', pr: 1, branch: 'feature', author: 'test' },
@@ -75,12 +75,19 @@ test('AC-2: lane-sets-required-gates - gates reflect lane requirements', () => {
     violations: [],
     reworkRequested: false,
     scenarioRequirements: [],
-  });
+    dependencies: [],
+    submission: { pr: 1, epoch: 1 },
+    revision: 1,
+    policyRevision: 1,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    stageEnteredAt: new Date().toISOString(),
+  } as unknown as Work);
 
   const now = new Date();
 
   // Low-lane items should pass acceptance with just CI and one review
-  const lowLaneWork = createWork('low', ['src/model/policy.ts']);
+  const lowLaneWork = createWork(['src/model/policy.ts']);
   const lowResult = evaluate(lowLaneWork, [lowLaneWork], now, [15368]);
   assert.equal(lowResult.lane, 'low');
 
@@ -89,7 +96,7 @@ test('AC-2: lane-sets-required-gates - gates reflect lane requirements', () => {
   assert.ok(acceptanceGate?.passed, 'Low-lane should pass acceptance with CI and one review, skipping unit/integration proofs');
 
   // High-lane items should still require all proofs
-  const highLaneWork = createWork('high', ['src/server/routes/api.ts']);
+  const highLaneWork = createWork(['src/server/routes/api.ts']);
   const highResult = evaluate(highLaneWork, [highLaneWork], now, [15368]);
   assert.equal(highResult.lane, 'high');
 
@@ -100,7 +107,7 @@ test('AC-2: lane-sets-required-gates - gates reflect lane requirements', () => {
 
 // AC-3: Lanes are inputs to the single landability verdict; speed targets are shipped and reported
 test('AC-3: lanes-feed-verdict - lanes affect verdict and speed targets are reported', () => {
-  const createWork = (files: string[]): Omit<Work, keyof typeof gate> & { observation?: any } => ({
+  const createWork = (files: string[]) => ({
     id: 'test-id',
     key: 'TEST-1',
     type: 'feature' as const,
@@ -112,7 +119,7 @@ test('AC-3: lanes-feed-verdict - lanes affect verdict and speed targets are repo
     ready: true,
     epoch: 1,
     lease: null,
-    workspaces: [],
+    workspaces: [{ host: 'local', path: '/tmp/test', branch: 'feature', epoch: 1, owner: 'test' }],
     candidate: { sha: 'abc123', baseSha: 'def456', pr: 1, branch: 'feature', author: 'test' },
     observation: {
       candidate: { sha: 'abc123', baseSha: 'def456', pr: 1, branch: 'feature', author: 'test' },
@@ -136,7 +143,14 @@ test('AC-3: lanes-feed-verdict - lanes affect verdict and speed targets are repo
     violations: [],
     reworkRequested: false,
     scenarioRequirements: [],
-  });
+    dependencies: [],
+    submission: { pr: 1, epoch: 1 },
+    revision: 1,
+    policyRevision: 1,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    stageEnteredAt: new Date().toISOString(),
+  } as unknown as Work);
 
   const now = new Date();
 
