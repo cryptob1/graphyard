@@ -1901,7 +1901,9 @@ export async function landingCheck(github: LandingGitHub, work: Work, head: stri
   // file list computed against another base). A path only the base changed is inherited by
   // a three-way merge; it is not this candidate restoring its older copy of that path.
   // Recompute even for an unchanged head: an old observation may contain a false refusal.
-  const landed = predicted || !sameTree ? await landingDiff(github, base, head, predicted ? undefined : files) : null;
+  // Both predicted and live-base paths use three-way merge: files changed only by the base
+  // are not reverts (GY-855).
+  const landed = await landingDiff(github, base, head, predicted ? undefined : files);
   const landing: LandingCheck = { base, ...(landed ? { files: await compareScopeOf(github, work.plannedFiles ?? [], landed, base, budget) } : {}) };
   if (!peers) return landing;
   const open = peers.filter(peer => peer.id !== work.id && peer.stage !== 'done' && !!peer.submission && !!peer.candidate && peer.candidate.sha !== head
