@@ -32,14 +32,21 @@ async function setup() {
   return { directory, master };
 }
 function held(overrides: Partial<Work> = {}): Work {
+  const id = overrides.id ?? 'work-252';
+  const key = overrides.key ?? 'GY-252';
+  const pane = overrides.id === 'work-253' ? 'w1:p5' : 'w1:p4J1';
+  const defaultSessions = overrides.sessions !== undefined ? overrides.sessions : [
+    { id: 'alpha-principal:1', kind: 'implementation', principal: 'alpha-principal', epoch: 1, runtime: 'claude', host: 'machine-a', agentName: 'agent-alpha', pane, subject: `${key}: Follow-ups`, state: 'running', startedAt: iso(-minutes(300)), updatedAt: iso(0) }
+  ];
   return {
-    id: 'work-252', key: 'GY-252', title: 'Follow-ups', description: '', type: 'feature', priority: 1,
+    id, key, title: 'Follow-ups', description: '', type: 'feature', priority: 1,
     dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }],
     policy: { checks: ['test'], review: true }, plannedFiles: ['src/a.ts'], stage: 'build', revision: 3, policyRevision: 1,
     createdAt: iso(-minutes(600)), updatedAt: iso(0), stageEnteredAt: iso(-minutes(300)), ready: true, epoch: 1,
     lease: { owner: 'alpha-principal', epoch: 1, expiresAt: iso(minutes(600)) },
     lastAssignment: { owner: 'alpha-principal', epoch: 1, claimedAt: iso(-minutes(300)) },
-    workspaces: [{ host: 'machine-a', path: '/srv/worktrees/GY-252-1', epoch: 1, owner: 'alpha-principal', branch: 'graphyard/gy-252-1' }],
+    workspaces: [{ host: 'machine-a', path: `/srv/worktrees/${key}-1`, epoch: 1, owner: 'alpha-principal', branch: `graphyard/gy-252-1` }],
+    sessions: defaultSessions,
     candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null,
     gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: false, reasons: ['Worker has not submitted implementation for this attempt'] }], violations: [],
     ...overrides,
@@ -60,7 +67,19 @@ function harness(item: { current: Work[] }, agent: HerdrAgent, extra: Partial<Da
     requestSmoke: () => {},
     persist: async () => {},
     promptSession: (_agent, text) => { log.prompts.push(text); },
-    recordSession: async (_work, handle) => { log.sessions.push(handle); },
+    recordSession: async (work, handle) => {
+      log.sessions.push(handle);
+      // Update the item's sessions when recording
+      item.current = item.current.map(entry =>
+        entry.id === work.id ? {
+          ...entry,
+          sessions: [
+            ...(entry.sessions ?? []).filter(s => s.id !== handle.id),
+            handle as SessionHandle
+          ]
+        } as Work : entry
+      );
+    },
     // The control plane ends the attempt on this record, which frees the item for the next dispatch.
     reportCapacity: async (work, event) => { log.capacity.push(event); item.current = item.current.map(entry => entry.id === work.id ? { ...entry, lease: null, containmentQuarantine: null } as Work : entry); return item.current[0]; },
     preserveWork: async (_work, epoch) => { log.preserved.push(epoch); return { state: 'committed', commit: 'a'.repeat(40), branch: 'graphyard/gy-252-1', detail: 'kept as WIP' }; },
