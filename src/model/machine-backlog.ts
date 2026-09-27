@@ -21,11 +21,12 @@ import type { Work } from './work.js';
 /**
  * One follow-up finding as the parent's follow-up item holds it: the file it concerns, when known,
  * what is wrong, and where it was raised (a review thread's URL or ID), which is not part of its identity.
+ * Class indicates whether this is a defect (filed as item) or improvement (recorded in digest).
  */
-export interface FollowUpEntry { path: string | null; text: string; ref?: string }
+export interface FollowUpEntry { path: string | null; text: string; ref?: string; class?: 'defect' | 'improvement'; promotedTo?: string | null }
 /** How many findings one follow-up item records structurally; its description names the count beyond. */
 export const followUpEntriesMax = 500;
-const entry = z.object({ path: z.string().min(1).max(1000).nullable(), text: z.string().min(1).max(2000), ref: z.string().min(1).max(1000).optional() }).strict();
+const entry = z.object({ path: z.string().min(1).max(1000).nullable(), text: z.string().min(1).max(2000), ref: z.string().min(1).max(1000).optional(), class: z.enum(['defect', 'improvement']).optional(), promotedTo: z.string().regex(/^[A-Z][A-Z0-9]*-\d+$/).nullable().optional() }).strict();
 /**
  * `origin.reviewFollowUps`: the parent a follow-up item collects findings for, and the union of the
  * findings every approval of that parent named. Unlike the other origins it grows: an approval of a
@@ -33,22 +34,33 @@ const entry = z.object({ path: z.string().min(1).max(1000).nullable(), text: z.s
  */
 export const reviewFollowUpsOriginSchema = z.object({ parent: z.string().regex(/^[A-Z][A-Z0-9]*-\d+$/), findings: z.array(entry).max(followUpEntriesMax) }).strict();
 export type ReviewFollowUpsOrigin = z.infer<typeof reviewFollowUpsOriginSchema>;
+/**
+ * `origin.reviewDigest`: improvements and non-defect findings recorded on the parent but not filed as items.
+ * Entries may be promoted to a work item (promotedTo field). Parents list the approved parent keys.
+ */
+export const reviewDigestOriginSchema = z.object({ parent: z.string().regex(/^[A-Z][A-Z0-9]*-\d+$/), entries: z.array(entry).max(followUpEntriesMax) }).strict();
+export type ReviewDigestOrigin = z.infer<typeof reviewDigestOriginSchema>;
 /** What `POST /api/work/ID/followups` appends: the findings of one approval of the parent. */
 export const followUpAppendSchema = z.object({ findings: z.array(entry).min(1).max(200), reason: z.string().trim().min(1).max(2000) }).strict();
 
 /** The title every review follow-up item carries (src/review-threads.ts followUpItem). */
 const followUpTitle = /^Follow-ups from the approved review of ([A-Z][A-Z0-9]*-\d+)\b/;
 const faultTitle = /^Recurring \S+ faults:/;
-export type MachineKind = 'review-follow-up' | 'recurring-fault';
+export type MachineKind = 'review-follow-up' | 'review-digest' | 'recurring-fault';
 type Filed = Pick<Work, 'title'> & { origin?: Work['origin'] };
 
 /** The parent a review follow-up item collects findings for: from its origin, or from the title items filed before the origin existed carry. */
 export function followUpParent(work: Filed): string | null {
   return work.origin?.reviewFollowUps?.parent ?? followUpTitle.exec(work.title)?.[1] ?? null;
 }
+/** The parent a promoted digest item names: the key of the parent whose digest promoted it. */
+export function digestParent(work: Filed): string | null {
+  return work.origin?.reviewDigest?.parent ?? null;
+}
 /** Which kind of machine-filed item this is, or null for an operator's own. */
 export function machineKind(work: Filed): MachineKind | null {
   if (followUpParent(work)) return 'review-follow-up';
+  if (digestParent(work)) return 'review-digest';
   if (work.origin?.faultClass || faultTitle.test(work.title)) return 'recurring-fault';
   return null;
 }
@@ -199,8 +211,17 @@ export function triageAttention(work: Triageable, now: number) {
 export function backlogCounts(all: readonly Triageable[], now: number) {
   const backlog = all.filter(item => item.stage === 'backlog' && !item.ready);
   const machine = backlog.filter(item => !!machineKind(item));
+  // Digest counts: total entries and number of parents that have at least one
+  let digestEntries = 0, parentsWithDigest = new Set<string>();
+  for (const item of all) {
+    const digest = (item as any).origin?.reviewDigest;
+    if (digest?.entries?.length) {
+      digestEntries += digest.entries.length;
+      parentsWithDigest.add(digest.parent);
+    }
+  }
   return { operator: backlog.length - machine.length, machineUntriaged: machine.filter(untriaged).length, machineProposed: machine.filter(item => item.triage?.state === 'proposed').length,
-    overdue: overdueTriage(all, now).length };
+    overdue: overdueTriage(all, now).length, digestEntries, parentsWithDigest: parentsWithDigest.size };
 }
 
 /** The closure a triage judgement proposes, as the `close` decision carries it to the approver and the control plane applies it. */

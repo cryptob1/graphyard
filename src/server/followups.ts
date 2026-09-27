@@ -1,7 +1,8 @@
 import type pg from 'pg';
+import { createHash } from 'node:crypto';
 import { demand, operatorCapability, type Principal, type Work } from '../model.js';
 import { isDelivered } from '../model/closure.js';
-import { appendedDescription, followUpAppendSchema, followUpEntries, followUpParent, mergeDuplicateFollowUps, mergeFollowUpEntries, triageRecordSchema, untriaged, type FollowUpEntry } from '../model/machine-backlog.js';
+import { appendedDescription, followUpAppendSchema, followUpEntries, followUpParent, followUpEntryKey, mergeDuplicateFollowUps, mergeFollowUpEntries, triageRecordSchema, untriaged, digestParent, type FollowUpEntry } from '../model/machine-backlog.js';
 import { save } from '../store.js';
 import { closeWork, settleOpenRequests } from './close.js';
 import { authenticated, digest, receipt } from './decisions.js';
@@ -23,34 +24,172 @@ function masterOnly(actor: Principal, work: Work | undefined, services: Services
 }
 
 /**
- * `POST /api/work/ID/followups`: append one approval's findings to a parent's open follow-up item,
- * keeping only those it does not already hold by path and finding text. An approval whose every
- * finding the item already holds changes nothing. A closed or delivered item is refused with 409
- * "not an open follow-up item", and the loop files the parent's new one instead.
+ * `POST /api/work/ID/followups`: append one approval's findings to a parent's open follow-up item
+ * or to its review digest (when the target is the parent item itself), keeping only those it does
+ * not already hold by path and finding text. An approval whose every finding the item already holds
+ * changes nothing. A closed or delivered item is refused with 409 "not an open follow-up item", and
+ * the loop files the parent's new one instead.
  */
 export async function appendFollowUps(services: Services, caller: Principal, id: string, body: unknown, key: string) {
   const data = followUpAppendSchema.parse(body);
   const fingerprint = digest({ id, followups: data });
-  return services.engine.store.transaction(async (db, now) => {
+  let parentKey: string | null = null;
+  const result = await services.engine.store.transaction(async (db, now) => {
     const actor = await authenticated(services, db, now, caller);
     const replay = await receipt(db, actor, key, fingerprint); if (replay) return replay as unknown as { key: string; added: number };
     const all = await readAll(db);
     const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
     masterOnly(actor, work, services, 'append review follow-ups');
-    const parent = followUpParent(work!);
-    demand(parent && work!.stage !== 'done', `${work!.key} is not an open follow-up item`, 409);
-    const { findings, added } = mergeFollowUpEntries(followUpEntries(work!), data.findings as FollowUpEntry[]);
-    if (added.length) {
-      work!.origin = { ...work!.origin, reviewFollowUps: { parent: parent!, findings } };
-      work!.description = appendedDescription(work!.description ?? '', added, `Added by a later approval of ${parent} (${data.reason.slice(0, 300)}):`);
-      services.engine.evaluate(work!, all, now);
-      await recordDispatch(services, db, work!, now);
-      await save(db, work!, actor.id, 'followups.appended', now, { parent, added: added.length, offered: data.findings.length, reason: data.reason });
+
+    // Check if this is a follow-up item (append to its findings) or a parent (append to its digest).
+    const followUpParentKey = followUpParent(work!);
+    const isFollowUpItem = !!followUpParentKey;
+
+    if (isFollowUpItem) {
+      // Append to follow-up item (existing behavior).
+      demand(work!.stage !== 'done', `${work!.key} is not an open follow-up item`, 409);
+      const { findings, added } = mergeFollowUpEntries(followUpEntries(work!), data.findings as FollowUpEntry[]);
+      if (added.length) {
+        work!.origin = { ...work!.origin, reviewFollowUps: { parent: followUpParentKey!, findings } };
+        work!.description = appendedDescription(work!.description ?? '', added, `Added by a later approval of ${followUpParentKey} (${data.reason.slice(0, 300)}):`);
+        services.engine.evaluate(work!, all, now);
+        await recordDispatch(services, db, work!, now);
+        await save(db, work!, actor.id, 'followups.appended', now, { parent: followUpParentKey, added: added.length, offered: data.findings.length, reason: data.reason });
+      }
+      return { key: work!.key, added: added.length, findings: followUpEntries(work!).length };
+    } else {
+      // Append to digest (target is the parent).
+      demand(work!.stage !== 'done', `${work!.key} is not an open follow-up item`, 409);
+      parentKey = work!.key;
+
+      // Get or create digest entries for this parent.
+      const currentEntries = work!.origin?.reviewDigest?.entries ?? [];
+      const { findings: merged, added } = mergeFollowUpEntries(currentEntries, data.findings as FollowUpEntry[]);
+
+      if (added.length) {
+        work!.origin = { ...work!.origin, reviewDigest: { parent: parentKey, entries: merged } };
+        services.engine.evaluate(work!, all, now);
+        await recordDispatch(services, db, work!, now);
+        await save(db, work!, actor.id, 'digest.appended', now, { parent: parentKey, added: added.length, offered: data.findings.length, reason: data.reason });
+      }
+      return { key: work!.key, added: added.length, findings: merged.length };
     }
-    const result = { key: work!.key, added: added.length, findings: findings.length };
-    await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
-    return result;
   });
+
+  // Promotion logic (GY-884): after append transaction commits, check for entries that should be promoted.
+  // Entries appearing in >= 3 distinct parents' digests with no open promoted item are filed as one item.
+  // Note: promotion is best-effort and runs after the append completes, so failures don't affect the append result.
+  if (parentKey) {
+    promoteDigestEntries(services, key).catch(error => {
+      console.error(`Digest promotion check failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  }
+
+  return result;
+}
+
+/**
+ * Check for digest entries that appear in >= 3 distinct parents' digests and file a promotion item
+ * for entries without an open promoted item (GY-884). Uses deterministic key for idempotency.
+ * This runs asynchronously after the append transaction commits and does not block the append.
+ */
+function promoteDigestEntries(services: Services, appendKey: string): Promise<void> {
+  return (async () => {
+    try {
+      const all = await services.engine.store.list();
+
+      // Build map of entry keys to their parents' digest entries.
+      const entryMap = new Map<string, { parents: Set<string>; entries: FollowUpEntry[] }>();
+      for (const item of all) {
+        if (item.stage === 'done') continue;
+        const digest = item.origin?.reviewDigest;
+        if (!digest?.parent) continue;
+
+        for (const entry of digest.entries ?? []) {
+          // Skip entries already promoted (unless promotion item is closed).
+          if (entry.promotedTo) {
+            const promotedItem = all.find(w => w.key === entry.promotedTo);
+            if (promotedItem && promotedItem.stage !== 'done') continue;
+          }
+
+          const entryKey = followUpEntryKey(entry);
+          const existing = entryMap.get(entryKey) ?? { parents: new Set<string>(), entries: [] };
+          existing.parents.add(digest.parent);
+          if (!existing.entries.some(e => followUpEntryKey(e) === entryKey)) {
+            existing.entries.push(entry);
+          }
+          entryMap.set(entryKey, existing);
+        }
+      }
+
+      // Find entries in >= 3 parents' digests.
+      const promotionCandidates: { entryKey: string; entry: FollowUpEntry; parents: string[] }[] = [];
+      for (const [entryKey, data] of entryMap) {
+        if (data.parents.size >= 3) {
+          promotionCandidates.push({ entryKey, entry: data.entries[0]!, parents: Array.from(data.parents) });
+        }
+      }
+
+      if (promotionCandidates.length === 0) return;
+
+      // File one promotion item for the candidates (idempotent via deterministic key).
+      const promotionPayload = {
+        title: 'Recurring digest entry: review and apply',
+        description: `These findings appeared in multiple parents' review digests and may indicate a recurring issue:\n\n` +
+          promotionCandidates.map((c, i) => `${i + 1}. ${c.entry.path ? `${c.entry.path}: ` : ''}${c.entry.text}`).join('\n') +
+          `\n\nReview and apply or decline each across the codebase.`,
+        type: 'chore' as const,
+        priority: 2,
+        dependencies: promotionCandidates[0]!.parents.slice(0, 10).map(parentKey => {
+          const item = all.find(w => w.key === parentKey);
+          return item?.id ?? '';
+        }).filter(Boolean),
+        criteria: [{ id: 'AC-1', text: 'Review the recurring entries and apply each finding or decline with recorded reason.', proofs: [] }],
+        producerProofs: [],
+        plannedFiles: [],
+        reason: `Promoted from digest entries in ${promotionCandidates[0]!.parents.length} parents`,
+      };
+
+      // Create deterministic key from sorted entry keys for idempotency.
+      const entryHash = createHash('sha256')
+        .update(promotionCandidates.map(c => c.entryKey).sort().join('\x00'))
+        .digest('hex')
+        .slice(0, 16);
+      const deterministicKey = `digest-promote:${entryHash}`;
+
+      // File the promotion item as the coordinator (same as the control plane's operator agent).
+      const coordinatorActor: Principal = { id: 'graphyard-control-plane', role: 'coordinator' };
+      const filed = await services.engine.execute(coordinatorActor, 'create', null, promotionPayload, deterministicKey);
+
+      // Mark all promoted entries with the new item key in their parent digests.
+      await services.engine.store.transaction(async (db, now) => {
+        const current = await readAll(db);
+        for (const item of current) {
+          const parent = item.origin?.reviewDigest?.parent;
+          if (!parent || item.stage === 'done') continue;
+
+          let updated = false;
+          const entries = (item.origin?.reviewDigest?.entries ?? []).map(entry => {
+            const entryKey = followUpEntryKey(entry);
+            if (promotionCandidates.some(c => c.entryKey === entryKey) && !entry.promotedTo) {
+              updated = true;
+              return { ...entry, promotedTo: filed.key };
+            }
+            return entry;
+          });
+
+          if (updated) {
+            item.origin = { ...item.origin, reviewDigest: { ...item.origin!.reviewDigest!, entries } };
+            services.engine.evaluate(item, current, now);
+            await recordDispatch(services, db, item, now);
+          }
+        }
+      });
+    } catch (error) {
+      // Promotion is best-effort; don't fail or block on errors.
+      console.error(`Digest entry promotion: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  })();
 }
 
 /** The ledger kind of the one-time follow-up migration; its presence is what makes a second run a no-op. */

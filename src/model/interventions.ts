@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { stages, type Stage } from './work.js';
 import { faultClassOriginSchema } from './fault-classes.js';
-import { reviewFollowUpsOriginSchema } from './machine-backlog.js';
+import { reviewFollowUpsOriginSchema, reviewDigestOriginSchema } from './machine-backlog.js';
 
 // work.ts spreads the origin schema into createSchema, so both modules reference each other; the
 // stage enum is resolved at parse time to keep that cycle free of evaluation order.
@@ -135,6 +135,8 @@ export const workOriginSchema = z.object({
   // The parent a review follow-up item collects findings for (GY-402), and their union: the one
   // origin that grows, as a later approval of the parent appends to it (model/machine-backlog.ts).
   reviewFollowUps: reviewFollowUpsOriginSchema.optional(),
+  // Improvements promoted from multiple parents' digests (GY-884): the parent and entries with promotedTo mark.
+  reviewDigest: reviewDigestOriginSchema.optional(),
 }).strict();
 export type WorkOrigin = z.infer<typeof workOriginSchema>;
 

@@ -74,11 +74,12 @@ export function criteriaRuleSection(key: string, sha: string, criteria: { id: st
     + `Judge each acceptance criterion met or unmet at head ${sha}, and state that judgement for every criterion in the review body. `
     + 'Classify each finding, and each open review thread, as BLOCKING or FOLLOW-UP. BLOCKING: the head fails a stated acceptance criterion, or a correctness or security defect in the changed code breaks one of the item\'s own criteria. '
     + 'FOLLOW-UP: everything else — edge cases beyond the criteria, style, naming, hypotheticals, further hardening, and bot suggestions. '
+    + 'Classify each FOLLOW-UP as DEFECT or IMPROVEMENT. DEFECT: wrong behaviour, a failing or missing test for shipped behaviour, or security. IMPROVEMENT: an improvement, style, naming, or a nice-to-have. '
     + 'APPROVE when every criterion is met and no finding or thread is BLOCKING; list the FOLLOW-UP ones in the body instead of requesting changes for them. '
-    + 'Write each FOLLOW-UP finding of your own that has no review thread on a line of its own, before the closing lines, exactly of the form "Follow-up finding: PATH:LINE — what is wrong and why"; Graphyard files those in the same backlog item as the Follow-up threads. '
+    + 'Write each FOLLOW-UP finding of your own that has no review thread on a line of its own, before the closing lines, in one of two forms: "Follow-up defect: PATH:LINE — what is wrong and why" for a DEFECT, or "Follow-up idea: PATH:LINE — what to improve and why" for an IMPROVEMENT; Graphyard files defects in a backlog item and records improvements in the parent\'s review digest. '
     + 'REQUEST_CHANGES cites only BLOCKING findings, and names for each the acceptance criterion it blocks; never request changes for a FOLLOW-UP. Never weaken a criterion to let the change pass. '
-    + 'End the review body with three lines, exactly of the forms "Resolved threads: ID1 ID2", "Follow-up threads: ID3 ID4" and "Overridden threads: ID5 ID6": the first names the review thread IDs you verified fixed, or no longer applicable, at this head; the second names the unresolved threads you judged FOLLOW-UP; the third names the threads whose finding you judged wrong, with the reason for each earlier in the body. Write "none" after a line\'s colon when it names nothing. '
-    + 'Once Graphyard observes your approval of this head it resolves the Resolved threads, and files the Follow-up threads and findings as one backlog item and resolves each thread with a reply naming that item. ';
+    + 'End the review body with four lines, exactly of the forms "Resolved threads: ID1 ID2", "Follow-up threads: ID3 ID4", "Defect threads: ID7 ID8" and "Overridden threads: ID5 ID6": the first names the review thread IDs you verified fixed, or no longer applicable, at this head; the second names the unresolved threads you judged FOLLOW-UP; the third names the subset of the Follow-up line that are DEFECTs (threads you classified DEFECT); the fourth names the threads whose finding you judged wrong, with the reason for each earlier in the body. Write "none" after a line\'s colon when it names nothing. Threads on the Follow-up line but not the Defect line are IMPROVEMENTs. '
+    + 'Once Graphyard observes your approval of this head it resolves the Resolved threads, and files the Defect threads and defect findings as one backlog item, records the Improvement threads and improvements in the parent\'s review digest, and resolves each thread with a reply naming the item or digest entry. ';
 }
 
 /** The launch prompt's thread section: each thread with its ID, and how the verdict names the fixed, follow-up and overridden ones. `total` counts the unresolved threads when more exist than `threads` lists. */
@@ -107,9 +108,11 @@ function parseThreadLine(body: unknown, label: string): string[] {
 export const parseResolvedThreads = (body: unknown) => parseThreadLine(body, 'resolved threads');
 /** The thread IDs a verdict names on its last `Follow-up threads:` line, read exactly as the Resolved line is. */
 export const parseFollowUpThreads = (body: unknown) => parseThreadLine(body, 'follow-up threads');
+/** The thread IDs a verdict names on its last `Defect threads:` line: the subset of Follow-up threads classified as defects. */
+export const parseDefectThreads = (body: unknown) => parseThreadLine(body, 'defect threads');
 
-/** A FOLLOW-UP the reviewer found in the diff, with no review thread: one `Follow-up finding:` line of its verdict. */
-export interface FollowUpFinding { path: string | null; line: number | null; text: string }
+/** A FOLLOW-UP the reviewer found in the diff, with no review thread: one `Follow-up finding:` or `Follow-up defect:` or `Follow-up idea:` line of its verdict. */
+export interface FollowUpFinding { path: string | null; line: number | null; text: string; class?: 'defect' | 'improvement' }
 /**
  * The most `Follow-up finding:` lines the review ledger records of one filing, and the most characters
  * kept of each. The ledger's copy is only a record: every finding is parsed again from the review on
@@ -117,25 +120,30 @@ export interface FollowUpFinding { path: string | null; line: number | null; tex
  */
 export const followUpFindingLimit = 50, followUpFindingMax = 500;
 /**
- * The findings a verdict writes on its `Follow-up finding: PATH:LINE — text` lines (GY-166): a
- * FOLLOW-UP with no thread is filed in the same item as the Follow-up threads, never left in free
- * text nobody files. A line without a leading PATH[:LINE] is kept whole, with no path; PATH is any
- * token that is not a bare number, so a root-level file such as `Dockerfile:10` is scoped too; a LINE
- * that is not a safe integer is dropped (the path is kept). Every
- * line is read, and whole: none is dropped past a count or cut to the ledger's bound.
+ * The findings a verdict writes on its `Follow-up finding:`, `Follow-up defect:`, or `Follow-up idea:` lines
+ * (GY-166, GY-884): a FOLLOW-UP with no thread is filed or recorded in the parent's digest.
+ * A line without a leading PATH[:LINE] is kept whole, with no path; PATH is any token that is not a bare number,
+ * so a root-level file such as `Dockerfile:10` is scoped too; a LINE that is not a safe integer is dropped (the
+ * path is kept). Every line is read, and whole: none is dropped past a count or cut to the ledger's bound.
+ * Legacy `Follow-up finding:` lines default to defect (file as item). New forms use `Follow-up defect:` or
+ * `Follow-up idea:` to classify explicitly.
  */
 export function parseFollowUpFindings(body: unknown): FollowUpFinding[] {
   if (typeof body !== 'string') return [];
   const findings: FollowUpFinding[] = [];
   for (const entry of body.split(/\r?\n/)) {
-    const match = /^\s*(?:[-*]\s+)?follow-up finding:\s*(.+)$/i.exec(entry);
-    const text = match?.[1]!.replace(/\s+/g, ' ').trim();
+    // Match "Follow-up finding:", "Follow-up defect:", or "Follow-up idea:"
+    const match = /^\s*(?:[-*]\s+)?follow-up (finding|defect|idea):\s*(.+)$/i.exec(entry);
+    const type = match?.[1]?.toLowerCase();
+    const text = match?.[2]!.replace(/\s+/g, ' ').trim();
     if (!text || /^none\.?$/i.test(text)) continue;
     const located = /^`?([^\s`:]+)(?::(\d+))?`?\s+[—–-]+\s+\S/.exec(text);
     const path = located && !/^\d+$/.test(located[1]!) ? located[1]! : null;
     // A line number the ledger's integer schema would refuse (unsafe, or Infinity) is no line at all.
     const line = path && located![2] ? Number(located![2]) : null;
-    findings.push({ path, line: line !== null && Number.isSafeInteger(line) ? line : null, text });
+    // Classify: defect if explicit or legacy "Follow-up finding:", improvement if "Follow-up idea:"
+    const cls: 'defect' | 'improvement' = type === 'idea' ? 'improvement' : 'defect';
+    findings.push({ path, line: line !== null && Number.isSafeInteger(line) ? line : null, text, class: cls });
   }
   return findings;
 }
@@ -252,6 +260,11 @@ export type CreateFollowUpItem = (item: FollowUpItem, key: string) => Promise<{ 
  * the control plane keeps only those the item does not already hold, by path and finding text.
  */
 export type AppendFollowUpFindings = (item: string, findings: FollowUpEntry[], reason: string, key: string) => Promise<{ key: string; added: number }>;
+/**
+ * Appends improvements (non-defect findings) to the parent item's review digest, idempotent on `key`:
+ * recorded but not filed as a work item.
+ */
+export type AppendDigestFindings = (parent: string, findings: FollowUpEntry[], reason: string, key: string) => Promise<{ key: string; added: number }>;
 /**
  * The findings one approval files, as the parent's follow-up item holds them: each thread's path and
  * excerpt (its URL kept as where it was raised), then each finding with no thread.
@@ -392,19 +405,14 @@ export function followUpItem(input: { key: string; workId: string; pr: number; s
 }
 
 /**
- * File the threads an approval named as follow-up, with the findings it wrote on `Follow-up finding:`
- * lines: one backlog item for all of them, then a reply
- * naming the item on each thread and its resolution. Only named threads are touched, and only those
- * of the pull request opened before the approval; nothing else is ever answered. A named thread
- * somebody else resolved first is still filed, and left as they resolved it.
- * `listed` names the threads the reviewer's launch prompt listed; a named thread outside it is
- * refused, and a launch that could not read the threads vouches for none. Each step is recorded as it lands, so a retry creates no second item (the item key is kept, and
- * the create is idempotent on the approval, and the payload of an attempted create is kept in `store` before it
- * is sent and repeated verbatim) and replies to no thread twice: before replying, the thread
- * is read for a reply already naming the item, so a reply whose record was lost is not posted again. Runs outside every
- * coordination transaction.
+ * File the threads an approval named as follow-up, with the findings it wrote on `Follow-up finding:`,
+ * `Follow-up defect:` or `Follow-up idea:` lines (GY-166, GY-884): defects filed as one backlog item,
+ * improvements recorded in the parent's review digest, then a reply naming the item or digest entry on
+ * each thread and its resolution. Only named threads are touched, and only those of the pull request
+ * opened before the approval; nothing else is ever answered. Runs outside every coordination transaction.
+ * `classified`: the launch carried the DEFECT/IMPROVEMENT rule (GY-884), so this approval must classify findings.
  */
-export async function fileFollowUpThreads(input: { repository: string; key: string; workId: string; pr: number; sha: string; reviewId: number; reviewer: string; previous?: FollowUpFiling; listed?: string[]; store?: FollowUpCreateStore; existing?: string; append?: AppendFollowUpFindings }, run: ChildRun, create: CreateFollowUpItem, now: Date): Promise<FollowUpFiling> {
+export async function fileFollowUpThreads(input: { repository: string; key: string; workId: string; pr: number; sha: string; reviewId: number; reviewer: string; previous?: FollowUpFiling; listed?: string[]; store?: FollowUpCreateStore; existing?: string; append?: AppendFollowUpFindings; digestAppend?: AppendDigestFindings; parentKey?: string; classified?: boolean }, run: ChildRun, create: CreateFollowUpItem, now: Date): Promise<FollowUpFiling> {
   const previous = input.previous;
   const createKey = followUpCreateKey(input.repository, input.pr, input.reviewId);
   const base = { at: now.toISOString(), reviewId: input.reviewId, attempts: (previous?.attempts ?? 0) + 1 };
@@ -414,20 +422,21 @@ export async function fileFollowUpThreads(input: { repository: string; key: stri
   catch (error) { return { ...base, ...carried, failure: `the review ${input.reviewId} could not be read: ${firstLine(error)}` }; }
   if (review?.state !== 'APPROVED' || review?.commit_id !== input.sha || String(review?.user?.login).toLowerCase() !== input.reviewer.toLowerCase())
     return { ...base, ...carried, failure: `review ${input.reviewId} is not ${input.reviewer}'s approval of ${input.sha.slice(0, 12)}` };
-  // Every ID on the Follow-up line, even one the Resolved line names too: resolveNamedThreads leaves such a thread for this filing.
+  // Every ID on the Follow-up line, even one the Resolved line names too.
   const named = parseFollowUpThreads(review.body).slice(0, listedThreadLimit);
+  // The subset of Follow-up threads classified as DEFECT; unclassified threads default to defect.
+  const defectThreadIds = new Set(parseDefectThreads(review.body));
+  const hasDefectLine = /^defect threads:/im.test(review.body);
   // A create already attempted is repeated exactly as it was sent, never rebuilt from GitHub's data now.
   let pending: PendingFollowUpCreate | undefined;
   if (!previous?.item && input.store) {
     try { pending = await input.store.read(createKey); }
     catch (error) { return { ...base, ...carried, named, classified: true, failure: `the attempted follow-up create could not be read back: ${firstLine(error)}` }; }
   }
-  // Read from the review itself until a create is first attempted, never from the ledger's bounded record
-  // of them; once created, the item holds every one and the record is kept as it was.
+  // Read from the review itself until a create is first attempted, never from the ledger's bounded record.
   const findings = pending ? pending.findings : previous?.item ? carried.findings : parseFollowUpFindings(review.body);
   if (!named.length && !findings.length && !pending?.threads.length) return { ...base, named, threads: [], findings, replied: [], resolved: [], refused: [], classified: true };
-  // Every thread of the pull request, resolved or not: a named thread somebody resolved after the
-  // approval is still a finding the reviewer judged FOLLOW-UP, and is filed in the item all the same.
+  // Every thread of the pull request, resolved or not: a named thread somebody resolved after the approval is still filed.
   let all: { thread: LaunchThread; resolved: boolean }[] = [];
   if (named.length || pending?.threads.length) {
     try { all = await readReviewThreads(input.repository, input.pr, run); }
@@ -435,15 +444,12 @@ export async function fileFollowUpThreads(input: { repository: string; key: stri
   }
   const open = all.filter(entry => !entry.resolved).map(entry => entry.thread);
   let threads = carried.threads, refused = carried.refused;
-  // Like the findings, the threads are read from GitHub until a create is first attempted, never from the
-  // ledger's bounded record: a retry must send the create the same payload under the same key.
+  // Like the findings, the threads are read from GitHub until a create is first attempted, never from the ledger's bounded record.
   if (pending) { threads = pending.threads; refused = pending.refused; }
   else if (!previous?.item) {
     const submitted = Date.parse(String(review.submitted_at ?? ''));
     threads = []; refused = [];
     for (const id of named) {
-      // The reviewer judged only the threads its launch prompt listed: an ID it was not shown — past
-      // the listing bound, or quoted from an untrusted excerpt — is never answered or resolved.
       if (!input.listed?.includes(id)) { refused.push(`${id}: not listed to the reviewer at launch`); continue; }
       const thread = all.find(entry => entry.thread.id === id)?.thread;
       if (!thread) { refused.push(`${id}: not a review thread of pull request #${input.pr}`); continue; }
@@ -452,41 +458,59 @@ export async function fileFollowUpThreads(input: { repository: string; key: stri
       threads.push(thread);
     }
   }
-  if (!threads.length && !findings.length) return { ...base, named, threads, findings, replied: [], resolved: [], refused, classified: true };
-  let item = carried.item;
-  if (!item) {
-    const payload = pending?.item ?? followUpItem(input, threads, findings);
-    // One follow-up item per parent (GY-402): an open one the parent already has takes this
-    // approval's findings, and only those it does not hold yet; a new item is filed only when none is open.
-    const appendTo = pending ? pending.appendTo : input.append ? input.existing : undefined;
-    // Kept before it is sent: a create whose response is lost must be retried with this very payload.
-    if (!pending && input.store) {
-      try { await input.store.write({ key: createKey, item: payload, threads, findings, refused, ...(appendTo ? { appendTo } : {}) }); }
-      catch (error) { return { ...base, named, threads, findings, replied: [], resolved: [], refused, classified: true, failure: `the follow-up create could not be recorded before it was sent: ${firstLine(error)}` }; }
-    }
-    if (appendTo) {
-      if (!input.append) return { ...base, named, threads, findings, replied: [], resolved: [], refused, classified: true, failure: `the findings of review ${input.reviewId} are owed to ${appendTo}, and this pass cannot append to it` };
-      try { item = (await input.append(appendTo, followUpEntriesOf(threads, findings), payload.reason, `${createKey.slice(0, 193)}:append`)).key; }
-      catch (error) {
-        // The item was closed or delivered since it was chosen: the findings are filed as the parent's new follow-up item.
-        if (!(error as { notOpen?: boolean })?.notOpen) return { ...base, named, threads, findings, replied: [], resolved: [], refused, classified: true, failure: `the follow-ups could not be appended to ${appendTo}: ${firstLine(error)}` };
+  // Classify threads: defect if listed in Defect threads line, or if no Defect line exists (backwards compat, default to defect).
+  const defectThreads = threads.filter(t => !hasDefectLine || defectThreadIds.has(t.id));
+  const improvementThreads = threads.filter(t => hasDefectLine && !defectThreadIds.has(t.id));
+  // Classify findings by their class field; legacy "Follow-up finding:" lines default to defect.
+  const defectFindings = findings.filter(f => f.class !== 'improvement');
+  const improvementFindings = findings.filter(f => f.class === 'improvement');
+  // No defects to file and no improvements to record: nothing to do.
+  if (!defectThreads.length && !defectFindings.length && !improvementThreads.length && !improvementFindings.length)
+    return { ...base, named, threads, findings, replied: [], resolved: [], refused, classified: true };
+  let item = carried.item, digestKey: string | undefined;
+  // File defects as work item (existing path).
+  if (defectThreads.length || defectFindings.length) {
+    if (!item) {
+      const payload = pending?.item ?? followUpItem(input, defectThreads, defectFindings);
+      const appendTo = pending ? pending.appendTo : input.append ? input.existing : undefined;
+      if (!pending && input.store) {
+        try { await input.store.write({ key: createKey, item: payload, threads: defectThreads, findings: defectFindings, refused, ...(appendTo ? { appendTo } : {}) }); }
+        catch (error) { return { ...base, named, threads, findings, replied: [], resolved: [], refused, classified: true, failure: `the follow-up create could not be recorded: ${firstLine(error)}` }; }
+      }
+      if (appendTo) {
+        if (!input.append) return { ...base, named, threads, findings, replied: [], resolved: [], refused, classified: true, failure: `defect findings are owed to ${appendTo}, and this pass cannot append` };
+        try { item = (await input.append(appendTo, followUpEntriesOf(defectThreads, defectFindings), payload.reason, `${createKey.slice(0, 193)}:append`)).key; }
+        catch (error) {
+          if (!(error as { notOpen?: boolean })?.notOpen) return { ...base, named, threads, findings, replied: [], resolved: [], refused, classified: true, failure: `defects could not be appended to ${appendTo}: ${firstLine(error)}` };
+        }
+      }
+      if (!item) {
+        try { item = (await create(payload, createKey)).key; }
+        catch (error) { return { ...base, named, threads, findings, replied: [], resolved: [], refused, classified: true, failure: `the follow-up item could not be created: ${firstLine(error)}` }; }
       }
     }
-    if (!item) {
-      try { item = (await create(payload, createKey)).key; }
-      catch (error) { return { ...base, named, threads, findings, replied: [], resolved: [], refused, classified: true, failure: `the follow-up item could not be created: ${firstLine(error)}` }; }
-    }
   }
+  // Record improvements in parent's digest.
+  if ((improvementThreads.length || improvementFindings.length) && input.parentKey && input.digestAppend) {
+    const digestKey_ = `${createKey.slice(0, 190)}:digest`;
+    try { digestKey = (await input.digestAppend(input.parentKey, followUpEntriesOf(improvementThreads, improvementFindings), `Improvements from approval ${input.reviewId} of ${input.key}`, digestKey_)).key; }
+    catch (error) { return { ...base, named, threads, findings, replied: [], resolved: [], refused, classified: true, failure: `improvements could not be recorded in ${input.parentKey}: ${firstLine(error)}` }; }
+  }
+  // Reply on threads with the item or digest key.
   const replied = [...carried.replied], resolved = [...carried.resolved], failed: string[] = [];
   for (const thread of threads) {
     if (resolved.includes(thread.id)) continue;
-    // Resolved by somebody else since: nothing is left to answer on it.
     if (!open.some(entry => entry.id === thread.id)) { resolved.push(thread.id); continue; }
+    const isDefect = defectThreads.includes(thread);
+    const target = isDefect ? item : digestKey;
+    if (!target) { failed.push(`${thread.id}: no item or digest for this finding`); continue; }
     try {
-      // A reply posted by an attempt whose record was lost is recognised on the thread, never repeated.
-      if (!replied.includes(thread.id) && await hasFollowUpReply(thread.id, item, run)) replied.push(thread.id);
+      if (!replied.includes(thread.id) && await hasFollowUpReply(thread.id, target, run)) replied.push(thread.id);
       if (!replied.includes(thread.id)) {
-        const body = `${followUpReplyPrefix(item)} the independent review approved ${input.key} at ${input.sha.slice(0, 12)} with every acceptance criterion met and judged this finding beyond them. Graphyard resolves this thread; the finding is tracked in ${item}.`;
+        const verb = isDefect ? 'Filed' : 'Recorded in the review digest of';
+        const body = isDefect
+          ? `${followUpReplyPrefix(target)} the independent review approved ${input.key} at ${input.sha.slice(0, 12)} with every acceptance criterion met and judged this finding beyond them. Graphyard resolves this thread; the finding is tracked in ${target}.`
+          : `${verb} ${target}: the independent review approved ${input.key} at ${input.sha.slice(0, 12)} and judged this an improvement beyond the acceptance criteria. Graphyard resolves this thread and records the improvement on the parent item.`;
         const reply = JSON.parse(String(await run('gh', ['api', 'graphql', '-f', `query=${replyMutation}`, '-f', `thread=${thread.id}`, '-f', `body=${body}`])));
         if (!reply?.data?.addPullRequestReviewThreadReply?.comment?.id) throw new Error('GitHub did not report the reply as posted');
         replied.push(thread.id);
