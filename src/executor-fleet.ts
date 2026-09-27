@@ -116,7 +116,7 @@ export const executorRegistrationSchema = z.object({
    * it or recording itself stopped (GY-646): killed by its watchdog, or otherwise. Recorded by the
    * next process at start, and kept until that process stops.
    */
-  interrupted: actionRef.extend({ since: z.string(), pid: z.number().int().positive(), lastSeen: z.string(), recordedAt: z.string() }).strict().nullable().default(null),
+  interrupted: actionRef.extend({ since: z.string(), pid: z.number().int().positive(), lastSeen: z.string(), recordedAt: z.string() }).strict().nullish(),
 }).strict();
 export type ExecutorRegistration = z.infer<typeof executorRegistrationSchema>;
 
@@ -250,7 +250,7 @@ export function executorFleetReport(registrations: ExecutorRegistration[], coord
     return { name: registration.name, host: registration.host, pid: registration.pid, principal: registration.principal, kinds: registration.kinds, alive: running, state,
       release: registration.release, coordinator: coordinator.commit, split, needsRestart, supervisor: registration.supervisor, restart: registration.supervisor?.restart ?? executorRestartCommand,
       standDown: registration.standDown, claims: registration.claims, lastClaim: registration.lastClaim, inFlight: registration.inFlight,
-      interrupted: registration.state === 'stopped' ? null : registration.interrupted, startedAt: registration.startedAt, updatedAt: registration.updatedAt, stoppedAt: registration.stoppedAt, line };
+      interrupted: registration.state === 'stopped' ? null : registration.interrupted ?? null, startedAt: registration.startedAt, updatedAt: registration.updatedAt, stoppedAt: registration.stoppedAt, line };
   });
   const needing = executors.filter(row => row.needsRestart);
   const attention: AttentionItem[] = [];
