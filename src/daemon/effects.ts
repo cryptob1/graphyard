@@ -40,7 +40,7 @@ import { readRelease, restartExecutors } from '../executor-fleet.js';
 import { serverCallName, timedCall, timedFetch, timedRun } from '../master/timings.js';
 import type { RunRecord, Runner } from '../runner/types.js';
 import type { ResearchEvent } from '../research.js';
-import { doctorRole, doctorSettings, type DoctorEffects } from './doctor.js';
+import { doctorRole, doctorSessionArgs, doctorSettings, type DoctorEffects } from './doctor.js';
 
 import { piRunner } from '../runner/pi.js';
 import { registryHeadlessLaunch, registryRunner } from '../runner/roles.js';
@@ -526,9 +526,11 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   /**
    * The doctor's effects under the live configuration (GY-711). Its primary run takes the
    * registry's doctor role when an operator defines one, else Pi on `run.doctor.model`; the
-   * fallback run is Pi on the stronger `fallbackModel`. The session holds the control plane URL
-   * and the operator-agent credential by path — never the token itself — and its shipped command
-   * allowlist (integrations/pi) holds it to the sanctioned master commands.
+   * fallback run is Pi on the stronger `fallbackModel`. Every run launches restricted to the
+   * doctor's own tool set — bash and its report tool — so no other tool ever starts. The session
+   * holds the control plane URL and the operator-agent credential by path — never the token
+   * itself — and its shipped command allowlist (integrations/pi) holds it to the sanctioned
+   * master commands.
    */
   const doctor = (config: MasterConfig): DoctorEffects => {
     const settings = doctorSettings(config.run);
@@ -541,12 +543,12 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
           if (fleet) {
             const launch = registryHeadlessLaunch(fleet.account);
             // The doctor's command allowlist is the Pi extension's: a registry doctor role on any other runtime would run unguarded, so it is not used.
-            if (launch.command === 'pi') return { runner: registryRunner(fleet.account), runtime: launch.command, model: launch.model, release: fleet.release };
+            if (launch.command === 'pi') return { runner: registryRunner(fleet.account, [...doctorSessionArgs]), runtime: launch.command, model: launch.model, release: fleet.release };
             await fleet.release(`the registry doctor role names runtime ${launch.command}; the doctor runs only on Pi, where its command allowlist applies`);
           }
         }
         const model = attempt === 'primary' ? settings.model : settings.fallbackModel;
-        return { runner: piRunner({ command: settings.command, model }), runtime: 'pi', model };
+        return { runner: piRunner({ command: settings.command, model, args: [...doctorSessionArgs] }), runtime: 'pi', model };
       },
       file: (input, key) => asOperatorAgent('POST', 'work', input, key) as Promise<Work>,
       recordRun: run => asOperatorAgent('POST', 'doctor', run),

@@ -1,6 +1,6 @@
 import { optimisticExcludeEvent, optimisticMergeEvent, parseOptimisticExclude } from '../../optimistic-merge.js';
 import { z } from 'zod';
-import { demand, type Work } from '../../model.js';
+import { demand, operatorScopeIncludes, type Work } from '../../model.js';
 import type { IntegrationJob } from '../../coordination.js';
 import { parseEventHistoryQuery, readEventHistory } from '../../events-history.js';
 import { catchUpPipelineTimelines, pipelineBackfillState } from '../../pipeline-backfill.js';
@@ -168,29 +168,40 @@ export const statusRoutes = defineRoutes('status', [
     // master's operator-agent identity, and the route aggregates each item's findings and actions
     // into one event on that item, so a run is one summary in the ledger with an event per item it
     // found or acted on. The last runs are served on /api/status for `master status` and the
-    // dashboard's Doctor panel.
+    // dashboard's Doctor panel. An operator identity needs the master's filing capability — any
+    // operator-agent token may not append doctor history — and every item the run names must be
+    // inside the poster's scope, so a narrow agent poisons no audit history beyond its authority.
     method: 'POST', path: '/api/doctor',
     async handle(context) {
       const { actor, services: { engine } } = context;
-      demand(['coordinator', 'admin', 'operator-agent'].includes(actor.role), 'Coordinator permission required', 403);
+      demand(['coordinator', 'admin'].includes(actor.role)
+        || (actor.role === 'operator-agent' && !!actor.capabilities?.includes('intent:create')),
+        'Coordinator permission or the intent:create capability is required', 403);
       const run = doctorRunRecordSchema.parse(await parseJson(context, 65_536));
+      // One event per item: an action on an item with no finding reaches its history too, and
+      // several findings for one item are one event, never a duplicate.
+      const perItem = new Map<string, { subject: string; findings: unknown[]; actions: unknown[] }>();
+      for (const finding of run.findings) if (itemKey(finding.subject)) {
+        const entry = perItem.get(finding.subject) ?? { subject: finding.subject, findings: [], actions: [] };
+        entry.findings.push(finding);
+        perItem.set(finding.subject, entry);
+      }
+      for (const action of run.actions) if (itemKey(action.subject)) {
+        const entry = perItem.get(action.subject) ?? { subject: action.subject, findings: [], actions: [] };
+        entry.actions.push(action);
+        perItem.set(action.subject, entry);
+      }
       // The summary and its per-item events land in one transaction: a run is recorded whole or
       // not at all, and the loop posts a refused run again.
       await engine.store.transaction(async db => {
+        // An operator identity appends history only for the items inside its scope, judged before
+        // anything is written, so a refused run leaves the ledger exactly as it was.
+        if (actor.role === 'operator-agent' && perItem.size) {
+          const referenced = (await db.query(`SELECT id, document->>'key' AS key FROM work_items WHERE document->>'key' = ANY($1)`, [[...perItem.keys()]])).rows as { id: string; key: string }[];
+          const outside = referenced.filter(item => !operatorScopeIncludes(actor, item)).map(item => item.key);
+          demand(!outside.length, `Work item is outside this operator-agent scope: ${outside.join(', ')}`, 403);
+        }
         await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, doctorRunEvent, JSON.stringify(run)]);
-        // One event per item: an action on an item with no finding reaches its history too, and
-        // several findings for one item are one event, never a duplicate.
-        const perItem = new Map<string, { subject: string; findings: unknown[]; actions: unknown[] }>();
-        for (const finding of run.findings) if (itemKey(finding.subject)) {
-          const entry = perItem.get(finding.subject) ?? { subject: finding.subject, findings: [], actions: [] };
-          entry.findings.push(finding);
-          perItem.set(finding.subject, entry);
-        }
-        for (const action of run.actions) if (itemKey(action.subject)) {
-          const entry = perItem.get(action.subject) ?? { subject: action.subject, findings: [], actions: [] };
-          entry.actions.push(action);
-          perItem.set(action.subject, entry);
-        }
         if (!perItem.size) return;
         const items = (await db.query(`SELECT id, document->>'key' AS key FROM work_items WHERE document->>'key' = ANY($1)`, [[...perItem.keys()]])).rows as { id: string; key: string }[];
         for (const entry of perItem.values()) {

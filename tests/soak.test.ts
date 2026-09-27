@@ -13,7 +13,7 @@ import { server } from '../src/server.js';
 import { processJob } from '../src/github.js';
 import { Refusal, type Principal, type Work } from '../src/model.js';
 import { approverSessionName, decisionInput, masterConfigSchema, mergeExecutor, type MasterConfig, type WorkerProfile } from '../src/master.js';
-import { mergeBatchSize, mergeParallelTips, optimisticExcludeGlobs, optimisticMergeEnabled, rerunFailedChecks } from '../src/master/profiles.js';
+import { mergeBatchSize, mergeParallelTips, optimisticExcludeGlobs, optimisticMergeEnabled, rerunFailedChecks, doctorSettingsSchema } from '../src/master/profiles.js';
 import { emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { Launcher } from '../src/daemon/cycle.js';
 import { successorWidening } from '../src/model/successors.js';
@@ -22,6 +22,9 @@ import { performSelfUpgrade, type SelfUpgradeOutcome } from '../src/daemon/upgra
 import { defaultOptimisticExclude } from '../src/optimistic-merge.js';
 import { queuePlacement } from '../src/merge-queue.js';
 import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } from './helpers/soak-world.js';
+import { doctorRunEvent } from '../src/server/routes/status.js';
+import type { DoctorEffects } from '../src/daemon/doctor.js';
+import type { Runner } from '../src/runner/types.js';
 
 /**
  * GY-404: per-item gates cannot catch faults that emerge from interaction over time, so this runs
@@ -279,13 +282,27 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   // One executor instance for the loop's process, and a fresh request per merge the loop asks for, as `master run` wires it.
   const executor = { principal: principals.coordinator.id, instance: `soak-${randomUUID()}` };
   const merge: DaemonEffects['merge'] = work => mergeExecutor(config, snapshot, transport, executor, randomUUID(), github.gh(repository))(work);
+  // The pipeline doctor (GY-711) fires inside this world too: a scripted Pi run reports the first
+  // item as stuck, the loop applies the report through its real path, and every run summary is
+  // posted to the control plane the dashboard reads. The day thus proves the doctor step fires
+  // from the real cycle on its interval — per-cycle behaviour belongs in this world.
+  const doctor: DaemonEffects['doctor'] = {
+    settings: { ...doctorSettingsSchema.parse({}), command: 'pi' }, cwd: '/soak/coordinator', env: {},
+    runner: async () => ({ runtime: 'pi', model: 'soak/doctor', runner: {
+      name: 'pi', start: (_prompt: string, runOptions: { tool: string }) => ({
+        id: `soak-doctor-${clock.now()}`, events: [], onEvent: () => () => {}, cancel: () => {},
+        result: async () => ({ ok: true as const, tool: runOptions.tool, payloads: [],
+          payload: { findings: [{ subject: items[0].key, check: 'worker' as const, detail: 'The scripted soak finding: this item stood in its stage past the worker bound', unactionable: false }], actions: [], filed: [] } }) }) } as unknown as Runner }),
+    file: async input => api(principals.operatorAgent, 'POST', 'work', input) as Promise<Work>,
+    recordRun: async run => api(principals.operatorAgent, 'POST', 'doctor', run),
+  };
   const effects: DaemonEffects = {
     agents: () => herdr.list(),
     herdr: () => ({ agents: herdr.list(), available: true }),
     panes: async () => ({ panes: herdr.paneList(), available: true }),
     recordSession: (work, handle) => api(principals.coordinator, 'POST', `work/${work.id}/session`, handle),
     credentials: async profiles => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])),
-    snapshot, dispatch, requestProof, approver, merge,
+    snapshot, dispatch, requestProof, approver, merge, doctor,
     closeSession: pane => { if (options.regression === 'approvers-left-open' && /approver/.test(herdr.agents.get(pane)?.name ?? '')) return; herdr.close(pane); },
     decide: (work, action, reason, input = {}) => api(principals.operatorAgent, 'POST', `work/${work.id}/decide`, { action, input: decisionInput(action, work, input), reason }),
     decisions: work => api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(work.id)}/decisions`),
@@ -523,6 +540,13 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.equal((await ledger('optimistic.revert.merged')).length, 1, 'one merged revert on the ledger');
   assert.equal((await ledger('optimistic.revert.merged')).filter(row => row.details?.reopened?.source === 'optimistic-revert').length, 1, 'one reopen, with the failure attached');
   assert.ok(!github.commits.get(github.tip)!.broken, 'main is green at the end of the day');
+  // GY-711: the doctor fired from the real cycle on its ten-minute interval across the day — the
+  // cursor holds its recent runs (all reported), the ledger holds every summary the loop posted,
+  // and the scripted finding reached the run record it belongs to.
+  const postedDoctorRuns = Number((await store.pool.query(`SELECT count(*) AS n FROM events WHERE kind = $1 AND created_at >= $2`, [doctorRunEvent, new Date(dayStart).toISOString()])).rows[0].n);
+  assert.ok(postedDoctorRuns >= Math.floor(Number(process.env.SOAK_HOURS ?? 24) * 2), `the doctor ran on its interval through the day: ${postedDoctorRuns} summaries on the ledger`);
+  assert.ok(state.doctor.runs.length > 0 && state.doctor.runs.every(entry => entry.state === 'reported'), 'every doctor run the cursor retains reported');
+  assert.ok(state.doctor.runs.some(entry => entry.findings.some(finding => finding.subject === items[0].key && finding.check === 'worker')), 'the doctor report applied: its finding is on the run record');
   // The loop published its merge-queue settings exactly once for the whole day — on a change, not
   // every cycle (GY-330, GY-498, GY-500, GY-516) — and each setting reached the installation ledger.
   assert.equal(mergeQueuePosts.length, 1, `one publication, not one per cycle: ${JSON.stringify(mergeQueuePosts)}`);

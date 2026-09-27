@@ -77,7 +77,7 @@ export const researchParameters: JsonSchema = {
 export const doctorReportParameters: JsonSchema = {
   type: 'object', additionalProperties: false, required: ['findings', 'actions', 'filed'],
   properties: {
-    findings: { type: 'array', maxItems: 200, description: 'One entry per finding: the work item key or status-level subject, the check whose bound it passed, and what was stuck',
+    findings: { type: 'array', maxItems: 50, description: 'One entry per finding: the work item key or status-level subject, the check whose bound it passed, and what was stuck',
       items: { type: 'object', additionalProperties: false, required: ['subject', 'check', 'detail'],
         properties: {
           subject: text(200, 'The work item key the finding is on, such as GY-711, or a status-level subject such as installation'),
@@ -85,7 +85,7 @@ export const doctorReportParameters: JsonSchema = {
           detail: text(2000, 'What was stuck, since when, and why'),
           unactionable: { type: 'boolean', description: 'true when you could not act on it: a human-only decision, or a fault class with no item to act through' },
         } } },
-    actions: { type: 'array', maxItems: 200, description: 'One entry per sanctioned command you ran: what it was and what became of it',
+    actions: { type: 'array', maxItems: 50, description: 'One entry per sanctioned command you ran: what it was and what became of it',
       items: { type: 'object', additionalProperties: false, required: ['subject', 'command', 'outcome', 'detail'],
         properties: { subject: text(200, 'The work item key the command acted on'), command: text(500, 'The command, as you ran it'), outcome: { type: 'string', enum: ['applied', 'refused'], description: 'applied when the control plane accepted it' }, detail: text(1000, 'What it changed, or the refusal the control plane gave') } } },
     filed: { type: 'array', maxItems: 20, description: 'One entry per fault item to file for a finding no open item covers (the loop files it and deduplicates it against open items)',
@@ -249,7 +249,13 @@ export function doctorSegmentAllowed(words: ShellWord[], context: DoctorGuardCon
   const reads = doctorReadPrograms.get(program);
   let allowed = reads !== undefined && !rest.some(word => reads?.test(word.value));
   if (program === 'git') allowed = gitRead(rest.map(word => word.value));
-  if (program === 'gh') allowed = ghReads.get(rest[0]?.value ?? '')?.has(rest[1]?.value ?? '') ?? false;
+  if (program === 'gh') {
+    // gh reads the configured repository only: `-R`/`--repo` selects another repository and a
+    // github.com URL names one, so both are refused rather than resolved against the checkout.
+    const override = rest.find(word => { const value = word.value; return value.startsWith('-R') || value.startsWith('--repo') || value.includes('github.com'); });
+    if (override) return { allow: false, reason: doctorRefusal(`gh ${override} (gh reads the repository this checkout serves; no repository override)`) };
+    allowed = ghReads.get(rest[0]?.value ?? '')?.has(rest[1]?.value ?? '') ?? false;
+  }
   if (!allowed) return { allow: false, reason: doctorRefusal(`${program}${rest[0] ? ` ${rest[0].value}` : ''}`) };
   const outside = rest.find(word => doctorPathOutside(word.value, context));
   return outside ? { allow: false, reason: doctorRefusal(`reading ${outside.value}, a path outside the checkout ${context.cwd},`) } : { allow: true };

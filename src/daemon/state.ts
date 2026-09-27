@@ -304,6 +304,18 @@ export const doctorActionSchema = z.object({
 export const doctorFileEntrySchema = z.object({
   faultClass: z.enum(faultClasses), title: z.string().max(200), work: z.string().max(50).nullable().default(null), deduplicated: z.boolean().default(false),
 }).strict();
+/** The full fault-filing request a doctor run makes (src/daemon/doctor.ts doctorFileItem): what the loop files when no open item covers the class. */
+export const doctorFiledSchema = z.object({
+  faultClass: z.enum(faultClasses), title: doctorLine(200), description: doctorLine(20000),
+  priority: z.number().int().min(0).max(1),
+  criteria: z.array(z.object({ id: z.string().trim().regex(/^[A-Z]+-\d+$/), text: doctorLine(4000), proofs: z.array(doctorLine(200)).min(1).max(10) }).strict()).min(1).max(20),
+  plannedFiles: z.array(doctorLine(500)).min(1).max(100),
+}).strict();
+/** A filing the control plane did not accept when its run applied, kept for the later cycles that file it again. */
+export const doctorPendingFileSchema = z.object({
+  /** The filing's stable idempotency key: the same key the refused filing was posted under. */
+  key: doctorLine(200), at: z.string().max(40), file: doctorFiledSchema,
+}).strict();
 export const doctorStates = ['running', 'reported', 'failed'] as const;
 export const doctorRunRecordSchema = z.object({
   at: z.string().max(40), state: z.enum(doctorStates),
@@ -317,6 +329,8 @@ export const retainedDoctorRuns = 20;
 export type DoctorRunRecord = z.infer<typeof doctorRunRecordSchema>;
 export type DoctorFinding = z.infer<typeof doctorFindingsSchema>;
 export type DoctorAction = z.infer<typeof doctorActionSchema>;
+export type DoctorFiled = z.infer<typeof doctorFiledSchema>;
+export type DoctorPendingFile = z.infer<typeof doctorPendingFileSchema>;
 /**
  * The release this loop's own process loaded, read once at its startup exactly as an executor reads
  * its (GY-437) and overwritten by every new process: what every action it takes runs, until its
@@ -391,9 +405,11 @@ export const daemonStateSchema = z.object({
     runs: z.array(doctorRunRecordSchema).default([]),
     /** The runs (by `at`) the control plane has not yet accepted: posted again on later cycles until it does. */
     unposted: z.array(z.string().max(40)).max(40).default([]),
+    /** Filings the control plane did not accept when their run applied: filed again on later cycles, under the same key, until one is. */
+    pendingFiles: z.array(doctorPendingFileSchema).max(40).default([]),
     /** When the approver remedy last read each open item's decision history, by item id. */
     decisionsCheckedAt: z.record(z.string(), z.string()).default({}),
-  }).strict().default(() => ({ runs: [], unposted: [], decisionsCheckedAt: {} })),
+  }).strict().default(() => ({ runs: [], unposted: [], pendingFiles: [], decisionsCheckedAt: {} })),
   /**
    * The system invariants (GY-404): what the loop carries between cycles to judge them — base
    * refreshes per candidate, when each merge candidate was first seen mergeable, the builds and lease

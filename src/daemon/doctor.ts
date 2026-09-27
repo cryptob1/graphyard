@@ -4,11 +4,11 @@ import { createHash } from 'node:crypto';
 import type { Work } from '../model.js';
 import { createSchema } from '../model.js';
 import { isClosed } from '../model/closure.js';
-import { faultClasses, openFaultClassItem } from '../model/fault-classes.js';
+import { openFaultClassItem } from '../model/fault-classes.js';
 import { scopeRefusalBlocker, unplannedPaths } from '../model/scope.js';
 import { approverSessionName, guardBroadScope } from '../master/autonomy.js';
 import { containmentPhase } from '../master.js';
-import { doctorActionSchema, doctorFindingsSchema, doctorRunRecordSchema, type DoctorAction, type DoctorFinding, type DoctorRunRecord } from './state.js';
+import { doctorActionSchema, doctorFindingsSchema, doctorFiledSchema, doctorRunRecordSchema, type DoctorAction, type DoctorFinding, type DoctorFiled, type DoctorPendingFile, type DoctorRunRecord } from './state.js';
 import { doctorSettingsSchema, type DoctorSettings } from '../master/profiles.js';
 import { z } from 'zod';
 import type { Runner } from '../runner/types.js';
@@ -35,20 +35,24 @@ export const doctorRole = 'doctor';
 /** The tool name the doctor's Pi session submits its report through. */
 export const doctorTool = 'graphyard_doctor_report';
 
-const line = (max: number) => z.string().trim().min(1).max(max);
-/** The fault item a doctor run asks the loop to file: P0/P1, criteria and planned files. */
-export const doctorFiledSchema = z.object({
-  faultClass: z.enum(faultClasses),
-  title: line(200), description: line(20000),
-  priority: z.number().int().min(0).max(1),
-  criteria: z.array(z.object({ id: z.string().trim().regex(/^[A-Z]+-\d+$/), text: line(4000), proofs: z.array(line(200)).min(1).max(10) }).strict()).min(1).max(20),
-  plannedFiles: z.array(line(500)).min(1).max(100),
-}).strict();
-export type DoctorFile = z.infer<typeof doctorFiledSchema>;
-/** `graphyard_doctor_report`: the doctor's structured report, re-validated here (GY-711). */
+/**
+ * The tool set the doctor's session is launched with, on the runtime's tools flag: bash under its
+ * command allowlist, and its report tool. Every other tool — read, edit, write, any built-in —
+ * never starts, so none can reach past the checkout boundary before the extension's gate judges it
+ * (the extension refuses them too, as the second line of defence).
+ */
+export const doctorSessionTools = ['bash', doctorTool] as const;
+
+/** The launch arguments carrying that tool set, on the runtime's tools flag. */
+export const doctorSessionArgs = ['--tools', doctorSessionTools.join(',')] as const;
+
+/** The fault item a doctor run asks the loop to file: P0/P1, criteria and planned files (the shape state.ts keeps). */
+export { doctorFiledSchema };
+export type DoctorFile = DoctorFiled;
+/** `graphyard_doctor_report`: the doctor's structured report, re-validated here (GY-711). Findings and actions are bound at the run record's own 50, so everything a report may carry is everything the posted run keeps. */
 export const doctorReportPayloadSchema = z.object({
-  findings: z.array(doctorFindingsSchema).max(200).default([]),
-  actions: z.array(doctorActionSchema).max(200).default([]),
+  findings: z.array(doctorFindingsSchema).max(50).default([]),
+  actions: z.array(doctorActionSchema).max(50).default([]),
   filed: z.array(doctorFiledSchema).max(20).default([]),
 }).strict();
 export type DoctorReportPayload = z.infer<typeof doctorReportPayloadSchema>;
@@ -232,11 +236,20 @@ export async function applyDoctorRun(cycle: Cycle, effects: DoctorEffects, run: 
   const deduped = dedupDoctorFiles(payload.filed, snapshot.work);
   for (const { file, covered } of deduped) {
     if (covered) { await note('installation', `Not filing "${file.title}": the ${file.faultClass} fault class is already covered by an open item`); continue; }
+    const filingKey = `${key}:file:${file.faultClass}`;
     try {
-      const filedItem = await effects.file(doctorFileItem(file, `The pipeline doctor found a ${file.faultClass} fault no open item covers: ${file.description.slice(0, 1500)}`), `${key}:file:${file.faultClass}`);
+      const filedItem = await effects.file(doctorFileItem(file, `The pipeline doctor found a ${file.faultClass} fault no open item covers: ${file.description.slice(0, 1500)}`), filingKey);
+      // Filed: any pending retry of the same filing is dropped before the cursor is persisted.
+      state.doctor.pendingFiles = state.doctor.pendingFiles.filter(entry => entry.key !== filingKey);
       run.filed.push({ faultClass: file.faultClass, title: file.title, work: filedItem.key, deduplicated: false });
       await note(filedItem.key, `Filed ${filedItem.key} (P${file.priority}) for the ${file.faultClass} fault no open item covered: ${file.title}`);
-    } catch (error) { await note('installation', `Could not file "${file.title}": ${message(error)}`, 'failed'); }
+    } catch (error) {
+      // A filing the control plane would not take is kept on the cursor — before the failed record
+      // persists it — so a later cycle files it again under the same stable key; a control plane
+      // that was only briefly unreachable loses no P0/P1 fault item (GY-711).
+      state.doctor.pendingFiles = [...state.doctor.pendingFiles.filter(entry => entry.key !== filingKey), { key: filingKey, at: run.at, file }].slice(-40);
+      performed.push(await record(state, filingKey, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `Could not file "${file.title}": ${message(error)}`, attempts: (state.actions[filingKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), daemon.persist));
+    }
   }
   run.state = 'reported';
   run.detail = `${run.findings.length} finding(s), ${run.actions.length} action(s), ${run.filed.length} filed, ${deduped.filter(entry => entry.covered).length} deduplicated: ${run.detail}`.slice(0, 1000);
@@ -267,6 +280,28 @@ export async function postRun(cycle: Pick<Cycle, 'state' | 'effects'>, effects: 
 const retainedRuns = 20;
 
 /**
+ * A filing the control plane did not accept when its run applied is filed again on a later cycle,
+ * under the same stable key, until the control plane takes it or an open item comes to cover the
+ * class. The cursor is updated before the outcome is recorded, so an abrupt exit between the two
+ * leaves the filing pending rather than lost.
+ */
+export async function retryDoctorFile(cycle: Cycle, effects: DoctorEffects, pending: DoctorPendingFile, now: () => number) {
+  const { state, effects: daemon, snapshot } = cycle;
+  const attempts = (state.actions[pending.key]?.attempts ?? 0) + 1;
+  const drop = async (detail: string, work: string | null, outcome: DaemonAction['state']) => {
+    state.doctor.pendingFiles = state.doctor.pendingFiles.filter(entry => entry.key !== pending.key);
+    await record(state, pending.key, { kind: 'fault', work, principal: null, state: outcome, detail: detail.slice(0, 2000), attempts, cycle: state.cycle }, now(), daemon.persist);
+  };
+  if (openFaultClassItem(snapshot.work, pending.file.faultClass)) return drop(`Not filing "${pending.file.title}" on retry: the ${pending.file.faultClass} fault class is now covered by an open item`, null, 'done');
+  try {
+    const filedItem = await effects.file(doctorFileItem(pending.file, `The pipeline doctor found a ${pending.file.faultClass} fault no open item covers: ${pending.file.description.slice(0, 1500)}`), pending.key);
+    await drop(`Filed ${filedItem.key} (P${pending.file.priority}) for the ${pending.file.faultClass} fault on a later cycle: ${pending.file.title}`, filedItem.key, 'done');
+  } catch (error) {
+    await record(state, pending.key, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `Still could not file "${pending.file.title}": ${message(error)}`.slice(0, 2000), attempts, cycle: state.cycle }, now(), daemon.persist);
+  }
+}
+
+/**
  * Step 7c: the doctor. The deterministic remedies run every cycle; the doctor itself every
  * `run.doctor.intervalMinutes`. A run settles beside the loop and applies its own report (events
  * per item, the summary) when it ends, so no cycle ever waits on a model.
@@ -287,15 +322,23 @@ export async function doctorStep(cycle: Cycle) {
     await postRun(cycle, doctor, inFlight, now);
     return;
   }
-  // Runs the control plane refused or never received are posted again, one per cycle.
+  // Runs the control plane refused or never received are posted again, one per cycle, and a fault
+  // filing it did not accept is filed again under its stable key, one per cycle.
   const unposted = state.doctor.runs.find(entry => entry.state !== 'running' && state.doctor.unposted.includes(entry.at));
   if (unposted && readyToRetry(state.actions[`doctor:post:${unposted.at}`], state.cycle)) await postRun(cycle, doctor, unposted, now);
+  const pendingFile = state.doctor.pendingFiles.find(entry => readyToRetry(state.actions[entry.key], state.cycle));
+  if (pendingFile) await retryDoctorFile(cycle, doctor, pendingFile, now);
   if (!doctorDue(state, clock, doctor.settings)) return;
   const run = doctorRunRecordSchema.parse({ at: new Date(clock).toISOString(), state: 'running', runs: [], findings: [], actions: [], filed: [], detail: '' });
   state.doctor.runs = [...state.doctor.runs, run].slice(-retainedRuns);
+  // Every open item is evidence, oldest stage first: an item that has held its stage longest is the
+  // likeliest stuck one, so it leads, and `boundedInput` — not a newest-100 slice — is what bounds
+  // the list, saying how many lines it left out.
   const input: DoctorInput = {
-    items: snapshot.work.filter(item => item.stage !== 'done' && !isClosed(item)).slice(-100).map(item =>
-      `${item.key} [${item.stage} since ${item.stageEnteredAt}${item.lease ? `, lease ${item.lease.owner} epoch ${item.lease.epoch} until ${item.lease.expiresAt}` : ', unclaimed'}]${item.blocker ? ` blocker: ${item.blocker.slice(0, 200)}` : ''}${item.candidate ? ` candidate ${item.candidate.sha.slice(0, 12)} (PR #${item.candidate.pr})` : ''}`),
+    items: snapshot.work.filter(item => item.stage !== 'done' && !isClosed(item))
+      .sort((left, right) => Date.parse(left.stageEnteredAt) - Date.parse(right.stageEnteredAt))
+      .map(item =>
+        `${item.key} [${item.stage} since ${item.stageEnteredAt}${item.lease ? `, lease ${item.lease.owner} epoch ${item.lease.epoch} until ${item.lease.expiresAt}` : ', unclaimed'}]${item.blocker ? ` blocker: ${item.blocker.slice(0, 200)}` : ''}${item.candidate ? ` candidate ${item.candidate.sha.slice(0, 12)} (PR #${item.candidate.pr})` : ''}`),
     faults: state.faults.instances.slice(-40).reverse().map(instance => `${instance.at} ${instance.kind} on ${instance.subject}: ${instance.text}`),
   };
   const prompt = doctorPrompt(cycle.config, input);

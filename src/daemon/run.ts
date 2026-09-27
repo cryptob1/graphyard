@@ -12,7 +12,7 @@ import { Launcher, defaultLaunchConcurrency, runCycle } from './cycle.js';
 import { detailChanged } from './decisions.js';
 import { describeSelfUpgrade } from './upgrade.js';
 import { describeTimings } from '../master/timings.js';
-import { stopDoctorRuns } from './doctor.js';
+import { stopDoctorRuns, doctorReport } from './doctor.js';
 
 /**
  * The compact daemon view `master status` joins onto Graphyard truth. `faultPolicy` is the recurrence
@@ -58,6 +58,10 @@ export function daemonSummary(state: DaemonState, now: number, intervalMs: numbe
     faults: faultRecurrenceReport(state, faultPolicy, now),
     // The system invariants as the last observation judged them (GY-404): one line per invariant, with its threshold and reading.
     invariants: { at: state.invariants.at, violated: state.invariants.report.filter(check => !check.holds).length, lines: state.invariants.report.map(check => check.line), checks: state.invariants.report },
+    // The pipeline doctor as this cursor holds it (GY-711): whether a run is in flight right now —
+    // which the control plane's posted runs cannot show, they settle only afterwards — and its
+    // recent runs, newest first.
+    doctor: doctorReport(state),
   };
 }
 

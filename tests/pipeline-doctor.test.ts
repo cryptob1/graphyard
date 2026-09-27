@@ -5,7 +5,7 @@ import { emptyDaemonState, type DaemonEffects, type DaemonState } from '../src/m
 import { Launcher, type Cycle } from '../src/daemon/cycle.js';
 import { Timings } from '../src/master/timings.js';
 import { approverSessionName } from '../src/master/autonomy.js';
-import { clearDoctorRuns, clearCoveredBlockers, decisionCheckMs, doctorBounds, doctorDue, doctorIntervalMs, doctorPrompt, doctorRunsSettled, doctorSanctionedCommands, doctorStep, relaunchUnansweredApprovers, settleSubmittedContainment, stopDoctorRuns, unansweredDecisionMs, type DoctorEffects } from '../src/daemon/doctor.js';
+import { clearDoctorRuns, clearCoveredBlockers, decisionCheckMs, doctorBounds, doctorDue, doctorIntervalMs, doctorPrompt, doctorReportPayloadSchema, doctorRunsSettled, doctorSanctionedCommands, doctorSessionArgs, doctorSessionTools, doctorStep, relaunchUnansweredApprovers, settleSubmittedContainment, stopDoctorRuns, unansweredDecisionMs, type DoctorEffects } from '../src/daemon/doctor.js';
 import { doctorTool } from '../src/daemon/doctor.js';
 import { doctorRunRecordSchema, type DoctorRunRecord } from '../src/daemon/state.js';
 import { doctorSettingsSchema } from '../src/master/profiles.js';
@@ -130,6 +130,10 @@ test('unit:doctor-scheduled-and-scoped — the doctor runs every ten minutes by 
     ['git log --output', words('git', 'log', '--output=src/x.ts')],
     ['gh api', words('gh', 'api', '-X', 'DELETE', 'repos/o/p/git/refs/heads/main')],
     ['gh pr merge', words('gh', 'pr', 'merge', '12')],
+    ['gh -R override', words('gh', 'pr', 'diff', '1', '-R', 'other/private')],
+    ['gh -R attached override', words('gh', 'pr', 'view', '-Rother/private', '1')],
+    ['gh --repo override', words('gh', 'pr', 'view', '--repo=other/private', '12')],
+    ['a foreign PR URL', words('gh', 'pr', 'view', 'https://github.com/other/private/pull/5')],
     ['rg --pre', words('rg', '--pre', 'sh', 'x')],
     ['sort -o', words('sort', '-o', 'src/x.ts', 'README.md')],
   ];
@@ -141,8 +145,18 @@ test('unit:doctor-scheduled-and-scoped — the doctor runs every ten minutes by 
     assert.deepEqual(doctorSegmentAllowed(segment, guard), { allow: true }, `${segment.map(word => word.value).join(' ')} is a read inside the checkout`);
   assert.equal(doctorSegmentAllowed(words('node', master.cliPath, 'master', 'merge', 'GY-74'), guard).allow, false, 'the named CLI still refuses merge');
 
-  // The doctor session launched through the headless runner gets exactly the doctor tool.
+  // The doctor session launched through the headless runner gets exactly the doctor tool, and the
+  // launch itself names that surface on the runtime's tools flag: bash under the allowlist and the
+  // report tool — no read, edit or write ever starts, whatever the extension gate sees.
   assert.deepEqual(piTools('doctor').map(tool => tool.name), [doctorTool]);
+  assert.deepEqual([...doctorSessionTools], ['bash', doctorTool]);
+  assert.deepEqual([...doctorSessionArgs], ['--tools', `bash,${doctorTool}`]);
+
+  // The report schema is the run record's own bound: a report carrying more findings than a run
+  // record can hold is refused at validation, so nothing accepted is dropped before it is posted.
+  assert.throws(() => doctorReportPayloadSchema.parse({ findings: Array.from({ length: 51 }, (_, index) => ({ subject: `GY-${index}`, check: 'blocked', detail: 'x' })), actions: [], filed: [] }),
+    /<=50|at most 50/, '51 findings exceed the report bound');
+  assert.equal(doctorReportPayloadSchema.parse({ findings: Array.from({ length: 50 }, (_, index) => ({ subject: `GY-${index}`, check: 'blocked', detail: 'x' })), actions: [], filed: [] }).findings.length, 50, '50 findings are accepted whole');
 
   // Every tool the doctor's session calls is judged at the extension hook, not only bash: no
   // built-in read, edit or write may bypass the allowlist and the checkout boundary, and only the
@@ -180,9 +194,10 @@ test('unit:doctor-scheduled-and-scoped — the doctor runs every ten minutes by 
 
 test('unit:doctor-run-recorded — a doctor run records one event per item it found or acted on, one run summary on the cursor and the control plane, and files a fault item only when no open item already covers its class', async () => {
   clearDoctorRuns();
-  const work = [item(), item({ id: 'id-GY-75', key: 'GY-75' })];
+  const work = [item({ stageEnteredAt: at(60_000) }), item({ id: 'id-GY-75', key: 'GY-75', stageEnteredAt: at(0) })];
   const filed: { title: string; priority: number }[] = [];
   const posted: { at: string; findings: unknown[] }[] = [];
+  const prompts: string[] = [];
   const report = {
     findings: [
       { subject: 'GY-74', check: 'blocked' as const, detail: 'blocked 14 min on a scope refusal', unactionable: false },
@@ -199,10 +214,11 @@ test('unit:doctor-run-recorded — a doctor run records one event per item it fo
   const doctor: DoctorEffects = {
     settings: doctorSettingsSchema.parse({}) as DoctorEffects['settings'], cwd: '/tmp', env: {},
     runner: () => Promise.resolve({ runtime: 'pi', model: 'test/model', release: async () => {}, runner: {
-      name: 'pi', start: (_prompt: string, options: { tool: string }) => ({
-        id: 'run', events: [], onEvent: () => () => {}, cancel: () => {},
-        result: async () => ({ ok: true as const, tool: options.tool, payload: report, payloads: [report] }),
-      }) } as unknown as Runner }),
+      name: 'pi', start: (prompt: string, options: { tool: string }) => {
+        prompts.push(prompt);
+        return { id: 'run', events: [], onEvent: () => () => {}, cancel: () => {},
+          result: async () => ({ ok: true as const, tool: options.tool, payload: report, payloads: [report] }) };
+      } } as unknown as Runner }),
     file: async input => { filed.push({ title: input.title, priority: input.priority }); return item({ id: 'id-GY-91', key: 'GY-91', title: input.title }); },
     recordRun: async run => { posted[0] = { at: run.at, findings: run.findings }; },
   };
@@ -212,6 +228,7 @@ test('unit:doctor-run-recorded — a doctor run records one event per item it fo
   await doctorRunsSettled();
   const run = first.state.doctor.runs[0];
   assert.equal(run.state, 'reported');
+  assert.ok(prompts[0].indexOf('GY-75') < prompts[0].indexOf('GY-74'), 'the evidence lists open items oldest stage first, not by work number');
   assert.deepEqual([run.findings.length, run.actions.length], [2, 1]);
   assert.deepEqual(posted.length && [posted[0].at, posted[0].findings.length], [run.at, 2], 'the run summary was posted to the control plane');
   // One event per item the run found or acted on, plus one summary event.
@@ -286,6 +303,50 @@ test('unit:doctor-run-recorded — a doctor run records one event per item it fo
   assert.equal(fifth.state.doctor.runs[0].state, 'failed', 'with no report, the run is recorded failed, not left running');
   clearDoctorRuns();
 
+  // A filing the control plane did not accept is kept on the cursor and filed again on a later
+  // cycle under the same stable key — a briefly unreachable control plane loses no P0/P1 fault
+  // item — and a filing whose fault class an open item comes to cover meanwhile is dropped.
+  const filedKeys: string[] = [];
+  let refuseFilings = true;
+  const filing: DoctorEffects = { ...doctor, file: async (input, key) => {
+    if (refuseFilings) throw new Error('Graphyard refused work (503): the control plane is unavailable');
+    filedKeys.push(key);
+    return item({ id: 'id-GY-92', key: 'GY-92', title: input.title });
+  } };
+  const filingReport = { findings: [], actions: [], filed: [
+    { faultClass: 'merge' as const, title: 'Merge faults recur', description: 'evidence', priority: 1, criteria: [{ id: 'AC-1', text: 'Fixed', proofs: ['unit:m'] }], plannedFiles: ['src/m.ts'] }] };
+  const filingDoctor: DoctorEffects = { ...filing, runner: () => Promise.resolve({ runtime: 'pi', model: 'test/model', release: async () => {}, runner: {
+    name: 'pi', start: (_prompt: string, options: { tool: string }) => ({
+      id: 'run', events: [], onEvent: () => () => {}, cancel: () => {},
+      result: async () => ({ ok: true as const, tool: options.tool, payload: filingReport, payloads: [filingReport] }),
+    }) } as unknown as Runner }) };
+  const sixth = cycle(work, { doctor: filingDoctor });
+  await doctorStep(sixth);
+  await doctorRunsSettled();
+  assert.equal(sixth.state.doctor.pendingFiles.length, 1, 'the refused filing is kept on the cursor for a later cycle');
+  const filingKey = sixth.state.doctor.pendingFiles[0].key;
+  assert.ok(/Could not file "Merge faults recur"/.test(sixth.state.actions[filingKey]?.detail ?? ''), 'the refusal is recorded under the filing\'s own stable key');
+  sixth.state.cycle += 1;
+  refuseFilings = false;
+  await doctorStep(cycle(work, { doctor: filingDoctor, state: sixth.state }));
+  assert.deepEqual(filedKeys, [filingKey], 'the filing is retried on the later cycle under the same stable key');
+  assert.equal(sixth.state.doctor.pendingFiles.length, 0, 'the filing leaves the pending list once accepted');
+  // A later run refuses again; by its retry an open item covers the class, so the filing is
+  // dropped as covered instead of standing beside the item that already covers it.
+  refuseFilings = true;
+  const seventh = cycle(work, { doctor: filingDoctor, state: sixth.state, clock: Date.parse(at(11 * 60_000)) });
+  await doctorStep(seventh);
+  await doctorRunsSettled();
+  assert.equal(sixth.state.doctor.pendingFiles.length, 1, 'the run that fired at its interval filed again and was refused again');
+  const refilingKey = sixth.state.doctor.pendingFiles[0].key;
+  assert.notEqual(refilingKey, filingKey, 'each run files under its own key');
+  work.push(item({ id: 'id-GY-95', key: 'GY-95', stage: 'ready', origin: { faultClass: { class: 'merge', threshold: 1, windowHours: 1, count: 1, detectedAt: observedAt, instances: [] } } }));
+  sixth.state.cycle += 1;
+  await doctorStep(cycle(work, { doctor: filingDoctor, state: sixth.state }));
+  assert.equal(sixth.state.doctor.pendingFiles.length, 0, 'the pending filing is dropped once an open item covers its class');
+  assert.ok(/now covered by an open item/.test(sixth.state.actions[refilingKey]?.detail ?? ''), 'the drop is recorded, not silent');
+  clearDoctorRuns();
+
   // The route itself aggregates a run's findings and actions into one event per affected item: an
   // action-only item reaches its item history, repeated findings are one event, and a status-level
   // subject files nothing.
@@ -306,10 +367,17 @@ test('unit:doctor-run-recorded — a doctor run records one event per item it fo
     actions: [{ subject: 'GY-75', command: 'graphyard master unblock GY-75 REASON', outcome: 'applied', detail: 'blocker cleared' }],
     filed: [] };
   const doctorRoute = statusRoutes.routes.find(route => route.method === 'POST' && route.path === '/api/doctor')!;
-  const outcome = await doctorRoute.handle({ actor: { id: 'operator-agent-1', role: 'operator-agent' },
-    services: { engine: { store: { transaction: async (run: (session: typeof db) => Promise<void>) => run(db) } } },
+  const post = (actor: any) => doctorRoute.handle({ actor, services: { engine: { store: { transaction: async (run: (session: typeof db) => Promise<void>) => run(db) } } },
     body: async () => Buffer.from(JSON.stringify(postedRun)) } as any, []);
+  // The live post is admitted: the operator-agent identity the loop posts as reaches /api/doctor —
+  // an operator identity holding the master's filing capability, whose scope covers every item the
+  // run names. A narrow agent poisons no audit history: without the capability, or with an item
+  // outside its scope, the run is refused whole and nothing is inserted.
+  const outcome = await post({ id: 'operator-agent-1', role: 'operator-agent', capabilities: ['intent:create'], scope: { repositories: ['owner/project'], workItems: ['*'] } });
   assert.deepEqual(outcome, { recorded: true, runs: 1 });
+  assert.equal(await post({ id: 'approver-1', role: 'operator-agent', capabilities: ['decision:approve'], scope: { repositories: ['owner/project'], workItems: ['*'] } }).then(() => true, (error: any) => error.message), 'Coordinator permission or the intent:create capability is required', 'an operator agent without the filing capability is refused');
+  assert.equal(await post({ id: 'narrow-1', role: 'operator-agent', capabilities: ['intent:create'], scope: { repositories: ['owner/project'], workItems: ['id-GY-90'] } }).then(() => true, (error: any) => error.message), 'Work item is outside this operator-agent scope: GY-74, GY-75', 'an item outside the poster\'s scope refuses the whole run');
+  assert.equal(inserts.length, 3, 'the refused runs inserted nothing: only the accepted run\'s summary and its two per-item events');
   assert.equal(inserts.filter(entry => entry.kind === doctorRunEvent).length, 1, 'one run summary event');
   const perItem = inserts.filter(entry => entry.kind === doctorFindingEvent);
   assert.deepEqual(perItem.map(entry => entry.workId), ['work-74', 'work-75'], 'one event per affected item');
