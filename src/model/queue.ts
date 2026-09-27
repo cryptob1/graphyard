@@ -27,16 +27,18 @@ export const queueSettings = (settings: number | MergeQueueSettings | undefined)
  */
 /**
  * Verdict-gated re-entry: a landability-family ejection allows re-entry once evaluateLandability
- * returns landable. Legacy ejections without a family field are treated as landability-family.
- * Non-landability ejections keep sha+policyRevision stickiness.
+ * returns landable. Non-landability ejections keep sha+policyRevision stickiness.
  */
-function canVerdictGatedReenter(work: Work, all: Work[], now: Date): boolean {
-  if (!work.queueEjection || !work.candidate) return false;
-  const ejection = work.queueEjection;
-  if (ejection.sha !== work.candidate.sha || ejection.policyRevision !== work.policyRevision) return false;
-  // Non-landability ejections (family is explicitly set to null) keep sha stickiness
-  if (ejection.family === null) return false;
-  // Landability-family ejections (family is 'landability' or undefined for legacy) re-enter if the verdict is landable
+function canReenter(work: Work, all: Work[], now: Date): boolean {
+  const { queueEjection: ejection, candidate } = work;
+  // No ejection, so can re-enter
+  if (!ejection) return true;
+  // Ejection doesn't match current head, so can re-enter
+  if (!candidate || ejection.sha !== candidate.sha || ejection.policyRevision !== work.policyRevision) return true;
+  // Only verdict-gated re-entry for landability-family ejections (family === 'landability')
+  // Non-landability ejections (family === null or undefined) keep sha stickiness, no re-entry
+  if (ejection.family !== 'landability') return false;
+  // Landability-family ejections re-enter if the verdict is landable
   const verdict = evaluateLandability(work, all, now);
   return verdict.verdict === 'landable';
 }
@@ -61,10 +63,25 @@ export function placeInQueue(work: Work, all: Work[], now: Date, ciAppIds: numbe
   const optimistic: OptimisticEligibility | null = !queue && eligible ? optimisticEligibility(work, all, { enabled: optimisticMode, gatesPass: eligible, exclude: optimisticExclude }) : null;
   if (optimistic?.eligible) return { queue: null, queueSequence, ejection, history, reasons: [] as string[], placement: null, optimistic };
   if (queue && reason) {
-    ejection = { at: now.toISOString(), sequence: queue.sequence, reason, sha: candidate?.sha ?? null, policyRevision: work.policyRevision, conflict: null };
+    // Determine if this ejection came from a landability-family refusal (build or acceptance gate).
+    // Non-landability reasons (CI, review, threads, etc.) get family: null to keep sha stickiness.
+    const verdict = evaluateLandability(probe, all, now);
+    const isLandabilityReason = verdict.verdict === 'refused' && (
+      (verdict.reasons.some(r => r.gate === 'build') && reason.includes('Landing speculative tip would fail')) ||
+      (verdict.reasons.some(r => r.gate === 'acceptance') && (reason.includes('Proof ') && (reason.includes(' failed on speculative tip') || reason.includes(' was revoked on speculative tip') || reason.includes('Proof requirements not met'))))
+    );
+    ejection = {
+      at: now.toISOString(),
+      sequence: queue.sequence,
+      reason,
+      sha: candidate?.sha ?? null,
+      policyRevision: work.policyRevision,
+      conflict: null,
+      family: isLandabilityReason ? 'landability' : null
+    };
     record('ejected', reason, queue.speculation?.tip ?? candidate?.sha);
     queue = null;
-  } else if (!queue && eligible && (!(ejection && candidate && ejection.sha === candidate.sha && ejection.policyRevision === work.policyRevision) || canVerdictGatedReenter(work, all, now) || predecessorReentry(work, all))) {
+  } else if (!queue && eligible && (canReenter(work, all, now) || predecessorReentry(work, all))) {
     queueSequence = nextQueueSequence(all);
     queue = { sequence: queueSequence, enqueuedAt: now.toISOString(), policyRevision: work.policyRevision, speculation: null };
     ejection = null;
