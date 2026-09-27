@@ -46,6 +46,8 @@ Reviews and proofs bind one head, base and policy revision. The queue head's tip
 
 `mergeQueue.parallelTips` (master config, default 4, published via `POST /api/merge-queue`) stacked tips test at once; entries merge in order once every tip through theirs passes. Set it to 1 for serial validation. Each publication wakes successors; in-flight tips receive frequent verdict reads. After any configured failed-check rerun, a failing tip ejects its entry once those ahead pass; later tips rebuild. `master status` and Merge step list them.
 
+Under a window wider than one, every queued entry validates on its own tip and `mergeQueue.batchSize` no longer combines entries into one combined tip — the defaults (4 and 4) therefore validate four entry tips at once, not one four-entry batch. That is the throughput-first reading of the defaults: one CI duration covers four positions instead of one, at the cost of up to four concurrent CI runs and a discarded suffix when a tip fails. Operators who want the old single-tip spend set `parallelTips: 1`, which restores exactly the batched behaviour. `batchSize` still widens the observation band and the delivery/ejection wake depth.
+
 ### Optimistic merges
 
 `mergeQueue.optimistic` (default on, independent of `mergeQueue.rerunFailedChecks`): a green entry disjoint from base changes and shared infrastructure lands head-bound, unqueued; a main guard [reverts](master-agent.md#repair-lane) and reopens culprits (`master status`: `optimisticMerge`).

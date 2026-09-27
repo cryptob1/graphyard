@@ -1402,8 +1402,8 @@ export function tipVerdict(work: Work, ciAppIds: readonly number[] | null = null
 
 /** How many queue positions are validated at once when master config sets no `mergeQueue.parallelTips`. */
 export const defaultParallelTips = 4;
-/** The largest parallel-tip window master config and the control plane accept. */
-export const maxParallelTips = 32;
+/** The largest parallel-tip window master config and the control plane accept (GY-498 review: beyond this, GitHub-side contention, not the queue plan, limits throughput). */
+export const maxParallelTips = 16;
 /** The installation-ledger event recording the parallel-tip window the master published (POST /api/merge-queue). */
 export const mergeParallelTipsEvent = 'merge-queue.parallel-tips';
 /** One in-flight speculative tip: what it holds, where it is published, and what CI said about it. */

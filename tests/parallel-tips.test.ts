@@ -322,13 +322,13 @@ test('unit:parallel-speculative-tips — the master publishes mergeQueue.paralle
     // The loop publishes the values in its own master config, once per change, through the route.
     const posted: unknown[] = [];
     const mutate = async (path: string, data: unknown) => { posted.push(data); const response = await api(`/api/${path}`, tokens.coordinator, { method: 'POST', body: JSON.stringify(data) }); assert.equal(response.status, 200, JSON.stringify(response.body)); return response.body; };
-    let configured: { batchSize?: number; parallelTips?: number } | undefined = { parallelTips: 2 };
+    let configured: { batchSize?: number; optimistic?: boolean; parallelTips?: number } | undefined = { parallelTips: 2 };
     const effects = daemonEffects(process.cwd(), () => ({ url, run: {}, mergeQueue: configured }) as any, { snapshot: async () => ({ work: [], now: new Date().toISOString() }), mutate, executor: {} as any });
     await effects.publishMergeBatchSize!();
     await effects.publishMergeBatchSize!();
-    assert.deepEqual(posted, [{ batchSize: 4, parallelTips: 2, rerunFailedChecks: 1 }], 'published once, not every cycle');
+    assert.deepEqual(posted, [{ batchSize: 4, optimistic: true, parallelTips: 2, rerunFailedChecks: 1 }], 'published once, not every cycle');
     assert.equal(engine.parallelTips, 2, 'the control plane validates by the master\'s window at once');
-    assert.deepEqual((await api('/api/status', tokens.coordinator)).body.mergeQueue, { batchSize: 4, parallelTips: 2, rerunFailedChecks: 1 });
+    assert.deepEqual((await api('/api/status', tokens.coordinator)).body.mergeQueue, { batchSize: 4, optimistic: true, parallelTips: 2, rerunFailedChecks: 1 });
     const ledger = async (kind: string) => (await store.pool.query('SELECT payload FROM events WHERE work_id IS NULL AND kind=$1 ORDER BY seq', [kind])).rows.map(row => row.payload);
     assert.deepEqual(await ledger(mergeParallelTipsEvent), [{ parallelTips: 2, previous: null }], 'recorded in the installation ledger');
     // A restarted control plane reads the published value back from the installation ledger.

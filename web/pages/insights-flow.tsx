@@ -119,17 +119,22 @@ export function LandedPerDay({ report }: { report: any }) {
 /**
  * The merge queue's pace (GY-498), from the flow report's `mergeQueue`: merges per hour over the
  * window the merges were read for, and the median time a merged entry waited in the queue. An
- * unmeasured figure reads Unavailable, never zero.
+ * unmeasured figure reads Unavailable, never zero; a figure from fewer than `sparseSamples` merges
+ * reads '—' with its sample count, the report's sparse-data convention, so a quiet repository never
+ * shows a rate or median drawn from two samples as if it were the week's.
  */
 export function MergeQueuePace({ report }: { report: any }) {
   const pace = report?.mergeQueue;
   if (!report) return null;
-  const perHour = typeof pace?.mergesPerHour === 'number' ? String(pace.mergesPerHour) : 'Unavailable';
-  const wait = typeof pace?.queueWait?.medianMs === 'number' ? minutes(pace.queueWait.medianMs) : 'Unavailable';
+  const sparse = (n: number | undefined) => typeof n === 'number' && n < sparseSamples;
+  const rateSparse = sparse(pace?.merges) && typeof pace?.mergesPerHour === 'number';
+  const perHour = typeof pace?.mergesPerHour === 'number' ? (rateSparse ? '—' : String(pace.mergesPerHour)) : 'Unavailable';
+  const waitSparse = sparse(pace?.queueWait?.n) && typeof pace?.queueWait?.medianMs === 'number';
+  const wait = typeof pace?.queueWait?.medianMs === 'number' ? (waitSparse ? '—' : minutes(pace.queueWait.medianMs)) : 'Unavailable';
   const figure = { display: 'flex', flexDirection: 'column', gap: '2px' } as const, value = { margin: 0, fontWeight: 600 } as const;
   return <dl className="merge-pace" data-flow="merge-queue" aria-label="Merge queue pace" style={{ display: 'flex', gap: '24px', margin: '12px 0 0' }}>
-    <div data-pace="merges-per-hour" style={figure}><dt className="muted">Merges per hour</dt><dd style={value}>{perHour}</dd></div>
-    <div data-pace="median-queue-wait" style={figure}><dt className="muted">Median queue wait</dt><dd style={value}>{wait}{typeof pace?.queueWait?.n === 'number' && pace.queueWait.n > 0 && <small> of {pace.queueWait.n} merged</small>}</dd></div>
+    <div data-pace="merges-per-hour" style={figure}><dt className="muted">Merges per hour</dt><dd style={value} data-sparse={rateSparse || undefined} title={rateSparse ? `Fewer than ${sparseSamples} merges` : undefined}>{perHour}</dd>{rateSparse && <small className="muted step-sparse" data-sparse="sparse">{pace.merges} merges</small>}</div>
+    <div data-pace="median-queue-wait" style={figure}><dt className="muted">Median queue wait</dt><dd style={value} data-sparse={waitSparse || undefined} title={waitSparse ? `Fewer than ${sparseSamples} merges` : undefined}>{wait}{typeof pace?.queueWait?.n === 'number' && pace.queueWait.n > 0 && !waitSparse && <small> of {pace.queueWait.n} merged</small>}</dd>{waitSparse && <small className="muted step-sparse" data-sparse="sparse">{pace.queueWait.n} merged</small>}</div>
   </dl>;
 }
 
