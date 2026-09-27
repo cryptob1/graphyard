@@ -55,6 +55,8 @@ A reviewer or producer is `awaiting acknowledgement` until 30 s of activity (`co
 
 When a live attempt's blocker or scope request resolves, its inactive session is re-prompted once (item, epoch, change, `complete GY-N EPOCH PR`), recorded on its handle. **Idle-with-lease** (30 quiet minutes, nothing open) shows on its handle with the pane, re-prompted once, then after 30 more handed to a new attempt on its branch. Sessions with an agentless pane, or whose item left build, close with a reason.
 
+Every paste the loop sends a running session is addressed by the **pane recorded on the attempt's own session handle** — the stable `principal:epoch` handle the dispatch registered — never by the profile's agent name, which its next session reuses; a paste resolved by name lands on whichever session holds the name now (GY-852). Before the pane is recorded, the runtime's name listing is the only address, and a pane it resolves that the item's record ties to another attempt's session is refused, with the reason on the record. An idle attempt whose recorded pane is gone from the runtime is handed to a new attempt without pasting into or closing any other pane.
+
 ### The dispatcher's own state
 
 - **The dispatcher bounds its own state where it composes it**, each cut marked with an ellipsis.

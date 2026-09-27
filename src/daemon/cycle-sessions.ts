@@ -21,9 +21,15 @@ export async function closeStep(cycle: Cycle) {
     && Date.parse(item.lease.expiresAt) > clock && !!cwd && cwd.replace(/ \(deleted\)$/, '').endsWith(`/${item.key}-${item.lease.epoch}`));
   // 1. Close finished worker sessions. Authority stops at the lease, so a launched agent with no
   //    active assignment has nothing left to do and its pane must not linger holding a provider seat.
+  //    The pane a live attempt's own handle records is that attempt's session (GY-852) and is never
+  //    closed as finished: profiles reuse agent names across sessions, so the name of a profile with
+  //    no active assignment can be held by another item's live session, and closing it by name would
+  //    end that item's worker.
+  const heldPanes = new Set(open.flatMap(item => !!item.lease && Date.parse(item.lease.expiresAt) > clock
+    ? (item.sessions ?? []).filter(s => s.kind === 'implementation' && s.pane).map(s => s.pane!) : []));
   for (const profile of config.workers.filter(worker => worker.mode === 'launch')) await isolate('close', null, profile.name, async () => {
     const agent = agents.find(candidate => candidate.name === profile.agentName);
-    if (!agent?.pane_id) return;
+    if (!agent?.pane_id || heldPanes.has(agent.pane_id)) return;
     // A runtime that left its pane (Herdr detects no agent in it: a bare shell, status unknown) never
     // reports idle, yet its agent name keeps the profile from every dispatch (2026-09-26: six of ten
     // profiles held for hours). Such a pane is closed unless a live lease of its principal is worked
@@ -283,16 +289,28 @@ export async function closeStep(cycle: Cycle) {
     }
   };
   for (const profile of config.workers.filter(worker => worker.mode === 'launch')) await isolate('session', heldBy(profile), profile.name, async () => {
-    const agent = agents.find(candidate => candidate.name === profile.agentName);
     const item = open.find(candidate => !!candidate.lease && candidate.lease.owner === profile.principal && Date.parse(candidate.lease.expiresAt) > clock);
-    if (!agent?.pane_id || !item || agent.agent_status !== 'blocked' || failedOver.has(item.id)) return;
-    const epoch = item.lease!.epoch, pane = agent.pane_id;
+    if (!item || failedOver.has(item.id)) return;
+    const epoch = item.lease!.epoch;
+    // The blocked session is the one this attempt's own handle names (GY-852): the keys and the
+    // paste reach that attempt's pane, never whichever session holds the profile's agent name now.
+    // Before the runtime's coordinates are recorded, the name listing is the only address there is,
+    // and what it resolves to is validated against the record before anything is sent.
+    const own = item.sessions?.find(s => s.kind === 'implementation' && s.id === `${profile.principal}:${epoch}` && s.pane);
+    const agent = own ? agents.find(candidate => candidate.pane_id === own.pane)
+      : agents.find(candidate => candidate.name === profile.agentName);
+    if (!agent?.pane_id || agent.agent_status !== 'blocked' || checkPaneStillBelongs(item, `${profile.principal}:${epoch}`, agent.pane_id)) return;
+    const pane = agent.pane_id;
     const handle = (outcome: string, finished: boolean) => workerHandle(cycle, item, profile, epoch, pane, outcome, finished);
     await unblock(`Worker session ${profile.agentName}`, `${profile.name}:${epoch}`, agent, item, profile.principal, epoch, item.workspaces.find(entry => entry.epoch === epoch)?.path ?? null, handle,
       reason => endWorkerAttempt(cycle, item, profile, epoch, pane, reason, `ended without submitting: its session ${profile.agentName} was ${reason}`));
   });
   for (const session of await effects.launchedSessions?.().catch(() => [] as LaunchedSession[]) ?? []) await isolate('session', open.find(candidate => candidate.key === session.work) ?? null, session.agentName, async () => {
-    const agent = agents.find(candidate => candidate.name === session.agentName), item = open.find(candidate => candidate.key === session.work);
+    const item = open.find(candidate => candidate.key === session.work);
+    // The session is found by the pane its launcher recorded for it (GY-852); the name is the
+    // fallback for a launch that recorded none, and its reuse across sessions is exactly why.
+    const agent = agents.find(candidate => !!session.pane && candidate.pane_id === session.pane)
+      ?? agents.find(candidate => candidate.name === session.agentName);
     if (!agent?.pane_id || !item || agent.agent_status !== 'blocked' || state.actions[failoverKey(session.role, item, session.record)]?.state === 'done') return;
     // The session's own handle on the item — the one its launcher registered — carries the prompt
     // and the loop's answer, as a worker's does (GY-223). One the launcher never registered has
@@ -388,7 +406,7 @@ export async function closeStep(cycle: Cycle) {
     for (const id of Object.keys(state.absences)) if (!gone.has(id)) delete state.absences[id];
   }
 
-  await resumeStep(cycle, failedOver);
+  await resumeStep(cycle, failedOver, runtime?.available !== false);
   await closeExitedWorkerSessions(cycle, runtime ?? null);
 }
 
@@ -454,19 +472,26 @@ function scopeChange(item: Work) {
 }
 
 /**
- * Check if the pane recorded for an item's session still belongs to this item/epoch.
- * Returns null if the pane is valid, or a reason string if it should be refused.
- * If no sessions are recorded yet, returns null (the pane is valid until sessions exist).
+ * Why a pane the loop resolved for a paste is not the one this attempt's session is recorded in,
+ * or null when it may be pasted into (GY-852).
+ *
+ * The loop's own handle for a live attempt is the one its id names — the stable `principal:epoch`
+ * the dispatch registered — and once the runtime has started it carries the pane the session
+ * occupies. That pane is the only address a paste may go to. A launch write cannot record the
+ * epoch itself (only the lease holder's writes may, `engine.ts`), so the attempt a handle belongs
+ * to is read from its id, not from an epoch field. Before the pane is recorded, the runtime's
+ * agent-name listing is all the address there is; then the pane the name resolved to is refused
+ * when this item's record ties it to another attempt's session. Anything pasted after such a
+ * refusal would land on whichever session holds the name now, which is how one item's re-prompt
+ * reached another item's pane (2026-09-26).
  */
-function checkPaneStillBelongs(item: Work, epoch: number, pane: string | undefined): string | null {
+function checkPaneStillBelongs(item: Work, handleId: string, pane: string | undefined): string | null {
   if (!pane) return 'no pane recorded';
-  // If no sessions are recorded yet, the pane is valid (no conflict detected).
-  if (!item.sessions?.length) return null;
-  const session = item.sessions.find(s => s.kind === 'implementation' && s.epoch === epoch && s.pane === pane);
-  // Only fail if other sessions exist but this pane doesn't match any of them.
-  if (!session && item.sessions.some(s => s.kind === 'implementation' && s.epoch === epoch)) {
-    return `pane ${pane} no longer belongs to ${item.key} epoch ${epoch} (pane reassigned or session ended)`;
-  }
+  const recorded = (item.sessions ?? []).filter(s => s.kind === 'implementation' && s.pane);
+  const own = recorded.find(s => s.id === handleId);
+  if (own) return own.pane === pane ? null : `pane ${pane} is not where ${item.key}'s session ${handleId} is recorded (pane ${own.pane}); the profile's agent name has been reassigned`;
+  const other = recorded.find(s => s.pane === pane);
+  if (other) return `pane ${pane} is recorded for ${item.key}'s session ${other.id}, not for the attempt this paste concerns`;
   return null;
 }
 
@@ -479,7 +504,7 @@ function checkPaneStillBelongs(item: Work, epoch: number, pane: string | undefin
  * naming the pane, and it is re-prompted once; still inactive `idleLeaseMs` later, its attempt is
  * handed to a new one that keeps its branch.
  */
-async function resumeStep(cycle: Cycle, failedOver: Set<string>) {
+async function resumeStep(cycle: Cycle, failedOver: Set<string>, listingLive: boolean) {
   const { config, state, effects, now, performed, isolate, agents, heldBy } = cycle;
   const live = new Set<string>();
   for (const profile of config.workers.filter(worker => worker.mode === 'launch')) await isolate('session', heldBy(profile), profile.name, async () => {
@@ -487,10 +512,33 @@ async function resumeStep(cycle: Cycle, failedOver: Set<string>) {
     if (!item || failedOver.has(item.id) || item.submission?.epoch === item.lease!.epoch) return;
     const epoch = item.lease!.epoch, keys = { blocker: resumeWaitKey('blocker', item, epoch), scope: resumeWaitKey('scope', item, epoch), idle: idleLeaseKey(item, epoch) };
     for (const key of Object.values(keys)) live.add(key);
-    const agent = agents.find(candidate => candidate.name === profile.agentName && !!candidate.pane_id), status = agent?.agent_status ?? null, pane = agent?.pane_id ?? null;
+    // The session this attempt is told anything in is the one its own handle names — the stable
+    // `principal:epoch` id, whose pane the launcher recorded once the runtime started (GY-852).
+    // The profile's agent name is reused across sessions, so it is only the fallback for a session
+    // whose coordinates are not recorded yet, and what it resolves to is validated against the
+    // record before anything is pasted into it.
+    const handleId = `${profile.principal}:${epoch}`;
+    const own = item.sessions?.find(s => s.kind === 'implementation' && s.id === handleId && s.pane);
+    const agent = own ? agents.find(candidate => candidate.pane_id === own.pane)
+      : agents.find(candidate => candidate.name === profile.agentName && !!candidate.pane_id);
+    const status = agent?.agent_status ?? null, pane = agent?.pane_id ?? null;
     const entry = (key: string, outcome: DaemonAction['state'], detail: string, attempts = 1) =>
       record(state, key, { kind: 'session', work: item.key, principal: profile.principal, epoch, state: outcome, detail, attempts, cycle: state.cycle }, now(), effects.persist);
     const drop = async (...names: string[]) => { const found = names.filter(name => state.actions[name]); for (const name of found) delete state.actions[name]; if (found.length) await effects.persist(state); };
+    /** Ends the idle attempt on the record and hands the item to a new one, closing only a pane that is still this attempt's. */
+    const reclaimIdle = async (reason: string, closePane: string | null) => {
+      const reclaimKey = `resume:reclaim:${item.id}:${epoch}`, previous = state.actions[reclaimKey];
+      if (previous?.state === 'done' || (previous && !readyToRetry(previous, state.cycle))) return;
+      const attempts = (previous?.attempts ?? 0) + 1;
+      await entry(reclaimKey, 'started', `${profile.agentName} on ${item.key} epoch ${epoch} is ${reason}; handing ${item.key} to a new attempt`, attempts);
+      try {
+        const next = await endWorkerAttempt(cycle, item, profile, epoch, closePane, reason, `ended without submitting: its session ${profile.agentName} was ${reason}`);
+        performed.push(await entry(reclaimKey, 'done', `${profile.agentName} on ${item.key} epoch ${epoch} was ${reason}; ${next}, keeping the attempt's branch`, attempts));
+        await drop(keys.idle);
+      } catch (error) {
+        performed.push(await entry(reclaimKey, 'failed', `${profile.agentName} on ${item.key} epoch ${epoch} is ${reason}, but its attempt could not be handed on: ${message(error)}`, attempts));
+      }
+    };
 
     // What the attempt waits on, marked the first time it is seen and again when it changes.
     const request = item.scopeRequest;
@@ -509,15 +557,15 @@ async function resumeStep(cycle: Cycle, failedOver: Set<string>) {
       if (previous && previous.state !== 'failed') { await drop(keys.blocker, keys.scope); return; }
       // No session to tell (1d settles a dead one), or one on a runtime prompt (1b answers that first).
       if (!agent || !pane || status === 'blocked') return;
-      // Verify the pane still belongs to this item/epoch: it may have been reassigned to another item or gone (GY-852).
-      const paneReason = checkPaneStillBelongs(item, epoch, pane);
+      // The pane the name resolved — only before this attempt's own pane was recorded — must still
+      // be the one the item's record ties to this attempt's session (GY-852): otherwise the
+      // resolution is refused with the reason on the record. The waits stand, so the resolution is
+      // delivered on a later cycle once the attempt's own pane verifies, instead of being consumed.
+      const paneReason = checkPaneStillBelongs(item, handleId, pane);
       if (paneReason) {
         performed.push(await entry(promptKey, 'failed', `${item.key} epoch ${epoch}: ${changed}; the recorded pane cannot be re-prompted: ${paneReason}`, (previous?.attempts ?? 0) + 1));
-        await drop(keys.blocker, keys.scope);
         return;
       }
-      // Ensure the agent found by name still holds this pane (AC-1: re-prompts must route by pane, not agent name).
-      if (agent?.pane_id !== pane) return;
       if (status === 'working') { await entry(promptKey, 'done', `${item.key} epoch ${epoch}: ${changed}; ${profile.agentName} is already active, so it is not re-prompted`); await drop(keys.blocker, keys.scope); return; }
       if (!effects.promptSession || !readyToRetry(previous, state.cycle)) return;
       const attempts = (previous?.attempts ?? 0) + 1;
@@ -534,30 +582,34 @@ async function resumeStep(cycle: Cycle, failedOver: Set<string>) {
     }
 
     // 1f. Idle with a live lease and nothing open.
-    if (!agent || !pane || !['idle', 'done'].includes(status ?? '')) { await drop(keys.idle); return; }
+    if (!agent || !pane || !['idle', 'done'].includes(status ?? '')) {
+      // The attempt's own pane is gone from the runtime while it holds the lease (GY-852, AC-2):
+      // it cannot be re-prompted, and the profile's agent name — which another item's session may
+      // now hold — is no address. Past the idle bound the attempt ends and is redispatched, and
+      // nothing is closed: a pane the name resolves to, if any, is not this attempt's. Only a
+      // runtime that answered the listing may say the pane is gone; an unreadable one is believed
+      // by nobody here.
+      if (own && !agent && listingLive) {
+        const idle = state.actions[keys.idle];
+        if (!idle) return;
+        const reprompted = state.actions[`resume:idle:${item.id}:${epoch}:${idle.at}`];
+        if ((reprompted?.state === 'done' ? now() - Date.parse(reprompted.at) : now() - Date.parse(idle.at)) <= idleLeaseMs) return;
+        await reclaimIdle(`idle with a live lease: its pane ${own.pane} has been gone from the runtime since ${idle.at}, so it cannot be re-prompted, and its agent name is no address`, null);
+      } else await drop(keys.idle);
+      return;
+    }
     const idle = state.actions[keys.idle];
     if (!idle) { await entry(keys.idle, 'waiting', `${item.key} epoch ${epoch}: ${profile.agentName} in pane ${pane} holds a live lease with no open blocker or scope request and has shown no activity since this cycle`); return; }
     const quietMs = now() - Date.parse(idle.at), minutes = Math.round(quietMs / 60_000);
     const repromptKey = `resume:idle:${item.id}:${epoch}:${idle.at}`, reprompted = state.actions[repromptKey];
     if (!reprompted || reprompted.state === 'failed') {
       if (quietMs <= idleLeaseMs || !effects.promptSession || !readyToRetry(reprompted, state.cycle)) return;
-      // Verify the pane still belongs to this item/epoch before idle-re-prompting (GY-852, AC-2).
-      const paneReason = checkPaneStillBelongs(item, epoch, pane);
+      // The pane the name resolved — only before this attempt's own pane was recorded — must still
+      // be the one the item's record ties to this attempt's session before the idle re-prompt
+      // (GY-852, AC-2); otherwise the attempt ends as idle and is redispatched, closing nothing.
+      const paneReason = checkPaneStillBelongs(item, handleId, pane);
       if (paneReason) {
-        // The pane is gone or belongs to another item: end the attempt as idle and redispatch.
-        // Do not close the pane if it belongs to another item; only close our own pane if any (GY-852, AC-2).
-        const reclaimKey = `resume:reclaim:${item.id}:${epoch}`, reclaimPrevious = state.actions[reclaimKey];
-        if (reclaimPrevious?.state === 'done' || (reclaimPrevious && !readyToRetry(reclaimPrevious, state.cycle))) return;
-        const reason = `idle with a live lease: pane ${pane} is gone since ${idle.at}; cannot re-prompt (${paneReason})`, attempts = (reclaimPrevious?.attempts ?? 0) + 1;
-        await entry(reclaimKey, 'started', `${profile.agentName} on ${item.key} epoch ${epoch} is ${reason}; handing ${item.key} to a new attempt`, attempts);
-        try {
-          // Pass null for pane since it doesn't belong to this item; endWorkerAttempt will not close it.
-          const next = await endWorkerAttempt(cycle, item, profile, epoch, null, reason, `ended without submitting: its session ${profile.agentName} was ${reason}`);
-          performed.push(await entry(reclaimKey, 'done', `${profile.agentName} on ${item.key} epoch ${epoch} was ${reason}; ${next}, keeping the attempt's branch`, attempts));
-          await drop(keys.idle);
-        } catch (error) {
-          performed.push(await entry(reclaimKey, 'failed', `${profile.agentName} on ${item.key} epoch ${epoch} is ${reason}, but its attempt could not be handed on: ${message(error)}`, attempts));
-        }
+        await reclaimIdle(`idle with a live lease: pane ${pane} is gone since ${idle.at}; cannot re-prompt (${paneReason})`, null);
         return;
       }
       const attempts = (reprompted?.attempts ?? 0) + 1, observed = `idle-with-lease: ${profile.agentName} in pane ${pane} has shown no activity since ${idle.at} (${minutes} minutes) while holding ${item.key} epoch ${epoch} with no open blocker or scope request`;
@@ -573,17 +625,10 @@ async function resumeStep(cycle: Cycle, failedOver: Set<string>) {
       return;
     }
     if (reprompted.state !== 'done' || now() - Date.parse(reprompted.at) <= idleLeaseMs) return;
-    const reclaimKey = `resume:reclaim:${item.id}:${epoch}`, previous = state.actions[reclaimKey];
-    if (previous?.state === 'done' || (previous && !readyToRetry(previous, state.cycle))) return;
-    const reason = `idle with a live lease: no activity in pane ${pane} since ${idle.at}, nor in the ${Math.round((now() - Date.parse(reprompted.at)) / 60_000)} minutes after its re-prompt at ${reprompted.at}`, attempts = (previous?.attempts ?? 0) + 1;
-    await entry(reclaimKey, 'started', `${profile.agentName} on ${item.key} epoch ${epoch} is ${reason}; handing ${item.key} to a new attempt`, attempts);
-    try {
-      const next = await endWorkerAttempt(cycle, item, profile, epoch, pane, reason, `ended without submitting: its session ${profile.agentName} was ${reason}`);
-      performed.push(await entry(reclaimKey, 'done', `${profile.agentName} on ${item.key} epoch ${epoch} was ${reason}; ${next}, keeping the attempt's branch`, attempts));
-      await drop(keys.idle);
-    } catch (error) {
-      performed.push(await entry(reclaimKey, 'failed', `${profile.agentName} on ${item.key} epoch ${epoch} is ${reason}, but its attempt could not be handed on: ${message(error)}`, attempts));
-    }
+    // The pane is re-verified against the record before it is closed, so the final reclaim never
+    // closes a pane this attempt no longer holds (GY-852).
+    const paneReason = checkPaneStillBelongs(item, handleId, pane);
+    await reclaimIdle(`idle with a live lease: no activity in pane ${pane} since ${idle.at}, nor in the ${Math.round((now() - Date.parse(reprompted.at)) / 60_000)} minutes after its re-prompt at ${reprompted.at}${paneReason ? `; its pane no longer verifies (${paneReason})` : ''}`, paneReason ? null : pane);
   });
   // A wait whose attempt no longer holds a live lease has nobody left to tell.
   const stale = Object.entries(state.actions).filter(([key, action]) => action.state === 'waiting' && waitPrefixes.some(prefix => key.startsWith(prefix)) && !live.has(key));
