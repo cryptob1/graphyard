@@ -5,6 +5,13 @@ import { dismissedReviewIds } from '../src/github.js';
 import { openReviewConflict, reconcileReviewConflict } from '../src/model/review-conflict.js';
 import { trackFaults, type FaultRecord } from '../src/model/fault-classes.js';
 import { mergeBaseDismissal, mergeBaseDismissalAttention } from '../src/merge-base-ancestry.js';
+import { reviewConflictAttention, type ReviewConflict } from '../src/model/review-conflict.js';
+import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
+import { buildMasterStatus, masterConfigSchema } from '../src/master.js';
+import { queueRef } from '../src/merge-queue.js';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 // GY-486: three review-convergence faults in 24 hours, each counted where no second review event
 // happened. The test is named for the proof it produces: manual:fault-class-review-convergence.
@@ -55,9 +62,11 @@ test('manual:fault-class-review-convergence — GY-100: an approval GitHub dismi
     // latest review is the re-post alone.
     const list = [{ ...original, state: 'DISMISSED' }, repost];
     if (run === 'base') {
-      // The original's dismissal is never seen, and the re-post is taken for a second verdict.
-      assert.deepEqual(observe(item, list, 6, true).map(entry => entry.event), ['review.conflicted'], 'the base raises the conflict');
-      assert.deepEqual(openReviewConflict(item)!.verdicts.map(verdict => verdict.id), [original.id, repost.id]);
+      // The original's dismissal is never seen, and the re-post is recorded as a second standing
+      // verdict for the request. Before GY-733 that pair was raised as a conflict; the two agree,
+      // so since GY-733 it is not one (see the GY-733 tests below).
+      observe(item, list, 6, true);
+      assert.deepEqual(item.reviewVerdicts!.verdicts.map(verdict => [verdict.id, !!verdict.dismissed]), [[original.id, false], [repost.id, false]], 'the base misses the dismissal');
       continue;
     }
     assert.deepEqual(observe(item, list, 6), [], 'no conflict against the candidate');
@@ -107,4 +116,123 @@ test('manual:fault-class-review-convergence — GY-288: one standing merge-base 
   // Only commit hashes are dropped: a different fault on the subject is still its own instance.
   const other = { ...second, text: second.text.replace('for a merge-base change', 'for a changed verdict') };
   assert.equal(trackFaults(record, [second, other], '2026-09-26T05:31:00.000Z').length, 1);
+});
+
+// GY-733: three review-convergence faults in 24 hours (GY-100, GY-487, GY-430) after GY-486 shipped.
+// The shared cause: the control plane treated a review that had settled as one that had not. It
+// kept reporting a conflict left on a delivered item, relaunched a reviewer whose posted verdict
+// it had simply not read yet and then withheld both agreeing approvals as a conflict, and counted
+// a merge-base dismissal it had already answered. Each test below replays the recorded instance;
+// against the base each fails with the fault it recorded, against the candidate the fault does not recur.
+
+const gy100Record = (): ReviewConflict => ({ state: 'conflicted', key: 'GY-100', pr: 116, sha: sha40('e9a5521c608c'), baseSha: sha40('b6a984ffc36a'), policyRevision: 2,
+  reviewer, requestId: '4177d8bcaee33119be12a468eb5d813c', at: '2026-09-23T23:40:12.443Z', reason: 'two verdicts',
+  verdicts: [{ id: 5297208889, reviewer, state: 'APPROVED', submittedAt: '2026-09-23T21:51:24Z', observedAt: '2026-09-23T21:52:00.000Z', requestId: '4177d8bcaee33119be12a468eb5d813c' },
+    { id: 5297255395, reviewer, state: 'APPROVED', submittedAt: '2026-09-23T21:55:54Z', observedAt: '2026-09-23T21:56:00.000Z', requestId: '4177d8bcaee33119be12a468eb5d813c' }] });
+
+test('manual:fault-class-review-convergence — GY-733/GY-100: a conflict record left standing on a delivered item is no fault, and a standing conflict of agreeing verdicts resolves', () => {
+  // GY-100 was delivered with the conflict raised on 2026-09-23 still `conflicted` on its record,
+  // and master status reported it — and the loop counted it — three days later.
+  const delivered = { ...gy100(), stage: 'done', reviewConflict: gy100Record() } as Work;
+  assert.deepEqual(reviewConflictAttention([delivered], []), [], 'the base reported "Review of GY-100 head e9a5521c608c (PR #116) is conflicted"');
+  assert.deepEqual(reconcileReviewConflict(delivered, at(60)).map(entry => entry.event), ['review.conflict-superseded']);
+  assert.equal(openReviewConflict(delivered), null);
+  assert.match(delivered.reviewConflict!.resolution!, /the item is done/);
+  // The same record on an open item: both verdicts are approvals of the head, so nothing is
+  // overturned; the conflict resolves on the next evaluation and the approval reaches the gates.
+  const open = { ...gy100(), reviewConflict: gy100Record(), reviewVerdicts: { sha: gy100Record().sha, baseSha: gy100Record().baseSha, policyRevision: 2, verdicts: gy100Record().verdicts } } as Work;
+  open.observation = { ...open.observation!, reviews: [{ id: 5297255395, reviewer, sha: open.candidate!.sha, state: 'APPROVED', submittedAt: '2026-09-23T21:55:54Z' }] };
+  assert.deepEqual(reconcileReviewConflict(open, at(60)).map(entry => entry.event), ['review.conflict-resolved'], 'the base kept the conflict open until a third review');
+  assert.match(open.reviewConflict!.resolution!, /the standing verdicts agree/);
+  assert.deepEqual(open.observation!.reviews.map(review => review.id), [5297255395], 'the approval is not withheld');
+});
+
+const H430 = sha40('46800e6ad90f'), B430 = sha40('41972215de37'), R430 = 'd3cf5655bf9f834bf29c154482709257';
+function gy430(observedAt: string, reviews: Observation['reviews'] = [], reviewIds?: number[]): Work {
+  const candidate = { sha: H430, baseSha: B430, pr: 229, branch: 'graphyard/gy-430-1', author: 'implementer' };
+  return { id: 'work-430', key: 'GY-430', title: 'Review twice', description: '', type: 'bug', priority: 1, dependencies: [], plannedFiles: ['src/'],
+    criteria: [{ id: 'AC-1', text: 'x', proofs: ['unit:x'] }], policy: { checks: [], review: true, reviewProvider: 'github' }, stage: 'review', revision: 30, policyRevision: 2,
+    createdAt: observedAt, updatedAt: observedAt, stageEnteredAt: observedAt, ready: true, epoch: 1, lease: null, workspaces: [], candidate, submission: { epoch: 1, pr: 229 },
+    reworkRequested: false, scenarioRequirements: [], evidence: [], blocker: null, violations: [], gates: [{ name: 'review', passed: false, reasons: ['Independent approval of the current commit is required'] }],
+    observation: { candidate, checks: [], reviews, ...(reviewIds ? { reviewIds } : {}), merged: false, mergeSha: null, mergeable: true, protected: true, files: ['src/a.ts'], at: observedAt,
+      prState: 'open', draft: false, baseTip: B430, baseTipContained: true },
+    autoDispatch: { review: { id: R430, kind: 'review', state: 'requested', provider: 'github', pr: 229, sha: H430, baseSha: B430, policyRevision: 2, requestedAt: '2026-09-26T16:44:56.026Z', reason: 'independent approval required' }, history: [], producers: [] } } as unknown as Work;
+}
+const first430 = { id: 5326659833, reviewer, sha: H430, state: 'APPROVED', submittedAt: '2026-09-26T17:02:48Z' };
+const second430 = { id: 5326702985, reviewer, sha: H430, state: 'APPROVED', submittedAt: '2026-09-26T17:15:52Z' };
+
+test('manual:fault-class-review-convergence — GY-733/GY-430: two approvals answering one request are one answer, not a conflict', () => {
+  const item = gy430('2026-09-26T17:09:18.974Z', [first430]);
+  assert.deepEqual(reconcileReviewConflict(item, new Date('2026-09-26T17:09:18.974Z')), []);
+  // GitHub now reports the second session's approval as the identity's latest.
+  item.observation = { ...item.observation!, at: '2026-09-26T17:16:41.853Z', reviews: [second430] };
+  assert.deepEqual(reconcileReviewConflict(item, new Date('2026-09-26T17:16:41.853Z')), [], 'the base raised review.conflicted and withheld both approvals');
+  assert.equal(openReviewConflict(item), null);
+  assert.deepEqual(item.observation.reviews.map(review => review.id), [second430.id], 'the approval reaches the gates');
+  // A disagreement on the same request is still the conflict GY-124 withholds.
+  const disagreed = gy430('2026-09-26T17:09:18.974Z', [first430]);
+  reconcileReviewConflict(disagreed, new Date('2026-09-26T17:09:18.974Z'));
+  disagreed.observation = { ...disagreed.observation!, reviews: [{ ...second430, state: 'CHANGES_REQUESTED' }] };
+  assert.deepEqual(reconcileReviewConflict(disagreed, new Date('2026-09-26T17:16:41.853Z')).map(entry => entry.event), ['review.conflicted']);
+});
+
+test('manual:fault-class-review-convergence — GY-733/GY-430: a reviewer whose posted verdict the observation has not read is not relaunched on a timer', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'graphyard-gy733-'));
+  try {
+    const token = join(directory, 'coordinator.token'); await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
+    const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: token, cliPath: '/bin/true', repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project',
+      reviewer: { appId: 5678, installationId: 91011, slug: 'graphyard-reviewer', credentialFile: join(directory, 'reviewer.json'), boundAt: '2026-09-26T00:00:00.000Z' },
+      reviewers: [{ name: 'claude-reviewer', agentName: 'review-claude-3', kind: 'claude' }, { name: 'opencode-reviewer', agentName: 'review-opencode-1', kind: 'opencode' }], producers: [], run: { awaitReviewersMinutes: 0, reviewerProfile: 'claude-reviewer' } });
+    // review-claude-3 posted its approval at 17:02:48 and the ledger settled the session on it; GitHub
+    // reads were timing out, so the item's observation was still the one from before the approval.
+    const records = [{ requestId: R430, state: 'completed', requestedAt: '2026-09-26T17:01:03.997Z', closedAt: '2026-09-26T17:03:10.000Z', profile: 'claude-reviewer', agentName: 'review-claude-3', attempt: 1,
+      verdict: { state: 'APPROVED', reviewer, reviewId: first430.id, submittedAt: first430.submittedAt } }];
+    let item = gy430('2026-09-26T16:44:56.026Z');
+    const launched: string[] = [];
+    const effects: DispatchEffects = {
+      snapshot: async () => ({ work: [item], now: new Date(clockMs).toISOString() }), agents: () => [],
+      credentials: async profiles => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])),
+      reconcileReviews: async () => ({ reviews: records as never }), reconcileProducers: async () => ({ producers: [] }),
+      launchReview: async (_item, _request, profile) => { launched.push(profile.name); }, launchProducer: async () => {}, persist: async () => {},
+    } as DispatchEffects;
+    // 17:08:18, when the base relaunched the request on review-opencode-1: more than five minutes after the session settled.
+    let clockMs = Date.parse('2026-09-26T17:08:18.966Z');
+    const cursor = emptyDispatchCursor(config);
+    const tick = await runDispatchTick(config, cursor, effects, () => clockMs);
+    assert.deepEqual(launched, [], 'the base launched a second reviewer here, whose approval then conflicted with the first');
+    assert.match(tick.waiting.find(entry => entry.kind === 'review')!.reason, /posted APPROVED \(review 5326659833\); no further attempt is launched until the observation of 46800e6ad90f reads it/);
+    // Still unread an hour later: still no second session.
+    clockMs += 3_600_000;
+    await runDispatchTick(config, cursor, effects, () => clockMs);
+    assert.deepEqual(launched, []);
+    // Once the observation has read the approval and the request still stands (the gate refused it), the next attempt launches.
+    item = gy430('2026-09-26T18:10:00.000Z', [first430], [first430.id]);
+    await runDispatchTick(config, cursor, effects, () => clockMs);
+    assert.equal(launched.length, 1, 'a verdict the control plane has read and still does not accept is attempted again');
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+const H487 = sha40('28d127adb443'), B487 = sha40('8c55d327b18a'), TIP487 = sha40('d399c8aa2ef8'), NEW487 = sha40('cea7af146274');
+function gy487(speculation: { tip: string; base: string; restored?: boolean }): Work {
+  const candidate = { sha: H487, baseSha: B487, pr: 297, branch: 'graphyard/gy-487-1', author: 'implementer' };
+  const dismissal = { reason: 'The merge-base changed after approval.', mergeBase: true, verdict: 'approved', commit: null, at: '2026-09-26T14:07:20Z', by: 'cryptob1' };
+  return { id: 'work-487', key: 'GY-487', title: 'Pools', description: '', type: 'bug', priority: 1, dependencies: [], plannedFiles: ['src/'],
+    criteria: [{ id: 'AC-1', text: 'x', proofs: ['unit:x'] }], policy: { checks: [], review: true, reviewProvider: 'github' }, stage: 'merge', revision: 40, policyRevision: 1,
+    createdAt: '2026-09-26T08:50:28Z', updatedAt: '2026-09-26T14:07:57.850Z', stageEnteredAt: '2026-09-26T14:07:57.850Z', ready: true, epoch: 1, lease: null, workspaces: [], candidate, submission: { epoch: 1, pr: 297 },
+    reworkRequested: false, scenarioRequirements: [], evidence: [], blocker: null, violations: [], gates: [{ name: 'ready', passed: true, reasons: [] }], queueSequence: 1,
+    queue: { sequence: 1, enqueuedAt: '2026-09-26T13:50:00Z', policyRevision: 1, speculation: { ref: queueRef('GY-487'), tip: speculation.tip, base: speculation.base, baseTree: sha40('7e1'), predecessors: [], policyRevision: 1, publishedAt: '2026-09-26T14:07:41.128Z', reviewedHead: sha40('ad2203503bb8'),
+      ...(speculation.restored ? { restoredApproval: { reviewer, reviewId: 5326115509, sha: H487, dismissal, at: '2026-09-26T14:07:33.100Z' } } : {}) } },
+    observation: { candidate, checks: [], merged: false, mergeSha: null, mergeable: true, protected: true, files: ['src/pools.ts'], scopeFiles: [], at: '2026-09-26T14:07:57.000Z', prState: 'open', draft: false,
+      baseTip: TIP487, baseTree: sha40('7e1'), baseTipContained: true, baseTipAncestor: false,
+      reviews: [{ id: 5326115509, reviewer, sha: H487, state: 'DISMISSED', submittedAt: '2026-09-26T13:58:02Z', dismissal } as Observation['reviews'][number]] } } as unknown as Work;
+}
+
+test('manual:fault-class-review-convergence — GY-733/GY-487: a merge-base dismissal the control plane already answered is not a fault', () => {
+  const now = '2026-09-26T14:07:57.850Z';
+  const line = (item: Work) => buildMasterStatus({ work: [item], now }, [], []).attentionItems.find(entry => entry.subject === 'GY-487' && /merge-base change/.test(entry.text));
+  // 14:07:33 the control plane restored the approval on the unchanged head; 14:07:41 it republished the tip onto d399c8aa2ef8.
+  assert.equal(line(gy487({ tip: H487, base: B487, restored: true })), undefined, `restored: the base reported "GitHub dismissed graphyard-reviewer[bot]'s approval of 28d127adb443"`);
+  assert.equal(line(gy487({ tip: NEW487, base: TIP487 })), undefined, 'republished: the base reported the same line at 14:07:57');
+  // A dismissal nothing has answered yet is still reported.
+  assert.ok(line(gy487({ tip: H487, base: B487 })), 'an unanswered dismissal stays attention');
 });

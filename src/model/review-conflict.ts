@@ -22,6 +22,10 @@ import { reviewProviderOf } from './review.js';
  * head, and the first verdict posted after the conflict — the fresh review — resolves it and is
  * the one the gates act on.
  *
+ * A conflict is a disagreement (GY-733): two verdicts that say the same thing overturn nothing, so
+ * they are not one, and a conflict whose verdicts stop disagreeing — one dismissed since — is
+ * resolved. A done item carries no open conflict: its record is history, never a fault.
+ *
  * Only the reviewer identity's verdicts are recorded and can conflict (see `reviewerIdentity`),
  * and only two that answered the same recorded request: a person's verdicts, and verdicts that
  * answered no request, pass through to the gates exactly as GitHub reports them.
@@ -89,6 +93,15 @@ export function openReviewConflict(work: Pick<Work, 'reviewConflict'>): ReviewCo
 }
 
 /**
+ * Whether verdicts answering one request disagree (GY-733). The conflict exists so that no verdict
+ * is silently overturned by a second one; two verdicts saying the same thing overturn nothing, and
+ * withholding both only spent a third review to reach the verdict both already gave. A relaunch
+ * that follows a session whose verdict the observation had not read yet (GY-430), and a re-posted
+ * approval whose dismissed original GitHub hid (GY-100), are both such agreeing pairs.
+ */
+export const verdictsDisagree = (verdicts: readonly Pick<ObservedVerdict, 'state'>[]) => new Set(verdicts.map(verdict => verdict.state)).size > 1;
+
+/**
  * Record the verdicts the current observation carries, raise or resolve the conflict, and withhold
  * every conflicting verdict from the observation the gates read. Idempotent: re-evaluating the
  * same observation changes nothing. Returns the transitions for the ledger.
@@ -101,6 +114,13 @@ export function reconcileReviewConflict(work: Work, now: Date): ReviewConflictTr
   const open = openReviewConflict(work);
   // A new head, base or policy revision is a new request altogether: the conflict on the old
   // binding answers nothing about it, and is closed with the reason.
+  // A delivered or closed item asks no review of anything: a conflict left standing on it would be
+  // reported and counted as a fault for as long as the record exists (GY-733, GY-100).
+  if (open && work.stage === 'done') {
+    work.reviewConflict = { ...open, state: 'superseded', resolvedAt: at, resolution: 'the item is done: nothing is reviewed on it any more' };
+    transitions.push({ event: 'review.conflict-superseded', conflict: work.reviewConflict });
+    return transitions;
+  }
   if (open && (!current || !binds(open, work))) {
     work.reviewConflict = { ...open, state: 'superseded', resolvedAt: at,
       resolution: !candidate ? 'the item no longer has a candidate' : candidate.sha !== open.sha ? `head changed from ${short(open.sha)} to ${short(candidate.sha)}` : candidate.baseSha !== open.baseSha ? `base changed from ${short(open.baseSha)} to ${short(candidate.baseSha)}` : `policy revision changed from ${open.policyRevision} to ${work.policyRevision}` };
@@ -128,7 +148,15 @@ export function reconcileReviewConflict(work: Work, now: Date): ReviewConflictTr
   work.reviewVerdicts = record;
   const standing = record.verdicts.filter(verdict => !verdict.dismissed && !verdict.superseded && reviewerIdentity(verdict.reviewer));
   const conflict = openReviewConflict(work);
-  if (conflict) {
+  // A conflict whose verdicts no longer disagree — one was dismissed since, or it was raised
+  // between two agreeing verdicts before GY-733 — withholds nothing: it is resolved, and the
+  // standing verdict reaches the gates as GitHub reports it.
+  const remaining = conflict ? conflict.verdicts.filter(entry => { const kept = record.verdicts.find(verdict => verdict.id === entry.id); return !kept || !kept.dismissed && !kept.superseded; }) : [];
+  if (conflict && !verdictsDisagree(remaining)) {
+    work.reviewConflict = { ...conflict, state: 'resolved', resolvedAt: at,
+      resolution: remaining.length ? `the standing verdicts agree (${remaining.map(describe).join(', ')}): nothing is overturned, so the gates act on them` : 'every verdict of the conflict was dismissed: nothing stands to act on' };
+    transitions.push({ event: 'review.conflict-resolved', conflict: work.reviewConflict });
+  } else if (conflict) {
     // The fresh review: the first standing verdict on the head that is not one of the conflict.
     const fresh = standing.find(verdict => !conflict.verdicts.some(entry => entry.id === verdict.id));
     if (fresh) {
@@ -145,7 +173,8 @@ export function reconcileReviewConflict(work: Work, now: Date): ReviewConflictTr
       const key = `${verdict.reviewer.toLowerCase()}\0${verdict.requestId}`;
       groups.set(key, [...(groups.get(key) ?? []), verdict]);
     }
-    const pair = [...groups.values()].find(group => group.length > 1);
+    // Two verdicts that agree are one answer given twice, not a conflict (GY-733).
+    const pair = [...groups.values()].find(group => group.length > 1 && verdictsDisagree(group));
     if (pair) {
       work.reviewConflict = { state: 'conflicted', key: work.key, pr: candidate!.pr, sha: candidate!.sha, baseSha: candidate!.baseSha, policyRevision: work.policyRevision,
         reviewer: pair[0].reviewer, requestId: pair[0].requestId, verdicts: pair, at,
@@ -165,9 +194,10 @@ export function reconcileReviewConflict(work: Work, now: Date): ReviewConflictTr
  * verdicts and the sessions that posted them, read from the reviewer ledger by review id (a
  * session the ledger has no record of is named as such — that is the launcher fault itself).
  */
-export function reviewConflictAttention(work: Pick<Work, 'key' | 'reviewConflict'>[], records: { id: string; agentName: string; profile: string; requestId?: string; verdict?: { reviewId: number } }[]): { subject: string; text: string; next: string }[] {
+export function reviewConflictAttention(work: Pick<Work, 'key' | 'stage' | 'reviewConflict'>[], records: { id: string; agentName: string; profile: string; requestId?: string; verdict?: { reviewId: number } }[]): { subject: string; text: string; next: string }[] {
   return work.flatMap(item => {
-    const conflict = openReviewConflict(item);
+    // A done item's record is history, never a review waiting to settle (GY-733).
+    const conflict = item.stage === 'done' ? null : openReviewConflict(item);
     if (!conflict) return [];
     const session = (verdict: ObservedVerdict) => {
       const record = records.find(entry => entry.verdict?.reviewId === verdict.id);

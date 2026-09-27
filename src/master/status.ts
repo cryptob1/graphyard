@@ -7,7 +7,7 @@ import { type Work, carriedBindings, describeGround, reviewProviderOf, reviewerP
 import { containmentAttestation, containmentGraceMs } from '../quarantine.js';
 import { defaultMergeBatchSize, describeMergeBatches, type MergeBatchView, predictQueue, describeGitHubQueue, pendingBaseRefresh, baseRefreshConflict, currentBaseRefreshCarry, branchContamination, currentRestore, restoredApproval, unpublishableEntry, refusedReconciliation, type QueuePlacement } from '../merge-queue.js';
 import { MERGE_PROTOCOL } from '../protocol-version.js';
-import { mergeBaseDismissal, mergeBaseDismissalAttention } from '../merge-base-ancestry.js';
+import { mergeBaseDismissal, mergeBaseDismissalAttention, mergeBaseDismissalSettled } from '../merge-base-ancestry.js';
 import { pipelineSpeed, pipelineSpeedSummary } from '../pipeline-speed.js';
 import { profileSessions, type WorkerProfile } from './profiles.js';
 import { sessionActivity } from './launch.js';
@@ -196,7 +196,9 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     const restore = currentRestore(work);
     const contamination = contaminated || restore?.restore ? { head: contaminated?.head ?? restore!.restore!.contaminated, foreign: contaminated?.foreign ?? restore!.restore!.foreign, source: contaminated?.source ?? [],
       restore: restore?.restore ? { cause: restore.restore.cause, requested: restore.restore.requested, performedAt: restore.restore.performedAt, outcome: restore.restore.outcome, own: restore.restore.own, head: restore.head, conflict: restore.conflict } : null } : null;
-    const restored = restoredApproval(work), baseDismissal = mergeBaseDismissal(work);
+    // A dismissal the control plane already answered — approval restored, or tip republished onto the
+    // base tip — is not attention (GY-733): the row's restoredApproval still names it.
+    const restored = restoredApproval(work), dismissed = mergeBaseDismissal(work), baseDismissal = dismissed && !mergeBaseDismissalSettled(work, dismissed, restored) ? dismissed : null;
     const approvalRestored = restored ? { reviewer: restored.reviewer, reviewId: restored.reviewId ?? null, sha: restored.sha, dismissal: restored.dismissal, at: restored.at,
       line: `${restored.reviewer}'s approval of ${restored.sha.slice(0, 12)} was dismissed by GitHub for a merge-base change while the head was unchanged (${restored.dismissal.reason ?? 'reason unread'}${restored.dismissal.at ? ` at ${restored.dismissal.at}` : ''}); the control plane restored it as the binding approval, requested no review, spent no attempt, and re-posts it through the reviewer App before the merge` } : null;
     // A role with no account left is one line for the whole repository (`capacity` below), never a

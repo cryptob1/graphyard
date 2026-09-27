@@ -21,7 +21,7 @@ Dispatch is optimistic (overlap holds nothing), smallest planned scope first; `g
 
 **An approval must survive a tip publication.** [Carry rules](github.md#bindings-and-carry) apply.
 
-**A merge-base dismissal is not a reviewer withdrawing a verdict.** An approval of the current head dismissed with `The merge-base changed after approval.` is restored (`observation.reviews[].dismissal`); no other dismissal is. Its re-post is no new verdict (`observation.dismissedReviewIds`).
+**A merge-base dismissal is not a reviewer withdrawing a verdict.** An approval of the current head dismissed with `The merge-base changed after approval.` is restored (`observation.reviews[].dismissal`); no other dismissal is. Its re-post is no new verdict (`observation.dismissedReviewIds`). A dismissal already answered — approval restored, or tip republished onto the base tip — raises no attention.
 
 **A branch must never keep another item's unlanded commits.** Tips build from reviewed heads; ejection restores left branches (`baseRefresh.restore`). A tip behind an unlanded departed entry waits (`Restoring after predecessor ejection`) for its restored head; another item's carried files (`Carried from another item's tip`) are not rework. Git decides landing (`landing.landed`); landed peers deliver immediately.
 
