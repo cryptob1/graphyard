@@ -385,3 +385,42 @@ test('unit:settle-clock-bound-named a timed read too slow to bound the offset is
   assert.equal(row.attention, `Containment quarantine from epoch 1 blocks dispatch: worker lease lapsed at ${at(-600_000)}, past the 120s grace window; ${refusal}`);
   assert.doesNotMatch(row.attention!, /clocks disagree/);
 });
+
+test('unit:settle-clock-bound-fast-read the fresh probe after a pane close is judged with the timed read\'s bounds too, so the same cycle still settles on a slow plane', async () => {
+  // The stranded worker's idle pane shell is excused, so the loop closes its pane and re-probes the
+  // item in the same cycle (GY-189). On a plane whose snapshot read takes 12 s, that fresh probe too
+  // must carry the timed read's bound: judged with the snapshot's, its width alone exceeded the 5 s
+  // tolerance and the settlement this close unlocked was refused (GY-795).
+  let local = Date.parse(observedAt) - 6_000, probeCount = 0;
+  const fetched: string[] = [];
+  const fetcher = (async (url: string, init: RequestInit) => {
+    fetched.push(`${init.method} ${url}`);
+    local += 200;
+    return new Response(null, { headers: { date: new Date(local - 100).toUTCString() } });
+  }) as unknown as typeof fetch;
+  const observations: { clockOffset: { min: number; max: number }; clockRoundTripMs?: number; clockSource?: string }[] = [];
+  const containment: DaemonEffects['containment'] = (items, observed) => {
+    probeCount += 1;
+    observations.push({ clockOffset: observed.clockOffset, clockRoundTripMs: observed.clockRoundTripMs, clockSource: observed.clockSource });
+    return assessContainment(items, { hostId: 'coordinator-host', observedAt: observed.now, clockOffset: observed.clockOffset,
+      clockRoundTripMs: observed.clockRoundTripMs, clockSource: observed.clockSource, localNow: new Date(local),
+      probe: () => probeCount === 1 ? paneShellProbe() : { ...paneShellProbe(), processes: [], held: [], paneShell: null } } as any);
+  };
+  const overrides: Partial<DaemonEffects> = {
+    snapshot: async () => { local += 12_000; return { work: [stranded()], now: observedAt }; },
+    controlPlaneClock: () => readControlPlaneClock('https://graphyard.example', { fetcher, clock: () => local }),
+    containment,
+  };
+  const { settled, closed } = await loop(stranded(), overrides, undefined, () => local);
+  assert.deepEqual(fetched, ['HEAD https://graphyard.example/'], 'the light read is one HEAD of the plane, read once before assessing');
+  assert.deepEqual(observations.length, 2, 'the closed pane\'s item is probed again after the close');
+  assert.equal(observations[0].clockSource, 'timed read', 'the initial assessment is judged with the timed read');
+  assert.deepEqual(closed, [pane], 'the idle shell beside the ended scope has its pane closed');
+  const fresh = observations[1];
+  assert.equal(fresh.clockSource, 'timed read', 'the fresh probe after the close is judged with the timed read, not the snapshot read');
+  assert.equal(fresh.clockRoundTripMs, 200);
+  assert.ok(fresh.clockOffset.max - fresh.clockOffset.min <= 200 + 999,
+    `the fresh probe's bound is the timed read's (${JSON.stringify(fresh.clockOffset)}), not the snapshot read's 24 s`);
+  assert.equal(settled.length, 1, 'the settlement the close unlocked is not refused on the snapshot read\'s width');
+  assert.deepEqual(settled[0].refusals, []);
+});

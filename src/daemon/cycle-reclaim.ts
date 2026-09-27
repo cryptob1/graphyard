@@ -7,6 +7,7 @@ import { gigabytes, message, reclaimIntervalMs, reclaimSummarySchema } from './s
 import { readyToRetry } from './sessions.js';
 import { detailChanged } from './decisions.js';
 import { launchAppearanceMs, preserveInterruptedAttempt, record } from './effects.js';
+import type { ContainmentObservation } from './effects.js';
 import type { Cycle } from './cycle.js';
 import type { Work } from '../model.js';
 import type { SessionHandle } from '../model/sessions.js';
@@ -30,7 +31,7 @@ import type { DaemonEffects } from './effects.js';
  * to repeat, so a close a restart interrupted (`started`, then `indeterminate`) is simply retried.
  */
 export async function closeEndedWorkerPanes(state: DaemonState, effects: DaemonEffects, open: Work[], assessments: Record<string, ContainmentAssessment>,
-  observed: { now: string; clockOffset: { min: number; max: number } }, now: () => number, performed: DaemonAction[]) {
+  observed: ContainmentObservation, now: () => number, performed: DaemonAction[]) {
   const closed: Work[] = [];
   for (const item of open) {
     const assessment = assessments[item.id], quarantine = item.containmentQuarantine, recorded = assessment?.verification?.recordedScope;
@@ -213,8 +214,11 @@ export async function reclaimStep(cycle: Cycle) {
   //     recorded as an escalation rather than settled. A live worker's quarantine is never touched.
   const measured = effects.controlPlaneClock ? await effects.controlPlaneClock().catch(() => null) : null;
   const clockBounds = await containmentClock(clockOffset, measured ? () => Promise.resolve(measured) : undefined);
-  const assessments = await effects.containment?.(snapshot.work, { now: snapshot.now, clockOffset: clockBounds.clockOffset, clockRoundTripMs: clockBounds.roundTripMs, clockSource: clockBounds.source }) ?? {};
-  await closeEndedWorkerPanes(state, effects, open, assessments, { now: snapshot.now, clockOffset }, now, performed);
+  // Every containment assessment this cycle is judged with the timed read's bounds, the fresh probe
+  // after a pane close included (GY-795): the snapshot's bound is as wide as its slow read.
+  const observed: ContainmentObservation = { now: snapshot.now, clockOffset: clockBounds.clockOffset, clockRoundTripMs: clockBounds.roundTripMs, clockSource: clockBounds.source };
+  const assessments = await effects.containment?.(snapshot.work, observed) ?? {};
+  await closeEndedWorkerPanes(state, effects, open, assessments, observed, now, performed);
   // 3c. Reclaim the panes its ended launches left agentless (GY-842), and report what the host holds.
   await reclaimLaunchedPanes(cycle);
   for (const item of open.filter(candidate => candidate.containmentQuarantine && containmentPhase(candidate, clock)?.state === 'lapsed')) await isolate('settle', item, item.key, async () => {
