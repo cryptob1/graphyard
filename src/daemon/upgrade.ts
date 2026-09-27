@@ -123,8 +123,8 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
     }
     if (!deps.restartExecutors) return failed('loaded code moved but this loop cannot restart the executors');
     const executors = await deps.restartExecutors(pending.to).catch(error => ({ result: 'refused' as const, reason: message(error), coordinator: { commit: pending.to }, held: [], restarted: [], unsupervised: [], forgotten: [] }));
-    if (executors.result === 'refused') {
-      const reason = `the executors were not restarted: ${executors.reason ?? 'the restart was refused'}; the fleet stands down on the moved checkout on its own and the restart is retried next cycle`;
+    if (executors.result === 'refused' || executors.result === 'incomplete') {
+      const reason = `the executors were not restarted: ${executors.reason ?? 'the restart was refused or incomplete'}; the fleet stands down on the moved checkout on its own and the restart is retried next cycle`;
       return failed(reason);
     }
     // The cursor is written before the loop re-executes itself: the next process must find the
@@ -168,6 +168,8 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
   // 3. How this checkout stands, before anything touches it.
   const checkout = await checkoutState(deps.root, deps.run);
   if (!checkout.commit) return failed(`the coordinator checkout at ${deps.root} could not be read`);
+  if (checkout.detached !== true) return refused(`HEAD holds ${checkout.branch ?? 'a branch'} instead of standing detached; it is upgraded only as a clean detached checkout of ${config.baseBranch}`, checkout.commit);
+  if (checkout.dirty === true) return refused('tracked files differ from the commit it holds; it is upgraded only clean', checkout.commit);
   if (to === checkout.commit) {
     // The checkout already holds the tip: finish what an earlier pass still owes, or align and
     // clear a refusal that no longer describes anything.
@@ -179,8 +181,6 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
     if (cleared) await note(`The checkout is current at ${shortCommit(to)}; the earlier refusal is cleared`, false);
     return { outcome: 'up-to-date', commit: to };
   }
-  if (checkout.detached !== true) return refused(`HEAD holds ${checkout.branch ?? 'a branch'} instead of standing detached; it is upgraded only as a clean detached checkout of ${config.baseBranch}`, checkout.commit);
-  if (checkout.dirty === true) return refused('tracked files differ from the commit it holds; it is upgraded only clean', checkout.commit);
 
   // 4. What the move would change, then the move itself.
   //    A restart still owed for an earlier move stays owed: a docs-only move on top of a src/ one

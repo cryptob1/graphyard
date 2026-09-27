@@ -83,9 +83,10 @@ class FakeGit {
 const verified = (sha: string): DaemonState['deployment'] =>
   deploymentObservationSchema.parse({ source: 'endpoint', sha, at: iso(0), reason: null, deployed: ['GY-1'], pending: [] });
 const restarted = (to: string) => ({ result: 'restarted' as const, reason: null, coordinator: { commit: to }, held: [], restarted: [], unsupervised: [], forgotten: [] });
+const incomplete = (to: string) => ({ result: 'incomplete' as const, reason: 'a restarted unit failed to re-register within 120s', coordinator: { commit: to }, held: [], restarted: [], unsupervised: [], forgotten: [] });
 
 interface UpgradeRecording { executors: (string | null)[]; self: number; persisted: number }
-const recording = (fake: FakeGit, root: string, behaviour: 'restart' | 'refuse' = 'restart'): { deps: () => Parameters<typeof performSelfUpgrade>[2]; calls: UpgradeRecording } => {
+const recording = (fake: FakeGit, root: string, behaviour: 'restart' | 'refuse' | 'incomplete' = 'restart'): { deps: () => Parameters<typeof performSelfUpgrade>[2]; calls: UpgradeRecording } => {
   const calls: UpgradeRecording = { executors: [], self: 0, persisted: 0 };
   return {
     calls,
@@ -94,7 +95,9 @@ const recording = (fake: FakeGit, root: string, behaviour: 'restart' | 'refuse' 
       run: fake.run,
       restartExecutors: async to => {
         calls.executors.push(to);
-        return behaviour === 'restart' ? restarted(to) : { ...restarted(to), result: 'refused' as const, reason: 'Restart refused while an executor on host-a holds a claimed action: exec-1 holds merge for GY-7' };
+        if (behaviour === 'restart') return restarted(to);
+        if (behaviour === 'refuse') return { ...restarted(to), result: 'refused' as const, reason: 'Restart refused while an executor on host-a holds a claimed action: exec-1 holds merge for GY-7' };
+        return incomplete(to);
       },
       restartSelf: async () => { calls.self += 1; },
       persist: async () => { calls.persisted += 1; },
@@ -259,6 +262,53 @@ test('unit:loop-self-upgrade — between cycles the loop checks out the verified
     // and persisted it on the cursor; the checkout then moved (the upgrade this feature performs)
     // and a new process starts from that persisted cursor. It reports the release it loaded, never
     // the one the cursor carried over.
+    // P1: When executors restart returns 'incomplete' (some units failed to re-register), the
+    // alignment should fail and the restarts stay owed, just like 'refused'.
+    const incompleteTip = hex('g');
+    const incompleteFrom = hex('h');
+    const incomplete_state = emptyDaemonState(master);
+    fake.head = incompleteFrom;
+    fake.nextTip = incompleteTip;
+    incomplete_state.deployment = verified(incompleteTip);
+    incomplete_state.release = { commit: incompleteFrom, dirty: false };
+    fake.diffPaths = ['src/daemon/run.ts'];
+    const incompleteFleet = recording(fake, checkout, 'incomplete');
+    const incompleteResult = await performSelfUpgrade(master, incomplete_state, incompleteFleet.deps());
+    assert.equal(incompleteResult.outcome, 'failed');
+    assert.match(incompleteResult.outcome === 'failed' ? incompleteResult.reason : '', /the executors were not restarted/);
+    assert.equal(fake.checkoutTo, incompleteTip, 'the checkout moved before the incomplete restart');
+    assert.deepEqual(incomplete_state.upgrade.pending, { from: incompleteFrom, to: incompleteTip, code: true }, 'the restarts stay owed on the cursor');
+    assert.equal(incomplete_state.upgrade.alignedRelease, null, 'and the release is not marked aligned');
+
+    // P2: When the checkout is already at the tip but is dirty or non-detached, it should be
+    // refused before marking alignment (not after).
+    const atTipDirty = emptyDaemonState(master);
+    const atTipTip = hex('i');
+    fake.head = atTipTip;
+    fake.originTip = atTipTip;
+    fake.dirty = ' M src/daemon/run.ts\n';
+    atTipDirty.deployment = verified(atTipTip);
+    const refusedAtTipDirty = recording(fake, checkout);
+    const atTipDirtyResult = await performSelfUpgrade(master, atTipDirty, refusedAtTipDirty.deps());
+    assert.equal(atTipDirtyResult.outcome, 'refused');
+    assert.match(atTipDirtyResult.outcome === 'refused' ? atTipDirtyResult.reason : '', /tracked files differ from the commit it holds/);
+    assert.deepEqual(refusedAtTipDirty.calls.executors, [], 'no executors were restarted');
+    assert.equal(atTipDirty.upgrade.alignedRelease, null, 'and the release was not marked aligned');
+
+    // Same validation for non-detached checkout at the tip.
+    fake.dirty = '';
+    fake.branch = 'refs/heads/main';
+    fake.head = atTipTip;
+    const atTipNonDetached = emptyDaemonState(master);
+    atTipNonDetached.deployment = verified(atTipTip);
+    const refusedAtTipNonDetached = recording(fake, checkout);
+    const atTipNonDetachedResult = await performSelfUpgrade(master, atTipNonDetached, refusedAtTipNonDetached.deps());
+    assert.equal(atTipNonDetachedResult.outcome, 'refused');
+    assert.match(atTipNonDetachedResult.outcome === 'refused' ? atTipNonDetachedResult.reason : '', /HEAD holds refs\/heads\/main instead of standing detached/);
+    assert.deepEqual(refusedAtTipNonDetached.calls.executors, [], 'no executors were restarted');
+    fake.branch = null;
+    fake.dirty = '';
+
     const repo = await repository();
     try {
       const previous = git(repo, 'rev-parse', 'HEAD');
