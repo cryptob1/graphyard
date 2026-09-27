@@ -1,6 +1,8 @@
 // Concern: an attempt that blocks again after its blocker was cleared (GY-867) — ended and handed on.
+// GY-885: an attempt that runs past its role's maximum time box — ended and retried fresh with backoff.
 import type { Work } from '../model.js';
 import type { DaemonState } from './state.js';
+import { roleSessionMaximumMs } from '../model/sessions.js';
 
 /**
  * GY-867. Unblocking an attempt only re-prompts the same session (cycle-sessions 1e). When what
@@ -46,4 +48,49 @@ export function preferOtherRuntime<T extends { profile: { kind?: string | null; 
   if (!avoid) return entries;
   const runtime = (entry: T) => entry.profile.kind ?? entry.profile.mode ?? null;
   return [...entries.filter(entry => runtime(entry) !== avoid), ...entries.filter(entry => runtime(entry) === avoid)];
+}
+
+/**
+ * GY-885: An attempt that has run past its role's time box is ended and retried with backoff.
+ * Returns the number of failed attempts (ended without submitting) in sequence before this one,
+ * capped at maxFailedAttempts.
+ */
+export function failedAttemptCount(item: Pick<Work, 'capacity' | 'submission'>): number {
+  if (!item.capacity?.exhaustions) return 0;
+  let count = 0;
+  for (const exhaustion of [...item.capacity.exhaustions].reverse()) {
+    if (exhaustion.role !== 'worker') continue;
+    if (exhaustion.cause !== 'interrupted') break;
+    if (!exhaustion.reason.startsWith('overlong attempt')) break;
+    count++;
+    if (count >= maxFailedAttempts) return maxFailedAttempts;
+  }
+  return count;
+}
+
+/** The backoff durations for retries: 5 min, 15 min, 45 min. Cap at 3 attempts. */
+export const retryBackoffMs = [5 * 60_000, 15 * 60_000, 45 * 60_000];
+
+/** The maximum number of failed attempts before holding the item. */
+export const maxFailedAttempts = 3;
+
+/** Why an attempt is ended for running past its role's time box. */
+export function overlongReason(item: Pick<Work, 'key'>, epoch: number, ageMs: number, maximumMs: number, failedCount: number) {
+  const hours = (ms: number) => Math.floor(ms / 3_600_000);
+  const minutes = (ms: number) => Math.floor((ms % 3_600_000) / 60_000);
+  const elapsed = `${hours(ageMs)}h${minutes(ageMs)}m`;
+  const limit = `${hours(maximumMs)}h${minutes(maximumMs)}m`;
+  const cause = failedCount > 0 ? `; retry ${failedCount + 1} of ${maxFailedAttempts}` : '';
+  return `overlong attempt on epoch ${epoch}: ran ${elapsed}, past the ${limit} maximum for its role${cause}`;
+}
+
+/** The key under which a session's overlong detection is tracked. */
+export const overlongKey = (item: Pick<Work, 'id'>, epoch: number) => `session:overlong:${item.id}:${epoch}`;
+
+/** The marker an overlong attempt's end carries in its capacity record, read back by dispatch. */
+export const overlongMarker = 'overlong attempt';
+
+/** Whether dispatch should hold the item because it has failed 3 times in a row. */
+export function shouldHoldForMaxRetries(item: Pick<Work, 'capacity' | 'submission'>): boolean {
+  return failedAttemptCount(item) >= maxFailedAttempts;
 }

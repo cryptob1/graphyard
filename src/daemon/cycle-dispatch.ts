@@ -14,7 +14,7 @@ import { clearProfileFailure, profileHealth, recordProfileFailure } from './sess
 import { detailChanged, routineDecision } from './decisions.js';
 import { capacityKey, record, stoppedStates } from './effects.js';
 import type { Cycle } from './cycle.js';
-import { preferOtherRuntime, runtimeToAvoid } from './reblocked-attempts.js';
+import { failedAttemptCount, maxFailedAttempts, preferOtherRuntime, retryBackoffMs, runtimeToAvoid, shouldHoldForMaxRetries } from './reblocked-attempts.js';
 import { researchHold, researchRunner, researchSettings, researchStep } from '../research.js';
 
 /** Step 4: dispatch claimable work under capacity, and report base refreshes of in-flight candidates. */
@@ -28,12 +28,50 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
   const offered = open.filter(item => {
     try { assertDispatchable(item, snapshot.work, snapshot.now); return true; } catch { return false; }
   }).sort(dispatchOrder);
+
+  // GY-885: Hold items that have exceeded max failed attempts, and filter out those in retry backoff.
+  const held885 = new Set<string>();
+  for (const item of offered) {
+    const failedCount = failedAttemptCount(item);
+    if (failedCount >= maxFailedAttempts) {
+      // Item has failed maxFailedAttempts times: hold it with a reason
+      const exhaustions = (item.capacity?.exhaustions ?? [])
+        .filter(e => e.role === 'worker' && e.cause === 'interrupted' && e.reason.startsWith('overlong attempt'))
+        .slice(-maxFailedAttempts);
+      const causes = exhaustions.map((e, i) => `Attempt ${i + 1}: ${e.reason}`).join('; ');
+      const key = `hold:attempt-retries-capped:${item.id}`;
+      if (!state.actions[key]) {
+        performed.push(await record(state, key, {
+          kind: 'escalation', work: item.key, principal: null, state: 'done',
+          detail: `${item.key} is held: ${maxFailedAttempts} consecutive attempts failed without submitting. ${causes}. The item will not be retried; operator decision required.`,
+          attempts: 1, cycle: state.cycle
+        }, now(), effects.persist));
+      }
+      held885.add(item.id);
+    } else if (failedCount > 0) {
+      // Check if the last failure was recent enough to require backoff.
+      const lastFailure = (item.capacity?.exhaustions ?? [])
+        .filter(e => e.role === 'worker' && e.cause === 'interrupted' && e.reason.startsWith('overlong attempt'))
+        .pop();
+      if (lastFailure) {
+        const failureTime = Date.parse(lastFailure.at);
+        if (Number.isFinite(failureTime)) {
+          const backoffDurationMs = failedCount <= retryBackoffMs.length ? retryBackoffMs[failedCount - 1] : retryBackoffMs[retryBackoffMs.length - 1];
+          const retryAt = failureTime + backoffDurationMs;
+          if (clock < retryAt) {
+            held885.add(item.id);
+          }
+        }
+      }
+    }
+  }
+
   // 4-research. Research before build (GY-259): an item about to be offered whose requirements
   //     were never researched gets one cheap Pi session first, and waits only while that run is
   //     within its time limit. A run that fails or times out is recorded and the item is built
   //     without a brief; research never holds an item past its bound. It runs only once
   //     `run.research` names the research account: an unconfigured loop dispatches as before.
-  const held = new Set(offered.filter(item => researchHold(item, clock)).map(item => item.id));
+  const held = new Set([...held885, ...new Set(offered.filter(item => researchHold(item, clock)).map(item => item.id))]);
   if (effects.recordResearch && effects.research && config.run?.research) await isolate('dispatch', null, 'research', async () => {
     const settings = researchSettings(config.run);
     const step = await researchStep({ items: offered.filter(item => !held.has(item.id)), clock, settings, config, cwd: effects.research!.cwd,

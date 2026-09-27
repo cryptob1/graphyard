@@ -5,12 +5,13 @@ import type { DaemonAction } from './state.js';
 import { detectExhaustion, type CapacityRole } from '../model/capacity.js';
 import { classifyRuntimePrompt, continueAfterDecline, type EscalationSession, escalationProfile, type HerdrAgent, ownLoginAccounts, profileAccount, type RuntimePrompt } from '../master.js';
 import { standingEscalations } from '../model/escalation.js';
+import { roleSessionMaximumMs } from '../model/sessions.js';
 import { capacityRecheckMs } from '../auto-dispatch.js';
 import { message, orphanObservationSchema } from './state.js';
 import { closeKey } from './reconcile.js';
 import { boundDetail } from './decisions.js';
 import { clearProfileFailure, orphanedSupervisors, readyToRetry } from './sessions.js';
-import { clearedBefore, clearedBlockerKey, reblockedKey, reblockedReason } from './reblocked-attempts.js';
+import { clearedBefore, clearedBlockerKey, failedAttemptCount, maxFailedAttempts, overlongKey, overlongReason, reblockedKey, reblockedMarker, reblockedReason, retryBackoffMs, shouldHoldForMaxRetries } from './reblocked-attempts.js';
 import { paneAlreadyGone } from '../request-settlement.js';
 import { blockedPromptAnswers, blockedPromptFailMs, blockedPromptSettleMs, failoverKey, handlerSettleMs, launchAppearanceMs, launcherRetry, promptDigest, type LaunchedSession, preserveInterruptedAttempt, record, stoppedStates } from './effects.js';
 import type { Cycle } from './cycle.js';
@@ -466,7 +467,7 @@ function scopeChange(item: Work) {
  * handed to a new one that keeps its branch.
  */
 async function resumeStep(cycle: Cycle, failedOver: Set<string>) {
-  const { config, state, effects, now, performed, isolate, agents, heldBy } = cycle;
+  const { config, state, effects, now, clock, performed, isolate, agents, heldBy } = cycle;
   const live = new Set<string>();
   for (const profile of config.workers.filter(worker => worker.mode === 'launch')) await isolate('session', heldBy(profile), profile.name, async () => {
     const item = heldBy(profile);
@@ -501,6 +502,34 @@ async function resumeStep(cycle: Cycle, failedOver: Set<string>) {
       }
       return;
     }
+
+    // GY-885: an attempt that runs past its role's time box is ended and retried fresh with backoff.
+    const sessionHandle = item.sessions?.find(h => h.kind === 'implementation' && h.state === 'running' && h.epoch === epoch);
+    if (sessionHandle) {
+      const startedAt = Date.parse(sessionHandle.startedAt);
+      if (Number.isFinite(startedAt)) {
+        const ageMs = Math.max(0, clock - startedAt);
+        const maximumMs = roleSessionMaximumMs['implementation'];
+        if (ageMs > maximumMs) {
+          const key = overlongKey(item, epoch), previous = state.actions[key];
+          if (!previous || previous.state === 'failed' || readyToRetry(previous, state.cycle)) {
+            const failedCount = failedAttemptCount(item);
+            const reason = overlongReason(item, epoch, ageMs, maximumMs, failedCount);
+            const attempts = (previous?.attempts ?? 0) + 1;
+            await entry(key, 'started', `${profile.agentName} on ${item.key} ${reason}; ending the attempt`, attempts);
+            try {
+              const next = await endWorkerAttempt(cycle, item, profile, epoch, pane, reason, `ended without submitting: its session ${profile.agentName} was ${reason}`);
+              performed.push(await entry(key, 'done', `${profile.agentName} on ${item.key} ${reason}; ${next}`, attempts));
+              await drop(keys.blocker, keys.idle);
+            } catch (error) {
+              performed.push(await entry(key, 'failed', `${profile.agentName} on ${item.key} ${reason}, but its attempt could not be ended: ${message(error)}`, attempts));
+            }
+            return;
+          }
+        }
+      }
+    }
+
     if (item.blocker || request) { await drop(keys.idle); return; }
 
     // 1e. Nothing is open any more: what the attempt waited on was resolved.
