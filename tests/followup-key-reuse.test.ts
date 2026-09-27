@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { loadMasterConfig, setupMaster } from '../src/master.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { followUpCreateKey, followUpItem } from '../src/review-threads.js';
-import { bindReviewer, existingFollowUpItem, followUpBodyKey, followUpExhaustedRetryMs, launchReview, reconcileReviews, saveReviewerProfile, stoppedFollowUpAttention } from '../src/reviewer.js';
+import { bindReviewer, existingFollowUpItem, followUpBodyKey, followUpExhaustedRetryMs, launchReview, readReviewLedger, reconcileReviews, resumeStoppedFollowUps, saveReviewerProfile, stoppedFollowUpAttention } from '../src/reviewer.js';
 import { clientErrorStatus, nextClientErrorRun, repeatedClientErrorLimit, retryStopped } from '../src/retry-stop.js';
 import type { Observation, Work } from '../src/model.js';
 
@@ -174,4 +174,93 @@ test('unit:repeated-4xx-retry-stops — only an unchanged 4xx counts toward the 
   assert.equal(nextClientErrorRun(run, 'refused (503): unavailable'), undefined);
   assert.equal(nextClientErrorRun(run, undefined), undefined);
   assert.equal(retryStopped(nextClientErrorRun(run, 'refused (403): forbidden')), true);
+});
+
+test('unit:followup-key-reuse-resolved — the linked resolution appends the changed body\'s findings to the item its key made (GY-603)', async () => {
+  const { root, cleanup } = await boundMaster();
+  try {
+    await launch(root);
+    const config = await loadMasterConfig(root), board = [work(), earlierFollowUp()];
+    // The control plane holds a receipt for the approval's key with a body this attempt no longer sends.
+    const sent: string[] = [];
+    const server = async (_item: unknown, key: string) => { sent.push(key); throw new Error(keyReuse); };
+    const appended: { item: string; findings: unknown[]; reason: string; key: string }[] = [];
+    const appendServer = async (item: string, findings: unknown[], reason: string, key: string) => { appended.push({ item, findings, reason, key }); return { key: item, added: findings.length }; };
+    const first = await reconcileReviews(root, config, { run: herdrRun, observe: verdict, work: board, threadsRun: github(), createFollowUpItem: server, appendFollowUps: appendServer });
+    const filing = first.reviews[0].followUps!;
+    assert.equal(filing.item, 'GY-300', 'still linked to the item its key already made');
+    assert.equal(filing.keyReuse, 'linked');
+    assert.equal(filing.failure, undefined);
+    // The findings the earlier body does not hold are appended, under a key of their own.
+    assert.equal(appended.length, 1);
+    assert.equal(appended[0].item, 'GY-300');
+    assert.deepEqual(appended[0].findings, [{ path: 'src/c.ts', text: 'src/c.ts:12 — the retry is unbounded' }]);
+    assert.match(appended[0].reason, /Follow-ups named by approval 77 of GY-64/);
+    assert.equal(appended[0].key, `${followUpCreateKey('owner/project', 64, 77)}:linked`);
+    assert.deepEqual(sent, [followUpCreateKey('owner/project', 64, 77)], 'one create, under the approval key; the refusal is not retried');
+    // Once filed, later passes repeat neither the create nor the append.
+    await reconcileReviews(root, config, { run: herdrRun, observe: verdict, work: board, threadsRun: github(), createFollowUpItem: server, appendFollowUps: appendServer, now: () => new Date(Date.now() + 2 * followUpExhaustedRetryMs) });
+    assert.equal(sent.length, 1);
+    assert.equal(appended.length, 1);
+  } finally { await cleanup(); }
+});
+
+test('unit:followup-key-reuse-resolved — an append refused because the linked item closed files the changed body under its own key (GY-603)', async () => {
+  const { root, cleanup } = await boundMaster();
+  try {
+    await launch(root);
+    const config = await loadMasterConfig(root), approvalKey = followUpCreateKey('owner/project', 64, 77);
+    const sent: { key: string; item: any }[] = [];
+    const server = async (item: any, key: string) => { sent.push({ key, item }); if (key === approvalKey) throw new Error(keyReuse); return { key: 'GY-301' }; };
+    let appends = 0;
+    const appendServer = async () => { appends++; throw Object.assign(new Error('Graphyard refused the follow-ups for GY-300 (409): GY-300 is not an open follow-up item'), { notOpen: true }); };
+    const filing = (await reconcileReviews(root, config, { run: herdrRun, observe: verdict, work: [work(), earlierFollowUp()], threadsRun: github(), createFollowUpItem: server, appendFollowUps: appendServer })).reviews[0].followUps!;
+    assert.equal(appends, 1);
+    assert.equal(filing.item, 'GY-301', 'the body is filed as its own item, as a reuse with nothing linked is');
+    assert.equal(filing.keyReuse, 'rekeyed');
+    assert.equal(filing.failure, undefined);
+    assert.equal(sent.length, 2);
+    assert.equal(sent[1].key, followUpBodyKey(approvalKey, sent[1].item));
+  } finally { await cleanup(); }
+});
+
+test('unit:repeated-4xx-retry-stops — retry-resume clears the stop; a persisting error re-stops at once, a fixed one files (GY-603)', async () => {
+  const { root, cleanup } = await boundMaster();
+  try {
+    await launch(root);
+    const config = await loadMasterConfig(root);
+    const refusal = 'Graphyard refused the follow-up item (422): plannedFiles entry is invalid';
+    let sent = 0, fixed = false;
+    const server = async () => { sent++; if (!fixed) throw new Error(refusal); return { key: 'GY-302' }; };
+    let clock = Date.parse('2026-09-26T11:00:00Z');
+    const now = () => new Date(clock);
+    const pass = () => reconcileReviews(root, config, { run: herdrRun, observe: verdict, work: [work()], threadsRun: github(), createFollowUpItem: server, now });
+    const filing = () => readReviewLedger(root).then(ledger => ledger.reviews[0].followUps!);
+    for (let attempt = 1; attempt <= repeatedClientErrorLimit; attempt++) { await pass(); clock += followUpExhaustedRetryMs + 60_000; }
+    assert.ok(!!(await filing()).stoppedAt);
+    // The attention names the command that resumes the filing.
+    assert.match(stoppedFollowUpAttention((await readReviewLedger(root)).reviews)[0].next, /graphyard master retry-resume GY-64/);
+    // The resume clears the stop and keeps the error run.
+    assert.deepEqual(await resumeStoppedFollowUps(root, 'owner/project', 'GY-64'), { key: 'GY-64', resumed: [77] });
+    const resumed = await filing();
+    assert.equal(resumed.stoppedAt, undefined);
+    assert.equal(resumed.clientError!.count, repeatedClientErrorLimit);
+    await assert.rejects(resumeStoppedFollowUps(root, 'owner/project', 'GY-64'), /no stopped follow-up filing to resume/);
+    // The next pass retries once; the error persisting, it re-stops at once instead of spending the run again.
+    await pass();
+    clock += followUpExhaustedRetryMs + 60_000;
+    assert.equal(sent, repeatedClientErrorLimit + 1);
+    const restopped = await filing();
+    assert.equal(restopped.clientError!.count, repeatedClientErrorLimit + 1);
+    assert.ok(!!restopped.stoppedAt);
+    // Fixed, resumed, and the next pass files: the run is over.
+    fixed = true;
+    assert.deepEqual(await resumeStoppedFollowUps(root, 'owner/project', 'GY-64'), { key: 'GY-64', resumed: [77] });
+    const filed = (await pass()).reviews[0].followUps!;
+    assert.equal(sent, repeatedClientErrorLimit + 2);
+    assert.equal(filed.item, 'GY-302');
+    assert.equal(filed.failure, undefined);
+    assert.equal(filed.stoppedAt, undefined);
+    assert.equal(filed.clientError, undefined);
+  } finally { await cleanup(); }
 });

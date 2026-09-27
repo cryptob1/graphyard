@@ -102,7 +102,7 @@ export const reviewRecordSchema = z.object({
     releasedAt: z.string().min(1).max(40).optional(),
     /** How a create refused as a key reuse was resolved (GY-598): linked to the approval's existing item, or filed under its body key. */
     keyReuse: z.enum(['linked', 'rekeyed']).optional(),
-    /** The unchanged 4xx error the filing's consecutive attempts failed with, and when that run stopped its retries (retry-stop.ts). */
+    /** The unchanged 4xx error the filing's consecutive attempts failed with, and when that run stopped its retries (retry-stop.ts); `graphyard master retry-resume` clears a stop once the cause is fixed (GY-603). */
     clientError: z.object({ error: z.string().min(1).max(500), count: z.number().int().min(1) }).strict().optional(), stoppedAt: z.string().min(1).max(40).optional() }).optional(),
   /** The launch prompt carried the criteria-only rule (GY-166): an approval must classify the listed threads, so one naming neither line vouches for none. */
   criteriaOnly: z.literal(true).optional(),
@@ -1193,15 +1193,27 @@ export function existingFollowUpItem(work: readonly Pick<Work, 'key' | 'title' |
 /**
  * A follow-up create whose key was used before with a different body (GY-598) — the body moved on
  * since the first attempt — is refused on every retry, so it is resolved rather than retried: the
- * item that key made is this approval's follow-up, and is linked; with none, the body is filed under
- * a key of its own, which a retry of the same body repeats.
+ * item that key made is this approval's follow-up, and is linked, with the changed body's own
+ * findings appended to it so the resolution loses none (GY-402's append, GY-603); with nothing to
+ * append to, the body is filed under a key of its own, which a retry of the same body repeats.
  */
-async function createResolvingKeyReuse(payload: FollowUpItem, key: string, create: CreateFollowUpItem, existing: () => string | undefined, resolved: (how: 'linked' | 'rekeyed') => void) {
+async function createResolvingKeyReuse(payload: FollowUpItem, key: string, create: CreateFollowUpItem, existing: () => string | undefined, resolved: (how: 'linked' | 'rekeyed') => void, append?: AppendFollowUpFindings) {
   try { return await create(payload, key); }
   catch (error) {
     if (!(error instanceof Error ? error.message : String(error)).includes(keyReuseRefusal)) throw error;
-    const linked = existing();
-    if (linked) { resolved('linked'); return { key: linked }; }
+    const linked = existing(), findings = payload.origin?.reviewFollowUps.findings;
+    if (linked && (!append || !findings?.length)) { resolved('linked'); return { key: linked }; }
+    if (linked && append && findings) {
+      // The item holds the body the key was first sent; the findings this body adds are appended
+      // under a key of their own, so a retried resolution repeats rather than duplicates them.
+      try { await append(linked, findings, payload.reason, `${key.slice(0, 193)}:linked`); resolved('linked'); return { key: linked }; }
+      catch (appendError) {
+        // The item is no longer open since it was found: the changed body files its own item, as a
+        // reuse with nothing linked does. Any other failure fails the filing, and a later pass
+        // repeats this append under the same key.
+        if (!(appendError as { notOpen?: boolean })?.notOpen) throw appendError;
+      }
+    }
     try { const made = await create(payload, followUpBodyKey(key, payload)); resolved('rekeyed'); return made; }
     catch (retry) { throw new Error(`under its body key after its approval key was refused as reused: ${retry instanceof Error ? retry.message : String(retry)}`); }
   }
@@ -1228,7 +1240,7 @@ async function fileApprovedFollowUp(record: ReviewRecord, verdict: NonNullable<R
   if (previous?.stoppedAt) return;
   if (previous && previous.attempts >= threadResolutionAttempts && (previous.item || now.getTime() - Date.parse(previous.at) < followUpExhaustedRetryMs)) return;
   let keyReuse = previous?.keyReuse;
-  const resolving: CreateFollowUpItem = (payload, key) => createResolvingKeyReuse(payload, key, create, () => existingFollowUpItem(work, item, verdict.reviewId), resolved => { keyReuse = resolved; });
+  const resolving: CreateFollowUpItem = (payload, key) => createResolvingKeyReuse(payload, key, create, () => existingFollowUpItem(work, item, verdict.reviewId), resolved => { keyReuse = resolved; }, append);
   // One follow-up item per parent (GY-402): the parent's open one, which this approval appends to —
   // unless it is this approval's own earlier item, which a retried create links instead (GY-598).
   const existing = existingFollowUpItem(work, item, verdict.reviewId) ? undefined
@@ -1359,6 +1371,31 @@ async function resolveApprovedThreads(records: ReviewRecord[], reviewer: string,
 export function stoppedFollowUpAttention(records: ReviewRecord[]) {
   return records.filter(record => !!record.followUps?.stoppedAt && !record.followUps.releasedAt && clientErrorStatus(record.followUps.clientError?.error) !== null)
     .map(record => retryStopAttention({ step: `follow-up filing for approval ${record.followUps!.reviewId} (PR #${record.pr})`, item: record.key, error: record.followUps!.clientError!.error, count: record.followUps!.clientError!.count, at: record.followUps!.stoppedAt! }));
+}
+
+/**
+ * Clears the stop of a follow-up filing the loop stopped retrying (GY-603): `graphyard master
+ * retry-resume GY-N`, once the cause the attention item names is fixed. Only the stop is cleared:
+ * the error run is kept, so the filing's next attempt either files — the cause was fixed — or,
+ * still refused with the same 4xx, re-stops at once instead of spending the run again. Each stop
+ * is cleared under its approval's filing lock; one the loop holds this pass is left held, and the
+ * command names it busy rather than wait. Throws when the item has no stopped filing to resume.
+ */
+export async function resumeStoppedFollowUps(root: string, repository: string, key: string) {
+  const stopped = (await readReviewLedger(root)).reviews.filter(record => record.key === key && !!record.followUps?.stoppedAt);
+  if (!stopped.length) throw new Error(`${key} has no stopped follow-up filing to resume; master status lists the stopped ones under attention`);
+  const resumed: number[] = [], busy: number[] = [];
+  for (const record of stopped) {
+    const release = await tryFollowUpLock(root, followUpCreateKey(repository, record.pr, record.followUps!.reviewId));
+    if (!release) { busy.push(record.followUps!.reviewId); continue; }
+    try {
+      await updateReviewLedger(root, ledger => {
+        const entry = ledger.reviews.find(candidate => candidate.id === record.id);
+        if (entry?.followUps?.stoppedAt) { delete entry.followUps.stoppedAt; resumed.push(record.followUps!.reviewId); }
+      });
+    } finally { await release(); }
+  }
+  return { key, resumed, ...(busy.length ? { busy, next: `the loop is filing approval(s) ${busy.join(', ')} this pass; the next pass reads the resumed record` } : {}) };
 }
 
 export function summarizeReviews(records: ReviewRecord[]) {

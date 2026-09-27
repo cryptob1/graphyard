@@ -55,7 +55,7 @@ With `run.research` set (`model`, `timeoutMinutes` 15, `tokenBudget`), a feature
 
 ## Machine-filed backlog
 
-One follow-up item per parent; approvals append their findings. With `run.research`, Pi triages machine-filed items (release, close, merge; closure needs approval), `triageConcurrency` (default 2) at once. Untriaged past 24h raises attention; status counts `machineUntriaged`/`operatorBacklog`.
+One follow-up item per parent; approvals append their findings. A filing that keeps failing with one unchanged 4xx error stops after 10 consecutive attempts (`repeatedClientErrorLimit`) and raises one attention item naming the step, the error and the item; the loop does not retry it on its own again. Fix what the error names, then `master retry-resume GY-N` clears the stop: the next attempt files, and an error persisting unchanged re-stops at once. With `run.research`, Pi triages machine-filed items (release, close, merge; closure needs approval), `triageConcurrency` (default 2) at once. Untriaged past 24h raises attention; status counts `machineUntriaged`/`operatorBacklog`.
 
 ## Automatic dispatch at submit
 
