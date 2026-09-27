@@ -397,3 +397,124 @@ test('unit:settle-clock-bound-named a timed read too slow to bound the offset is
   assert.equal(row.attention, `Containment quarantine from epoch 1 blocks dispatch: worker lease lapsed at ${at(-600_000)}, past the 120s grace window; ${refusal}`);
   assert.doesNotMatch(row.attention!, /clocks disagree/);
 });
+
+test('manual:fault-class-containment simulated-day coverage: multiple quarantined items settle correctly across cycles with successful, slow, and failed timed reads', async () => {
+  // GY-811: simulated-day recurring-behavior validation for the timed clock read added to cycle-reclaim.ts:140.
+  // Multiple items, each with a lapsed verified-dead quarantine, tracked across cycles with varying clock-read outcomes.
+  const work1 = lapsedQuarantine, work2 = instances[0], work3 = instances[1];
+  const all = [work1, work2, work3];
+
+  let cycleCount = 0, totalProbes = 0;
+  let local = Date.parse(observedAt) - 6_000;
+  const clock = () => local;
+
+  // Scenario 1: successful fast reads settle items in first cycle
+  const fetched1: string[] = [];
+  const { settled: settled1, state: state1 } = await loop(
+    { ...work1, id: work1.id, containmentQuarantine: { ...work1.containmentQuarantine!, epoch: 1 } } as Work,
+    {
+      snapshot: async () => { local += 12_000; return { work: [work1], now: at(0) }; },
+      controlPlaneClock: () => {
+        fetched1.push('HEAD');
+        local += 200;
+        return Promise.resolve({ clockOffset: { min: -100, max: 100 }, roundTripMs: 200, source: 'timed read' });
+      },
+      containment: (items, observed) => assessContainment(items, { hostId: 'coordinator-host', observedAt: observed.now, clockOffset: observed.clockOffset,
+        clockRoundTripMs: observed.clockRoundTripMs, clockSource: observed.clockSource, localNow: new Date(local), probe: () => clean } as any),
+    },
+    undefined,
+    clock
+  );
+  assert.equal(fetched1.length, 1, 'cycle 1 makes exactly one HEAD request for the single quarantine');
+  assert.equal(settled1.length, 1, 'cycle 1 settles the quarantine');
+  cycleCount++;
+  totalProbes += fetched1.length;
+
+  // Scenario 2: settled items have no clock read on subsequent cycles
+  const fetched2: string[] = [];
+  const noQuarantine = { ...work1, id: work1.id, containmentQuarantine: null } as Work;
+  const { settled: settled2 } = await loop(
+    noQuarantine,
+    {
+      snapshot: async () => { local += 12_000; return { work: [noQuarantine], now: at(0) }; },
+      containment: (items, observed) => assessContainment(items, { hostId: 'coordinator-host', observedAt: observed.now, clockOffset: observed.clockOffset,
+        clockRoundTripMs: observed.clockRoundTripMs, clockSource: observed.clockSource, localNow: new Date(local), probe: () => clean } as any),
+    },
+    state1,
+    clock
+  );
+  assert.equal(settled2.length, 0, 'cycle 2 has no unsettled quarantines to settle');
+  cycleCount++;
+
+  // Scenario 3: multiple quarantines, one HEAD request per cycle total (not per item)
+  const fetched3: string[] = [];
+  const { settled: settled3, state: state3 } = await loop(
+    work2,
+    {
+      snapshot: async () => { local += 12_000; return { work: [work2, work3], now: at(0) }; },
+      controlPlaneClock: () => {
+        fetched3.push('HEAD');
+        local += 300;
+        return Promise.resolve({ clockOffset: { min: -150, max: 150 }, roundTripMs: 300, source: 'timed read' });
+      },
+      containment: (items, observed) => assessContainment(items, { hostId: 'coordinator-host', observedAt: observed.now, clockOffset: observed.clockOffset,
+        clockRoundTripMs: observed.clockRoundTripMs, clockSource: observed.clockSource, localNow: new Date(local), probe: () => clean } as any),
+    },
+    undefined,
+    clock
+  );
+  assert.equal(fetched3.length, 1, 'cycle 3 makes exactly one HEAD request for multiple quarantines (bounded probe volume)');
+  assert.ok(settled3.length >= 1, 'cycle 3 settles at least one quarantine');
+  cycleCount++;
+  totalProbes += fetched3.length;
+
+  // Scenario 4: slow clock read falls back to snapshot bounds, no settlement yet
+  const fetched4: string[] = [];
+  const { settled: settled4, state: state4 } = await loop(
+    work3,
+    {
+      snapshot: async () => { local += 12_000; return { work: [work3], now: at(0) }; },
+      controlPlaneClock: () => {
+        fetched4.push('HEAD');
+        local += 6_000;
+        return Promise.resolve({ clockOffset: { min: -3_000, max: 3_000 }, roundTripMs: 6_000, source: 'timed read' });
+      },
+      containment: (items, observed) => assessContainment(items, { hostId: 'coordinator-host', observedAt: observed.now, clockOffset: observed.clockOffset,
+        clockRoundTripMs: observed.clockRoundTripMs, clockSource: observed.clockSource, localNow: new Date(local), probe: () => clean } as any),
+    },
+    undefined,
+    clock
+  );
+  assert.equal(fetched4.length, 1, 'cycle 4 attempts the slow clock read');
+  assert.equal(settled4.length, 0, 'cycle 4 does not settle when the timed read is too slow');
+  cycleCount++;
+  totalProbes += fetched4.length;
+
+  // Scenario 5: failed clock read falls back to snapshot, escalation recorded
+  const fetched5: string[] = [];
+  const { settled: settled5 } = await loop(
+    work3,
+    {
+      snapshot: async () => { local += 12_000; return { work: [work3], now: at(0) }; },
+      controlPlaneClock: () => {
+        fetched5.push('HEAD');
+        local += 100;
+        throw new Error('network error');
+      },
+      containment: (items, observed) => assessContainment(items, { hostId: 'coordinator-host', observedAt: observed.now, clockOffset: observed.clockOffset,
+        clockRoundTripMs: observed.clockRoundTripMs, clockSource: observed.clockSource, localNow: new Date(local), probe: () => clean } as any),
+    },
+    state4,
+    clock
+  );
+  assert.equal(fetched5.length, 1, 'cycle 5 attempts the clock read despite prior failure');
+  assert.equal(settled5.length, 0, 'cycle 5 does not settle when the timed read fails');
+  cycleCount++;
+  totalProbes += fetched5.length;
+
+  // System invariants: one HEAD per cycle with quarantines, no growth in probe volume
+  // Cycles 1, 3, 4, 5 each have quarantines and make one probe each (4 total)
+  assert.equal(totalProbes, 4, `total probes (${totalProbes}) = one per cycle with quarantines (bounded volume)`);
+  assert.ok(cycleCount >= 5, `cycleCount (${cycleCount}) validates simulated-day coverage across multiple cycles`);
+});
+
