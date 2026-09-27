@@ -169,10 +169,6 @@ test('unit:unobserved-approval-carried-on-republish — a republication reads th
   await onlyJob(mine);
   await processJob(engine, adapter(work => observation(work, { sha: H, baseSha: MAIN1 }, { baseTip: MAIN1, reviews: [observedReview(X0, H)] })));
   mine = await reload(mine);
-  if (!mine.queue?.speculation || mine.queue.speculation.tip !== A) {
-    console.error('DEBUG spec', JSON.stringify(mine.queue?.speculation));
-    console.error('DEBUG candidate', JSON.stringify(mine.candidate));
-  }
   assert.equal(mine.queue!.speculation!.tip, A, 'tip A was published behind the predecessor');
   assert.equal(mine.queue!.speculation!.carry!.approval.carried, false, 'the baseline excluded the approval, so tip A carries none');
   assert.match(mine.queue!.speculation!.carry!.approval.reason, /no approval was bound to the replaced head/);
@@ -384,4 +380,24 @@ test('unit:approval-carry-recorded — master status and the item history record
   assert.match(restoredRow.binding!.approval.reason, new RegExp(`\\(review ${X1}\\)`));
   assert.match(restoredRow.binding!.approval.reason, new RegExp(`restored and carried to tip ${B.slice(0, 12)}`));
   assert.equal(reviewDismissal(observed.observation!.reviews[0]!)?.byApp, true);
+});
+
+test('a failed pre-push review read or App login lookup is recorded rather than silently dropping the carry or the restore (GY-606)', async () => {
+  const login = github.controlPlaneLogin;
+  try {
+    github.request = (async (path: string) => {
+      if (/^\/issues\/\d+\/timeline/.test(path)) return [{ event: 'head_ref_force_pushed', actor: { login: 'graphyard[bot]' }, created_at: at, before: A, after: B }];
+      throw new Error('reviews unavailable');
+    }) as typeof github.request;
+    github.controlPlaneLogin = async () => { throw new Error('installation lookup failed'); };
+    const dismissals = await github.reviewDismissals(700);
+    assert.deepEqual(dismissals.forcePushes.map(entry => entry.byApp), [false], 'no push is attributed to the App without its login');
+    assert.match(dismissals.actorsUnread!, /login could not be read.*installation lookup failed/);
+    const read = await (github as any).approvalOnHead({ policy: { review: true } } as Work, { number: 700, head: { sha: A }, user: { login: 'implementer' } });
+    assert.equal(read.approval, null);
+    assert.match(read.unread, /reviews could not be read.*reviews unavailable/);
+  } finally {
+    github.request = transport;
+    github.controlPlaneLogin = login;
+  }
 });
