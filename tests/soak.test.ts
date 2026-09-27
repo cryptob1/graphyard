@@ -22,6 +22,7 @@ import { performSelfUpgrade, type SelfUpgradeOutcome } from '../src/daemon/upgra
 import { defaultOptimisticExclude } from '../src/optimistic-merge.js';
 import { queuePlacement } from '../src/merge-queue.js';
 import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } from './helpers/soak-world.js';
+import { readControlPlaneClock, assessContainment, type ControlPlaneClock } from '../src/master/containment.js';
 
 /**
  * GY-404: per-item gates cannot catch faults that emerge from interaction over time, so this runs
@@ -82,6 +83,8 @@ const plan = {
   breaksMain: 10, infrastructure: new Set([13, 14]),
   // GY-516: a flake on a speculative tip whose one rerun passes, and one whose rerun fails again.
   flaky: { rerunPasses: 13, rerunFails: 14 },
+  // GY-795: one item gets a containment quarantine to test the timed clock read.
+  quarantine: 8,
   // GY-839: for one stretch of the day GitHub answers every open candidate's compares without a
   // usable merge base, so the landing comparison keeps the two-way endpoint diff and the base's
   // own new changes read as reverts — the reading this item fixes. The window covers the NOTICE
