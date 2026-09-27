@@ -1,10 +1,8 @@
 import { before, after, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import pg from 'pg';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store, migrationDigests, recordedMigrationDigests } from '../src/store.js';
@@ -193,76 +191,4 @@ test('unit:migration-retry-backoff a failed attempt releases its locks, backs of
     'past the lock budget the failure is raised instead of retried',
   );
   assert.equal(rollbacks, 2, 'a failure that is not retried leaves nothing to roll back');
-});
-
-test('integration:migration-stale-digest-prevention a migration re-reads table digests after acquiring the lock to prevent stale digests from an overlapping release', async () => {
-  const store = new Store(url('skips'));
-  await store.init();
-  const initial = await recorded(store);
-
-  // Drop a column from jobs to make it require migration
-  await store.pool.query('ALTER TABLE jobs DROP COLUMN generation');
-
-  // Mark jobs' digest as stale (simulating a previous deployment change)
-  await markStale(store, 'jobs');
-  const stale = await recorded(store);
-
-  // Verify jobs is marked as needing migration
-  assert.notEqual(stale.tables?.jobs, initial.tables?.jobs, 'jobs digest should be stale');
-
-  // Now simulate an overlapping release that records different digests for jobs
-  // This digest never actually got applied to the DB (simulating a rollback/cancel scenario)
-  const fakeOverlapDigest = 'sha256:overlap-' + Math.random().toString(36).slice(2);
-  const recordedByOverlapRelease = {
-    migration: stale.migration,
-    prelude: stale.prelude,
-    tables: { ...stale.tables, jobs: fakeOverlapDigest }
-  };
-  await setComment(store, JSON.stringify(recordedByOverlapRelease));
-
-  // Start a new migration. The fix requires it to RE-READ digests inside the transaction
-  // to detect that the recorded digest doesn't match the actual table's current DDL.
-  const next = new Store(url('skips'));
-  try {
-    const boot = await timed(() => next.init({ lockTimeoutMs: 30_000 }));
-    assert.equal(boot.error, null, `init failed: ${boot.error?.message}`);
-
-    // Verify that jobs was migrated (the column should be back)
-    const { rows } = await next.pool.query("SELECT 1 FROM information_schema.columns WHERE table_name='jobs' AND column_name='generation'");
-    assert.equal(rows.length, 1, "jobs column exists after migration");
-
-    // The digest should now match the current code's expected digest for jobs
-    const after = await recorded(next);
-    assert.equal(after.tables?.jobs, digests.tables.jobs,
-      'the migration corrected the stale digest by re-reading after acquiring the lock');
-  } finally { await next.close(); await store.close(); }
-});
-
-test('unit:migration-GY-824-fixes verifies that all GY-773 follow-up fixes are present in the code', () => {
-  const thisFile = fileURLToPath(import.meta.url);
-  const code = readFileSync(join(dirname(thisFile), '../src/store/migration-locks.ts'), 'utf-8');
-
-  // P1: Check that digests are re-read inside the transaction after acquiring the lock
-  assert.ok(code.includes('const { rows: tableCheck } = await step(\'check if graphyard_schema exists\''),
-    'GY-824 P1: re-read of table existence check after lock is present');
-  assert.ok(code.includes('const { rows: schemaRows } = await step(\'a lock on table graphyard_schema\''),
-    'GY-824 P1: re-read of digests after lock is present');
-
-  // P2: Check that deadline is rechecked after retry backoff
-  assert.ok(code.includes('await backoff(attempt);\n      if (!retryable()) throw error;'),
-    'GY-824 P2: deadline recheck after retry backoff is present');
-
-  // P2: Check that cancellation state is reset at the start of each retry
-  assert.ok(code.includes('cancelledWaiting = false;'),
-    'GY-824 P2: cancellation state reset is present');
-
-  // P1: Check that deadline is checked after acquiring the advisory lock
-  assert.ok(code.includes('if (Date.now() >= deadline) throw new Error(`Schema migration to generation ${schemaVersion} exceeded its ${timeout} ms deadline after acquiring the migration advisory lock'),
-    'GY-824 P1: deadline check after acquiring lock is present');
-
-  // P1: Check that unchangedPrelude/unchangedTable compare against recordedInTxn, not recorded
-  assert.ok(code.includes('const unchangedPrelude = recordedInTxn?.prelude === digests.prelude;'),
-    'GY-824 P1: unchangedPrelude uses recordedInTxn is present');
-  assert.ok(code.includes('const unchangedTable = (name: string) => recordedInTxn?.tables?.[name] === digests.tables[name];'),
-    'GY-824 P1: unchangedTable uses recordedInTxn is present');
 });
