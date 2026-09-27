@@ -2148,6 +2148,10 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
   // The fleet is read before the claim, so the claim order can name it (GY-492): with a backlog
   // due, the merge-queue head's job is claimed first however recently it became due, instead of
   // waiting behind every older entry for a worker to reach it.
+  // The order above is computed from this pre-claim snapshot (GY-492): queue positions can shift
+  // before `takeJob`, so the order can name an entry already out of the band — harmless today,
+  // priority being advisory and the publication guard rechecking ownership; re-read after the
+  // claim only if claim order ever gains a correctness role.
   const all = await engine.store.list();
   const job = await engine.store.takeJob(observationClaimOrder(all, engine.mergeBatchSize, Date.now(), budgetTight(github.budget?.())), observationHeadCount(all, engine.mergeBatchSize));
   if (!job) return false;
