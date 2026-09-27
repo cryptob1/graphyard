@@ -32,7 +32,10 @@ import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } f
  * `runDaemon` does, so session launches run beside the cycle — outliving it, holding their profile
  * from hand-off, and reported by the next cycle — and the invariants hold on that detached path. A
  * change to the loop that breaks an invariant fails here, in CI, before
- * it merges; a new behaviour that repeats per cycle, head or item belongs in this world.
+ * it merges; a new behaviour that repeats per cycle, head or item belongs in this world. The loop
+ * records every worker's session handle and may prompt a session (GY-544): three workers ask for
+ * scope that is decided before the loop's next cycle sees the request, and two panes are misread
+ * by Herdr as holding no agent for one cycle, and one worker's runtime exits and leaves its pane on a bare shell.
  */
 const repository = 'owner/project';
 const PROOF = 'unit:soak-behaves';
@@ -60,8 +63,13 @@ const plan = {
   items: 15, releaseEveryMs: 15 * minute, workMs: 20 * minute,
   rework: new Set([3, 7, 11]), deaths: new Set([5, 9]), deathAfterMs: 8 * minute,
   deploys: [2 * hour + 30 * minute, 5 * hour], split: { at: 45 * minute, item: 12 }, clean: 2, unstable: 4, slowRecompute: 8, exhaustedReviewer: 6,
+  // GY-544: scope asked and answered between two cycles, and a live pane Herdr misreads for one cycle.
+  scoped: new Set([1, 10, 13]), scopeAfterMs: 6 * minute, misread: new Set([1, 10]), misreadAfterMs: 4 * minute,
+  // A runtime that exits and leaves its pane open on a bare shell.
+  exits: new Set([10]), exitAfterMs: 12 * minute,
 };
 const file = (n: number) => `src/soak/item-${n}.ts`;
+const fixture = (n: number) => `src/soak/item-${n}-fixture.ts`;
 
 let pgServer: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
 before(async () => {
@@ -111,7 +119,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   // ---- The fifteen items, created in the backlog and released one every fifteen minutes. ----
   const items: Work[] = [];
   for (let n = 1; n <= plan.items; n++) {
-    let work = await engine.execute(principals.operator, 'create', null, { title: `Soak item ${n}`, plannedFiles: [file(n)], criteria: [{ id: 'AC-1', text: `Item ${n} behaves`, proofs: [PROOF] }] }, id());
+    let work = await engine.execute(principals.operator, 'create', null, { title: `Soak item ${n}`, plannedFiles: [file(n)], criteria: [{ id: 'AC-1', text: plan.scoped.has(n) ? `Item ${n} behaves, with its fixture ${fixture(n)}` : `Item ${n} behaves`, proofs: [PROOF] }] }, id());
     if (n === plan.exhaustedReviewer) work = await engine.execute(principals.operator, 'reviewpolicy', work.id, { provider: 'agent', expectedPolicyRevision: work.policyRevision, reason: 'Reviewed by the reviewer bots',
       reviewerProfiles: [{ name: 'claude-reviewer', runtime: 'claude', reviewerApp: 'claude-reviewer' }, { name: 'cursor-reviewer', runtime: 'cursor', reviewerApp: 'cursor-reviewer' }] }, id());
     items.push(work);
@@ -122,7 +130,8 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   github.exhaustedProfiles.add('claude-reviewer');
 
   // ---- Workers: the loop dispatches, the simulated session claims, works, pushes and submits (or dies). ----
-  interface Session { work: string; key: string; branch: string; profile: WorkerProfile; epoch: number; pane: string; pushAt: number; diesAt: number | null; state: 'working' | 'submitted' | 'dead' }
+  interface Session { work: string; key: string; branch: string; profile: WorkerProfile; epoch: number; pane: string; pushAt: number; diesAt: number | null; exitsAt: number | null; state: 'working' | 'submitted' | 'dead' | 'exited';
+    scopeAt: number | null; misreadAt: number | null; misread: boolean }
   const sessions: Session[] = [], lost: string[] = [];
   const attempts = new Map<string, number>();
   const principalOf = (profile: WorkerProfile): Principal => ({ id: profile.principal, role: 'worker' });
@@ -135,13 +144,39 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     await engine.execute(principal, 'workspace', work.id, { epoch, host: 'soak-host', path: `/tmp/soak/${key.toLowerCase()}-${epoch}`, branch }, id());
     const attempt = (attempts.get(key) ?? 0) + 1; attempts.set(key, attempt);
     const pane = herdr.open(profile.agentName);
-    sessions.push({ work: work.id, key, branch, profile, epoch, pane, pushAt: clock.now() + plan.workMs, diesAt: plan.deaths.has(n) && attempt === 1 ? clock.now() + plan.deathAfterMs : null, state: 'working' });
-    return { key, epoch };
+    sessions.push({ work: work.id, key, branch, profile, epoch, pane, pushAt: clock.now() + plan.workMs, diesAt: plan.deaths.has(n) && attempt === 1 ? clock.now() + plan.deathAfterMs : null,
+      exitsAt: plan.exits.has(n) && attempt === 1 ? clock.now() + plan.exitAfterMs : null, state: 'working',
+      scopeAt: plan.scoped.has(n) && attempt === 1 ? clock.now() + plan.scopeAfterMs : null, misreadAt: plan.misread.has(n) && attempt === 1 ? clock.now() + plan.misreadAfterMs : null, misread: false });
+    // The pane is the session's own coordinate: the loop records it on the implementation handle.
+    return { key, epoch, pane, agentName: profile.agentName };
   };
   const workersTick = async (now: number) => {
     for (const session of sessions.filter(entry => entry.state === 'working')) {
       if (session.diesAt !== null && now >= session.diesAt) { herdr.kill(session.pane); session.state = 'dead'; continue; }
+      // The runtime exits and leaves a bare shell in its pane; its supervisor keeps the lease a few
+      // minutes more, then releases it, so the item goes to a new attempt without a lease loss.
+      if (session.exitsAt !== null && now >= session.exitsAt) {
+        const listed = herdr.agents.get(session.pane);
+        if (listed?.agent) { listed.agent = null; listed.agent_status = 'unknown'; }
+        const principal = principalOf(session.profile);
+        if (now < session.exitsAt + 4 * minute) await engine.execute(principal, 'heartbeat', session.work, { epoch: session.epoch }, id());
+        else { await engine.execute(principal, 'release', session.work, { epoch: session.epoch }, id()); session.state = 'exited'; }
+        continue;
+      }
       const principal = principalOf(session.profile);
+      // Herdr misreads the live agent for exactly one cycle: its pane shows no agent, then shows it again.
+      const listed = herdr.agents.get(session.pane);
+      if (session.misread && listed) { listed.agent = 'claude'; session.misread = false; }
+      else if (session.misreadAt !== null && now >= session.misreadAt && listed) { listed.agent = null; session.misread = true; session.misreadAt = null; misreads.push(session.pane); }
+      // The worker asks for scope its criteria name and goes idle waiting; the control plane decides
+      // it before the loop's next cycle, so the loop never sees the request open.
+      if (session.scopeAt !== null && now >= session.scopeAt) {
+        session.scopeAt = null;
+        await engine.execute(principal, 'scope', session.work, { epoch: session.epoch, paths: [fixture(numberOf(session))], reason: 'The fixture my criterion names' }, id());
+        herdr.status(session.pane, 'idle');
+        await engine.execute(principals.coordinator, 'autoscope', session.work, { epoch: session.epoch }, id());
+        decided.push(`${session.key}:${session.epoch}`);
+      }
       if (now < session.pushAt) {
         // A renewal refused is lease loss: the supervisor stops the session, as `watch` does.
         try { await engine.execute(principal, 'heartbeat', session.work, { epoch: session.epoch }, id()); }
@@ -153,6 +188,25 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       session.state = 'submitted';
       herdr.status(session.pane, 'done');
     }
+  };
+
+  // ---- The session record and the prompts the loop gives sessions (GY-544). ----
+  const decided: string[] = [], misreads: string[] = [], prompts: { key: string; epoch: number; pane: string; text: string }[] = [], exitedLive: string[] = [], exitedClosed: string[] = [];
+  const panes = new Map<string, string>();
+  const recordSession: DaemonEffects['recordSession'] = async (work, handle) => {
+    if (handle.pane) panes.set(`${work.id}:${handle.id}`, handle.pane);
+    if (handle.kind === 'implementation' && handle.state === 'finished' && /the agent has exited/.test(handle.outcome ?? '')) {
+      const pane = panes.get(`${work.id}:${handle.id}`), listed = pane ? herdr.agents.get(pane) : undefined;
+      exitedClosed.push(`${work.key} ${handle.id}`);
+      if (listed?.agent) exitedLive.push(`${work.key} ${handle.id} in pane ${pane}, whose agent is live: ${handle.outcome}`);
+    }
+    return api(principals.coordinator, 'POST', `work/${work.id}/session`, handle);
+  };
+  const promptSession: DaemonEffects['promptSession'] = async (agent, text) => {
+    const session = sessions.find(entry => entry.pane === agent.pane_id);
+    prompts.push({ key: session?.key ?? '?', epoch: session?.epoch ?? 0, pane: agent.pane_id!, text });
+    // The prompted session resumes.
+    herdr.status(agent.pane_id!, 'working');
   };
 
   // ---- Approvers and producers: sessions the loop launches, each acting on the minute after. ----
@@ -212,6 +266,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       return { source: 'endpoint', sha: production.sha, at: new Date(clock.now()).toISOString(), reason: null, deployed: serving.map(item => item.key), pending: delivered.filter(item => !serving.includes(item)).map(item => item.key) };
     },
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    recordSession, promptSession,
   };
 
   // ---- The day. ----
@@ -221,7 +276,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   // handed it over — here, before the simulated clock moves on.
   const launcher = new Launcher();
   const violations: string[] = [], observed = new Set<string>(), failures: string[] = [], escalations: string[] = [], spent = new Set<string>();
-  let released = 0, split = false, deploys = 0, cycles = 0, reportedDispatches = 0;
+  let released = 0, split = false, deploys = 0, cycles = 0, reportedDispatches = 0, exitedRowsSeen = 0;
   const jobsDue = async () => Number((await store.pool.query('SELECT count(*) AS due FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now())')).rows[0].due);
   for (let elapsed = 0; elapsed <= options.hours * hour;) {
     const now = clock.now();
@@ -264,6 +319,11 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       // The interval between cycles is when a hand-off launch settles; the day's clock waits for
       // them so the world never acts on a half-finished launch.
       await launcher.idle();
+      // GY-544: the loop's exited-session sightings stay bounded by the implementation handles still running here.
+      const exitedRows = Object.keys(state.actions).filter(key => key.startsWith('exited:implementation:'));
+      const running = (await store.list()).flatMap(item => (item.sessions ?? []).filter(handle => handle.kind === 'implementation' && handle.state === 'running' && handle.host === config.hostId)).length;
+      exitedRowsSeen += exitedRows.length;
+      if (exitedRows.length > running) violations.push(`${new Date(now).toISOString()} (+${Math.round(elapsed / minute)} min) ${exitedRows.length} exited-session sighting(s) for ${running} running implementation handle(s)`);
       for (const check of state.invariants.report as InvariantCheck[]) {
         if (check.observed) observed.add(check.invariant);
         if (!check.holds) violations.push(`${new Date(now).toISOString()} (+${Math.round(elapsed / minute)} min) ${check.line}`);
@@ -275,12 +335,13 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   }
 
   const final = (await store.list()).filter(item => items.some(entry => entry.id === item.id));
-  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, herdr, hand, escalations, spent };
+  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, herdr, hand, escalations, spent,
+    decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen };
 }
 
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 180_000 }, async () => {
   const began = performance.now();
-  const { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
+  const { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, state, decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
   const undelivered = final.filter(item => item.stage !== 'done' || !item.delivery);
   assert.deepEqual(undelivered.map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
@@ -305,6 +366,21 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   const reviewed = final.find(item => item.key === items[plan.exhaustedReviewer - 1].key)!;
   assert.ok(reviewed.reviewFailovers?.some(failover => failover.profile === 'claude-reviewer' && failover.exhaustion === 'usage-limit' && failover.nextProfile === 'cursor-reviewer'), `the exhausted reviewer bot failed over to the next profile: ${JSON.stringify(reviewed.reviewFailovers)}`);
   assert.ok(cycles > 24 * 6, `the loop cycled through the day (${cycles} cycles)`);
+  // GY-544: every scope decision made between two cycles earned exactly one re-prompt for its attempt, and nothing else re-prompted it.
+  assert.equal(decided.length, plan.scoped.size, 'three scope requests were asked and decided between cycles');
+  for (const attempt of decided) {
+    const [key, epoch] = attempt.split(':');
+    const told = prompts.filter(prompt => prompt.key === key && prompt.epoch === Number(epoch) && /its scope request was applied/.test(prompt.text));
+    assert.equal(told.length, 1, `${attempt}: one re-prompt for its scope decision: ${JSON.stringify(prompts)}`);
+  }
+  assert.equal(prompts.length, decided.length, `no prompt beyond one per scope decision: ${JSON.stringify(prompts.map(prompt => prompt.text.slice(0, 200)))}`);
+  // Herdr's misreads closed no live session; the pane whose runtime exited was closed as exited; no sighting outlived its handle.
+  assert.equal(misreads.length, plan.misread.size, 'two live panes were misread for a cycle');
+  assert.deepEqual(exitedLive, [], 'no implementation handle was closed as exited while its agent was live');
+  for (const n of plan.exits) assert.ok(exitedClosed.some(entry => entry.startsWith(`${items[n - 1].key} `)), `${items[n - 1].key}: the handle of the worker whose runtime exited was closed as exited: ${exitedClosed.join(', ')}`);
+  assert.ok(exitedRowsSeen > 0, 'the loop recorded exited-session sightings during the day');
+  assert.deepEqual(Object.keys(state.actions).filter(key => key.startsWith('exited:implementation:')), [], 'no exited-session sighting outlives the day');
+  assert.deepEqual(final.flatMap(item => (item.sessions ?? []).filter(handle => handle.kind === 'implementation' && handle.state === 'running').map(handle => `${item.key} ${handle.id}`)), [], 'every implementation handle is closed once its item is delivered');
   const seconds = (performance.now() - began) / 1000;
   assert.ok(seconds < 120, `the day runs well inside the three minutes the CI test job allows it (${seconds.toFixed(1)} s)`);
 });

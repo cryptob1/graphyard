@@ -572,6 +572,7 @@ async function closeExitedWorkerSessions(cycle: Cycle, runtime: { agents: HerdrA
   for (const item of snapshot.work) for (const handle of item.sessions ?? []) {
     if (handle.kind !== 'implementation' || handle.state !== 'running' || handle.host !== config.hostId) continue;
     const leased = !!item.lease && item.lease.owner === handle.principal && Date.parse(item.lease.expiresAt) > clock;
+    const seenKey = `exited:implementation:${item.id}:${handle.id}:${handle.startedAt}`;
     let reason: string | null = null;
     if (item.stage !== 'build' && !leased) reason = `${item.key} has left build, the stage this implementation session was launched for, and is now in ${item.stage}`;
     else if (runtime?.available && handle.pane && !(clock - Date.parse(handle.startedAt) < launchAppearanceMs)) {
@@ -581,7 +582,7 @@ async function closeExitedWorkerSessions(cycle: Cycle, runtime: { agents: HerdrA
       const read = !!listed || !workspace || runtime.agents.some(agent => agent.pane_id?.startsWith(`${workspace}:`));
       const exited = read && (!listed || listed.agent === null || listed.agent === '')
         ? `the ${handle.runtime} runtime is no longer the foreground process of pane ${handle.pane}: Herdr ${listed ? 'detects no agent in it' : 'lists no agent in it'}, so the agent has exited` : null;
-      const seenKey = `exited:implementation:${item.id}:${handle.id}:${handle.startedAt}`, seen = state.actions[seenKey];
+      const seen = state.actions[seenKey];
       if (exited) {
         sighted.add(seenKey);
         if (!seen) { await record(state, seenKey, { kind: 'close', work: item.key, principal: handle.principal, state: 'waiting', detail: `${exited}; implementation session ${handle.id} is closed if that still stands on a later cycle, ${launchAppearanceMs / 1000}s from now`, attempts: 1, cycle: state.cycle }, now(), effects.persist); continue; }
@@ -598,6 +599,8 @@ async function closeExitedWorkerSessions(cycle: Cycle, runtime: { agents: HerdrA
       try {
         await effects.recordSession!(item, { id: handle.id, kind: 'implementation', runtime: handle.runtime, host: handle.host, subject: handle.subject, state: 'finished', outcome: `closed by the loop: ${found}`.slice(0, 500) });
         performed.push(await entry('done', `Closed implementation session ${handle.id} of ${item.key}${handle.pane ? ` (pane ${handle.pane})` : ''}: ${found}`));
+        // Its sighting goes with it, in this cycle's sweep.
+        sighted.delete(seenKey);
       } catch (error) {
         performed.push(await entry('failed', `Could not close implementation session ${handle.id} of ${item.key}: ${message(error)}`));
       }
