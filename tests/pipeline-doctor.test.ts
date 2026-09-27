@@ -5,11 +5,12 @@ import { emptyDaemonState, type DaemonEffects, type DaemonState } from '../src/m
 import { Launcher, type Cycle } from '../src/daemon/cycle.js';
 import { Timings } from '../src/master/timings.js';
 import { approverSessionName } from '../src/master/autonomy.js';
-import { clearDoctorRuns, clearCoveredBlockers, decisionCheckMs, doctorBounds, doctorDue, doctorIntervalMs, doctorPrompt, doctorRunsSettled, doctorSanctionedCommands, doctorStep, relaunchUnansweredApprovers, settleSubmittedContainment, unansweredDecisionMs, type DoctorEffects } from '../src/daemon/doctor.js';
+import { clearDoctorRuns, clearCoveredBlockers, decisionCheckMs, doctorBounds, doctorDue, doctorIntervalMs, doctorPrompt, doctorRunsSettled, doctorSanctionedCommands, doctorStep, relaunchUnansweredApprovers, settleSubmittedContainment, stopDoctorRuns, unansweredDecisionMs, type DoctorEffects } from '../src/daemon/doctor.js';
 import { doctorTool } from '../src/daemon/doctor.js';
 import { doctorRunRecordSchema, type DoctorRunRecord } from '../src/daemon/state.js';
 import { doctorSettingsSchema } from '../src/master/profiles.js';
-import { doctorSanctionedCommands as piSanctioned, doctorRedirects, doctorSegmentAllowed, graphyardTools as piTools } from '../integrations/pi/index.js';
+import graphyardExtension, { doctorSanctionedCommands as piSanctioned, doctorRedirects, doctorSegmentAllowed, graphyardTools as piTools } from '../integrations/pi/index.js';
+import { statusRoutes, doctorFindingEvent, doctorRunEvent } from '../src/server/routes/status.js';
 import type { Runner } from '../src/runner/types.js';
 import type { Work } from '../src/model.js';
 import { operatorAgentRouteGuard } from '../src/server/auth.js';
@@ -103,6 +104,7 @@ test('unit:doctor-scheduled-and-scoped — the doctor runs every ten minutes by 
   // redirection is refused on the raw line before any segment is judged.
   const guard = { cwd: process.cwd(), cli: master.cliPath };
   const dynamic = (value: string) => ({ value, dynamic: true, glob: false });
+  const glob = (value: string) => ({ value, dynamic: false, glob: true });
   const refused: [string, ReturnType<typeof words>][] = [
     ['node -e', words('node', '-e', 'require("child_process").execSync("git push")', 'status')],
     ['node --require', words('node', '--require', '/tmp/x.js', master.cliPath, 'status')],
@@ -112,6 +114,9 @@ test('unit:doctor-scheduled-and-scoped — the doctor runs every ten minutes by 
     ['sudo', words('sudo', 'cat', '/etc/shadow')],
     ['a script named like a read', words('./cat', 'README.md')],
     ['the credential by variable', [...words('cat'), dynamic('$GRAPHYARD_TOKEN_FILE')]],
+    ['a brace glob', [...words('cat'), glob('{README.md,/etc/passwd}')]],
+    ['a path glob', [...words('grep', 'token'), glob('src/**/*.ts')]],
+    ['a node script glob', [...words('node'), glob('*.mjs'), ...words('master', 'status')]],
     ['a path outside the checkout', words('cat', '/home/someone/.graphyard/operator-agent.token')],
     ['a home path', words('grep', '-r', 'token', '~')],
     ['a parent path', words('cat', '../../secrets.token')],
@@ -138,6 +143,31 @@ test('unit:doctor-scheduled-and-scoped — the doctor runs every ten minutes by 
 
   // The doctor session launched through the headless runner gets exactly the doctor tool.
   assert.deepEqual(piTools('doctor').map(tool => tool.name), [doctorTool]);
+
+  // Every tool the doctor's session calls is judged at the extension hook, not only bash: no
+  // built-in read, edit or write may bypass the allowlist and the checkout boundary, and only the
+  // report tool joins bash on the allowed surface.
+  const hook: Record<string, (event: any, ctx: any) => unknown> = {};
+  graphyardExtension({ registerTool: () => {}, on: (event, handler) => { hook[event] = handler as never; return handler; } });
+  const call = (toolName: string, input: any = {}) => hook.tool_call({ toolName, input }, { cwd: process.cwd() }) as { block?: boolean; reason?: string } | undefined;
+  const role = process.env.GRAPHYARD_PI_ROLE;
+  try {
+    process.env.GRAPHYARD_PI_ROLE = 'doctor';
+    for (const refusedTool of ['read', 'edit', 'write', 'grep_files', '']) {
+      const verdict = call(refusedTool, { path: '/etc/passwd' });
+      assert.equal(verdict?.block, true, `the ${refusedTool || 'unnamed'} tool is refused for the doctor role`);
+      assert.match(verdict!.reason!, /was not run|Record the refused call/, `the ${refusedTool || 'unnamed'} refusal says it was recorded, not run`);
+    }
+    assert.equal(call(doctorTool, { findings: [], actions: [], filed: [] }), undefined, 'the doctor report tool runs');
+    assert.equal(call('bash', { command: 'graphyard status GY-74' }), undefined, 'an allowlisted bash command runs');
+    const refusedBash = call('bash', { command: 'cat {README.md,/etc/passwd}' });
+    assert.equal(refusedBash?.block, true, 'a bash command outside the allowlist is still refused');
+  } finally {
+    if (role === undefined) delete process.env.GRAPHYARD_PI_ROLE; else process.env.GRAPHYARD_PI_ROLE = role;
+  }
+  // Another role keeps its built-in surface: the tool gate is the doctor's alone (the role is
+  // read per call, and the finally above restored the session's own).
+  assert.equal(call('read', { path: 'src/x.ts' }), undefined, 'without the doctor role the built-in tools are not blocked here');
 
   // The shipped template names every check bound, the sanctioned commands and the unactionable rule.
   const prompt = doctorPrompt({ repository: master.repository, cliPath: `node ${master.cliPath}` }, { items: [], faults: [] });
@@ -232,6 +262,62 @@ test('unit:doctor-run-recorded — a doctor run records one event per item it fo
   assert.equal(fourth.state.doctor.runs[0].state, 'reported', 'the fallback ran and reported');
   assert.deepEqual(fourth.state.doctor.runs[0].runs.map(entry => entry.result), ['spawn', 'reported']);
   clearDoctorRuns();
+
+  // Shutdown that begins while the runner is still being selected starts no doctor: `active` is
+  // not yet the cancellable one, so the chosen session is rechecked against `stopping`, released
+  // without starting, and the attempt is recorded as cancelled — never leaked past the shutdown.
+  let releaseSelection!: () => void;
+  const selection = new Promise<void>(resolve => { releaseSelection = resolve; });
+  const started: string[] = [];
+  const releasedEarly: string[] = [];
+  const slow: DoctorEffects = { ...doctor, runner: async attempt => {
+    await selection;
+    return { runtime: 'pi', model: 'registry/model', release: async reason => { releasedEarly.push(reason); },
+      runner: { name: 'pi', start: () => { started.push(attempt); throw new Error('a stopping loop must not start a doctor'); } } as unknown as Runner };
+  } };
+  const fifth = cycle(work, { doctor: slow });
+  await doctorStep(fifth);
+  const shutdown = stopDoctorRuns('shutdown during selection');
+  releaseSelection();
+  await shutdown;
+  assert.deepEqual(started, [], 'a stopping loop starts no doctor run');
+  assert.deepEqual(releasedEarly, ['the primary doctor run ended'], 'the selected session is released without starting');
+  assert.deepEqual(fifth.state.doctor.runs[0].runs.map(entry => entry.result), ['cancelled'], 'the interrupted attempt is recorded as cancelled');
+  assert.equal(fifth.state.doctor.runs[0].state, 'failed', 'with no report, the run is recorded failed, not left running');
+  clearDoctorRuns();
+
+  // The route itself aggregates a run's findings and actions into one event per affected item: an
+  // action-only item reaches its item history, repeated findings are one event, and a status-level
+  // subject files nothing.
+  const inserts: { workId: string | null; kind: string; payload: any }[] = [];
+  const rows = [{ id: 'work-74', key: 'GY-74' }, { id: 'work-75', key: 'GY-75' }];
+  const db: { query(sql: string, params?: any[]): Promise<any> } = { query: async (sql, params = []) => {
+    if (sql.includes('VALUES(NULL')) { inserts.push({ workId: null, kind: params[1], payload: JSON.parse(params[2]) }); return { rowCount: 1 }; }
+    if (sql.includes('INSERT INTO events')) { inserts.push({ workId: params[0], kind: params[2], payload: JSON.parse(params[3]) }); return { rowCount: 1 }; }
+    if (sql.includes('work_items')) return { rows };
+    return { rows: [] };
+  } };
+  const postedRun: DoctorRunRecord = { at: at(60_000), state: 'reported', runs: [], detail: 'stuck and fixed',
+    findings: [
+      { subject: 'GY-74', check: 'blocked', detail: 'first', unactionable: false },
+      { subject: 'GY-74', check: 'overdue', detail: 'second', unactionable: false },
+      { subject: 'installation', check: 'launch', detail: 'nobody launched', unactionable: true },
+    ],
+    actions: [{ subject: 'GY-75', command: 'graphyard master unblock GY-75 REASON', outcome: 'applied', detail: 'blocker cleared' }],
+    filed: [] };
+  const doctorRoute = statusRoutes.routes.find(route => route.method === 'POST' && route.path === '/api/doctor')!;
+  const outcome = await doctorRoute.handle({ actor: { id: 'operator-agent-1', role: 'operator-agent' },
+    services: { engine: { store: { transaction: async (run: (session: typeof db) => Promise<void>) => run(db) } } },
+    body: async () => Buffer.from(JSON.stringify(postedRun)) } as any, []);
+  assert.deepEqual(outcome, { recorded: true, runs: 1 });
+  assert.equal(inserts.filter(entry => entry.kind === doctorRunEvent).length, 1, 'one run summary event');
+  const perItem = inserts.filter(entry => entry.kind === doctorFindingEvent);
+  assert.deepEqual(perItem.map(entry => entry.workId), ['work-74', 'work-75'], 'one event per affected item');
+  assert.deepEqual(perItem[0].payload.findings.map((finding: any) => finding.detail), ['first', 'second'], 'both findings for one item are one event');
+  assert.deepEqual(perItem[0].payload.actions, [], 'an item with findings only carries no actions');
+  assert.deepEqual(perItem[1].payload.actions.map((action: any) => action.command), ['graphyard master unblock GY-75 REASON'], 'an action-only item reaches its item history');
+  assert.deepEqual(perItem[1].payload.findings, []);
+  assert.ok(!perItem.some(entry => entry.payload.subject === 'installation'), 'a status-level subject files no per-item event');
 });
 
 test('unit:loop-applies-routine-remedies — the loop settles a lapsed containment whose attempt submitted, clears a blocker whose named scope plannedFiles already covers, and relaunches an approver for a decision unanswered past ten minutes', async () => {

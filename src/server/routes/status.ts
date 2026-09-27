@@ -25,6 +25,8 @@ import { doctorRunRecordSchema } from '../../daemon/state.js';
 
 /** The ledger kinds the pipeline doctor's runs are recorded under (GY-711): one per run, one per item a run found. */
 export const doctorRunEvent = 'doctor-run', doctorFindingEvent = 'doctor-finding';
+/** Whether a subject a doctor run names is a work item (`GY-74`), not a status-level one (`installation`). */
+const itemKey = (subject: string) => /^GY-\d+$/.test(subject);
 
 /** Control-plane status and the work reads every client polls. */
 export const statusRoutes = defineRoutes('status', [
@@ -155,24 +157,37 @@ export const statusRoutes = defineRoutes('status', [
   },
   {
     // The pipeline doctor's run summaries (GY-711). The loop posts one per doctor run, as the
-    // master's operator-agent identity, and the route expands the findings into one event per
-    // item, so a run is one summary in the ledger with an event per item it found. The last runs
-    // are served on /api/status for `master status` and the dashboard's Doctor panel.
+    // master's operator-agent identity, and the route aggregates each item's findings and actions
+    // into one event on that item, so a run is one summary in the ledger with an event per item it
+    // found or acted on. The last runs are served on /api/status for `master status` and the
+    // dashboard's Doctor panel.
     method: 'POST', path: '/api/doctor',
     async handle(context) {
       const { actor, services: { engine } } = context;
       demand(['coordinator', 'admin', 'operator-agent'].includes(actor.role), 'Coordinator permission required', 403);
       const run = doctorRunRecordSchema.parse(await parseJson(context, 65_536));
-      // The summary and its per-item findings land in one transaction: a run is recorded whole or
+      // The summary and its per-item events land in one transaction: a run is recorded whole or
       // not at all, and the loop posts a refused run again.
       await engine.store.transaction(async db => {
         await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, doctorRunEvent, JSON.stringify(run)]);
-        const keys = [...new Set(run.findings.map(finding => finding.subject).filter(subject => /^GY-\d+$/.test(subject)))];
-        if (!keys.length) return;
-        const items = (await db.query(`SELECT id, document->>'key' AS key FROM work_items WHERE document->>'key' = ANY($1)`, [keys])).rows as { id: string; key: string }[];
-        for (const finding of run.findings) {
-          const item = items.find(entry => entry.key === finding.subject);
-          if (item) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [item.id, actor.id, doctorFindingEvent, JSON.stringify(finding)]);
+        // One event per item: an action on an item with no finding reaches its history too, and
+        // several findings for one item are one event, never a duplicate.
+        const perItem = new Map<string, { subject: string; findings: unknown[]; actions: unknown[] }>();
+        for (const finding of run.findings) if (itemKey(finding.subject)) {
+          const entry = perItem.get(finding.subject) ?? { subject: finding.subject, findings: [], actions: [] };
+          entry.findings.push(finding);
+          perItem.set(finding.subject, entry);
+        }
+        for (const action of run.actions) if (itemKey(action.subject)) {
+          const entry = perItem.get(action.subject) ?? { subject: action.subject, findings: [], actions: [] };
+          entry.actions.push(action);
+          perItem.set(action.subject, entry);
+        }
+        if (!perItem.size) return;
+        const items = (await db.query(`SELECT id, document->>'key' AS key FROM work_items WHERE document->>'key' = ANY($1)`, [[...perItem.keys()]])).rows as { id: string; key: string }[];
+        for (const entry of perItem.values()) {
+          const item = items.find(candidate => candidate.key === entry.subject);
+          if (item) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [item.id, actor.id, doctorFindingEvent, JSON.stringify(entry)]);
         }
       });
       return { recorded: true, runs: 1 };

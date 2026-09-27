@@ -164,7 +164,7 @@ export function graphyardTools(role: string | undefined = process.env.GRAPHYARD_
   const decide = tool('graphyard_decide', 'Graphyard decide', 'Record your verdict on the Graphyard decision you were asked to judge: approve true or false, with your reason. Call it exactly once; it is your answer.', decideParameters, params => `decision ${params.decision}`, true);
   const evidence = tool('graphyard_submit_evidence', 'Graphyard evidence', 'Submit one proof\'s result on the exact head, base and policy revision you were given, with the exercise run against the tree with the criterion\'s behaviour removed. Call it once per proof, pass or fail.', evidenceParameters, params => `proof ${params.proof}`, false);
   // The research session's brief (GY-259), the diagnostician's diagnosis, and the doctor's report are registered for their own roles only.
-  if (role === 'doctor') return [tool('graphyard_doctor_report', 'Graphyard doctor report', 'Record the report of your doctor run: one entry per finding (what was stuck, under which check bound, and whether you could act), one per sanctioned command you ran and what it changed, and one per fault item to file for a finding no open item covers. Call it exactly once; it is your result.', doctorReportParameters, () => 'the doctor report', true)];
+  if (role === 'doctor') return [tool(doctorReportToolName, 'Graphyard doctor report', 'Record the report of your doctor run: one entry per finding (what was stuck, under which check bound, and whether you could act), one per sanctioned command you ran and what it changed, and one per fault item to file for a finding no open item covers. Call it exactly once; it is your result.', doctorReportParameters, () => 'the doctor report', true)];
   if (role === 'research') return [tool('graphyard_research_brief', 'Graphyard research brief', 'Record the research brief for the item you were asked to research: existing code to reuse, patterns and prior art with sources, risks, the approach you recommend, and the operator\'s product questions with your recommended answers. Call it exactly once; it is your result.', researchParameters, () => 'the brief', true)];
   // The triage session's judgement of a machine-filed backlog item (GY-402), likewise for its own role only.
   if (role === 'triage') return [tool('graphyard_triage_decision', 'Graphyard triage decision', 'Record your judgement of the machine-filed backlog item you were asked to triage: release it with a priority, close it with a reason (naming the delivered item that already fixed it, if any), or merge it into another open item. Call it exactly once; it is your result.', triageParameters, () => 'the judgement', true)];
@@ -232,8 +232,10 @@ export function doctorSegmentAllowed(words: ShellWord[], context: DoctorGuardCon
   const { index, wrapped } = commandIndex(words);
   const program = words[index]?.value.split('/').pop() ?? '';
   if (index !== 0 || wrapped) return { allow: false, reason: doctorRefusal(`a command run through an assignment or ${words[index - 1]?.value ?? 'a wrapper'}`) };
-  const expanded = words.find(word => word.dynamic);
-  if (expanded) return { allow: false, reason: doctorRefusal(`the expansion "${expanded.value}", whose value cannot be checked before it runs,`) };
+  // A word the shell would expand — variable, substitution or pathname glob — cannot be checked
+  // before it runs: `cat {README.md,/etc/passwd}` is a glob, and its matches are read verbatim.
+  const expanded = words.find(word => word.dynamic || word.glob);
+  if (expanded) return { allow: false, reason: doctorRefusal(`the expansion "${expanded.value}", whose value or matches cannot be checked before it runs,`) };
   // The program by its bare name, found on PATH: never a script of the same name in the checkout.
   if (words[0].value !== program) return { allow: false, reason: doctorRefusal(`${words[0].value} (run programs by their bare name)`) };
   const rest = words.slice(1);
@@ -469,6 +471,12 @@ export function mktempDirectories(command: string, output: string, root = tmpdir
   try { return statSync(line).isDirectory() ? [line] : []; } catch { return []; }
 }
 
+/** The tool name the doctor's session submits its report through; the one non-bash tool it holds. */
+export const doctorReportToolName = 'graphyard_doctor_report';
+
+/** The refusal a tool outside the doctor's surface gets: recorded, never run. */
+const doctorToolRefusal = (what: string) => `Graphyard refused this tool for the doctor role: ${what} is outside the doctor's tool surface, so it was not run. The doctor runs bash under its command allowlist and its ${doctorReportToolName} tool; every other tool — read, edit, write, any built-in — is refused. Record the refused call in your graphyard_doctor_report instead of retrying it.`;
+
 // ---- The extension -----------------------------------------------------------------------------
 /** The section Graphyard adds to every Pi session's system prompt. */
 export const systemPromptSection = `${autonomyContract} You run headless: nobody reads this session while it runs and nothing you print reaches a person. Your answer is the Graphyard tool call your request names, and nothing else counts as an answer. When a command is refused, read the reason and retry safely; never wait for anyone.`;
@@ -485,7 +493,13 @@ export default function graphyard(pi: ExtensionApi) {
     return undefined;
   });
   pi.on('tool_call', (event, ctx) => {
-    if (event?.toolName !== 'bash') return undefined;
+    const tool = String(event?.toolName ?? '');
+    // The doctor role holds every tool, not only bash (GY-711): no built-in read, edit or write
+    // may bypass the checkout boundary or the sanctioned commands, so every tool but bash and the
+    // doctor's own report tool is refused before anything runs.
+    if (process.env.GRAPHYARD_PI_ROLE === 'doctor' && tool !== 'bash' && tool !== doctorReportToolName)
+      return { block: true, reason: doctorToolRefusal(tool || 'an unnamed tool') };
+    if (tool !== 'bash') return undefined;
     const command = String(event.input?.command ?? '');
     const context = { cwd: ctx?.cwd ?? process.cwd(), sessionDirectories };
     // The doctor role is judged by its command allowlist (GY-711) before the destructive-command

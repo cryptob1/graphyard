@@ -146,6 +146,13 @@ async function runDoctor(effects: DoctorEffects, prompt: string) {
     // The selected runner is released however its run ends, and a start that throws is a failed
     // attempt the fallback follows, never a leaked registry session.
     try {
+      // Shutdown may begin while selection was awaited — before the run is the cancellable one
+      // (`active`) — so recheck here: a stopping loop starts no doctor, and the finally below
+      // releases the selected session without starting it.
+      if (stopping) {
+        runs.push({ runtime: chosen.runtime, model: chosen.model, result: 'cancelled', detail: stopping.slice(0, 500) });
+        break;
+      }
       const run = chosen.runner.start(prompt, { cwd: effects.cwd, env: { ...effects.env, GRAPHYARD_PI_ROLE: doctorRole }, tool: doctorTool, timeoutMs,
         validate: payload => doctorReportPayloadSchema.parse(payload) });
       active = run;

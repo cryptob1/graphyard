@@ -9,7 +9,7 @@ The master acts without asking. Three decisions are human-only: goals and priori
 
 ## Operate
 
-Keep cycling: status, dispatch, review, merge, deployment verification. Stop only when every in-scope item is Done or has a genuine external blocker recorded in Graphyard, and every merged change is verified against the exact deployed release or has a recorded deployment blocker.
+Keep cycling: status, dispatch, review, merge, deployment verification. Stop only when every in-scope item is Done or has a genuinely external blocker recorded in Graphyard, and every merged change is verified against the exact deployed release or has a recorded deployment blocker.
 
 1. `master status` at startup and after events.
 2. `master run` dispatches ready work in `schedule.order`.
@@ -51,7 +51,7 @@ Each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `linge
 
 ### The pipeline doctor
 
-Every `run.doctor.intervalMinutes` (10 by default) the loop launches the **doctor**: a headless Pi session (the registry's `doctor` role, else Pi) with the master's read access and only sanctioned operator-agent commands — `master scope`, `requirements`, `unblock`, `decide` + `approver`, `settle-containment`, `close`, `create`, `release`; never merge, dispatch, evidence or leases; refused commands are recorded, not run. Runs post an event per item and a summary to `/api/doctor` for `master status` and the Doctor panel; unactionable findings become escalations or P0/P1 fault items. Each cycle the loop settles a submitted attempt's lapsed fence its probe verifies, clears a blocker `plannedFiles` covers, and relaunches an approver for a decision unanswered 10 minutes. Off: `run.doctor.enabled=false`.
+Every `run.doctor.intervalMinutes` (10 by default) the loop launches the **doctor**: a headless Pi session (the registry's `doctor` role, else Pi) with the master's read access and only sanctioned operator-agent commands — `master scope`, `requirements`, `unblock`, `decide` + `approver`, `settle-containment`, `close`, `create`, `release`; never merge, dispatch, evidence or leases; every tool is held: only allowlisted bash and the report tool; refusals are recorded, not run. Runs post one event per item (findings and actions together) and a summary to `/api/doctor` for `master status` and the Doctor panel; unactionable ones become escalations or P0/P1 fault items. Each cycle the loop settles a submitted attempt's verified lapsed fence, clears a blocker `plannedFiles` covers, and relaunches an approver for a decision unanswered 10 minutes. Off: `run.doctor.enabled=false`.
 
 ## Research before build
 
