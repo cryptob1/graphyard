@@ -131,8 +131,8 @@ export async function verifyContainmentDeath(
   // runs late in a cycle that can take tens of seconds, and measuring it against the snapshot's time
   // refused every automatic settlement as "dated after the control-plane clock" (2026-09-26).
   // Local time less the smallest measured offset is the latest control-plane time the probe could have run at.
-  const refusals = containmentSettlementRefusals(work, verification, { now: Math.max(Date.parse(options.observedAt), localNow.getTime() - options.clockOffset.min) })
-    .map(refusal => namedClockBound(refusal, { roundTripMs: options.clockRoundTripMs, source: options.clockSource }, options.clockOffset.max - options.clockOffset.min));
+  const baseRefusals = containmentSettlementRefusals(work, verification, { now: Math.max(Date.parse(options.observedAt), localNow.getTime() - options.clockOffset.min) });
+  const refusals = baseRefusals.map(refusal => namedClockBound(refusal, { roundTripMs: options.clockRoundTripMs, source: options.clockSource }, options.clockOffset.max - options.clockOffset.min));
   return { ...assessment, settleable: !refusals.length, refusals, verification };
 }
 /** Verify every lapsed quarantine this host is responsible for, keyed by work id; a live worker's is not probed. */

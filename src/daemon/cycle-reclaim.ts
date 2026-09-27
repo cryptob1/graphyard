@@ -1,6 +1,7 @@
 // Concern: cycle step 3 — reclaim disk, bounded resources and dead sessions' quarantines.
 import { describeReclaim, paneReclaimStatus, agentlessPaneAttentionBound } from '../master-resources.js';
 import { diskThresholdBytes, containmentPhase } from '../master.js';
+import { containmentClock } from '../master/containment.js';
 import { worktreeRootMinFreeBytes } from '../install/worktree-root.js';
 import { gigabytes, message, reclaimIntervalMs, reclaimSummarySchema } from './state.js';
 import { readyToRetry } from './sessions.js';
@@ -210,7 +211,9 @@ export async function reclaimStep(cycle: Cycle) {
   //     supervisor is gone, so it does: the probe is the same one `master settle-containment`
   //     runs, the control plane re-evaluates every refusal itself, and an unverifiable signal is
   //     recorded as an escalation rather than settled. A live worker's quarantine is never touched.
-  const assessments = await effects.containment?.(snapshot.work, { now: snapshot.now, clockOffset }) ?? {};
+  const measured = effects.controlPlaneClock ? await effects.controlPlaneClock().catch(() => null) : null;
+  const clockBounds = await containmentClock(clockOffset, measured ? () => Promise.resolve(measured) : undefined);
+  const assessments = await effects.containment?.(snapshot.work, { now: snapshot.now, clockOffset: clockBounds.clockOffset, clockRoundTripMs: clockBounds.roundTripMs, clockSource: clockBounds.source }) ?? {};
   await closeEndedWorkerPanes(state, effects, open, assessments, { now: snapshot.now, clockOffset }, now, performed);
   // 3c. Reclaim the panes its ended launches left agentless (GY-842), and report what the host holds.
   await reclaimLaunchedPanes(cycle);
