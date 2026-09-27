@@ -239,8 +239,9 @@ export function doctorSegmentAllowed(words: ShellWord[], context: DoctorGuardCon
   const rest = words.slice(1);
   if (doctorCliPrograms.has(program)) return doctorCommandWords(rest.map(word => word.value));
   if (program === 'node') {
-    const script = rest[0]?.value ?? '';
-    if (!script || script.startsWith('-') || !doctorCliScript(script, context)) return { allow: false, reason: doctorRefusal(`node ${script || ''}`.trim() + ' (node runs only the Graphyard CLI script, with no node options)') };
+    // node runs only the Graphyard CLI script, with no options or variable expansion
+    if (rest.length < 1 || rest[0].value.startsWith('-') || rest[0].dynamic) return { allow: false, reason: doctorRefusal('node (node runs only the Graphyard CLI script, with no options or expansions)') };
+    if (!doctorCliScript(rest[0].value, context)) return { allow: false, reason: doctorRefusal(`node ${rest[0].value} (node runs only the Graphyard CLI script)`) };
     return doctorCommandWords(rest.slice(1).map(word => word.value));
   }
   const reads = doctorReadPrograms.get(program);
@@ -254,10 +255,15 @@ export function doctorSegmentAllowed(words: ShellWord[], context: DoctorGuardCon
 function gitRead(args: string[]) {
   const [subcommand, ...rest] = args;
   if (!gitReads.has(subcommand ?? '') || rest.some(arg => gitWriting.test(arg))) return false;
-  if (subcommand === 'worktree') return rest.length === 1 && rest[0] === 'list' || rest[0] === 'list' && rest.slice(1).every(arg => ['--porcelain', '-v', '--verbose', '-z'].includes(arg));
+  if (subcommand === 'worktree') {
+    // Only `git worktree list` is safe; `add` and `remove` write and can erase worktrees
+    return (rest.length === 1 && rest[0] === 'list') || (rest[0] === 'list' && rest.slice(1).every(arg => ['--porcelain', '-v', '--verbose', '-z'].includes(arg)));
+  }
   if (subcommand === 'branch') {
+    // Only listing options are safe; `-D`, `-d`, `-m`, `-c` are destructive
     const options = rest.filter(arg => arg.startsWith('-'));
     if (!options.every(arg => gitBranchListing.test(arg))) return false;
+    // Allow only if all args are listing options, or at least one listing option makes it a list command
     return rest.length === options.length || options.some(arg => /^(?:-a|-r|-l|--all|--remotes|--list|--contains|--no-contains|--merged|--no-merged|--points-at)$/.test(arg));
   }
   return true;
