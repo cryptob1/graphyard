@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { BaseRefresh, LandingCheck, QueueEjection, QueueEntry, QueueHistoryEntry, RevertedDelivery } from '../merge-queue.js';
-import { criterionSchema, policySchema, resourcesSchema, type Criterion, type Lane } from './policy.js';
+import { criterionSchema, policySchema, resourcesSchema, type Criterion } from './policy.js';
 import type { Evidence } from './evidence.js';
 import type { AgentReview, ReviewFailover, ReviewRequest } from './review.js';
 import type { Delivery, ReleaseDelivery } from './delivery.js';
@@ -228,8 +228,6 @@ export interface Work extends Create {
   // field is what the gate evaluator and the merge broker read independently.
   leadHold?: { action: BlockingRulingAction; rulingId: string; leadId: string; slice: SliceId; ruleId: string; reason: string; at: string } | null;
   gates: Gate[]; violations: string[];
-  lane?: Lane;
-  speedTarget?: number;
 }
 // One scope rule for every scoped read and mutation, so a route cannot answer
 // with data its own authorization would have refused.
