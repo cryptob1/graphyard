@@ -28,7 +28,8 @@ import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } f
  * (src/model/invariants.ts) holds. Fifteen items pass through it: released every fifteen minutes so
  * a merge lands about every fifteen, three sent back by their reviewer, two whose worker dies, two
  * production deploys, a file split on main that re-plans an item, one pull request GitHub reports
- * CLEAN at once and one UNSTABLE, a reviewer bot out of quota that fails over, and the loop's
+ * CLEAN at once and one UNSTABLE, a reviewer bot out of quota that fails over, two flaky tips
+ * rerun once (GY-516), one passing on the rerun and one failing again, and the loop's
  * between-cycles self-upgrade (GY-437) against a simulated coordinator checkout that stands dirty
  * across the second deploy for a while. Every one of the fifteen must be delivered. The loop
  * carries one `Launcher` across its cycles (GY-616), as `runDaemon` does, so session launches run
@@ -67,6 +68,8 @@ const plan = {
   deploys: [2 * hour + 30 * minute, 5 * hour], dirtyCheckout: { from: 4 * hour + 50 * minute, to: 6 * hour }, split: { at: 45 * minute, item: 12 }, clean: 2, unstable: 4, slowRecompute: 8, exhaustedReviewer: 6,
   /** GY-500: the item whose first head breaks main after its optimistic merge, and the items that change shared infrastructure and so queue. */
   breaksMain: 10, infrastructure: new Set([13, 14]),
+  // GY-516: a flake on a speculative tip whose one rerun passes, and one whose rerun fails again.
+  flaky: { rerunPasses: 13, rerunFails: 14 },
 };
 const file = (n: number) => `src/soak/item-${n}.ts`;
 const files = (n: number) => plan.infrastructure.has(n) ? [file(n), `tests/helpers/soak-item-${n}.ts`] : [file(n)];
@@ -128,6 +131,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   for (const n of plan.rework) github.verdicts.set(items[n - 1].key, ['CHANGES_REQUESTED']);
   github.unstable.add(items[plan.unstable - 1].key); github.slowRecompute.add(items[plan.slowRecompute - 1].key);
   github.exhaustedProfiles.add('claude-reviewer');
+  github.flaky.set(items[plan.flaky.rerunPasses - 1].key, 'rerun-passes'); github.flaky.set(items[plan.flaky.rerunFails - 1].key, 'rerun-fails');
 
   // ---- Workers: the loop dispatches, the simulated session claims, works, pushes and submits (or dies). ----
   interface Session { work: string; key: string; branch: string; profile: WorkerProfile; epoch: number; attempt: number; pane: string; pushAt: number; diesAt: number | null; state: 'working' | 'submitted' | 'dead' }
@@ -355,7 +359,7 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.ok(github.merges.some(entry => entry.key === items[plan.clean - 1].key && entry.state === 'CLEAN' && entry.mode === 'immediate'), `a CLEAN pull request merged at once: ${JSON.stringify(github.merges)}`);
   assert.ok(github.merges.some(entry => entry.key === items[plan.unstable - 1].key && entry.state === 'UNSTABLE' && entry.mode === 'immediate'), 'an UNSTABLE pull request merged at once');
   assert.ok(github.merges.some(entry => entry.key === items[plan.slowRecompute - 1].key && entry.mode === 'auto-merge'), 'one GitHub reported BLOCKED when asked was set to auto-merge, and GitHub merged it once it recomputed');
-  assert.equal(final.reduce((total, item) => total + (item.pipeline?.reworkRounds ?? 0), 0), plan.rework.size + 1, 'three rework rounds from review, and the reverted optimistic merge');
+  assert.equal(final.reduce((total, item) => total + (item.pipeline?.reworkRounds ?? 0), 0), plan.rework.size + 2, 'three rework rounds from review, the reverted optimistic merge, and the failed rerun');
   assert.equal(sessions.filter(session => session.state === 'dead').length, plan.deaths.size, 'two workers died');
   // Every dispatch the launcher settled was reported by a later cycle (GY-616): one dispatch-done
   // per session, none lost between the hand-off and the drain.
@@ -376,9 +380,9 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   for (const n of plan.infrastructure) assert.ok(!optimistic.includes(items[n - 1].key), `${items[n - 1].key} changes shared infrastructure and queued`);
   assert.equal(optimistic.filter(key => key === culprit).length, 2, `${culprit} merged optimistically, and again after its rework round`);
   assert.deepEqual(github.reverts.map(entry => [entry.key, !!entry.merged]), [[culprit, true]], 'exactly one revert, of the culprit, and it landed');
-  const [failed] = (await ledger('optimistic.post-merge')).filter(row => keyOf(row.work_id) === culprit && row.details?.verdict === 'fail');
-  assert.ok(failed, `the culprit's post-merge run failed on main: ${JSON.stringify(await ledger('optimistic.post-merge'))}`);
-  const failedAt = new Date(failed.created_at).getTime();
+  const [postMergeFailed] = (await ledger('optimistic.post-merge')).filter(row => keyOf(row.work_id) === culprit && row.details?.verdict === 'fail');
+  assert.ok(postMergeFailed, `the culprit's post-merge run failed on main: ${JSON.stringify(await ledger('optimistic.post-merge'))}`);
+  const failedAt = new Date(postMergeFailed.created_at).getTime();
   assert.ok(github.reverts[0].mergedAt! - failedAt <= 5 * minute, `the revert landed within one CI duration of the failure (${Math.round((github.reverts[0].mergedAt! - failedAt) / minute)} min)`);
   assert.equal((await ledger('optimistic.revert.merged')).length, 1, 'one merged revert on the ledger');
   assert.equal((await ledger('optimistic.revert.merged')).filter(row => row.details?.reopened?.source === 'optimistic-revert').length, 1, 'one reopen, with the failure attached');
@@ -388,6 +392,15 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.ok(guardWrites <= 2 * optimistic.length + 4, `the main guard writes its state only on a change (${guardWrites} rows for ${optimistic.length} optimistic merges)`);
   const busiest = Math.max(...github.reads.commitChecks.values());
   assert.ok(busiest <= 4, `the main guard reads at most a few commits' checks per cycle (${busiest})`);
+  // GY-516: each flaky tip was rerun exactly once; the one whose rerun passed merged that tip with no
+  // further round, and the one whose rerun failed again went back for one more and was still delivered.
+  const flaky = { passes: items[plan.flaky.rerunPasses - 1].key, fails: items[plan.flaky.rerunFails - 1].key };
+  assert.deepEqual(github.reruns.map(entry => entry.key).sort(), Object.values(flaky).sort(), `one rerun per flaky tip: ${JSON.stringify(github.reruns)}`);
+  const passed = github.reruns.find(entry => entry.key === flaky.passes)!, failed = github.reruns.find(entry => entry.key === flaky.fails)!;
+  assert.ok(github.contains(github.merges.find(entry => entry.key === flaky.passes)!.sha, passed.sha), 'the tip whose rerun passed is the one that landed');
+  assert.equal(final.find(item => item.key === flaky.passes)!.pipeline?.reworkRounds ?? 0, 0, 'a flake whose rerun passed costs no rework round');
+  assert.equal(final.find(item => item.key === flaky.fails)!.pipeline?.reworkRounds, 1, 'a tip that failed again after its rerun returned to its worker once');
+  assert.ok(!github.contains(github.merges.find(entry => entry.key === flaky.fails)!.sha, failed.sha), 'and a new head, not the failed tip, landed');
   assert.ok(cycles > 24 * 6, `the loop cycled through the day (${cycles} cycles)`);
   // GY-437: the between-cycles self-upgrade ran after every cycle of the day. Each deploy aligned
   // the checkout once, and restarted the fleet and the loop once (every merge touches src/); the
