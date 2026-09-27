@@ -211,6 +211,11 @@ export const masterRunSchema = z.object({
   // re-prompts it once, and how long after that re-prompt a still-quiet session is recorded as
   // never started (see acknowledgeLaunch); default 90.
   acknowledgementSeconds: z.number().int().min(30).max(900).optional(),
+  // How often the loop observes standing faults and judges the system invariants (GY-708): the
+  // control-plane, attention and Herdr reads they need run on the first cycle at least this long
+  // after the last observation. Unset: 60 (`faultObservationIntervalMs`); 0 observes every cycle,
+  // and a value at or below intervalSeconds does too, so it saves reads only above the cycle.
+  faultObservationSeconds: z.number().int().min(0).max(900).optional(),
   // How long a launched runtime has to come up in its pane before the launch fails and closes it
   // (GY-413); default 60. A loaded host echoes the launch command slowly, which is a slow start.
   launchStartSeconds: z.number().int().min(10).max(600).optional(),
