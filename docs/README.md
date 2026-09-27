@@ -21,7 +21,6 @@ Start with the numbered path; the other pages are references to open when a task
 - [Operations and recovery](operations.md) — checklist and incident tree.
 - [Operations reference](operations-reference.md) — recovery procedures and limits.
 - [Coordination](coordination.md) — criteria, overlap and scope.
-- [Disposable attempts](disposable-attempts.md) — the role time box, the retry ladder and the cap decision.
 - [Slice-lead delegation](delegation.md) — leads and escalations.
 
 ## Build integrations
