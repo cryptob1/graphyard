@@ -454,6 +454,17 @@ function scopeChange(item: Work) {
 }
 
 /**
+ * Check if the pane recorded for an item's session still belongs to this item/epoch.
+ * Returns null if the pane is valid, or a reason string if it should be refused.
+ */
+function checkPaneStillBelongs(item: Work, epoch: number, pane: string | undefined): string | null {
+  if (!pane) return 'no pane recorded';
+  const session = item.sessions?.find(s => s.kind === 'implementation' && s.epoch === epoch && s.pane === pane);
+  if (!session) return `pane ${pane} no longer belongs to ${item.key} epoch ${epoch} (pane reassigned or session ended)`;
+  return null;
+}
+
+/**
  * 1e–1f. A worker told nothing waits for ever (GY-524). While a live attempt has a blocker or a
  * scope request open, the loop marks what it waits on; once none is open, the session is re-prompted
  * once with what changed and the exact next command — unless it is already active — and the
@@ -492,6 +503,13 @@ async function resumeStep(cycle: Cycle, failedOver: Set<string>) {
       if (previous && previous.state !== 'failed') { await drop(keys.blocker, keys.scope); return; }
       // No session to tell (1d settles a dead one), or one on a runtime prompt (1b answers that first).
       if (!agent || !pane || status === 'blocked') return;
+      // Verify the pane still belongs to this item/epoch: it may have been reassigned to another item or gone (GY-852).
+      const paneReason = checkPaneStillBelongs(item, epoch, pane);
+      if (paneReason) {
+        performed.push(await entry(promptKey, 'failed', `${item.key} epoch ${epoch}: ${changed}; the recorded pane cannot be re-prompted: ${paneReason}`, (previous?.attempts ?? 0) + 1));
+        await drop(keys.blocker, keys.scope);
+        return;
+      }
       if (status === 'working') { await entry(promptKey, 'done', `${item.key} epoch ${epoch}: ${changed}; ${profile.agentName} is already active, so it is not re-prompted`); await drop(keys.blocker, keys.scope); return; }
       if (!effects.promptSession || !readyToRetry(previous, state.cycle)) return;
       const attempts = (previous?.attempts ?? 0) + 1;
@@ -515,6 +533,23 @@ async function resumeStep(cycle: Cycle, failedOver: Set<string>) {
     const repromptKey = `resume:idle:${item.id}:${epoch}:${idle.at}`, reprompted = state.actions[repromptKey];
     if (!reprompted || reprompted.state === 'failed') {
       if (quietMs <= idleLeaseMs || !effects.promptSession || !readyToRetry(reprompted, state.cycle)) return;
+      // Verify the pane still belongs to this item/epoch before idle-re-prompting (GY-852, AC-2).
+      const paneReason = checkPaneStillBelongs(item, epoch, pane);
+      if (paneReason) {
+        // The pane is gone or belongs to another item: end the attempt as idle and redispatch.
+        const reclaimKey = `resume:reclaim:${item.id}:${epoch}`, reclaimPrevious = state.actions[reclaimKey];
+        if (reclaimPrevious?.state === 'done' || (reclaimPrevious && !readyToRetry(reclaimPrevious, state.cycle))) return;
+        const reason = `idle with a live lease: pane ${pane} is gone since ${idle.at}; cannot re-prompt (${paneReason})`, attempts = (reclaimPrevious?.attempts ?? 0) + 1;
+        await entry(reclaimKey, 'started', `${profile.agentName} on ${item.key} epoch ${epoch} is ${reason}; handing ${item.key} to a new attempt`, attempts);
+        try {
+          const next = await endWorkerAttempt(cycle, item, profile, epoch, pane, reason, `ended without submitting: its session ${profile.agentName} was ${reason}`);
+          performed.push(await entry(reclaimKey, 'done', `${profile.agentName} on ${item.key} epoch ${epoch} was ${reason}; ${next}, keeping the attempt's branch`, attempts));
+          await drop(keys.idle);
+        } catch (error) {
+          performed.push(await entry(reclaimKey, 'failed', `${profile.agentName} on ${item.key} epoch ${epoch} is ${reason}, but its attempt could not be handed on: ${message(error)}`, attempts));
+        }
+        return;
+      }
       const attempts = (reprompted?.attempts ?? 0) + 1, observed = `idle-with-lease: ${profile.agentName} in pane ${pane} has shown no activity since ${idle.at} (${minutes} minutes) while holding ${item.key} epoch ${epoch} with no open blocker or scope request`;
       await entry(repromptKey, 'started', `${observed}; re-prompting it once`, attempts);
       try {
