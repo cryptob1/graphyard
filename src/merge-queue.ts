@@ -321,6 +321,14 @@ export interface QueueEjection {
    * `speculativeConflict` still reads from their reason.
    */
   conflict?: { base: string | null } | null;
+  /**
+   * GY-878: Whether the ejection came from a landability-family refusal (build/acceptance gates).
+   * Landability ejections are verdict-gated: an entry re-enters once evaluateLandability
+   * returns landable for the same head. Non-landability ejections (CI, review, threads, etc.)
+   * keep sha+policyRevision stickiness to avoid eject/re-enter churn. Absent on records that
+   * predate this field; legacy records are treated as landability-family for re-entry.
+   */
+  family?: 'landability' | null;
 }
 export interface QueueHistoryEntry {
   at: string; event: 'enqueued' | 'predicted' | 'ejected' | 'dissolved'; sequence: number; reason?: string; tip?: string;
