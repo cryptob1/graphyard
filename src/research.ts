@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { z } from 'zod';
-import { demand, operatorScopeIncludes, type Principal, type Work } from './model.js';
+import { demand, demandWork, operatorScopeIncludes, type Principal, type Work } from './model.js';
 import { humanOnlyRefusal, parkRule } from './model/human-request.js';
 import { defaultPiModel, piRunner } from './runner/pi.js';
 import type { Run, RunResult, Runner } from './runner/types.js';
@@ -353,7 +353,7 @@ async function transact(services: Services, actor: Principal, id: string, key: s
     const replay = await receipt(db, actor, key, fingerprint); if (replay) return replay;
     const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(row => row.document);
     const work = all.find(item => item.id === id || item.key === id);
-    demand(work, 'Work item not found', 404);
+    demandWork(work);
     demand(operatorScopeIncludes(actor, work!), 'Work item is outside this operator-agent scope', 403);
     demand(work!.stage !== 'done', 'Delivered work is immutable');
     const { kind, details } = change(work!, now);

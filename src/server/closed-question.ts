@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type pg from 'pg';
-import { demand, type Evidence, type Principal, type Work } from '../model.js';
+import { demand, demandWork, type Evidence, type Principal, type Work } from '../model.js';
 import { appliedThreshold, closedQuestionFor, closedQuestionRefusal, closedQuestionRequestSchema, judgeAnswer, type ClosedQuestionRecord } from '../model/closed-question.js';
 import { boundState, type StateReaders } from '../closed-question.js';
 import { save } from '../store.js';
@@ -24,7 +24,7 @@ const bound = (work: Work, data: { sha: string; baseSha: string; policyRevision:
   !!work.candidate && work.candidate.sha === data.sha && work.candidate.baseSha === data.baseSha && work.policyRevision === data.policyRevision && !work.reworkRequested;
 /** What refuses a judgement before and after the responder is asked: the item, its authority boundaries, and the exact candidate. */
 function refusal(work: Work | undefined, data: { proof: string; sha: string; baseSha: string; policyRevision: number }) {
-  demand(work, 'Work item not found', 404);
+  demandWork(work);
   demand(work!.stage !== 'done', 'Delivered work is immutable');
   const refused = closedQuestionRefusal(work!, data.proof);
   demand(!refused, refused!, 409);

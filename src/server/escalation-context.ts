@@ -1,6 +1,6 @@
 import type pg from 'pg';
 import { z } from 'zod';
-import { Refusal, demand, escalationTriggers, operatorScopeIncludes, standingEscalations, type Principal, type Work } from '../model.js';
+import { Refusal, demand, demandWork, escalationTriggers, operatorScopeIncludes, standingEscalations, type Principal, type Work } from '../model.js';
 import { foldDecisions } from '../model/approval.js';
 import { assembleEscalationContext, canonical, contextBudget, escalationAction, intentLedgerKinds, contextLadder, routineLedgerKinds, rulesRef, type ContextInputs, type LedgerKindCount, type LedgerRow, type PrecedentDecision, type RulesSource } from '../model/escalation-context.js';
 import type { Services } from './routes.js';
@@ -41,7 +41,7 @@ export async function readEscalationContext(services: Services, actor: Principal
   const budget = (() => { try { return contextBudget(env, query.budget); } catch (error) { throw new Refusal((error as Error).message, 400); } })();
   const graph = await services.engine.store.list();
   const work = graph.find(item => item.id === id || item.key === id);
-  demand(work, 'Work item not found', 404);
+  demandWork(work);
   demand(actor.role !== 'operator-agent' || operatorScopeIncludes(actor, work!), 'Work item is outside this operator-agent scope', 403);
   const standing = standingEscalations(work!);
   const trigger = query.trigger ?? standing[0]?.trigger;

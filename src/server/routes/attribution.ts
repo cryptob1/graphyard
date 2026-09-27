@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { demand, operatorScopeIncludes, type Work } from '../../model.js';
+import { demand, demandWork, operatorScopeIncludes, type Work } from '../../model.js';
 import { attributionDrilldown, attributionHistory, attributionWindows, computeAttribution, readAttribution, releaseManifest } from '../../attribution.js';
 import type { Release } from '../../delivery.js';
 import { defineRoutes } from '../routes.js';
@@ -43,7 +43,7 @@ export const attributionRoutes = defineRoutes('attribution', [
     async handle({ actor, services: { engine } }, [id]) {
       z.uuid().parse(id);
       const work = (await engine.store.pool.query('SELECT document FROM work_items WHERE id=$1', [id])).rows[0]?.document as Work | undefined;
-      demand(work, 'Work item not found', 404);
+      demandWork(work);
       demand(operatorScopeIncludes(actor, work!), 'Work item is outside this operator-agent scope', 403);
       demand(actor.role !== 'worker' || work!.lastAssignment?.owner === actor.id || work!.workspaces.some(w => w.owner === actor.id), 'Workers read the attribution history of their assigned work only', 403);
       const records = await attributionHistory(engine.store, id);

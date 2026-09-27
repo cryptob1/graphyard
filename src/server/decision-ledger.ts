@@ -1,5 +1,5 @@
 import type pg from 'pg';
-import { demand, operatorScopeIncludes, standingEscalations, type Principal, type Work } from '../model.js';
+import { demand, demandWork, operatorScopeIncludes, standingEscalations, type Principal, type Work } from '../model.js';
 import { foldDecisions, type Decision, type DecisionState } from '../model/approval.js';
 import type { Services } from './routes.js';
 
@@ -81,7 +81,7 @@ export async function listDecisions(services: Services, actor: Principal, id: st
   // The one item it answers for, by id or key (GY-377). Loading every document to find it made each
   // read cost the whole graph, and the loop and master status read this for every open item.
   const work = await findDecisionSubject(services.engine.store.pool, id);
-  demand(work, 'Work item not found', 404);
+  demandWork(work);
   demand(actor.role !== 'operator-agent' || operatorScopeIncludes(actor, work!), 'Work item is outside this operator-agent scope', 403);
   return { key: work!.key, decisions: await readDecisions(services.engine.store.pool, work!) };
 }
