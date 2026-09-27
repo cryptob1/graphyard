@@ -8,11 +8,11 @@ import { compactHeartbeatReceipt } from './store/receipts.js';
 import { authorizedForProof, unauthorizedProofs } from './proof-grants.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
 import { activeLease, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, submittedEpoch, type Attestation, requireCurrent, createSchema, criterionSchema, bindingApproval, carriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type ApprovalIdentity, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type Lease, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
-import { Refusal } from './model/refusal.js';
+import { Refusal, demandWork } from './model/refusal.js';
 import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
 import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
-import { branchContamination, nextQueueEntries, disprovedConflict, currentRestore, decideIdentityCarry, defaultMergeBatchSize, mergeBatchSizeEvent, dismissedApproval, keptTipCarry, onto, pendingRestore, reviewedFilesOf, queueHistoryLimit, queueSequencingReason, reconciliationRefusalPrefix, tipReplacesHead, type BaseRefresh, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type QueueSpeculation, type RestoredApproval } from './merge-queue.js';
+import { branchContamination, nextQueueEntries, disprovedConflict, currentRestore, decideIdentityCarry, defaultMergeBatchSize, mergeBatchSizeEvent, dismissedApproval, keptTipCarry, onto, pendingRestore, reviewedFilesOf, queueHistoryLimit, queueSequencingReason, reconciliationRefusalPrefix, reconcileCheckReruns, rerunFailedChecksEvent, tipReplacesHead, checkRerunLimit, type BaseRefresh, type CheckRerun, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type QueueSpeculation, type RestoredApproval } from './merge-queue.js';
 import { queueEjectionRecord } from './model/queue.js';
 import { githubFromEnv, mergeBandQueueDepth } from './github.js';
 import { regressionRefusals } from './regression-guard.js';
@@ -33,6 +33,7 @@ import { beginAttempt, endAttempt, endLapsedAttempt, recordIntervention, recordR
 import { foldDecisions, type Decision } from './model/approval.js';
 import { coveringWindow, directMergeAuthorization, directMergeFromEnv, directMergeWindows, sweepDirectMerges, type DirectMergeWindow } from './direct-merge.js';
 import { repairAuditEvent, repairScopeRefusal, type RepairAudit } from './master/repair-lane.js';
+import { defaultRerunFailedChecks, maxRerunFailedChecks } from './master/profiles.js';
 
 const epoch = z.number().int().positive();
 const sha = z.string().regex(/^[a-f0-9]{40}$/);
@@ -431,6 +432,49 @@ export class Engine {
     this.mergeBatchSize = Number.isSafeInteger(row?.size) && row.size >= 1 ? row.size : defaultMergeBatchSize;
     return this.mergeBatchSize;
   }
+  /**
+   * How many times a required check that failed on a candidate sha is rerun before the failure
+   * counts (GY-516): `mergeQueue.rerunFailedChecks` as the master publishes it, else the product
+   * default (src/master/profiles.ts); 0 disables.
+   */
+  rerunFailedChecks = defaultRerunFailedChecks;
+  /** `mergeQueue.rerunFailedChecks` as the master last published it (POST /api/merge-queue), read back from the installation ledger, else the default. */
+  async loadRerunFailedChecks() {
+    const row = (await this.store.pool.query('SELECT (payload->>\'rerunFailedChecks\')::int AS reruns FROM events WHERE work_id IS NULL AND kind=$1 ORDER BY seq DESC LIMIT 1', [rerunFailedChecksEvent])).rows[0];
+    this.rerunFailedChecks = Number.isSafeInteger(row?.reruns) && row.reruns >= 0 && row.reruns <= maxRerunFailedChecks ? row.reruns : defaultRerunFailedChecks;
+    return this.rerunFailedChecks;
+  }
+  /**
+   * Records the outcome of asking GitHub to rerun an owed check (GY-516), made by the integration
+   * job outside any transaction: `requested` holds the failure until the rerun concludes,
+   * `refused` lets it stand, and the entry is re-evaluated at once either way.
+   */
+  async recordCheckRerun(id: string, jobToken: string, owed: Pick<CheckRerun, 'sha' | 'check' | 'failedRunId'>, outcome: { state: 'requested' | 'refused'; runId?: number; detail?: string }) {
+    return this.store.transaction(async (db, now) => {
+      const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
+      requireCurrent(job, 'Integration job lease expired or superseded');
+      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const work = all.find(w => w.id === id);
+      demand(work, 'Work item not found', 404);
+      const index = (work.checkReruns ?? []).findIndex(entry => entry.sha === owed.sha && entry.check === owed.check && entry.failedRunId === owed.failedRunId);
+      if (index < 0 || work.checkReruns![index].state !== 'owed') return work;
+      const rerun: CheckRerun = { ...work.checkReruns![index], state: outcome.state, ...(outcome.runId !== undefined ? { runId: outcome.runId } : {}), ...(outcome.detail ? { detail: outcome.detail } : {}), ...(outcome.state === 'refused' ? { resolvedAt: now.toISOString() } : {}) };
+      work.checkReruns = work.checkReruns!.map((entry, at) => at === index ? rerun : entry).slice(-checkRerunLimit);
+      const queuedBefore = work.queue?.sequence ?? null;
+      this.evaluate(work, all, now);
+      await this.recordEjection(db, work, all, queuedBefore, now);
+      await this.recordDispatch(db, work, now);
+      await save(db, work, 'github', `check.rerun.${outcome.state}`, now, rerun);
+      return work;
+    });
+  }
+  /** A queue entry the evaluation just derived out is recorded as an ejection, and the entries behind it are woken. */
+  private async recordEjection(db: PoolClient, work: Work, all: Work[], queuedBefore: number | null, now: Date, extra: Record<string, unknown> = {}) {
+    if (queuedBefore === null || work.queue || work.queueEjection?.sequence !== queuedBefore) return;
+    await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'queue.ejected',
+      JSON.stringify({ details: { sequence: queuedBefore, reason: work.queueEjection.reason, ...extra, at: now.toISOString() } })]);
+    for (const behind of nextQueueEntries(all, work.id, Math.max(mergeBandQueueDepth, this.mergeBatchSize))) await wakeJob(db, behind.id);
+  }
   // The launch fence is a deployment-independent safety default; only tests shorten it.
   constructor(public store: Store, public ciAppIds: number[] = [15368], public leaseSeconds = 120, public repository = process.env.GITHUB_REPOSITORY ?? '', public launchFence = launchFenceMs) {}
   private async observeSubmission(actor: Principal, id: string | null, data: { epoch: number; pr: number }, key: string): Promise<Observation | null> {
@@ -630,7 +674,7 @@ export class Engine {
         all.push(work!);
         this.refuseRenewedDeferral(work!, all);
       }
-      demand(work, 'Work item not found', 404);
+      demandWork(work);
       // A lease past its expiry that a recorded server-side renewal fault still covers stays live (GY-558).
       await this.renewalGrace(db, work, now);
       if (actor.role === 'operator-agent') {
@@ -2124,6 +2168,12 @@ export class Engine {
       // An approval GitHub withdrew for a merge-base change on this unchanged head binds again
       // before the gates read the record, so no review request is opened for it (GY-127).
       const restoredApproval = observation.merged ? null : this.restoreDismissedApproval(work, now);
+      // A required check that just failed on this candidate is owed one rerun before it counts, and
+      // a rerun that concluded is resolved with its own conclusion (GY-516), before the gates read it.
+      const reruns = reconcileCheckReruns(work, this.ciAppIds, this.rerunFailedChecks, now);
+      if (reruns.transitions.length || work.checkReruns) work.checkReruns = reruns.reruns;
+      for (const transition of reruns.transitions) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', transition.kind,
+        JSON.stringify({ details: { ...transition.rerun, at: now.toISOString() } })]);
       this.evaluate(work, all, now);
       if (restoredApproval) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'review.restored',
         JSON.stringify({ details: { ...restoredApproval, baseSha: observation.candidate.baseSha, policyRevision: work.policyRevision } })]);
@@ -2183,11 +2233,7 @@ export class Engine {
       // it is woken to predict against the real base. For a merged entry that could never publish
       // a speculative tip, the ejection is its refused reconciliation (GY-94): nothing is delivered,
       // and the ledger keeps the refusal and the exit side by side.
-      if (queuedBefore !== null && !work.queue && work.queueEjection?.sequence === queuedBefore) {
-        await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'queue.ejected',
-          JSON.stringify({ details: { sequence: queuedBefore, reason: work.queueEjection.reason, ...(refusedReconciliation ? { decision: refusedReconciliation.decision, mergeSha: observation.mergeSha } : {}), at: now.toISOString() } })]);
-        for (const behind of nextQueueEntries(all, work.id, Math.max(mergeBandQueueDepth, this.mergeBatchSize))) await wakeJob(db, behind.id);
-      }
+      await this.recordEjection(db, work, all, queuedBefore, now, refusedReconciliation ? { decision: refusedReconciliation.decision, mergeSha: observation.mergeSha } : {});
       // A stuck batch the evaluation dissolved (GY-506) is recorded on the ledger once, when it happened.
       const dissolved = work.queue?.batchDissolved ?? null;
       if (dissolved && JSON.stringify(dissolved) !== JSON.stringify(dissolvedBefore)) {
