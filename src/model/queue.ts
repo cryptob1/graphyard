@@ -26,6 +26,14 @@ function verdictGatedReentry(work: Work, all: Work[], now: Date): boolean {
   if (!ejection || !work.candidate || ejection.sha !== work.candidate.sha || ejection.policyRevision !== work.policyRevision) {
     return false;
   }
+  // Only apply verdict-gated re-entry for landability-family refusals.
+  // Non-landability reasons (CI, review, threads, etc.) keep sha stickiness.
+  const reason = ejection.reason.toLowerCase();
+  const isLandabilityReason = reason.includes('planned files') || reason.includes('landing') ||
+    reason.includes('revert work') || reason.includes('merge would fail');
+  if (!isLandabilityReason) {
+    return false;
+  }
   const verdict = evaluateLandability(work, all, now);
   return verdict.verdict === 'landable';
 }
