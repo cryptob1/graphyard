@@ -1,5 +1,5 @@
 import type pg from 'pg';
-import { demand, operatorCapability, type Principal, type Work } from '../model.js';
+import { demand, demandWork, operatorCapability, type Principal, type Work } from '../model.js';
 import { closeRefusal, closeSchema, closureRefRefusal, commitRef, itemRef, type Closure } from '../model/closure.js';
 import { dispatchHistoryLimit, type DispatchRequest } from '../model/dispatch.js';
 import { humanRequestBlocker, retainedHumanRequests, type HumanRequest } from '../model/human-request.js';
@@ -35,7 +35,7 @@ export async function closeWork(services: Services, caller: Principal, id: strin
     const replay = await receipt(db, actor, key, fingerprint); if (replay) return replay as unknown as Work;
     demand(['admin', 'coordinator', 'operator-agent'].includes(actor.role), 'Only the master (coordinator or operator agent) or an admin may close work', 403);
     const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(row => row.document);
-    const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
+    const work = all.find(item => item.id === id || item.key === id); demandWork(work);
     if (actor.role === 'operator-agent') operatorCapability(actor, 'intent:create', work!, services.repository);
     const refused = closeRefusal(work!, now.getTime()); demand(!refused, refused!, 409);
     const badRef = closureRefRefusal(work!, all, data.kind, ref); demand(!badRef, badRef!, 422);

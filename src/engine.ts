@@ -7,8 +7,8 @@ import { leaseCommands } from './store/pools.js';
 import { compactHeartbeatReceipt } from './store/receipts.js';
 import { authorizedForProof, unauthorizedProofs } from './proof-grants.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, submittedEpoch, type Attestation, requireCurrent, createSchema, criterionSchema, bindingApproval, carriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type ApprovalIdentity, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type Lease, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
-import { Refusal, demandWork } from './model/refusal.js';
+import { activeLease, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, submittedEpoch, type Attestation, requireCurrent, createSchema, criterionSchema, bindingApproval, carriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type ApprovalIdentity, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, demandWork, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type Lease, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
+import { Refusal } from './model/refusal.js';
 import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
 import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
@@ -486,7 +486,7 @@ export class Engine {
       requireCurrent(job, 'Integration job lease expired or superseded');
       const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
       const work = all.find(w => w.id === id);
-      demand(work, 'Work item not found', 404);
+      demandWork(work);
       const index = (work.checkReruns ?? []).findIndex(entry => entry.sha === owed.sha && entry.check === owed.check && entry.failedRunId === owed.failedRunId);
       if (index < 0 || work.checkReruns![index].state !== 'owed') return work;
       const rerun: CheckRerun = { ...work.checkReruns![index], state: outcome.state, ...(outcome.runId !== undefined ? { runId: outcome.runId } : {}), ...(outcome.detail ? { detail: outcome.detail } : {}), ...(outcome.state === 'refused' ? { resolvedAt: now.toISOString() } : {}) };
@@ -1478,7 +1478,7 @@ export class Engine {
       if (receipt) { demand(receipt.fingerprint === fingerprint, idempotencyMismatch); return receipt.result; }
       const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
       const work = all.find(item => item.id === id || item.key === id);
-      demand(work, 'Work item not found', 404);
+      demandWork(work);
       demand(data.expectedRevision <= work.revision, 'Task changed before the merge was requested; retry');
       demand(data.queueTip === undefined || work.queue?.speculation?.tip === data.queueTip && work.queue.speculation.base === data.baseSha, 'Task changed before the merge was requested; retry');
       this.evaluate(work, all, now);
@@ -1506,7 +1506,7 @@ export class Engine {
   async recordPostMerge(id: string, mergeSha: string, verdict: PostMergeVerdict, on?: string): Promise<Work> {
     return this.store.transaction(async (db, now) => {
       const work: Work = (await db.query('SELECT document FROM work_items WHERE id=$1 FOR UPDATE', [id])).rows[0]?.document;
-      demand(work, 'Work item not found', 404);
+      demandWork(work);
       demand(work.optimisticMerges?.some(entry => entry.mergeSha === mergeSha), `${work.key} has no optimistic merge ${mergeSha.slice(0, 12)}`, 409);
       if (!applyPostMerge(work, mergeSha, verdict, now, on)) return work;
       await save(db, work, 'graphyard', 'optimistic.post-merge', now, { mergeSha, on: on ?? mergeSha, ...verdict });
@@ -1522,7 +1522,7 @@ export class Engine {
   async recordOptimisticRevert(id: string, mergeSha: string, revert: OptimisticRevert): Promise<Work> {
     return this.store.transaction(async (db, now) => {
       const work: Work = (await db.query('SELECT document FROM work_items WHERE id=$1 FOR UPDATE', [id])).rows[0]?.document;
-      demand(work, 'Work item not found', 404);
+      demandWork(work);
       demand(work.optimisticMerges?.some(entry => entry.mergeSha === mergeSha), `${work.key} has no optimistic merge ${mergeSha.slice(0, 12)}`, 409);
       const delivered = work.stage === 'done';
       if (!applyRevert(work, mergeSha, revert, now)) return work;
@@ -1546,7 +1546,7 @@ export class Engine {
   async recordGitHubQueue(id: string, state: GitHubMergeQueueState, action: MergeQueueAction): Promise<Work> {
     return this.store.transaction(async (db, now) => {
       const work: Work = (await db.query('SELECT document FROM work_items WHERE id=$1 FOR UPDATE', [id])).rows[0]?.document;
-      demand(work, 'Work item not found', 404);
+      demandWork(work);
       if (action.kind !== 'hold') await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'github', action.kind === 'enqueue' ? 'merge.enqueued' : 'merge.dequeued',
         JSON.stringify({ details: { reason: action.reason, pr: work.candidate?.pr ?? null, sha: work.candidate?.sha ?? null, head: state.head, queue: state.queue, mode: state.mode, at: now.toISOString() } })]);
       // A refused enqueue or dequeue is a hold for the queue, never silent (all merges stalled when

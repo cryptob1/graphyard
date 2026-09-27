@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type pg from 'pg';
-import { activeLease, demand, operatorScopeIncludes, type Principal, type Work } from '../model.js';
+import { activeLease, demand, demandWork, operatorScopeIncludes, type Principal, type Work } from '../model.js';
 import { capacityEventSchema, capacityRetryAt, capacitySignature, retainedExhaustions, type CapacityState, type ExhaustionRecord } from '../model/capacity.js';
 import { describeHumanRequest, humanAnswerSchema, humanDecisionLabel, humanOnlyReadsDecisions, humanOnlyRefusal, humanRequestBlocker, humanRequestSchema, openHumanOnly, parkRule, retainedHumanRequests, type HumanOnlySubject, type HumanRequest } from '../model/human-request.js';
 import { decisionsByWork } from './decision-ledger.js';
@@ -64,7 +64,7 @@ export async function requestHumanDecision(services: Services, actor: Principal,
   return services.engine.store.transaction(async (db, now) => {
     const replay = await receipt(db, actor, key, fingerprint); if (replay) return replay;
     demand(actor.role === 'worker' || actor.role === 'admin', 'Worker permission required', 403);
-    const { work, all } = await findWork(db, id); demand(work, 'Work item not found', 404);
+    const { work, all } = await findWork(db, id); demandWork(work);
     demand(work!.stage !== 'done', 'Delivered work is immutable');
     activeLease(work!, actor, data.epoch, now);
     demand(!work!.humanRequest, `${work!.key} already waits on human request ${work!.humanRequest?.id}; answer it before recording another`);
@@ -93,7 +93,7 @@ export async function answerHumanDecision(services: Services, actor: Principal, 
     // so neither can drift from the other (model/human-request.ts `parkRule`).
     const refusal = humanOnlyRefusal(parkRule.kind, actor);
     demand(!refusal, refusal!, 403);
-    const { work, all } = await findWork(db, id); demand(work, 'Work item not found', 404);
+    const { work, all } = await findWork(db, id); demandWork(work);
     const request = work!.humanRequest;
     demand(request, `${work!.key} has no open human-only request`, 404);
     demand(request!.id === data.request, `${work!.key}'s open request is ${request!.id}, not ${data.request}; reload before answering`);
@@ -146,7 +146,7 @@ export async function recordCapacity(services: Services, actor: Principal, id: s
   return services.engine.store.transaction(async (db, now) => {
     const replay = await receipt(db, actor, key, fingerprint); if (replay) return replay;
     demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
-    const { work, all } = await findWork(db, id); demand(work, 'Work item not found', 404);
+    const { work, all } = await findWork(db, id); demandWork(work);
     demand(work!.stage !== 'done', 'Delivered work is immutable');
     const capacity = capacityOf(work!);
     if (data.event === 'exhausted') {

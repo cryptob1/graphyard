@@ -1,5 +1,5 @@
 import type pg from 'pg';
-import { demand, operatorCapability, type Principal, type Work } from '../model.js';
+import { demand, demandWork, operatorCapability, type Principal, type Work } from '../model.js';
 import { isDelivered } from '../model/closure.js';
 import { appendedDescription, followUpAppendSchema, followUpEntries, followUpParent, mergeDuplicateFollowUps, mergeFollowUpEntries, triageRecordSchema, untriaged, type FollowUpEntry } from '../model/machine-backlog.js';
 import { save } from '../store.js';
@@ -35,7 +35,7 @@ export async function appendFollowUps(services: Services, caller: Principal, id:
     const actor = await authenticated(services, db, now, caller);
     const replay = await receipt(db, actor, key, fingerprint); if (replay) return replay as unknown as { key: string; added: number };
     const all = await readAll(db);
-    const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
+    const work = all.find(item => item.id === id || item.key === id); demandWork(work);
     masterOnly(actor, work, services, 'append review follow-ups');
     const parent = followUpParent(work!);
     demand(parent && work!.stage !== 'done', `${work!.key} is not an open follow-up item`, 409);
@@ -103,7 +103,7 @@ export async function recordTriage(services: Services, caller: Principal, id: st
     const replay = await receipt(db, actor, key, fingerprint); if (replay) return replay as unknown as Work;
     demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
     const all = await readAll(db);
-    const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
+    const work = all.find(item => item.id === id || item.key === id); demandWork(work);
     demand(untriaged(work!), `${work!.key} is not a machine-filed item awaiting triage`, 409);
     const judgement = data.judgement;
     if (judgement.outcome === 'close' && judgement.ref) {
@@ -131,7 +131,7 @@ export async function recordTriage(services: Services, caller: Principal, id: st
  */
 export async function applyTriageClosure(services: Services, actor: Principal, workId: string, input: { kind: 'superseded' | 'obsolete' | 'duplicate'; ref: string | null; reason: string; triageAt: string }, decision: string, key: string) {
   const all = await services.engine.store.list();
-  const work = all.find(item => item.id === workId); demand(work, 'Work item not found', 404);
+  const work = all.find(item => item.id === workId); demandWork(work);
   const target = input.kind === 'duplicate' && input.ref ? all.find(item => item.key === input.ref) : undefined;
   if (target && followUpParent(target) && target.stage !== 'done') {
     const findings = followUpParent(work!) ? followUpEntries(work!) : [{ path: null, text: `${work!.key}: ${work!.title}`.slice(0, 2000) }];

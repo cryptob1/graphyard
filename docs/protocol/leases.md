@@ -16,6 +16,7 @@ Register the exact branch, path and host ID (`graphyard register GY-1 workspace.
 - `submit` (CLI `complete`) ends it; later heartbeats are refused with `Implementation lease for epoch N ended when GY-N was submitted; stop heartbeating after complete`.
 - `park` records a human-only request and releases it.
 - A coordinator `capacity` report (`event: "exhausted"`) releases it for another account.
+- The item itself is gone: a renewal receives 404 with `code: "work-not-found"` in the response body. This is the server's definite answer that the item has been deleted or superseded; it is not a proxy error, so the worker terminates immediately without waiting for lease expiry (GY-448).
 - Otherwise it expires, classified from the unsubmitted epoch's ledger: an unwithdrawn `blocked` report is `lease.expired` with cause `blocked-awaiting-operator`; an admin `--previous-worker-stopped` attestation is `stopped-by-attestation`; `capacity.exhausted` is `exhausted-capacity`; nothing is a `lease-loss` escalation, auto-settled if a record later explains it ([settling](../delegation.md#who-may-settle-what)).
 
 

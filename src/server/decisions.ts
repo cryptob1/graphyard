@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { z } from 'zod';
-import { Refusal, demand, resolveEscalation, standingEscalations, type Principal, type Work } from '../model.js';
+import { Refusal, demand, demandWork, resolveEscalation, standingEscalations, type Principal, type Work } from '../model.js';
 import { save, wakeJob } from '../store.js';
 import { approvalConflict, approveCapability, assertDecisionAuthority, decisionApprovalSchema, decisionInputs, decisionPrecondition, decisionRequestSchema, decisionSituation, foldDecisions, requiredDecisionCapabilities, standingRefusal, type Decision, type DecisionState } from '../model/approval.js';
 import { canonical, decisionRace, readDecisions, resolvePin, samePin, type DecisionRecord, type StaleRace } from './decision-ledger.js';
@@ -58,7 +58,7 @@ export async function requestDecision(services: Services, caller: Principal, id:
   return services.engine.store.transaction(async (db, now) => {
     const actor = await authenticated(services, db, now, caller);
     const replay = await receipt(db, actor, key, fingerprint); if (replay) return replay;
-    const work = await findWork(db, id); demand(work, 'Work item not found', 404);
+    const work = await findWork(db, id); demandWork(work);
     for (const capability of requiredDecisionCapabilities(data.action, input, work!)) assertDecisionAuthority(actor, capability, work!, services.repository);
     const precondition = decisionPrecondition(data.action, input, work!); demand(!precondition, precondition!, 409);
     // The repair lane's decision names the fault it repairs (GY-406): a merge-path location. The
@@ -136,7 +136,7 @@ export async function approveDecision(services: Services, caller: Principal, id:
     const settled = await services.engine.store.transaction(async (db, now) => {
       const actor = await authenticated(services, db, now, caller);
       const replay = await receipt(db, actor, key, fingerprint); if (replay) return replay;
-      const work = await findWork(db, id); demand(work, 'Work item not found', 404);
+      const work = await findWork(db, id); demandWork(work);
       const decision = (await readDecisions(db, work!)).find(entry => entry.id === data.decision);
       demand(decision, `Decision ${data.decision} does not exist on ${work!.key}`, 404);
       // Separation of duties is judged before authority, so a conflicted identity is told the

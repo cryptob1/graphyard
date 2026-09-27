@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { demand, type Principal, type Work } from '../model.js';
+import { demand, demandWork, type Principal, type Work } from '../model.js';
 import { approvalConflict, approveCapability, assertDecisionAuthority, decisionRefusalSchema, decisionRequestSchema } from '../model/approval.js';
 import { scopeRefusalBlocker, unplannedPaths } from '../model/scope.js';
 import { save } from '../store.js';
@@ -19,7 +19,7 @@ export async function refuseDecision(services: Services, caller: Principal, id: 
   return services.engine.store.transaction(async (db, now) => {
     const actor = await authenticated(services, db, now, caller);
     const replay = await receipt(db, actor, key, fingerprint); if (replay) return replay;
-    const work = await findWork(db, id); demand(work, 'Work item not found', 404);
+    const work = await findWork(db, id); demandWork(work);
     const decision = (await readDecisions(db, work!)).find(entry => entry.id === data.decision);
     demand(decision, `Decision ${data.decision} does not exist on ${work!.key}`, 404);
     demand(actor.id !== decision!.requestedBy, `The requester cannot refuse its own decision: ${actor.id} requested ${decision!.id}; an independent approver refuses it, and the requester takes it back with graphyard master withdraw ${work!.key} ${decision!.id} REASON`, 403);
@@ -50,7 +50,7 @@ export async function withdrawDecision(services: Services, caller: Principal, id
   return services.engine.store.transaction(async (db, now) => {
     const actor = await authenticated(services, db, now, caller);
     const replay = await receipt(db, actor, key, fingerprint); if (replay) return replay;
-    const work = await findWork(db, id); demand(work, 'Work item not found', 404);
+    const work = await findWork(db, id); demandWork(work);
     const decision = (await readDecisions(db, work!)).find(entry => entry.id === data.decision);
     demand(decision, `Decision ${data.decision} does not exist on ${work!.key}`, 404);
     demand(actor.id === decision!.requestedBy, `Only the requester may withdraw decision ${decision!.id}; ${decision!.requestedBy} requested it`, 403);

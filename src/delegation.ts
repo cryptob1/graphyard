@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { z } from 'zod';
-import { blockingRulingActions, demand, escalationTriggers, holdDelivery, implementerIdentities, releaseLeadHold, operatorScopeIncludes, raiseEscalation, leadHoldRefusal, sliceIds, standingEscalations, type BlockingRulingAction, type Principal, type SliceId, type Work } from './model.js';
+import { blockingRulingActions, demand, demandWork, escalationTriggers, holdDelivery, implementerIdentities, releaseLeadHold, operatorScopeIncludes, raiseEscalation, leadHoldRefusal, sliceIds, standingEscalations, type BlockingRulingAction, type Principal, type SliceId, type Work } from './model.js';
 import { save, wakeJob, type Store } from './store.js';
 import { fileConflicts, resourceConflicts } from './coordination.js';
 
@@ -212,7 +212,7 @@ export async function recordLeadRuling(store: Store, actor: Principal, id: strin
   const data = rulingSchema.parse(input);
   return once(store, actor, key, { command: 'lead.ruling', id, data }, async (db, now) => {
     const work = (await db.query("SELECT document FROM work_items WHERE id::text=$1 OR document->>'key'=$1", [id])).rows[0]?.document as Work | undefined;
-    demand(work, 'Work item not found', 404); demand(work.slice === actor.slice, 'Slice leads may coordinate only their own slice', 403);
+    demandWork(work); demand(work.slice === actor.slice, 'Slice leads may coordinate only their own slice', 403);
     // Delivery is an immutable snapshot. A ruling must never bump a delivered
     // item's revision or attach new escalation state to it; use a follow-up task.
     demand(work.stage !== 'done', 'Delivered work is immutable; rulings cannot rewrite it, so create a follow-up task', 409);
