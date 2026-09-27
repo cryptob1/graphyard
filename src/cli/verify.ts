@@ -19,6 +19,10 @@ import { abnormalTestExit, isolatedTestEnvironment, reserveTestPorts, testPortEn
  * plane requests no review until that evidence has passed on the head.
  */
 export interface ProofRun { proof: string; criteria: string[]; result: 'pass' | 'fail'; executed: number; failed: number; skipped: number; files: string[]; abnormal?: string; leftToCi?: boolean }
+// leftToCi marks a run the proof's own cases did not decide: every case of the proof passed, and
+// the run still failed around them — a hook, a crash or a signal from the other suites its files
+// carry (GY-853). The item's own criteria are not judged by it; CI, which runs the whole suite,
+// settles it. A failed, skipped or unexecuted case of the proof itself is never left to CI.
 export interface Outstanding { proof: string; criteria: string[]; reason: string }
 export interface VerifyRecord { key: string; head: string; clean: boolean; at: string; ran: ProofRun[]; outstanding: Outstanding[] }
 type Criterion = { id: string; proofs: string[]; bootstrap?: unknown };
@@ -91,18 +95,19 @@ export function countProofCases(tap: string, proof: string) {
   return { executed, failed, skipped };
 }
 
-export async function verifyWorkingTree(work: { key: string; criteria: Criterion[]; plannedFiles?: string[] }, root: string, now = () => new Date()): Promise<VerifyRecord> {
+export async function verifyWorkingTree(work: { key: string; criteria: Criterion[] }, root: string, now = () => new Date()): Promise<VerifyRecord> {
   const { runnable, outstanding } = classifyProofs(work.criteria);
   const head = git(root, ['rev-parse', 'HEAD']);
   const clean = git(root, ['status', '--porcelain']) === '';
-  const planned = new Set(work.plannedFiles ?? []);
   const ran: ProofRun[] = [];
   for (const entry of runnable) {
     const files = await proofFiles(root, entry.proof);
     const result = await runProof(root, entry.proof, files);
-    // A proof's test files are all outside planned files, or the proof is for a mechanical test not related to the item's own work
-    const allOutsidePlanned = files.length > 0 && files.every(file => !planned.has(file));
-    ran.push({ proof: entry.proof, criteria: entry.criteria, ...result, ...(allOutsidePlanned && result.result === 'fail' ? { leftToCi: true } : {}) });
+    // The proof's own cases decide its criterion (GY-853): a failed, skipped or unexecuted case is
+    // the item's own test failing and blocks, wherever its file sits. When every case of the proof
+    // passed but the run still did not complete normally, the failure lies in the rest of the run —
+    // the other suites the files carry, which a sandbox may not be able to run — and is left to CI.
+    ran.push({ proof: entry.proof, criteria: entry.criteria, ...result, ...(result.result === 'fail' && result.abnormal ? { leftToCi: true } : {}) });
   }
   const record: VerifyRecord = { key: work.key, head, clean, at: now().toISOString(), ran, outstanding };
   await mkdir(join(root, '.graphyard', 'verify'), { recursive: true });
@@ -121,9 +126,12 @@ export async function selfVerification(root: string, key: string) {
     outstanding: record.outstanding.map(({ proof, criteria, reason }) => ({ proof, criteria, reason })), verifiedAt: record.at };
   if (record.head !== head) return { state: 'stale' as const, reason: `verified ${record.head.slice(0, 12)}, not HEAD ${head.slice(0, 12)}; run graphyard verify ${key} again`, ...summary };
   const failing = record.ran.filter(entry => entry.result !== 'pass' && !entry.leftToCi);
+  const deferred = record.ran.filter(entry => entry.result !== 'pass' && entry.leftToCi);
+  const clean = record.clean ? '' : ' (with uncommitted changes present when it ran)';
   return { state: failing.length ? 'failing' as const : 'passing' as const,
     reason: failing.length ? `${failing.map(entry => entry.proof).join(', ')} did not pass on HEAD; the control plane returns this head to its worker before review`
-      : `every mechanical proof passed on HEAD${record.clean ? '' : ' (with uncommitted changes present when it ran)'}`, ...summary };
+      : deferred.length ? `the item's own criteria passed on HEAD${clean}; ${deferred.map(entry => entry.proof).join(', ')} did not complete in this sandbox with every case of the proof passing, so its failure is left to CI`
+      : `every mechanical proof passed on HEAD${clean}`, ...summary };
 }
 
 export const verifyCommand: CliCommand = {
@@ -135,7 +143,7 @@ export const verifyCommand: CliCommand = {
     '                                outstanding, and record the result complete reports',
   ],
   run: async (context, work) => {
-    const record = await verifyWorkingTree({ ...work, plannedFiles: work.plannedFiles }, context.repositoryRoot());
+    const record = await verifyWorkingTree(work, context.repositoryRoot());
     context.print(record);
     if (record.ran.some(entry => entry.result !== 'pass' && !entry.leftToCi)) process.exitCode = 1;
   },

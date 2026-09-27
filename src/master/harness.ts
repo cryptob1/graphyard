@@ -240,14 +240,18 @@ export function masterHarness(root: string, config: MasterConfig, harness: strin
  * So every raw `--force*` push is denied, the lease push included, and the CLI makes the one lease
  * push itself: to the branch registered for the caller's live lease, conditional on the tip it
  * fetched (`--force-with-lease=refs/heads/BRANCH:TIP`), so it replaces only what it saw.
- *
- * GY-853: Workers submit when their own criteria pass; the full test suite is CI's gate. A worker
- * runs the build and tests for its own criteria here. When those pass, the worker submits via
- * complete, naming in the PR any full-suite failures that come only from its sandbox and lie
- * outside its planned files, instead of recording a blocker. The graphyard verify command distinguishes
- * failures in the item's own criteria's tests (which block submission) from failures in unrelated
- * suites outside planned files (which are marked as 'left to CI' and reported as outstanding).
  */
+/**
+ * GY-853: the submission policy every worker request carries, verbatim, so the rule is stated once
+ * and the launch prompt (dispatch.ts workerPrompt) delivers it to every worker runtime. Workers
+ * submit when their own criteria pass: the full test suite is CI's gate, so a worker runs the
+ * build and the tests for its own criteria — graphyard verify runs exactly those — and when they
+ * pass it submits with complete, naming in the pull request any full-suite failures that come only
+ * from its sandbox and lie outside its planned files, instead of recording a blocker. graphyard
+ * verify reports a run whose own proof cases all passed but which failed around them as left to
+ * CI; a failure of a criterion's own test cases always blocks.
+ */
+export const submissionPolicyRule = 'The full test suite is CI\'s gate, not yours: run the build and the tests for your own criteria (graphyard verify GY-N runs exactly those), and when they pass, submit with complete, naming in the pull request any full-suite failures that come only from your sandbox and lie outside your planned files, instead of recording a blocker. graphyard verify reports a run whose own proof cases all passed but which failed around them as left to CI; a failure of your own criteria\'s tests always blocks. ';
 /** Every character an empty-source refspec's name can start with as typed: a ref name's first character, a quote, or an expansion. */
 export const emptySourceStarts = [...'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', ...'_.-/@\'"$`{~'];
 export function workerHarnessPlan(input: { cliPath: string; branch: string; baseBranch: string; credentialHome: string }): HarnessPlan {
