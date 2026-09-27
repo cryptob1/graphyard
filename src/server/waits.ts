@@ -6,6 +6,7 @@ import { describeHumanRequest, humanAnswerSchema, humanDecisionLabel, humanOnlyR
 import { decisionsByWork } from './decision-ledger.js';
 import { endAttempt, recordIntervention } from '../pipeline-speed.js';
 import { save } from '../store.js';
+import { eventWorkSql } from '../store/snapshot-delta.js';
 import type { Services } from './routes.js';
 
 /**
@@ -44,6 +45,12 @@ function endLease(work: Work, epoch: number, now: Date) {
   work.lease = null;
   // The scope request of an attempt that no longer exists is moot; a fresh attempt asks afresh.
   work.scopeRequest = null;
+}
+
+/** Whether the item's latest `blocked` report was written by `owner` during attempt `epoch`. */
+async function blockerRecordedBy(db: Db, workId: string, epoch: number, owner: string) {
+  const row = (await db.query(`SELECT actor, ${eventWorkSql()}->'epoch' AS work_epoch FROM events WHERE work_id=$1 AND kind='blocked' ORDER BY seq DESC LIMIT 1`, [workId])).rows[0];
+  return !!row && row.actor === owner && Number(row.work_epoch) === epoch;
 }
 
 /**
@@ -147,18 +154,25 @@ export async function recordCapacity(services: Services, actor: Principal, id: s
       const same = (entry: ExhaustionRecord) => entry.role === report.role && entry.profile === report.profile && entry.account === report.account
         && (report.role === 'worker' ? entry.epoch === report.epoch : entry.requestId === report.requestId && entry.resetsAt === report.resetsAt);
       if (capacity.exhaustions.some(same)) return work!;
-      let owner: string | null = null;
+      let owner: string | null = null, endedBlocker: string | null = null;
       if (report.role === 'worker') {
         demand(work!.epoch === report.epoch, `Attempt ${report.epoch} is not ${work!.key}'s current attempt (${work!.epoch}); reload before reporting`);
         demand(!work!.submission || work!.submission.epoch !== report.epoch, `Attempt ${report.epoch} already submitted; nothing is left to re-queue`);
         owner = work!.lease?.epoch === report.epoch ? work!.lease.owner : work!.lastAssignment?.epoch === report.epoch ? work!.lastAssignment.owner : null;
+        // GY-867: a blocker belongs to the attempt that recorded it, as a scope refusal does
+        // (GY-597). It ends with that attempt only when the ledger shows this epoch's own worker
+        // wrote it; a blocker anyone else set, or a human request, stays for the next attempt.
+        if (report.endsBlocker && work!.lease?.epoch === report.epoch && work!.blocker && await blockerRecordedBy(db, work!.id, report.epoch, work!.lease.owner)) {
+          endedBlocker = work!.blocker;
+          work!.blocker = null;
+        }
         if (work!.lease?.epoch === report.epoch) endLease(work!, report.epoch, now);
       }
       const record: ExhaustionRecord = { ...report, at: now.toISOString(), owner, recordedBy: actor.id };
       work!.capacity = { ...capacity, exhaustions: [...capacity.exhaustions, record].slice(-retainedExhaustions) };
       // A worker that died is not a spent account: the same record, its own history entry.
       const interrupted = report.cause === 'interrupted';
-      return commit(services, db, now, work!, all, actor, interrupted ? 'capacity.interrupted' : 'capacity.exhausted', { exhaustion: record, requeued: report.role === 'worker' ? (interrupted ? 'the attempt ended as released with its partial work on the record; the item is claimable once its containment settles' : 'the attempt ended as released; the item is claimable on another account once its containment settles') : 'the request is launched again on another account' }, key, fingerprint);
+      return commit(services, db, now, work!, all, actor, interrupted ? 'capacity.interrupted' : 'capacity.exhausted', { exhaustion: record, ...(endedBlocker ? { endedBlocker } : {}), requeued: report.role === 'worker' ? (interrupted ? 'the attempt ended as released with its partial work on the record; the item is claimable once its containment settles' : 'the attempt ended as released; the item is claimable on another account once its containment settles') : 'the request is launched again on another account' }, key, fingerprint);
     }
     const standing = capacity.escalations.find(entry => entry.role === data.role);
     if (data.event === 'escalated') {
