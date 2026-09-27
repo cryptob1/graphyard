@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { readdirSync } from 'node:fs';
+import { mkdirSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isolatedTestEnvironment, reserveTestPorts, testPortEnvironment, type ReserveOptions } from '../../src/cli/test-isolation.js';
@@ -34,7 +34,11 @@ export async function runTests(options: RunOptions = {}): Promise<RunResult> {
   // The browser window is the dev server's port and the sentinel above it that holds the window.
   const reservation = await reserveTestPorts(options.browser ? { first: defaultBrowserPort, span: 2, last: 65_000, ...options.ports } : options.ports);
   try {
-    const set = options.browser ? { GRAPHYARD_BROWSER_PORT: String(reservation.base) } : testPortEnvironment(reservation.base);
+    // The suite's managed checkouts live inside the tree it runs from (ignored by .graphyard/): a worker's
+    // sandbox can write nowhere else, and the default ~/.local/share/graphyard failed every checkout there (GY-498).
+    const dataHome = resolve(cwd, '.graphyard/test-data');
+    mkdirSync(dataHome, { recursive: true });
+    const set = { ...(options.browser ? { GRAPHYARD_BROWSER_PORT: String(reservation.base) } : testPortEnvironment(reservation.base)), GRAPHYARD_DATA_HOME: dataHome };
     const environment = isolatedTestEnvironment(options.environment ?? process.env, set);
     const files = args.some(arg => !arg.startsWith('-')) ? [] : readdirSync(resolve(cwd, 'tests')).filter(name => name.endsWith('.test.ts')).sort().map(name => `tests/${name}`);
     const [command, commandArgs] = options.browser
