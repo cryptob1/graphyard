@@ -9,7 +9,7 @@ import { advisoryLocks } from './locks.js';
 import { lockRebuiltTriggerTables, retryDeadlocks } from './migration-locks.js';
 import { coordinationDocumentSql, coordinationRelevance, coordinationTail, coordinationTrimSql, detoasted, type CoordinationTrim } from './coordination-sql.js';
 import { namedPool, reportPool, type ReportPoolOptions } from './report-pool.js';
-import { closePool, leasePoolConnections, reserve, trackedPool } from './pools.js';
+import { closePool, leasePoolConnections, reserve } from './pools.js';
 
 export * from './snapshot-delta.js';
 export type { CoordinationTrim } from './coordination-sql.js';
@@ -49,12 +49,12 @@ export class BackgroundLane {
 
 export class Store {
   pool: pg.Pool;
-  /** Lease commands only (pools.ts `leaseCommands`); `background` bounds the tick to half the main pool; `reportPool` serves report reads only (report-pool.ts). */
+  /** Lease commands only (pools.ts `leaseCommands`), its failed statements named like the main pool's (GY-447); `background` bounds the tick to half the main pool; `reportPool` serves report reads only (report-pool.ts). */
   leasePool: pg.Pool; readonly background: BackgroundLane; reportPool: pg.Pool;
   constructor(url: string, options: { max?: number; leaseMax?: number } & ReportPoolOptions = {}) {
     const max = Math.max(2, Math.floor(options.max ?? 12));
     this.pool = namedPool(url, max, storeConnectionTimeoutMs, storeStatementTimeoutMs);
-    this.leasePool = trackedPool(new pg.Pool({ connectionString: url, max: Math.max(1, Math.floor(options.leaseMax ?? leasePoolConnections)), connectionTimeoutMillis: storeConnectionTimeoutMs, statement_timeout: storeStatementTimeoutMs }));
+    this.leasePool = namedPool(url, Math.max(1, Math.floor(options.leaseMax ?? leasePoolConnections)), storeConnectionTimeoutMs, storeStatementTimeoutMs);
     this.background = new BackgroundLane(Math.max(1, Math.floor(max / 2))); this.reportPool = reportPool(url, options, storeConnectionTimeoutMs, storeStatementTimeoutMs);
   }
   /**
