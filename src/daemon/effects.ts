@@ -11,7 +11,7 @@ import type { SessionHandleInput } from '../model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from '../request-settlement.js';
 import { type ResourceReclaimReport, reclaimResources, dispatchRefusal } from '../master-resources.js';
 import { RefusedResponse } from '../model/refusal.js';
-import { mergeBatchSize, rerunFailedChecks } from '../master/profiles.js';
+import { mergeBatchSize, optimisticMergeEnabled, rerunFailedChecks } from '../master/profiles.js';
 import type { CapacityRole, PartialWork } from '../model/capacity.js';
 import { readProducerLedger, saveProducerLedger, independentProducerProfiles, launchProducer, reclaimCheckouts } from '../producer.js';
 import { followUpThreadIds, readReviewLedger, updateReviewLedger, launchReview } from '../reviewer.js';
@@ -103,9 +103,9 @@ export interface DaemonEffects {
    */
   publishProductionEnvironment?: () => Promise<unknown>;
   /**
-   * Publishes `mergeQueue.batchSize` (GY-330) and `mergeQueue.rerunFailedChecks` (GY-516) to the
-   * control plane, whose merge queue batches by the one and reruns failed required checks by the
-   * other; sent only on a change, and read at the start of every cycle so a reconfiguration applies
+   * Publishes `mergeQueue.batchSize` (GY-330) `mergeQueue.rerunFailedChecks`, and `mergeQueue.optimistic` (GY-500) to the control
+   * plane, whose merge queue batches by the one and lets disjoint entries past it by the other;
+   * sent only on a change, and read at the start of every cycle so a reconfiguration applies
    * before the next merge.
    */
   publishMergeBatchSize?: () => Promise<unknown>;
@@ -621,7 +621,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       publishedEnvironment = environment;
     },
     publishMergeBatchSize: async () => {
-      const settings = { batchSize: mergeBatchSize(current()), rerunFailedChecks: rerunFailedChecks(current()) };
+      const settings = { batchSize: mergeBatchSize(current()), optimistic: optimisticMergeEnabled(current()), rerunFailedChecks: rerunFailedChecks(current()) };
       const key = JSON.stringify(settings);
       if (key === publishedMergeQueue) return;
       await mutate('merge-queue', settings);
