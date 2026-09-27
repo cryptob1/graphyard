@@ -262,6 +262,7 @@ export function coordinatorWriteDenials(coordinatorRoot: string): HarnessRule[] 
 }
 export function workerHarnessPlan(input: { cliPath: string; branch: string; baseBranch: string; credentialHome: string }): HarnessPlan {
   const cli = `node ${input.cliPath}`;
+  const coordinatorRoot = coordinatorCheckoutRoot(input.cliPath);
   const allow: HarnessRule[] = [
     ...['status', 'sync', 'restore-branch', 'complete', 'blocked', 'heartbeat', 'events', 'diagnose'].map(command => ({ rule: `Bash(${cli} ${command}:*)`, why: `The worker's own ${command} command on its claimed item; the server checks the lease epoch.` })),
     { rule: `Bash(git push origin ${input.branch})`, why: 'Push the assigned branch; Graphyard observes it as the candidate head.' },
@@ -310,9 +311,17 @@ export function workerHarnessPlan(input: { cliPath: string; branch: string; base
     [`* ${input.baseBranch} *`, 'The base branch moves only through the guarded merge.'],
     [`*refs/heads/${input.baseBranch}*`, 'The base branch moves only through the guarded merge, in its full ref spelling too.'],
   ];
+  const coordinatorGitCommands: HarnessRule[] = !coordinatorRoot || coordinatorRoot === '/' ? [] : [
+    { rule: `Bash(git -C ${coordinatorRoot}:* commit:*)`, why: 'The coordinator checkout is not writable; commit there would modify the loop that owns it (GY-888).' },
+    { rule: `Bash(git -C ${coordinatorRoot}:* checkout:*)`, why: 'The coordinator checkout is not writable; switching branches there would affect the running loop (GY-888).' },
+    { rule: `Bash(git -C ${coordinatorRoot}:* merge:*)`, why: 'The coordinator checkout is not writable; merge there would affect the running loop (GY-888).' },
+    { rule: `Bash(cd ${coordinatorRoot}:* && git commit:*)`, why: 'The coordinator checkout is not writable; commit there would modify the loop that owns it (GY-888).' },
+    { rule: `Bash(cd ${coordinatorRoot}:* && git checkout:*)`, why: 'The coordinator checkout is not writable; switching branches there would affect the running loop (GY-888).' },
+  ];
   const deny: HarnessRule[] = [
     ...push.flatMap(([form, why]) => [{ rule: `Bash(git push ${form})`, why }, { rule: `Bash(git -* push ${form})`, why: `${why} Also behind git's global options.` }]),
     ...coordinatorWriteDenials(coordinatorCheckoutRoot(input.cliPath)),
+    ...coordinatorGitCommands,
     { rule: 'Bash(git rebase:*)', why: 'sync merges the base branch; a rebase would re-resolve files outside the planned files.' },
     { rule: 'Bash(gh pr merge:*)', why: 'Workers never merge; the control plane\'s merge gate decides.' },
     { rule: 'Bash(gh pr review:*)', why: 'Workers never review their own work.' },
