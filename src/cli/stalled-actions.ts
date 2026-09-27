@@ -35,6 +35,7 @@ const elapsed = (ms: number) => ms >= 3_600_000 ? `${Math.floor(ms / 3_600_000)}
 export function stalledActionAttention(snapshot: { work: Work[]; now: string }): AttentionItem[] {
   return queueSnapshot(snapshot.work, new Date(snapshot.now)).stalled.map(entry => ({
     subject: entry.key,
+    kind: 'stalled-action' as const,
     text: `${entry.key}'s ${entry.kind} action is stalled, retried only on a widening backoff: ${entry.stall!.failures} attempts in a row failed for one unchanged reason — ${entry.stall!.reason} — and it has been open ${elapsed(entry.waitedMs)} over ${entry.attempts} attempt(s)${entry.retryAt ? `; next attempt at ${entry.retryAt}` : ''}. Nothing changes by attempting it again while that condition stands`,
     ...agentOwner('master', `Clear what that reason names: the row rechecks ${Math.round(actionStallRecheckMs / 1000)}s after the third identical failure and twice as long after each further one, up to ${Math.round(actionStallMaxMs / 60_000)} minutes, so it is claimed within one such interval of the condition clearing and needs no forced retry. master status lists it under actions.stalled`),
   }));

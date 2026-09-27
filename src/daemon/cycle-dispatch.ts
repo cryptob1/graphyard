@@ -14,6 +14,8 @@ import { clearProfileFailure, profileHealth, recordProfileFailure } from './sess
 import { detailChanged, routineDecision } from './decisions.js';
 import { capacityKey, record, stoppedStates } from './effects.js';
 import type { Cycle } from './cycle.js';
+import { preferOtherRuntime, runtimeToAvoid } from './reblocked-attempts.js';
+import { hotBeside, hotspots, type Hotspot } from './hotspots.js';
 import { researchHold, researchRunner, researchSettings, researchStep } from '../research.js';
 
 /** Step 4: dispatch claimable work under capacity, and report base refreshes of in-flight candidates. */
@@ -23,10 +25,14 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
   //    identity; the daemon never holds a lease. An unhealthy profile is skipped, not waited on.
   //    Planned-file overlap never holds an item (dispatch is optimistic: the merge queue and a
   //    sync round integrate whichever lands second); only exclusive resources do. The smallest
-  //    planned scope within a priority is offered first.
+  //    planned scope within a priority is offered first, and within a priority an item that
+  //    touches no file two or more live attempts are already changing is offered before one that
+  //    does (GY-882): the hot set is computed once from this cycle's snapshot and passed into the
+  //    comparator — never derived inside it — and the reorder still holds nothing.
+  const hot = hotspots(open, clock), hotFiles = new Set(hot.map(entry => entry.file));
   const offered = open.filter(item => {
     try { assertDispatchable(item, snapshot.work, snapshot.now); return true; } catch { return false; }
-  }).sort(dispatchOrder);
+  }).sort((a, b) => dispatchOrder(a, b, hotFiles));
   // 4-research. Research before build (GY-259): an item about to be offered whose requirements
   //     were never researched gets one cheap Pi session first, and waits only while that run is
   //     within its time limit. A run that fails or times out is recorded and the item is built
@@ -145,7 +151,9 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
     const key = dispatchKey(item);
     if (cycle.launcher.busy(key) || (state.actions[key] && state.actions[key].state !== 'failed')) return;
     const free = await effects.agents();
-    const pick = () => health.find(entry => entry.healthy && !taken.has(entry.profile.name) && !free.some(agent => agent.name === entry.profile.agentName));
+    // After an attempt ended as reblocked (GY-867), a profile on another runtime is tried first.
+    const order = preferOtherRuntime(health, runtimeToAvoid(item));
+    const pick = () => order.find(entry => entry.healthy && !taken.has(entry.profile.name) && !free.some(agent => agent.name === entry.profile.agentName));
     let choice = pick();
     if (!choice) {
       // Every launch profile working is capacity, not a decision for anyone. Escalate only when no
@@ -160,15 +168,25 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
     }
     taken.add(choice.profile.name);
     const holds = [choice.profile.name];
-    cycle.launch('dispatch', item, key, holds, sink => launch(item, key, choice!, free, pick, holds, sink));
+    // Captured at decision time: the launch runs on the launcher after this cycle may have ended,
+    // and the record it writes must name the contention this ordering acted on (GY-882).
+    const beside = hotBeside(item, hot);
+    cycle.launch('dispatch', item, key, holds, sink => launch(item, key, choice!, free, pick, holds, sink, beside));
   }) === 'stop') break; });
+
+  /** What a dispatch that starts on a hot file adds to its record, so master status can show the contention (GY-882). */
+  function hotspotNote(beside: Pick<Hotspot, 'file'> & { beside: string[] } | null) {
+    if (!beside) return '';
+    const who = beside.beside.join(' and ');
+    return `; it starts on ${beside.file}, which ${who} ${beside.beside.length === 1 ? 'is' : 'are'} already changing (GY-882 hot spot)`;
+  }
 
   /**
    * One item's launch on the profile chosen for it, passing a profile another dispatcher holds over
    * for the next free one. It runs on the launcher, after the cycle that chose it may have ended, so
    * what it records goes to `performed` — the launcher's sink the next cycle reports.
    */
-  async function launch(item: Work, key: string, chosen: NonNullable<ReturnType<typeof health.find>>, free: Awaited<ReturnType<typeof effects.agents>>, pick: () => ReturnType<typeof health.find>, holds: string[], performed: DaemonAction[]) {
+  async function launch(item: Work, key: string, chosen: NonNullable<ReturnType<typeof health.find>>, free: Awaited<ReturnType<typeof effects.agents>>, pick: () => ReturnType<typeof health.find>, holds: string[], performed: DaemonAction[], beside: { file: string; beside: string[] } | null) {
     let choice = chosen;
     const previous = state.actions[key];
     for (;;) {
@@ -187,7 +205,9 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
         }, async () => await effects.dispatch(item, current.profile, free, snapshot) as { pane?: string | null; agentName?: string; principal?: string } | undefined,
         launched => launched, pane => `herdr pane attach ${pane}${config.herdrWorkspace ? ` --workspace ${config.herdrWorkspace}` : ''}`);
         clearProfileFailure(state, current.profile);
-        performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: current.profile.principal, epoch: item.epoch, state: 'done', detail: `Dispatched ${item.key} to ${current.profile.name}; the worker launcher claimed under ${current.profile.principal}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+        // The file comes before the claimant keys, so the 2000-character detail bound trims a long
+        // key list and never the file it contends on; a cold dispatch records nothing new here.
+        performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: current.profile.principal, epoch: item.epoch, state: 'done', detail: `Dispatched ${item.key} to ${current.profile.name}; the worker launcher claimed under ${current.profile.principal}${hotspotNote(beside)}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
         return;
       } catch (error) {
         // Another dispatcher — an executor, or a hand dispatch — holds the profile or the item

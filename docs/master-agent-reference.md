@@ -23,7 +23,7 @@ Dispatch is optimistic (overlap holds nothing), smallest planned scope first; `g
 
 **A merge-base dismissal is not a reviewer withdrawing a verdict.** An approval of the current head dismissed with `The merge-base changed after approval.` is restored (`observation.reviews[].dismissal`); no other dismissal is. Its re-post is no new verdict (`observation.dismissedReviewIds`).
 
-**A branch must never keep another item's unlanded commits.** Tips build from reviewed heads; ejection restores left branches (`baseRefresh.restore`). A tip behind an unlanded departed entry waits (`Restoring after predecessor ejection`) for its restored head; another item's carried files (`Carried from another item's tip`) are not rework. Git decides landing (`landing.landed`); landed peers deliver immediately.
+**A branch must never keep another item's unlanded commits.** Tips build from reviewed heads; ejection restores left branches (`baseRefresh.restore`). A tip behind an unlanded departed entry waits (`Restoring after predecessor ejection`) for its restored head; another item's carried files (`Carried from another item's tip`) are not rework, nor an ejection (GY-871). Git decides landing (`landing.landed`); landed peers deliver immediately.
 
 #### A contaminated branch
 
@@ -61,7 +61,7 @@ A failed snapshot read retries once after 0.5–1.5 s; a failed cycle waits min(
 
 ## Resources and disk
 
-`resourceRegistry` declares every bounded resource, reported under `resources` ([remedies](operations-reference.md#control-plane-resources)). The loop `git worktree remove`s finished worktrees (`run.reclaimIdleHours`; never dirty/unpushed), `run.worktreeRemovalLimit`/cycle, logging `.graphyard/worktree-reclaim.jsonl`; `disk` attention below `run.diskThresholdGb`. Review and proof checkouts live under `run.worktreeRoot` (default `~/.local/share/graphyard/worktrees/REPOSITORY-ID`).
+`resourceRegistry` declares every bounded resource, reported under `resources` ([remedies](operations-reference.md#control-plane-resources)). The loop `git worktree remove`s finished worktrees (`run.reclaimIdleHours`; never dirty/unpushed), `run.worktreeRemovalLimit`/cycle, logging `.graphyard/worktree-reclaim.jsonl`; `disk` attention below `run.diskThresholdGb`. Review and proof checkouts live under `run.worktreeRoot` (default `~/.local/share/graphyard/worktrees/REPOSITORY-ID`). Agentless panes a Graphyard launch on this host left behind are swept each cycle (6/pass, 120 s launch bound, never foreign/agent/live-lease panes, only this host's recorded panes); counts on `daemon.actions`, attention past 20 agentless, and a drained backlog recorded as drained ([panes](master-agent-sessions.md#panes-are-closed-and-reclaimed)).
 
 ## Recovery
 
