@@ -13,7 +13,7 @@ import { server } from '../src/server.js';
 import { processJob } from '../src/github.js';
 import { Refusal, type Principal, type Work } from '../src/model.js';
 import { approverSessionName, decisionInput, masterConfigSchema, mergeExecutor, type MasterConfig, type WorkerProfile } from '../src/master.js';
-import { emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
+import { emptyDaemonState, faultObservationIntervalMs, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { Launcher } from '../src/daemon/cycle.js';
 import { successorWidening } from '../src/model/successors.js';
 import { systemInvariants, type InvariantCheck } from '../src/model/invariants.js';
@@ -34,8 +34,11 @@ import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } f
  * across the second deploy for a while. Every one of the fifteen must be delivered. The loop
  * carries one `Launcher` across its cycles (GY-616), as `runDaemon` does, so session launches run
  * beside the cycle — outliving it, holding their profile from hand-off, and reported by the next
- * cycle — and the invariants hold on that detached path. A change to the loop that breaks an
- * invariant fails here, in CI, before
+ * cycle — and the invariants hold on that detached path. From ninety minutes to two hours the day
+ * cycles at a third of faultObservationIntervalMs (GY-466), so the loop's between-observations
+ * branch runs under the same invariants, with one held integration job standing across its
+ * throttled cycles and one seeded overrun opening the loop's own cost line between observations.
+ * A change to the loop that breaks an invariant fails here, in CI, before
  * it merges; a new behaviour that repeats per cycle, head or item belongs in this world.
  */
 const repository = 'owner/project';
@@ -64,6 +67,8 @@ const plan = {
   items: 15, releaseEveryMs: 15 * minute, workMs: 20 * minute,
   rework: new Set([3, 7, 11]), deaths: new Set([5, 9]), deathAfterMs: 8 * minute,
   deploys: [2 * hour + 30 * minute, 5 * hour], dirtyCheckout: { from: 4 * hour + 50 * minute, to: 6 * hour }, split: { at: 45 * minute, item: 12 }, clean: 2, unstable: 4, slowRecompute: 8, exhaustedReviewer: 6,
+  // GY-466: a stretch whose cycles land inside faultObservationIntervalMs, before the first deploy.
+  subInterval: { from: 90 * minute, to: 120 * minute },
   // GY-516: a flake on a speculative tip whose one rerun passes, and one whose rerun fails again.
   flaky: { rerunPasses: 10, rerunFails: 14 },
 };
@@ -105,8 +110,10 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
  * effects, standing for a change that breaks an invariant, so the soak shows it would fail.
  */
 let days = 0;
-async function simulateDay(options: { hours: number; regression?: 'approvers-left-open'; handApprovers?: boolean }) {
+async function simulateDay(options: { hours: number; regression?: 'approvers-left-open'; handApprovers?: boolean; subInterval?: { from: number; to: number } }) {
   const dayStart = clock.now();
+  /** GY-466: whether this instant of the day sits in the sub-interval stretch, whose cycles land inside faultObservationIntervalMs. */
+  const inSubInterval = () => !!options.subInterval && elapsed >= options.subInterval.from && elapsed < options.subInterval.to;
   const github = new SimulatedGitHub({ repository, baseBranch: 'main', appId: 1234, ciAppId: 15368, reviewerApps, ciMs: 5 * minute, reviewMs: 3 * minute, firstPullRequest: 100 * ++days },
     [...Array.from({ length: plan.items }, (_, index) => file(index + 1)), 'README.md']);
   const herdr = new SimulatedHerdr();
@@ -213,7 +220,10 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     withdraw: (work, decision, reason) => api(principals.operatorAgent, 'POST', `work/${work.id}/decide`, { action: 'withdraw', decision, reason }),
     baseSuccessions: async since => ({ tip: github.tip, successions: github.successions.filter(entry => github.commits.get(entry.commit)!.at >= Date.parse(since)), files: new Set(github.files) }),
     replan: (work, paths, reason) => api(principals.operatorAgent, 'POST', `work/${work.id}/requirements`, successorWidening(work, paths, reason)),
-    controlPlane: async () => ({ build: { commit: production.build } }),
+    // GY-466: across the sub-interval stretch the control plane holds one integration job, so the
+    // throttled cycles between observations have a standing fault they must neither end nor reopen;
+    // each read is counted, for the stretch's reads to be judged against its cycles.
+    controlPlane: async () => ({ build: { commit: production.build }, ...(inSubInterval() ? (throttled.reads++, { github: true, heldJobs: 1, jobs: [] }) : {}) }),
     observeDeployment: async delivered => {
       const serving = delivered.filter(item => github.contains(production.sha, item.delivery!.mergeSha));
       return { source: 'endpoint', sha: production.sha, at: new Date(clock.now()).toISOString(), reason: null, deployed: serving.map(item => item.key), pending: delivered.filter(item => !serving.includes(item)).map(item => item.key) };
@@ -272,8 +282,13 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   const launcher = new Launcher();
   const violations: string[] = [], observed = new Set<string>(), failures: string[] = [], escalations: string[] = [], spent = new Set<string>();
   let released = 0, split = false, deploys = 0, cycles = 0, reportedDispatches = 0;
+  // GY-466: the sub-interval stretch's cycles and its control-plane reads, judged against each other
+  // in the test; and whether the stretch's first cycle has already inherited its seeded overrun.
+  const throttled = { cycles: 0, reads: 0 };
+  let seededOverrun = false;
   const jobsDue = async () => Number((await store.pool.query('SELECT count(*) AS due FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now())')).rows[0].due);
-  for (let elapsed = 0; elapsed <= options.hours * hour;) {
+  let elapsed = 0;
+  for (; elapsed <= options.hours * hour;) {
     const now = clock.now();
     // Scheduled events: releases, the file split on main, the deploys.
     while (released < plan.items && elapsed >= released * plan.releaseEveryMs) await engine.execute(principals.operator, 'ready', items[released++].id, {}, id());
@@ -303,6 +318,16 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       for (const act of pending.splice(0)) await act();
       await engine.reconcile();
       for (let guard = 0; guard < 200 && await jobsDue(); guard++) await processJob(engine, adapter);
+      // GY-466: inside the stretch the loop cycles faster than it observes, so the
+      // between-observations branch of faultStep runs under the day's invariants. The stretch's
+      // first cycle observes as the minute-step cycle before it left the interval exactly spent;
+      // the second is throttled, and inherits one seeded overrun from the cycle before it, so the
+      // loop's own cost line opens on a cycle that read none of the external sources and ends once
+      // the loop's cycle fits its interval again.
+      if (inSubInterval()) {
+        throttled.cycles++;
+        if (throttled.cycles === 2 && !seededOverrun) { seededOverrun = true; state.metrics.push({ cycle: state.cycle, at: new Date(now).toISOString(), durationMs: 10 * faultObservationIntervalMs, childWaitMs: 0, open: 0, actions: 0 } as never); }
+      }
       try {
         const result = await runCycle(config, state, effects, clock.now, launcher); cycles++;
         reportedDispatches += result.actions.filter(action => action.kind === 'dispatch' && action.state === 'done').length;
@@ -326,17 +351,19 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       }
     }
     const open = (await store.list()).filter(item => item.stage !== 'done').length;
-    const step = open ? minute : 10 * minute;
+    // GY-466: the stretch cycles at a third of the observation interval, so most of its cycles take
+    // the between-observations branch of faultStep.
+    const step = inSubInterval() ? faultObservationIntervalMs / 3 : open ? minute : 10 * minute;
     elapsed += step; await moveClock(step);
   }
 
   const final = (await store.list()).filter(item => items.some(entry => entry.id === item.id));
-  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, herdr, hand, escalations, spent, upgrades, refusalSamples, checkout };
+  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, herdr, hand, escalations, spent, upgrades, refusalSamples, checkout, throttled };
 }
 
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 180_000 }, async () => {
   const began = performance.now();
-  const { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, state, upgrades, refusalSamples, checkout } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
+  const { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, state, upgrades, refusalSamples, checkout, throttled } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24), subInterval: plan.subInterval });
   const undelivered = final.filter(item => item.stage !== 'done' || !item.delivery);
   assert.deepEqual(undelivered.map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
@@ -387,6 +414,23 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.equal(state.upgrade.alignedRelease, production.deploys[1].sha, 'the loop stands aligned with the last deployed release');
   assert.equal(state.release?.commit, checkout.head, 'the re-executed loop reports the release the checkout holds');
   assert.ok(Object.keys(state.actions).filter(key => key.startsWith('upgrade:')).length <= production.deploys.length + 1, `the cursor holds one upgrade action per deploy and one refusal: ${Object.keys(state.actions).filter(key => key.startsWith('upgrade:')).join(', ')}`);
+  // GY-466: the stretch from ninety minutes to two hours cycled inside faultObservationIntervalMs,
+  // so the loop's between-observations branch ran under the day's invariants (every violation line
+  // above covers those cycles too). Its cycles read the control plane once per observation
+  // interval, not once per cycle; the held integration job it reported across the stretch stood as
+  // one instance the throttled cycles neither ended nor reopened, ending at the first observation
+  // after it cleared; and the seeded overrun opened the loop's own cost line once, on a cycle
+  // inside the stretch, ending on the next — both far below the filing threshold of three.
+  assert.equal(throttled.cycles, 90, `the stretch cycled every ${faultObservationIntervalMs / 3 / 1000} s, inside the observation interval`);
+  assert.equal(throttled.reads, 30, 'the external sources were read once per observation interval across the stretch, not once per cycle');
+  const cost = state.faults.instances.filter(entry => entry.kind === 'loop-cost');
+  assert.equal(cost.length, 1, `the seeded overrun stands as one loop-cost instance, not one per cycle: ${JSON.stringify(state.faults.instances)}`);
+  assert.ok(!Object.values(state.faults.open).includes(cost[0].id), 'the cost line ended between observations');
+  const held = state.faults.instances.find(entry => entry.kind === 'held-jobs');
+  assert.ok(held, 'the held integration job the stretch reported was observed at all');
+  assert.equal(state.faults.instances.filter(entry => entry.kind === 'held-jobs').length, 1, 'a fault read only on observations is neither ended nor reopened by the throttled cycles');
+  assert.ok(Date.parse(held.at) >= dayStart + plan.subInterval.from && Date.parse(held.lastSeenAt) < dayStart + plan.subInterval.to, `it opened in the stretch and its last sighting was a throttled cycle's, not an observation's: ${JSON.stringify(held)}`);
+  assert.ok(!Object.values(state.faults.open).includes(held.id), 'it ended at the first observation after the stretch released it');
   const seconds = (performance.now() - began) / 1000;
   assert.ok(seconds < 120, `the day runs well inside the three minutes the CI test job allows it (${seconds.toFixed(1)} s)`);
 });
