@@ -76,9 +76,12 @@ export const controlPlaneClockTimeoutMs = 10_000;
 export async function readControlPlaneClock(url: string, deps: { fetcher?: typeof fetch; clock?: () => number; timeoutMs?: number } = {}): Promise<ControlPlaneClock> {
   const fetcher = deps.fetcher ?? fetch, clock = deps.clock ?? Date.now;
   const before = clock();
-  const response = await fetcher(`${url.replace(/\/+$/, '')}/`, { method: 'HEAD', signal: AbortSignal.timeout(deps.timeoutMs ?? controlPlaneClockTimeoutMs) });
+  // `redirect: 'error'` keeps the measurement the plane's own: a proxy's redirect answer is no
+  // reading of its clock, and following it would stamp the bound with another host's time.
+  const response = await fetcher(`${url.replace(/\/+$/, '')}/`, { method: 'HEAD', redirect: 'error', signal: AbortSignal.timeout(deps.timeoutMs ?? controlPlaneClockTimeoutMs) });
   const after = clock();
   await response.body?.cancel().catch(() => undefined);
+  if (!response.ok) throw new Error(`The control plane answered HEAD / with ${response.status}, not the direct successful answer a clock measurement needs`);
   const dated = Date.parse(response.headers.get('date') ?? '');
   if (!Number.isFinite(dated)) throw new Error(`The control plane answered HEAD / (${response.status}) without a readable Date header`);
   // The header names the second the plane answered in: its clock read somewhere in [dated, dated + 999].

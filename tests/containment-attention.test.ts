@@ -377,7 +377,11 @@ test('unit:settle-clock-bound-fast-read the timed read bounds the offset by the 
   const dated = (async () => { local += 150; return new Response(null, { headers: { date: new Date(Date.parse(observedAt)).toUTCString() } }); }) as unknown as typeof fetch;
   const clock = await readControlPlaneClock('https://graphyard.example/', { fetcher: dated, clock: () => local });
   assert.deepEqual(clock, { clockOffset: { min: -999, max: 150 }, roundTripMs: 150, source: 'timed read' }, 'the header is truncated to the second, so the bound is a second wider than the round trip');
-  const undated = (async () => { const response = new Response(null, { status: 502 }); response.headers.delete('date'); return response; }) as unknown as typeof fetch;
+  const errored = (async () => { const response = new Response(null, { status: 502 }); response.headers.delete('date'); return response; }) as unknown as typeof fetch;
+  await assert.rejects(readControlPlaneClock('https://graphyard.example', { fetcher: errored }), /with 502, not the direct successful answer/);
+  const redirected = (async () => new Response(null, { status: 302, headers: { location: 'https://elsewhere.example/' } })) as unknown as typeof fetch;
+  await assert.rejects(readControlPlaneClock('https://graphyard.example', { fetcher: redirected }), /with 302, not the direct successful answer/, 'a redirect is another host\'s answer, never a measurement of the plane\'s clock');
+  const undated = (async () => { const response = new Response(null, { status: 200 }); response.headers.delete('date'); return response; }) as unknown as typeof fetch;
   await assert.rejects(readControlPlaneClock('https://graphyard.example', { fetcher: undated }), /without a readable Date header/);
   assert.deepEqual(await containmentClock({ min: -6_000, max: 6_000 }, () => readControlPlaneClock('https://graphyard.example', { fetcher: undated })),
     { clockOffset: { min: -6_000, max: 6_000 }, roundTripMs: 12_000, source: 'snapshot read' });
