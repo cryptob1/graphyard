@@ -9,7 +9,7 @@ The master acts without asking. Three decisions are human-only: goals and priori
 
 ## Operate
 
-Keep cycling: status, dispatch, review, merge, deployment verification. Stop only when every in-scope item is Done or has a genuinely external blocker recorded in Graphyard, and every merged change is verified against the exact deployed release or has a recorded deployment blocker.
+Keep cycling: status, dispatch, review, merge, deployment verification ([verify](delivery.md#observe-and-verify)). Stop only when every in-scope item is Done or genuinely blocked in Graphyard, and every merge is verified live or deployment-blocked.
 
 1. `master status` at startup and after events.
 2. `master run` dispatches ready work in `schedule.order`.
@@ -63,7 +63,7 @@ A candidate passing the build gate gets, in `autoDispatch`, one producer request
 
 **Concurrency is per role.** A profile's `concurrency` (1–20, default 1) caps its simultaneous sessions, each with a name unique to its request above one. It applies without a restart; lowering it drains sessions first (`longestWaitMs`); a role starved ten minutes counts in `counts.concurrencyStarved`.
 
-**Requests always settle.** A gone pane (`pane_not_found`) is closed. No request outlives its own token: expired, unreported by Herdr, it settles `expired`; one still pending counts in `dispatch.sessionReconcile.stuck`. Unanswered sessions relaunch elsewhere (12 per request, then `dispatch.abandoned`); an unposted reviewer is reminded first. A producer run killed (exit 143/137) or vanished from Herdr reached no verdict, so it spends no attempt and is relaunched at once (`lost`); a request whose attempts are spent raises `escalation:proof-exhausted` (group, each attempt's outcome, next owner), then a quoting **rework** a cycle later.
+**Requests always settle.** A gone pane (`pane_not_found`) is closed. No request outlives its own token: expired, unreported by Herdr, it settles `expired`; one still pending counts in `dispatch.sessionReconcile.stuck`. Unanswered sessions relaunch elsewhere (12 per request, then `dispatch.abandoned`); an unposted reviewer is reminded first. Producer runs killed or vanished spend no attempt; spent attempts raise `escalation:proof-exhausted`, then a quoting rework a cycle later.
 
 **Every role, approvers too, fails over on spent quota** or waits as one `capacity` line.
 
