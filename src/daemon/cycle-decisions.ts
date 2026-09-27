@@ -118,7 +118,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     let launched: Awaited<ReturnType<NonNullable<DaemonEffects['approver']>>>;
     try { launched = await effects.approver!(item, watch.decision); }
     catch (error) {
-      if ((error as { capacityExhausted?: boolean })?.capacityExhausted) { Object.assign(watch, { launches: watch.launches - 1, agentName: null, pane: null, account: null, runtime: null, session: null }); return `the decision waits for approver capacity: ${message(error)}`; }
+      if ((error as { capacityExhausted?: boolean })?.capacityExhausted) { Object.assign(watch, { launches: watch.launches - 1, agentName: null, pane: null, account: null, runtime: null, session: null, capacity: message(error).slice(0, 500) }); return `the decision waits for approver capacity: ${message(error)}`; }
       // A role at its concurrency limit is a wait for a slot, not a failed session (GY-190): the
       // launch is not counted against the decision's bound, and the next cycle makes it again, so
       // the approver starts on the first cycle after a slot frees without anybody asking.
@@ -435,7 +435,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   for (const [key, watch] of Object.entries(state.approvals)) {
     if (!watch.capacity || watch.settledAt) continue;
     const item = snapshot.work.find(c => c.key === watch.work);
-    if (!item || !approversSpent) continue;
+    if (!item || approversSpent) continue;
     const age = Date.parse(watch.requestedAt);
     capacityWaiting.push({ item, watch, key, age });
   }

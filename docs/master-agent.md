@@ -87,8 +87,6 @@ A pass is trusted only when that stripped run failed with a case executed; other
 
 ### Repair lane
 
-The first of two no-admin-bypass exceptions: a `"repair": "merge-path"` item (`mergePath` files only) stalled 15 minutes, checks passed, given an approver's `master decide GY-N repair-merge REASON` naming the fault, merges through the App's ruleset bypass, audited (`repair.merged`) and flagged until a normal merge.
-
-The main guard's revert ([optimistic merges](github.md#optimistic-merges)) is the second: on a confirmed required-suite failure on main traced to the culprit it lands a revert built on the base tip — refused when a later merge touched the culprit's files — head-bound through the same bypass, recorded `optimistic.revert.*` not `repair.merged`, the item reopened as rework.
+The sole no-admin-bypass exception: a `"repair": "merge-path"` item (`mergePath` files only) stalled 15 minutes, checks passed, given an approver's `master decide GY-N repair-merge REASON` naming the fault, merges through the App's ruleset bypass, audited (`repair.merged`) and flagged until a normal merge.
 
 Unresolved review threads are the reviewer's inputs, not merge blockers (`reviewThreads`); its approval names each on `Resolved threads:`, `Follow-up threads:` or `Overridden threads:` ([rules](coordination.md#review-gate-verdicts-not-threads)).
