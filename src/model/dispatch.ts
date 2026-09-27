@@ -212,6 +212,8 @@ export interface RequestProgress {
   /** `verdict` is the session's recorded verdict state, as a status reader summarizes it: `DISMISSED`, `APPROVED`, or null. */
   session: { state: string; attempt?: number; resolution?: string | null; verdict?: string | null } | null;
   retry?: { attempts: number; limit: number; nextAt: string | null; exhausted: boolean } | null;
+  /** A producer request's proofs the producer recorded as not exercising their criterion on its head (GY-817), each as a rework names it. */
+  unexercised?: string[];
 }
 /**
  * Verdicts that answer a review request. The gate accepts one and refuses the other, and either
@@ -220,7 +222,7 @@ export interface RequestProgress {
  */
 export const answeringVerdicts = ['APPROVED', 'CHANGES_REQUESTED'];
 /** A live request whose session settled leaving its gate unsatisfied, with nothing scheduled to answer it. */
-export interface UnansweredRequest { requestId: string; kind: DispatchKind; group?: string; sinceMs: number; state: string; verdict: string | null; attempts: number; resolution: string | null }
+export interface UnansweredRequest { requestId: string; kind: DispatchKind; group?: string; sinceMs: number; state: string; verdict: string | null; attempts: number; resolution: string | null; unexercised?: string[] }
 
 /**
  * A request nothing is going to answer: its session settled — with a verdict the gate cannot
@@ -235,7 +237,8 @@ export function unansweredRequest(request: RequestProgress, kind: DispatchKind):
   if (request.retry && !request.retry.exhausted && request.retry.nextAt) return null;
   if (session.verdict && answeringVerdicts.includes(session.verdict)) return null;
   return { requestId: request.requestId, kind, ...(request.group ? { group: request.group } : {}), sinceMs: request.sinceMs,
-    state: session.state, verdict: session.verdict ?? null, attempts: request.retry?.attempts ?? session.attempt ?? 1, resolution: session.resolution ?? null };
+    state: session.state, verdict: session.verdict ?? null, attempts: request.retry?.attempts ?? session.attempt ?? 1, resolution: session.resolution ?? null,
+    ...(request.unexercised?.length ? { unexercised: request.unexercised } : {}) };
 }
 
 /** One settled reviewer session as a status reader summarizes it (summarizeReviews), for the judgement below. */
