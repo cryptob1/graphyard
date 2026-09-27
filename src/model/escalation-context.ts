@@ -260,19 +260,27 @@ export function rulesRef(work: Work, baseBranch: string) {
 // ---- The spawned handler -----------------------------------------------------------------------
 /**
  * A handler's judgement: the resolve decision it requests, the reason, and the precedent it relied
- * on. `followPrecedent` is the built-in judgement: adopt the newest applied decision of the same
- * trigger and cite it. A decision's reason is a claim about one kind of incident, so an applied
- * decision of another trigger is never adopted — it stays in the context for a judging session to
- * weigh — and with no applied precedent of its own trigger the judgement declines rather than
- * invent a line.
+ * on. `followPrecedent` is the built-in judgement: for requirement-weakening and security-concern
+ * triggers, it returns null because those reasons are claims about one item's criteria or code and
+ * cannot be copied from another item (GY-873 AC-1). For other triggers, it adopts the newest
+ * applied decision of the same trigger and rewrites its reason to cite the precedent by id and item,
+ * stating this item's own facts (key and epoch) rather than copying claims about the precedent's
+ * item (GY-873 AC-2). An applied decision of another trigger is never adopted — it stays in the
+ * context for a judging session to weigh — and with no applied precedent of its own trigger the
+ * judgement declines rather than invent a line.
  */
 export interface EscalationJudgement { trigger: EscalationTrigger; reason: string; precedent: string[]; followed: PrecedentEntry | null }
 export function followPrecedent(context: EscalationContext): EscalationJudgement | null {
+  // Requirement-weakening and security-concern reasons are claims about one item's criteria or code
+  // and cannot be copied from another item; judge them afresh (GY-873 AC-1).
+  if (context.escalation.trigger === 'requirement-weakening' || context.escalation.trigger === 'security-concern') return null;
   const followed = context.precedent.detail.find(entry => entry.state === 'applied' && entry.trigger === context.escalation.trigger);
   if (!followed) return null;
-  const line = followed.reason.replace(/^Following precedent [0-9a-f-]+ on GY-\d+ \([^)]*\): /, '');
+  // For other triggers, rewrite the reason to cite the precedent by id and item, and state this
+  // item's own facts (key and epoch) rather than copying claims about the precedent's item (GY-873 AC-2).
+  const reason = `Following precedent ${followed.id} on ${followed.work}: ${context.key} (epoch ${context.item.epoch}) ${context.escalation.trigger.replace('-', ' ')}`;
   return { trigger: context.escalation.trigger, precedent: [followed.id], followed,
-    reason: `Following precedent ${followed.id} on ${followed.work} (${followed.trigger ?? context.action}, ${followed.state}): ${line}`.slice(0, 2000) };
+    reason: reason.slice(0, 2000) };
 }
 export type EscalationJudge = (context: EscalationContext) => Promise<EscalationJudgement | null> | EscalationJudgement | null;
 export interface DecisionRequest { action: typeof escalationAction; input: { trigger: EscalationTrigger; expectedRevision: number }; reason: string; precedent: string[]; context: string }

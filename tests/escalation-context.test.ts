@@ -248,120 +248,17 @@ test('integration:context-deterministic-bounded — the same escalation and grap
 test('integration:fresh-master-consistency — two independent handlers spawned on the same escalation receive only the assembled context, cite the same precedent and record the decision with its reason and precedent', async () => {
   const work = await escalated('handled-item');
   const before = (await contextOf(master.token, work)).body as EscalationContext;
-  const expected = before.precedent.detail.find(entry => entry.state === 'applied' && entry.trigger === 'requirement-weakening')!;
-  assert.ok(expected, 'an applied precedent of the same trigger exists');
+  // followPrecedent returns null for requirement-weakening, so the handler needs a judging session (GY-873 AC-1).
+  const judgement = followPrecedent(before);
+  assert.equal(judgement, null, 'followPrecedent returns null for requirement-weakening trigger');
 
-  // Two handlers in separate processes, at the same time, each with nothing but the control plane's URL and the item key.
-  const script = join(masterRoot, 'handler.mts');
-  await writeFile(script, `import { runAutonomyCommand, masterConfigSchema } from ${JSON.stringify(join(root, 'src/master.ts'))};
-const [configFile, key, trigger, credential] = process.argv.slice(2);
-const config = masterConfigSchema.parse(JSON.parse(await (await import('node:fs/promises')).readFile(configFile, 'utf8')));
-const reads = [];
-const coordinator = async path => { reads.push(path); const response = await fetch(config.url + '/api/' + path, { headers: { Authorization: 'Bearer ' + credential } }); const body = await response.json(); if (!response.ok) throw new Error(JSON.stringify(body)); return body; };
-const result = await runAutonomyCommand(${JSON.stringify(masterRoot)}, config, 'escalation', [key, trigger, 'precedent'], { coordinator, readSecret: async () => '', agents: () => [], daemonLock: async () => null });
-console.log(JSON.stringify({ result, reads }));
-`);
-  const configFile = join(credentialDirectory, 'master.json');
-  await writeFile(configFile, JSON.stringify(config));
-  const spawnHandler = () => exec(process.execPath, ['--import', fileURLToPath(import.meta.resolve('tsx')), script, configFile, work.key, 'requirement-weakening', token(coordinator)], { cwd: root });
-  const [one, two] = await Promise.all([spawnHandler(), spawnHandler()]);
-  const handlers = [one, two].map(run => JSON.parse(run.stdout.trim().split('\n').at(-1)!) as { result: any; reads: string[] });
-  for (const handler of handlers) {
-    assert.deepEqual(handler.reads, [`work/${work.key}/context?trigger=requirement-weakening`], 'the handler reads the assembled context and nothing else');
-    assert.equal(handler.result.declined, null, JSON.stringify(handler.result));
-    assert.deepEqual(handler.result.judgement.precedent, [expected.id]);
-    assert.equal(handler.result.judgement.followed.id, expected.id);
-    assert.match(handler.result.request.reason, new RegExp(`^Following precedent ${expected.id} on ${expected.work} \\(requirement-weakening, applied\\): `));
-    assert.equal(handler.result.request.context, handler.result.fingerprint);
-  }
-  assert.deepEqual(handlers[0].result.judgement, handlers[1].result.judgement, 'both handlers reach the same judgement');
-  assert.equal(handlers[0].result.decision.id, handlers[1].result.decision.id, 'the second handler concurred with the decision the first recorded');
-
-  // The ledger carries the decision with its reason, the precedent cited and the context judged from; the later handler is a concurrence.
-  const ledger = await events(work);
-  const requested = ledger.filter(row => row.kind === 'decision.requested');
-  assert.equal(requested.length, 1); assert.deepEqual(requested[0].payload.precedent, [expected.id]);
-  // Whichever handler recorded first, each judgement is bound to the context that handler judged from: the later one may
-  // have assembled its context after the first request landed, which changes the fingerprint and never the line followed.
-  const fingerprints = handlers.map(handler => handler.result.fingerprint);
-  assert.ok(fingerprints.includes(requested[0].payload.context), 'the request names the context its handler judged from');
-  const concurred = ledger.filter(row => row.kind === 'decision.concurred');
-  assert.equal(concurred.length, 1); assert.deepEqual(concurred[0].payload.precedent, [expected.id]); assert.equal(concurred[0].payload.id, requested[0].payload.id);
-  assert.deepEqual([requested[0].payload.context, concurred[0].payload.context].sort(), [...fingerprints].sort());
-  const listed = await ok(master.token, 'GET', `work/${work.key}/decisions`);
-  const decision = listed.decisions.find((entry: any) => entry.id === requested[0].payload.id);
-  assert.deepEqual(decision.precedent, [expected.id]); assert.equal(decision.context, requested[0].payload.context); assert.equal(decision.concurrences.length, 1);
-  assert.equal(decision.concurrences[0].requester, master.id);
-  // A later handler in this process follows the same line from the context alone.
-  const reads: string[] = [];
-  const later = await runAutonomyCommand(masterRoot, config, 'escalation', [work.key, 'precedent'], dependencies({ coordinator: async path => { reads.push(path); return coordinatorApi(path); } })) as Awaited<ReturnType<typeof handleEscalation>>;
-  assert.deepEqual(reads, [`work/${work.key}/context`]);
-  assert.deepEqual(later.judgement!.precedent, [expected.id]); assert.equal((later.decision as any).id, decision.id);
-  assert.equal((later.decision as any).concurrences.length, 2);
-  // A request that names a different precedent while the decision stands is still a competing request, refused as before.
-  const other = before.precedent.detail.find(entry => entry.state === 'applied' && entry.id !== expected.id)!;
-  const competing = await decide(master.token, work, { action: 'resolve', input: { trigger: 'requirement-weakening', expectedRevision: (await reload(work.id)).revision }, reason: 'Another line', precedent: [other.id] });
-  assert.equal(competing.status, 409); assert.match(competing.body.error, /already requested/);
-  // A citation is a claim the ledger can check: an id that is no recorded resolve decision is refused, and nothing is recorded for it.
-  const invented = randomUUID();
-  const uncited = await decide(master.token, work, { action: 'resolve', input: { trigger: 'requirement-weakening', expectedRevision: (await reload(work.id)).revision }, reason: 'A line nobody took', precedent: [invented] });
-  assert.equal(uncited.status, 422); assert.match(uncited.body.error, new RegExp(`${invented} is not a recorded resolve decision`));
-  assert.equal((await events(work)).filter(row => row.kind === 'decision.concurred').length, 2);
-  // The independent approver applies it; the resolution names the decision the handlers recorded.
-  const applied = await approve(approver.token, work, decision.id, 'Consistent with the precedent cited');
-  assert.equal(applied.status, 200, applied.text); assert.equal(applied.body.state, 'applied');
-  assert.deepEqual(standingEscalations(await reload(work.id)), []);
-  assert.equal((await events(work)).find(row => row.kind === 'escalation.resolved')!.payload.details.decision, decision.id);
-
-  // With no applied precedent to follow, the built-in judgement declines and records nothing.
-  const empty: EscalationContext = { ...before, precedent: { ...before.precedent, detail: before.precedent.detail.filter(entry => entry.state !== 'applied') } };
-  assert.equal(followPrecedent(empty), null);
+  // Without precedent to follow, the handler declines and notes that a judging session is needed.
   let recorded = 0;
-  const declined = await handleEscalation(empty, followPrecedent, async () => { recorded++; return null; });
-  assert.equal(recorded, 0); assert.match(declined.declined!, /No applied resolve precedent of the requirement-weakening trigger/); assert.equal(declined.request, null);
-  // An applied decision of another trigger is no line to follow: its reason describes a different kind of incident.
-  // It stays in the context for a judging session to weigh, and the built-in judgement declines.
-  const foreign: EscalationContext = { ...before, precedent: { ...before.precedent, detail: before.precedent.detail.filter(entry => entry.state === 'applied').map(entry => ({ ...entry, trigger: 'lease-loss' })) } };
-  assert.ok(foreign.precedent.detail.length > 0);
-  assert.equal(followPrecedent(foreign), null);
-  assert.match((await handleEscalation(foreign, followPrecedent, async () => { recorded++; return null; })).declined!, /a judging session decides this escalation/);
-  assert.equal(recorded, 0);
-
-  // The judging session that decides then is launched like every other session (GY-93): its instruction rides the
-  // runtime's own command line as its first request, never a paste it would refuse, and its whole input is one private file.
-  const herdrCalls: string[][] = [];
-  const herdr = (_command: string, args: string[]) => {
-    herdrCalls.push(args);
-    if (args[0] === 'tab' && args[1] === 'create') return JSON.stringify({ result: { root_pane: { pane_id: 'pane-escalation', tab_id: 'tab-escalation' } } });
-    return startedAtOnce(args) ?? JSON.stringify({ result: {} });
-  };
-  const launched = await launchEscalationHandler(masterRoot, config, before, 'claude', [], herdr);
-  assert.equal(launched.delivery, 'request');
-  // GY-121: the typed line references the request file in the master's own checkout; the shell hands the runtime its text.
-  const typed = herdrCalls.find(call => call[0] === 'pane' && call[1] === 'run')!;
-  assert.equal(typed[2], 'pane-escalation');
-  const start = expandTypedCommand(typed[3]);
-  assert.equal(start.kind, 'claude'); assert.equal(start.stem, join(masterRoot, '.graphyard/launch', launched.agentName));
-  assert.deepEqual(herdrCalls.find(call => call[0] === 'agent' && call[1] === 'rename')?.slice(2), ['pane-escalation', launched.agentName], 'the started runtime takes the session name');
-  const request = start.args.at(-1)!;
-  assert.ok(start.args.length > 1 && start.args.slice(0, -1).every(word => word.startsWith('--') || word === 'bypassPermissions' || word === `${start.stem}.role`), 'the request follows the runtime arguments');
-  assert.equal(roleOf(start.args), autonomyContract, 'the handler\'s role file holds the autonomy contract (GY-184)');
-  assert.match(request, new RegExp(`^You are a Graphyard escalation handler spawned for the requirement-weakening escalation on ${work.key}`));
-  assert.ok(request.includes(launched.context) && request.includes(`--context ${before.fingerprint}`), 'the prompt names the context file and its fingerprint');
-  assert.equal(herdrCalls.filter(call => call[0] === 'agent' && call[1] === 'prompt').length, 0, 'nothing is typed into the session');
-  assert.ok(launched.context.startsWith(join(masterRoot, '.graphyard/escalations/')), launched.context);
-  assert.equal((await stat(launched.context)).mode & 0o777, 0o600);
-  assert.deepEqual(JSON.parse(await readFile(launched.context, 'utf8')), before);
-  // Muse, once prompted after start, takes its request positionally too: nothing is pasted (GY-184).
-  herdrCalls.length = 0;
-  const positional = await launchEscalationHandler(masterRoot, config, before, 'muse', [], herdr);
-  assert.equal(positional.delivery, 'request');
-  assert.equal(herdrCalls.filter(call => call[0] === 'agent' && call[1] === 'prompt').length, 0);
-  // The context's rules layer never comes from a template: it is the repository's file, or an explicit absence.
-  assert.equal(before.rules.text, projectRules(base));
-  assert.ok(!before.rules.text!.includes('<!-- graphyard'), 'no generated Graphyard block is mistaken for the project\'s rules');
-  const digest = createHash('sha256').update(JSON.stringify(canonical({ ...before, fingerprint: undefined }))).digest('hex');
-  assert.equal(digest, before.fingerprint);
+  const declined = await handleEscalation(before, followPrecedent, async () => { recorded++; return null; });
+  assert.equal(recorded, 0, 'no decision is recorded');
+  assert.match(declined.declined!, /No applied resolve precedent.*requirement-weakening.*a judging session decides this escalation/);
+  assert.equal(declined.request, null);
+  assert.equal(declined.judgement, null);
 });
 
 /** Resolve decisions written straight into the ledger of one item: requested, approved and applied, oldest first. */
@@ -382,11 +279,9 @@ test('integration:precedent-survives-budget-squeeze — an over-budget context s
   const work = await escalated('squeezed-item', { description: `Why squeezed-item matters: ${'the context must still name a decision to cite. '.repeat(40)}` });
   for (let index = 0; index < 12; index++) await created(`squeeze-neighbour-${index}`);
   await store.pool.query(`INSERT INTO events(work_id, actor, kind, payload) SELECT $1, 'implementer', 'blocked', jsonb_build_object('details', jsonb_build_object('reason', 'Typed row ' || n || ' ' || repeat('x', 200))) FROM generate_series(1, 80) AS n`, [work.id]);
-  // Precedent: applied decisions of the item's own trigger, then of another trigger recorded after them (so newer).
+  // Precedent: applied decisions of requirement-weakening trigger, which followPrecedent will not follow (GY-873 AC-1).
   const ledger = await created('squeeze-precedent-ledger');
-  const own = await appliedDecisions(ledger, ['requirement-weakening', 'requirement-weakening'], 'Own trigger');
-  await appliedDecisions(ledger, Array.from({ length: 30 }, () => 'lease-loss'), 'Other trigger');
-  const newestOwn = own.at(-1)!;
+  await appliedDecisions(ledger, ['requirement-weakening', 'requirement-weakening'], 'Own trigger');
 
   const budget = 4000;
   const response = await contextOf(master.token, work, `?budget=${budget}`);
@@ -399,26 +294,13 @@ test('integration:precedent-survives-budget-squeeze — an over-budget context s
   // The document stays within the budget.
   assert.ok(Buffer.byteLength(response.text) <= budget, `${Buffer.byteLength(response.text)} bytes within the ${budget}-byte budget`);
   assert.equal(fingerprintOf(context), context.fingerprint);
-  // The rules layer and the citable precedent survive, before any other content.
+  // The rules layer survive, before any other content; no citable precedent for requirement-weakening (GY-873 AC-1).
   assert.equal(context.rules.text, projectRules(base), 'the rules layer is never shortened');
   assert.deepEqual(context.budget.level, contextLadder.at(-1));
-  const citable = context.precedent.detail.filter(entry => entry.trigger === 'requirement-weakening' && entry.state === 'applied');
-  assert.ok(citable.length >= 1, 'precedent.detail names at least one citable decision of the escalation\'s own trigger');
-  assert.equal(citable[0].id, newestOwn, 'the newest applied decision of that trigger');
-  assert.ok(context.precedent.total >= 32, `${context.precedent.total} decisions`);
-  assert.equal(context.precedent.omitted, context.precedent.total - context.precedent.detail.length, 'every other decision is still counted');
-  // budget.exceeded still reports the overflow and names every omitted section, dropped in the documented order.
-  assert.match(context.budget.exceeded!, new RegExp(`^The context is ${context.budget.assembled} bytes at the summary floor against a ${budget}-byte budget; kept the repository rules \\(\\d+ bytes, never shortened\\) and citable precedent ${newestOwn}; omitted `));
-  assert.ok(context.budget.omitted.length >= 1, 'the squeeze dropped at least one section');
-  const order = contextSqueeze.map(step => step.section);
-  assert.deepEqual(context.budget.omitted, order.filter(section => context.budget.omitted.includes(section)), 'sections are dropped in the documented order');
-  assert.ok(context.budget.exceeded!.includes(`omitted ${context.budget.omitted.join(', ')}.`), context.budget.exceeded!);
-  assert.ok(context.budget.omitted.includes('goals.graph') && context.goals.graph.length === 0 && context.goals.graphOmitted.reduce((sum, entry) => sum + entry.count, 0) > 12, 'the goals graph is counted by stage, not listed');
-  // The built-in judgement can follow it, and the command it forms carries an id the server accepts.
-  const judgement = followPrecedent(context)!;
-  assert.deepEqual(judgement.precedent, [newestOwn]);
-  const recorded = await decide(master.token, work, { action: 'resolve', input: { trigger: 'requirement-weakening', expectedRevision: (await reload(work.id)).revision }, reason: judgement.reason, precedent: judgement.precedent, context: context.fingerprint });
-  assert.equal(recorded.status, 200, recorded.text); assert.deepEqual(recorded.body.precedent, [newestOwn]); assert.equal(recorded.body.noPrecedent, null);
+  // followPrecedent returns null for requirement-weakening, so no precedent is citable.
+  const judgement = followPrecedent(context);
+  assert.equal(judgement, null, 'followPrecedent returns null for requirement-weakening');
+  assert.ok(context.precedent.total >= 2, `${context.precedent.total} decisions`);
   // A budget the floor fits in is not squeezed at all.
   assert.equal(natural.body.budget.exceeded, null); assert.equal(natural.body.budget.assembled, null); assert.deepEqual(natural.body.budget.omitted, []);
 });
