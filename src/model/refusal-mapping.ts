@@ -1,4 +1,4 @@
-import { queueSequencingReason } from '../merge-queue.js';
+import { checkRerunHeld, queueSequencingReason } from '../merge-queue.js';
 import { reviewNeed } from './dispatch.js';
 import { standingEscalations } from './escalation.js';
 import { leadHoldRefusal } from './delegation.js';
@@ -133,7 +133,8 @@ export function refusalAction(work: Work, gate: string, refusal: string, all: Wo
     const name = refusal.match(/^Required CI check (.+) has not passed on the current candidate$/)![1];
     const runs = (work.observation?.checks ?? []).filter(check => check.name === name);
     const latest = runs.length ? runs.reduce((newest, check) => (check.attempt ?? 0) >= (newest.attempt ?? 0) ? check : newest) : null;
-    return latest && ['failure', 'timed_out', 'action_required', 'cancelled'].includes(latest.result) ? 'request-rework' : 'resync';
+    // A failure held by its one owed or running rerun (GY-516) is answered by the rerun's reading.
+    return latest && ['failure', 'timed_out', 'action_required', 'cancelled'].includes(latest.result) && !checkRerunHeld(work, name) ? 'request-rework' : 'resync';
   }
   if (gate === 'review') {
     const standstill = reviewStandstill(work, all, now);
