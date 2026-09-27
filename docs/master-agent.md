@@ -9,7 +9,7 @@ The master acts without asking. Three decisions are human-only: goals and priori
 
 ## Operate
 
-Keep cycling: status, dispatch, review, merge, deployment verification. Stop only when every in-scope item is Done or has a genuinely external blocker recorded in Graphyard, and every merge is verified against the exact deployed release or deployment-blocked.
+Keep cycling: status, dispatch, review, merge, deployment verification. Stop only when every in-scope item is Done or has a genuinely external blocker recorded in Graphyard, and every merge verified against the exact deployed release or deployment-blocked.
 
 1. `master status` at startup and after events.
 2. `master run` dispatches ready work in `schedule.order`.
@@ -39,10 +39,10 @@ that host's loop. `sessions.unseen` lists stale handles. `dispatch.sessionReconc
   way as any other. Implementation sessions are left to the lease.
 - **Duplicate**: the older of two sessions for one role and head.
 
-A closure decides no gate, ends no lease, and stops no process. A profile's concurrency is counted against live sessions only, and a name is busy only while a live session has it. A session past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` producer, 12h coordination) raises attention, is never closed.
+A closure decides no gate, ends no lease, and stops no process. A profile's concurrency is counted against live sessions only, and a name is busy only while a live session has it. A session past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) raises attention, is never closed.
 
-**So what an operator or a master does instead of closing sessions by hand:** nothing for one
-that finished or died (`graphyard master run --once` sweeps); for an overlong one, attach with the command on the handle. Never mark
+**So what an operator or a master does instead of closing sessions by hand:** nothing, for a session
+that finished or died (`graphyard master run --once` sweeps); for an overlong one, attach to it with the command on the handle. Never mark
 another session's handle finished to free a slot.
 
 ### System invariants
@@ -63,7 +63,7 @@ A candidate passing the build gate gets, in `autoDispatch`, one producer request
 
 **Concurrency is per role.** A profile's `concurrency` (1–20, default 1) caps its simultaneous sessions, each with a name unique to its request above one. It applies without a restart; lowering it drains sessions first (`longestWaitMs`); a role starved ten minutes counts in `counts.concurrencyStarved`.
 
-**Requests always settle.** A gone pane (`pane_not_found`) is closed. No request outlives its own token: expired, unreported by Herdr, it settles `expired`; one still pending counts in `dispatch.sessionReconcile.stuck`. Unanswered sessions relaunch elsewhere (12 per request, then `dispatch.abandoned`); an unposted reviewer is reminded first. Producer runs killed or vanished spend no attempt; spent attempts raise `escalation:proof-exhausted`, then a quoting rework next cycle.
+**Requests always settle.** A gone pane (`pane_not_found`) is closed. No request outlives its own token: expired, unreported by Herdr, it settles `expired`; one still pending counts in `dispatch.sessionReconcile.stuck`. Unanswered sessions relaunch elsewhere (12 per request, then `dispatch.abandoned`); an unposted reviewer is reminded first. Killed or vanished producer runs spend no attempt; spent attempts raise `escalation:proof-exhausted`, then a quoting rework.
 
 **Every role, approvers too, fails over on spent quota** or waits as one `capacity` line.
 
@@ -85,8 +85,8 @@ A pass is trusted only when that stripped run failed with a case executed; other
 
 ### Repair lane
 
-The first of two no-admin-bypass exceptions: a `"repair": "merge-path"` item (`mergePath` files only) stalled 15 minutes, checks passed, given an approver's `master decide GY-N repair-merge REASON` naming the fault, merges through the App's ruleset bypass, audited (`repair.merged`) and flagged until a normal merge.
+The first of two no-admin-bypass exceptions: a `"repair": "merge-path"` item (`mergePath` files only) stalled 15 minutes, checks passed, given an approver's `master decide GY-N repair-merge REASON` naming the fault, merges through the App's ruleset bypass, audited (`repair.merged`), flagged until a normal merge.
 
-The main guard's revert ([optimistic merges](github.md#optimistic-merges)) is the second: on a confirmed required-suite failure on main traced to the culprit it lands a revert built on the base tip — refused when a later merge touched the culprit's files — head-bound through the same bypass, recorded `optimistic.revert.*` not `repair.merged`, the item reopened as rework.
+The main guard's revert ([optimistic merges](github.md#optimistic-merges)) is the second: a confirmed required-suite failure on main traced to the culprit lands a revert built on the base tip — refused when a later merge touched the culprit's files — head-bound through the same bypass, recorded `optimistic.revert.*` not `repair.merged`, the item reopened as rework.
 
 Unresolved review threads are the reviewer's inputs, not merge blockers (`reviewThreads`); its approval names each on `Resolved threads:`, `Follow-up threads:` or `Overridden threads:` ([rules](coordination.md#review-gate-verdicts-not-threads)).
