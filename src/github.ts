@@ -258,6 +258,10 @@ export function queuedAhead(work: Pick<Work, 'id' | 'queue'>, all: readonly Pick
  * cadence follows it rather than inventing a second reading of the same state.
  */
 export function observationBand(work: Work, all: Work[], now: Date, next = nextAction(work, all, now)): { band: Exclude<CadenceBand, 'steady'>; reason: string; fresh?: true } {
+  // The recorded window is derived by gate evaluation, including tips still awaiting CI.
+  // Every in-flight tip needs verdict reads even before its test gate passes.
+  if (work.queue?.tips?.length && work.stage !== 'done')
+    return { band: 'merge', reason: `${work.key} is validating a tip in the parallel window; its verdict can advance the queue` };
   const open = !!work.candidate && !!work.observation && !work.observation.merged && work.observation.prState === 'open';
   if (next?.kind === 'merge' || open && work.gates.every(gate => gate.name === 'merge' || gate.passed)) {
     // Only the entries that can merge next need the merge band's 20-second freshness. On
@@ -2207,7 +2211,7 @@ export async function githubFromEnv() {
 async function advanceQueue(engine: Engine, github: GitHub, work: Work, job: { work_id: string; token: string }, guard: (snapshot: Work, success: boolean) => () => Promise<void>, hold: (feature: PermissionFeature) => string | null) {
   const all = await engine.store.list();
   const placement = queuePlacement(work, all.map(item => item.id === work.id ? work : item), Date.now());
-  if (!placement || placement.current || !placement.publishable) return { work, published: false, held: null };
+  if (!placement || placement.current || !placement.publishable || engine.parallelTips > 0 && placement.position >= engine.parallelTips) return { work, published: false, held: null };
   // Publishing a tip writes a merge commit and a ref; without Contents: write the call can
   // only 403. The entry keeps its place and waits for the permission instead of retrying.
   const held = hold('merge-queue');
@@ -2399,7 +2403,7 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
   const readAt = batchSizeRead.get(engine);
   if (readAt === undefined || Date.now() - readAt >= mergeBatchSizeRefreshMs) {
     batchSizeRead.set(engine, Date.now());
-    await Promise.all([engine.loadMergeBatchSize(), engine.loadRerunFailedChecks(), engine.loadOptimisticExclude()]).catch(() => batchSizeRead.delete(engine));
+    await Promise.all([engine.loadMergeBatchSize(), engine.loadParallelTips(), engine.loadRerunFailedChecks(), engine.loadOptimisticExclude()]).catch(() => batchSizeRead.delete(engine));
   }
   // The main guard (GY-500) is the installation's, not a job's: it runs here on its own interval,
   // and a failure of it is recorded and retried on the next interval, never failing a job.
@@ -2421,7 +2425,9 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
   // priority being advisory and the publication guard rechecking ownership; re-read after the
   // claim only if claim order ever gains a correctness role.
   const all = await engine.store.list();
-  const job = await engine.store.takeJob(observationClaimOrder(all, engine.mergeBatchSize, Date.now(), budgetTight(github.budget?.())), observationHeadCount(all, engine.mergeBatchSize));
+  // The band spans the parallel-tip window too (GY-498): every entry validated at once is claimed first.
+  const band = Math.max(engine.mergeBatchSize, engine.parallelTips);
+  const job = await engine.store.takeJob(observationClaimOrder(all, band, Date.now(), budgetTight(github.budget?.())), observationHeadCount(all, band));
   if (!job) return false;
   const startedAt = Date.now();
   let work: Work | undefined;
