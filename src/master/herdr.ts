@@ -47,6 +47,14 @@ export async function observeHerdrAgents(run?: ChildRun) {
   catch { return { agents: [] as HerdrAgent[], available: false, reason: 'Herdr session health is unavailable; Graphyard work state remains authoritative' }; }
 }
 
+/** One pane the host's runtime holds, as `herdr pane list` reports it (GY-842): with or without an agent in it. */
+export interface HerdrPane { pane_id?: string; tab_id?: string; title?: string }
+/** Every pane on this host (GY-842): the pane inventory the agent list does not stand in, since a pane a bare shell holds and a pane no session ever named are both real. */
+export async function listHerdrPanes(run?: ChildRun): Promise<HerdrPane[]> {
+  const result = await herdrJson(['pane', 'list'], run);
+  return Array.isArray(result?.panes) ? result.panes : [];
+}
+
 export async function closeHerdrPane(pane: string, run?: ChildRun, timeoutMs = 5_000) {
   await herdrJson(['pane', 'close', pane], run);
   const deadline = Date.now() + timeoutMs;
