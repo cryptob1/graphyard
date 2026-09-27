@@ -6,6 +6,7 @@ import { migration, tables } from './schema.js';
 import { releaseInfo, schemaVersion } from '../release.js';
 import { appendSave, resolvedPayloadSql } from './snapshot-delta.js';
 import { advisoryLocks } from './locks.js';
+import { lockRebuiltTriggerTables, retryDeadlocks } from './migration-locks.js';
 import { coordinationDocumentSql, coordinationRelevance, coordinationTail, coordinationTrimSql, detoasted, type CoordinationTrim } from './coordination-sql.js';
 import { namedPool, reportPool, type ReportPoolOptions } from './report-pool.js';
 import { closePool, leasePoolConnections, reserve, trackedPool } from './pools.js';
@@ -113,9 +114,9 @@ export class Store {
       if (!watching) return;
       try {
         if (lost) throw lost;
+        cancelledWaiting = true; // Marked before the cancel goes out: its 57014 can reach the migration before this query returns.
         const { rows } = await guard.query("SELECT pg_cancel_backend(pid) AS cancelled FROM pg_stat_activity WHERE pid=$1 AND wait_event_type='Lock'", [pid]);
-        if (rows[0]?.cancelled) cancelledWaiting = true;
-        else if (watching) poll = setTimeout(() => { polling = watch(pid); }, 100);
+        if (!rows[0]?.cancelled) { cancelledWaiting = false; if (watching) poll = setTimeout(() => { polling = watch(pid); }, 100); }
       } catch (error) {
         if (watching) abort(new Error(`Schema migration to generation ${schemaVersion} lost the connection its lock-wait watchdog needs (${(error as Error).message}) past its ${timeout} ms deadline, while waiting for ${waitingOn}; startup fails instead of outlasting the health check — retry the deploy`, { cause: error }));
       }
@@ -125,20 +126,19 @@ export class Store {
       await guard.query('SET statement_timeout = 5000');
       const pid = Number((await db.query('SELECT pg_backend_pid() AS pid')).rows[0].pid);
       poll = setTimeout(() => { polling = watch(pid); }, Math.max(0, deadline - Date.now()));
-      await db.query('BEGIN');
-      // The pool's statement timeout bounds coordination reads and writes, not the migration's own
-      // work: its lock waits share the deadline above, and a backfill or index build still completes.
-      await db.query('SET LOCAL statement_timeout = 0');
-      // The migration's own lock, never the coordination lock (GY-203): two migrations serialize,
-      // while the live replica's coordination transactions run on beside it.
-      await step(waitingOn, 'SELECT pg_advisory_xact_lock($1)', [advisoryLocks.migration]);
-      await step('a lock on the migration\'s shared function graphyard_immutable', migrationPrelude);
-      for (const table of tables) await step(`a lock on table ${table.name} (or an object its migration touches)`, table.ddl);
-      const current = Number((await step('a lock on table graphyard_schema', 'SELECT COALESCE(MAX(version),0) AS version FROM graphyard_schema')).rows[0].version);
-      if (current > schemaVersion) throw newerSchema(current);
-      if (current < schemaVersion) await step(waitingOn, 'INSERT INTO graphyard_schema(version, graphyard_version) VALUES($1,$2)', [schemaVersion, releaseInfo().version]);
-      await step(waitingOn, `COMMENT ON TABLE graphyard_schema IS ${literal(digest)}`);
-      await Promise.race([db.query('COMMIT'), abandoned]);
+      const migrate = async () => {
+        // The pool's statement timeout bounds coordination work, not the migration's: its lock waits share the deadline above.
+        await db.query('BEGIN'); await db.query('SET LOCAL statement_timeout = 0');
+        // The migration's own lock, never the coordination lock (GY-203): two migrations serialize beside live coordination.
+        await step(waitingOn, 'SELECT pg_advisory_xact_lock($1)', [advisoryLocks.migration]);
+        await step('a lock on the migration\'s shared function graphyard_immutable', migrationPrelude);
+        for (const { name, ddl } of tables) { const waiting = `a lock on table ${name} (or an object its migration touches)`; await lockRebuiltTriggerTables(step, waiting, ddl); await step(waiting, ddl); }
+        const current = Number((await step('a lock on table graphyard_schema', 'SELECT COALESCE(MAX(version),0) AS version FROM graphyard_schema')).rows[0].version);
+        if (current > schemaVersion) throw newerSchema(current);
+        if (current < schemaVersion) await step(waitingOn, 'INSERT INTO graphyard_schema(version, graphyard_version) VALUES($1,$2)', [schemaVersion, releaseInfo().version]);
+        await step(waitingOn, `COMMENT ON TABLE graphyard_schema IS ${literal(digest)}`);
+        await Promise.race([db.query('COMMIT'), abandoned]);
+      }; await retryDeadlocks(migrate, () => !aborted && Date.now() < deadline, () => db.query('ROLLBACK').catch(() => {}));
     } catch (error) {
       // An abandoned migration's connection is still busy: it is destroyed below, which rolls it back.
       if (aborted) throw aborted;
@@ -228,7 +228,7 @@ export class Store {
    */
   async takeJob(order: string[] = [], headCount = 0, starvedAfterMs = observationStarvedAfterMs) {
     const token = randomUUID();
-    const result = await this.pool.query(`WITH picked AS (SELECT work_id, generation<>claimed_generation AS woken FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now()) ORDER BY CASE WHEN array_position($1::uuid[], work_id) <= $3::int THEN 0 WHEN available_at < now() - ($4::text||' milliseconds')::interval THEN 1 WHEN array_position($1::uuid[], work_id) IS NOT NULL THEN 2 ELSE 3 END, array_position($1::uuid[], work_id), available_at FOR UPDATE SKIP LOCKED LIMIT 1)
+    const result = await this.pool.query(`WITH picked AS (SELECT work_id, generation<>claimed_generation AS woken FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now()) ORDER BY CASE WHEN array_position($1::uuid[], work_id) <= $3::int THEN 0 WHEN available_at < now() - ($4::text||' milliseconds')::interval * 3 THEN 1 WHEN available_at < now() - ($4::text||' milliseconds')::interval THEN 2 WHEN array_position($1::uuid[], work_id) IS NOT NULL THEN 3 ELSE 4 END, CASE WHEN available_at < now() - ($4::text||' milliseconds')::interval * 3 THEN available_at END, array_position($1::uuid[], work_id), available_at FOR UPDATE SKIP LOCKED LIMIT 1)
       UPDATE jobs SET token=$2, locked_until=now()+interval '90 seconds', attempts=attempts+1,claimed_generation=generation
       FROM picked WHERE jobs.work_id=picked.work_id RETURNING jobs.*, picked.woken`, [order.length ? order : null, token, Math.max(0, Math.floor(headCount)), String(Math.max(0, Math.floor(starvedAfterMs)))]);
     return result.rows[0] as { work_id: string; token: string; attempts: number; woken: boolean } | undefined;
