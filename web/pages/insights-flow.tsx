@@ -7,6 +7,7 @@ import { formatDuration } from '../../src/model/duration';
 import { readStepRows } from '../step-moves';
 import { ShippingPulse, usePulse, type PulseRead } from '../shipping-pulse';
 import FlowAnalytics from '../flow-analytics';
+import OptimisticMerges from '../optimistic-merges';
 import type { Work } from '../../src/model';
 import type { HumanRequestRow } from '../../src/model/human-request';
 import type { Dashboard } from './dashboard';
@@ -393,6 +394,7 @@ export default function InsightsPage({ work, status, api, token, observedAt, set
       <LandedPerDay report={report}/>
       <WhereTimeGoes report={report}/>
     </div>
+    <OptimisticMerges work={work} enabled={status?.mergeQueue?.optimistic}/>
     <details className="insight-details" onToggle={event => { if (event.currentTarget.open) setDetailed(true); }}><summary>Show details</summary>
       {detailed && <div className="insight-details-body"><InsightsDetails pulse={pulse} repository={status?.repository} api={api} token={token} canAudit={['admin', 'coordinator', 'producer'].includes(status?.actor?.role)}/></div>}
     </details>
