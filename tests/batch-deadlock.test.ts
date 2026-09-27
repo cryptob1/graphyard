@@ -12,6 +12,7 @@ import { describeMergeBatches, predictQueue, queueRef } from '../src/merge-queue
 import { diagnose } from '../src/coordination.js';
 import { buildMasterStatus } from '../src/master/status.js';
 import { CHECK_NAME, Refusal, ReconciliationRetry, type Principal, type Work } from '../src/model.js';
+import { optimisticMergeEvent } from '../src/optimistic-merge.js';
 
 // GY-506: the merge-queue deadlock. Every test is named for the proof it produces.
 
@@ -118,6 +119,11 @@ before(async () => {
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'owner/project'); engine.controlPlaneAppId = 1234;
+  // These tests prove queue mechanics (GY-506), so the lane is published off the way the master
+  // publishes it (POST /api/merge-queue): with optimistic merge on (GY-500, default on), a lone
+  // disjoint candidate is eligible and never enters the queue at all, and every job re-reads the
+  // ledger setting, so a field assignment would not survive the first observation.
+  await store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', ['graphyard', optimisticMergeEvent, JSON.stringify({ optimistic: false, previous: null })]);
   engine.principals = [operator, worker, producer];
 });
 after(async () => { if (store) await store.close(); if (database) await database.stop(); });
