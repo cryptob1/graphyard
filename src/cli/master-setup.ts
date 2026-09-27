@@ -1,6 +1,7 @@
 import { agentOwner, herdrWorkspaceHealth, humanOwner, type AttentionItem, type MasterConfig } from '../master.js';
 import { reviewerBindingHealth } from '../reviewer.js';
 import { loopSupervision, loopSupervisionAttention, type LoopSupervisorHost } from '../supervisor.js';
+import { triageConcurrency } from '../triage.js';
 
 /**
  * The `setup` section of master status: installation state that silently stops every launch or
@@ -13,12 +14,24 @@ import { loopSupervision, loopSupervisionAttention, type LoopSupervisorHost } fr
  */
 export const browserProfileMissing = 'No browser profile is configured: App permission updates, installation acceptance, and page-only protection changes cannot run through master browser until the operator lends the master a signed-in Chrome profile';
 export const browserProfileNext = (cliPath: string) => `node ${cliPath} master init --token-stdin --browser-profile PROFILE`;
+/**
+ * What drives triage of machine-filed backlog items (GY-431): the loop's triage step runs only on
+ * the research account `run.research` names. Without it nothing triages them — each review
+ * follow-up and recurring-fault item waits for a person's release or close and, past a day, only
+ * raises attention — so setup says so rather than leaving it to be discovered from that attention.
+ */
+export function triageSetup(master: Pick<MasterConfig, 'run'>) {
+  const configured = !!master.run?.research;
+  return { configured, drivenBy: 'run.research' as const,
+    text: configured ? `The loop triages machine-filed items on the research account (run.research, model ${master.run.research!.model}), ${master.run.research!.triageConcurrency ?? triageConcurrency} at once`
+      : 'Triage of machine-filed items is off: run.research is not set, so review follow-ups and recurring-fault items wait for graphyard master release or master close and, past a day untriaged, raise attention. Set run.research in .graphyard/master.json to have the loop triage them' };
+}
 export async function setupHealth(root: string, master: MasterConfig, supervisorHost?: LoopSupervisorHost) {
   const reviewer = await reviewerBindingHealth(master);
   const supervisor = await loopSupervision({ root, cliPath: master.cliPath }, supervisorHost);
   const supervisorAttention = loopSupervisionAttention(supervisor);
   const herdrWorkspace = await herdrWorkspaceHealth(master);
-  const setup = { reviewer, supervisor, herdrWorkspace,
+  const setup = { reviewer, supervisor, herdrWorkspace, triage: triageSetup(master),
     attention: [...reviewer.attention, ...supervisorAttention.map(item => item.text), ...(herdrWorkspace.exists === false ? [herdrWorkspace.reason!] : [])] };
   // An unsupervised loop stays stopped; each supervisor state names its own repair.
   const attention: AttentionItem[] = supervisorAttention.map(item => ({ subject: 'setup', text: item.text, ...agentOwner('master', item.next) }));

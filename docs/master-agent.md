@@ -55,7 +55,7 @@ With `run.research` set (`model`, `timeoutMinutes` 15, `tokenBudget`), a feature
 
 ## Machine-filed backlog
 
-One follow-up item per parent; approvals append their findings. The one-time migration folds the duplicates filed before that into each parent's oldest open item; an item it finds leased is named `deferred`, and the loop asks again only once a cycle sees one of those leases end — never on a timer — so the re-asks, their receipts and their resumed passes are bounded by the deferrals. With `run.research`, Pi triages machine-filed items (release, close, merge; closure needs approval, applied in one transaction with the merge's append), `triageConcurrency` (default 2) at once. Untriaged past 24h raises attention; status counts `machineUntriaged`/`operatorBacklog`.
+One follow-up item per parent; approvals append their findings. The one-time migration folds the duplicates filed before that into each parent's oldest open item; an item it finds leased is named `deferred`, and the loop asks again only once a cycle sees one of those leases end — never on a timer — so the re-asks, their receipts and their resumed passes are bounded by the deferrals. Only with `run.research` (`master status` `setup.triage` says which) does Pi triage machine-filed items (release, close, merge; closure needs approval, applied in one transaction with the merge's append), `triageConcurrency` (default 2) at once. Untriaged past 24h raises attention; status counts `machineUntriaged`/`operatorBacklog`.
 
 ## Automatic dispatch at submit
 

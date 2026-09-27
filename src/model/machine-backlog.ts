@@ -54,16 +54,20 @@ export function machineKind(work: Filed): MachineKind | null {
 }
 
 const normalized = (text: string) => text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+/** One spelling of a repository path: `./src/a.ts`, `src\\a.ts`, `src//a.ts` and `SRC/A.ts` all read `src/a.ts` (GY-431). */
+const canonicalPath = (path: string) => path.trim().replace(/\\/g, '/').replace(/\/{2,}/g, '/').replace(/^(?:\.\/)+/, '').toLowerCase();
 /**
  * The identity a finding is deduplicated on: its path and its text, where the text leaves out a
  * leading `path:line —` the reviewer repeats (so the same finding named on a later head at a moved
- * line is the same finding) and case, punctuation and spacing.
+ * line is the same finding) and case, punctuation and spacing. Both paths are compared in their
+ * canonical spelling, so the same finding cited as `./src/a.ts` or in another casing is one finding.
  */
 export function followUpEntryKey(finding: FollowUpEntry) {
-  const path = finding.path?.trim() ?? '';
+  const path = canonicalPath(finding.path ?? '');
   let text = finding.text.trim();
-  if (path && text.replace(/^`/, '').startsWith(path)) text = text.replace(/^`?[^\s`]+`?(?::\d+)?\s*(?:[—–:-]+\s*)?/, '');
-  return `${path.toLowerCase()}\u0000${normalized(text)}`;
+  const cited = /^`?([^\s`:]+)`?(?::\d+(?:-\d+)?)?\s*(?:[—–:-]+\s*)?/.exec(text);
+  if (path && cited && canonicalPath(cited[1]!) === path) text = text.slice(cited[0].length);
+  return `${path}\u0000${normalized(text)}`;
 }
 /**
  * `existing` with each of `incoming` it does not already hold, in order, up to `followUpEntriesMax`;

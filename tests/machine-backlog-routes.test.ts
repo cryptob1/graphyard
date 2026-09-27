@@ -9,7 +9,7 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import { followUpItem } from '../src/review-threads.js';
-import { followUpEntries } from '../src/model/machine-backlog.js';
+import { backlogCounts, followUpEntries } from '../src/model/machine-backlog.js';
 import { isClosed, type Principal, type Work } from '../src/model.js';
 
 // GY-402 against a real Postgres and the real routes: a later approval's findings appended to the
@@ -180,4 +180,26 @@ test('unit:machine-backlog-triaged — an approved triage merge applies atomical
   const open = await reload(source.key);
   assert.equal(open.stage, 'backlog');
   assert.equal(open.triage?.state, 'proposed');
+});
+
+test('unit:machine-backlog-triaged — the dashboard counts a proposed closure as proposed, not awaiting triage: the board\'s backlog rows resolve to snapshot documents that carry triage (GY-431)', async () => {
+  const parent = await ok(operator, 'work', { title: 'Parent K', plannedFiles: ['src/k.ts'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:k'] }] }) as Work;
+  const shipped = await ok(operator, 'work', { title: 'Shipped K fix', plannedFiles: ['src/k2.ts'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:k'] }] }) as Work;
+  await store.pool.query('UPDATE work_items SET document=$2 WHERE id=$1', [shipped.id, JSON.stringify({ ...(await reload(shipped.key)), stage: 'done', closure: null })]);
+  const waiting = await followUp(parent, 51, ['src/k.ts — still waiting']);
+  const closing = await followUp(parent, 52, ['src/k2.ts — already fixed']);
+  await ok(coordinator, `work/${closing.key}/triage`, { judgement: { outcome: 'close', ref: shipped.key, reason: 'The fix shipped' } });
+  // The Work page's rows exactly as web/pages/overview.tsx builds them: the board's backlog group,
+  // each row resolved to the document the default snapshot serves for it.
+  const [snapshot, board] = await Promise.all([ok(operator, 'work-snapshot'), ok(operator, 'board')]);
+  const byId = new Map((snapshot.work as Work[]).map(work => [work.id, work]));
+  const ours = new Set([waiting.id, closing.id]);
+  const rows = (board.groups.backlog as { id: string }[]).filter(row => ours.has(row.id)).map(row => byId.get(row.id)!);
+  assert.equal(rows.length, 2, 'both follow-ups are backlog rows the snapshot serves');
+  assert.equal(rows.find(row => row.id === closing.id)!.triage?.state, 'proposed', 'the snapshot row carries its triage');
+  const counts = backlogCounts(rows, Date.now());
+  assert.deepEqual({ untriaged: counts.machineUntriaged, proposed: counts.machineProposed }, { untriaged: 1, proposed: 1 });
+  // The same split master status reads from the whole store.
+  const whole = backlogCounts((await store.list()).filter(work => ours.has(work.id)), Date.now());
+  assert.deepEqual({ untriaged: whole.machineUntriaged, proposed: whole.machineProposed }, { untriaged: counts.machineUntriaged, proposed: counts.machineProposed });
 });

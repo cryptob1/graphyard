@@ -8,6 +8,8 @@ import { neededDecision, routineDecision } from '../src/daemon/decisions.js';
 import { decisionInputs, decisionPrecondition } from '../src/model/approval.js';
 import { graphyardTools } from '../integrations/pi/index.js';
 import type { Run, RunEvent, RunOptions, RunResult, Runner } from '../src/runner/types.js';
+import { triageSetup } from '../src/cli/master-setup.js';
+import type { MasterConfig } from '../src/master.js';
 
 // GY-402: nothing judged the loop's own backlog items — 170 review follow-ups and the recurring
 // fault items sat unreleased for good. Each is now triaged within a day by a triage session, a
@@ -126,4 +128,15 @@ test('unit:triage-concurrency-setting — run.research.triageConcurrency sets ho
   assert.equal(step({ triageConcurrency: 5 }).length, 5, 'the setting raises it');
   await triageSettled();
   assert.throws(() => researchSettings({ research: { triageConcurrency: 0 } }));
+});
+
+test('unit:machine-backlog-triaged — master setup says run.research is what drives triage: off without it, naming the setting, and on with the account\'s model and concurrency (GY-431)', () => {
+  const setup = (run: unknown) => triageSetup({ run } as Pick<MasterConfig, 'run'>);
+  const off = setup({ intervalSeconds: 60 });
+  assert.deepEqual({ configured: off.configured, drivenBy: off.drivenBy }, { configured: false, drivenBy: 'run.research' });
+  assert.match(off.text, /Triage of machine-filed items is off: run\.research is not set/);
+  assert.match(off.text, /Set run\.research in \.graphyard\/master\.json/);
+  const on = setup({ intervalSeconds: 60, research: researchSettings({ research: { model: 'zai/glm-flash', triageConcurrency: 3 } }) });
+  assert.equal(on.configured, true);
+  assert.match(on.text, /model zai\/glm-flash\), 3 at once/);
 });
