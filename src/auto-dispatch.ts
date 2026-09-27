@@ -17,7 +17,7 @@ import { detectExhaustion, type ExhaustionSignal } from './model/capacity.js';
 import { capacityRefusal } from './fleet.js';
 import { launchReview, reconcileReviews, reviewVerdictReminderMs, unpostedVerdict, type ReviewRecord } from './reviewer.js';
 import { answeredByPendingSession, independentProducerProfiles, launchProducer, reconcileProducers, requestAttemptLimit, sessionRetry, type ProducerRecord } from './producer.js';
-import { currentEvidence } from './model/evidence.js';
+import { unexercisedFindings } from './model/mechanical-proofs.js';
 
 /**
  * The launch side of automatic dispatch at submit. The control plane records what each exact
@@ -155,21 +155,8 @@ export const dispatchRetryMinMs = 30_000, dispatchRetryMaxMs = 600_000, dispatch
  */
 export const reviewerReminderBoundMs = reviewVerdictReminderMs, verdictIngestGraceMs = 5 * 60_000;
 
-/**
- * The producer's finding that a proof on this head does not exercise its criterion (GY-135): the
- * pass also held with the change removed. Such evidence is the worker's to fix, so the request is
- * never launched again for the head and the loop requests the rework instead (GY-193 AC-3).
- */
-export function unexercisedFindings(work: Work, sha: string | undefined = work.candidate?.sha, proofs?: readonly string[]): { proof: string; finding: string }[] {
-  if (!sha) return [];
-  const findings = new Map<string, string>();
-  for (const entry of work.evidence ?? []) {
-    if (!entry.unexercised || entry.sha !== sha || entry.policyRevision !== work.policyRevision || (proofs && !proofs.includes(entry.proof))) continue;
-    findings.set(entry.proof, entry.unexercised);
-  }
-  // A trusted pass recorded since answers the finding: the proof is proven on this head after all.
-  return [...findings].filter(([proof]) => !(sha === work.candidate?.sha && currentEvidence(work, proof)?.result === 'pass')).map(([proof, finding]) => ({ proof, finding }));
-}
+// The producer's finding that a proof does not exercise its criterion is read by the planner too (GY-817).
+export { unexercisedFindings };
 /** A session record as the dispatcher reads it from either ledger. */
 type DispatchedSession = { requestId?: string; state: string; requestedAt: string; closedAt?: string; resolution?: string; profile?: string; attempt?: number; acknowledgedAt?: string; verdict?: { state: string } };
 const requestSessions = (records: DispatchedSession[], requestId: string) => records.filter(record => record.requestId === requestId);
