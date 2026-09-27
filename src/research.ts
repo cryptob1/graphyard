@@ -6,7 +6,7 @@ import { humanOnlyRefusal, parkRule } from './model/human-request.js';
 import { defaultPiModel, piRunner } from './runner/pi.js';
 import type { Run, RunResult, Runner } from './runner/types.js';
 import { save } from './store.js';
-import { researchHoldGraceMs } from './model/pr-steps.js';
+import { researchHoldGraceMs } from './model/research-step.js';
 import type { Services } from './server/routes.js';
 
 // ---------------------------------------------------------------------------
