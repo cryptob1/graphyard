@@ -1,6 +1,6 @@
 // Concern: cycle step 2 — decide open scope requests and measure the decision budget.
 import type { Work } from '../model.js';
-import { type ScopeRequestState, pathScope, pathScopeContains, pinningTestGround, redecidableScopeRefusal, routableScopeRequest, scopeRefusalBlocker, testFile, unplannedPaths } from '../model/scope.js';
+import { type ScopeRequestState, pathScope, pathScopeContains, pinningTestGround, redecidableScopeRefusal, routableScopeRequest, testFile, unplannedPaths } from '../model/scope.js';
 import { barrelSuccessorGround, criterionSymbolGround, criterionSymbols, criterionTestGround, phraseCallees } from '../model/criterion-scope.js';
 import { type Successor, successorGround, successorsOf } from '../model/successors.js';
 import { findingScope, type ReviewFinding } from '../review-scope.js';
@@ -155,14 +155,8 @@ export async function scopeStep(cycle: Cycle) {
       const decision = decided.scopeDecision;
       if (!decision) throw new Error('The control plane answered without a decision');
       settled.set(item.id, decided);
-      // GY-807: when a scope decision is approved, clear any scope-related blockers, not just the ones
-      // with the standard "Scope request refused" prefix. This handles cases where a worker manually set
-      // a blocker like "Blocked on scope" that wouldn't be cleared by the standard prefix check.
-      if (decision.state === 'approved' && decided.blocker) {
-        const blockStartsWithPrefix = decided.blocker.startsWith(scopeRefusalBlocker);
-        const blockIsAboutScope = /\bscope\b/i.test(decided.blocker);
-        if (blockStartsWithPrefix || blockIsAboutScope) decided.blocker = null;
-      }
+      // An approved answer has lifted the blockers the ask earned in the same mutation (GY-807,
+      // engine applyScopeDecision), so the settled copy already reads unblocked.
       // An additive refusal no finding grounds is put to the independent approver in step 4c, on
       // this same cycle: naming `master scope` would leave it waiting for a master to be around. Its
       // wait is measured when the approver answers, the decision the worker actually waits on.

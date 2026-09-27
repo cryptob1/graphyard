@@ -227,6 +227,15 @@ export function closeEndedScopeRequest(work: Work, now: Date, by: string) {
 }
 /** The commands that end an attempt, or clear what an ended one left behind, and so close its scope request. */
 const attemptEndingCommands = new Set<string>(['submit', 'release', 'rework', 'requirements', 'unblock']);
+/**
+ * Whether a blocker is one a scope answer settles (GY-807): the loop's own refusal blocker, or a
+ * worker's report naming the scope ask it waits on. An approved answer must clear both here, in
+ * the mutation that applies the answer — clearing one on a daemon's ephemeral copy would change
+ * nothing once the snapshot reloads, and the item would stay blocked on a request that no longer
+ * exists with nothing moving it.
+ */
+export const scopeSettledBlocker = (blocker: string | null | undefined): boolean =>
+  !!blocker && (blocker.startsWith(scopeRefusalBlocker) || /\bscope\b/i.test(blocker));
 function applyScopeDecision(work: Work, request: NonNullable<Work['scopeRequest']>, now: Date): ScopeDecision {
   const verdict = decideScopeRequest(work, request);
   const decision: ScopeDecision = { state: verdict.state, reason: verdict.reason, at: now.toISOString(), decidedBy: 'graphyard',
@@ -242,7 +251,10 @@ function applyScopeDecision(work: Work, request: NonNullable<Work['scopeRequest'
     work.policyRevision++;
     work.formalReviewResetRequired = true; work.formalReviewBaseline = undefined;
     work.observation = null; work.mergeAuthorization = null; work.reviewRequest = null;
-    if (work.blocker?.startsWith(scopeRefusalBlocker)) work.blocker = null;
+    // The answer lifts every blocker the ask earned (GY-807): the loop's own refusal blocker, and
+    // the worker's report naming the ask it was waiting on. Clearing it here, in the same
+    // transaction, is what keeps the item from staying blocked on a request that no longer exists.
+    if (scopeSettledBlocker(work.blocker)) work.blocker = null;
   } else {
     // Refused and escalated: the reason is the item's blocker, so the ready gate holds it
     // until an operator decides the scope the item does not already imply.

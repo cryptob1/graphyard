@@ -5,7 +5,7 @@ The master (`coordinator`) routes, merges, verifies deployments, administers Git
 
 ## Autonomy: agents approve agents
 
-The master acts without asking. Three decisions are human-only: goals and priorities, spending money or opening third-party accounts, and issuing credentials to people ([who decides](glossary.md#who-decides)); everything else it applies alone or through an approver agent; never ask a human to run what an agent may run.
+The master acts without asking. Three decisions are human-only: goals and priorities, spending money or opening third-party accounts, and issuing credentials to people ([who decides](glossary.md#who-decides)); everything else it applies alone or through an approver agent.
 
 ## Operate
 
@@ -19,7 +19,11 @@ Keep cycling: status, dispatch, review, merge, deployment verification. Stop onl
 
 Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions. `controlPlane.production` flags main ahead of production.
 
-`master run` runs this loop under the `graphyard-master.service` unit ([supervision](onboarding.md#the-loop-must-be-supervised)); restart it (`systemctl --user restart graphyard-master`) when `daemon.liveness` is `stalled` or `absent`.
+`master run` runs this loop under the `graphyard-master.service` unit; restart it (`systemctl --user restart graphyard-master`) when `daemon.liveness` is `stalled` or `absent`.
+
+### System-driven items
+
+Unless created `"systemDriven": false`, an item refuses hand `dispatch`, `merge`, `review` and `decide attest|merge`, except stopped-loop recovery, unproduced `manual:` attestations, and `decide merge` of unauthorized merges or with no operator agent.
 
 ### Session liveness is reconciled, not trusted
 
@@ -45,13 +49,17 @@ another session's handle finished to free a slot.
 
 Each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `lingering-sessions` (30 min), `refresh-churn` (3 per own head), `merge-stall` (10 min), `cycle-p90` (30 s), `untriaged-backlog` (24 h), `deploy-lease-loss` (0). Faults per class; thresholds: `invariants` in `.graphyard/master.json`; `tests/soak.test.ts` enforces.
 
+## Machine-filed backlog
+
+One follow-up item per parent; approvals append their findings. With `run.research`, Pi triages them (release, close, merge; closure needs approval), `triageConcurrency` (default 2) at once. Untriaged past 24h raises attention.
+
 ## Automatic dispatch at submit
 
-A candidate passing the build gate gets one producer request per proof group (`unit`, `integration`, `manual`) and a review request once unit and integration pass. **The loop launches within 30 seconds**: every `dispatchIntervalSeconds` it starts the reviewer profile (`run.reviewerProfile`) and one producer session on a `master producer add FILE` profile ([template](../examples/master/claude-producer.json)). Sessions are recorded in `.graphyard/reviews.json` and `.graphyard/producers.json`.
+A candidate passing the build gate gets, in `autoDispatch`, one producer request per proof group (`unit`, `integration`, `manual` for `producerProofs`), then a review request once its unit and integration proofs pass (`proofs-pending` until then). **The loop launches each request within 30 seconds**: every `dispatchIntervalSeconds` it starts the reviewer profile (`run.reviewerProfile`) and one producer session per proof group on a `master producer add FILE` profile ([template](../examples/master/claude-producer.json)), recorded in `.graphyard/reviews.json` and `.graphyard/producers.json`. A reviewer launch awaits the head's bot reviews (`run.awaitReviewers`) for `awaitReviewersMinutes` (default 8), skipping one that last posted a usage-limit notice until it next reviews (`skipped: <bot> exhausted since <time>`; `dispatch.botReviewers`).
 
-**Concurrency is per role.** A profile's `concurrency` (1–20, default 1) caps simultaneous sessions, each with a name unique to its request. It applies without a restart; lowering it drains sessions first (`longestWaitMs`); a role starved ten minutes counts in `counts.concurrencyStarved`.
+**Concurrency is per role.** A profile's `concurrency` caps simultaneous sessions, each with a name unique to its request. It applies without a restart; lowering it drains sessions first (`longestWaitMs`); a role starved ten minutes counts in `counts.concurrencyStarved`.
 
-**Requests always settle.** A gone pane (`pane_not_found`) is closed. No request outlives its own token: expired, unreported by Herdr, it settles `expired`; one still pending counts in `dispatch.sessionReconcile.stuck`. Unanswered sessions relaunch elsewhere (12 per request, then `dispatch.abandoned`); an unposted reviewer is reminded first. A proof row pending on its own head's session completes on it; one pending on another head is refused until reconciled.
+**Requests always settle.** A gone pane (`pane_not_found`) is closed. No request outlives its own token: expired, unreported by Herdr, it settles `expired`; one still pending counts in `dispatch.sessionReconcile.stuck`. Unanswered sessions relaunch elsewhere (12 per request, then `dispatch.abandoned`); an unposted reviewer is reminded first. A proof row pending on another head is refused until reconciled.
 
 **Every role, approvers too, fails over on spent quota** or waits as one `capacity` line.
 
@@ -71,13 +79,10 @@ A pass is trusted only when that stripped run failed with a case executed; other
 
 ## Bounded automatic recovery from stalled-gate faults
 
-**Stalled items holding failing gates are detected and recovered autonomously within bounded time, not escalated manually.** A stalled-gate fault is an item holding a failing gate with nothing moving it: no rework request, no review request, no producer request, and no named wait. Three or more such instances in 24 hours trigger a `fault-class-stalled-gate` item that finds and removes the shared cause.
+A stalled-gate fault is an item holding a failing gate nothing moves: no rework, review or producer request and no named wait. Three instances in 24 hours file one `fault-class-stalled-gate` item that removes the shared cause. The loop recovers every cycle (`daemon.liveness`); operators never intervene:
 
-The loop recovers automatically by:
-1. **Merge conflicts on submitted candidates**: when a candidate is submitted with a GitHub-reported merge conflict against a moved base, `syncConflict` detects it and the loop requests a sync rework without waiting for a fresh observation. A stale observation showing the conflict is still actionable; skipping the freshness check lets the loop route the rework immediately rather than waiting passively, which would leave the item stalled.
-2. **Scope-approved requests with scope-related blockers**: when a scope request is approved by the approver or widened automatically by the loop's rules, any scope-related blocker (`"Scope request refused"` or any blocker containing "scope") is cleared. An approved scope answer must clear its blocker so the item is no longer held.
-
-The loop continues this autonomous recovery process on every cycle (`daemon.liveness`); operators never intervene.
+1. **Merge conflicts on submitted candidates**: a head GitHub reports conflicting with the base gets its sync rework at once: its binding names the head and base tip, so a stale observation still decides it.
+2. **Scope answers lift what their ask earned**: an approved answer clears the loop's refusal blocker and the worker's "Blocked on scope: …" report in the same mutation.
 
 ## Guarded merges
 

@@ -449,10 +449,13 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     const key = decisionKey(item, decision);
     needed.add(key);
     const watch = state.approvals[key];
-    // Rework waits for an observation that still describes the item (GY-144). A request already
-    // standing is left as it is — neither supervised into a second request nor withdrawn — until
-    // GitHub is observed again and the item says whether it still needs the round.
-    const wait = decision.action === 'rework' ? reworkObservationWait(item, clock, pause) : null;
+    // Rework waits for an observation that still describes the item (GY-144). The decision's own
+    // binding is passed, never the item's next-action binding (the generic gate binding, which
+    // cannot name the grounds): a conflict binding is decisive however old the observation is, and
+    // waiting on its account left the item actorless with nothing moving it (GY-807). A request
+    // already standing is left as it is — neither supervised into a second request nor withdrawn —
+    // until GitHub is observed again and the item says whether it still needs the round.
+    const wait = decision.action === 'rework' ? reworkObservationWait(item, clock, pause, decision.binding) : null;
     if (wait) {
       const waitKey = `wait:rework:${item.id}`;
       if (detailChanged(state.actions[waitKey], wait)) await note(waitKey, item, 'decision', 'done', wait);
