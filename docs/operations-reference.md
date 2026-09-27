@@ -21,6 +21,10 @@ On the worker `graphyard master settle-containment GY-N "reason"` verifies nothi
 
 Stop the worker, then `graphyard rework GY-N --previous-worker-stopped "reason"`; the next worker resubmits. `scripts/rework-causes.mjs` classifies the last 100 deliveries' rework rounds by ledger reason; `master status` reports the split (`speed.reworkRounds.ownChange`): median excluding causes outside the item's own change.
 
+## Flaky CI check
+
+A required check failing on a tip or head reruns once per sha (*rerun failed jobs*, Actions:write), holding position, approval, proofs, with no rework meanwhile; a second failure or refusal ejects (`check.rerun.*`). `mergeQueue.rerunFailedChecks`: default 1, 0 disables, published like `batchSize`.
+
 ## Accepted evidence turns out to be wrong
 
 `graphyard revoke GY-N revoke.json` ([body](protocol/evidence.md#revocation)) closes the gate; the queue ejects it.
@@ -54,7 +58,7 @@ About ten requests uncached; unchanged, none.
 
 ### What a pause means for gates
 
-A rate-limit `403`/`429` pauses requests; gates read stale until it lifts.
+A rate-limit `403`/`429` pauses requests; gates read stale until it lifts: nothing merges on an observation over two minutes old.
 
 ### Reading the budget
 
