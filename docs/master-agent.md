@@ -67,7 +67,7 @@ A candidate passing the build gate gets, in `autoDispatch`, one producer request
 
 **Every role, approvers too, fails over on spent quota** or waits as one `capacity` line.
 
-**Unjudged approvers relaunch** (hand-launched too): 3 per decision, timeouts uncounted, then escalate (`session N:` ends).
+**Unjudged approvers relaunch** (hand-launched too): 3 per decision, timeouts uncounted, permanent launch refusals counted, then escalate (`session N:` ends, `launch N refused:` refusals).
 
 The master never launches reviews or producers by hand, except `master review GY-N [PROFILE]` once the loop stops relaunching.
 
