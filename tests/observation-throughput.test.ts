@@ -124,7 +124,7 @@ const insert = async (works: Work[]) => {
   for (const work of works) await store.pool.query('INSERT INTO work_items(id,document) VALUES($1,$2)', [work.id, work]);
 };
 /** When each job became due: the head last, its queue behind it, the waiting item and the backlog before it. */
-const dueAt = (position: number) => new Date(Date.now() - (position === 0 ? 1_000 : (120 - position) * 60_000));
+const dueAt = (position: number) => new Date(Date.now() - (position === 0 ? 1_000 : (15 - position / 3) * 60_000));
 
 test('unit:job-claim-priority — thirty due jobs with the head due last are claimed head first: the queue head and its band, then a submission never observed, then the item a review waits on, then the backlog by availability, which is what availability alone still claims', async () => {
   await freshStore();
@@ -318,4 +318,19 @@ test('unit:stale-reading-named — an item whose next step is a resync of a stal
   assert.ok(!firstObservationOwed(evaluated));
   assert.ok(waitsOnObservation(evaluated, [evaluated]));
   assert.ok(observationClaimOrder([evaluated], 1).includes(evaluated.id), 'its job is named for claiming');
+});
+
+test('unit:starved-job-aging — a job starved past three bounds is claimed oldest first, ahead of named jobs that keep coming due, so no named job waits without bound', async () => {
+  await freshStore();
+  const base = sha('main-aging');
+  // 2026-09-26: 55 named jobs were due and each came back starved within five minutes of its last
+  // claim, so the named jobs at positions 43-47 (GY-615, GY-646, GY-710, GY-713 in merge) waited 100 minutes.
+  const early = Array.from({ length: 4 }, (_, index) => item(`GY-E${index}`, 540 + index, sha(`early-${index}-${base}`), base));
+  const late = item('GY-LATE', 550, sha(`late-${base}`), base);
+  await insert([...early, late]);
+  for (const work of early) await store.pool.query('INSERT INTO jobs(work_id,available_at) VALUES($1,$2)', [work.id, new Date(Date.now() - 6 * 60_000)]);
+  await store.pool.query('INSERT INTO jobs(work_id,available_at) VALUES($1,$2)', [late.id, new Date(Date.now() - 100 * 60_000)]);
+  const order = [...early.map(work => work.id), late.id];
+  const first = await store.takeJob(order, 0);
+  assert.equal(first?.work_id, late.id, 'the job starved 100 minutes goes before named jobs starved six');
 });
