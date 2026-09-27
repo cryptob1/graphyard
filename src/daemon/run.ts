@@ -188,10 +188,6 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
       const cycleRefusal = await escalate(await checkoutOf());
       if (cycleRefusal) {
         log(`[graphyard-master] the checkout became dirty during the idle delay; the loop cycles nothing until it is cleaned`);
-        while (!stopping && !options.once) {
-          if (watchdog.supervised) { try { await effects.notify?.('alive'); } catch (error) { log(`[graphyard-master] supervisor notification failed: ${message(error)}`); } }
-          try { await delay(interval(), undefined, { signal: waking.signal }); } catch { /* woken to stop */ }
-        }
         break;
       }
       try {

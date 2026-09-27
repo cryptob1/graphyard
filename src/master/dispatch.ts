@@ -101,11 +101,14 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
       // The Git directories the worker writes are granted once its worktree exists (launchWorker).
       // A launch refused for its effective arguments gives the chosen session back at once (GY-184).
       const chosen = selected;
-      const launch = await onSelectedSession(chosen, `worker launch for ${work.key} failed`, async () => accountLaunch(profile, chosen.account));
+      const launch = await onSelectedSession(chosen, `worker launch for ${work.key} failed`, async () => {
+        const launchResult = await accountLaunch(profile, chosen.account);
+        // GY-865: validate the effective launch configuration against worker confinement, accounting for registry-selected accounts.
+        const confinementRefusal = effectiveConfinementRefusal(launchResult.kind, launchResult.args, launchResult.environment);
+        if (confinementRefusal) throw new Error(confinementRefusal);
+        return launchResult;
+      });
       launched = launch;
-      // GY-865: validate the effective launch configuration against worker confinement, accounting for registry-selected accounts.
-      const confinementRefusal = effectiveConfinementRefusal(launch.kind, launch.args, launch.environment);
-      if (confinementRefusal) throw new Error(confinementRefusal);
       // A prompt the runtime never accepted closes the session and releases the claim; the launch is
       // then made once more from a fresh claim, rather than leaving an idle session holding the item.
       for (let attempt = 1; ; attempt++) {

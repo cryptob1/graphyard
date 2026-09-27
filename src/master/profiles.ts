@@ -92,7 +92,9 @@ export function workerConfinementRefusal(profile: { kind?: string; agentArgs?: r
 }
 
 export function effectiveConfinementRefusal(kind: string | undefined, args: string[], environment: Record<string, string>): string | null {
-  const bypass = args.find(arg => ['--dangerously-skip-permissions', '--dangerously-bypass-approvals-and-sandbox', '--yolo'].includes(arg));
+  const bypassArgs = ['--dangerously-skip-permissions', '--dangerously-bypass-approvals-and-sandbox'];
+  if (kind !== 'gemini' && kind !== 'qwen') bypassArgs.push('--yolo');
+  const bypass = args.find(arg => bypassArgs.includes(arg));
   if (bypass) return `The effective launch for worker carries ${bypass}: it turns the runtime's approval and write confinement off, and every worker is launched with writes confined to its assigned worktree. This comes from the registry account or its contract; verify the registry configuration does not override worker confinement.`;
   if (kind === 'codex') {
     for (let index = 0; index < args.length; index++) {
