@@ -19,11 +19,7 @@ Keep cycling: status, dispatch, review, merge, deployment verification. Stop onl
 
 Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions. `controlPlane.production` flags main ahead of production.
 
-`master run` runs this loop under the `graphyard-master.service` unit ([supervision](onboarding.md#the-loop-must-be-supervised)); restart it (`systemctl --user restart graphyard-master`) when `daemon.liveness` is `stalled` or `absent`.
-
-### Nothing runs a dirty coordinator checkout
-
-The loop and every executor run the modules they loaded from the coordinator checkout, so neither starts, self-upgrades nor restarts from one holding uncommitted work (GY-857): modified tracked files, or untracked files under `src/`, `scripts/`, `bin/`, `tests/` or `docs/`. A loop started dirty never cycles — it keeps its process for its supervisor and records an escalation naming the dirty paths and which live leases' planned files they match — the between-cycles self-upgrade is skipped, and every executor claim is settled refused with the same paths, until the checkout is cleaned and the process restarted on committed code.
+`master run` runs this loop under the `graphyard-master.service` unit ([supervision](onboarding.md#the-loop-must-be-supervised)); restart it (`systemctl --user restart graphyard-master`) when `daemon.liveness` is `stalled` or `absent`, never from a dirty checkout: neither the loop nor an executor runs uncommitted work (GY-857; [sessions](master-agent-sessions.md#workers-are-write-confined-to-their-worktree)).
 
 ### System-driven items
 

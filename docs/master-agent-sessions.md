@@ -19,7 +19,7 @@ Sessions run in no-approval mode (`"approvals": "auto"`): `--permission-mode byp
 
 ### Workers are write-confined to their worktree
 
-A worker writes its assigned worktree and the Git directories beside it, and nothing else (GY-857). Codex keeps `--sandbox workspace-write` with `--add-dir` granted for those directories alone; an opencode worker profile must set `OPENCODE_PERMISSION` with `"external_directory":"deny"`; Claude Code worker rules deny `Edit`/`Write` of the coordinator checkout's own files (`src/`, `tests/`, `scripts/`, `bin/`, `docs/`, …) in both files the session reads — its worktree settings and its role file. A profile that would turn confinement off — `--dangerously-skip-permissions`, `--yolo`, a codex sandbox other than workspace-write, an opencode document that does not deny external directories — is refused when the launcher installs the worker's harness, so the worker never starts able to write the checkout the loop and the executors run from.
+A worker writes its assigned worktree and Git directories (GY-857): codex keeps `--sandbox workspace-write`, `--add-dir` for those; an opencode worker profile sets `OPENCODE_PERMISSION` with `"external_directory":"deny"`; Claude worker rules deny `Edit`/`Write` of the coordinator checkout; a profile turning confinement off is refused at launch. The loop and executors never start, self-upgrade or restart from a checkout holding uncommitted work: a dirty loop cycles nothing, executor claims refused, the escalation names the paths and matching live leases.
 
 ## Accounts and failover
 
