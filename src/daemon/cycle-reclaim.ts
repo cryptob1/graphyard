@@ -1,6 +1,7 @@
 // Concern: cycle step 3 — reclaim disk, bounded resources and dead sessions' quarantines.
 import { describeReclaim } from '../master-resources.js';
 import { diskThresholdBytes, containmentPhase } from '../master.js';
+import { containmentClock } from '../master/containment.js';
 import { worktreeRootMinFreeBytes } from '../install/worktree-root.js';
 import { gigabytes, message, reclaimIntervalMs, reclaimSummarySchema } from './state.js';
 import { readyToRetry } from './sessions.js';
@@ -12,7 +13,7 @@ import type { ContainmentAssessment } from '../master.js';
 import { closablePane, endedScopeStates } from '../quarantine.js';
 import { paneAlreadyGone } from '../request-settlement.js';
 import type { DaemonAction, DaemonState } from './state.js';
-import type { DaemonEffects } from './effects.js';
+import type { ContainmentObservation, DaemonEffects } from './effects.js';
 
 /**
  * Session cleanup for a worker whose supervisor scope has ended (GY-189). `watch` exiting leaves
@@ -28,7 +29,7 @@ import type { DaemonEffects } from './effects.js';
  * to repeat, so a close a restart interrupted (`started`, then `indeterminate`) is simply retried.
  */
 export async function closeEndedWorkerPanes(state: DaemonState, effects: DaemonEffects, open: Work[], assessments: Record<string, ContainmentAssessment>,
-  observed: { now: string; clockOffset: { min: number; max: number } }, now: () => number, performed: DaemonAction[]) {
+  observed: ContainmentObservation, now: () => number, performed: DaemonAction[]) {
   const closed: Work[] = [];
   for (const item of open) {
     const assessment = assessments[item.id], quarantine = item.containmentQuarantine, recorded = assessment?.verification?.recordedScope;
@@ -132,8 +133,14 @@ export async function reclaimStep(cycle: Cycle) {
   //     supervisor is gone, so it does: the probe is the same one `master settle-containment`
   //     runs, the control plane re-evaluates every refusal itself, and an unverifiable signal is
   //     recorded as an escalation rather than settled. A live worker's quarantine is never touched.
-  const assessments = await effects.containment?.(snapshot.work, { now: snapshot.now, clockOffset }) ?? {};
-  await closeEndedWorkerPanes(state, effects, open, assessments, { now: snapshot.now, clockOffset }, now, performed);
+  //     The clock is bounded by a light timed read taken just before the probe, not by the
+  //     snapshot's read: that read takes seconds on a loaded plane, and a bound that wide refused
+  //     every automatic settlement as unmeasurable (GY-811). Should the timed read fail, the
+  //     snapshot's bounds stand and the refusal names their round trip.
+  const measured = effects.containment && snapshot.work.some(item => item.containmentQuarantine) ? await containmentClock(clockOffset, effects.controlPlaneClock) : null;
+  const observed: ContainmentObservation = measured ? { now: snapshot.now, clockOffset: measured.clockOffset, clockRoundTripMs: measured.roundTripMs, clockSource: measured.source } : { now: snapshot.now, clockOffset };
+  const assessments = await effects.containment?.(snapshot.work, observed) ?? {};
+  await closeEndedWorkerPanes(state, effects, open, assessments, observed, now, performed);
   for (const item of open.filter(candidate => candidate.containmentQuarantine && containmentPhase(candidate, clock)?.state === 'lapsed')) await isolate('settle', item, item.key, async () => {
     const epoch = item.containmentQuarantine!.epoch;
     const assessment = assessments[item.id];
