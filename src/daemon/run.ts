@@ -1,6 +1,7 @@
 // Concern: the long-running loop — cycle scheduling, config reload, the watchdog and its summary.
 import { setTimeout as delay } from 'node:timers/promises';
 import type { ConfigReload, MasterConfig } from '../master.js';
+import { checkoutGuardApplies, coordinatorCheckoutRefusal, coordinatorCheckoutRoot, dirtyCheckoutEscalation, dirtyCheckoutLeases, dirtyCheckoutPaths, readCoordinatorCheckout, type CoordinatorCheckout } from '../master/profiles.js';
 import { acquireDaemonLock, type DaemonAction, type DaemonState, message, storeAction } from './state.js';
 import { faultClassPolicyFromEnv, type FaultClassPolicy } from '../model/fault-classes.js';
 import { faultRecurrenceReport } from './faults.js';
@@ -8,6 +9,8 @@ import { latencyBudget, silenceReport } from './metrics.js';
 import { boundedPersist, cycleCost, cycleTimes, cycleDelay, cycleFailureCeiling, describeFailingCall, loopLiveness, namedEffects, noteCycleFailure, noteCycleSuccess, noteUnhandled, watchdogPlan } from './liveness.js';
 import type { DaemonEffects } from './effects.js';
 import { Launcher, defaultLaunchConcurrency, runCycle } from './cycle.js';
+import { detailChanged } from './decisions.js';
+import { describeSelfUpgrade } from './upgrade.js';
 import { describeTimings } from '../master/timings.js';
 
 /**
@@ -42,6 +45,9 @@ export function daemonSummary(state: DaemonState, now: number, intervalMs: numbe
     // The cycle's usual wall time, p50 and p95 over the last 30 minutes (GY-616).
     cycleTime: cycleTimes(state.metrics, now),
     deployment: state.deployment,
+    // The release this process loaded, and what the between-cycles self-upgrade has done (GY-437).
+    release: state.release,
+    upgrade: state.upgrade,
     profiles: state.profiles,
     config: state.config,
     reclaim: state.reclaim,
@@ -102,12 +108,17 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
   /** Re-reads .graphyard/master.json before each cycle, so profiles, workspace, run settings and autoMerge apply without a restart. */
   reload?: () => Promise<ConfigReload>;
   /** The process whose unhandled rejections and uncaught exceptions the loop catches; defaults to this one. */
-  process?: Pick<NodeJS.Process, 'on' | 'off'> } ) {
+  process?: Pick<NodeJS.Process, 'on' | 'off'>;
+  /** Reads how the coordinator checkout stands; defaults to reading it from the configured CLI launcher's root. */
+  checkout?: () => CoordinatorCheckout | Promise<CoordinatorCheckout> } ) {
   // Progress goes to stderr so stdout stays the machine-readable result the CLI prints.
   const now = options.now ?? Date.now, log = options.log ?? (line => console.error(line));
   const interval = () => typeof options.intervalMs === 'function' ? options.intervalMs() : options.intervalMs;
   const effects = boundedPersist(namedEffects(raw)), host = options.process ?? process;
   acquireDaemonLock(state, options.identity, now(), interval());
+  // GY-437: the release is this process's, never the cursor's: a loop re-executed onto a moved
+  // checkout must not report the release the process before it loaded.
+  state.release = raw.loadedRelease ?? null;
   await effects.persist(state);
   // Under a supervisor that watches for keep-alives, a hung cycle is a restart rather than a
   // silent pipeline; a window that would restart a healthy loop is recorded and left to the
@@ -135,8 +146,43 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
   // Session launches run beside the cycles, never inside one (GY-616): a cycle hands a launch over
   // and moves on, and the next cycle reports what it did. The launcher outlives every cycle.
   const launcher = new Launcher(config.run.launchConcurrency ?? defaultLaunchConcurrency);
+  // GY-857: the checkout guard. The modules this process imported were read from the coordinator
+  // checkout at startup; when it holds uncommitted work, cycling would run unreviewed code and a
+  // self-upgrade would move the checkout underneath it, so the loop refuses — at startup it never
+  // becomes live at all, and between cycles it skips the upgrade and keeps running the release it
+  // loaded. Either refusal is an escalation naming the dirty paths and which live leases' planned
+  // files they match: those matches are the checkout's writes attributed to the attempts most
+  // likely to have made them.
+  const checkoutOf = async () => options.checkout?.() ?? await readCoordinatorCheckout(coordinatorCheckoutRoot(config.cliPath));
+  const escalationKey = 'escalation:dirty-checkout';
+  const escalate = async (checkout: CoordinatorCheckout) => {
+    if (!checkoutGuardApplies(checkout.root)) return null;
+    const refusal = coordinatorCheckoutRefusal(checkout, 'the master loop');
+    if (!refusal) return null;
+    let detail = refusal;
+    try {
+      const snapshot = await raw.snapshot();
+      detail = dirtyCheckoutEscalation(refusal, dirtyCheckoutLeases(snapshot.work, dirtyCheckoutPaths(checkout), Date.parse(snapshot.now) || undefined));
+    } catch { /* the refusal stands alone when the plane cannot be read */ }
+    const existing = state.actions[escalationKey];
+    if (detailChanged(existing, detail)) {
+      storeAction(state, escalationKey, { kind: 'escalation', work: null, principal: null, state: 'failed', detail, attempts: (existing?.attempts ?? 0) + 1, epoch: null, cycle: state.cycle, at: new Date(now()).toISOString() }, 'action:config');
+      await effects.persist(state);
+      log(`[graphyard-master] escalation failed: ${detail}`);
+    }
+    return detail;
+  };
   try {
-    do {
+    const startRefusal = await escalate(await checkoutOf());
+    if (startRefusal) {
+      // The refused loop keeps its process for its supervisor — a crash would only be restarted
+      // onto the same dirty checkout — and cycles nothing until it is restarted on a clean one.
+      log(`[graphyard-master] the loop cycles nothing from a dirty coordinator checkout; clean or stash the paths it names, then restart it`);
+      while (!stopping && !options.once) {
+        if (watchdog.supervised) { try { await effects.notify?.('alive'); } catch (error) { log(`[graphyard-master] supervisor notification failed: ${message(error)}`); } }
+        try { await delay(interval(), undefined, { signal: waking.signal }); } catch { /* woken to stop */ }
+      }
+    } else do {
       let phase: 'reload' | 'cycle' = 'reload', wait: number;
       try {
         if (options.reload) {
@@ -162,6 +208,20 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
         failed.push({ cycle: failure.cycle, call: failure.call, reason: failure.reason, delayMs: failure.delayMs });
         log(`[graphyard-master] cycle ${failure.cycle} failed in ${describeFailingCall(failure)}: ${failure.reason}; ${state.failures.consecutive} consecutive failure(s), the next cycle runs in ${Math.round(failure.delayMs / 1000)}s at ${failure.nextAt}`);
         wait = failure.delayMs;
+      }
+      // GY-437: between cycles — never mid-cycle — align this checkout with the verified deployed
+      // release. An alignment that re-executes the loop through its supervisor ends this process
+      // here: the supervisor starts the next one on the code the checkout now holds.
+      // GY-857: never while the checkout is dirty — the alignment would check out over work it
+      // holds and re-execute the loop onto code no commit names.
+      if (effects.selfUpgrade && !stopping) {
+        const upgradeRefusal = await escalate(await checkoutOf());
+        if (!upgradeRefusal) {
+          try {
+            const upgraded = await effects.selfUpgrade(state);
+            if (upgraded.outcome !== 'skipped') log(`[graphyard-master] upgrade ${describeSelfUpgrade(upgraded)}`);
+          } catch (error) { log(`[graphyard-master] upgrade failed: ${message(error)}`); }
+        }
       }
       // The keep-alive says the process is alive, which a failed cycle leaves true: the watchdog
       // is for a cycle that hangs, and a thrown one has just proved it did not.
