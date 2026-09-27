@@ -567,16 +567,17 @@ export async function readFlow(store: Store, query: FlowQuery): Promise<FlowData
  * The flow report cache (GY-705): each store's last computed flow report per window and filter
  * set, kept with the dataset it was computed from, so `GET /api/analytics/flow` and its
  * drill-downs answer from memory instead of re-reading a week of facts (about 6 s at 250 open
- * items). A report is served for at most `flowReportFreshMs`, and at once recomputed when the
- * flow moved under it: a new flow fact (every step change — a stage, gate, merge or delivery —
- * records one), a new deployment observation (`invalidateFlowReports`) or a new production-watch
- * pass.
+ * items). An idle report is served for at most `flowReportFreshMs`. Fact changes coalesce
+ * for `flowReportCoalesceMs` from the start of a read. Deployment observations invalidate
+ * immediately, and a new production-watch pass uses a different cache key.
  */
 export const flowReportFreshMs = 60_000;
+/** Bound fact-driven recomputations on busy boards; deployment invalidation still takes effect immediately. */
+export const flowReportCoalesceMs = 10_000;
 /** How many window-and-filter reports one store keeps; each holds its own bounded dataset. */
 export const flowReportPoolLimit = 8;
 export interface PooledFlowReport { dataset: FlowDataset; report: ReturnType<typeof computeFlow> }
-interface PoolEntry { read: Promise<PooledFlowReport>; at: number; lastFact: number }
+interface PoolEntry { read: Promise<PooledFlowReport>; at: number; lastFact: number; pending: boolean }
 const reportPools = new WeakMap<Store, Map<string, PoolEntry>>();
 /**
  * What a pooled report stands for: every query field `readFlow` and `computeFlow` read, and the
@@ -593,8 +594,8 @@ export function invalidateFlowReports(store: Store) { reportPools.get(store)?.cl
  * The flow report for `query` from the cache, computed on a miss. The bounded projection
  * catch-up runs first on every read — on the report pool (GY-491), like the read itself — so a
  * step event recorded since the cached report was computed becomes a newer flow fact and the
- * read recomputes; an idle flow is served from the cache. Concurrent misses share one
- * computation, and a failed one is never cached.
+ * read recomputes after the coalescing interval; an idle flow is served from the cache.
+ * Concurrent misses share one computation, and a failed one is never cached.
  */
 export async function pooledFlowReport(store: Store, query: FlowQuery): Promise<PooledFlowReport> {
   await projectFlow(store, { batches: 3, pool: store.reportPool });
@@ -602,11 +603,14 @@ export async function pooledFlowReport(store: Store, query: FlowQuery): Promise<
   const pool = reportPools.get(store) ?? reportPools.set(store, new Map()).get(store)!;
   const key = flowReportKey(query);
   const hit = pool.get(key);
-  if (hit && hit.lastFact === lastFact && Date.now() - hit.at < flowReportFreshMs) return hit.read;
-  const entry: PoolEntry = { at: Date.now(), lastFact, read: readFlow(store, query).then(dataset => ({ dataset, report: computeFlow(dataset, query) })) };
+  if (hit && (hit.pending || (Date.now() - hit.at < flowReportFreshMs &&
+    (hit.lastFact === lastFact || Date.now() - hit.at < flowReportCoalesceMs)))) return hit.read;
+  const entry: PoolEntry = { at: Date.now(), lastFact, pending: true, read: readFlow(store, query).then(dataset => ({ dataset, report: computeFlow(dataset, query) })) };
   pool.delete(key); pool.set(key, entry);
   while (pool.size > flowReportPoolLimit) pool.delete(pool.keys().next().value!);
-  entry.read.catch(() => { if (pool.get(key) === entry) pool.delete(key); });
+  entry.read.then(() => { entry.pending = false; }, () => {
+    if (pool.get(key) === entry) pool.delete(key);
+  });
   return entry.read;
 }
 
