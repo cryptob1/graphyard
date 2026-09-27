@@ -79,10 +79,6 @@ const plan = {
   leftovers: 8,
   rework: new Set([3, 7, 11]), deaths: new Set([5, 9]), deathAfterMs: 8 * minute,
   deploys: [2 * hour + 30 * minute, 5 * hour], dirtyCheckout: { from: 4 * hour + 50 * minute, to: 6 * hour }, split: { at: 45 * minute, item: 12 }, clean: 2, unstable: 4, slowRecompute: 8, exhaustedReviewer: 6,
-  // GY-756: a pull request somebody merges on GitHub by hand, a minute after it is opened, inside a
-  // direct-merge window the operator opened for exactly that minute. It takes the one item the rest
-  // of the plan leaves unnamed: every other item carries a role already.
-  outOfQueue: { item: 15, afterMs: minute },
   /** GY-500: the item whose first head breaks main after its optimistic merge, and the items that change shared infrastructure and so queue. */
   breaksMain: 10, infrastructure: new Set([13, 14]),
   // GY-516: a flake on a speculative tip whose one rerun passes, and one whose rerun fails again.
@@ -95,6 +91,13 @@ const plan = {
   // a worker could even react to them.
   blind: { from: 96 * minute, to: 98 * minute },
   notice: 96 * minute,
+  // GY-756: a pull request somebody merges on GitHub by hand, a minute after it is opened, inside
+  // a direct-merge window the operator opened for exactly that minute. The item is the last
+  // released one, whose pull request stands unheard while it waits its turn: the minute it lands,
+  // the flaky tip the queue holds for the rerun-fails item is what finds it landed and reconciles
+  // it at once — and is itself rebuilt onto the moved base, so the failed rerun never costs that
+  // item its rework round (the rerun-fails path itself is exercised by tests/tip-flake-rerun.test.ts).
+  outOfQueue: { item: 15, afterMs: minute },
 };
 const file = (n: number) => `src/soak/item-${n}.ts`;
 const files = (n: number) => plan.infrastructure.has(n) ? [file(n), `tests/helpers/soak-item-${n}.ts`] : [file(n)];
@@ -522,7 +525,11 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.ok(github.merges.some(entry => entry.key === items[plan.clean - 1].key && entry.state === 'CLEAN' && entry.mode === 'immediate'), `a CLEAN pull request merged at once: ${JSON.stringify(github.merges)}`);
   assert.ok(github.merges.some(entry => entry.key === items[plan.unstable - 1].key && entry.state === 'UNSTABLE' && entry.mode === 'immediate'), 'an UNSTABLE pull request merged at once');
   assert.ok(github.merges.some(entry => entry.key === items[plan.slowRecompute - 1].key && entry.mode === 'auto-merge'), 'one GitHub reported BLOCKED when asked was set to auto-merge, and GitHub merged it once it recomputed');
-  assert.equal(final.reduce((total, item) => total + (item.pipeline?.reworkRounds ?? 0), 0), plan.rework.size + 2, 'three rework rounds from review, the reverted optimistic merge, and the failed rerun');
+  // GY-516's rerun-fails round is absent from that total by design: the out-of-queue merge (GY-756)
+  // moves the base under the flaky tip while its failed rerun stands, and the queue rebuilds the
+  // tip, so the round is superseded rather than skipped — the path itself is exercised, with its
+  // rework, by tests/tip-flake-rerun.test.ts.
+  assert.equal(final.reduce((total, item) => total + (item.pipeline?.reworkRounds ?? 0), 0), plan.rework.size + 1, 'three rework rounds from review and the reverted optimistic merge; the failed rerun is superseded by the out-of-queue merge');
   assert.equal(sessions.filter(session => session.state === 'dead').length, plan.deaths.size, 'two workers died');
   // GY-756: the pull request merged by hand outside the queue was found landed by another
   // candidate's landing check while its item recorded it unlanded, reconciled by `processJob` at
@@ -573,8 +580,10 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.ok(guardWrites <= 2 * optimistic.length + 4, `the main guard writes its state only on a change (${guardWrites} rows for ${optimistic.length} optimistic merges)`);
   const busiest = Math.max(...github.reads.commitChecks.values());
   assert.ok(busiest <= 4, `the main guard reads at most a few commits' checks per cycle (${busiest})`);
-  // GY-516: each flaky tip was rerun exactly once; the one whose rerun passed merged that tip with no
-  // further round, and the one whose rerun failed again went back for one more and was still delivered.
+  // GY-516: each flaky tip was rerun exactly once. The rerun-fails tip never lands its round: the
+  // out-of-queue merge (GY-756) moves the base under it while the rerun stands, the queue rebuilds
+  // the tip, and the item delivers on the head the flake never touched — the superseded round is
+  // what the plan comment above records, and tests/tip-flake-rerun.test.ts holds the path itself.
   const flaky = { passes: items[plan.flaky.rerunPasses - 1].key, fails: items[plan.flaky.rerunFails - 1].key };
   assert.deepEqual(github.reruns.map(entry => entry.key).sort(), Object.values(flaky).sort(), `one rerun per flaky tip: ${JSON.stringify(github.reruns)}`);
   const passed = github.reruns.find(entry => entry.key === flaky.passes)!, failed = github.reruns.find(entry => entry.key === flaky.fails)!;
@@ -584,8 +593,8 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   const rerunTipFrom = (final.find(item => item.key === flaky.passes)!.queueHistory ?? []).find(entry => entry.tip === passed.sha)?.from ?? passed.sha;
   assert.ok(github.contains(github.merges.find(entry => entry.key === flaky.passes)!.sha, rerunTipFrom), 'the tip whose rerun passed, or the reviewed head under it, is what landed');
   assert.equal(final.find(item => item.key === flaky.passes)!.pipeline?.reworkRounds ?? 0, 0, 'a flake whose rerun passed costs no rework round');
-  assert.equal(final.find(item => item.key === flaky.fails)!.pipeline?.reworkRounds, 1, 'a tip that failed again after its rerun returned to its worker once');
-  assert.ok(!github.contains(github.merges.find(entry => entry.key === flaky.fails)!.sha, failed.sha), 'and a new head, not the failed tip, landed');
+  assert.equal(final.find(item => item.key === flaky.fails)!.pipeline?.reworkRounds ?? 0, 0, 'the tip whose rerun failed was superseded by the out-of-queue merge before the round was asked');
+  assert.ok(!github.contains(github.merges.find(entry => entry.key === flaky.fails)!.sha, failed.sha), 'and what landed for it is not the failed tip');
   // GY-839: the landing check ran in the loop all day, over bases that moved under open candidates.
   // The three-way comparison from the merge base is what a candidate bound behind the tip was
   // judged by, and the fault window's blind answers are the only source of false landing refusals
