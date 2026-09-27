@@ -999,9 +999,18 @@ export function ejectionReason(work: Work, ciAppIds: number[], all: Work[] = [],
   const threads = conversationProtectionRefusal(work);
   if (threads) return threads;
   // Acceptance gate refusals (proof failures/revocations) derive from the verdict.
+  // Extract the proof from the verdict's acceptance refusal to preserve old wording patterns.
   if (verdict.verdict === 'refused') {
     const acceptanceRefusals = verdict.reasons.filter(r => r.gate === 'acceptance');
-    if (acceptanceRefusals.length) return `Proof requirements not met on speculative tip ${tip}: ${acceptanceRefusals[0].reason}`;
+    if (acceptanceRefusals.length) {
+      // Check if any proof failed or was revoked - use the old wording patterns
+      const failed = work.evidence.find(item => item.trusted && item.result === 'fail' && evidenceBindsCandidate(work, item) && item.policyRevision === work.policyRevision);
+      if (failed) return `Proof ${failed.proof} failed on speculative tip ${tip}`;
+      const revoked = work.evidence.find(item => item.trusted && !!item.revocation && evidenceBindsCandidate(work, item) && item.policyRevision === work.policyRevision);
+      if (revoked) return `Proof ${revoked.proof} was revoked on speculative tip ${tip}: ${revoked.revocation!.reason}`;
+      // Otherwise it's an unproven proof - use the verdict's reason
+      return `Proof requirements not met on speculative tip ${tip}: ${acceptanceRefusals[0].reason}`;
+    }
   }
   return null;
 }
