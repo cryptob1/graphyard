@@ -325,6 +325,9 @@ export function mergeParallelTips(config: Pick<MasterConfig, 'mergeQueue'> | nul
   return config?.mergeQueue?.parallelTips ?? defaultParallelTips;
 }
 
+/** The recommended parallel-tips value onboarding writes into a new installation's master.json (GY-501): the product default every installation gets, never this repository's own config. */
+export const onboardingParallelTips = defaultParallelTips;
+
 /**
  * The merge queue as the control plane runs it (GY-330, GY-498): the batch size and parallel-tip
  * window the server reports it evaluates by (`/api/status` mergeQueue), else this master's own

@@ -93,12 +93,13 @@ export function ciConcurrencyAdvisories(checks: string[], workflows: WorkflowFil
 }
 
 /**
- * Advisories for parallel-tips concurrency: when the merge queue validates multiple tips
- * concurrently (parallelTips > 1) and the repository's workflows use per-pull-request
- * concurrency, warn to ensure the CI concurrency limit is high enough. Returns an advisory
- * suggesting the required concurrency capacity.
+ * Advisories for parallel-tips concurrency (GY-501): when the merge queue validates several tips
+ * concurrently — `mergeQueue.parallelTips` as onboarding wrote it — and a pull-request workflow
+ * runs its jobs behind a concurrency group, that group's one-at-a-time run is too small a slice
+ * of CI for the tips to validate in parallel. One advisory per such workflow, recommending the
+ * concurrent-runner capacity the tips need: parallelTips × jobs per run.
  */
-export function parallelTipsAdvisories(parallelTips: number, checks: string[], workflows: WorkflowFile[]) {
+export function parallelTipsAdvisories(parallelTips: number, workflows: WorkflowFile[]) {
   if (!parallelTips || parallelTips === 1) return [];
   const pullRequestWorkflows = workflows.filter(({ text }) => readWorkflow(text).pullRequest);
   if (!pullRequestWorkflows.length) return [];
@@ -209,7 +210,7 @@ export function withMergeSettings<T extends object>(protection: T, settings: Rep
   return protection;
 }
 
-export function protectionPlan(current: any, config: { repository: string; baseBranch: string; githubAppId: number }, work: Work[], rules: unknown = current?.[branchRules], workflows: WorkflowFile[] = readWorkflows(), masterConfig?: { mergeQueue?: { parallelTips?: number } }) {
+export function protectionPlan(current: any, config: { repository: string; baseBranch: string; githubAppId: number; mergeQueue?: { parallelTips?: number } }, work: Work[], rules: unknown = current?.[branchRules], workflows: WorkflowFile[] = readWorkflows()) {
   const { protection, items } = requiredReviewProtection(work);
   const reviews = current?.required_pull_request_reviews, checks = current?.required_status_checks;
   const observed = { requiredApprovals: Number(reviews?.required_approving_review_count ?? 0), requireLastPushApproval: reviews?.require_last_push_approval === true, dismissStaleReviews: reviews?.dismiss_stale_reviews === true };
@@ -247,9 +248,11 @@ export function protectionPlan(current: any, config: { repository: string; baseB
     ...(autoMerge && !autoMerge.enabled ? [`allow_auto_merge false to true (${config.repository} cannot have a merge queue, so GitHub merges through auto-merge)`] : []),
   ];
   const requiredChecks = work.filter(item => item.stage !== 'done').flatMap(item => item.policy.checks);
+  // The master config planned under carries the repository's `mergeQueue.parallelTips` (GY-501):
+  // an installation whose onboarding wrote it learns when its CI cannot validate the tips in parallel.
   const advisories = [
     ...ciConcurrencyAdvisories(requiredChecks, workflows),
-    ...parallelTipsAdvisories(masterConfig?.mergeQueue?.parallelTips ?? 0, requiredChecks, workflows),
+    ...parallelTipsAdvisories(config.mergeQueue?.parallelTips ?? 0, workflows),
   ];
   return { repository: config.repository, branch: config.baseBranch, mode: protection.mode, items, current: { ...observed, requireConversationResolution: conversationResolution }, desired: { ...protection, requireConversationResolution: false }, changes, blockers, advisories,
     // GitHub performs the merge through its queue (GY-258); null when the branch rules were not read.

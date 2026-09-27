@@ -6,7 +6,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { assertRepository, buildProposal, canonicalJson, collectScanInput, discover, localDirectory, saveDiscovery, setupProposalSchema, type ScanInput, type SetupProposal } from './onboarding.js';
 import { defaultOptimisticExclude } from './optimistic-merge.js';
-import { defaultParallelTips } from './merge-queue.js';
+import { onboardingParallelTips } from './master/profiles.js';
 import { generatedFilesAssignment } from './install/generated-files.js';
 import { ensureMergeMode, type ProtectionRun } from './protection.js';
 import { autonomyContract } from './autonomy.js';
@@ -473,13 +473,14 @@ export async function readDocumentationConfig(root: string): Promise<Documentati
 
 /**
  * The `mergeQueue` configuration onboarding writes when a repository's master config names none:
- * the product-default parallel-tips value (`defaultParallelTips`, merge-queue.ts) and shared-infrastructure
- * globs (`defaultOptimisticExclude`, optimistic-merge.ts) under the keys `mergeQueue.parallelTips` and
- * `mergeQueue.optimisticExclude`, where the operator tunes them for this repository. A later `master init`
- * keeps what is written, exactly as it keeps an operator-tuned profile, so the defaults are named once
- * per repository and the product hardcodes nobody's file list or concurrency settings.
+ * the product's recommended parallel-tips value (`onboardingParallelTips`, master/profiles.ts) and
+ * shared-infrastructure globs (`defaultOptimisticExclude`, optimistic-merge.ts) under the keys
+ * `mergeQueue.parallelTips` and `mergeQueue.optimisticExclude`, where the operator tunes them for
+ * this repository. A later `master init` keeps what is written, exactly as it keeps an operator-tuned
+ * profile, so the defaults are named once per repository and the product hardcodes nobody's file
+ * list or concurrency settings.
  */
-export const onboardingMergeQueue = (): { parallelTips: number; optimisticExclude: string[] } => ({ parallelTips: defaultParallelTips, optimisticExclude: [...defaultOptimisticExclude] });
+export const onboardingMergeQueue = (): { parallelTips: number; optimisticExclude: string[] } => ({ parallelTips: onboardingParallelTips, optimisticExclude: [...defaultOptimisticExclude] });
 
 // --- Executor supervision: what a host runs, and the unit that keeps it running (GY-105) -----------
 
