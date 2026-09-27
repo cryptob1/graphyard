@@ -6,7 +6,6 @@ import { queueSequencingReason } from '../merge-queue.js';
 import type { DaemonAction } from './state.js';
 import { boundDeployment, deploymentObservationSchema, maxProofAttempts, message } from './state.js';
 import { candidateKey, decisionKey } from './reconcile.js';
-import { automatableProof } from '../model/mechanical-proofs.js';
 import { missingProofs } from './metrics.js';
 import { readyToRetry } from './sessions.js';
 import { detailChanged, maxApproverLaunches, standingVerdict } from './decisions.js';
@@ -68,10 +67,7 @@ export async function shepherdStep(cycle: Cycle) {
     }
     const outstanding = missingProofs(item, new Date(clock));
     if (!outstanding.length) return;
-    // GY-868: only a manual proof no producer session may run waits for an operator witness. One a
-    // producer may run is answered through its producer group — requested, reworked on a judged
-    // failure, or attested when nothing was executed — never parked here for a human.
-    const manual = outstanding.filter(proof => proof.startsWith('manual:') && !automatableProof(item, proof));
+    const manual = outstanding.filter(proof => proof.startsWith('manual:'));
     const automatable = outstanding.filter(proof => !proof.startsWith('manual:'));
     if (manual.length) {
       const key = `escalation:proof:${item.id}:${item.candidate!.sha}:${item.policyRevision}`;
