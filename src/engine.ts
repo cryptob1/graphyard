@@ -89,6 +89,7 @@ const commands = {
   autosettle: z.object({ epoch, settlementHash: z.string().regex(/^[a-f0-9]{64}$/), reason: z.string().trim().min(1).max(2000), verification: containmentVerificationSchema }).strict(),
   release: z.object({ epoch }).strict(),
   workspace: z.object({ epoch, host: z.string().trim().min(1).max(200), path: z.string().startsWith('/').max(1000).refine(p => !/[\u0000-\u001f]/.test(p), 'Invalid path').transform(workspacePath), branch: z.string().max(200).refine(validBranch, 'Invalid Graphyard branch name') }).strict(),
+  'preserve-attempt': z.object({ epoch: z.number().int().positive(), branch: z.string().max(200).refine(validBranch, 'Invalid Graphyard branch name'), refs: z.string().max(10000), diff: z.string().max(100000), at: z.iso.datetime() }).strict(),
   // `documentation` is the worker's explicit statement that the change alters no documented
   // behaviour: the other way the standard documentation criterion is met (model/documentation.ts).
   submit: z.object({ epoch, pr: z.number().int().positive(), documentation: z.string().trim().min(1).max(1000).optional() }).strict(),
@@ -1138,6 +1139,10 @@ export class Engine {
         demand(!all.some(w => w.workspaces.some(s => (s.branch === data.branch && (w.id !== work!.id || !work!.reworkRequested)) || s.host === data.host && pathsOverlap(s.path, data.path))), 'Branch or host/path is already reserved or overlaps a reservation; use a fresh workspace');
         if (work.submission) demand(data.branch === work.workspaces.find(w => w.epoch === work!.submission!.epoch)?.branch, 'Rework must use the already linked PR branch in a fresh workspace');
         work.workspaces.push({ ...data, owner: actor.id });
+      }
+      if (command === 'preserve-attempt') {
+        if (!work.preservedAttempts) work.preservedAttempts = [];
+        work.preservedAttempts.push({ epoch: data.epoch, branch: data.branch, refs: data.refs, diff: data.diff, at: data.at });
       }
       if (command === 'submit') {
         demand(work.workspaces.some(w => w.epoch === data.epoch), 'Register the assignment workspace first');

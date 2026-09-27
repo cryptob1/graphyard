@@ -202,8 +202,11 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
           await effects.persist(state);
           return;
         }
-        recordProfileFailure(state, current.profile, message(error), now());
-        performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: current.profile.principal, epoch: item.epoch, state: 'failed', detail: `Dispatch of ${item.key} to ${current.profile.name} failed: ${message(error)}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+        // Workspace failures (worktree creation, branch conflicts) do not put the profile in cooldown
+        // (GY-860 AC-2): the failure is host/worktree specific, not a profile issue.
+        const isWorkspaceFailure = /Git worktree creation failed|branch|workspace|worktree/.test(message(error));
+        if (!isWorkspaceFailure) recordProfileFailure(state, current.profile, message(error), now());
+        performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: current.profile.principal, epoch: item.epoch, state: 'failed', detail: `Dispatch of ${item.key} to ${current.profile.name} failed: ${message(error)}${isWorkspaceFailure ? ' (workspace-specific failure, not a profile issue; the profile remains available)' : ''}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
         return;
       }
     }
