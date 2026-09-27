@@ -164,7 +164,7 @@ export const startedStates = ['idle', 'done', 'working'], promptableStates = ['i
  */
 export const runtimeScreens: Record<string, RegExp> = {
   claude: /Claude Code|Welcome to Claude|esc to interrupt|bypass permissions on|shift\+tab to cycle|for shortcuts|^\s*[∙✻✶✳✢]/m,
-  codex: /\bCodex\b|esc to interrupt/, cursor: /\bCursor\b/, opencode: /\bOpenCode\b|\btab agents\b|Ask anything…/, gemini: /\bGemini\b/,
+  codex: /\bCodex\b|esc to interrupt/, cursor: /\bCursor\b/, opencode: /\btab agents\b|Ask anything…/, gemini: /\bGemini\b/,
 };
 export type StartState = 'ready' | 'starting' | 'absent' | 'blocked' | 'consent';
 export interface StartObservation { state: StartState; agent: HerdrAgent | null; detail: string; line: string; prompt?: ConsentPrompt }
