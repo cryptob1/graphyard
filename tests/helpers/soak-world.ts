@@ -91,6 +91,17 @@ export class SimulatedGitHub {
   unstable = new Set<string>(); slowRecompute = new Set<string>();
   /** Successions (renames and splits) recorded on the base branch. */
   successions: Succession[] = [];
+  /**
+   * Items whose first speculative tip hits an infrastructure flake (GY-516): its `test` run fails,
+   * and the one rerun the control plane asks for passes (`rerun-passes`) or fails again (`rerun-fails`).
+   */
+  flaky = new Map<string, 'rerun-passes' | 'rerun-fails'>();
+  /** The CI runs reported per commit, created once CI finishes on it; a rerun appends a later attempt. */
+  runs = new Map<string, { name: string; result: string; id: number; attempt: number; at: number }[]>();
+  /** Every rerun the control plane asked for: the item, the tip and the failed check run. */
+  reruns: { key: string; sha: string; checkRunId: number; at: number }[] = [];
+  /** Each item's first speculative tip, the one its flake hits. */
+  private flakeTips = new Map<string, string>();
   private serial = 0;
   constructor(readonly options: WorldOptions, files: string[]) {
     const root: Commit = { sha: sha('root'), tree: sha('tree', 'root'), parents: [], files, at: clock.now(), message: 'root' };
@@ -128,6 +139,27 @@ export class SimulatedGitHub {
   }
   pr(work: Pick<Work, 'submission' | 'candidate'>) { const number = work.candidate?.pr ?? work.submission?.pr; const pr = number ? this.prs.get(number) : undefined; if (!pr) throw new Error(`No pull request #${number}`); return pr; }
 
+  /** The CI runs that have reported on `pr`'s head by `now`: every attempt, as GitHub keeps them. */
+  checks(pr: PullRequest, now: number) {
+    const head = pr.head;
+    if (now - pr.pushed.get(head)! < this.options.ciMs) return [];
+    if (!this.runs.has(head)) {
+      const flake = this.flakeTips.get(pr.key) === head && this.flaky.has(pr.key);
+      this.runs.set(head, ['test', 'typecheck'].map(name => ({ name, result: flake && name === 'test' ? 'failure' : 'success', id: ++this.serial, attempt: 1, at: now })));
+    }
+    return this.runs.get(head)!.filter(run => run.at <= now);
+  }
+  /** GitHub's "rerun failed jobs": the failed run's job runs again on the same commit, reporting `ciMs` later. */
+  rerun(checkRunId: number) {
+    const [head, runs] = [...this.runs].find(([, entries]) => entries.some(entry => entry.id === checkRunId)) ?? [];
+    const failed = runs?.find(entry => entry.id === checkRunId);
+    if (!head || !runs || !failed || failed.result !== 'failure') throw new Error(`GitHub POST /actions/jobs/${checkRunId}/rerun refused: not a failed job`);
+    const pr = [...this.prs.values()].find(entry => entry.head === head)!;
+    const now = clock.now();
+    this.reruns.push({ key: pr.key, sha: head, checkRunId, at: now });
+    runs.push({ name: failed.name, result: this.flaky.get(pr.key) === 'rerun-fails' ? 'failure' : 'success', id: ++this.serial, attempt: failed.attempt + 1, at: now + this.options.ciMs });
+    return { runId: 900_000 + checkRunId };
+  }
   /** One minute of GitHub: CI finishes, reviewers post verdicts, reviewer Apps answer, and auto-merge lands what it may. */
   tick(now: number) {
     for (const pr of [...this.prs.values()].filter(entry => entry.open)) {
@@ -175,11 +207,10 @@ export class SimulatedGitHub {
       reviewerAppFor: (profile: { reviewerApp?: string; runtime?: string } | null | undefined) => profile ? options.reviewerApps.find(app => app.id === profile.reviewerApp && app.runtime === profile.runtime) : undefined,
       async observe(work: Work): Promise<Observation> {
         const pr = world.pr(work), now = clock.now();
-        const ci = now - pr.pushed.get(pr.head)! >= options.ciMs;
         return {
           clockOffset: { min: 0, max: 0 }, prState: pr.open ? 'open' : 'closed', draft: false, prCreatedAt: new Date(pr.createdAt).toISOString(),
           candidate: { sha: pr.head, baseSha: pr.base, pr: pr.number, branch: pr.branch, author: pr.author, createdAt: new Date(pr.createdAt).toISOString() },
-          checks: ci ? ['test', 'typecheck'].map((name, index) => ({ name, result: 'success', appId: options.ciAppId, id: pr.number * 10 + index })) : [],
+          checks: world.checks(pr, now).map(run => ({ name: run.name, result: run.result, appId: options.ciAppId, id: run.id, attempt: run.attempt })),
           // GitHub's latest verdict per reviewer, and the id of every review, as the real adapter reports them.
           reviews: [...new Map(pr.reviews.map(review => [review.reviewer, { ...review }])).values()], reviewIds: pr.reviews.map(review => review.id),
           // A reviewer App's verdict is read for the request the item is bound to, never for another.
@@ -198,6 +229,7 @@ export class SimulatedGitHub {
         const changed = onto.files.filter(file => !world.commits.get(bound)!.files.includes(file));
         world.record({ sha: tip, tree: sha('tree', tip), parents: [from, predicted], files: [...new Set([...world.commits.get(from)!.files, ...onto.files])], at: clock.now(), message: `Graphyard speculative tip for ${work.key}` });
         pr.head = tip; pr.base = predicted; pr.pushed.set(tip, clock.now());
+        if (!world.flakeTips.has(work.key)) world.flakeTips.set(work.key, tip);
         return { ...base, tip, tipTree: sha('tree', tip), reviewedHead: from,
           merge: { from, parents: [from, predicted], author: 'graphyard[bot]', authoredByApp: true, conflicts: false, baseChanges: changed, diff: { reviewed: sha('patch', from), tip: sha('patch', from) } } };
       },
@@ -236,6 +268,7 @@ export class SimulatedGitHub {
       },
       async dequeuePullRequest(state: GitHubMergeQueueState) { const pr = world.prs.get(Number(state.pullRequestId.slice(3)))!; pr.autoMerge = false; },
       async publishGroupCheck() {},
+      async rerunFailedJobs(checkRunId: number) { return world.rerun(checkRunId); },
     };
     return adapter as unknown as GitHub;
   }
