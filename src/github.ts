@@ -1901,9 +1901,7 @@ export async function landingCheck(github: LandingGitHub, work: Work, head: stri
   // file list computed against another base). A path only the base changed is inherited by
   // a three-way merge; it is not this candidate restoring its older copy of that path.
   // Recompute even for an unchanged head: an old observation may contain a false refusal.
-  // Both predicted and live-base paths use three-way merge: files changed only by the base
-  // are not reverts (GY-855).
-  const landed = await landingDiff(github, base, head, predicted ? undefined : files);
+  const landed = predicted || !sameTree ? await landingDiff(github, base, head, predicted ? undefined : files) : null;
   const landing: LandingCheck = { base, ...(landed ? { files: await compareScopeOf(github, work.plannedFiles ?? [], landed, base, budget) } : {}) };
   if (!peers) return landing;
   const open = peers.filter(peer => peer.id !== work.id && peer.stage !== 'done' && !!peer.submission && !!peer.candidate && peer.candidate.sha !== head
@@ -2342,12 +2340,13 @@ export function observationThroughputStatus(coordinator: { githubBudget?: ({ thr
  * budget (its non-304 requests), which is what the worker returns its paced slot with (GY-567).
  */
 export async function processJob(engine: Engine, github: GitHub, spent?: (charged: number) => void): Promise<boolean> {
-  // The batch size and the rerun count (GY-516) are the master's configuration, published to the
-  // installation ledger; a restarted server reads them back here before the next evaluation it runs.
+  // The batch size, the rerun count (GY-516) and the optimistic exclude globs (GY-503) are the
+  // master's configuration, published to the installation ledger; a restarted server reads them
+  // back here before the next evaluation it runs.
   const readAt = batchSizeRead.get(engine);
   if (readAt === undefined || Date.now() - readAt >= mergeBatchSizeRefreshMs) {
     batchSizeRead.set(engine, Date.now());
-    await Promise.all([engine.loadMergeBatchSize(), engine.loadRerunFailedChecks()]).catch(() => batchSizeRead.delete(engine));
+    await Promise.all([engine.loadMergeBatchSize(), engine.loadRerunFailedChecks(), engine.loadOptimisticExclude()]).catch(() => batchSizeRead.delete(engine));
   }
   // The main guard (GY-500) is the installation's, not a job's: it runs here on its own interval,
   // and a failure of it is recorded and retried on the next interval, never failing a job.

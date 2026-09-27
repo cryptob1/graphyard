@@ -53,17 +53,19 @@ const build = (work: Work, observation: Observation) => evaluate({ ...work, cand
 test('unit:landing-check-three-way-live-base — main changes unrelated file, candidate built on old base, no regression', async () => {
   const f = fixture();
   try {
-    // The scenario: candidate is built on an old base (root) where file A was 'old'
-    // Meanwhile main has advanced to a new base where file A is 'shipped'
-    // Candidate adds file B without touching A
-    // In a three-way merge (root -> candidate -> base), A should be 'shipped' (inherited from base)
-    // and there should be no regression
+    // GY-472's shape: the candidate was built on root, where A read 'old', and main has since
+    // changed A to 'shipped'. A three-way merge of the head onto the live base inherits main's
+    // A, so the candidate is not refused for reverting a file it never touched, and its landing
+    // record lists only its own change.
     const seen = await f.github.observe(f.work);
-    // The candidate should not be refused for reverting A, even though main changed it
-    // because in a three-way merge of (root, candidate, base), A is inherited from base
-    assert.deepEqual(regressionRefusals(f.work, seen, []), [], 'should have no regression refusal when main changed unrelated file');
-    // Only B should be in the landing files (the candidate's own change)
+    assert.deepEqual(regressionRefusals(f.work, seen, []), [], 'should have no regression refusal when main changed an unrelated file');
     assert.deepEqual(seen.landing!.files!.map(file => file.path), ['B']);
+    // The same shape where the head really restores old A is a revert: it is still refused,
+    // and the build gate holds the candidate.
+    f.revert();
+    const refused = await f.github.observe(f.work);
+    assert.match(regressionRefusals(f.work, refused, []).join('\n'), /A: .*differs from the base branch tip/);
+    assert.equal(build(f.work, refused).passed, false, build(f.work, refused).reasons.join('; '));
   } finally { f.clean(); }
 });
 
