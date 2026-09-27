@@ -26,6 +26,8 @@ const counts = { documents: 0, locks: 0, locked: [] as string[], versioned: 0 };
 // contention-recovery test arms several attempts of the same batch in a row).
 const hold: { id: string | null; ms: number; fired: boolean; times: number } = { id: null, ms: 0, fired: false, times: 0 };
 
+let onLocked: ((id: string) => Promise<void>) | undefined;
+
 let openItems: Work[] = [], heldDone: Work[] = [];
 
 const createItem = async (title: string) =>
@@ -67,6 +69,7 @@ before(async () => {
         const result = await query(...args);
         if (documents) counts.documents += Number((result as { rowCount?: number }).rowCount ?? 0);
         if (text === reconcileVersionsSql) counts.versioned = Math.max(counts.versioned, Number((result as { rowCount?: number }).rowCount ?? 0));
+        if (text === reconcileItemLockSql && onLocked) await onLocked(values[0]);
         if (text === reconcileItemLockSql && hold.id && values?.[0] === hold.id && (!hold.fired || hold.times > 0)) {
           hold.fired = true;
           if (hold.times > 0) hold.times--;
@@ -244,4 +247,34 @@ test('unit:reconcile-reads-open-items-once — a batch that wrote, then finds a 
   const after = await store.list();
   assert.equal(after.find(item => item.id === peer.id)!.title, 'Moved before its row lock', 'the raw write on the peer stands');
   assert.equal(after.find(item => item.id === written.id)!.lease, null, 'the lapsed lease was reconciled on the run that committed');
+});
+
+
+test('unit:reconcile-reads-open-items-once — sustained contention defers a batch and lets later items and the next tick progress', { timeout: 60_000 }, async () => {
+  const [written, peer, later] = openItems.slice(10, 13);
+  const expired = { owner: 'worker', epoch: 1, expiresAt: new Date(Date.now() - 60_000).toISOString() };
+  for (const item of [written, later]) await store.pool.query(`UPDATE work_items SET document = jsonb_set(document, '{lease}', $2::jsonb) WHERE id = $1`, [item.id, JSON.stringify(expired)]);
+  engine.reconcileBatchMs = 0;
+  let attempts = 0;
+  // Move a peer on EVERY attempt, including any retries beyond the cap: an unbounded
+  // implementation cannot finish this pass. This does not depend on timer scheduling.
+  onLocked = async id => {
+    if (id === written.id) {
+      attempts++;
+      await store.pool.query(`UPDATE work_items SET document = jsonb_set(document, '{title}', $2::jsonb) WHERE id = $1`, [peer.id, JSON.stringify(`Continuous mutation ${attempts}`)]);
+    }
+  };
+  const warnings: string[] = [];
+  const warn = console.warn;
+  console.warn = line => warnings.push(String(line));
+  try { await engine.reconcile(); }
+  finally { onLocked = undefined; console.warn = warn; engine.reconcileBatchMs = 250; }
+  assert.equal(attempts, engine.reconcileMaxAttempts, 'the contended batch has a finite attempt budget');
+  assert.ok(warnings.some(line => /deferred 1 item\(s\).*6 contended attempts/.test(line)), 'deferral is visible in the server log');
+  const after = await store.list();
+  assert.ok(after.find(item => item.id === written.id)!.lease, 'the deferred write was rolled back');
+  assert.equal(after.find(item => item.id === later.id)!.lease, null, 'later candidates made progress in the same tick');
+  assert.equal(after.find(item => item.id === peer.id)!.title, `Continuous mutation ${attempts}`, 'concurrent mutations survive');
+  await engine.reconcile();
+  assert.equal((await store.list()).find(item => item.id === written.id)!.lease, null, 'the next tick retries and settles the deferred item');
 });

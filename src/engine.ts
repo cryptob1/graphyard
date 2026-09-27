@@ -1903,6 +1903,8 @@ export class Engine {
   reconcileRetries = 3;
   reconcileRetryBackoffMs = 25;
   reconcileRetryBackoffCapMs = 400;
+  /** Maximum contended attempts per batch per tick; remaining work must still get a turn. */
+  reconcileMaxAttempts = 6;
   /**
    * Reconcile every item that can still change, in batches. A pass reads its candidates once
    * (GY-727): the opening transaction — a short coordination transaction, like every mutation's —
@@ -1924,7 +1926,9 @@ export class Engine {
    * lock across the batch — that would make every mutation wait for it again, the exact blocking
    * GY-727 removed — so after `reconcileRetries` contended attempts in a row the next attempt
    * waits a little longer first (doubling per further contended attempt, capped) instead, giving
-   * the fleet room to quiesce while nothing is blocked.
+   * the fleet room to quiesce while nothing is blocked. After six contended attempts the
+   * batch is deferred to the next tick and this pass continues with its remaining candidates,
+   * so sustained writes cannot starve the server steps that follow reconciliation.
    * Between batches the locks are released and the event loop runs, so a renewal waits at most one
    * batch however long the whole pass takes. One item always completes per batch.
    */
@@ -1989,7 +1993,15 @@ export class Engine {
         if (!(error instanceof ReconcileContended)) throw error;
         // Rolled back: the batch's writes never happened, so its items are read again and it runs again.
         for (const id of written) fleet.get(id)!.version = '';
+        const attemptedThrough = next;
         next = batch; contended++;
+        if (contended >= this.reconcileMaxAttempts) {
+          console.warn(`reconciliation deferred ${attemptedThrough - batch} item(s) after ${contended} contended attempts; retrying next tick`);
+          next = attemptedThrough;
+          contended = 0;
+          await new Promise(resolve => setImmediate(resolve));
+          continue;
+        }
         // Contended past the quiet attempts, the next try waits a little longer first: the batch
         // never takes the coordination lock across its evaluation, so a fleet that keeps moving
         // under it is answered with a slower retry, never with one that blocks mutations (GY-727).
