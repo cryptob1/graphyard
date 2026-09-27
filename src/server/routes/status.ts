@@ -14,7 +14,8 @@ import { defineRoutes, parseJson } from '../routes.js';
 import { coordinationSnapshot, coordinationViewHeader } from '../work-view.js';
 import { executorHost } from './agent-registry.js';
 import { directMergeStatus } from '../../direct-merge.js';
-import { maxMergeBatchSize, maxParallelTips, mergeBatchSizeEvent, mergeParallelTipsEvent } from '../../merge-queue.js';
+import { maxMergeBatchSize, maxParallelTips, mergeParallelTipsEvent, mergeBatchSizeEvent, rerunFailedChecksEvent } from '../../merge-queue.js';
+import { maxRerunFailedChecks } from '../../master/profiles.js';
 import { eventStats } from '../../store/snapshot-delta.js';
 import { productionEnvironmentEvent, productionEnvironmentName, resolvedProductionEnvironment } from '../../flow-analytics.js';
 import { boardFromStatus } from '../../model/board.js';
@@ -63,7 +64,7 @@ export const statusRoutes = defineRoutes('status', [
         // that no longer cover the roster, what production serves against the base branch, and
         // the build/protocol the CLI checks before brokering a merge. Production names work
         // items across the repository, so a scoped operator agent does not see it.
-        delegationLimits: services.delegationLimits, build, production: actor.role === 'operator-agent' ? null : production?.status() ?? null, productionEnvironment, ciAppIds: engine.ciAppIds, mergeQueue: { batchSize: engine.mergeBatchSize, parallelTips: engine.parallelTips },
+        delegationLimits: services.delegationLimits, build, production: actor.role === 'operator-agent' ? null : production?.status() ?? null, productionEnvironment, ciAppIds: engine.ciAppIds, mergeQueue: { batchSize: engine.mergeBatchSize, parallelTips: engine.parallelTips, rerunFailedChecks: engine.rerunFailedChecks },
         // The documentation policy this control plane stamps on new items, which doctor compares
         // with the checkout's committed graphyard.json (GY-293).
         documentation: engine.documentation,
@@ -122,26 +123,25 @@ export const statusRoutes = defineRoutes('status', [
       const { actor, services: { engine } } = context;
       demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
       const body = await parseJson(context, 4096, '{}');
-      const batchSize = body?.batchSize, parallelTips = body?.parallelTips;
-      demand(batchSize !== undefined || parallelTips !== undefined, 'batchSize or parallelTips is required', 400);
-      demand(batchSize === undefined || Number.isSafeInteger(batchSize) && batchSize >= 1 && batchSize <= maxMergeBatchSize, `batchSize must be an integer from 1 to ${maxMergeBatchSize}`, 400);
-      demand(parallelTips === undefined || Number.isSafeInteger(parallelTips) && parallelTips >= 1 && parallelTips <= maxParallelTips, `parallelTips must be an integer from 1 to ${maxParallelTips}`, 400);
-      // One setting, one ledger kind: recorded only when it differs from what the ledger holds.
-      // Applied only once the ledger holds it (GY-384): a failed INSERT leaves the evaluation on
-      // the recorded size and the master unpublished, so its next cycle retries.
-      const record = async (kind: string, field: string, value: number, load: () => Promise<number>, apply: (value: number) => void) => {
-        const previous = await load();
+      const { batchSize, parallelTips, rerunFailedChecks } = body ?? {};
+      demand(batchSize !== undefined || parallelTips !== undefined || rerunFailedChecks !== undefined, 'batchSize, parallelTips or rerunFailedChecks is required', 400);
+      if (batchSize !== undefined) demand(Number.isSafeInteger(batchSize) && batchSize >= 1 && batchSize <= maxMergeBatchSize, `batchSize must be an integer from 1 to ${maxMergeBatchSize}`, 400);
+      if (rerunFailedChecks !== undefined) demand(Number.isSafeInteger(rerunFailedChecks) && rerunFailedChecks >= 0 && rerunFailedChecks <= maxRerunFailedChecks, `rerunFailedChecks must be an integer from 0 to ${maxRerunFailedChecks}`, 400);
+      if (parallelTips !== undefined) demand(Number.isSafeInteger(parallelTips) && parallelTips >= 1 && parallelTips <= maxParallelTips, `parallelTips must be an integer from 1 to ${maxParallelTips}`, 400);
+      let recorded = false;
+      // Each value is applied only once the ledger holds it (GY-384): a failed INSERT leaves the
+      // evaluation on the recorded value and the master unpublished, so its next cycle retries.
+      const record = async (kind: string, field: string, value: number, previous: number, apply: () => void) => {
         const latest = (await engine.store.pool.query('SELECT 1 FROM events WHERE work_id IS NULL AND kind=$1 LIMIT 1', [kind])).rowCount;
-        if (latest && previous === value) return false;
+        if (latest && previous === value) return apply();
         await engine.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, kind, JSON.stringify({ [field]: value, previous: latest ? previous : null })]);
-        apply(value);
-        return true;
+        apply();
+        recorded = true;
       };
-      const recorded = [
-        batchSize !== undefined && await record(mergeBatchSizeEvent, 'batchSize', batchSize, () => engine.loadMergeBatchSize(), value => { engine.mergeBatchSize = value; }),
-        parallelTips !== undefined && await record(mergeParallelTipsEvent, 'parallelTips', parallelTips, () => engine.loadParallelTips(), value => { engine.parallelTips = value; }),
-      ].some(Boolean);
-      return { mergeQueue: { batchSize: engine.mergeBatchSize, parallelTips: engine.parallelTips }, recorded };
+      if (batchSize !== undefined) await record(mergeBatchSizeEvent, 'batchSize', batchSize, await engine.loadMergeBatchSize(), () => { engine.mergeBatchSize = batchSize; });
+      if (parallelTips !== undefined) await record(mergeParallelTipsEvent, 'parallelTips', parallelTips, await engine.loadParallelTips(), () => { engine.parallelTips = parallelTips; });
+      if (rerunFailedChecks !== undefined) await record(rerunFailedChecksEvent, 'rerunFailedChecks', rerunFailedChecks, await engine.loadRerunFailedChecks(), () => { engine.rerunFailedChecks = rerunFailedChecks; });
+      return { mergeQueue: { batchSize: engine.mergeBatchSize, parallelTips: engine.parallelTips, rerunFailedChecks: engine.rerunFailedChecks }, recorded };
     },
   },
   {

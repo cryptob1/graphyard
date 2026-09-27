@@ -252,6 +252,13 @@ export const masterBrowserSchema = z.object({
 export type MasterBrowser = z.infer<typeof masterBrowserSchema>;
 
 export const agentIdentitySchema = z.object({ id: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$/), credentialFile: z.string().min(1).max(1000) }).strict();
+/**
+ * GY-516: the product default for `mergeQueue.rerunFailedChecks`, so every installation reruns a
+ * failed required check once on the same sha before the failure ejects the entry; 0 disables it.
+ */
+export const defaultRerunFailedChecks = 1;
+/** The most reruns per sha and check master config and the control plane accept. */
+export const maxRerunFailedChecks = 3;
 export const masterConfigSchema = z.object({
   version: z.literal(1),
   url: z.string(),
@@ -278,7 +285,7 @@ export const masterConfigSchema = z.object({
   // heads the queue (default 4). Since every entry has its own tip, `batchSize` (GY-330) no longer
   // batches validation; it only widens the observation band and the delivery/ejection wake depth.
   // The loop publishes both to the control plane on every change.
-  mergeQueue: z.object({ batchSize: z.number().int().min(1).max(maxMergeBatchSize).optional(), parallelTips: z.number().int().min(1).max(maxParallelTips).optional() }).strict().optional(),
+  mergeQueue: z.object({ batchSize: z.number().int().min(1).max(maxMergeBatchSize).optional(), parallelTips: z.number().int().min(1).max(maxParallelTips).optional(), rerunFailedChecks: z.number().int().min(0).max(maxRerunFailedChecks).optional() }).strict().optional(),
   // The operator's own authenticated browser profile, used only by master browser flows.
   browser: masterBrowserSchema.optional(),
   // The master's own operator-agent identity, and the separate approver identity whose session
@@ -315,6 +322,12 @@ export function mergeQueueStatus(master: MasterConfig, snapshot: { work: Work[];
   return { ...window, configured: { batchSize: mergeBatchSize(master), parallelTips: mergeParallelTips(master) },
     ...mergeQueueInsights(snapshot.work, Date.parse(snapshot.now), window.parallelTips, Array.isArray(coordinator?.ciAppIds) ? coordinator.ciAppIds : null) };
 }
+
+/** Reruns of a failed required check per sha under this master config: `mergeQueue.rerunFailedChecks`, or the product default of 1. */
+export function rerunFailedChecks(config: Pick<MasterConfig, 'mergeQueue'> | null | undefined): number {
+  return config?.mergeQueue?.rerunFailedChecks ?? defaultRerunFailedChecks;
+}
+
 export function assertMasterBinding(config: MasterConfig, status: any) {
   if (status.actor?.role !== 'coordinator') throw new Error('Master commands require the configured coordinator identity');
   if (typeof status.repository !== 'string' || status.repository.toLowerCase() !== config.repository.toLowerCase() || status.baseBranch !== config.baseBranch || status.githubAppId !== config.githubAppId) throw new Error('The Graphyard repository, managed base branch, or GitHub App changed; rerun master init before continuing');

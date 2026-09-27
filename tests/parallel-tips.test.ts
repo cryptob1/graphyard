@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
+import { observationBand } from '../src/github.js';
 import { defaultParallelTips, describeTipWindow, maxParallelTips, mergeParallelTipsEvent, mergeQueueInsights, predictQueue, queueRef, tipValidationPrefix, windowBatchView } from '../src/merge-queue.js';
 import { server } from '../src/server.js';
 import { daemonEffects } from '../src/master-daemon.js';
@@ -307,7 +308,7 @@ test('unit:parallel-speculative-tips — the master publishes mergeQueue.paralle
       const response = await fetch(`${url}${path}`, { ...init, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() } });
       return { status: response.status, body: await response.json() };
     };
-    assert.deepEqual((await api('/api/status', tokens.coordinator)).body.mergeQueue, { batchSize: 4, parallelTips: 4 }, 'status reports the window the control plane runs');
+    assert.deepEqual((await api('/api/status', tokens.coordinator)).body.mergeQueue, { batchSize: 4, parallelTips: 4, rerunFailedChecks: 1 }, 'status reports the window the control plane runs');
     const post = (token: string, body: object) => api('/api/merge-queue', token, { method: 'POST', body: JSON.stringify(body) });
     assert.equal((await post(tokens.worker, { parallelTips: 2 })).status, 403, 'only the master (or an operator) sets it');
     assert.equal((await post(tokens.coordinator, { parallelTips: 0 })).status, 400);
@@ -320,9 +321,9 @@ test('unit:parallel-speculative-tips — the master publishes mergeQueue.paralle
     const effects = daemonEffects(process.cwd(), () => ({ url, run: {}, mergeQueue: configured }) as any, { snapshot: async () => ({ work: [], now: new Date().toISOString() }), mutate, executor: {} as any });
     await effects.publishMergeBatchSize!();
     await effects.publishMergeBatchSize!();
-    assert.deepEqual(posted, [{ batchSize: 4, parallelTips: 2 }], 'published once, not every cycle');
+    assert.deepEqual(posted, [{ batchSize: 4, parallelTips: 2, rerunFailedChecks: 1 }], 'published once, not every cycle');
     assert.equal(engine.parallelTips, 2, 'the control plane validates by the master\'s window at once');
-    assert.deepEqual((await api('/api/status', tokens.coordinator)).body.mergeQueue, { batchSize: 4, parallelTips: 2 });
+    assert.deepEqual((await api('/api/status', tokens.coordinator)).body.mergeQueue, { batchSize: 4, parallelTips: 2, rerunFailedChecks: 1 });
     const ledger = async (kind: string) => (await store.pool.query('SELECT payload FROM events WHERE work_id IS NULL AND kind=$1 ORDER BY seq', [kind])).rows.map(row => row.payload);
     assert.deepEqual(await ledger(mergeParallelTipsEvent), [{ parallelTips: 2, previous: null }], 'recorded in the installation ledger');
     // A restarted control plane reads the published value back from the installation ledger.
@@ -342,4 +343,28 @@ test('unit:parallel-speculative-tips — the master publishes mergeQueue.paralle
     await store.close();
     await database.stop();
   }
+});
+
+
+test('unit:parallel-speculative-tips — every active tip receives merge-band verdict reads while CI is running', () => {
+  const all = keys.map((_, index) => entry(index, [running]));
+  const views = describeTipWindow(all, predictQueue(all, now), 4, [CI_APP]);
+  for (const work of all) work.queue!.tips = views.get(work.key)!.tips;
+  assert.deepEqual(all.map(work => observationBand(work, all, new Date(now), { kind: 'merge' } as any).band),
+    ['merge', 'merge', 'merge', 'merge', 'idle', 'idle']);
+});
+
+test('unit:parallel-tips-failure-rebuild — a failed check held for rerun is running, not an attributed failure', () => {
+  const first = entry(0, [pass]);
+  const second = entry(1, [{ ...failing, id: 42 }], { checkReruns: [{ sha: tip(1), check: 'test', failedRunId: 42, state: 'requested', at }] });
+  const all = [first, second];
+  const view = describeTipWindow(all, predictQueue(all, now), 4, [CI_APP]).get(second.key)!;
+  assert.equal(view.own!.ci, 'running');
+  assert.equal(view.firstFailure, null);
+  assert.equal(view.validated, false);
+  const held = evaluate(second, all, new Date(now), [CI_APP], 1, 4);
+  assert.ok(held.queue);
+  assert.equal(held.queueEjection, null);
+  second.checkReruns![0].state = 'failed';
+  assert.match(evaluate(second, all, new Date(now), [CI_APP], 1, 4).queueEjection?.reason ?? '', /attributed to this entry/);
 });

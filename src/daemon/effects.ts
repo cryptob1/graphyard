@@ -11,7 +11,7 @@ import type { SessionHandleInput } from '../model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from '../request-settlement.js';
 import { type ResourceReclaimReport, reclaimResources, dispatchRefusal } from '../master-resources.js';
 import { RefusedResponse } from '../model/refusal.js';
-import { mergeBatchSize, mergeParallelTips } from '../master/profiles.js';
+import { mergeBatchSize, mergeParallelTips, rerunFailedChecks } from '../master/profiles.js';
 import type { CapacityRole, PartialWork } from '../model/capacity.js';
 import { readProducerLedger, saveProducerLedger, independentProducerProfiles, launchProducer, reclaimCheckouts } from '../producer.js';
 import { followUpThreadIds, readReviewLedger, updateReviewLedger, launchReview } from '../reviewer.js';
@@ -620,7 +620,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       publishedEnvironment = environment;
     },
     publishMergeBatchSize: async () => {
-      const config = { batchSize: mergeBatchSize(current()), parallelTips: mergeParallelTips(current()) };
+      const config = { batchSize: mergeBatchSize(current()), parallelTips: mergeParallelTips(current()), rerunFailedChecks: rerunFailedChecks(current()) };
       const published = JSON.stringify(config);
       if (published === publishedMergeQueue) return;
       await mutate('merge-queue', config);

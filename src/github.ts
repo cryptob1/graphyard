@@ -14,7 +14,7 @@ import { nextAction } from './model/next-action.js';
 import { foldDecisions } from './model/approval.js';
 import { normalMergeState, repairAudit, repairAuditEvent, repairLaneVerdict, type RepairAudit, type RepairLaneVerdict } from './master/repair-lane.js';
 export { CHECK_NAME };
-import { alreadyMergeableRefusal, approvalOfHead, baseRefreshNeeded, dismissedVerdict, enqueueRequestCurrent, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, pendingRestore, predictQueue, queuePlacement, queueRef, mergeCheckBranch, treeIdenticalPrediction, type GitHubMergeQueueState, type HeadForcePush, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type ObservedApproval, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread } from './merge-queue.js';
+import { alreadyMergeableRefusal, approvalOfHead, baseRefreshNeeded, dismissedVerdict, enqueueRequestCurrent, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, owedCheckReruns, pendingRestore, predictQueue, queuePlacement, queueRef, mergeCheckBranch, treeIdenticalPrediction, type GitHubMergeQueueState, type HeadForcePush, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type ObservedApproval, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread } from './merge-queue.js';
 import { blockedFeatures, controlPlanePermissions, describeShortfall, permissionShortfalls, requiredPermissions, type PermissionFeature, type PermissionLevel, type PermissionShortfall } from './github-permissions.js';
 import { agentOwner, type AttentionItem } from './master/attention.js';
 import type { IntegrationJob } from './coordination.js';
@@ -257,6 +257,10 @@ export function queuedAhead(work: Pick<Work, 'id' | 'queue'>, all: readonly Pick
  * cadence follows it rather than inventing a second reading of the same state.
  */
 export function observationBand(work: Work, all: Work[], now: Date, next = nextAction(work, all, now)): { band: Exclude<CadenceBand, 'steady'>; reason: string; fresh?: true } {
+  // The recorded window is derived by gate evaluation, including tips still awaiting CI.
+  // Every in-flight tip needs verdict reads even before its test gate passes.
+  if (work.queue?.tips?.length && work.stage !== 'done')
+    return { band: 'merge', reason: `${work.key} is validating a tip in the parallel window; its verdict can advance the queue` };
   const open = !!work.candidate && !!work.observation && !work.observation.merged && work.observation.prState === 'open';
   if (next?.kind === 'merge' || open && work.gates.every(gate => gate.name === 'merge' || gate.passed)) {
     // Only the entries that can merge next need the merge band's 20-second freshness. On
@@ -1777,6 +1781,17 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     }
   }
   /**
+   * GitHub's "rerun failed jobs" for the workflow run that produced check run `checkRunId` (GY-516).
+   * An Actions check run's id is its job's id, which names the run; only the failed jobs rerun, on
+   * the same sha, so the rerun's check run is the one the gates read next.
+   */
+  async rerunFailedJobs(checkRunId: number): Promise<{ runId: number }> {
+    const job = await this.request(`/actions/jobs/${checkRunId}`);
+    demand(Number.isSafeInteger(job?.run_id), `Check run ${checkRunId} is not a GitHub Actions job; it cannot be rerun`);
+    await this.request(`/actions/runs/${job.run_id}/rerun-failed-jobs`, 'POST', {});
+    return { runId: job.run_id };
+  }
+  /**
    * The pull request's place in GitHub's merge queue (GY-258): whether the base branch has a queue,
    * whether the pull request is queued or set to auto-merge, and the merge group commit GitHub builds
    * for its entry. One GraphQL read.
@@ -1942,7 +1957,7 @@ export async function githubFromEnv() {
 async function advanceQueue(engine: Engine, github: GitHub, work: Work, job: { work_id: string; token: string }, guard: (snapshot: Work, success: boolean) => () => Promise<void>, hold: (feature: PermissionFeature) => string | null) {
   const all = await engine.store.list();
   const placement = queuePlacement(work, all.map(item => item.id === work.id ? work : item), Date.now());
-  if (!placement || placement.current || !placement.publishable) return { work, published: false, held: null };
+  if (!placement || placement.current || !placement.publishable || engine.parallelTips > 0 && placement.position >= engine.parallelTips) return { work, published: false, held: null };
   // Publishing a tip writes a merge commit and a ref; without Contents: write the call can
   // only 403. The entry keeps its place and waits for the permission instead of retrying.
   const held = hold('merge-queue');
@@ -2016,7 +2031,7 @@ export const idleObservationSeconds = 300;
 export const observationFreshnessMs = 120_000;
 /** Consecutive permission refusals a job may retry at the normal cadence before it is held. */
 export const permissionRefusalLimit = 3;
-/** How often the job loop re-reads the batch size and the parallel-tip window the master published (GY-330, GY-498). */
+/** How often the job loop re-reads the merge-queue settings the master published (GY-330, GY-516). */
 export const mergeBatchSizeRefreshMs = 30_000;
 const batchSizeRead = new WeakMap<Engine, number>();
 /**
@@ -2127,17 +2142,20 @@ export function observationThroughputStatus(coordinator: { githubBudget?: ({ thr
  * budget (its non-304 requests), which is what the worker returns its paced slot with (GY-567).
  */
 export async function processJob(engine: Engine, github: GitHub, spent?: (charged: number) => void): Promise<boolean> {
-  // The batch size and the parallel-tip window are the master's configuration, published to the
+  // The batch size and the rerun count (GY-516) are the master's configuration, published to the
   // installation ledger; a restarted server reads them back here before the next evaluation it runs.
   const readAt = batchSizeRead.get(engine);
   if (readAt === undefined || Date.now() - readAt >= mergeBatchSizeRefreshMs) {
     batchSizeRead.set(engine, Date.now());
-    await engine.loadMergeBatchSize().catch(() => batchSizeRead.delete(engine));
-    await engine.loadParallelTips().catch(() => batchSizeRead.delete(engine));
+    await Promise.all([engine.loadMergeBatchSize(), engine.loadParallelTips(), engine.loadRerunFailedChecks()]).catch(() => batchSizeRead.delete(engine));
   }
   // The fleet is read before the claim, so the claim order can name it (GY-492): with a backlog
   // due, the merge-queue head's job is claimed first however recently it became due, instead of
   // waiting behind every older entry for a worker to reach it.
+  // The order above is computed from this pre-claim snapshot (GY-492): queue positions can shift
+  // before `takeJob`, so the order can name an entry already out of the band — harmless today,
+  // priority being advisory and the publication guard rechecking ownership; re-read after the
+  // claim only if claim order ever gains a correctness role.
   const all = await engine.store.list();
   // The band spans the parallel-tip window too (GY-498): every entry validated at once is claimed first.
   const band = Math.max(engine.mergeBatchSize, engine.parallelTips);
@@ -2198,6 +2216,16 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
       // A peer git shows landed while its item records it unlanded is delivered now (GY-744).
       await engine.reconcileLanded(observation, all, peer => github.observe(peer, all));
       schedule.cadence = observationCadence(work, all.map(item => item.id === work!.id ? work! : item), now, previous, github.steadyStateMs?.(now.getTime()));
+      // A required check that failed on this candidate is rerun once before it counts (GY-516): the
+      // observation recorded the rerun as owed, holding the entry's position; GitHub is asked here,
+      // outside any transaction, and its answer recorded. A refusal lets the failure stand at once.
+      for (const owed of owedCheckReruns(work, engine.ciAppIds)) {
+        let outcome: { state: 'requested' | 'refused'; runId?: number; detail?: string };
+        if (typeof github.rerunFailedJobs !== 'function') outcome = { state: 'refused', detail: 'This GitHub adapter cannot rerun failed jobs' };
+        else try { outcome = { state: 'requested', runId: (await github.rerunFailedJobs(owed.failedRunId)).runId }; }
+        catch (error) { outcome = { state: 'refused', detail: error instanceof Error ? error.message.slice(0, 300) : 'GitHub refused the rerun' }; }
+        work = await engine.recordCheckRerun(work.id, job.token, owed, outcome);
+      }
       // A branch carrying another item's unlanded commits is restored by the control plane (GY-127):
       // on its own for a tip the queue ejected, on the coordinator's request otherwise. The restored
       // head is a new candidate, so the job requeues onto it before anything else is dispatched.
