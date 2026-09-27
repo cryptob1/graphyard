@@ -17,6 +17,10 @@ Add reviewers with `master reviewer setup` and `master reviewer add FILE` ([Clau
 
 Sessions run in no-approval mode (`"approvals": "auto"`): `--permission-mode bypassPermissions`, `.claude.json` trust (Claude Code); `--ask-for-approval never --sandbox workspace-write`, network, `--add-dir` (Codex); `--force --trust` (Cursor); allow-all `OPENCODE_PERMISSION` (opencode); `--yolo` (Gemini, Qwen); `--allow-all-tools --allow-all-paths` (Copilot); `--approval-mode never --trust-workspace` (Muse); none (Pi). `"prompt"`, `refusedLaunchKinds` and runtimes lacking command-line requests never start; [registry](onboarding.md#configure-the-fleet) runtimes need `{request}` in their arguments. Codex's sandbox gets `.git/worktrees/GY-N-E` and shared `.git` via `--add-dir`, probed first (`Worker launch failed: the codex sandbox cannot write PATH`).
 
+### Workers are write-confined to their worktree
+
+A worker writes its assigned worktree and the Git directories beside it, and nothing else (GY-857). Codex keeps `--sandbox workspace-write` with `--add-dir` granted for those directories alone; an opencode worker profile must set `OPENCODE_PERMISSION` with `"external_directory":"deny"`; Claude Code worker rules deny `Edit`/`Write` of the coordinator checkout's own files (`src/`, `tests/`, `scripts/`, `bin/`, `docs/`, …) in both files the session reads — its worktree settings and its role file. A profile that would turn confinement off — `--dangerously-skip-permissions`, `--yolo`, a codex sandbox other than workspace-write, an opencode document that does not deny external directories — is refused when the launcher installs the worker's harness, so the worker never starts able to write the checkout the loop and the executors run from.
+
 ## Accounts and failover
 
 A profile's `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`) in order, unless the [agent registry](onboarding.md#configure-the-fleet) defines the role. A launch takes the first logged-in account under `run.quotaCeilingPercent`, else **fails over** (`dispatch.accounts`).
