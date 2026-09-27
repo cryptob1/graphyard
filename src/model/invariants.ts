@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { mergeableNow } from '../merge-queue.js';
+import { sessionName, sessionNameDigestLength, sessionNameDistinguisher, sessionNameDistinguisherLimit, sessionNameLimit } from '../session-name.js';
 import { isClosed } from './closure.js';
 import { standingEscalations } from './escalation.js';
 import type { FaultClass, FaultKind, FaultObservation } from './fault-classes.js';
@@ -105,8 +106,29 @@ export function followUpParent(work: Pick<Work, 'criteria' | 'dependencies' | 't
 /** Filed by the product rather than a person: a follow-up of an approval, a recurring fault class, or an intervention pattern. */
 export const machineFiled = (work: Pick<Work, 'criteria' | 'dependencies' | 'title' | 'origin'>) => followUpParent(work) !== null || !!work.origin?.faultClass || !!work.origin?.pattern;
 
-/** An approver session's name: the role word, the item's key, and the decision's id (master/autonomy.ts `approverSessionName`). */
-const approverNamePattern = /^(?:graphyard|gy)-approver-(gy-\d+)-[0-9a-f]+$/;
+/**
+ * Whether `name` is an approver session master/autonomy.ts `approverSessionName` builds for `key`:
+ * `distinctSessionName` over one of its two role words, the key and a decision's UUID. The whole
+ * name is judged by that rule, rebuilt from session-name.ts rather than copied: the head
+ * `sessionName(role, key)`, then a hexadecimal decision fragment of the length the limit leaves,
+ * so a configured session that only begins like one (`graphyard-approver-gy-5-worker`) is not one;
+ * or, for a key too long to leave a fragment, `sessionName`'s shortened head and digest of the
+ * whole identity. That shortened head is all such a name can be known by without its decision, so
+ * two long keys that agree on it both claim the name.
+ */
+function isApproverSessionName(key: string, name: string) {
+  const hex = (value: string) => /^[0-9a-f]+$/.test(value);
+  return ['graphyard-approver', 'gy-approver'].some(role => {
+    const head = sessionName(role, key), room = Math.min(sessionNameLimit - head.length - 1, sessionNameDistinguisherLimit);
+    if (room >= sessionNameDistinguisher) {
+      const tail = name.startsWith(`${head}-`) ? name.slice(head.length + 1) : '';
+      return tail.length >= sessionNameDistinguisher && tail.length <= room && hex(tail);
+    }
+    // The fallback keeps the first characters of role, key and decision; with no room for a fragment they are all role and key.
+    const shortened = sessionName(role, key, '0'.repeat(sessionNameDistinguisher)).slice(0, -(sessionNameDigestLength + 1));
+    return name.length === shortened.length + 1 + sessionNameDigestLength && name.startsWith(`${shortened}-`) && hex(name.slice(shortened.length + 1));
+  });
+}
 const open = (work: Work) => work.stage !== 'done' && !isClosed(work);
 const time = (value: string | null | undefined) => { const parsed = value ? Date.parse(value) : Number.NaN; return Number.isFinite(parsed) ? parsed : null; };
 const minutes = (ms: number) => `${Math.round(ms / 60_000)} min`;
@@ -152,11 +174,15 @@ export function checkInvariants(record: InvariantRecord, input: InvariantInput):
       if (settled !== null && now - settled > bound && listed(watch.agentName, watch.pane)) { lingering.push({ subject: watch.work, detail: `approver session ${watch.agentName ?? watch.pane} on ${watch.work}, ${minutes(now - settled)} after its decision settled` }); if (watch.agentName) named.add(watch.agentName); }
     }
     // An approver the loop no longer watches — launched by hand (`master approver`, GY-403), or its watch retired — is
-    // known by its name (master/autonomy.ts `approverSessionName`), which carries the item's key.
+    // known by its name, judged by the rule the launcher names it with (`isApproverSessionName`). A
+    // name shortened past its key can be claimed by more than one item; it lingers only once every claimant is settled.
     for (const agent of input.agents) {
-      const key = approverNamePattern.exec(agent.name ?? '')?.[1], item = key ? work.find(entry => entry.key.toLowerCase() === key) : undefined;
-      const settled = item?.stage === 'done' ? time(item.delivery?.mergedAt) ?? time(item.closure?.at) : null;
-      if (item && settled !== null && now - settled > bound && !named.has(agent.name!)) lingering.push({ subject: item.key, detail: `approver session ${agent.name} on ${item.key}, ${minutes(now - settled)} after it was delivered` });
+      if (!agent.name || named.has(agent.name)) continue;
+      const items = work.filter(item => isApproverSessionName(item.key, agent.name!));
+      const settled = items.map(item => item.stage === 'done' ? time(item.delivery?.mergedAt) ?? time(item.closure?.at) : null);
+      if (!items.length || settled.some(at => at === null || now - at <= bound)) continue;
+      const latest = Math.max(...(settled as number[]));
+      lingering.push({ subject: items[0].key, detail: `approver session ${agent.name} on ${items.map(item => item.key).join(' or ')}, ${minutes(now - latest)} after it was delivered` });
     }
     judge('lingering-sessions', `no session open ${limits.sessionAfterSettleMinutes} min after its item is delivered or its decision settled`,
       lingering.length ? `${lingering.length} session(s) still open, e.g. ${lingering[0].detail}` : 'no session outlived its item or decision', !lingering.length, lingering.map(entry => entry.subject));
@@ -213,8 +239,14 @@ export function checkInvariants(record: InvariantRecord, input: InvariantInput):
   else judge('cycle-p90', `p90 under ${limits.cycleP90Seconds} s over ${limits.cycleWindowMinutes} min`, `p90 ${(p90 / 1000).toFixed(1)} s over ${durations.length} cycle(s)`, p90 < limits.cycleP90Seconds * 1000);
 
   // 6. Machine-filed backlog items untriaged past the bound number at most the threshold (zero).
+  //    Untriaged is model/machine-backlog.ts `untriaged`: no judgement stands on the item — one
+  //    whose closure is proposed waits for its independent approver, one a human parked in the
+  //    backlog after triage has been judged — and a refused judgement is judged again, its clock
+  //    from the refusal (`triageSince`), so a slow closure approval or a park fires nothing.
   const triageBound = limits.untriagedBacklogHours * 3_600_000;
-  const untriaged = work.filter(item => open(item) && item.stage === 'backlog' && !item.ready && machineFiled(item) && now - (time(item.createdAt) ?? now) > triageBound);
+  const untriaged = work.filter(item => open(item) && item.stage === 'backlog' && !item.ready && machineFiled(item)
+    && (!item.triage || item.triage.state === 'refused')
+    && now - (time(item.triage?.state === 'refused' ? item.triage.at : item.createdAt) ?? now) > triageBound);
   judge('untriaged-backlog', `at most ${limits.untriagedBacklogMax} machine-filed backlog item(s) untriaged past ${limits.untriagedBacklogHours} h`,
     untriaged.length ? `${untriaged.length} untriaged, the oldest ${untriaged[0].key}` : 'every machine-filed backlog item is triaged or younger than the bound', untriaged.length <= limits.untriagedBacklogMax, untriaged.map(item => item.key));
 
