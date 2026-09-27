@@ -4,7 +4,7 @@ import { mkdtemp, rm, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { candidateConflicts, openCandidates } from '../src/conflicts.js';
+import { candidateConflicts, openCandidates, probeCandidateConflictsWithBudget } from '../src/conflicts.js';
 import type { Work } from '../src/model.js';
 
 function workWithFiles(key: string, files: string[], sha: string): Work {
@@ -22,11 +22,12 @@ function workWithFiles(key: string, files: string[], sha: string): Work {
 }
 
 test('unit:conflict-probe-overlap-only-cached: the probe runs for overlapping pairs only and caches results', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'conflict-probe-'));
+  const dataRoot = await mkdtemp(join(tmpdir(), 'conflict-probe-'));
+  const gitRoot = await mkdtemp(join(tmpdir(), 'conflict-probe-git-'));
   try {
-    execFileSync('git', ['init', '-q', root]);
-    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: root });
-    execFileSync('git', ['config', 'user.email', 'test@test.invalid'], { cwd: root });
+    execFileSync('git', ['init', '-q', gitRoot]);
+    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: gitRoot });
+    execFileSync('git', ['config', 'user.email', 'test@test.invalid'], { cwd: gitRoot });
 
     // Create 5 overlapping pairs by building 100 candidates with specific file patterns
     const work: Work[] = [];
@@ -59,20 +60,40 @@ test('unit:conflict-probe-overlap-only-cached: the probe runs for overlapping pa
     }
 
     // First call: should probe 5 pairs (only overlapping ones) and skip the rest
-    let probesRun = 0;
-    const mockProbe = () => {
-      probesRun++;
-      return [];
+    let firstCallProbes = 0;
+    const mockRun = (cmd: string, args: string[]) => {
+      if (cmd === 'git' && args[2] === 'cat-file') {
+        // Presence checks always return true for our test shas
+        return '';
+      }
+      if (cmd === 'git' && args[2] === 'merge-tree') {
+        firstCallProbes++;
+        throw { status: 0, stdout: '' }; // Simulate successful clean merge
+      }
+      return '';
     };
 
-    const result1 = candidateConflicts(work, mockProbe);
-    assert.equal(probesRun, 5, `Expected 5 probes on first call (only overlapping pairs), got ${probesRun}`);
+    await probeCandidateConflictsWithBudget(gitRoot, work, dataRoot, mockRun);
+    assert.equal(firstCallProbes, 5, `Expected 5 probes on first call (only overlapping pairs), got ${firstCallProbes}`);
 
-    // Second call with same data: also should only probe overlapping pairs (5)
-    const result2 = candidateConflicts(work, mockProbe);
-    assert.equal(probesRun, 10, `Expected 10 total probes after second call (5 per call), got ${probesRun}`);
+    // Second call with same heads: should reuse cache, no new probes for the same pairs
+    let secondCallProbes = 0;
+    const mockRun2 = (cmd: string, args: string[]) => {
+      if (cmd === 'git' && args[2] === 'cat-file') {
+        return '';
+      }
+      if (cmd === 'git' && args[2] === 'merge-tree') {
+        secondCallProbes++;
+        throw { status: 0, stdout: '' };
+      }
+      return '';
+    };
+
+    await probeCandidateConflictsWithBudget(gitRoot, work, dataRoot, mockRun2);
+    assert.equal(secondCallProbes, 0, `Expected 0 probes on second call with unchanged heads (cached), got ${secondCallProbes}`);
   } finally {
-    await rm(root, { recursive: true, force: true });
+    await rm(dataRoot, { recursive: true, force: true });
+    await rm(gitRoot, { recursive: true, force: true });
   }
 });
 
