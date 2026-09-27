@@ -251,10 +251,11 @@ export const approvalWatchSchema = z.object({
 export type ApprovalWatch = z.infer<typeof approvalWatchSchema>;
 /**
  * What a re-keyed watch takes over from the one it retires: the session goes on, and so does what
- * it runs on, so a retained session's exhaustion holds the account it spent (GY-182).
+ * it runs on, so a retained session's exhaustion holds the account it spent (GY-182). Both hold
+ * markers are carried to prevent re-writing the same exhaustion hold and report (GY-804).
  */
 export const carriedSession = (prior: ApprovalWatch) => ({ launches: prior.launches, agentName: prior.agentName, pane: prior.pane, launchedAt: prior.launchedAt,
-  exhaustedAt: prior.exhaustedAt, account: prior.account, runtime: prior.runtime, session: prior.session });
+  exhaustedAt: prior.exhaustedAt, account: prior.account, runtime: prior.runtime, session: prior.session, heldExhaustion: prior.heldExhaustion, reportedExhaustion: prior.reportedExhaustion });
 
 /**
  * The loop's own failures (GY-119). A cycle that throws — a control-plane read that timed out, a
