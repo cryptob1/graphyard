@@ -24,6 +24,7 @@ import { inspectProfileAccounts, masterConfigSchema, workerPrompt, type MasterCo
 import { MERGE_PROTOCOL } from '../src/protocol-version.js';
 import { executorDeclarationFile, executorSlotUndeclaredExit, executorSupervisionStatus, executorUnit, executorUnitTemplate, installExecutorSupervision, readExecutorDeclaration, renderExecutorUnit, setupRepository, writeExecutorDeclaration, type SystemctlRunner } from '../src/repository-setup.js';
 import { executorFleet } from '../src/cli/executor-report.js';
+import { readExecutorRegistrations } from '../src/executor-fleet.js';
 import OverviewPage from '../web/pages/overview.js';
 import { boardFromStatus } from '../src/model/board.js';
 import WorkDetails from '../web/pages/work-details.js';
@@ -149,7 +150,7 @@ test('integration:executor-supervised-restart: the shipped unit starts an execut
   const plane = fakeControlPlane(3000);
   await new Promise<void>(resolve => plane.http.listen(0, '127.0.0.1', resolve));
   const url = `http://127.0.0.1:${(plane.http.address() as { port: number }).port}`;
-  const { checkout, credentials } = await coordinatorCheckout(url, { count: 1, kinds: ['resync'], intervalSeconds: 1 });
+  const { checkout, credentials, credentialFile } = await coordinatorCheckout(url, { count: 1, kinds: ['resync'], intervalSeconds: 1 });
   // systemd's keep-alive channel, recorded: the executor speaks to it only because NOTIFY_SOCKET is set.
   const notifications = join(credentials, 'notify.log'), bin = join(credentials, 'bin');
   await mkdir(bin); await writeFile(join(bin, 'systemd-notify'), `#!/bin/sh\necho "$@" >> '${notifications}'\n`); await chmod(join(bin, 'systemd-notify'), 0o755);
@@ -187,6 +188,10 @@ test('integration:executor-supervised-restart: the shipped unit starts an execut
       const second = supervisor.current();
       assert.notEqual(second.pid, first.pid);
       assert.deepEqual(supervisor.exits.map(exit => exit.signal), ['SIGKILL']);
+      // The restarted executor records what the killed one was running (GY-646).
+      await until(async () => (await readExecutorRegistrations({ credentialFile })).some(entry => entry.pid === second.pid), 'the restarted executor to register');
+      const interrupted = (await readExecutorRegistrations({ credentialFile })).find(entry => entry.pid === second.pid)!.interrupted;
+      assert.deepEqual(interrupted && { id: interrupted.id, key: interrupted.key, kind: interrupted.kind, pid: interrupted.pid }, { id: plane.row.id, key: 'GY-1', kind: 'resync', pid: first.pid });
 
       // 3. The restarted executor takes the row the dead one held, as a further attempt of the same
       //    action; the handler now completes and the row settles. The claim was never stranded.
@@ -250,6 +255,53 @@ test('integration:executor-supervised-restart: the shipped unit starts an execut
     assert.deepEqual(status.units.map(unit => unit.active), ['inactive', 'inactive']);
     assert.equal(status.start, `systemctl --user start ${executorUnit(1)} ${executorUnit(2)}`);
   } finally {
+    await new Promise<void>(resolve => plane.http.close(() => resolve()));
+    await rm(checkout, { recursive: true, force: true }); await rm(credentials, { recursive: true, force: true });
+  }
+});
+
+test('unit:executor-stand-down-exits — an executor under the shipped unit whose checkout moves to a newer commit stands down by exiting with status 0 within 30s, and the unit\'s restart policy starts it again on the new commit (GY-646)', async () => {
+  const plane = fakeControlPlane(3000);
+  plane.state.holdResync = false;
+  await new Promise<void>(resolve => plane.http.listen(0, '127.0.0.1', resolve));
+  const url = `http://127.0.0.1:${(plane.http.address() as { port: number }).port}`;
+  const { checkout, credentials } = await coordinatorCheckout(url, { count: 1, kinds: ['resync'], intervalSeconds: 1 });
+  const commit = async (text: string) => {
+    await writeFile(join(checkout, 'README.md'), `${text}\n`);
+    git(checkout, 'add', 'README.md'); git(checkout, '-c', 'user.name=Graphyard', '-c', 'user.email=graphyard@example.com', 'commit', '-q', '-m', text);
+    return git(checkout, 'rev-parse', 'HEAD');
+  };
+  const loaded = await commit('the release the executor loads');
+  const notifications = join(credentials, 'notify.log'), bin = join(credentials, 'bin');
+  await mkdir(bin); await writeFile(join(bin, 'systemd-notify'), `#!/bin/sh\necho "$@" >> '${notifications}'\n`); await chmod(join(bin, 'systemd-notify'), 0o755);
+  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, NOTIFY_SOCKET: '/run/user/0/systemd/notify-fixture', GRAPHYARD_TOKEN: undefined, GRAPHYARD_TOKEN_FILE: undefined, GRAPHYARD_URL: undefined };
+  const log: string[] = [];
+  const unit = parseUnit(renderExecutorUnit(await readFile(join(root, 'examples/master', executorUnitTemplate), 'utf8'), { root: checkout, node: process.execPath }), '1');
+  // The policy a clean exit relies on: status 0 is restarted, never held down.
+  assert.equal(unit.service.Restart, 'always');
+  assert.ok(!(unit.service.RestartPreventExitStatus ?? '').split(/\s+/).includes('0'), 'the unit restarts an executor that exits with status 0');
+  const supervisor = superviseLikeSystemd(unit, env, log);
+  try {
+    const first = supervisor.current();
+    await until(() => log.join('').includes(`runs ${loaded.slice(0, 12)}`) && /serving resync every 1s as slot 1 under systemd supervision/.test(log.join('')), `the executor to start on ${loaded.slice(0, 12)}\n${log.join('')}`, 90_000);
+    await until(() => plane.state.claims.length >= 2, `the executor to poll\n${log.join('')}`);
+
+    // The checkout moves on. The executor stands down at its next claim and exits cleanly, well
+    // inside the 30s bound, instead of idling until WatchdogSec aborts it.
+    const moved = await commit('a delivered fix');
+    const movedAt = Date.now();
+    await until(() => supervisor.exits.length === 1, `the standing-down executor to exit\n${log.join('')}`, 30_000);
+    assert.ok(Date.now() - movedAt < 30_000);
+    assert.deepEqual(supervisor.exits[0], { pid: first.pid!, code: 0, signal: null }, `the stand-down is a clean exit, not a signal or a failure\n${log.join('')}`);
+    assert.match(log.join(''), new RegExp(`stands down: this executor loaded ${loaded.slice(0, 12)} at startup and its checkout now holds ${moved.slice(0, 12)}; it claims nothing more.*; it exits so its supervisor restarts it on the current code`));
+
+    // The restart policy brings it back, on the new commit.
+    await until(() => supervisor.starts.length === 2, 'the unit to restart the executor', Number(unit.service.RestartSec) * 1000 + 30_000);
+    const second = supervisor.current();
+    await until(() => log.join('').includes(`[${second.pid}] [graphyard-executor] master@unit-host/1 runs ${moved.slice(0, 12)}`), `the restarted executor to run ${moved.slice(0, 12)}\n${log.join('')}`, 90_000);
+    assert.equal(second.exitCode, null, 'the restarted executor is running');
+  } finally {
+    await supervisor.stop();
     await new Promise<void>(resolve => plane.http.close(() => resolve()));
     await rm(checkout, { recursive: true, force: true }); await rm(credentials, { recursive: true, force: true });
   }
