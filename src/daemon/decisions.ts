@@ -1,7 +1,7 @@
 // Concern: routine decisions — standing verdicts, decision reasons and the approver step.
 import { type Work, type AgentReview, reviewProviderOf, standingEscalations, leaseLossEpoch, RefusedResponse } from '../model.js';
 import { routableScopeRequest, scopeDecisionBinding, scopeDecisionReason } from '../model/scope.js';
-import { baseRefreshConflict, failedCheckResults, latestCheckRun, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, restoringAfterEjectionPrefix, speculativeConflict, type ReviewThread, describeThread } from '../merge-queue.js';
+import { baseRefreshConflict, failedCheckResults, latestCheckRun, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, refreshInFlight, restoringAfterEjectionPrefix, speculativeConflict, type ReviewThread, describeThread } from '../merge-queue.js';
 import { mechanicalFailure, mechanicalVerdicts } from '../model/mechanical-proofs.js';
 import { unexercisedFindings } from '../auto-dispatch.js';
 import { decisionBindingMax } from '../model/approval.js';
@@ -251,7 +251,8 @@ export function failedCheckRework(work: Work): { reason: string; binding: string
   if (!failed.length) return null;
   // A head behind the base tip is first brought onto it by the control plane (GY-534): the failure
   // may be one main already fixed, and a rework asked for it is refused on exactly those grounds.
-  if (pendingBaseRefresh(work)?.check) return null;
+  // Nor while the head that refresh published is still to be observed: the failure is the old head's.
+  if (pendingBaseRefresh(work)?.check || refreshInFlight(work)) return null;
   return { reason: `${work.key}: required CI check${failed.length === 1 ? '' : 's'} ${failed.join(', ')} failed on candidate ${candidate.sha.slice(0, 12)}. No gate passes a head whose required checks failed, so the item returns to a worker to fix what CI found.`,
     binding: `${candidate.sha}:ci:${failed.join(',')}` };
 }

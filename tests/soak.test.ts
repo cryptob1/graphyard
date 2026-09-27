@@ -102,7 +102,7 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
  * effects, standing for a change that breaks an invariant, so the soak shows it would fail.
  */
 let days = 0;
-async function simulateDay(options: { hours: number; regression?: 'approvers-left-open'; handApprovers?: boolean }) {
+async function simulateDay(options: { hours: number; regression?: 'approvers-left-open'; handApprovers?: boolean; timebomb?: boolean }) {
   const dayStart = clock.now();
   const github = new SimulatedGitHub({ repository, baseBranch: 'main', appId: 1234, ciAppId: 15368, reviewerApps, ciMs: 5 * minute, reviewMs: 3 * minute, firstPullRequest: 100 * ++days },
     [...Array.from({ length: plan.items }, (_, index) => file(index + 1)), 'README.md']);
@@ -123,6 +123,15 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   for (const n of plan.rework) github.verdicts.set(items[n - 1].key, ['CHANGES_REQUESTED']);
   github.unstable.add(items[plan.unstable - 1].key); github.slowRecompute.add(items[plan.slowRecompute - 1].key);
   github.exhaustedProfiles.add('claude-reviewer');
+  // GY-534: main carries a clock timebomb that fails the required `test` check on every head
+  // without its fix. The first three items are released a minute apart, so their heads are pushed
+  // before the fix lands on main and their check fails once main already holds it; the second
+  // item's first head is also broken on its own, so it fails again once it contains the fix.
+  // Main keeps moving under the failing candidates: unrelated commits land while the broken item's
+  // refreshed head is still failing, before its rework is asked for.
+  const timebomb = { fixAt: 23 * minute, fix: null as string | null, broken: 2, brokenHeads: new Set<string>(), moveAt: [27 * minute, 29 * minute], moves: [] as number[] };
+  if (options.timebomb) github.failsTest = (key, head) => !timebomb.fix || !github.contains(head, timebomb.fix)
+    || key === items[timebomb.broken - 1].key && [...timebomb.brokenHeads].some(broken => github.contains(head, broken));
 
   // ---- Workers: the loop dispatches, the simulated session claims, works, pushes and submits (or dies). ----
   interface Session { work: string; key: string; branch: string; profile: WorkerProfile; epoch: number; pane: string; pushAt: number; diesAt: number | null; state: 'working' | 'submitted' | 'dead' }
@@ -151,7 +160,9 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
         catch (error) { if (!(error instanceof Refusal)) throw error; herdr.kill(session.pane); session.state = 'dead'; lost.push(`${session.key} epoch ${session.epoch}: ${error.message}`); }
         continue;
       }
-      const pr = github.push(session.key, session.branch, principal.id, sha('head', session.key, session.epoch), [file(numberOf(session))]);
+      const head = sha('head', session.key, session.epoch);
+      if (options.timebomb && numberOf(session) === timebomb.broken && !timebomb.brokenHeads.size) timebomb.brokenHeads.add(head);
+      const pr = github.push(session.key, session.branch, principal.id, head, [file(numberOf(session))]);
       await engine.execute(principal, 'submit', session.work, { epoch: session.epoch, pr: pr.number, documentation: 'A simulated item: it changes no documented behaviour' }, id());
       session.state = 'submitted';
       herdr.status(session.pane, 'done');
@@ -198,13 +209,20 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   // One executor instance for the loop's process, and a fresh request per merge the loop asks for, as `master run` wires it.
   const executor = { principal: principals.coordinator.id, instance: `soak-${randomUUID()}` };
   const merge: DaemonEffects['merge'] = work => mergeExecutor(config, snapshot, transport, executor, randomUUID(), github.gh(repository))(work);
+  // Every decision the loop asked for, and every one the control plane refused (GY-534).
+  const decided: { key: string; action: string; reason: string; refused: string | null; at: number }[] = [];
   const effects: DaemonEffects = {
     agents: () => herdr.list(),
     herdr: () => ({ agents: herdr.list(), available: true }),
     credentials: async profiles => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])),
     snapshot, dispatch, requestProof, approver, merge,
     closeSession: pane => { if (options.regression === 'approvers-left-open' && /approver/.test(herdr.agents.get(pane)?.name ?? '')) return; herdr.close(pane); },
-    decide: (work, action, reason, input = {}) => api(principals.operatorAgent, 'POST', `work/${work.id}/decide`, { action, input: decisionInput(action, work, input), reason }),
+    decide: async (work, action, reason, input = {}) => {
+      const entry = { key: work.key, action, reason, refused: null as string | null, at: clock.now() };
+      decided.push(entry);
+      try { return await api(principals.operatorAgent, 'POST', `work/${work.id}/decide`, { action, input: decisionInput(action, work, input), reason }); }
+      catch (error) { entry.refused = error instanceof Error ? error.message : String(error); throw error; }
+    },
     decisions: work => api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(work.id)}/decisions`),
     withdraw: (work, decision, reason) => api(principals.operatorAgent, 'POST', `work/${work.id}/decide`, { action: 'withdraw', decision, reason }),
     baseSuccessions: async since => ({ tip: github.tip, successions: github.successions.filter(entry => github.commits.get(entry.commit)!.at >= Date.parse(since)), files: new Set(github.files) }),
@@ -272,7 +290,11 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   for (let elapsed = 0; elapsed <= options.hours * hour;) {
     const now = clock.now();
     // Scheduled events: releases, the file split on main, the deploys.
-    while (released < plan.items && elapsed >= released * plan.releaseEveryMs) await engine.execute(principals.operator, 'ready', items[released++].id, {}, id());
+    while (released < plan.items && elapsed >= released * (options.timebomb && released < 3 ? minute : plan.releaseEveryMs)) await engine.execute(principals.operator, 'ready', items[released++].id, {}, id());
+    if (options.timebomb && !timebomb.fix && elapsed >= timebomb.fixAt) timebomb.fix = github.commit('Fix the clock timebomb in the test suite', [...github.files]).sha;
+    else if (options.timebomb && timebomb.moveAt.includes(elapsed)) {
+      github.commit(`Unrelated change ${timebomb.moves.length + 1} on main`, [...github.files]); timebomb.moves.push(now);
+    }
     if (!split && elapsed >= plan.split.at) {
       split = true;
       const from = file(plan.split.item), successors = [`src/soak/item-${plan.split.item}-a.ts`, `src/soak/item-${plan.split.item}-b.ts`];
@@ -298,7 +320,14 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     if (!deploying) {
       for (const act of pending.splice(0)) await act();
       await engine.reconcile();
-      for (let guard = 0; guard < 200 && await jobsDue(); guard++) await processJob(engine, adapter);
+      for (let guard = 0; guard < 200 && await jobsDue(); guard++) {
+        const refreshed = github.failedCheckRefreshes.length;
+        await processJob(engine, adapter);
+        // The loop runs beside the reconciliation jobs, not after them: on the timebomb day the
+        // cycle runs between a failed-check refresh being bound and the reading of the head it
+        // published (GY-534), the window in which the old head's failure must owe nothing.
+        if (options.timebomb && github.failedCheckRefreshes.length > refreshed) break;
+      }
       try {
         const result = await runCycle(config, state, effects, clock.now, launcher); cycles++;
         reportedDispatches += result.actions.filter(action => action.kind === 'dispatch' && action.state === 'done').length;
@@ -327,7 +356,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   }
 
   const final = (await store.list()).filter(item => items.some(entry => entry.id === item.id));
-  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, herdr, hand, escalations, spent, upgrades, refusalSamples, checkout };
+  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, herdr, hand, escalations, spent, upgrades, refusalSamples, checkout, decided, timebomb };
 }
 
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 180_000 }, async () => {
@@ -396,6 +425,32 @@ test('unit:soak-invariants-hold — hand-launched approvers that vanish or stop 
     assert.ok(![...herdr.agents.values()].some(agent => agent.name === approverSessionName(final.find(item => item.key === key)!, decision)), `${key}: no approver session for it is left open`);
   }
   assert.equal([...hand.values()].reduce((total, entry) => total + entry.refused, 0), 1, 'one relaunch was refused by a registry timeout, and retried');
+});
+
+test('unit:soak-invariants-hold — a required check failing behind a base that fixed it: each worker head is refreshed at most once, no rework is owed or refused for the base\'s failure, and main moving under the failing candidates starts no refresh storm', { timeout: 120_000 }, async () => {
+  // GY-534: the control plane answers a required check that failed on a head behind the base tip
+  // by merging the tip into the head (trigger `failed check behind base`), once per worker head.
+  const { items, final, github, violations, failures, decided, timebomb } = await simulateDay({ hours: 6, timebomb: true });
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
+  assert.deepEqual(violations, [], 'every system invariant holds across the refreshes');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  const refreshes = github.failedCheckRefreshes, broken = items[timebomb.broken - 1].key;
+  const summary = refreshes.map(entry => `${entry.key} ${entry.from.slice(0, 7)}→${entry.head.slice(0, 7)} onto ${entry.base.slice(0, 7)}`).join(', ');
+  assert.deepEqual([...new Set(refreshes.map(entry => entry.key))].sort(), items.slice(0, 3).map(item => item.key).sort(), `the three heads pushed before the fix were each brought onto it: ${summary}`);
+  assert.equal(new Set(refreshes.map(entry => entry.from)).size, refreshes.length, `each worker head was refreshed at most once: ${summary}`);
+  assert.ok(!refreshes.some(entry => refreshes.some(other => other.head === entry.from)), `no head a refresh produced was refreshed again: ${summary}`);
+  assert.ok(refreshes.every(entry => github.contains(entry.head, timebomb.fix!)), 'every refreshed head contains the fix');
+  const ciReworks = decided.filter(entry => entry.action === 'rework' && /required CI check/.test(entry.reason));
+  assert.deepEqual(ciReworks.map(entry => entry.key), [broken], `a rework for a failed check is owed only for the head whose own failure survived the refresh: ${ciReworks.map(entry => entry.reason).join(' | ')}`);
+  assert.ok(ciReworks.every(entry => refreshes.some(refresh => entry.reason.includes(refresh.head.slice(0, 12)))), 'and only for the refreshed head, never for the failure the base fixed');
+  // Main moved repeatedly under the broken item's failing refreshed head before its rework was
+  // asked for; it was not refreshed again, and its failure went back to its worker exactly once.
+  const brokenRefresh = refreshes.find(entry => entry.key === broken)!;
+  assert.ok(timebomb.moves.filter(at => at > brokenRefresh.at && at < ciReworks[0].at).length >= 2, `main moved repeatedly under the failing refreshed head: refreshed +${Math.round((brokenRefresh.at - timebomb.moves[0]) / minute)} min after the first move, rework +${Math.round((ciReworks[0].at - timebomb.moves[0]) / minute)} min`);
+  // (A dead worker's lease-loss resolve may meet a revision race and be asked again; that is not this class.)
+  const timebombed = new Set(items.slice(0, 3).map(item => item.key));
+  assert.deepEqual(decided.filter(entry => entry.refused && (entry.action === 'rework' || timebombed.has(entry.key))).map(entry => `${entry.key} ${entry.action}: ${entry.refused}`), [], 'no rework, and no decision on a timebombed item, was refused');
+  assert.equal(final.reduce((total, item) => total + (item.pipeline?.reworkRounds ?? 0), 0), plan.rework.size + 1, 'the three reviewer rework rounds and the broken head\'s one');
 });
 
 test('unit:soak-invariants-hold — a loop change that breaks an invariant fails the soak: approver sessions the loop no longer closes are named within the hour', { timeout: 120_000 }, async () => {

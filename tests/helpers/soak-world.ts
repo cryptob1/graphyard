@@ -3,7 +3,7 @@ import type { GitHub } from '../../src/github.js';
 import type { HerdrAgent } from '../../src/master.js';
 import type { Observation, Work } from '../../src/model.js';
 import type { AgentReview, ReviewRequest } from '../../src/model/review.js';
-import { mergeableNow, queueRef, type BaseRefresh, type GitHubMergeQueueState, type QueuePlacement, type QueueSpeculation } from '../../src/merge-queue.js';
+import { baseRefreshNeeded, mergeableNow, queueRef, type BaseRefresh, type GitHubMergeQueueState, type QueuePlacement, type QueueSpeculation } from '../../src/merge-queue.js';
 import type { Succession } from '../../src/model/successors.js';
 
 // The outside world of the soak test (GY-404), simulated deterministically: one clock that both the
@@ -91,6 +91,10 @@ export class SimulatedGitHub {
   unstable = new Set<string>(); slowRecompute = new Set<string>();
   /** Successions (renames and splits) recorded on the base branch. */
   successions: Succession[] = [];
+  /** Whether the required `test` check fails on a head (GY-534); every head passes when unset. */
+  failsTest: ((key: string, head: string) => boolean) | null = null;
+  /** Every failed-check base refresh the control plane performed, in order. */
+  failedCheckRefreshes: { key: string; from: string; head: string; base: string; at: number }[] = [];
   private serial = 0;
   constructor(readonly options: WorldOptions, files: string[]) {
     const root: Commit = { sha: sha('root'), tree: sha('tree', 'root'), parents: [], files, at: clock.now(), message: 'root' };
@@ -179,7 +183,8 @@ export class SimulatedGitHub {
         return {
           clockOffset: { min: 0, max: 0 }, prState: pr.open ? 'open' : 'closed', draft: false, prCreatedAt: new Date(pr.createdAt).toISOString(),
           candidate: { sha: pr.head, baseSha: pr.base, pr: pr.number, branch: pr.branch, author: pr.author, createdAt: new Date(pr.createdAt).toISOString() },
-          checks: ci ? ['test', 'typecheck'].map((name, index) => ({ name, result: 'success', appId: options.ciAppId, id: pr.number * 10 + index })) : [],
+          checks: ci ? ['test', 'typecheck'].map((name, index) => ({ name, result: name === 'test' && world.failsTest?.(pr.key, pr.head) ? 'failure' : 'success', appId: options.ciAppId,
+            id: pr.number * 1000 + [...pr.pushed.keys()].indexOf(pr.head) * 10 + index })) : [],
           // GitHub's latest verdict per reviewer, and the id of every review, as the real adapter reports them.
           reviews: [...new Map(pr.reviews.map(review => [review.reviewer, { ...review }])).values()], reviewIds: pr.reviews.map(review => review.id),
           // A reviewer App's verdict is read for the request the item is bound to, never for another.
@@ -202,8 +207,18 @@ export class SimulatedGitHub {
           merge: { from, parents: [from, predicted], author: 'graphyard[bot]', authoredByApp: true, conflicts: false, baseChanges: changed, diff: { reviewed: sha('patch', from), tip: sha('patch', from) } } };
       },
       async refreshCandidateBase(work: Work): Promise<BaseRefresh> {
-        // No candidate in this world conflicts: a GitHub reading that says so is stale, as GY-375 found.
         const pr = world.pr(work), at = new Date(clock.now()).toISOString();
+        // A required check that failed behind the base tip (GY-534): the base is merged into the
+        // candidate's own branch, as GitHub's /merges does, and CI answers again on the result.
+        if (baseRefreshNeeded(work)?.trigger === 'failed check behind base') {
+          const from = pr.head, bound = pr.base, tip = world.tip, head = sha('refresh', from, tip), onto = world.commits.get(tip)!;
+          world.record({ sha: head, tree: sha('tree', head), parents: [from, tip], files: [...new Set([...world.commits.get(from)!.files, ...onto.files])], at: clock.now(), message: `Graphyard base refresh for ${work.key}` });
+          pr.head = head; pr.base = tip; pr.pushed.set(head, clock.now());
+          world.failedCheckRefreshes.push({ key: work.key, from, head, base: tip, at: clock.now() });
+          return { from: { sha: from, baseSha: bound }, base: tip, baseTree: onto.tree, policyRevision: work.policyRevision, at, head, conflict: null, carry: null, trigger: 'failed check behind base',
+            merge: { from, parents: [from, tip], author: 'graphyard[bot]', authoredByApp: true, conflicts: false, baseChanges: onto.files.filter(file => !world.commits.get(bound)!.files.includes(file)), diff: { reviewed: sha('patch', from), tip: sha('patch', from) } } } as BaseRefresh;
+        }
+        // No candidate in this world conflicts: a GitHub reading that says so is stale, as GY-375 found.
         return { from: { sha: pr.head, baseSha: pr.base }, base: world.tip, baseTree: world.tree, policyRevision: work.policyRevision, at, head: pr.head, conflict: null, merge: null, carry: null,
           stale: { head: pr.head, base: world.tip, policyRevision: work.policyRevision, at, reading: `GitHub reported ${pr.head.slice(0, 12)} conflicting, but a test merge is clean` } } as BaseRefresh;
       },

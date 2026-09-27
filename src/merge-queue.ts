@@ -527,12 +527,12 @@ export type RefreshTrigger = 'conflict confirmed' | 'failed check behind base' |
 /** Check results that report a failure, as opposed to a run still to answer. */
 export const failedCheckResults = ['failure', 'timed_out', 'action_required', 'cancelled'];
 /**
- * The latest run of the named check on the observed head, by attempt: a re-run supersedes the
- * run it repeats, so only the newest one says whether the check failed.
+ * The latest run of the named check on the observed head, ordered as the test gate orders them
+ * (`latestCheck`, by immutable check-run ID): a re-run supersedes the run it repeats, and a newly
+ * triggered workflow run supersedes an older one whatever its attempt number.
  */
 export function latestCheckRun(work: Pick<Work, 'observation'>, name: string) {
-  const runs = (work.observation?.checks ?? []).filter(check => check.name === name);
-  return runs.length ? runs.reduce((newest, check) => (check.attempt ?? 0) >= (newest.attempt ?? 0) ? check : newest) : null;
+  return latestCheck((work.observation?.checks ?? []).filter(check => check.name === name)) ?? null;
 }
 /** The first check the policy requires whose latest run on the observed head reported a failure, or null. */
 export function failedRequiredCheck(work: Pick<Work, 'observation' | 'policy'>): string | null {
@@ -632,6 +632,7 @@ export function baseRefreshNeeded(work: Work): { head: string; boundBase: string
   if (observation.candidate.sha !== candidate.sha) return null;
   const baseTip = observation.baseTip;
   if (observation.baseTipContained !== false || !baseTip || baseTip === candidate.baseSha) return null;
+  if (refreshInFlight(work)) return null;
   const refresh = work.baseRefresh;
   const recorded = !!refresh && refresh.from.sha === candidate.sha && refresh.base === baseTip && refresh.policyRevision === work.policyRevision;
   // A required check that failed on a head behind the base tip (GY-534). The failure may be the
@@ -657,6 +658,24 @@ export function baseRefreshNeeded(work: Work): { head: string; boundBase: string
   if (restore && restore.contaminated === candidate.sha && (restore.performedAt === null || restore.outcome === 'unrepairable')) return null;
   return check ? { head: candidate.sha, boundBase: candidate.baseSha, baseTip, trigger: 'failed check behind base', check }
     : { head: candidate.sha, boundBase: candidate.baseSha, baseTip, trigger: 'conflict confirmed', check: null };
+}
+
+/**
+ * A failed-check refresh (GY-534) that published a new head the observation has not caught up
+ * with yet, or null. Binding the refresh re-evaluates the item while its candidate and observation
+ * still name the old, failing head, and `recorded` in `baseRefreshNeeded` no longer calls it
+ * pending: read on its own, that head would owe a rework decision for exactly the failure the
+ * refresh answered. Until an observation taken after the refresh reads the branch, the refresh is
+ * in flight: the failure maps to a fresh reading, no rework is owed, and the same worker head is
+ * not refreshed again however far main moves meanwhile. A reading taken after the refresh that
+ * still shows the old head ends the window, so a push that did not stick falls back to rework.
+ */
+export function refreshInFlight(work: Pick<Work, 'candidate' | 'observation' | 'baseRefresh' | 'policyRevision'>): BaseRefresh | null {
+  const refresh = work.baseRefresh, candidate = work.candidate, observation = work.observation;
+  if (!refresh || !candidate || refresh.trigger !== 'failed check behind base' || refresh.stale || refresh.conflict || !refresh.head) return null;
+  if (refresh.head === candidate.sha || refresh.from.sha !== candidate.sha || refresh.policyRevision !== work.policyRevision) return null;
+  if (observation && observation.candidate.sha === candidate.sha && Date.parse(observation.at) > Date.parse(refresh.at)) return null;
+  return refresh;
 }
 
 /** The unresolved conflict a base refresh reported for exactly this candidate and branch head, or null. */

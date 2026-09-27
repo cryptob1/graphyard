@@ -1,4 +1,4 @@
-import { baseRefreshNeeded, failedCheckResults, latestCheckRun, queueSequencingReason } from '../merge-queue.js';
+import { baseRefreshNeeded, failedCheckResults, latestCheckRun, queueSequencingReason, refreshInFlight } from '../merge-queue.js';
 import { reviewNeed } from './dispatch.js';
 import { standingEscalations } from './escalation.js';
 import { leadHoldRefusal } from './delegation.js';
@@ -136,8 +136,9 @@ export function refusalAction(work: Work, gate: string, refusal: string, all: Wo
     if (!latest || !failedCheckResults.includes(latest.result)) return 'resync';
     // A failed check on a head behind the base tip is answered by the control plane's own base
     // refresh (GY-534), which the fresh reading runs: the failure may be one main already fixed,
-    // and a rework decision owed for it is refused on exactly those grounds.
-    return baseRefreshNeeded(work)?.trigger === 'failed check behind base' ? 'resync' : 'request-rework';
+    // and a rework decision owed for it is refused on exactly those grounds. A refresh that already
+    // published its head is answered by the reading that sees that head, not by rework either.
+    return baseRefreshNeeded(work)?.trigger === 'failed check behind base' || refreshInFlight(work) ? 'resync' : 'request-rework';
   }
   if (gate === 'review') {
     const standstill = reviewStandstill(work, all, now);

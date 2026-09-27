@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { baseRefreshNeeded, pendingBaseRefresh, type BaseRefresh } from '../src/merge-queue.js';
+import { baseRefreshNeeded, pendingBaseRefresh, refreshInFlight, type BaseRefresh } from '../src/merge-queue.js';
 import { evaluate, Refusal, type Evidence, type Observation, type Work } from '../src/model.js';
 import { nextAction, refusalAction } from '../src/model/next-action.js';
 import { failedCheckRework } from '../src/daemon/decisions.js';
@@ -96,6 +96,34 @@ test('manual:fault-class-decision — decision-refused|GY-392: once the refreshe
   const behindAgain = { ...failing, observation: { ...failing.observation!, baseTip: commit('f3'), baseTipContained: false } } as Work;
   assert.equal(baseRefreshNeeded(behindAgain), null);
   assert.equal(refusalAction(behindAgain, 'test', failedTest), 'request-rework');
+});
+
+for (const instance of instances) test(`manual:fault-class-decision — ${instance.id}: between binding the refresh and observing the head it published, the old failure owes no rework decision and the worker head is not refreshed again`, () => {
+  // The refresh is bound (engine.bindBaseRefresh) while the candidate and observation still name
+  // the old, failing head: the state the reviewer of PR #366 found owing the rework again.
+  const refreshed = commit('e2');
+  const bound = (item: Work): Work => evaluated({ ...item, baseRefresh: { from: { sha: instance.head, baseSha: staleBase }, base: fixedMain, baseTree: commit('b1'), policyRevision: 1,
+    at: now.toISOString(), head: refreshed, conflict: null, merge: null, carry: null, trigger: 'failed check behind base' } } as Work);
+  const item = bound(work(instance.key, instance.head));
+  assert.deepEqual(testRefusal(item), [failedTest], 'the gate still refuses the old head it reads');
+  assert.ok(refreshInFlight(item));
+  assert.equal(refusalAction(item, 'test', failedTest), 'resync', 'the reading that sees the refreshed head answers it');
+  const action = nextAction(item, [item], now);
+  assert.equal(action?.kind, 'resync');
+  assert.doesNotMatch(action!.reason, /needs a new head/);
+  assert.equal(failedCheckRework(item), null, 'no rework decision is owed for the failure the refresh answered');
+  assert.equal(baseRefreshNeeded(item), null, 'the refresh ran: nothing refreshes it again');
+  // Main moves again before the observation: still one refresh per worker head.
+  const movedAgain = bound(work(instance.key, instance.head, { baseTip: commit('f3') }));
+  assert.equal(baseRefreshNeeded(movedAgain), null);
+  assert.equal(failedCheckRework(movedAgain), null);
+  // A reading taken after the refresh that still shows the old head ends the window: the push did
+  // not stick, and the failure goes back to the worker rather than holding the item forever.
+  const later = new Date(now.getTime() + 60_000).toISOString();
+  const unstuck = bound(work(instance.key, instance.head, { at: later }));
+  assert.equal(refreshInFlight(unstuck), null);
+  assert.equal(refusalAction(unstuck, 'test', failedTest), 'request-rework');
+  assert.ok(failedCheckRework(unstuck));
 });
 
 test('manual:fault-class-decision — a failed check behind a base the control plane cannot merge in goes back to the worker with the conflict named', () => {
