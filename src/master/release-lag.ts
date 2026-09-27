@@ -5,7 +5,10 @@
 // used to be invisible: every component went on running the release it had loaded. This module
 // says, per component, what it loaded against the base tip, and names any component that stays
 // more than one delivery behind for over ten minutes — one delivery behind is the ordinary gap
-// between a merge and its verified deployment, and is never named.
+// between a merge and its verified deployment, and is never named. The ancestry scan is bounded:
+// what a release holds is a prefix of the merge-ordered deliveries, so each component scans from
+// the newest back and stops at the first delivery its release contains, however long the delivered
+// history is.
 import { agentOwner, type AttentionItem } from './attention.js';
 import { shortCommit } from '../executor-fleet.js';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
@@ -49,22 +52,27 @@ export interface ReleaseLagReport { baseTip: string | null; components: ReleaseL
  * Per component, the release it loaded against the base tip. A delivery counts as behind when
  * git answers and answers no — a commit this checkout does not hold, or a component with no
  * readable release, reads as unknown and is never counted, so attention is raised only on what
- * is known.
+ * is known. The scan runs from the newest delivery back: deliveries are ordered by merge, so
+ * what a release holds is a prefix of them, and the first delivery git places inside the release
+ * ends the scan — a component k deliveries behind costs k + 1 ancestry reads, however long the
+ * delivered history is (GY-490).
  */
 export async function releaseLag(baseTip: string | null, deliveries: readonly LagDelivery[], components: readonly LagComponent[],
   deps: { root: string; run?: ChildRun; now: number; graceMs?: number }): Promise<ReleaseLagReport> {
   const run = deps.run ?? defaultChildRun;
   const graceMs = deps.graceMs ?? releaseLagGraceMs;
-  const contains = async (commit: string, mergeSha: string): Promise<boolean> => {
-    if (commit === mergeSha) return true;
-    try { await run('git', ['-C', deps.root, 'merge-base', '--is-ancestor', mergeSha, commit]); return true; }
-    catch (error: any) { return error?.status !== 1; }
-  };
+  const newestFirst = [...deliveries].sort((a, b) => Date.parse(a.mergedAt) - Date.parse(b.mergedAt)).reverse();
   const rows = components.map(async (component): Promise<ReleaseLagRow> => {
     const commit = component.release.commit;
-    const missing = async (delivery: LagDelivery) => commit ? !(await contains(commit, delivery.mergeSha.toLowerCase())) : false;
     const behind: LagDelivery[] = [];
-    for (const delivery of deliveries) if (await missing(delivery)) behind.push(delivery);
+    if (commit) for (const delivery of newestFirst) {
+      const mergeSha = delivery.mergeSha.toLowerCase();
+      if (mergeSha === commit) break;
+      try { await run('git', ['-C', deps.root, 'merge-base', '--is-ancestor', mergeSha, commit]); break; }
+      catch (error: any) { if (error?.status !== 1) continue; }
+      behind.push(delivery);
+    }
+    behind.reverse();
     // The count of missing deliveries reaches two when the second-oldest of them merged — later
     // ones only push it further — or when the component started, if that is later, so a fresh
     // process is not blamed for history older than it.
@@ -83,11 +91,16 @@ export async function releaseLag(baseTip: string | null, deliveries: readonly La
   return { baseTip, components: settled, attention };
 }
 
-/** The attention a refused upgrade raises, until the checkout clears: the loop stays on its loaded release and says why. */
+/** The attention a refused upgrade raises, until the checkout clears: the loop stays on its loaded release and says why. A refusal over the package manifest or lockfile names the install that clears it, since the checkout it refused is already clean and detached. */
 export function upgradeRefusalAttention(refused: { at: string; reason: string; commit: string | null } | null | undefined, root: string, baseBranch: string): AttentionItem[] {
   if (!refused) return [];
-  return [{ subject: 'upgrade', text: `The loop left the coordinator checkout at ${shortCommit(refused.commit)} untouched: ${refused.reason} (seen ${refused.at}). It aligns the checkout with ${baseBranch} between cycles once it is a clean, detached checkout of ${baseBranch}.`,
-    ...agentOwner('master', `Clear the coordinator checkout at ${root} — git -C ${root} status --porcelain names what is in it, and git -C ${root} checkout --detach "origin/${baseBranch}" returns it to what the loop upgrades onto`) }];
+  const dependency = /package(-lock)?\.json/.test(refused.reason);
+  return [{ subject: 'upgrade', text: dependency
+    ? `The loop left the coordinator checkout at ${shortCommit(refused.commit)} untouched: ${refused.reason} (seen ${refused.at}). It moves the checkout once the dependencies the changed manifest or lockfile needs are installed at ${root}.`
+    : `The loop left the coordinator checkout at ${shortCommit(refused.commit)} untouched: ${refused.reason} (seen ${refused.at}). It aligns the checkout with ${baseBranch} between cycles once it is a clean, detached checkout of ${baseBranch}.`,
+    ...agentOwner('master', dependency
+      ? `Put the checkout on the base tip and install there: git -C ${root} checkout --detach "origin/${baseBranch}" && cd ${root} && npm ci; the loop then aligns the release and the fleet and the loop restart onto the installed code`
+      : `Clear the coordinator checkout at ${root} — git -C ${root} status --porcelain names what is in it, and git -C ${root} checkout --detach "origin/${baseBranch}" returns it to what the loop upgrades onto`) }];
 }
 
 /** The loop-side facts `master status` feeds the lag report: what the cursor and the fleet recorded. */

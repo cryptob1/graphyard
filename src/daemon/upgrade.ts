@@ -7,8 +7,12 @@
 // now aligns its checkout with the base branch once the deployment step has verified a delivery
 // is served, and when the diff touches code the loop or the executors load, it restarts the
 // fleet through `master executors restart` and then re-executes itself through the supervisor
-// unit it runs under. A checkout that is dirty or not detached is never touched: the refusal is
-// on the cursor, and `master status` names it until it clears.
+// unit it runs under. A checkout that is dirty, not detached, of unknown cleanliness, or whose
+// commit the base branch does not contain is never touched: the refusal is on the cursor, and
+// `master status` names it until it clears. While such a refusal stands and the checkout has not
+// moved, the fetch of origin backs off — the local reads alone re-establish the refusal — and a
+// diff that changes the package manifest or lockfile is refused too, because the loop runs no
+// dependency install.
 import { readFileSync } from 'node:fs';
 import type { ChildRun } from '../child-runner.js';
 import { shortCommit, type ExecutorRestartResult } from '../executor-fleet.js';
@@ -158,19 +162,38 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
   if (state.upgrade.alignedRelease === release && !state.upgrade.pending)
     return { outcome: 'skipped', reason: `release ${shortCommit(release)} was already aligned` };
 
-  // 2. The base tip, from a fresh fetch.
+  // 2. How this checkout stands, before anything reaches the network: these reads are local, and
+  //    the fetch below is the only network call an alignment makes.
+  const checkout = await checkoutState(deps.root, deps.run);
+  if (!checkout.commit) return failed(`the coordinator checkout at ${deps.root} could not be read`);
+  // Why the checkout is not to be touched, from the local reads alone: not detached, dirty, or of
+  // a cleanliness git could not read. A checkout whose cleanliness is unknown is refused like a
+  // dirty one — the guard never moves a checkout it cannot vouch for.
+  const localRefusal = checkout.detached !== true
+    ? `HEAD holds ${checkout.branch ?? 'a branch'} instead of standing detached; it is upgraded only as a clean detached checkout of ${config.baseBranch}`
+    : checkout.dirty !== false
+      ? checkout.dirty === true
+        ? 'tracked files differ from the commit it holds; it is upgraded only clean'
+        : 'whether its tracked files differ from the commit it holds could not be read; it is upgraded only when it is known clean'
+      : null;
+
+  // 3. The fetch backs off while a refusal stands and the checkout has not moved since it was
+  //    recorded: the local reads alone re-establish the refusal, so a checkout left dirty for
+  //    hours stops paying a network fetch every cycle. The moment the checkout clears, the fetch
+  //    resumes below.
+  if (state.upgrade.refused?.commit === checkout.commit && localRefusal)
+    return refused(localRefusal, checkout.commit);
+
+  // 4. The base tip, from a fresh fetch.
   let to: string;
   try {
     await git('fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${config.baseBranch}:refs/remotes/origin/${config.baseBranch}`);
     to = (await git('rev-parse', `refs/remotes/origin/${config.baseBranch}^{commit}`)).trim();
   } catch (error) { return failed(`the base branch could not be fetched: ${message(error)}`); }
 
-  // 3. How this checkout stands, before anything touches it.
-  const checkout = await checkoutState(deps.root, deps.run);
-  if (!checkout.commit) return failed(`the coordinator checkout at ${deps.root} could not be read`);
+  // 5. The checkout already holds the tip: finish what an earlier pass still owes, or align and
+  //    clear a refusal that no longer describes anything.
   if (to === checkout.commit) {
-    // The checkout already holds the tip: finish what an earlier pass still owes, or align and
-    // clear a refusal that no longer describes anything.
     if (state.upgrade.pending) return finish(state.upgrade.pending);
     const cleared = !!state.upgrade.refused;
     state.upgrade.alignedRelease = release;
@@ -179,20 +202,36 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
     if (cleared) await note(`The checkout is current at ${shortCommit(to)}; the earlier refusal is cleared`, false);
     return { outcome: 'up-to-date', commit: to };
   }
-  if (checkout.detached !== true) return refused(`HEAD holds ${checkout.branch ?? 'a branch'} instead of standing detached; it is upgraded only as a clean detached checkout of ${config.baseBranch}`, checkout.commit);
-  if (checkout.dirty === true) return refused('tracked files differ from the commit it holds; it is upgraded only clean', checkout.commit);
 
-  // 4. What the move would change, then the move itself.
+  // 6. The guards, before anything touches the checkout: detached, clean, and holding a commit the
+  //    base branch contains. A clean detached checkout of an unrelated commit — a bisect, a review
+  //    checkout — is refused like a dirty one, so nothing off the branch is ever moved away from.
+  if (localRefusal) return refused(localRefusal, checkout.commit);
+  const from = checkout.commit;
+  try { await git('merge-base', '--is-ancestor', from, `refs/remotes/origin/${config.baseBranch}`); }
+  catch (error: any) {
+    // An ancestry git cannot place is unknown, never off-branch — the release-lag report skips it
+    // the same way; a definitive no refuses the move.
+    if (error?.status === 1) return refused(`HEAD holds ${shortCommit(from)}, which ${config.baseBranch} does not contain; it is upgraded only as a clean detached checkout of ${config.baseBranch}, so a commit off the branch is never left behind`, from);
+  }
+
+  // 7. What the move would change, then the move itself.
   //    A restart still owed for an earlier move stays owed: a docs-only move on top of a src/ one
   //    leaves the fleet as stale as the src/ move did.
-  const owed = state.upgrade.pending?.code === true;
-  if (state.upgrade.pending) { state.upgrade.pending = null; await persist(); }
-  const from = checkout.commit;
-  let changed: string[], code: boolean;
+  let changed: string[];
   try {
     changed = (await git('diff', '--name-only', `${from}..${to}`)).split('\n').map(path => path.trim()).filter(Boolean);
-    code = owed || upgradeTouchesCode(changed);
   } catch (error) { return failed(`the diff from ${shortCommit(from)} to ${shortCommit(to)} could not be read: ${message(error)}`); }
+  // A diff that changes the package manifest or lockfile would restart the fleet and the loop on
+  // dependencies nobody installed — the lockfile is not even loaded code. The loop runs no
+  // install, so it refuses the move and lets the attention name the install, before anything is
+  // cleared: the owed restart below stays owed while the move is refused.
+  const manifests = changed.filter(path => path === 'package.json' || path === 'package-lock.json');
+  if (manifests.length)
+    return refused(`the diff to ${shortCommit(to)} changes ${manifests.join(' and ')} and the loop runs no dependency install; it leaves the checkout at ${shortCommit(from)} until the checkout stands on ${config.baseBranch} with the new dependencies installed`, from);
+  const owed = state.upgrade.pending?.code === true;
+  if (state.upgrade.pending) { state.upgrade.pending = null; await persist(); }
+  const code = owed || upgradeTouchesCode(changed);
   await note(`Checking out base tip ${shortCommit(to)} (from ${shortCommit(from)}): ${changed.length} path(s) changed${code ? ', loaded code among them' : ', none of them loaded code'}`, false);
   try { await git('checkout', '--detach', '--quiet', to); }
   catch (error) { return failed(`checking out ${shortCommit(to)} failed: ${message(error)}`); }
