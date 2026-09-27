@@ -63,7 +63,7 @@ export const defaultOptimisticExclude = [
   // Test helpers: shared setup every test file loads.
   'tests/helpers/', 'test/helpers/', '**/conftest.py', '**/jest.setup.*', '**/vitest.setup.*',
   // Schema and migration directories: what the store and every integration test stand on.
-  '**/migrations/', '**/migration/', '**/migrate/', '**/*migration*', '**/schema*', '**/schemas/',
+  '**/migrations/', '**/migration/', '**/migrate/', '**/*migration*', '**/schema*', '**/schemas/', '**/tables.ts',
 ] as const;
 
 /** The globs an exclude list must satisfy: repository-relative, one path segment or tree each, bounded like the documentation paths are. */
@@ -403,7 +403,7 @@ export function optimisticMetrics(all: Pick<Work, 'id' | 'key' | 'stage' | 'deli
   });
   const guard = mainGuard(all);
   return {
-    enabled, merges: merges.length, reverts: merges.filter(merge => merge.revert && merge.revert.state !== 'refused').length,
+    enabled, merges: merges.length, reverts: merges.filter(merge => merge.revert?.state === 'merged').length,
     postMerge: { passed: merges.filter(merge => merge.postMerge?.verdict === 'pass').length, failed: merges.filter(merge => merge.postMerge?.verdict === 'fail').length,
       pending: merges.filter(merge => !merge.revert && (!merge.postMerge || merge.postMerge.verdict === 'pending')).length },
     timeToMerge: { optimistic: timing(optimistic), queued: timing(queued) },
