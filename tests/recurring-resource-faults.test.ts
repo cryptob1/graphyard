@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import type { Work } from '../src/model.js';
 import { masterConfigSchema, type HerdrAgent, type MasterConfig } from '../src/master.js';
 import { emptyDaemonState, runDaemon, type DaemonEffects } from '../src/master-daemon.js';
+import { codeReloadBetweenCycles } from '../src/daemon/run.js';
 import { classified, trackFaults, type FaultRecord } from '../src/model/fault-classes.js';
 import { codeReloadReason, liveChildren, loadedRevision, readReclaimSightings, readResources, reclaimResources, resourceAttention, revisionReloadGraceMs, unownedNameGraceMs, type ResourceInputs } from '../src/master-resources.js';
 
@@ -131,4 +132,16 @@ test('GY-531 instance 3 — the loaded-revision fault standing across a second m
   // A fault that cleared and came back is still a new instance.
   trackFaults(record, [], '2026-09-26T07:45:00.000Z');
   assert.equal(trackFaults(record, [observe(1, second)], '2026-09-26T08:00:00.000Z').length, 1);
+});
+
+test('GY-531 — the reload gate between cycles never asks while a launch the loop handed over is in flight, nor outside a supervisor', async () => {
+  let asked = 0;
+  const behind = () => { asked += 1; return 'behind'; };
+  assert.equal(await codeReloadBetweenCycles(true, { pending: 1 }, behind, () => {}), null, 'a launch in flight holds the reload');
+  assert.equal(await codeReloadBetweenCycles(false, { pending: 0 }, behind, () => {}), null, 'an unsupervised loop never reloads');
+  assert.equal(asked, 0);
+  assert.equal(await codeReloadBetweenCycles(true, { pending: 0 }, behind, () => {}), 'behind');
+  const logged: string[] = [];
+  assert.equal(await codeReloadBetweenCycles(true, { pending: 0 }, () => { throw new Error('git failed'); }, line => logged.push(line)), null, 'a comparison that fails keeps the loop running');
+  assert.match(logged[0], /could not be compared with the checkout: git failed/);
 });
