@@ -68,6 +68,12 @@ test('unit:rework-round-causes-classified — the classifier reads a fixture led
   assert.equal(classifyReworkReason('GY-x: unit:docs-word-budget reports README+docs total 12058 words against a 12000 budget.').cause, 'docs-budget');
   assert.equal(classifyReworkReason('GY-x: the producer recorded evidence that does not exercise its criterion on a.').cause, 'lost-approval-or-proof');
   assert.equal(classifyReworkReason('Launch readiness flake; clear and retry.').cause, 'ci-flake');
+  assert.equal(classifyReworkReason('GY-x: the check hangs on the runner; a rerun cleared it.').cause, 'ci-flake');
+  // A negated flake mention is not a flake round: an own-change review defect described as
+  // "not a flake" is classified by the rest of its text, never excluded from the split (GY-643).
+  assert.equal(classifyReworkReason('GY-x: graphyard-reviewer[bot] requested changes on ccc3. The defect is deterministic, not a flake.').cause, 'own-change');
+  assert.equal(classifyReworkReason('GY-x: the check is not flaky; it fails because the change removed the fixture.').cause, 'own-change');
+  assert.equal(classifyReworkReason('GY-x: reruns passed; no flake and no defect the text names.').cause, 'other');
   assert.equal(classifyReworkReason('GY-x: graphyard-reviewer[bot] requested changes on a. The verdict stands against the current head.').cause, 'own-change');
   assert.equal(classifyReworkReason('GY-x: required CI check test failed on candidate a, cause not established by the text.').cause, 'other', 'an unattributed round is counted as other, never guessed into a named cause');
 

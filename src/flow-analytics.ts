@@ -1579,7 +1579,9 @@ export function flowExport(report: FlowReport, drilldown: ReturnType<typeof flow
 // item's own change; `other` keeps a round the ledger text does not tie to a named class counted
 // rather than guessed away. Rules run in order and the first match wins, so a base-caused CI
 // failure is base breakage before it is anything else, and a docs-budget finding is the docs
-// budget before it is a review finding.
+// budget before it is a review finding. A negated mention ("not a flake") never makes the round
+// that cause: the flake rules read negation, so an own-change round described as "not a flake"
+// is classified by the rest of its text.
 
 export type ReworkCause = 'own-change' | 'base-breakage' | 'conflict' | 'docs-budget' | 'lost-approval-or-proof' | 'ci-flake' | 'other';
 
@@ -1630,7 +1632,10 @@ export const reworkCauseRules: ReworkCauseRule[] = [
   { cause: 'lost-approval-or-proof', marker: 'evidence missing or invalid', pattern: /\bevidence is (missing|invalid)\b/i },
   { cause: 'lost-approval-or-proof', marker: 'only the evidence is owed', pattern: /\bonly the evidence\b/i },
   { cause: 'lost-approval-or-proof', marker: 'trusted fail bound to the head', pattern: /\btrusted (fail|evidence .{0,60}fail)/i },
-  { cause: 'ci-flake', marker: 'flake named in the reason', pattern: /\b(flake|flaky)\b/i },
+  // A negated mention ("deterministic, not a flake", "not flaky", "no flakes") is not a flake:
+  // the lookbehinds keep the rule from firing on the word alone, so the round falls through to
+  // the own-change rules the text may name instead of being excluded from the split (GY-643).
+  { cause: 'ci-flake', marker: 'an unnegated flake named in the reason', pattern: /\b(?<!\bnot\b[^.\n]{0,20})(?<!\bnever\b[^.\n]{0,15})(?<!\bno\b[^.\n]{0,10})(?<!non-)(flake|flaky)s?\b/i },
   { cause: 'ci-flake', marker: 'CI job hangs', pattern: /\bhangs\b/i },
   { cause: 'ci-flake', marker: 'transient failure', pattern: /\btransient(ly)? (fail|blocked|refus)/i },
   { cause: 'ci-flake', marker: 'launch-readiness flake', pattern: /\blaunch readiness\b/i },
