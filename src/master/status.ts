@@ -12,6 +12,7 @@ import { pipelineSpeed, pipelineSpeedSummary } from '../pipeline-speed.js';
 import { profileSessions, type WorkerProfile } from './profiles.js';
 import { sessionActivity } from './launch.js';
 import { sessionView } from '../model/session-state.js';
+import { mechanicalProof, unexercisedDetail, unexercisedFindings } from '../model/mechanical-proofs.js';
 import type { HerdrAgent } from './herdr.js';
 import { type ContainmentAssessment, containmentHold, containmentPhase } from './containment.js';
 import { agentOwner, type AttentionItem, controlPlaneAttention, type ControlPlaneStatus, fleetStatus, workAttentionOwner, type WorkAttentionCause } from './attention.js';
@@ -69,7 +70,13 @@ export function describeDispatch(work: Work, reviews: { pending: any[]; complete
   // the attempts so far and when the next one is due are reported beside the request.
   const retry = (requestId: string) => sessions.retries?.find(entry => entry.requestId === requestId) ?? null;
   const describe = (request: NonNullable<typeof state.review>, records: any[]) => ({ requestId: request.id, sha: request.sha, baseSha: request.baseSha, policyRevision: request.policyRevision, requestedAt: request.requestedAt, sinceMs: since(request.requestedAt), reason: request.reason,
-    ...(request.group ? { group: request.group, proofs: request.proofs } : {}), session: session(records, request.id), failure: failure(request.id), retry: retry(request.id) });
+    ...(request.group ? { group: request.group, proofs: request.proofs } : {}), session: session(records, request.id), failure: failure(request.id), retry: retry(request.id),
+    // A proof the producer found does not exercise its criterion returns the head to its worker (GY-817).
+    ...(request.group ? unexercisedOf(request) : {}) });
+  const unexercisedOf = (request: NonNullable<typeof state.review>) => {
+    const findings = unexercisedFindings(work, request.sha, request.proofs).filter(entry => mechanicalProof(entry.proof));
+    return findings.length ? { unexercised: findings.map(entry => unexercisedDetail(entry, request.sha)) } : {};
+  };
   const reviewRecords = [...reviews.completed, ...reviews.pending], producerRecords = [...sessions.producers.completed, ...sessions.producers.pending];
   return { review: state.review ? describe(state.review, reviewRecords) : null, producers: state.producers.map(request => describe(request, producerRecords)),
     recent: state.history.slice(-5).map(request => ({ kind: request.kind, ...(request.group ? { group: request.group } : {}), sha: request.sha, state: request.state, resolution: request.resolution ?? null, resolvedAt: request.resolvedAt ?? null })) };

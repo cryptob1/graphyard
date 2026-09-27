@@ -31,7 +31,8 @@ import { expandTypedCommand } from './helpers/launch-shell.js';
  * (src/model/invariants.ts) holds. Fifteen items pass through it: released every fifteen minutes so
  * a merge lands about every fifteen, three sent back by their reviewer, two whose worker dies, two
  * production deploys, a file split on main that re-plans an item, one pull request GitHub reports
- * CLEAN at once and one UNSTABLE, a reviewer bot out of quota that fails over, and the loop's
+ * CLEAN at once and one UNSTABLE, a reviewer bot out of quota that fails over, two flaky tips
+ * rerun once (GY-516), one passing on the rerun and one failing again, and the loop's
  * between-cycles self-upgrade (GY-437) against a simulated coordinator checkout that stands dirty
  * across the second deploy for a while. Every one of the fifteen must be delivered. The loop
  * carries one `Launcher` across its cycles (GY-616), as `runDaemon` does, so session launches run
@@ -66,6 +67,8 @@ const plan = {
   items: 15, releaseEveryMs: 15 * minute, workMs: 20 * minute,
   rework: new Set([3, 7, 11]), deaths: new Set([5, 9]), deathAfterMs: 8 * minute,
   deploys: [2 * hour + 30 * minute, 5 * hour], dirtyCheckout: { from: 4 * hour + 50 * minute, to: 6 * hour }, split: { at: 45 * minute, item: 12 }, clean: 2, unstable: 4, slowRecompute: 8, exhaustedReviewer: 6,
+  // GY-516: a flake on a speculative tip whose one rerun passes, and one whose rerun fails again.
+  flaky: { rerunPasses: 10, rerunFails: 14 },
 };
 const file = (n: number) => `src/soak/item-${n}.ts`;
 
@@ -204,7 +207,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   // The failover day is smaller on purpose: five items through the one real launch profile, with no
   // rework, deaths, split or reviewer exhaustion — what it exercises is the repeated launch path.
   const day: typeof plan = { ...plan, ...(failover ? { items: 5, rework: new Set<number>(), deaths: new Set<number>(), deploys: [45 * minute, 80 * minute], clean: 0, unstable: 0, slowRecompute: 0, exhaustedReviewer: 0, workMs: 5 * minute,
-    split: { at: Number.MAX_SAFE_INTEGER, item: 0 }, dirtyCheckout: { from: Number.MAX_SAFE_INTEGER, to: Number.MAX_SAFE_INTEGER } } : {}) };
+    split: { at: Number.MAX_SAFE_INTEGER, item: 0 }, dirtyCheckout: { from: Number.MAX_SAFE_INTEGER, to: Number.MAX_SAFE_INTEGER }, flaky: { rerunPasses: 0, rerunFails: 0 } } : {}) };
   const github = new SimulatedGitHub({ repository, baseBranch: 'main', appId: 1234, ciAppId: 15368, reviewerApps, ciMs: 5 * minute, reviewMs: 3 * minute, firstPullRequest: 100 * ++days },
     [...Array.from({ length: day.items }, (_, index) => file(index + 1)), 'README.md']);
   const herdr = failover ? failover.world.herdr : new SimulatedHerdr();
@@ -225,6 +228,8 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   if (day.unstable) github.unstable.add(items[day.unstable - 1].key);
   if (day.slowRecompute) github.slowRecompute.add(items[day.slowRecompute - 1].key);
   if (day.exhaustedReviewer) github.exhaustedProfiles.add('claude-reviewer');
+  if (day.flaky.rerunPasses) github.flaky.set(items[day.flaky.rerunPasses - 1].key, 'rerun-passes');
+  if (day.flaky.rerunFails) github.flaky.set(items[day.flaky.rerunFails - 1].key, 'rerun-fails');
 
   // ---- Workers: the loop dispatches, the simulated session claims, works, pushes and submits (or dies). ----
   interface Session { work: string; key: string; branch: string; profile: WorkerProfile; epoch: number; pane: string; pushAt: number; diesAt: number | null; state: 'working' | 'submitted' | 'dead' }
@@ -441,7 +446,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       // them so the world never acts on a half-finished launch.
       await launcher.idle();
       // Between cycles, as runDaemon runs it: the self-upgrade against the simulated checkout.
-      checkout.dirty = elapsed >= plan.dirtyCheckout.from && elapsed < plan.dirtyCheckout.to;
+      checkout.dirty = elapsed >= day.dirtyCheckout.from && elapsed < day.dirtyCheckout.to;
       const upgraded = await selfUpgrade(state);
       upgrades.outcomes.push(upgraded.outcome);
       if (upgraded.outcome === 'failed') failures.push(`${new Date(now).toISOString()}: self-upgrade failed: ${upgraded.reason}`);
@@ -477,7 +482,7 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.ok(github.merges.some(entry => entry.key === items[plan.clean - 1].key && entry.state === 'CLEAN' && entry.mode === 'immediate'), `a CLEAN pull request merged at once: ${JSON.stringify(github.merges)}`);
   assert.ok(github.merges.some(entry => entry.key === items[plan.unstable - 1].key && entry.state === 'UNSTABLE' && entry.mode === 'immediate'), 'an UNSTABLE pull request merged at once');
   assert.ok(github.merges.some(entry => entry.key === items[plan.slowRecompute - 1].key && entry.mode === 'auto-merge'), 'one GitHub reported BLOCKED when asked was set to auto-merge, and GitHub merged it once it recomputed');
-  assert.equal(final.reduce((total, item) => total + (item.pipeline?.reworkRounds ?? 0), 0), plan.rework.size, 'three rework rounds');
+  assert.equal(final.reduce((total, item) => total + (item.pipeline?.reworkRounds ?? 0), 0), plan.rework.size + 1, 'three rework rounds for review, and one for the tip that failed again after its rerun');
   assert.equal(sessions.filter(session => session.state === 'dead').length, plan.deaths.size, 'two workers died');
   // Every dispatch the launcher settled was reported by a later cycle (GY-616): one dispatch-done
   // per session, none lost between the hand-off and the drain.
@@ -486,6 +491,15 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.ok(final.find(item => item.key === items[plan.split.item - 1].key)!.plannedFiles.includes(`src/soak/item-${plan.split.item}-a.ts`), 'the split file re-planned its item onto the successors');
   const reviewed = final.find(item => item.key === items[plan.exhaustedReviewer - 1].key)!;
   assert.ok(reviewed.reviewFailovers?.some(failover => failover.profile === 'claude-reviewer' && failover.exhaustion === 'usage-limit' && failover.nextProfile === 'cursor-reviewer'), `the exhausted reviewer bot failed over to the next profile: ${JSON.stringify(reviewed.reviewFailovers)}`);
+  // GY-516: each flaky tip was rerun exactly once; the one whose rerun passed merged that tip with no
+  // further round, and the one whose rerun failed again went back for one more and was still delivered.
+  const flaky = { passes: items[plan.flaky.rerunPasses - 1].key, fails: items[plan.flaky.rerunFails - 1].key };
+  assert.deepEqual(github.reruns.map(entry => entry.key).sort(), Object.values(flaky).sort(), `one rerun per flaky tip: ${JSON.stringify(github.reruns)}`);
+  const passed = github.reruns.find(entry => entry.key === flaky.passes)!, failed = github.reruns.find(entry => entry.key === flaky.fails)!;
+  assert.ok(github.contains(github.merges.find(entry => entry.key === flaky.passes)!.sha, passed.sha), 'the tip whose rerun passed is the one that landed');
+  assert.equal(final.find(item => item.key === flaky.passes)!.pipeline?.reworkRounds ?? 0, 0, 'a flake whose rerun passed costs no rework round');
+  assert.equal(final.find(item => item.key === flaky.fails)!.pipeline?.reworkRounds, 1, 'a tip that failed again after its rerun returned to its worker once');
+  assert.ok(!github.contains(github.merges.find(entry => entry.key === flaky.fails)!.sha, failed.sha), 'and a new head, not the failed tip, landed');
   assert.ok(cycles > 24 * 6, `the loop cycled through the day (${cycles} cycles)`);
   // GY-437: the between-cycles self-upgrade ran after every cycle of the day. Each deploy aligned
   // the checkout once, and restarted the fleet and the loop once (every merge touches src/); the
