@@ -90,8 +90,10 @@ assignment's worktree or quietly remove historical reservations.
 Run \`sync GY-N\` before every push. It merges the base branch (\`git fetch origin &&
 git merge origin/BASE\`; never rebase) and lists every file outside the item's
 plannedFiles that no longer matches origin/BASE. Files outside plannedFiles must match
-origin/BASE byte-for-byte: restore them, never re-resolve a merge in favour of your
-branch. Only an operator can widen plannedFiles, through an audited requirements revision.
+origin/BASE byte-for-byte: restore them with \`sync GY-N --restore\`, never re-resolve a merge in favour of your
+branch. The restore command restores every out-of-scope file to its base version with a single
+commit and never requires a force push.
+Only an operator can widen plannedFiles, through an audited requirements revision.
 
 Submit the PR with \`complete GY-N EPOCH PR_NUMBER\`. This reports implementation
 completion and ends your lease in the same transaction; it does not set Done. It is
