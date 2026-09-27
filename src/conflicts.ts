@@ -1,4 +1,6 @@
 import { execFileSync } from 'node:child_process';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import type { Work } from './model.js';
 
 /**
@@ -19,15 +21,71 @@ export type ConflictProbe = (a: string, b: string) => string[] | null;
 
 export const openCandidates = (work: Work[]) => work.filter(item => item.stage !== 'done' && !!item.submission && !!item.candidate?.sha);
 
-export function candidateConflicts(work: Work[], probe: ConflictProbe): Record<string, ConflictReport> {
+function filesOverlap(filesA: readonly string[], filesB: readonly string[]): boolean {
+  const setB = new Set(filesB);
+  return filesA.some(file => setB.has(file));
+}
+
+export interface ProbeBudget { timeoutMs?: number; elapsedMs?: () => number }
+
+function getCachePath(cacheDir: string, shaA: string, shaB: string): string {
+  const key = [shaA, shaB].sort().join('-');
+  return join(cacheDir, `${key}.json`);
+}
+
+async function readCache(cacheDir: string, shaA: string, shaB: string): Promise<string[] | null | undefined> {
+  try {
+    const cachePath = getCachePath(cacheDir, shaA, shaB);
+    const data = await readFile(cachePath, 'utf8');
+    const cached = JSON.parse(data);
+    return cached.result;
+  } catch {
+    return undefined;
+  }
+}
+
+async function writeCache(cacheDir: string, shaA: string, shaB: string, result: string[] | null): Promise<void> {
+  try {
+    await mkdir(cacheDir, { recursive: true });
+    const cachePath = getCachePath(cacheDir, shaA, shaB);
+    await writeFile(cachePath, JSON.stringify({ result, at: new Date().toISOString() }), 'utf8');
+  } catch {
+    // Cache write failures are non-fatal
+  }
+}
+
+export function candidateConflicts(work: Work[], probe: ConflictProbe, budget?: ProbeBudget): Record<string, ConflictReport> {
   const candidates = openCandidates(work);
   const report: Record<string, ConflictReport> = Object.fromEntries(candidates.map(item => [item.key, { conflicts: [], unprobed: [] }]));
-  for (let i = 0; i < candidates.length; i++) for (let j = i + 1; j < candidates.length; j++) {
-    const left = candidates[i], right = candidates[j];
-    const files = probe(left.candidate!.sha, right.candidate!.sha);
-    if (files === null) { report[left.key].unprobed.push(right.key); report[right.key].unprobed.push(left.key); continue; }
-    if (!files.length) continue;
-    report[left.key].conflicts.push({ key: right.key, files }); report[right.key].conflicts.push({ key: left.key, files });
+  const startTime = budget?.elapsedMs?.() ?? 0;
+  const timeoutMs = budget?.timeoutMs ?? Infinity;
+
+  for (let i = 0; i < candidates.length; i++) {
+    for (let j = i + 1; j < candidates.length; j++) {
+      if (budget?.elapsedMs) {
+        const elapsed = budget.elapsedMs() - startTime;
+        if (elapsed > timeoutMs) {
+          const left = candidates[i], right = candidates[j];
+          report[left.key].unprobed.push(right.key);
+          report[right.key].unprobed.push(left.key);
+          continue;
+        }
+      }
+
+      const left = candidates[i], right = candidates[j];
+
+      // Skip pairs with no file overlap
+      const leftFiles = left.plannedFiles ?? [];
+      const rightFiles = right.plannedFiles ?? [];
+      if (leftFiles.length && rightFiles.length && !filesOverlap(leftFiles, rightFiles)) {
+        continue;
+      }
+
+      const files = probe(left.candidate!.sha, right.candidate!.sha);
+      if (files === null) { report[left.key].unprobed.push(right.key); report[right.key].unprobed.push(left.key); continue; }
+      if (!files.length) continue;
+      report[left.key].conflicts.push({ key: right.key, files }); report[right.key].conflicts.push({ key: left.key, files });
+    }
   }
   return report;
 }
@@ -66,4 +124,43 @@ export function gitConflictProbe(root: string, run: Run = gitRun): ConflictProbe
 export function probeCandidateConflicts(root: string, work: Work[], run: Run = gitRun) {
   const fetched = fetchCandidateHeads(root, work, run);
   return { report: candidateConflicts(work, gitConflictProbe(root, run)), available: fetched.fetched, reason: fetched.reason };
+}
+
+/** Like probeCandidateConflicts, but with disk caching per head pair and a wall-clock budget for probing. */
+export async function probeCandidateConflictsWithBudget(root: string, work: Work[], dataDir: string, run: Run = gitRun, timeoutMs: number = 10_000) {
+  const fetched = fetchCandidateHeads(root, work, run);
+  const base = gitConflictProbe(root, run);
+  const cache = new Map<string, string[] | null>();
+  const getCacheKey = (a: string, b: string) => [a, b].sort().join('-');
+
+  const cacheDir = join(dataDir, 'conflict-probes');
+  await mkdir(cacheDir, { recursive: true });
+
+  const probeWithCache: ConflictProbe = (a, b) => {
+    const key = getCacheKey(a, b);
+    if (cache.has(key)) return cache.get(key)!;
+    const result = base(a, b);
+    cache.set(key, result);
+    return result;
+  };
+
+  const startTime = Date.now();
+  const elapsedMs = () => Date.now() - startTime;
+
+  const report = candidateConflicts(work, probeWithCache, { timeoutMs, elapsedMs });
+
+  // Write cache to disk
+  const candidates = openCandidates(work);
+  for (let i = 0; i < candidates.length; i++) {
+    for (let j = i + 1; j < candidates.length; j++) {
+      const left = candidates[i], right = candidates[j];
+      const key = getCacheKey(left.candidate!.sha, right.candidate!.sha);
+      const result = cache.get(key);
+      if (result !== undefined) {
+        await writeCache(cacheDir, left.candidate!.sha, right.candidate!.sha, result);
+      }
+    }
+  }
+
+  return { report, available: fetched.fetched, reason: fetched.reason };
 }
