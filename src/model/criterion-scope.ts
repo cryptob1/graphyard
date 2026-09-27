@@ -195,11 +195,14 @@ export function barrelSuccessorGround(path: string, planned: readonly { path: st
   return null;
 }
 
-/** Whether `value` reads as a pinned string in a test: a quoted literal on one of its lines holds it (comment tails cut, so a remark after a string pins nothing), or a comment opens on it as the description of what the test asserts (`GY-170 AC-3: Settings › Agents lists…`) — a remark that merely mentions it pins nothing. */
+/** A remark that says the behaviour is not tested yet — a TODO marker or a coverage-needed note — records the absence of a test, never the description of one, so it pins nothing (`// TODO: Settings › Agents needs coverage`). */
+const untestedRemark = /\b(?:TODO|FIXME|XXX)\b|needs?\s+(?:a\s+|an\s+)?(?:coverage|tests?|specs?)\b|\bnot\s+covered\b|\buntested\b|\bno\s+(?:tests?|coverage|specs?)\b/i;
+
+/** Whether `value` reads as a pinned string in a test: a quoted literal on one of its lines holds it (comment tails cut, so a remark after a string pins nothing), or a comment opens on it as the description of what the test asserts (`GY-170 AC-3: Settings › Agents lists…`) — a remark that merely mentions it pins nothing, and a TODO or coverage-needed remark pins nothing either. */
 function pinnedText(text: string, value: string) {
   const quoted = new RegExp(`['"\`][^'"\`\n]*${escapeRegExp(value)}`);
   const describes = new RegExp(`^\\s*(?://+|/?\\*+)?\\s*(?:[^:\\n]*:)?\\s*${escapeRegExp(value)}(?![A-Za-z0-9])`);
-  return text.split('\n').some(line => quoted.test(line.replace(/(?<=[\s;{},(=]|^)\/\/[^\n]*/g, '')) || describes.test(line));
+  return text.split('\n').some(line => quoted.test(line.replace(/(?<=[\s;{},(=]|^)\/\/[^\n]*/g, '')) || describes.test(line) && !untestedRemark.test(line));
 }
 
 /**
@@ -209,7 +212,8 @@ function pinnedText(text: string, value: string) {
  * The pin reads like an assertion, never a mention (GY-438 review follow-up): a one-word label only
  * where the test quotes it whole; a multi-word label or a route only where a quoted string holds it
  * or a comment describes the test by it — a bare `text.includes` also matched a label a comment or
- * an unrelated remark named, which exercises nothing the change would break.
+ * an unrelated remark named, which exercises nothing the change would break. A TODO or
+ * coverage-needed remark is the absence of a test, never a description of one, so it pins nothing.
  */
 export function criterionTestGround(path: string, text: string | null, symbols: readonly CriterionSymbol[]): string | null {
   if (!text || !testFile(path)) return null;
