@@ -5,7 +5,7 @@ The master (`coordinator`) routes, merges, verifies deployments, administers Git
 
 ## Autonomy: agents approve agents
 
-The master acts without asking. Three decisions are human-only: goals and priorities, spending money or opening third-party accounts, and issuing credentials to people ([who decides](glossary.md#who-decides)); everything else it applies alone or through an approver agent; never ask a human to run what an agent may run.
+The master acts without asking. Three decisions are human-only: goals and priorities, spending money or opening third-party accounts, issuing credentials to people ([who decides](glossary.md#who-decides)); everything else it applies alone or through an approver agent, never asking a human to run what an agent may run.
 
 ## Operate
 
@@ -17,7 +17,7 @@ Keep cycling: status, dispatch, review, merge, deployment verification. Stop onl
 4. `master verify-deployment GY-N` after delivery ([refusals](operations-reference.md#perpetual-master-loop)).
 5. Close finished agent sessions; return to status.
 
-Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions. `controlPlane.production` flags main ahead of production.
+Ordinary review findings, rework, idle workers, proof setup are not stopping conditions. `controlPlane.production` flags main ahead of production.
 
 `master run` runs this loop under the `graphyard-master.service` unit ([supervision](onboarding.md#the-loop-must-be-supervised)); restart it (`systemctl --user restart graphyard-master`) when `daemon.liveness` is `stalled` or `absent`, never from a dirty checkout (GY-857; [sessions](master-agent-sessions.md#workers-are-write-confined-to-their-worktree)).
 
@@ -28,9 +28,7 @@ Unless created `"systemDriven": false`, an item refuses hand `dispatch`, `merge`
 ### Session liveness is reconciled, not trusted
 
 **The control plane reconciles session liveness; closing finished sessions is not the master's
-manual duty.** A sweep runs on every automatic-dispatch tick (`run.dispatchIntervalSeconds`, default 10, 30 at most). A handle closes at the second consecutive sweep
-that misses it; an unobserved one is left alone for its first 3 minutes. A handle another host launched is left to
-that host's loop. `dispatch.sessionReconcile` reports each closure:
+manual duty.** Every dispatch tick (`run.dispatchIntervalSeconds`, default 10, 30 at most) a sweep closes a handle at its second consecutive miss, leaves an unobserved one its first 3 minutes, and another host's handle to that host's loop. `dispatch.sessionReconcile` reports each closure:
 
 - **Vanished**: missing from two consecutive listings.
 - **Ended**: agentless pane or terminal state. `idle`, `done` and
@@ -39,11 +37,9 @@ that host's loop. `dispatch.sessionReconcile` reports each closure:
   way as any other. Implementation sessions are left to the lease.
 - **Duplicate**: the older of two sessions for one role and head.
 
-A closure decides no gate, ends no lease, and stops no process. Concurrency is counted against live sessions only, and a name is busy only while a live session has it. A session past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) raises attention, is never closed.
+A closure decides no gate, ends no lease, stops no process. Concurrency counts live sessions only; a name is busy only while a live session holds it. A session past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` producer, 12h coordination) raises attention, never closed.
 
-**So what an operator or a master does instead of closing sessions by hand:** nothing, for a session
-that finished or died (`graphyard master run --once` sweeps); for an overlong one, attach to it with the command on the handle. Never mark
-another session's handle finished to free a slot.
+**Instead of closing sessions by hand:** nothing — `graphyard master run --once` sweeps finished or died sessions; for an overlong one, attach with the command on the handle. Never mark another session's handle finished to free a slot.
 
 ### System invariants
 
@@ -51,11 +47,11 @@ Each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `linge
 
 ### The pipeline doctor
 
-Every `run.doctor.intervalMinutes` (10 by default) the loop launches the **doctor**: a headless Pi session (the registry's `doctor` role, else Pi) with the master's read access and only sanctioned operator-agent commands — `master scope`, `requirements`, `unblock`, `decide` + `approver`, `settle-containment`, `close`, `create`, `release`; never merge, dispatch, evidence or leases; every tool is held: only allowlisted bash and the report tool; refusals are recorded, not run. Runs post one event per item (findings and actions together) and a summary to `/api/doctor` for `master status` and the Doctor panel; unactionable ones become escalations or P0/P1 fault items. Each cycle the loop settles a submitted attempt's verified lapsed fence, clears a blocker `plannedFiles` covers, and relaunches an approver for a decision unanswered 10 minutes. Off: `run.doctor.enabled=false`.
+Every `run.doctor.intervalMinutes` (default 10) the loop launches the **doctor** — headless Pi (registry `doctor` role, else Pi), the master's read access, only sanctioned operator-agent commands: `master scope`, `requirements`, `unblock`, `decide` + `approver`, `settle-containment`, `close`, `create`, `release`; never merge, dispatch, evidence or leases; only allowlisted bash and its report tool run, refusals recorded. A run posts one event per affected item and a summary to `/api/doctor` (`master status`, the Doctor panel); unactionable findings raise escalations or deduplicated P0/P1 fault items. Each cycle the loop itself settles a submitted attempt's verified lapsed fence, clears a `plannedFiles`-covered blocker, and relaunches an approver unanswered 10 minutes. Off: `run.doctor.enabled=false`.
 
 ## Research before build
 
-With `run.research` set (`model`, `timeoutMinutes` 15, `tokenBudget`), a feature (or `"research": true`) gets one read-only Pi briefing per revision. Product questions: Needs you; build follows the recommendation, a differing answer reworks, failure never blocks.
+With `run.research` set (`model`, `timeoutMinutes` 15, `tokenBudget`), a feature (or `"research": true`) gets one read-only Pi briefing per revision; product questions: needs you, build follows the recommendation, a differing answer reworks, failure never blocks.
 
 ## Machine-filed backlog
 
@@ -63,11 +59,11 @@ One follow-up item per parent; approvals append their findings. With `run.resear
 
 ## Automatic dispatch at submit
 
-A candidate passing the build gate gets, in `autoDispatch`, one producer request per proof group (`unit`, `integration`, `manual` for `producerProofs`), then a review request once its unit and integration proofs pass (`proofs-pending` until then; failure returns it to its worker). **The loop launches each request within 30 seconds**: every `dispatchIntervalSeconds` it starts the reviewer profile (`run.reviewerProfile`) and one producer session per proof group on a `master producer add FILE` profile ([template](../examples/master/claude-producer.json)), recorded in `.graphyard/reviews.json` and `.graphyard/producers.json`. A reviewer launch awaits the head's bot reviews (`run.awaitReviewers`) for `awaitReviewersMinutes`, skipping one that last posted a usage-limit notice until it next reviews (`skipped: <bot> exhausted since <time>`; `dispatch.botReviewers`).
+A build-gate pass gets, in `autoDispatch`, one producer request per proof group (`unit`, `integration`, `manual` for `producerProofs`), then a review request once its unit and integration proofs pass (`proofs-pending` until then; failure returns it to its worker). **The loop launches each request within 30 seconds**: every `dispatchIntervalSeconds` it starts the reviewer profile (`run.reviewerProfile`) and one producer session per proof group on a `master producer add FILE` profile ([template](../examples/master/claude-producer.json)), recorded in `.graphyard/reviews.json` and `.graphyard/producers.json`. A reviewer launch awaits the head's bot reviews (`run.awaitReviewers`) for `awaitReviewersMinutes`, skipping one whose last review was a usage-limit notice until it next reviews (`skipped: <bot> exhausted since <time>`; `dispatch.botReviewers`).
 
-**Concurrency is per role.** A profile's `concurrency` (1–20, default 1) caps its simultaneous sessions, each with a name unique to its request above one. It applies without a restart; lowering it drains sessions first (`longestWaitMs`); a role starved ten minutes counts in `counts.concurrencyStarved`.
+**Concurrency is per role.** A profile's `concurrency` (1–20, default 1) caps its simultaneous sessions, each with a name unique to its request above one; it applies without a restart, lowering it drains sessions first (`longestWaitMs`), and a role starved ten minutes counts in `counts.concurrencyStarved`.
 
-**Requests always settle.** A gone pane (`pane_not_found`) is closed. No request outlives its own token: expired, unreported by Herdr, it settles `expired`; one still pending counts in `dispatch.sessionReconcile.stuck`. Unanswered sessions relaunch elsewhere (12 per request, then `dispatch.abandoned`); an unposted reviewer is reminded first. A proof row pending on its own head's session completes on it; one pending on another head is refused until reconciled.
+**Requests always settle.** A gone pane (`pane_not_found`) closes. No request outlives its own token: expired, unreported by Herdr, it settles `expired`; a pending one counts in `dispatch.sessionReconcile.stuck`. Unanswered sessions relaunch elsewhere (12 per request, then `dispatch.abandoned`); an unposted reviewer is reminded first. A proof row completes on its own head's session; on another head it is refused until reconciled.
 
 **Every role, approvers too, fails over on spent quota** or waits as one `capacity` line.
 
@@ -81,7 +77,7 @@ With a pass, the producer records `"exercise"`: the same proof run with the crit
 "exercise":{"criterion":"AC-1","behaviour":"the lease expiry check in claim()","result":"fail","executed":4}
 ```
 
-A pass is trusted only when that stripped run failed with a case executed; otherwise it is recorded as not exercising its criterion rather than as passing (`unexercised`, `evidence.exercise.refused`); the loop requests rework quoting it. When every proof a unit or integration group has left is such a finding, the item's next action is `request-rework`, naming the proof, the criterion and the mutation that survived, and `master status` names it as awaiting rework for a non-exercising proof. `decide attest` adds `exercise` (fails on base), approver-confirmed; unexercised `manual:` proofs: re-attest, never rework.
+A pass is trusted only when that stripped run failed with a case executed; otherwise it is recorded `unexercised` (`evidence.exercise.refused`), not passing, and the loop requests rework quoting it. When every proof a unit or integration group has left is such a finding, the next action is `request-rework`, naming the proof, the criterion and the surviving mutation; `master status` calls it awaiting rework for a non-exercising proof. `decide attest` adds `exercise` (fails on base), approver-confirmed; unexercised `manual:` proofs: re-attest, never rework.
 
 ## Guarded merges
 
