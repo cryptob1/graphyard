@@ -397,10 +397,12 @@ test('unit:carried-approval-rebinds — a carried binding from an earlier pull r
 
   // The record refreshes the binding as soon as an observation shows the newer approval of H,
   // dismissed by GitHub on the tip push or not; a later change request refreshes nothing.
-  const dismissed = staleCarry([{ id: 5327788286, reviewer: 'graphyard-reviewer[bot]', sha: H, state: 'DISMISSED', dismissal: { verdict: 'approved' } } as Observation['reviews'][number]]);
+  const dismissed = staleCarry([{ id: 5327788286, reviewer: 'graphyard-reviewer[bot]', sha: H, state: 'DISMISSED', dismissal: { verdict: 'approved', mergeBase: true } } as Observation['reviews'][number]]);
   const refreshed = refreshedCarriedApproval(dismissed)!;
   assert.deepEqual([refreshed.carried, refreshed.reviewer, refreshed.reviewId, refreshed.originalSha, refreshed.sha], [true, 'graphyard-reviewer[bot]', 5327788286, H, H]);
   assert.match(refreshed.reason, new RegExp(`approval of ${H.slice(0, 12)} by graphyard-reviewer\\[bot\\] \\(review 5327788286\\), the head tip ${TIP.slice(0, 12)} was built from, replaces the carried approval of ${OLD.slice(0, 12)}`));
+  // A dismissal that is not from mergeBase (manually dismissed) does not refresh the binding.
+  assert.equal(refreshedCarriedApproval(staleCarry([{ id: 5327788286, reviewer: 'graphyard-reviewer[bot]', sha: H, state: 'DISMISSED', dismissal: { verdict: 'approved', mergeBase: false } } as Observation['reviews'][number]])), null, 'a deliberately dismissed approval does not re-bind');
   assert.equal(refreshedCarriedApproval(staleCarry([{ id: 5327788286, reviewer: 'graphyard-reviewer[bot]', sha: H, state: 'APPROVED' }, { id: 5327788290, reviewer: 'graphyard-reviewer[bot]', sha: H, state: 'CHANGES_REQUESTED' }])), null);
   assert.equal(refreshedCarriedApproval(staleCarry([{ id: 700, reviewer: 'graphyard-reviewer[bot]', sha: H, state: 'APPROVED' }])), null, 'an older approval is not newer than the binding');
   assert.equal(refreshedCarriedApproval(staleCarry([{ id: 5327788286, reviewer: 'someone-else', sha: H, state: 'APPROVED' }])), null, 'only the carried reviewer re-binds its own approval');

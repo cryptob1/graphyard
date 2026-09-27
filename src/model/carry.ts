@@ -244,7 +244,7 @@ export function refreshedCarriedApproval(work: Work): CarriedApproval | null {
   const reviewer = carried.reviewer.toLowerCase(), baseline = work.formalReviewBaseline;
   const own = (observation.reviews ?? []).filter(review => review.reviewer.toLowerCase() === reviewer && ['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(review.state));
   const approved = (review: NonNullable<Work['observation']>['reviews'][number]) => review.state === 'APPROVED'
-    || review.state === 'DISMISSED' && (review as { dismissal?: { verdict?: string } }).dismissal?.verdict === 'approved';
+    || review.state === 'DISMISSED' && (review as { dismissal?: { verdict?: string; mergeBase?: boolean } }).dismissal?.verdict === 'approved' && (review as { dismissal?: { mergeBase?: boolean } }).dismissal?.mergeBase;
   const latest = own.at(-1);
   if (!latest || latest.state === 'CHANGES_REQUESTED') return null;
   const newest = own.filter(review => review.sha === head && approved(review) && Number.isSafeInteger(review.id)

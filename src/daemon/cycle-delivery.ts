@@ -59,9 +59,9 @@ export async function actOnRepeatedRefusal(cycle: Cycle, item: Work, mergeKey: s
   const minutes = Math.floor((now() - Date.parse(since)) / 60_000);
   if (now() - Date.parse(since) < repeatedMergeRefusalMs) return;
   const key = `${mergeKey}:repeated`, previous = state.actions[key];
-  if (previous?.state === 'done' && previous.since === since) return;
-  // Like the refusal itself, the attention is the gate working, not a daemon fault: no fault kind.
   const carried = !!carriedApproval(item);
+  if (previous?.state === 'done' && previous.since === since && !carried) return;
+  // Like the refusal itself, the attention is the gate working, not a daemon fault: no fault kind.
   const next = carried
     ? `Graphyard clears the carried approval so the review gate requests a fresh review of tip ${item.candidate!.sha.slice(0, 12)}, and the next queue entry heads the queue meanwhile`
     : `Graphyard marks candidate ${item.candidate!.sha.slice(0, 12)} for a rework decision the approver judges, and the next queue entry heads the queue meanwhile`;
