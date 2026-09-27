@@ -568,15 +568,17 @@ export interface PaneReclaimStatus {
  * on 26 September 2026, 584 of them Graphyard's, agentless; the host throttled and every session
  * and test run on it slowed. A pane counts as agentless only when the runtime reports the pane
  * with no agent in it, and only a pane a Graphyard session recorded is Graphyard's — a pane the
- * operator or another tool opened is never counted, and never closed.
+ * operator or another tool opened is never counted, and never closed. Only the handles `hostId`
+ * recorded count: the reading is this host's, and a remote handle naming the same pane coordinate
+ * is another host's launch, not this host's pane.
  */
-export function paneReclaimStatus(panes: { pane_id?: string }[] | null, work: Work[], agents: HerdrAgent[] | null, now: number): PaneReclaimStatus {
+export function paneReclaimStatus(panes: { pane_id?: string }[] | null, work: Work[], agents: HerdrAgent[] | null, now: number, hostId: string): PaneReclaimStatus {
   // Every pane on the host, from the pane inventory; the agent inventory stands in for presence
   // when the pane list could not be read, since it lists a session's pane while the pane exists.
   const listed = new Set((panes ?? []).map(pane => pane.pane_id).filter((id): id is string => !!id));
   // A launch's own record of its pane (GY-172): the handle every launcher registers, whatever its role.
   const recorded = new Map<string, { work: Work; kind: string; launchedAt: string | null; running: boolean }>();
-  for (const item of work) for (const handle of item.sessions ?? []) if (handle.pane)
+  for (const item of work) for (const handle of item.sessions ?? []) if (handle.pane && handle.host === hostId)
     recorded.set(handle.pane, { work: item, kind: handle.kind, launchedAt: Number.isFinite(Date.parse(handle.startedAt)) ? handle.startedAt : null, running: handle.state === 'running' });
   // A pane with an agent in it is a live session, whatever its state: the inventory detects the agent.
   const withAgent = new Set((agents ?? []).filter(agent => !!agent.agent && !!agent.pane_id).map(agent => agent.pane_id!));

@@ -85,9 +85,14 @@ export const paneSweepLimit = 6;
  * is raised once agentless panes pass the bound.
  */
 export async function reclaimLaunchedPanes(cycle: Cycle) {
-  const { state, effects, now, clock, snapshot, performed, isolate, agents, open } = cycle;
+  const { config, state, effects, now, clock, snapshot, performed, isolate, agents, open } = cycle;
+  // The inventory and the close are local to this host, so only the handles this host's launchers
+  // recorded are matched or counted: a finished handle another host recorded that happens to name
+  // this host's pane coordinate would otherwise make a local pane another launch's target, and its
+  // counts would not be this host's (GY-842). The implementation-session close (1g) filters the
+  // same way.
   const recorded = new Map<string, { item: Work; handle: SessionHandle }>();
-  for (const item of snapshot.work) for (const handle of item.sessions ?? []) if (handle.pane) recorded.set(handle.pane, { item, handle });
+  for (const item of snapshot.work) for (const handle of item.sessions ?? []) if (handle.pane && handle.host === config.hostId) recorded.set(handle.pane, { item, handle });
   // Whether a live lease is worked in the worktree `cwd` names (…/worktrees/GY-N-EPOCH).
   const workedHere = (cwd: string | undefined) => !!cwd && open.some(item => !!item.lease && Date.parse(item.lease.expiresAt) > clock
     && cwd.replace(/ \(deleted\)$/, '').endsWith(`/${item.key}-${item.lease.epoch}`));
@@ -121,12 +126,15 @@ export async function reclaimLaunchedPanes(cycle: Cycle) {
     });
   }
   // What the host holds, on the record for `master status` to show, with attention past the bound.
-  // A host holding nothing agentless records nothing: a quiet installation stays quiet.
+  // A host holding nothing agentless records nothing until it once held some: a quiet installation
+  // stays quiet, and a drained backlog is recorded as drained instead of standing reported.
   const inventory = await effects.panes?.().catch(() => null) ?? null;
-  const status = paneReclaimStatus(inventory?.available ? inventory.panes : null, snapshot.work, agents, now());
+  const status = paneReclaimStatus(inventory?.available ? inventory.panes : null, snapshot.work, agents, now(), config.hostId);
   const counts = `Herdr reports ${status.panes ?? 'an unknown number of'} pane(s) on this host, ${status.launched} opened by Graphyard launch(es), ${status.agentless} standing agentless${status.oldest ? `; the oldest is pane ${status.oldest.pane} of ${status.oldest.work} (${status.oldest.kind}), launched ${status.oldest.launchedAt}` : ''}`;
   const statusKey = 'sweep:panes:status';
-  if (status.agentless > 0 && (closed || detailChanged(state.actions[statusKey], counts))) performed.push(await record(state, statusKey, { kind: 'close', work: null, principal: null, state: 'done', detail: `Pane sweep: ${counts}`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
+  const previous = state.actions[statusKey], previousAgentless = Number(/(\d+) standing agentless/.exec(previous?.detail ?? '')?.[1] ?? 0);
+  const drained = status.agentless === 0 && previousAgentless > 0;
+  if ((status.agentless > 0 && (closed || detailChanged(previous, counts))) || drained) performed.push(await record(state, statusKey, { kind: 'close', work: null, principal: null, state: 'done', detail: `Pane sweep: ${counts}${drained ? '; the backlog has drained, and no pane stands agentless' : ''}`, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
   const attentionKey = 'sweep:panes:attention';
   if (status.attention) {
     if (detailChanged(state.actions[attentionKey], status.attention.text)) performed.push(await record(state, attentionKey, { kind: 'escalation', work: null, principal: null, state: 'done', detail: status.attention.text, attempts: 1, cycle: state.cycle }, now(), effects.persist));

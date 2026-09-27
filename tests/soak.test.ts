@@ -62,6 +62,8 @@ const config: MasterConfig = masterConfigSchema.parse({ version: 1, url: 'https:
 const start = Date.parse('2031-06-02T08:00:00Z');
 const plan = {
   items: 15, releaseEveryMs: 15 * minute, workMs: 20 * minute,
+  // GY-842: review panes of a previous day, standing agentless with their worktrees deleted.
+  leftovers: 8,
   rework: new Set([3, 7, 11]), deaths: new Set([5, 9]), deathAfterMs: 8 * minute,
   deploys: [2 * hour + 30 * minute, 5 * hour], dirtyCheckout: { from: 4 * hour + 50 * minute, to: 6 * hour }, split: { at: 45 * minute, item: 12 }, clean: 2, unstable: 4, slowRecompute: 8, exhaustedReviewer: 6,
   // GY-516: a flake on a speculative tip whose one rerun passes, and one whose rerun fails again.
@@ -109,7 +111,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   const dayStart = clock.now();
   const github = new SimulatedGitHub({ repository, baseBranch: 'main', appId: 1234, ciAppId: 15368, reviewerApps, ciMs: 5 * minute, reviewMs: 3 * minute, firstPullRequest: 100 * ++days },
     [...Array.from({ length: plan.items }, (_, index) => file(index + 1)), 'README.md']);
-  const herdr = new SimulatedHerdr();
+  const herdr = new SimulatedHerdr(() => clock.now());
   const adapter = github.adapter();
   const moveClock = async (ms: number) => { clock.advance(ms); await store.pool.query('UPDATE simulated_clock SET offset_ms=$1', [clock.offsetMs]); };
   await moveClock(0);
@@ -122,6 +124,18 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       reviewerProfiles: [{ name: 'claude-reviewer', runtime: 'claude', reviewerApp: 'claude-reviewer' }, { name: 'cursor-reviewer', runtime: 'cursor', reviewerApp: 'cursor-reviewer' }] }, id());
     items.push(work);
   }
+  // ---- The backlog a previous day left (GY-842): panes of review sessions whose worktrees the
+  // ---- reclaim removed while the panes stood on. Enough of them that the sweep's per-pass bound
+  // ---- is what paces the drain, and one pane Graphyard never launched that it must never touch.
+  // Pane ids are this simulated world's own, so two days on one control plane never collide.
+  const world = `w${days}:`, leftovers = plan.leftovers, foreignPane = `${world}operator`;
+  for (let index = 0; index < leftovers; index++) {
+    const work = items[index], pane = `${world}left${index}`;
+    herdr.shell(pane, `/tmp/soak/leftover-${index} (deleted)`);
+    await api(principals.coordinator, 'POST', `work/${work.id}/session`, { id: `review-leftover-${index}`, kind: 'review', runtime: 'claude', host: 'soak-host',
+      subject: `${work.key}: review (previous day)`, state: 'running', pane, attach: `herdr pane attach ${pane}` });
+  }
+  herdr.shell(foreignPane, '/home/vish');
   const numberOf = (work: Pick<Work, 'key'>) => items.findIndex(item => item.key === work.key) + 1;
   for (const n of plan.rework) github.verdicts.set(items[n - 1].key, ['CHANGES_REQUESTED']);
   github.unstable.add(items[plan.unstable - 1].key); github.slowRecompute.add(items[plan.slowRecompute - 1].key);
@@ -139,9 +153,10 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     const epoch = claimed.epoch, key = work.key, n = numberOf(work);
     // A rework attempt pushes to the pull request already linked, from a fresh workspace.
     const branch = work.candidate?.branch ?? `graphyard/${key.toLowerCase()}-${epoch}`;
-    await engine.execute(principal, 'workspace', work.id, { epoch, host: 'soak-host', path: `/tmp/soak/${key.toLowerCase()}-${epoch}`, branch }, id());
+    const path = `/tmp/soak/${key}-${epoch}`;
+    await engine.execute(principal, 'workspace', work.id, { epoch, host: 'soak-host', path, branch }, id());
     const attempt = (attempts.get(key) ?? 0) + 1; attempts.set(key, attempt);
-    const pane = herdr.open(profile.agentName);
+    const pane = herdr.open(profile.agentName, 'working', path);
     sessions.push({ work: work.id, key, branch, profile, epoch, pane, pushAt: clock.now() + plan.workMs, diesAt: plan.deaths.has(n) && attempt === 1 ? clock.now() + plan.deathAfterMs : null, state: 'working' });
     return { key, epoch };
   };
@@ -158,7 +173,9 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       const pr = github.push(session.key, session.branch, principal.id, sha('head', session.key, session.epoch), [file(numberOf(session))]);
       await engine.execute(principal, 'submit', session.work, { epoch: session.epoch, pr: pr.number, documentation: 'A simulated item: it changes no documented behaviour' }, id());
       session.state = 'submitted';
-      herdr.status(session.pane, 'done');
+      // Its work done, the runtime exits and leaves the pane behind (GY-842); the loop's session
+      // end closes it in the same step, or the sweep reclaims it as the backstop.
+      herdr.kill(session.pane);
     }
   };
 
@@ -205,6 +222,8 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   const effects: DaemonEffects = {
     agents: () => herdr.list(),
     herdr: () => ({ agents: herdr.list(), available: true }),
+    panes: async () => ({ panes: herdr.paneList(), available: true }),
+    recordSession: (work, handle) => api(principals.coordinator, 'POST', `work/${work.id}/session`, handle),
     credentials: async profiles => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])),
     snapshot, dispatch, requestProof, approver, merge,
     closeSession: pane => { if (options.regression === 'approvers-left-open' && /approver/.test(herdr.agents.get(pane)?.name ?? '')) return; herdr.close(pane); },
@@ -331,12 +350,12 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   }
 
   const final = (await store.list()).filter(item => items.some(entry => entry.id === item.id));
-  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, herdr, hand, escalations, spent, upgrades, refusalSamples, checkout };
+  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, herdr, hand, escalations, spent, upgrades, refusalSamples, checkout, foreignPane };
 }
 
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 180_000 }, async () => {
   const began = performance.now();
-  const { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, state, upgrades, refusalSamples, checkout } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
+  const { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, state, upgrades, refusalSamples, checkout, herdr, foreignPane } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
   const undelivered = final.filter(item => item.stage !== 'done' || !item.delivery);
   assert.deepEqual(undelivered.map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
@@ -387,6 +406,24 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.equal(state.upgrade.alignedRelease, production.deploys[1].sha, 'the loop stands aligned with the last deployed release');
   assert.equal(state.release?.commit, checkout.head, 'the re-executed loop reports the release the checkout holds');
   assert.ok(Object.keys(state.actions).filter(key => key.startsWith('upgrade:')).length <= production.deploys.length + 1, `the cursor holds one upgrade action per deploy and one refusal: ${Object.keys(state.actions).filter(key => key.startsWith('upgrade:')).join(', ')}`);
+  // GY-842 across the day: every pane the day's launches opened went somewhere — closed once, by
+  // the step that ended its session or by the bounded sweep — the operator's own pane was never
+  // touched, the previous day's backlog drained over successive bounded passes, and the drain
+  // itself is what stands on the cursor.
+  assert.equal(new Set(herdr.closed).size, herdr.closed.length, `no pane was closed twice: ${herdr.closed.join(', ')}`);
+  assert.ok(!herdr.closed.includes(foreignPane), 'the pane Graphyard never launched is never closed');
+  const reclaimed = herdr.closed.filter(pane => pane.includes(':left'));
+  assert.equal(reclaimed.length, plan.leftovers, 'every leftover pane of the previous day is reclaimed');
+  const passes = [...new Set(reclaimed.map(pane => herdr.closedAt.get(pane)))];
+  assert.ok(passes.length >= 2, `the backlog drained over successive passes, not in one burst (${passes.length})`);
+  // The bound paces every pass: however the backlog interleaves with the day's other panes, no
+  // pass carries more than six of the leftovers, and the eight take several passes.
+  const perPass = [...new Set(reclaimed.map(pane => herdr.closedAt.get(pane)))].map(at => reclaimed.filter(pane => herdr.closedAt.get(pane) === at).length);
+  assert.ok(perPass.every(count => count <= 6), `a pass closes at most the bound of six (${perPass.join(', ')})`);
+  const sweepStatus = state.actions['sweep:panes:status'];
+  assert.match(sweepStatus?.detail ?? '', /0 standing agentless; the backlog has drained/, `the drain is what stands on the record (${sweepStatus?.detail?.slice(0, 200)})`);
+  assert.doesNotMatch(sweepStatus?.detail ?? '', /the oldest is pane/, 'no oldest pane outlives the drained day');
+  assert.ok(!state.actions['sweep:panes:attention'], 'the day never stood past the agentless attention bound');
   const seconds = (performance.now() - began) / 1000;
   assert.ok(seconds < 120, `the day runs well inside the three minutes the CI test job allows it (${seconds.toFixed(1)} s)`);
 });
