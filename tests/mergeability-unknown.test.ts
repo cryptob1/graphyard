@@ -5,6 +5,7 @@ import { predictQueue, queueRef } from '../src/merge-queue.js';
 import { evaluate, type Observation, type Work } from '../src/model.js';
 import { mergeabilityComputingRefusal } from '../src/model/gates.js';
 import { refusalRuleFor } from '../src/model/refusal-mapping.js';
+import { gateRefusalCatalogue } from '../src/model/refusal-catalogue.js';
 
 // GY-548. GitHub answers `mergeable: null` while it recomputes mergeability after the base moves;
 // that was recorded as not mergeable and held merge-stage items for hours. Each test is named for
@@ -107,4 +108,22 @@ test('unit:queued-unknown-mergeability — a queued entry whose own pull request
   assert.equal(onTip.queue?.sequence, 7, 'the published entry still holds its position');
   const tipMerge = onTip.gates.find(gate => gate.name === 'merge')!.reasons;
   assert.ok(!tipMerge.includes(notMergeable) && !tipMerge.includes(mergeabilityComputingRefusal), tipMerge.join('; '));
+});
+
+test('unit:verify-mergeability-wait-bounded — final verification waits on GitHub\'s mergeability computation once, and the pending computation has its own catalogue id (GY-554)', async () => {
+  const work = { id: 'id-GY-548', key: 'GY-548', policy: { review: false, checks: ['test'] }, plannedFiles: ['src/feature.ts'], submission: { pr: PR, epoch: 1 }, policyRevision: 1, observation: null } as unknown as Work;
+  // null every time: the first observation re-requests, the second reads once and confirms.
+  const computing = provider([null]);
+  const verified = await computing.github.verify(work);
+  assert.equal(verified.mergeabilityUnknown, true);
+  assert.equal(computing.reads.length, (1 + mergeabilityRetries + 1) + (1 + 1), 'only the first observation in verify re-requests');
+
+  // Settled during the first observation: the second read agrees and nothing waits again.
+  const settles = provider([null, true]);
+  assert.equal((await settles.github.verify(work)).mergeable, true);
+  assert.equal(settles.reads.length, 2 + 1 + 2);
+
+  const ids = (text: string) => gateRefusalCatalogue.filter(shape => shape.gate === 'merge' && shape.match.test(text)).map(shape => shape.id);
+  assert.deepEqual(ids(mergeabilityComputingRefusal), ['mergeability-computing']);
+  assert.deepEqual(ids(notMergeable), ['not-mergeable']);
 });
