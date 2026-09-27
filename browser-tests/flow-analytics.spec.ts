@@ -2,6 +2,9 @@ import { test, expect, type Page } from '@playwright/test';
 import { computeFlow, deriveFacts, flowDrilldown, flowExport, type FlowDataset, type FlowFact, type LedgerEvent, type ProjectionState } from '../src/flow-analytics';
 import { computeAttribution, type AttributionDataset } from '../src/attribution';
 import type { Work } from '../src/model';
+import { stepIds } from '../src/model/pr-steps';
+import { formatDuration } from '../src/model/duration';
+import { NOW, boardApi, boardWork } from './ui-board';
 
 // Browser-only fixtures. The report is computed by the real aggregation from synthetic
 // ledger events, so the page is exercised against the exact payload the API produces.
@@ -261,3 +264,120 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
     expect(contrast).not.toBe('rgb(0, 0, 0)');
   });
 }
+
+// GY-705: the Flow panel on the GY-161 board, with the report, the step-move rows and the work
+// snapshot each under the test's control.
+type PanelControl = { report: any; failMoves: boolean; holdReport: Promise<void> | null; holdMoves: Promise<void> | null; work: any[] };
+async function flowPanel(page: Page, control: Partial<PanelControl> = {}) {
+  const state: PanelControl = { report: boardApi('analytics/flow?window=7'), failMoves: false, holdReport: null, holdMoves: null, work: boardWork(), ...control };
+  await page.clock.setFixedTime(new Date(NOW));
+  await page.route('**/api/**', async route => {
+    const url = new URL(route.request().url());
+    const path = url.pathname.slice(1) + url.search;
+    if (url.pathname === '/api/analytics/flow/drilldown' && url.searchParams.get('metric') === 'steps') {
+      if (state.holdMoves) await state.holdMoves;
+      return state.failMoves ? route.fulfill({ status: 503, json: { error: 'The ledger is under load' } }) : route.fulfill({ json: boardApi(path) });
+    }
+    if (url.pathname === '/api/analytics/flow') {
+      if (state.holdReport) await state.holdReport;
+      return route.fulfill({ json: state.report });
+    }
+    if (url.pathname === '/api/work-snapshot') return route.fulfill({ json: { work: state.work, jobs: [], now: new Date(NOW).toISOString() } });
+    return route.fulfill({ json: boardApi(path) });
+  });
+  await page.goto('/');
+  await page.getByLabel('Access token').fill('fixture');
+  await page.getByRole('button', { name: 'Open control plane' }).click();
+  await expect(page.getByRole('heading', { name: 'Work', level: 1 })).toBeVisible();
+  if (page.viewportSize()!.width <= 650) await page.getByRole('button', { name: 'Menu' }).click();
+  await page.getByRole('navigation', { name: 'Primary' }).getByRole('button', { name: 'Insights', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Insights', level: 1 })).toBeVisible();
+  return state;
+}
+/** A report whose step dwell has a well-sampled median for every step. */
+function everyStepMeasured() {
+  const report = boardApi('analytics/flow?window=7') as any;
+  return { ...report, stepDwell: stepIds.map((step, index) => ({ step, n: 9, medianMs: (index + 2) * 7 * 60_000, sparse: false })) };
+}
+const stepHead = (page: Page, step: string) => page.locator('.flow-step').nth(stepIds.indexOf(step as any));
+
+test('unit:flow-medians-independent-of-replay — a failed step-move read leaves every step header showing its median from the report, under its own notice', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  const report = everyStepMeasured();
+  await flowPanel(page, { report, failMoves: true });
+  await expect(page.locator('[data-flow="replay-error"]')).toContainText('The recorded history could not be read');
+  await expect(page.locator('[data-flow="report-error"]')).toHaveCount(0);
+  for (const { step, medianMs } of report.stepDwell)
+    await expect(stepHead(page, step).locator('.flow-median')).toHaveText(` · median ${formatDuration(medianMs / 60000)}`);
+  await expect(page.locator('.flow-step .flow-median', { hasText: '—' })).toHaveCount(0);
+  await expect(page.locator('.flow-wait')).toHaveText('No recorded history to replay.');
+});
+
+test('unit:flow-medians-independent-of-replay — a step-move read that has not answered never holds the medians back', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  const report = everyStepMeasured();
+  await flowPanel(page, { report, holdMoves: new Promise(() => {}) });
+  for (const { step, medianMs } of report.stepDwell)
+    await expect(stepHead(page, step).locator('.flow-median')).toHaveText(` · median ${formatDuration(medianMs / 60000)}`);
+  await expect(page.locator('.flow-wait')).toHaveText('Reading the recorded step changes…');
+});
+
+for (const viewport of [{ name: 'desktop', width: 1440, height: 1000 }, { name: '375 px', width: 375, height: 812 }]) {
+  test(`unit:flow-now-compact — 40 items at one step keep the Now panel within 320 px behind a '+N more' control that shows them all, at ${viewport.name}`, async ({ page }) => {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    const work = boardWork();
+    const template = work.find(item => item.key === 'GY-15');
+    const crowd = Array.from({ length: 40 }, (_, index) => ({ ...template, id: `crowd-${index}`, key: `GY-${300 + index}`, title: `Crowded item ${index}` }));
+    await flowPanel(page, { work: [...work, ...crowd] });
+    const lane = page.locator('[data-flow="now"]');
+    const step = await lane.locator('.now-dot[data-key="GY-300"]').getAttribute('data-step');
+    const total = Number(await stepHead(page, step!).getAttribute('data-count'));
+    await expect(lane.locator(`.now-dot[data-step="${step}"]`)).toHaveCount(12);
+    expect(total).toBeGreaterThanOrEqual(40);
+    // The step header carries the column's full count at either width.
+    const count = stepHead(page, step!).locator('> span').getByText(`${total} now`);
+    await expect(count).toBeVisible();
+    // Several dots share a row: the twelve shown stand on six rows.
+    const rows = await lane.locator(`.now-dot[data-step="${step}"]`).evaluateAll(dots => new Set(dots.map(dot => (dot as HTMLElement).dataset.row)).size);
+    expect(rows).toBe(6);
+    const more = lane.locator(`.now-more[data-step="${step}"]`);
+    await expect(more).toHaveAttribute('data-hidden', String(total - 12));
+    await expect(more).toContainText(`+${total - 12}`);
+    await expect(more).toHaveAccessibleName(new RegExp(`Show all ${total} items`));
+    const bounded = async () => {
+      const height = (await lane.boundingBox())!.height;
+      expect(height).toBeLessThanOrEqual(320);
+      const overflow = await page.evaluate(() => ({ width: document.documentElement.clientWidth, content: document.documentElement.scrollWidth }));
+      expect(overflow.content).toBeLessThanOrEqual(overflow.width);
+    };
+    await bounded();
+    // No two shown dots overlap.
+    const boxes = await lane.locator('.now-dot').evaluateAll(dots => dots.map(dot => dot.getBoundingClientRect()).map(r => ({ left: r.left, right: r.right, top: r.top, bottom: r.bottom })));
+    for (const [i, a] of boxes.entries()) for (const b of boxes.slice(i + 1))
+      expect(a.right <= b.left + 0.5 || b.right <= a.left + 0.5 || a.bottom <= b.top + 0.5 || b.bottom <= a.top + 0.5, 'Now dots overlap').toBe(true);
+    await more.click();
+    await expect(lane.locator(`.now-dot[data-step="${step}"]`)).toHaveCount(total);
+    for (const item of crowd) await expect(lane.locator(`.now-dot[data-key="${item.key}"]`)).toHaveCount(1);
+    await expect(more).toHaveAttribute('aria-expanded', 'true');
+    await bounded();
+    // The expanded column scrolls inside the lane, down to its last item.
+    await lane.locator('.now-dot[data-key="GY-339"]').scrollIntoViewIfNeeded();
+    await expect(lane.locator('.now-dot[data-key="GY-339"]')).toBeInViewport();
+    await more.click();
+    await expect(lane.locator(`.now-dot[data-step="${step}"]`)).toHaveCount(12);
+  });
+}
+
+test('unit:flow-now-renders-first — the Now view is drawn from the work snapshot before the flow report answers, and the medians follow the report', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  let answer!: () => void;
+  const report = everyStepMeasured();
+  await flowPanel(page, { report, holdReport: new Promise<void>(resolve => { answer = resolve; }), holdMoves: new Promise(() => {}) });
+  const lane = page.locator('[data-flow="now"]');
+  await expect(lane.locator('.now-dot').first()).toBeVisible();
+  await expect(lane.locator('.now-dot[data-key="GY-15"]')).toBeVisible();
+  await expect(page.locator('.flow-step .flow-median').first()).toHaveText(' · median —');
+  answer();
+  for (const { step, medianMs } of report.stepDwell)
+    await expect(stepHead(page, step).locator('.flow-median')).toHaveText(` · median ${formatDuration(medianMs / 60000)}`);
+});
