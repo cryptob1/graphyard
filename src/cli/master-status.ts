@@ -74,7 +74,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const runtime = await timedStep('herdr', () => observeHerdrAgents());
   const credentials = await timedStep('credentials', () => inspectWorkerCredentials(root, master.workers));
   let reviewRecords = (await readReviewLedger(root)).reviews, reviewRuntime = { available: true, reason: null as string | null };
-  const { snapshot, clockOffset } = await timedStep('snapshot', () => snapshotWithClock(() => masterApi('work-snapshot')));
+  const { snapshot, clockOffset } = await timedStep('snapshot', () => snapshotWithClock(() => masterApi('work-snapshot?view=bounded')));
   const sections = new ReportSections(); // optional sections (GY-422)
   // Sessions the automatic dispatcher launched are settled against this same snapshot: a
   // head change cancels them here as well as in the loop, so status never shows a stale one.

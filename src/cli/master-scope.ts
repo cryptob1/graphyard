@@ -10,7 +10,7 @@ import type { Work } from '../model/work.js';
 export async function approveScopeRequest(root: string, config: MasterConfig, args: string[], deps: { coordinator: (path: string) => Promise<any>; fetcher?: typeof fetch; operatorToken?: () => Promise<string> }) {
   const allowBroad = args.includes(broadScopeFlag); args = args.filter(flag => flag !== broadScopeFlag);
   if (!args[0]) throw new Error(`Use master scope GY-N [${broadScopeFlag}] [REASON]`);
-  const work = ((await deps.coordinator('work-snapshot')).work as Work[]).find(item => item.id === args[0] || item.key === args[0]);
+  const work = await deps.coordinator(`work/${args[0]}`).catch(() => null) as Work | null;
   if (!work) throw new Error(`Unknown work item ${args[0]}`);
   const request = work.scopeRequest;
   if (!request) throw new Error(`${work.key} has no open scope request to approve`);
