@@ -217,7 +217,14 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       const head = sha('head', session.key, session.epoch);
       if (numberOf(session) === plan.breaksMain && session.attempt === 1) github.breaking.add(head);
       const pr = github.push(session.key, session.branch, principal.id, head, files(numberOf(session)));
-      await engine.execute(principal, 'submit', session.work, { epoch: session.epoch, pr: pr.number, documentation: 'A simulated item: it changes no documented behaviour' }, id());
+      try { await engine.execute(principal, 'submit', session.work, { epoch: session.epoch, pr: pr.number, documentation: 'A simulated item: it changes no documented behaviour' }, id()); }
+      catch (error) {
+        // A submit the server refuses is never absorbed: the item moved under this worker, and the
+        // refusal names the exact world that did it, so the crash carries its own diagnosis.
+        const current = (await store.list()).find(item => item.id === session.work);
+        console.error(`submit refused for ${session.key} epoch ${session.epoch}: pushed ${session.branch} as #${pr.number}; the item stands at stage ${current?.stage} with submission ${JSON.stringify(current?.submission)} and lease ${JSON.stringify(current?.lease)}: ${error instanceof Error ? error.message : String(error)}`);
+        throw error;
+      }
       session.state = 'submitted';
       // Its work done, the runtime exits and leaves the pane behind (GY-842); the loop's session
       // end closes it in the same step, or the sweep reclaims it as the backstop.
@@ -261,7 +268,17 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       return { agentName, pane };
     }
     const agentName = approverSessionName(work, decision), pane = herdr.open(agentName);
-    pending.push(async () => { await api(principals.approver, 'POST', `work/${work.id}/approve`, { decision, reason: `Approved: the loop's routine ${decision} decision for ${work.key} rests on what it verified` }); herdr.status(pane, 'done'); });
+    pending.push(async () => {
+      try { await api(principals.approver, 'POST', `work/${work.id}/approve`, { decision, reason: `Approved: the loop's routine ${decision} decision for ${work.key} rests on what it verified` }); }
+      catch (error) {
+        // A real approver session ends here rather than crashing: when the item moved between the
+        // request and the approval, the server refuses the approval (409), settles the decision
+        // stale, and the loop re-requests it for a fresh approver — the refusal is the designed
+        // protection, so the session that receives it has nothing left to judge.
+        if (!(error instanceof Error) || !/\(409\): Task revision changed/.test(error.message)) throw error;
+      }
+      herdr.status(pane, 'done');
+    });
     return { agentName, pane };
   };
   // GY-496: the dispatcher's producer request for item `plan.spentProducer`'s first head, scheduled by
