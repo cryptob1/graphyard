@@ -166,8 +166,14 @@ export const containmentVerificationSchema = z.object({
     unit: z.string().min(1).max(200), activeState: z.string().min(1).max(40),
     /** Members a live scope still holds that were not attributed to another assignment. */
     processes: z.array(z.number().int().positive()).max(200),
+    /** Total count of processes, when truncated; absent when all are recorded. */
+    processesCount: z.number().int().min(0).optional(),
     /** Members that descend from a live supervisor of a different work key or epoch. */
     attributed: z.array(z.number().int().positive()).max(200).default([]),
+    /** Total count of attributed processes, when truncated; absent when all are recorded. */
+    attributedCount: z.number().int().min(0).optional(),
+    /** Whether the processes list was truncated due to size limits; absent when neither list was truncated. */
+    truncated: z.boolean().optional(),
   }).strict()).max(50),
   /**
    * Every process reported above as holding the fence — a surviving supervisor or workspace
@@ -458,7 +464,13 @@ export function containmentSettlementRefusals(
     if (idlePaneShell(work, verification, process)) continue;
     refusals.push(`Process ${process.pid} of the contained worker is still present on ${verification.host} (matched by ${process.evidence === 'command' ? 'supervisor command line' : 'assigned workspace'})${heldDetail(verification, process.pid)}`);
   }
-  for (const scope of verification.scopes.filter(entry => entry.processes.length))
-    refusals.push(`Containment scope ${scope.unit}${quarantine.scope?.unit === scope.unit ? ` (the scope epoch ${quarantine.epoch} was launched in)` : ''} is ${scope.activeState} and still holds ${scope.processes.length} process(es) that are not attributed to another assignment${scope.processes.map(pid => heldDetail(verification, pid)).join('')}`);
+  for (const scope of verification.scopes) {
+    // A truncated scope that is the quarantine's own scope blocks settlement conservatively.
+    if ((scope.truncated ?? false) && quarantine.scope?.unit === scope.unit) {
+      refusals.push(`Containment scope ${scope.unit} (the scope epoch ${quarantine.epoch} was launched in) is ${scope.activeState} with more than 200 processes; settlement is deferred until the scope clears`);
+    } else if (scope.processes.length) {
+      refusals.push(`Containment scope ${scope.unit}${quarantine.scope?.unit === scope.unit ? ` (the scope epoch ${quarantine.epoch} was launched in)` : ''} is ${scope.activeState} and still holds ${scope.processes.length} process(es) that are not attributed to another assignment${scope.processes.map(pid => heldDetail(verification, pid)).join('')}`);
+    }
+  }
   return refusals;
 }
