@@ -51,7 +51,7 @@ Per cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `linger
 
 ## Research before build
 
-With `run.research` set (`model`, `timeoutMinutes` 15, `tokenBudget`), a feature (or `"research": true`) gets one read-only Pi briefing per revision. Product questions: Needs you; build follows the recommendation, a differing answer reworks, failure never blocks. `master status` `research`: `live`, `waiting`, `failed`. The loop posts `research.configured` to `POST /api/research-settings`; `/api/status`, `/api/board` serve it.
+With `run.research` set (`model`, `timeoutMinutes` 15, `tokenBudget`), a feature (or `"research": true`) gets one read-only Pi briefing per revision. Product questions: Needs you; build follows the recommendation, a differing answer reworks, failure never blocks. `master status` `research`: `live`, `waiting`, `failed`. The loop posts `research.configured` to `POST /api/research-settings` on each change; `/api/status`, `/api/board` serve it.
 
 ## Machine-filed backlog
 

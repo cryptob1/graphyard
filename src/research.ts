@@ -6,6 +6,7 @@ import { humanOnlyRefusal, parkRule } from './model/human-request.js';
 import { defaultPiModel, piRunner } from './runner/pi.js';
 import type { Run, RunResult, Runner } from './runner/types.js';
 import { save } from './store.js';
+import { researchHoldGraceMs } from './model/pr-steps.js';
 import type { Services } from './server/routes.js';
 
 // ---------------------------------------------------------------------------
@@ -128,8 +129,8 @@ export function requirementsRevision(work: Pick<Work, 'title' | 'description' | 
 /** The record for the item's current requirements, or null when this revision was never researched. */
 export const currentResearch = (work: Pick<Work, 'title' | 'description' | 'criteria' | 'researchBrief'>) =>
   work.researchBrief && work.researchBrief.revision === requirementsRevision(work) ? work.researchBrief : null;
-/** How long past its timeout a run recorded as running still holds dispatch: the runner stops it at the timeout, and its failure is posted within this. */
-export const researchHoldGraceMs = 60_000;
+/** How long past its timeout a run recorded as running still holds dispatch; one constant with the dashboard's Research step (src/model/pr-steps.ts). */
+export { researchHoldGraceMs };
 /**
  * Whether dispatch waits for this item's research: only while a run for its current requirements
  * is recorded as running and its time limit (plus the grace to record its end) has not passed. A

@@ -301,3 +301,21 @@ test('unit:research-in-flow-analytics — flow analytics record time in research
   assert.deepEqual(unconfigured.waiting, [], 'unconfigured, no released feature waits for research');
   assert.deepEqual(unconfigured.live.map(line => line.key), ['GY-3'], 'a run already recorded is still reported as it stands');
 });
+
+test('the loop publishes whether it researches every cycle but sends only on a change, retrying a failed send', async () => {
+  const { changePublisher } = await import('../src/daemon/effects.js');
+  let configured = false, fail = false;
+  const sent: boolean[] = [];
+  const publish = changePublisher(() => configured, async value => { if (fail) { fail = false; throw new Error('refused'); } sent.push(value); });
+  await publish(); await publish(); await publish();
+  assert.deepEqual(sent, [false], 'a steady value is sent once, not once per cycle');
+  configured = true; fail = true;
+  await assert.rejects(publish(), /refused/);
+  await publish(); await publish();
+  assert.deepEqual(sent, [false, true], 'a failed send is retried on the next cycle, then not again');
+  configured = false; await publish(); await publish();
+  assert.deepEqual(sent, [false, true, false], 'each change is sent once');
+  const restarted = changePublisher(() => configured, async value => { sent.push(value); });
+  await restarted();
+  assert.deepEqual(sent, [false, true, false, false], 'a restarted loop sends its value once; the control plane records only a change');
+});

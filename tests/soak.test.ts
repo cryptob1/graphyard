@@ -15,6 +15,8 @@ import { Refusal, type Principal, type Work } from '../src/model.js';
 import { approverSessionName, decisionInput, masterConfigSchema, mergeExecutor, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { Launcher } from '../src/daemon/cycle.js';
+import { changePublisher } from '../src/daemon/effects.js';
+import { researchConfiguredEvent } from '../src/research.js';
 import { successorWidening } from '../src/model/successors.js';
 import { systemInvariants, type InvariantCheck } from '../src/model/invariants.js';
 import { performSelfUpgrade, type SelfUpgradeOutcome } from '../src/daemon/upgrade.js';
@@ -197,6 +199,24 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   };
   // One executor instance for the loop's process, and a fresh request per merge the loop asks for, as `master run` wires it.
   const executor = { principal: principals.coordinator.id, instance: `soak-${randomUUID()}` };
+  // ---- Whether the loop researches (GY-434), published every cycle as `master run` wires it. ----
+  // `run.research` flaps twice in the day, the first publication of one change fails, and each
+  // re-execution of the loop starts a fresh publisher: the installation ledger still gains one
+  // event per change, never one per cycle.
+  const researchEvents = async (since: number) => Number((await store.pool.query('SELECT count(*) AS n FROM events WHERE work_id IS NULL AND kind=$1 AND seq>$2', [researchConfiguredEvent, since])).rows[0].n);
+  const lastResearch = (await store.pool.query('SELECT payload->>\'configured\' AS configured, seq FROM events WHERE work_id IS NULL AND kind=$1 ORDER BY seq DESC LIMIT 1', [researchConfiguredEvent])).rows[0];
+  const research = {
+    configured: false, failed: false, sends: 0, refused: 0, since: Number((await store.pool.query('SELECT coalesce(max(seq), 0) AS seq FROM events')).rows[0].seq),
+    // The changes the ledger should record: the day's first value unless the ledger already holds it, then each flip.
+    changes: lastResearch?.configured === 'false' ? 0 : 1,
+    publisher: null as unknown as () => Promise<void>,
+  };
+  const researchPublisher = () => changePublisher(() => research.configured, async configured => {
+    research.sends++;
+    if (research.configured && !research.failed) { research.failed = true; research.refused++; throw new Error('Graphyard refused research-settings (503): the control plane is restarting'); }
+    return api(principals.coordinator, 'POST', 'research-settings', { configured });
+  });
+  research.publisher = researchPublisher();
   const merge: DaemonEffects['merge'] = work => mergeExecutor(config, snapshot, transport, executor, randomUUID(), github.gh(repository))(work);
   const effects: DaemonEffects = {
     agents: () => herdr.list(),
@@ -215,6 +235,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       return { source: 'endpoint', sha: production.sha, at: new Date(clock.now()).toISOString(), reason: null, deployed: serving.map(item => item.key), pending: delivered.filter(item => !serving.includes(item)).map(item => item.key) };
     },
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    publishResearch: () => research.publisher(),
   };
 
   // ---- The coordinator checkout the loop runs from, and its supervisor (GY-437). ----
@@ -255,7 +276,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     root: '/soak/coordinator', run: coordinatorGit, now: clock.now, persist: async () => {},
     restartExecutors: async to => { upgrades.executors.push(to); return { result: 'restarted', reason: null, coordinator: { commit: to }, held: [], restarted: [], unsupervised: [], forgotten: [] }; },
     // The supervisor re-executes the loop: the next process loads the release the checkout holds, as runDaemon records it.
-    restartSelf: async () => { upgrades.self++; state.release = { commit: checkout.head, dirty: checkout.dirty }; },
+    restartSelf: async () => { upgrades.self++; research.publisher = researchPublisher(); state.release = { commit: checkout.head, dirty: checkout.dirty }; },
   });
 
   // ---- The day. ----
@@ -271,6 +292,8 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   const jobsDue = async () => Number((await store.pool.query('SELECT count(*) AS due FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now())')).rows[0].due);
   for (let elapsed = 0; elapsed <= options.hours * hour;) {
     const now = clock.now();
+    const researching = (elapsed >= hour && elapsed < hour + 30 * minute) || (elapsed >= 3 * hour && elapsed < 4 * hour);
+    if (researching !== research.configured) { research.configured = researching; research.changes++; }
     // Scheduled events: releases, the file split on main, the deploys.
     while (released < plan.items && elapsed >= released * plan.releaseEveryMs) await engine.execute(principals.operator, 'ready', items[released++].id, {}, id());
     if (!split && elapsed >= plan.split.at) {
@@ -327,12 +350,13 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   }
 
   const final = (await store.list()).filter(item => items.some(entry => entry.id === item.id));
-  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, herdr, hand, escalations, spent, upgrades, refusalSamples, checkout };
+  const researchRecorded = await researchEvents(research.since);
+  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, herdr, hand, escalations, spent, upgrades, refusalSamples, checkout, research: { ...research, recorded: researchRecorded } };
 }
 
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 180_000 }, async () => {
   const began = performance.now();
-  const { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, state, upgrades, refusalSamples, checkout } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
+  const { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, state, upgrades, refusalSamples, checkout, research } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
   const undelivered = final.filter(item => item.stage !== 'done' || !item.delivery);
   assert.deepEqual(undelivered.map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
@@ -374,6 +398,11 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.equal(state.upgrade.alignedRelease, production.deploys[1].sha, 'the loop stands aligned with the last deployed release');
   assert.equal(state.release?.commit, checkout.head, 'the re-executed loop reports the release the checkout holds');
   assert.ok(Object.keys(state.actions).filter(key => key.startsWith('upgrade:')).length <= production.deploys.length + 1, `the cursor holds one upgrade action per deploy and one refusal: ${Object.keys(state.actions).filter(key => key.startsWith('upgrade:')).join(', ')}`);
+  // GY-434: the research publication ran every cycle but reached the ledger once per change: a
+  // failed send was retried, and a re-executed loop's first send was not recorded again.
+  assert.equal(research.recorded, research.changes, `one installation.research-configured event per change of run.research (${research.sends} sends over ${cycles} cycles)`);
+  assert.ok(research.sends <= 1 + research.changes + research.refused + upgrades.self, `the loop sends on its first cycle, then only on a change, a failure or a restart: ${research.sends} sends, ${research.changes} changes, ${research.refused} refused, ${upgrades.self} restarts`);
+  assert.equal((await api(principals.coordinator, 'GET', 'status')).research.configured, research.configured, 'the status read carries what the loop last published');
   const seconds = (performance.now() - began) / 1000;
   assert.ok(seconds < 120, `the day runs well inside the three minutes the CI test job allows it (${seconds.toFixed(1)} s)`);
 });

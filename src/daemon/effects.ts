@@ -49,6 +49,20 @@ export const stoppedStates = ['idle', 'done', 'blocked'];
 export const launcherRetry = (error: unknown) => { const retryAt = (error as { retryAt?: unknown } | null)?.retryAt; return typeof retryAt === 'string' ? retryAt : null; };
 export const failoverKey = (role: CapacityRole, work: Work, attempt: string | number) => `failover:${role}:${work.id}:${attempt}`;
 export const capacityKey = (role: CapacityRole) => `capacity:${role}`;
+/**
+ * A publication the loop runs every cycle but sends only on a change: the value is remembered once
+ * the control plane accepted it, so a failed send is retried next cycle and a steady value sends
+ * nothing. A restarted loop sends once more; the control plane records only a change (GY-434).
+ */
+export function changePublisher<T>(read: () => T, send: (value: T) => Promise<unknown>) {
+  let published: { value: T } | null = null;
+  return async () => {
+    const value = read();
+    if (published && published.value === value) return;
+    await send(value);
+    published = { value };
+  };
+}
 
 export interface DaemonEffects {
   closeSession: (pane: string) => void | Promise<void>;
@@ -501,7 +515,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   // The same route, as the same requester: only the identity that asked may take a request back.
   const withdraw: DaemonEffects['withdraw'] = (work, decision, reason) => asOperatorAgent('POST', `work/${work.id}/decide`, { action: 'withdraw', decision, reason });
   const decisions: DaemonEffects['decisions'] = work => asOperatorAgent('GET', `work/${encodeURIComponent(work.id)}/decisions`);
-  let publishedEnvironment: string | null = null, publishedBatchSize: number | null = null, publishedResearch: boolean | null = null;
+  let publishedEnvironment: string | null = null, publishedBatchSize: number | null = null;
   const persistLoop = (state: DaemonState) => writeDaemonState(current(), state);
   return {
     agents: () => listHerdrAgents(run).catch(() => []),
@@ -631,12 +645,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       await mutate('merge-queue', { batchSize });
       publishedBatchSize = batchSize;
     },
-    publishResearch: async () => {
-      const configured = researchConfigured(current().run);
-      if (configured === publishedResearch) return;
-      await mutate('research-settings', { configured });
-      publishedResearch = configured;
-    },
+    publishResearch: changePublisher(() => researchConfigured(current().run), configured => mutate('research-settings', { configured })),
     recordDeployment: (work, observation) => mutate(`work/${work.id}/deployment`, { sha: observation.sha, mergeSha: work.delivery!.mergeSha, source: observation.source, observedAt: observation.observedAt }),
     requestSmoke: async work => {
       const config = current();
