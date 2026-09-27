@@ -1849,8 +1849,16 @@ export class Engine {
    * production bound; only tests shorten it, as they shorten `reconcileBatchMs`.
    */
   reconcileSlowWarnMs = 5_000;
-  /** Contended attempts in a row after which a reconciliation batch takes the coordination lock from its start (GY-727). */
+  /**
+   * Contended attempts in a row after which a reconciliation batch's next attempt waits before it
+   * runs again, doubling per further contended attempt up to `reconcileRetryBackoffCapMs` (GY-727):
+   * recovery from contention must never hold the coordination lock across a batch — that would make
+   * every mutation wait for it again — so a fleet that keeps moving under the batch is answered
+   * with a slower retry, never with a blocking one.
+   */
   reconcileRetries = 3;
+  reconcileRetryBackoffMs = 25;
+  reconcileRetryBackoffCapMs = 400;
   /**
    * Reconcile every item that can still change, in batches. A pass reads its candidates once
    * (GY-727): the opening transaction — a short coordination transaction, like every mutation's —
@@ -1868,8 +1876,11 @@ export class Engine {
    * capacity), so a batch that wrote anything commits only after it holds the coordination lock
    * and finds no other item moved since it evaluated: it tries that lock without waiting, since a
    * mutation holding it may be waiting for one of the batch's rows, and on either failure rolls
-   * back and runs again on the refreshed view. After `reconcileRetries` such failures in a row the
-   * batch takes the coordination lock from its start instead, as every batch did before GY-727.
+   * back and runs again on the refreshed view. Contention recovery never holds the coordination
+   * lock across the batch — that would make every mutation wait for it again, the exact blocking
+   * GY-727 removed — so after `reconcileRetries` contended attempts in a row the next attempt
+   * waits a little longer first (doubling per further contended attempt, capped) instead, giving
+   * the fleet room to quiesce while nothing is blocked.
    * Between batches the locks are released and the event loop runs, so a renewal waits at most one
    * batch however long the whole pass takes. One item always completes per batch.
    */
@@ -1889,7 +1900,7 @@ export class Engine {
     };
     let opened = false, written = new Set<string>();
     for (;;) {
-      const opening = !opened, serialized = opening || contended >= this.reconcileRetries, batch = next;
+      const opening = !opened, batch = next;
       written = new Set();
       let finished: boolean;
       try {
@@ -1924,18 +1935,24 @@ export class Engine {
             if (await this.reconcileItem(db, fleet.get(id)!.work, all, now)) written.add(id);
           }
           if (!written.size) return done;
-          const locked = serialized || (await db.query('SELECT pg_try_advisory_xact_lock($1) AS ok', [advisoryLocks.coordination])).rows[0].ok;
+          const locked = !!(await db.query('SELECT pg_try_advisory_xact_lock($1) AS ok', [advisoryLocks.coordination])).rows[0].ok;
           const versions = await versionsOf(db);
           if (!locked || moved(versions, written).length) throw new ReconcileContended();
           for (const id of written) fleet.get(id)!.version = versions.get(id)!;
           return done;
-        }, { lane: 'background', coordinationLock: serialized });
+        }, { lane: 'background', coordinationLock: opening });
       } catch (error) {
         if (!(error instanceof ReconcileContended)) throw error;
         // Rolled back: the batch's writes never happened, so its items are read again and it runs again.
         for (const id of written) fleet.get(id)!.version = '';
         next = batch; contended++;
-        await new Promise(resolve => setImmediate(resolve));
+        // Contended past the quiet attempts, the next try waits a little longer first: the batch
+        // never takes the coordination lock across its evaluation, so a fleet that keeps moving
+        // under it is answered with a slower retry, never with one that blocks mutations (GY-727).
+        const backoff = contended > this.reconcileRetries
+          ? Math.min(this.reconcileRetryBackoffMs * 2 ** (contended - this.reconcileRetries - 1), this.reconcileRetryBackoffCapMs)
+          : 0;
+        await new Promise(resolve => setTimeout(resolve, backoff));
         continue;
       }
       contended = 0;

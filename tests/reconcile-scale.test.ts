@@ -22,7 +22,9 @@ let database: EmbeddedPostgres, store: Store, engine: Engine;
 // batch's row lock of one item slow by `ms` after the lock is taken, so a test knows the batch
 // is holding its transaction.
 const counts = { documents: 0, locks: 0, locked: [] as string[], versioned: 0 };
-const hold: { id: string | null; ms: number; fired: boolean } = { id: null, ms: 0, fired: false };
+// `fired` holds the batch once; `times` holds it for that many consecutive locks instead (the
+// contention-recovery test arms several attempts of the same batch in a row).
+const hold: { id: string | null; ms: number; fired: boolean; times: number } = { id: null, ms: 0, fired: false, times: 0 };
 
 let openItems: Work[] = [], heldDone: Work[] = [];
 
@@ -65,8 +67,9 @@ before(async () => {
         const result = await query(...args);
         if (documents) counts.documents += Number((result as { rowCount?: number }).rowCount ?? 0);
         if (text === reconcileVersionsSql) counts.versioned = Math.max(counts.versioned, Number((result as { rowCount?: number }).rowCount ?? 0));
-        if (text === reconcileItemLockSql && hold.id && values?.[0] === hold.id && !hold.fired) {
+        if (text === reconcileItemLockSql && hold.id && values?.[0] === hold.id && (!hold.fired || hold.times > 0)) {
           hold.fired = true;
+          if (hold.times > 0) hold.times--;
           await new Promise(resolve => setTimeout(resolve, hold.ms));
         }
         return result;
@@ -172,6 +175,53 @@ test('unit:reconcile-reads-open-items-once — a batch that wrote on a view anot
   assert.equal(reloadedPeer.title, 'Moved under the batch', 'the write that bumped no revision was not overwritten');
   assert.equal(reloaded.lease, null, 'the lapsed lease was reconciled on the run that committed');
   assert.equal(reloaded.ready, true, 'the request that waited on the row lock landed');
+});
+
+test('unit:reconcile-reads-open-items-once — contention recovery never blocks a mutation outside the recovering batch', { timeout: 60_000 }, async () => {
+  // Three contended attempts in a row (a peer moved under each) drive the batch into recovery —
+  // the attempt that used to take the coordination lock for its whole evaluation. While that
+  // recovery batch holds its transaction, a mutation on an item it holds nothing for must still
+  // commit: recovery waits for the fleet, it never blocks it.
+  const [written, peer, outside] = [openItems[6], openItems[7], openItems[8]];
+  const locksOf = (id: string) => counts.locked.filter(locked => locked === id).length;
+  const waitFor = async (condition: () => boolean, what: string) => {
+    for (let waited = 0; !condition() && waited < 20_000; waited += 10) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.ok(condition(), what);
+  };
+  const expired = { owner: 'worker', epoch: 1, expiresAt: new Date(Date.now() - 60_000).toISOString() };
+  await store.pool.query(`UPDATE work_items SET document = jsonb_set(document, '{lease}', $2::jsonb) WHERE id = $1`, [written.id, JSON.stringify(expired)]);
+  engine.reconcileBatchMs = 0;
+  counts.locked = [];
+  hold.id = written.id; hold.ms = 200; hold.times = engine.reconcileRetries + 1; hold.fired = false;
+  let passDone = false;
+  const pass = engine.reconcile().then(() => { passDone = true; });
+  let outsideTookMs = 0;
+  try {
+    // Attempts 1..3: the batch writes `written`, and while it holds the row a raw write moves
+    // `peer`, so each attempt rolls back on the moved view.
+    for (let attempt = 1; attempt <= engine.reconcileRetries; attempt++) {
+      await waitFor(() => locksOf(written.id) >= attempt, `the pass reached the written item on attempt ${attempt} and took its row lock`);
+      await store.pool.query(`UPDATE work_items SET document = jsonb_set(document, '{title}', $2::jsonb) WHERE id = $1`, [peer.id, JSON.stringify(`Moved under recovery attempt ${attempt}`)]);
+      if (attempt === engine.reconcileRetries) hold.ms = 1500;
+      await waitFor(() => locksOf(written.id) >= attempt + 1, `attempt ${attempt} rolled back on the moved view and ran again`);
+    }
+    // The recovery attempt: previously the serialized one, holding the coordination lock from its
+    // start. It must evaluate without that lock, so the mutation below commits inside its window.
+    assert.ok(locksOf(written.id) === engine.reconcileRetries + 1, 'the recovery attempt runs after the contended attempts');
+    const mutationStarted = Date.now();
+    await engine.execute(operator, 'ready', outside.id, {}, randomUUID());
+    outsideTookMs = Date.now() - mutationStarted;
+    assert.ok(!passDone, 'the recovery batch is still holding its transaction');
+    assert.ok(outsideTookMs < 1000, `the mutation took ${outsideTookMs} ms; contention recovery blocked it`);
+    hold.id = null;
+    await waitFor(() => locksOf(written.id) >= engine.reconcileRetries + 2, 'the recovery attempt rolled back on the mutation and ran again');
+  } finally { engine.reconcileBatchMs = 250; hold.id = null; hold.ms = 0; hold.times = 0; }
+  await pass;
+  assert.ok(locksOf(written.id) >= engine.reconcileRetries + 2, `the batch ran the contended attempts, the recovery attempt and a final committing one (locked ${locksOf(written.id)})`);
+  const after = await store.list();
+  assert.equal(after.find(item => item.id === outside.id)!.ready, true, 'the mutation that ran inside the recovery window stands');
+  assert.equal(after.find(item => item.id === written.id)!.lease, null, 'the batch committed through recovery and reconciled the lapsed lease');
+  assert.equal(after.find(item => item.id === peer.id)!.title, `Moved under recovery attempt ${engine.reconcileRetries}`, 'no recovery attempt overwrote the peer write');
 });
 
 test('unit:reconcile-reads-open-items-once — a batch that wrote, then finds a later item moved under it at its row lock, rolls back and runs again', { timeout: 60_000 }, async () => {
