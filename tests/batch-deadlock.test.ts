@@ -331,3 +331,30 @@ test('unit:batch-view-stable — a re-derived batch view equal in content keeps 
   // The queue ref namespace is untouched by any of this.
   assert.match(queueRef(work.key), /^refs\/graphyard\/queue\//);
 });
+
+test('unit:parallel-speculative-tips — publication wakes the next leased job before the predecessor CI finishes', async () => {
+  await clearQueue();
+  const repo = new Repo(), github = repo.adapter();
+  const main = repo.commit([], 'main'); repo.refs.set('heads/main', main);
+  let head = await submitted(repo, 'Parallel head', () => repo.change([main], 'feat: first', ['src/first.ts']));
+  let behind = await submitted(repo, 'Parallel successor', () => repo.change([main], 'feat: second', ['src/second.ts']));
+  head = await validated(repo, github, head);
+  behind = await validated(repo, github, behind);
+  const request = github.request.bind(github);
+  github.request = async (path, method, body) => {
+    const response = await request(path, method, body);
+    const check = path.match(/^\/commits\/([a-f0-9]{40})\/check-runs/);
+    if (check && response?.check_runs)
+      return { ...response, check_runs: response.check_runs.map((run: any) => ({ ...run, status: 'in_progress', conclusion: null })) };
+    return response;
+  };
+  // cycle parks every other job an hour out, so publication must explicitly wake its successor.
+  head = await cycle(github, head);
+  assert.ok(head.queue?.speculation?.tip);
+  assert.ok(new Date((await jobRow(behind)).available_at).getTime() <= Date.now(), 'the successor is due immediately after publication');
+  head = await cycle(github, head);
+  assert.ok(head.observation!.checks.every(run => run.result === 'in_progress'), 'the predecessor tip has no CI verdict yet');
+  behind = await cycle(github, behind);
+  assert.ok(behind.queue?.speculation?.tip, 'the successor publishes while predecessor CI runs');
+  assert.equal(behind.queue!.speculation!.base, head.queue!.speculation!.tip);
+});
