@@ -91,13 +91,30 @@ function calledIdentifiers(text: string) {
   for (const match of text.matchAll(/(?<!\bfunction\*?\s+|\bnew\s+)(?<![\w$])([A-Za-z_$][\w$]*)\s*(?:<[^<>()]*>)?\(/g)) names.add(match[1]);
   return names;
 }
+/**
+ * The identifier sets one file's text parses to, memoized per text (GY-767): the scope loop reads
+ * `phraseCallees` and then `criterionSymbolGround` over the identical text in one judgement, and
+ * the memo keeps the widened grounding at the pre-existing parse count of one per file. A bounded
+ * FIFO: a cycle judges a handful of candidate files, and a full file text holds a slot only while
+ * it is hot. The sets are shared, so nothing here or in a caller mutates them.
+ */
+interface FileIdentifiers { declared: Set<string>; members: Set<string>; exported: Set<string>; api: Set<string>; called: Set<string> }
+const parseMemo = new Map<string, FileIdentifiers>(), parseMemoLimit = 32;
+const parseIdentifiers = (text: string): FileIdentifiers => {
+  const hit = parseMemo.get(text);
+  if (hit) return hit;
+  if (parseMemo.size >= parseMemoLimit) parseMemo.delete(parseMemo.keys().next().value!);
+  const parsed = { ...definedIdentifiers(text), called: calledIdentifiers(text) };
+  parseMemo.set(text, parsed);
+  return parsed;
+};
 const spells = (identifier: string, phrase: string) => {
   const words = phrase.split(' '), parts = humps(identifier);
   return parts.some((_, start) => words.every((word, index) => parts[start + index] === word || index === words.length - 1 && parts[start + index] === `${word}s`));
 };
 const literal = (text: string, value: string) => new RegExp(`['"\`]${escapeRegExp(value)}(?:['"\`/?]|\\$\\{)`).test(text);
 
-/** The most files on the base that may mention an identifier a phrase spells for a call or an unexported declaration of it to ground a file: more, and it is shared plumbing or a common local name, not the criterion's behaviour. */
+/** The most files on the base that may mention an identifier a phrase spells for a call or an unexported declaration of it to ground a file: more, and it is shared plumbing or a common local name, not the criterion's behaviour. An exported definition of the identifier grounds unbounded — it is the criterion's own surface, not a mention count. */
 export const criterionCallersMax = 10;
 /**
  * The identifiers `text` calls or declares without exporting that spell a phrase of the criteria:
@@ -107,8 +124,8 @@ export const criterionCallersMax = 10;
 export function phraseCallees(text: string | null, symbols: readonly CriterionSymbol[]) {
   if (!text) return [];
   const phrases = symbols.filter(entry => entry.kind === 'phrase');
-  const { declared, api } = definedIdentifiers(text);
-  const bounded = new Set([...calledIdentifiers(text), ...[...declared].filter(name => !api.has(name))]);
+  const { declared, api, called } = parseIdentifiers(text);
+  const bounded = new Set([...called, ...[...declared].filter(name => !api.has(name))]);
   return [...bounded].filter(name => phrases.some(entry => spells(name, entry.symbol)));
 }
 
@@ -125,7 +142,7 @@ export function phraseCallees(text: string | null, symbols: readonly CriterionSy
  */
 export function criterionSymbolGround(path: string, text: string | null, symbols: readonly CriterionSymbol[], mentions: ReadonlyMap<string, number> = new Map()): string | null {
   if (!text || pathScope(path).prefix) return null;
-  const { declared, members, exported, api } = definedIdentifiers(text), called = calledIdentifiers(text);
+  const { declared, members, exported, api, called } = parseIdentifiers(text);
   const few = (name: string) => (mentions.get(name) ?? Infinity) <= criterionCallersMax;
   const defines = (name: string) => exported.has(name) ? 'exports' : 'defines';
   const base = path.split('/').at(-1)!.replace(/\.[^.]+$/, '');
@@ -149,6 +166,9 @@ export function criterionSymbolGround(path: string, text: string | null, symbols
     }
   }
   const phrases = symbols.filter(entry => entry.kind === 'phrase');
+  // An exported definition of a phrase-spelled identifier grounds unbounded; an unexported one
+  // grounds, like a call of it, only under the criterionCallersMax rarity bound (`few`): an
+  // identifier half the base declares or calls is a common local name, not the criterion's behaviour.
   for (const { criterion, symbol } of phrases) {
     const definer = [...declared].find(name => spells(name, symbol) && (api.has(name) || few(name)));
     if (definer) return `${path} ${defines(definer)} ${definer}, the "${symbol}" ${criterion} names`;
