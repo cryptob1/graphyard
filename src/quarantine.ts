@@ -226,9 +226,9 @@ const interactiveLongFlagsShared = ['--login', '--interactive', '--noprofile', '
  * a flag of one shell is refused from every other.
  */
 const interactiveLongFlags = new Map<string, readonly string[]>([
-  ['bash', [...interactiveLongFlagsShared, '--noediting', '--restricted', '--verbose', '--posix']],
+  ['bash', [...interactiveLongFlagsShared, '--noediting', '--restricted', '--verbose']],
   ['sh', interactiveLongFlagsShared],
-  ['zsh', [...interactiveLongFlagsShared, '--no-rcs', '--no-global-rcs', '--restricted', '--verbose']],
+  ['zsh', [...interactiveLongFlagsShared, '--no-rcs', '--no-globalrcs', '--restricted', '--verbose']],
   ['fish', [...interactiveLongFlagsShared, '--private', '--no-config']],
   ['dash', interactiveLongFlagsShared],
   ['ksh', interactiveLongFlagsShared],
