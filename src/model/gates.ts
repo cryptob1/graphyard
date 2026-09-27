@@ -24,6 +24,11 @@ declare module './work.js' {
 /** The merge gate's refusal while GitHub has not computed a pull request's mergeability (GY-548). */
 export const mergeabilityComputingRefusal = 'GitHub is computing mergeability against the current base; the next observation reads it again';
 
+/**
+ * `mergeQueue` names the settings the queue evaluates by: `batchSize`, the parallel-tip `parallelTips`
+ * window (GY-498) and `optimistic` (GY-500). Without it the queue is validated batch by batch (GY-330),
+ * as every caller that names no settings expects.
+ */
 export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[], mergeQueue?: number | MergeQueueSettings): { stage: Stage; gates: Gate[]; violations: string[]; queue: QueueEntry | null; queueSequence: number; queueEjection: QueueEjection | null; queueHistory: QueueHistoryEntry[] } {
   const gates: Gate[] = [];
   const add = (name: string, reasons: string[]) => gates.push({ name, passed: reasons.length === 0, reasons });
@@ -110,7 +115,8 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[],
   // CI on a queued entry's own speculative tip is the merge step validating the combined result,
   // not the change going back to Test because the base moved (GY-292): its checks refuse the merge
   // gate, and the test gate, which judges the candidate's own change, stands. A batch member the
-  // plan merges on its batch's passing combined tip needs no verdict on its own tip (GY-330).
+  // plan merges on its batch's passing combined tip needs no verdict on its own tip (GY-330). Under
+  // a parallel-tip window (GY-498) the entry is validated by the tips it merges behind instead.
   const test = gates.find(g => g.name === 'test')!;
   const validating = tipValidation(work, queueState.queue, test.reasons);
   if (validating) { test.reasons = []; test.passed = true; }

@@ -15,7 +15,7 @@ import { defineRoutes, parseJson } from '../routes.js';
 import { coordinationSnapshot, coordinationViewHeader } from '../work-view.js';
 import { executorHost } from './agent-registry.js';
 import { directMergeStatus } from '../../direct-merge.js';
-import { maxMergeBatchSize, mergeBatchSizeEvent, rerunFailedChecksEvent } from '../../merge-queue.js';
+import { maxMergeBatchSize, maxParallelTips, mergeParallelTipsEvent, mergeBatchSizeEvent, rerunFailedChecksEvent } from '../../merge-queue.js';
 import { maxRerunFailedChecks } from '../../master/profiles.js';
 import { eventStats } from '../../store/snapshot-delta.js';
 import { productionEnvironmentEvent, productionEnvironmentName, resolvedProductionEnvironment } from '../../flow-analytics.js';
@@ -71,7 +71,7 @@ export const statusRoutes = defineRoutes('status', [
         // that no longer cover the roster, what production serves against the base branch, and
         // the build/protocol the CLI checks before brokering a merge. Production names work
         // items across the repository, so a scoped operator agent does not see it.
-        delegationLimits: services.delegationLimits, build, production: actor.role === 'operator-agent' ? null : production?.status() ?? null, productionEnvironment, ciAppIds: engine.ciAppIds, mergeQueue: { batchSize: engine.mergeBatchSize, optimistic: engine.optimisticMerge, rerunFailedChecks: engine.rerunFailedChecks, optimisticExclude: engine.optimisticExclude },
+        delegationLimits: services.delegationLimits, build, production: actor.role === 'operator-agent' ? null : production?.status() ?? null, productionEnvironment, ciAppIds: engine.ciAppIds, mergeQueue: { batchSize: engine.mergeBatchSize, optimistic: engine.optimisticMerge, optimisticExclude: engine.optimisticExclude, parallelTips: engine.parallelTips, rerunFailedChecks: engine.rerunFailedChecks },
         // The documentation policy this control plane stamps on new items, which doctor compares
         // with the checkout's committed graphyard.json (GY-293).
         documentation: engine.documentation,
@@ -123,24 +123,27 @@ export const statusRoutes = defineRoutes('status', [
     },
   },
   {
-    // The master loop publishes `mergeQueue.batchSize` (GY-330) and `mergeQueue.optimistic` (GY-500) from its own configuration, which
-    // lives only on the master's host: how many consecutive queue entries one combined tip
-    // validates. Recorded once per change in the installation ledger and applied to every
-    // evaluation from then on; a restarted server reads it back from there. `rerunFailedChecks`
-    // (GY-516), how many times a failed required check is rerun on its sha, travels the same way,
-    // as does `optimisticExclude` (GY-503), the repository's own shared-infrastructure globs.
+    // The master loop publishes `mergeQueue.batchSize` (GY-330), `mergeQueue.parallelTips` (GY-498)
+    // and `mergeQueue.optimistic` (GY-500) from its own configuration, which lives only on the
+    // master's host: how many consecutive queue entries one combined tip validates, how many queue
+    // positions are validated at once, and which eligible entries merge past the queue. Each is
+    // recorded once per change in the installation ledger and applied to every evaluation from then
+    // on; a restarted server reads it back from there. `rerunFailedChecks` (GY-516), how many times
+    // a failed required check is rerun on its sha, travels the same way, as does `optimisticExclude`
+    // (GY-503), the repository's own shared-infrastructure globs.
     method: 'POST', path: '/api/merge-queue',
     async handle(context) {
       const { actor, services: { engine } } = context;
       demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
       const body = await parseJson(context, 16384, '{}');
-      const { batchSize, rerunFailedChecks, optimistic, optimisticExclude } = body ?? {};
-      demand(batchSize !== undefined || rerunFailedChecks !== undefined || optimistic !== undefined || optimisticExclude !== undefined, 'batchSize, rerunFailedChecks, optimistic or optimisticExclude is required', 400);
+      const { batchSize, optimistic, optimisticExclude, parallelTips, rerunFailedChecks } = body ?? {};
+      demand(batchSize !== undefined || optimistic !== undefined || optimisticExclude !== undefined || parallelTips !== undefined || rerunFailedChecks !== undefined, 'batchSize, optimistic, optimisticExclude, parallelTips or rerunFailedChecks is required', 400);
       if (batchSize !== undefined) demand(Number.isSafeInteger(batchSize) && batchSize >= 1 && batchSize <= maxMergeBatchSize, `batchSize must be an integer from 1 to ${maxMergeBatchSize}`, 400);
       if (rerunFailedChecks !== undefined) demand(Number.isSafeInteger(rerunFailedChecks) && rerunFailedChecks >= 0 && rerunFailedChecks <= maxRerunFailedChecks, `rerunFailedChecks must be an integer from 0 to ${maxRerunFailedChecks}`, 400);
       demand(optimistic === undefined || typeof optimistic === 'boolean', 'optimistic must be true or false', 400);
       const exclude = optimisticExclude === undefined ? undefined : parseOptimisticExclude(optimisticExclude) ?? undefined;
       demand(optimisticExclude === undefined || exclude !== undefined, 'optimisticExclude must be at most 100 repository-relative globs (no whitespace, . or .. segments)', 400);
+      if (parallelTips !== undefined) demand(Number.isSafeInteger(parallelTips) && parallelTips >= 1 && parallelTips <= maxParallelTips, `parallelTips must be an integer from 1 to ${maxParallelTips}`, 400);
       await engine.loadMergeBatchSize();
       let recorded = false;
       // Each value is applied only once the ledger holds it (GY-384): a failed INSERT leaves the
@@ -153,10 +156,11 @@ export const statusRoutes = defineRoutes('status', [
         recorded = true;
       };
       if (batchSize !== undefined) await record(mergeBatchSizeEvent, 'batchSize', batchSize, await engine.loadMergeBatchSize(), () => { engine.mergeBatchSize = batchSize; });
+      if (parallelTips !== undefined) await record(mergeParallelTipsEvent, 'parallelTips', parallelTips, await engine.loadParallelTips(), () => { engine.parallelTips = parallelTips; });
       if (rerunFailedChecks !== undefined) await record(rerunFailedChecksEvent, 'rerunFailedChecks', rerunFailedChecks, await engine.loadRerunFailedChecks(), () => { engine.rerunFailedChecks = rerunFailedChecks; });
       if (optimistic !== undefined) await record(optimisticMergeEvent, 'optimistic', optimistic, engine.optimisticMerge, () => { engine.optimisticMerge = optimistic; });
       if (exclude !== undefined) await record(optimisticExcludeEvent, 'optimisticExclude', exclude, engine.optimisticExclude, () => { engine.optimisticExclude = exclude; });
-      return { mergeQueue: { batchSize: engine.mergeBatchSize, optimistic: engine.optimisticMerge, rerunFailedChecks: engine.rerunFailedChecks, optimisticExclude: engine.optimisticExclude }, recorded };
+      return { mergeQueue: { batchSize: engine.mergeBatchSize, optimistic: engine.optimisticMerge, optimisticExclude: engine.optimisticExclude, parallelTips: engine.parallelTips, rerunFailedChecks: engine.rerunFailedChecks }, recorded };
     },
   },
   {

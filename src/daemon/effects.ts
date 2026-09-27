@@ -11,7 +11,7 @@ import type { SessionHandleInput } from '../model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from '../request-settlement.js';
 import { type ResourceReclaimReport, reclaimResources, dispatchRefusal } from '../master-resources.js';
 import { RefusedResponse } from '../model/refusal.js';
-import { mergeBatchSize, optimisticExcludeGlobs, optimisticMergeEnabled, rerunFailedChecks } from '../master/profiles.js';
+import { mergeBatchSize, mergeParallelTips, optimisticExcludeGlobs, optimisticMergeEnabled, rerunFailedChecks } from '../master/profiles.js';
 import type { CapacityRole, PartialWork } from '../model/capacity.js';
 import { readProducerLedger, saveProducerLedger, independentProducerProfiles, launchProducer, reclaimCheckouts } from '../producer.js';
 import { followUpThreadIds, readReviewLedger, updateReviewLedger, launchReview } from '../reviewer.js';
@@ -109,9 +109,10 @@ export interface DaemonEffects {
    */
   publishProductionEnvironment?: () => Promise<unknown>;
   /**
-   * Publishes `mergeQueue.batchSize` (GY-330) `mergeQueue.rerunFailedChecks`, `mergeQueue.optimistic` (GY-500) and
-   * `mergeQueue.optimisticExclude` (GY-503) to the control plane, whose merge queue batches by the
-   * first, lets disjoint entries past it by the second and judges shared infrastructure by the last;
+   * Publishes `mergeQueue.batchSize` (GY-330), `mergeQueue.parallelTips` (GY-498),
+   * `mergeQueue.rerunFailedChecks`, `mergeQueue.optimistic` (GY-500) and `mergeQueue.optimisticExclude`
+   * (GY-503) to the control plane, whose merge queue batches and validates its window by the first
+   * two, lets disjoint entries past it by the third and judges shared infrastructure by the last;
    * sent only on a change, and read at the start of every cycle so a reconfiguration applies
    * before the next merge.
    */
@@ -676,11 +677,11 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       publishedEnvironment = environment;
     },
     publishMergeBatchSize: async () => {
-      const settings = { batchSize: mergeBatchSize(current()), optimistic: optimisticMergeEnabled(current()), rerunFailedChecks: rerunFailedChecks(current()), optimisticExclude: optimisticExcludeGlobs(current()) };
-      const key = JSON.stringify(settings);
-      if (key === publishedMergeQueue) return;
-      await mutate('merge-queue', settings);
-      publishedMergeQueue = key;
+      const config = { batchSize: mergeBatchSize(current()), optimistic: optimisticMergeEnabled(current()), parallelTips: mergeParallelTips(current()), rerunFailedChecks: rerunFailedChecks(current()), optimisticExclude: optimisticExcludeGlobs(current()) };
+      const published = JSON.stringify(config);
+      if (published === publishedMergeQueue) return;
+      await mutate('merge-queue', config);
+      publishedMergeQueue = published;
     },
     recordDeployment: (work, observation) => mutate(`work/${work.id}/deployment`, { sha: observation.sha, mergeSha: work.delivery!.mergeSha, source: observation.source, observedAt: observation.observedAt }),
     requestSmoke: async work => {

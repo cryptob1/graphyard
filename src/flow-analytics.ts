@@ -659,6 +659,22 @@ export function mergeReadyIntervals(gateFacts: FlowFact[], mergedAt: number | nu
   if (readyAt !== null) close(readyAt, mergedAt ?? to, mergedAt !== null ? 'merged' : 'open');
   return intervals;
 }
+/**
+ * How long one merged entry waited in the merge queue (GY-498): from the gate fact that recorded it
+ * queued, in the unbroken run of queued gate facts that ended at its merge, to the merge. An entry
+ * ejected and re-queued waits from its last entry. Null when no gate fact recorded it queued.
+ */
+export function queueWait(gateFacts: FlowFact[], mergedAt: number): number | null {
+  const ordered = [...gateFacts].sort((a, b) => time(a.observedAt)! - time(b.observedAt)! || (a.id ?? 0) - (b.id ?? 0));
+  let queuedAt: number | null = null;
+  for (const fact of ordered) {
+    const at = time(fact.observedAt)!;
+    if (at >= mergedAt) break;
+    if (fact.details.queued === true) queuedAt ??= at;
+    else queuedAt = null;
+  }
+  return queuedAt === null ? null : mergedAt - queuedAt;
+}
 // Classification is read back from the durable gate fact, never from a live client claim.
 export function classifyWait(gate: Record<string, any> | undefined, delivered: boolean): WaitCategory | null {
   if (delivered) return 'delivered';
@@ -704,6 +720,7 @@ export const metricDefinitions: Record<string, { label: string; formula: string;
   leadTime: { label: 'Lead time', formula: 'Delivered observation time minus the work-created time, per delivered item in the window.', sources: ['flow_facts:work.created', 'flow_facts:delivered'] },
   queueVsActive: { label: 'Queue versus active work time', formula: 'Active time is the union of lease intervals clipped to the window. Queue time is released, undelivered time in the window with no active lease.', sources: ['flow_facts:lease.claimed', 'flow_facts:lease.released', 'flow_facts:lease.lost'] },
   mergeReadyDwell: { label: 'Merge-ready dwell', formula: 'Interval from the gate fact where the candidate became merge ready (no gate refuses, or only merge-queue sequencing remains) to the next refusing gate fact, to the observed merge, or to the observation time for items still merge ready, clipped to the window. Gate facts observed after the merge never open an interval, and an interval that ended before the window is excluded rather than measured.', sources: ['flow_facts:gates.changed', 'flow_facts:merged'] },
+  mergeQueue: { label: 'Merge queue pace', formula: 'Merges per hour: merged facts in the window divided by the hours of the window the merged facts were read for. Queue wait: for each entry merged in the window, the merge time minus the gate fact that recorded it queued, in the unbroken run of queued gate facts that ended at the merge; an entry with no such fact is left out.', sources: ['flow_facts:merged', 'flow_facts:gates.changed'] },
   phases: { label: 'Phase durations', formula: 'Per candidate episode (one commit under review), the interval between consecutive milestones. A milestone uses the independently observed provider timestamp when the provider supplies one. The production milestone is the earliest successful deployment of the configured production environment (report.productionEnvironment) that contains the merge commit; a deployment to any other environment never ends the phase.', sources: ['flow_facts:candidate.observed', 'flow_facts:review.submitted', 'flow_facts:review.completed', 'flow_facts:gates.changed', 'flow_facts:merge.authorized', 'flow_facts:merged', 'deployment_observations'] },
   ci: { label: 'CI duration, failure and retry', formula: 'Per check name and commit, the interval between the first pending observation and the first terminal observation. Durations are bounded by Graphyard observation intervals, not by provider start timestamps.', sources: ['flow_facts:check.observed'] },
   evidence: { label: 'Evidence wait, expiry and staleness', formula: 'Wait is review completion to the gate fact where acceptance stops refusing. Expiry counts recorded evidence whose expiry precedes the observation time; staleness counts evidence bound to a superseded commit.', sources: ['flow_facts:evidence.recorded', 'flow_facts:gates.changed'] },
@@ -898,6 +915,18 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
     }
   }
   const mergeReadyDwell = { ...distribution(mergeReadyValues), current: mergeReadyCurrent.sort((a, b) => b.sinceMs - a.sinceMs).slice(0, flowLimits.distinct) };
+
+  // The merge queue's pace (GY-498): merges per hour over the part of the window the merged facts
+  // were read for, and how long each entry merged in the window waited in the queue.
+  const mergedUntil = time(coveredUntil(dataset, 'merged')) ?? to;
+  const mergedInWindow = scopedFacts.filter(fact => fact.kind === 'merged' && time(fact.observedAt)! >= from && time(fact.observedAt)! < mergedUntil);
+  const queueWaits = mergedInWindow.map(fact => {
+    const gateFacts = [...(carry.get(`${fact.workId}:gates.changed`) ? [carry.get(`${fact.workId}:gates.changed`)!] : []), ...itemFacts(fact.workId, 'gates.changed')];
+    return queueWait(gateFacts, time(fact.observedAt)!);
+  }).filter((ms): ms is number => ms !== null);
+  const coveredHours = Math.max(0, mergedUntil - from) / 3_600_000;
+  const mergeQueue = { merges: mergedInWindow.length, mergesPerHour: coveredHours > 0 ? Number((mergedInWindow.length / coveredHours).toFixed(3)) : null, queueWait: distribution(queueWaits) };
+  if (!mergedInWindow.length) unavailable.push({ metric: 'mergeQueue', reason: 'No merge was observed during this window.' });
 
   // Candidate episodes. One episode is one commit under review; a new candidate supersedes
   // the previous one so a later push never silently extends an earlier measurement.
@@ -1187,7 +1216,7 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
       statement: 'Flow analytics describe observed work, queueing, and capacity. No metric is keyed by a person, and no principal, provider login, or producer identity is stored in a flow fact or returned by this API.',
     },
     coverage, exclusions, unavailable,
-    stageDwell, stepDwell, wip, cumulativeFlow, throughput, leadTime, queueVsActive, mergeReadyDwell, phases, ci, evidence, operations, bottleneck,
+    stageDwell, stepDwell, wip, cumulativeFlow, throughput, leadTime, queueVsActive, mergeReadyDwell, mergeQueue, phases, ci, evidence, operations, bottleneck,
   };
 }
 export type FlowReport = ReturnType<typeof computeFlow>;

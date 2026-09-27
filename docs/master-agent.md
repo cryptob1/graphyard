@@ -19,7 +19,7 @@ Keep cycling: status, dispatch, review, merge, deployment verification. Stop onl
 
 Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions. `controlPlane.production` flags main ahead of production.
 
-`master run` runs this loop under the `graphyard-master.service` unit ([supervision](onboarding.md#the-loop-must-be-supervised)); restart it (`systemctl --user restart graphyard-master`) when `daemon.liveness` is `stalled` or `absent`.
+`master run` runs this loop under the `graphyard-master.service` unit ([supervision](onboarding.md#the-loop-must-be-supervised)); restart it (`systemctl --user restart graphyard-master`) when `daemon.liveness` is `stalled` or `absent`, never from a dirty checkout (GY-857; [sessions](master-agent-sessions.md#workers-are-write-confined-to-their-worktree)).
 
 ### System-driven items
 
@@ -42,7 +42,7 @@ that host's loop. `dispatch.sessionReconcile` reports each closure:
 A closure decides no gate, ends no lease, and stops no process. Concurrency is counted against live sessions only, and a name is busy only while a live session has it. A session past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) raises attention, is never closed.
 
 **So what an operator or a master does instead of closing sessions by hand:** nothing, for a session
-that finished or died (loop stopped: `graphyard master run --once` sweeps); for an overlong one, attach to it with the command on the handle. Never mark
+that finished or died (`graphyard master run --once` sweeps); for an overlong one, attach to it with the command on the handle. Never mark
 another session's handle finished to free a slot.
 
 ### System invariants
@@ -67,11 +67,9 @@ A candidate passing the build gate gets, in `autoDispatch`, one producer request
 
 **Concurrency is per role.** A profile's `concurrency` (1–20, default 1) caps its simultaneous sessions, each with a name unique to its request above one. It applies without a restart; lowering it drains sessions first (`longestWaitMs`); a role starved ten minutes counts in `counts.concurrencyStarved`.
 
-**Requests always settle.** A gone pane (`pane_not_found`) is closed. No request outlives its own token: expired, unreported by Herdr, it settles `expired`; one still pending counts in `dispatch.sessionReconcile.stuck`. Unanswered sessions relaunch elsewhere. A proof row pending on its own head's session completes on it; one pending on another head is refused until reconciled.
+**Requests always settle.** A gone pane (`pane_not_found`) is closed. No request outlives its own token: expired, unreported by Herdr, it settles `expired`; one still pending counts in `dispatch.sessionReconcile.stuck`. Unanswered sessions relaunch elsewhere (12 per request, then `dispatch.abandoned`); an unposted reviewer is reminded first. A proof row pending on its own head's session completes on it; one pending on another head is refused until reconciled.
 
 **Every role, approvers too, fails over on spent quota** or waits as one `capacity` line.
-
-**Unjudged approvers relaunch** (hand-launched too): 3 per decision, timeouts uncounted, then escalate (`session N:` ends).
 
 The master never launches reviews or producers by hand, except `master review GY-N [PROFILE]` once the loop stops relaunching.
 

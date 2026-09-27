@@ -135,16 +135,33 @@ export class SimulatedGitHub {
     while (queue.length) { const at = queue.pop()!; if (at === ancestor) return true; if (seen.has(at)) continue; seen.add(at); queue.push(...(this.commits.get(at)?.parents ?? [])); }
     return false;
   }
-  /** A commit off the base branch: a worker's head or a published tip. Content identity is inherited from the first parent and changed only where the file list changes, so a path's blob is stable until its content actually changes — as GitHub's blob ids are. */
-  record(commit: Omit<Commit, 'contents'>) {
-    const first = commit.parents[0] ? this.commits.get(commit.parents[0])?.contents : undefined;
-    const contents = first ? new Map(first) : new Map<string, string>();
-    const had = first ? new Set(first.keys()) : new Set<string>();
-    for (const path of commit.files) if (!had.has(path)) contents.set(path, sha('content', path, commit.sha));
-    for (const path of [...contents.keys()]) if (!commit.files.includes(path)) contents.delete(path);
-    const stored = { ...commit, contents };
+  /**
+   * A commit off the base branch: a worker's head or a published tip. Content identity is inherited from the first parent and changed only where the file list changes, so a path's blob is stable until its content actually changes — as GitHub's blob ids are. `contents` overrides the inheritance, the way a merge commit's tree is really built.
+   */
+  record(commit: Omit<Commit, 'contents'>, contents?: Map<string, string>) {
+    const inherited = contents ?? (() => {
+      const first = commit.parents[0] ? this.commits.get(commit.parents[0])?.contents : undefined;
+      const contents = first ? new Map(first) : new Map<string, string>();
+      const had = first ? new Set(first.keys()) : new Set<string>();
+      for (const path of commit.files) if (!had.has(path)) contents.set(path, sha('content', path, commit.sha));
+      for (const path of [...contents.keys()]) if (!commit.files.includes(path)) contents.delete(path);
+      return contents;
+    })();
+    const stored = { ...commit, contents: inherited };
     this.commits.set(stored.sha, stored);
     return stored;
+  }
+  /**
+   * What merging `own` with `base` produces: the base's tree, with the paths `own` actually
+   * owns (its planned scope, plus paths the base lacks) taken from `own`. A tip or a branch
+   * restore merges the base into the item's head, so the result must hold the base's current
+   * content for every path the item never touched — a stale copy there reads as a revert.
+   */
+  mergedContents(ownSha: string, baseSha: string, planned: readonly string[]): Map<string, string> {
+    const own = this.commits.get(ownSha)!, base = this.commits.get(baseSha)!, contents = new Map(base.contents);
+    for (const [path, blob] of own.contents) if (planned.includes(path) || !base.contents.has(path)) contents.set(path, blob);
+    for (const path of [...contents.keys()]) if (!own.files.includes(path) && !base.files.includes(path)) contents.delete(path);
+    return contents;
   }
   /**
    * A commit onto the base branch: a merged pull request, or a change landed outside Graphyard (a file
@@ -383,11 +400,16 @@ export class SimulatedGitHub {
       async publishSpeculativeTip(work: Work, placement: QueuePlacement): Promise<QueueSpeculation> {
         const pr = world.pr(work), predicted = placement.predictedBase!;
         const base = { ref: queueRef(work.key), base: predicted, baseTree: world.commits.get(predicted)!.tree, predecessors: placement.predecessors, policyRevision: work.policyRevision, publishedAt: new Date(clock.now()).toISOString(), trigger: 'queue-head' as const };
-        // A head that already contains its predicted base is its own tip; otherwise the base is merged in, as GitHub's /merges does.
-        if (world.contains(pr.head, predicted)) return { ...base, tip: pr.head, tipTree: world.commits.get(pr.head)!.tree, reviewedHead: pr.head };
-        const from = pr.head, bound = pr.base, tip = sha('tip', from, predicted), onto = world.commits.get(predicted)!;
+        // A republication resets the branch to the item's own reviewed head first (GY-568), so a
+        // rebuilt tip never carries an entry that left the queue unlanded.
+        const speculation = work.queue?.speculation;
+        const reviewedHead = (speculation && speculation.tip === pr.head ? speculation.reviewedHead : undefined) ?? pr.head;
+        // A reviewed head that already contains its predicted base is the tip itself; otherwise the base is merged in, as GitHub's /merges does.
+        if (world.contains(reviewedHead, predicted)) return { ...base, tip: reviewedHead, tipTree: world.commits.get(reviewedHead)!.tree, reviewedHead };
+        const from = reviewedHead, bound = pr.base, tip = sha('tip', from, predicted), onto = world.commits.get(predicted)!;
         const changed = onto.files.filter(file => !world.commits.get(bound)!.files.includes(file));
-        world.record({ sha: tip, tree: sha('tree', tip), parents: [from, predicted], files: [...new Set([...world.commits.get(from)!.files, ...onto.files])], at: clock.now(), message: `Graphyard speculative tip for ${work.key}` });
+        world.record({ sha: tip, tree: sha('tree', tip), parents: [from, predicted], files: [...new Set([...world.commits.get(from)!.files, ...onto.files])], at: clock.now(), message: `Graphyard speculative tip for ${work.key}` },
+          world.mergedContents(from, predicted, work.plannedFiles ?? []));
         pr.head = tip; pr.base = predicted; pr.pushed.set(tip, clock.now());
         if (!world.flakeTips.has(work.key)) world.flakeTips.set(work.key, tip);
         return { ...base, tip, tipTree: sha('tree', tip), reviewedHead: from,
@@ -399,7 +421,22 @@ export class SimulatedGitHub {
         return { from: { sha: pr.head, baseSha: pr.base }, base: world.tip, baseTree: world.tree, policyRevision: work.policyRevision, at, head: pr.head, conflict: null, merge: null, carry: null,
           stale: { head: pr.head, base: world.tip, policyRevision: work.policyRevision, at, reading: `GitHub reported ${pr.head.slice(0, 12)} conflicting, but a test merge is clean` } } as BaseRefresh;
       },
-      async restoreBranch(): Promise<BaseRefresh> { throw new Error('No branch in this world carries another item\'s commits'); },
+      // Restores a branch that carries another item's unlanded commits (GY-127): back to the item's
+      // own reviewed head, then the base branch merged onto it, exactly as production moves it.
+      async restoreBranch(work: Work, restore: { contaminated: string; foreign: string[]; own: string | null; cause: string; requested: unknown; reason: string }): Promise<BaseRefresh> {
+        const pr = world.pr(work), at = new Date(clock.now()).toISOString();
+        const base = (fields: object, outcome: string, own: string | null, head = own ?? pr.head) => ({
+          from: { sha: own ?? pr.head, baseSha: pr.base }, base: world.tip, baseTree: world.tree, policyRevision: work.policyRevision, at, head, conflict: null, merge: null, carry: null,
+          trigger: restore.cause === 'repair' ? 'repair' : 'ejection restore', ...fields, restore: { ...restore, own, performedAt: at, outcome } }) as BaseRefresh;
+        const own = restore.own;
+        if (!own || own === pr.head) return base({}, 'unrepairable', own);
+        pr.head = own; pr.pushed.set(own, clock.now());
+        const onto = world.commits.get(world.tip)!;
+        const merged = world.record({ sha: sha('restore', own, world.tip), tree: sha('tree', 'restore', own, world.tip), parents: [own, world.tip], files: [...new Set([...world.commits.get(own)!.files, ...onto.files])], at: clock.now(), message: `Graphyard branch restore for ${work.key} onto ${world.options.baseBranch}` },
+          world.mergedContents(own, world.tip, work.plannedFiles ?? []));
+        pr.head = merged.sha; pr.base = world.tip; pr.pushed.set(merged.sha, clock.now());
+        return base({ head: merged.sha }, 'restored', own, merged.sha);
+      },
       async requestAgentReview(work: Work, profile: { name: string; reviewerApp: string; runtime: string }): Promise<ReviewRequest> {
         const pr = world.pr(work), request: ReviewRequest = { commentId: ++world.serial, sha: pr.head, baseSha: pr.base, policyRevision: work.policyRevision, body: `review ${profile.name}`, createdAt: new Date(clock.now()).toISOString(),
           provider: 'agent', profile: profile.name, reviewerApp: profile.reviewerApp, marker: uuid(sha('marker', world.serial)) };
