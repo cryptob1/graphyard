@@ -3,7 +3,7 @@
 
 - `GET /healthz`: unauthenticated.
 - `GET /api/status`: principal, integrations, `appPermissions`, held/failed jobs, `githubBudget`, clock.
-- `GET /api/work-snapshot`: `{work, now}` with `autoDispatch` requests; age leases against `now`. Open items whole; settled deliveries `summary: true`, without prose or histories. Supports paging via `?cursor=N&pageSize=N` (default 100, max 1000) to stream large snapshots; `?view=bounded` (default) returns bounded snapshot, `?view=coordination` trims open items, `?view=full` exports everything.
+- `GET /api/work-snapshot`: `{work, now}` with `autoDispatch` requests; age leases against `now`. Open items whole; settled deliveries `summary: true`, without prose or histories. `view=coordination` trims open items; `view=full` exports everything.
 - `GET /api/work/ID|KEY`: one whole document; `/api/work`: all.
 - `GET /api/interventions?window=7|30|90`: the window's ledger rows only (`ledger.since`).
 - `GET /api/events?work=UUID`: one item's events, newest first (`graphyard events GY-N --all` walks them). Without `work`, the whole ledger; operator agents must name an item unless they hold `decision:approve` over every item (the approver, verifying a decision; read only).

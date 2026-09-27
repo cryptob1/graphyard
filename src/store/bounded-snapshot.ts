@@ -8,9 +8,8 @@ import { settledSummariesSql } from './summary-sql.js';
  * done, with nothing owed and nothing running — as its summary (`settledSummariesSql`): the work
  * index's stored settled form without prose, with its bounded timeline, recent sessions and
  * completed-action count. A reader that needs one delivered item's history asks for that document.
- * Paging is supported via cursor (work number) and pageSize for streaming large snapshots.
  */
-export async function boundedSnapshot(pool: pg.Pool, cursor?: number, pageSize: number = 100): Promise<{ work: Work[]; now: string; jobs: IntegrationJob[]; nextCursor?: number; hasMore?: boolean }> {
+export async function boundedSnapshot(pool: pg.Pool): Promise<{ work: Work[]; now: string; jobs: IntegrationJob[] }> {
   const client = await pool.connect();
   try {
     await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
@@ -18,21 +17,8 @@ export async function boundedSnapshot(pool: pg.Pool, cursor?: number, pageSize: 
     const live = (await client.query('SELECT w.number, w.document FROM work_items w WHERE NOT EXISTS (SELECT 1 FROM work_index i WHERE i.id = w.id AND i.settled)')).rows;
     const meta = (await client.query("SELECT statement_timestamp() AS observed_at, (SELECT COALESCE(jsonb_agg(jsonb_build_object('work_id',work_id,'available_at',available_at,'locked_until',locked_until,'error',error,'held_until',held_until,'deferred_reason',deferred_reason,'unobserved',unobserved)), '[]'::jsonb) FROM jobs) AS jobs")).rows[0];
     await client.query('COMMIT');
-    let rows = [...settled, ...live].sort((a, b) => Number(a.number) - Number(b.number));
-
-    // Apply paging if cursor is provided
-    if (cursor !== undefined) {
-      rows = rows.filter(row => Number(row.number) > cursor);
-    }
-
-    const hasMore = rows.length > pageSize;
-    const paginated = rows.slice(0, pageSize);
-    const result: any = { work: paginated.map(row => row.document), now: meta.observed_at.toISOString(), jobs: meta.jobs };
-    if (hasMore) {
-      result.nextCursor = Number(paginated[paginated.length - 1].number);
-      result.hasMore = true;
-    }
-    return result;
+    const rows = [...settled, ...live].sort((a, b) => Number(a.number) - Number(b.number));
+    return { work: rows.map(row => row.document), now: meta.observed_at.toISOString(), jobs: meta.jobs };
   } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error; }
   finally { client.release(); }
 }

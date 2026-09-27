@@ -179,10 +179,7 @@ export const statusRoutes = defineRoutes('status', [
         const visibleWork = operatorVisible(snapshot.work);
         return { ...snapshot, work: visibleWork, jobs: actor.role === 'operator-agent' ? snapshot.jobs.filter(job => visibleWork.some(work => work.id === job.work_id)) : snapshot.jobs };
       };
-      // Parse paging parameters for bounded and full views
-      const cursor = url.searchParams.get('cursor') ? Number(url.searchParams.get('cursor')) : undefined;
-      const pageSize = url.searchParams.get('pageSize') ? Math.min(Number(url.searchParams.get('pageSize')), 1000) : 100;
-      if (view === 'bounded') return { ...scope(await boundedSnapshot(services.engine.store.pool, cursor, pageSize)), view };
+      if (view === 'bounded') return { ...scope(await boundedSnapshot(services.engine.store.pool)), view };
       if (view === 'full') return scope(await services.engine.store.workSnapshot());
       // The coordination view is trimmed in the database (GY-185): the histories it bounds never
       // leave it whole, and what the SQL cut is added to what the view says it left out.
