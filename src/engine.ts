@@ -1174,10 +1174,12 @@ export class Engine {
       }
       // A scope request belongs to the attempt that filed it (GY-597): a command that ended that
       // attempt, or an operator unblocking the item after it ended, closes it with the reason, so
-      // its refusal no longer holds the next attempt at the ready gate. Filing the request does not
-      // end the attempt, so a refusal holds the item only while the attempt that asked keeps its
-      // lease; once that attempt submits, releases or lapses, the request closes and the refusal
-      // is lifted like any other.
+      // its refusal no longer holds the next attempt at the ready gate. The lease-keeping `scope`
+      // command does not end the attempt, so a refusal holds the item only while the attempt that
+      // asked keeps its lease; once that attempt submits, releases or lapses, the request closes
+      // and the refusal is lifted like any other. The typed `request` hand-off releases the lease
+      // itself, and because `request` does not close a scope request, its refusal stays with the
+      // item for a decider.
       const closedScope = attemptEndingCommands.has(command) ? closeEndedScopeRequest(work, now, command) : null;
       if (closedScope) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'scope.closed', JSON.stringify({ details: closedScope })]);
       // A widening that covers an open scope ask is the answer to it: the deterministic rule the
