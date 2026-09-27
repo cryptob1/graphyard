@@ -6,13 +6,13 @@ import { carriedApproval, currentCarry, describeGround } from './carry.js';
 import { currentEvidence } from './evidence.js';
 import { exactApproval } from './review.js';
 import { requiredProofs } from './bootstrap.js';
-import { defaultOptimisticMerge, optimisticEligibility, type OptimisticEligibility } from '../optimistic-merge.js';
+import { defaultOptimisticMerge, defaultOptimisticExclude, optimisticEligibility, type OptimisticEligibility } from '../optimistic-merge.js';
 
-/** The master's merge-queue settings as the control plane applies them: `mergeQueue.batchSize` and `mergeQueue.optimistic`. */
-export interface MergeQueueSettings { batchSize?: number; optimistic?: boolean }
+/** The master's merge-queue settings as the control plane applies them: `mergeQueue.batchSize`, `mergeQueue.optimistic` and `mergeQueue.optimisticExclude`. */
+export interface MergeQueueSettings { batchSize?: number; optimistic?: boolean; optimisticExclude?: readonly string[] }
 export const queueSettings = (settings: number | MergeQueueSettings | undefined) => typeof settings === 'object'
-  ? { batchSize: settings.batchSize ?? defaultMergeBatchSize, optimistic: settings.optimistic ?? defaultOptimisticMerge }
-  : { batchSize: settings ?? defaultMergeBatchSize, optimistic: defaultOptimisticMerge };
+  ? { batchSize: settings.batchSize ?? defaultMergeBatchSize, optimistic: settings.optimistic ?? defaultOptimisticMerge, optimisticExclude: settings.optimisticExclude ?? defaultOptimisticExclude }
+  : { batchSize: settings ?? defaultMergeBatchSize, optimistic: defaultOptimisticMerge, optimisticExclude: defaultOptimisticExclude };
 
 /**
  * Queue membership is derived, never asserted: no command, operator, or administrator can
@@ -25,7 +25,7 @@ export const queueSettings = (settings: number | MergeQueueSettings | undefined)
  * main is guarded after the merge instead. An entry that stops being eligible joins as any other.
  */
 export function placeInQueue(work: Work, all: Work[], now: Date, ciAppIds: number[], eligible: boolean, settings: number | MergeQueueSettings = defaultMergeBatchSize) {
-  const { batchSize, optimistic: optimisticMode } = queueSettings(settings);
+  const { batchSize, optimistic: optimisticMode, optimisticExclude } = queueSettings(settings);
   const history = [...(work.queueHistory ?? [])];
   const candidate = work.candidate;
   let queue = work.queue ?? null, queueSequence = work.queueSequence ?? 0, ejection = work.queueEjection ?? null;
@@ -38,7 +38,7 @@ export function placeInQueue(work: Work, all: Work[], now: Date, ciAppIds: numbe
   // stands, with this entry's own record as just observed.
   const batchOf = (subject: Work) => queueBatch(subject, all.map(item => item.id === subject.id ? subject : item), now.getTime(), batchSize, ciAppIds);
   const reason = queue ? ejectionReason(probe, ciAppIds, all, batchOf(probe)) : null;
-  const optimistic: OptimisticEligibility | null = !queue && eligible ? optimisticEligibility(work, all, { enabled: optimisticMode, gatesPass: eligible }) : null;
+  const optimistic: OptimisticEligibility | null = !queue && eligible ? optimisticEligibility(work, all, { enabled: optimisticMode, gatesPass: eligible, exclude: optimisticExclude }) : null;
   if (optimistic?.eligible) return { queue: null, queueSequence, ejection, history, reasons: [] as string[], placement: null, optimistic };
   if (queue && reason) {
     ejection = { at: now.toISOString(), sequence: queue.sequence, reason, sha: candidate?.sha ?? null, policyRevision: work.policyRevision, conflict: null };

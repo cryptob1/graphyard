@@ -104,6 +104,8 @@ node "$GRAPHYARD_CLI" master start codex     # or: master start claude
 
 Run it as an OS identity whose GitHub credentials workers cannot read. `--browser-profile` is the Chrome profile signed in to GitHub as admin (`master browser`); *Confirm access* in GitHub Mobile stays human-only. Add the reviewer with `master reviewer setup` and `master reviewer add PROFILE` ([Claude](../examples/master/claude-reviewer.json) template); its manifest flow is the only App confirmation.
 
+Onboarding also writes `mergeQueue.optimisticExclude` into `.graphyard/master.json`: the [shared-infrastructure](github.md#optimistic-merges) globs — manifests and lockfiles, CI config, test helpers, schema and migration directories — that this repository never merges optimistically over. Tune the list there; re-runs keep it, and `mergeQueue.optimistic: false` turns the lane off.
+
 ### The loop must be supervised
 
 `master init` from the coordinator checkout writes `~/.config/systemd/user/graphyard-master.service`, runs `systemctl --user enable --now` and `loginctl enable-linger`, restarting on crash, reboot and hang; never a side effect: worker checkouts and temp directories are refused. Move it with `master init --token-stdin --replace-supervisor` from the new checkout; `master status` reports `setup.supervisor` and the merger.
