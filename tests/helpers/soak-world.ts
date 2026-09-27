@@ -108,6 +108,9 @@ export class SimulatedGitHub {
    * and the one rerun the control plane asks for passes (`rerun-passes`) or fails again (`rerun-fails`).
    */
   flaky = new Map<string, 'rerun-passes' | 'rerun-fails'>();
+  /** Items whose heads the plain reviewer never judges: a day whose reviews come from the loop's own
+   * reviewer sessions mutes it, so the session's verdict is the one the gates read (GY-733 soak). */
+  mutedReviewers = new Set<string>();
   /** The CI runs reported per commit, created once CI finishes on it; a rerun appends a later attempt. */
   runs = new Map<string, { name: string; result: string; id: number; attempt: number; at: number }[]>();
   /** Every rerun the control plane asked for: the item, the tip and the failed check run. */
@@ -293,7 +296,7 @@ export class SimulatedGitHub {
       const pushedAt = pr.pushed.get(pr.head)!;
       const ciDone = now - pushedAt >= this.options.ciMs;
       // The reviewer judges a head once CI reported on it.
-      if (ciDone && now - pushedAt >= this.options.ciMs + this.options.reviewMs && !pr.reviews.some(review => review.sha === pr.head)) {
+      if (ciDone && now - pushedAt >= this.options.ciMs + this.options.reviewMs && !pr.reviews.some(review => review.sha === pr.head) && !this.mutedReviewers.has(pr.key)) {
         const plan = this.verdicts.get(pr.key) ?? [];
         const state = plan.shift() ?? 'APPROVED';
         this.verdicts.set(pr.key, plan);
