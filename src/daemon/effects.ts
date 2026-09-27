@@ -1,6 +1,7 @@
 // Concern: the effects a cycle acts through — their interface, cursor records, and the production wiring.
 import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
+import { allocateSessionCheckout, removeSessionCheckout, worktreeRoot } from '../install/worktree-root.js';
 import { productionEnvironmentFromEnv } from '../flow-analytics.js';
 import { type ChildRun, ChildWaitLedger, childRunner } from '../child-runner.js';
 import type { Work } from '../model.js';
@@ -38,7 +39,7 @@ import { detectLoopSupervisorUnit, performSelfUpgrade, type SelfUpgradeOutcome }
 import { readRelease, restartExecutors } from '../executor-fleet.js';
 import { serverCallName, timedCall, timedFetch, timedRun } from '../master/timings.js';
 import type { RunRecord, Runner } from '../runner/types.js';
-import type { ResearchEvent } from '../research.js';
+import { type ResearchCheckout, type ResearchEvent } from '../research.js';
 import type { TriageJudgement } from '../model/machine-backlog.js';
 
 /** A reviewer or producer session a launch ledger holds as pending, as the failover step reads it. */
@@ -202,10 +203,13 @@ export interface DaemonEffects {
   /**
    * Research before build (GY-259): records a research run's start, brief or failure on the item as
    * the coordinator, and names the checkout the research session reads (and, in a test, its runner).
-   * A loop wired without it, or whose config has no `run.research`, researches nothing and dispatches as before.
+   * A loop wired without it, or whose config turns research off (`run.research.enabled: false`),
+   * researches nothing and dispatches as before. `cwd` is the loop's own checkout, which
+   * the triage step (GY-402) reads; a research session never reads it when `checkout` is given, which
+   * makes each run a detached throwaway worktree of it (GY-401). A test may pass `cwd` alone.
    */
   recordResearch?: (work: Work, event: ResearchEvent) => Promise<unknown>;
-  research?: { cwd: string; runner?: Runner };
+  research?: { cwd: string; checkout?: (work: Work) => Promise<ResearchCheckout>; runner?: Runner };
   /** Records a triage judgement on a machine-filed item as the coordinator (GY-402, POST work/ID/triage). */
   recordTriage?: (work: Work, body: { judgement: TriageJudgement; runtime?: string }) => Promise<unknown>;
   /** Asks the control plane for the one-time follow-up migration (GY-402, POST followups/migrate) as the operator agent. */
@@ -515,7 +519,23 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     promptSession: async (agent, text) => { await deliverPrompt(agent.name ?? agent.pane_id!, text, run); },
     reportCapacity: (work, event) => mutate(`work/${work.id}/capacity`, event),
     recordResearch: (work, event) => mutate(`work/${work.id}/research`, event),
-    research: { cwd: root },
+    // A research session never reads this checkout (GY-401): each run gets a detached throwaway
+    // worktree of its HEAD, allocated under the managed checkout root like a proof or review
+    // checkout and removed when the run settles — the prompt's read-only instruction is no
+    // longer the only guard, and a run the loop died under is reclaimed as any other orphan.
+    research: {
+      cwd: root,
+      checkout: async work => {
+        const base = worktreeRoot(root, current());
+        const head = (await run('git', ['-C', root, 'rev-parse', 'HEAD'])).trim();
+        const checkout = await allocateSessionCheckout(base, 'research', work.key, head, randomUUID());
+        const dispose = () => removeSessionCheckout(root, base, checkout.directory, run);
+        // A worktree git would not add leaves no directory behind for the reclaim pass to find.
+        try { await run('git', ['-C', root, 'worktree', 'add', '--detach', checkout.worktree, head]); }
+        catch (error) { await dispose().catch(() => {}); throw error; }
+        return { cwd: checkout.worktree, directory: checkout.directory, dispose };
+      },
+    },
     recordTriage: (work, body) => mutate(`work/${work.id}/triage`, body),
     migrateFollowUps: () => asOperatorAgent('POST', 'followups/migrate', {}, 'graphyard-followups-migration'),
     launchedSessions: async () => [

@@ -13,7 +13,7 @@ import { Engine, unauthorizedMergeViolation } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { humanRequestsCommand } from '../src/cli/session-commands.js';
 import { operatorCredentialRefusal, operatorOnlyDecision } from '../src/model/approval.js';
-import { humanOnlyRefusal, humanOnlyRules, openHumanOnly, operatorApprovalRule, parkRule, type HumanOnlyRule, type HumanRequestRow } from '../src/model/human-request.js';
+import { humanOnlyRefusal, humanOnlyRules, openHumanOnly, operatorApprovalRule, parkRule, researchRule, type HumanOnlyRule, type HumanRequestRow } from '../src/model/human-request.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import HumanRequestsPage from '../web/pages/human-requests.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
@@ -242,7 +242,7 @@ test('unit:human-surface-derived-from-refusals — a human-only refusal added to
     assert.equal(humanOnlyRefusal(rule.kind, operator), null);
     // The rules that were already there are untouched by it.
     assert.deepEqual(rows.filter(entry => entry.rule !== rule.kind).map(entry => entry.request.id), before.map(entry => entry.request.id));
-    assert.deepEqual(humanOnlyRules.filter(entry => entry !== rule).map(entry => entry.kind), [parkRule.kind, operatorApprovalRule.kind]);
+    assert.deepEqual(humanOnlyRules.filter(entry => entry !== rule).map(entry => entry.kind), [parkRule.kind, operatorApprovalRule.kind, researchRule.kind]);
   } finally {
     humanOnlyRules.splice(humanOnlyRules.indexOf(rule), 1);
   }

@@ -196,11 +196,42 @@ export const operatorApprovalRule: HumanOnlyRule = {
   },
 };
 
+/** The rule name a research question's row carries; it is answered under the park rule's refusal, as every goals-and-priorities request is. */
+export const researchQuestionRule = 'research-question';
+/**
+ * Every unanswered product question a research brief asked (src/research.ts), as a row of the
+ * human surface: the question, why it matters, the recommended answer the build already proceeds
+ * on, and the deadline. The answer is posted to `research-answer`; it never parks or releases the
+ * item, and one that differs from the recommendation returns a built head for rework. Derived
+ * here beside the rule table (GY-401), so the server's human-only list — the page, `graphyard
+ * human-requests`, `master status`, and every count or notification built from it — carries the
+ * questions with the rules, instead of each client merging them from the work documents alone.
+ */
+export function researchQuestionRows(work: readonly Pick<Work, 'id' | 'key' | 'title' | 'stage' | 'epoch' | 'researchBrief'>[], now: number): HumanRequestRow[] {
+  return work.filter(item => item.stage !== 'done').flatMap(item => (item.researchBrief?.questions ?? []).filter(question => !question.answer).map(question => ({
+    rule: researchQuestionRule, work: item.key, id: item.id, title: item.title,
+    request: { id: question.id, kind: question.kind, needed: question.question, requestedBy: 'the research step',
+      reason: `${question.why} Recommended: ${question.recommendation}. The build proceeds on this recommendation, provisionally; answer by ${question.deadline} to settle it before the head is built.`,
+      epoch: item.epoch, at: question.at },
+    waitedMs: Math.max(0, now - Date.parse(question.at)), decision: humanDecisionLabel[question.kind],
+    refusal: parkRule.refuse({ id: 'an agent identity', role: 'operator-agent', sessionKind: 'ai' })!,
+    answer: { cli: `POST /api/work/${item.key}/research-answer {"question":"${question.id}","answer":"…"}`, decline: 'Leave it unanswered: the recommendation stands',
+      dashboard: 'Work → Needs you → Answer', api: `POST /api/work/${item.key}/research-answer {"question":"${question.id}","answer":"…"}`,
+      post: { command: 'research-answer', body: { question: question.id }, field: 'answer', submit: `Answer for ${item.key}`, decline: null } },
+  })));
+}
+/** The research brief's product questions as a rule of the table: no ledger reads, refused like the park rule's. */
+export const researchRule: HumanOnlyRule = {
+  kind: researchQuestionRule,
+  refuse: actor => parkRule.refuse(actor),
+  open: (subject, now) => researchQuestionRows([subject.work], now),
+};
+
 /**
  * Every rule, in the order the surface lists them. Enforcement reads this table and so does the
  * page: adding a rule here is the one change a new human-only action needs.
  */
-export const humanOnlyRules: HumanOnlyRule[] = [parkRule, operatorApprovalRule];
+export const humanOnlyRules: HumanOnlyRule[] = [parkRule, operatorApprovalRule, researchRule];
 export const humanOnlyRule = (kind: string, rules: readonly HumanOnlyRule[] = humanOnlyRules) => rules.find(rule => rule.kind === kind) ?? null;
 /**
  * Why this session may not answer a row of that rule, or null when it may. A rule this reader

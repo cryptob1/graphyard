@@ -1,7 +1,7 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -17,6 +17,10 @@ import { emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from
 import { Launcher } from '../src/daemon/cycle.js';
 import { successorWidening } from '../src/model/successors.js';
 import { systemInvariants, type InvariantCheck } from '../src/model/invariants.js';
+import { reclaimCheckouts } from '../src/producer.js';
+import { allocateSessionCheckout, removeSessionCheckout } from '../src/install/worktree-root.js';
+import { clearResearchRuns, currentResearch, researchCheckouts, researchRunning, researchTool, type ResearchBrief } from '../src/research.js';
+import type { Run, RunOptions, RunResult, Runner } from '../src/runner/types.js';
 import { performSelfUpgrade, type SelfUpgradeOutcome } from '../src/daemon/upgrade.js';
 import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } from './helpers/soak-world.js';
 
@@ -30,11 +34,13 @@ import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } f
  * production deploys, a file split on main that re-plans an item, one pull request GitHub reports
  * CLEAN at once and one UNSTABLE, a reviewer bot out of quota that fails over, and the loop's
  * between-cycles self-upgrade (GY-437) against a simulated coordinator checkout that stands dirty
- * across the second deploy for a while. Every one of the fifteen must be delivered. The loop
- * carries one `Launcher` across its cycles (GY-616), as `runDaemon` does, so session launches run
- * beside the cycle — outliving it, holding their profile from hand-off, and reported by the next
- * cycle — and the invariants hold on that detached path. A change to the loop that breaks an
- * invariant fails here, in CI, before
+ * across the second deploy for a while. Every one of the fifteen must be delivered. Research runs
+ * by default (GY-401), so every item is researched first, in a checkout allocated under a managed
+ * root for its run, while the loop's reclaim pass runs every cycle: no research checkout may be
+ * reclaimed under its run or outlive it. The loop carries one `Launcher` across its cycles
+ * (GY-616), as `runDaemon` does, so session launches run beside the cycle — outliving it, holding
+ * their profile from hand-off, and reported by the next cycle — and the invariants hold on that
+ * detached path. A change to the loop that breaks an invariant fails here, in CI, before
  * it merges; a new behaviour that repeats per cycle, head or item belongs in this world.
  */
 const repository = 'owner/project';
@@ -87,7 +93,7 @@ before(async () => {
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
 });
-after(async () => { clock.uninstall(); if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (pgServer) await pgServer.stop(); });
+after(async () => { clearResearchRuns(); clock.uninstall(); if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (pgServer) await pgServer.stop(); });
 
 const id = () => randomUUID();
 async function api(principal: Principal, method: 'GET' | 'POST', path: string, body?: unknown) {
@@ -186,6 +192,54 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     });
   };
 
+  // ---- Research: every item is a feature, so the loop researches each before build (GY-401). The
+  // run reads a checkout allocated under a managed root of the day's own, and settles with a brief
+  // a few simulated minutes after it starts; the reclaim pass is judged against the simulated clock,
+  // so every directory it does not count as live is past its grace and would be removed.
+  const researchHome = await mkdtemp(join(tmpdir(), 'graphyard-soak-research-')), researchBase = join(researchHome, 'worktrees');
+  const reclaimConfig: MasterConfig = { ...config, run: { ...config.run, worktreeRoot: researchBase } };
+  const brief: ResearchBrief = { existingCode: [{ path: 'src/soak', note: 'the simulated item files' }], patterns: [], risks: [], approach: 'Change the planned file.', questions: [] };
+  const researching: { work: string; dueAt: number; finish: (result: RunResult<unknown>) => void }[] = [];
+  const researchedFor = new Map<string, string>(), researchLeaks: string[] = [];
+  let researchRuns = 0;
+  const runner: Runner = {
+    name: 'pi',
+    start<T>(_prompt: string, options: RunOptions<T>): Run<T> {
+      researchRuns++;
+      let finish!: (result: RunResult<T>) => void, done = false;
+      const result = new Promise<RunResult<T>>(resolve => { finish = outcome => { if (!done) { done = true; resolve(outcome); } }; });
+      researching.push({ work: researchedFor.get(options.cwd)!, dueAt: clock.now() + 4 * minute, finish: outcome => finish(outcome.ok ? { ...outcome, payload: options.validate(outcome.payload) } as RunResult<T> : outcome as RunResult<T>) });
+      return { id: `research-${researchRuns}`, events: [], onEvent: () => () => {}, cancel: reason => finish({ ok: false, failure: { reason: 'cancelled', detail: reason ?? 'cancelled' }, payloads: [] }), result: () => result };
+    },
+  };
+  const research: DaemonEffects['research'] = {
+    // The loop's own checkout, as production names it; research reads only the checkouts below.
+    cwd: researchHome,
+    runner,
+    checkout: async work => {
+      const checkout = await allocateSessionCheckout(researchBase, 'research', work.key, sha('research', work.key), id());
+      await mkdir(checkout.worktree);
+      researchedFor.set(checkout.worktree, work.id);
+      return { cwd: checkout.worktree, directory: checkout.directory, dispose: () => removeSessionCheckout(researchHome, researchBase, checkout.directory, async () => '') };
+    },
+  };
+  const researchTick = async (now: number) => {
+    for (const run of researching.filter(entry => now >= entry.dueAt)) {
+      researching.splice(researching.indexOf(run), 1);
+      run.finish({ ok: true, tool: researchTool, payload: brief, payloads: [brief] });
+      await researchRunning(run.work)?.settled;
+    }
+  };
+  // The loop's reclaim pass, as `master run` runs it, over the research root: it must remove nothing
+  // a run still reads, and the root must hold nothing no run reads.
+  const reclaimTick = async (now: number) => {
+    const report = await reclaimCheckouts(researchHome, reclaimConfig, { now, graceMs: 0 });
+    for (const directory of report.removed) researchLeaks.push(`${new Date(now).toISOString()}: the reclaim pass removed ${directory} under its research run`);
+    const live = new Set(researchCheckouts());
+    for (const entry of await readdir(researchBase).catch(() => [] as string[]))
+      if (!live.has(join(researchBase, entry))) researchLeaks.push(`${new Date(now).toISOString()}: ${entry} outlived its research run`);
+  };
+
   // ---- Production: two deploys, each a new control-plane build serving the base tip it was cut from. ----
   const production = { build: sha('build', 0), sha: github.tip, deploys: [] as { at: number; build: string; sha: string }[] };
   const snapshot = async () => { const read = await store.coordinationSnapshot(); return { work: read.work, now: read.now, jobs: read.jobs }; };
@@ -215,6 +269,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       return { source: 'endpoint', sha: production.sha, at: new Date(clock.now()).toISOString(), reason: null, deployed: serving.map(item => item.key), pending: delivered.filter(item => !serving.includes(item)).map(item => item.key) };
     },
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    recordResearch: (work, event) => api(principals.coordinator, 'POST', `work/${work.id}/research`, event), research,
   };
 
   // ---- The coordinator checkout the loop runs from, and its supervisor (GY-437). ----
@@ -296,12 +351,14 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     github.tick(now);
     await workersTick(now);
     if (!deploying) {
+      await researchTick(now);
       for (const act of pending.splice(0)) await act();
       await engine.reconcile();
       for (let guard = 0; guard < 200 && await jobsDue(); guard++) await processJob(engine, adapter);
       try {
         const result = await runCycle(config, state, effects, clock.now, launcher); cycles++;
-        reportedDispatches += result.actions.filter(action => action.kind === 'dispatch' && action.state === 'done').length;
+        // Research notices (GY-401) are dispatch actions too, but no launch: they carry no principal.
+        reportedDispatches += result.actions.filter(action => action.kind === 'dispatch' && action.state === 'done' && action.principal).length;
         escalations.push(...result.actions.filter(action => action.kind === 'escalation').map(action => action.detail));
         for (const watch of Object.values(state.approvals)) if (hand.has(watch.decision) && watch.exhaustedAt) spent.add(watch.decision);
         if (process.env.SOAK_TRACE) for (const action of result.actions) console.error(`+${Math.round(elapsed / minute)} ${action.kind} ${action.state} ${action.work ?? ''}: ${action.detail.slice(0, 300)}`);
@@ -310,6 +367,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       // The interval between cycles is when a hand-off launch settles; the day's clock waits for
       // them so the world never acts on a half-finished launch.
       await launcher.idle();
+      await reclaimTick(clock.now());
       // Between cycles, as runDaemon runs it: the self-upgrade against the simulated checkout.
       checkout.dirty = elapsed >= plan.dirtyCheckout.from && elapsed < plan.dirtyCheckout.to;
       const upgraded = await selfUpgrade(state);
@@ -327,12 +385,15 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   }
 
   const final = (await store.list()).filter(item => items.some(entry => entry.id === item.id));
-  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, herdr, hand, escalations, spent, upgrades, refusalSamples, checkout };
+  clearResearchRuns();
+  const leftover = await readdir(researchBase).catch(() => [] as string[]);
+  await rm(researchHome, { recursive: true, force: true });
+  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, herdr, hand, escalations, spent, upgrades, refusalSamples, checkout, research: { runs: researchRuns, leaks: researchLeaks, leftover } };
 }
 
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 180_000 }, async () => {
   const began = performance.now();
-  const { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, state, upgrades, refusalSamples, checkout } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
+  const { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, state, upgrades, refusalSamples, checkout, research } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
   const undelivered = final.filter(item => item.stage !== 'done' || !item.delivery);
   assert.deepEqual(undelivered.map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
@@ -356,6 +417,11 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.ok(final.find(item => item.key === items[plan.split.item - 1].key)!.plannedFiles.includes(`src/soak/item-${plan.split.item}-a.ts`), 'the split file re-planned its item onto the successors');
   const reviewed = final.find(item => item.key === items[plan.exhaustedReviewer - 1].key)!;
   assert.ok(reviewed.reviewFailovers?.some(failover => failover.profile === 'claude-reviewer' && failover.exhaustion === 'usage-limit' && failover.nextProfile === 'cursor-reviewer'), `the exhausted reviewer bot failed over to the next profile: ${JSON.stringify(reviewed.reviewFailovers)}`);
+  // Research ran for every item before build, and its checkouts lived exactly as long as their runs.
+  assert.deepEqual(final.filter(item => currentResearch(item)?.state !== 'recorded').map(item => `${item.key}: ${JSON.stringify(currentResearch(item))}`), [], 'every item was built on a recorded research brief');
+  assert.ok(research.runs >= plan.items, `one research run per item at least (${research.runs})`);
+  assert.deepEqual(research.leaks, [], 'no research checkout is reclaimed under its run, and none outlives it');
+  assert.deepEqual(research.leftover, [], 'the research root is empty at the end of the day');
   assert.ok(cycles > 24 * 6, `the loop cycled through the day (${cycles} cycles)`);
   // GY-437: the between-cycles self-upgrade ran after every cycle of the day. Each deploy aligned
   // the checkout once, and restarted the fleet and the loop once (every merge touches src/); the

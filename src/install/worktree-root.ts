@@ -90,9 +90,9 @@ export async function verifyWorktreeRoot(path: string, options: { minFreeBytes: 
  * files, an install's cache — sits beside that, so removing the directory removes all of it.
  */
 // `approval` is a headless approver's own working directory (GY-391): no checkout is made in it.
-export const checkoutKinds = ['proof', 'review', 'approval'] as const;
+export const checkoutKinds = ['proof', 'review', 'research', 'approval'] as const;
 export type CheckoutKind = typeof checkoutKinds[number];
-const managedName = /^graphyard-(proof|review|approval)-[a-z0-9][a-z0-9-]{0,39}-[0-9a-f]{7}-[0-9a-f]{8}$/;
+const managedName = /^graphyard-(proof|review|research|approval)-[a-z0-9][a-z0-9-]{0,39}-[0-9a-f]{7}-[0-9a-f]{8}$/;
 export interface SessionCheckout { directory: string; worktree: string }
 export const sessionCheckoutName = (kind: CheckoutKind, key: string, sha: string, id: string) => `graphyard-${kind}-${key.toLowerCase().replace(/[^a-z0-9-]/g, '-')}-${sha.slice(0, 7).toLowerCase()}-${id.replace(/-/g, '').slice(0, 8).toLowerCase()}`;
 export function sessionCheckout(base: string, kind: CheckoutKind, key: string, sha: string, id: string): SessionCheckout {

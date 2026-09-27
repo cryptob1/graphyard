@@ -40,11 +40,24 @@ const text = (content: unknown): string => typeof content === 'string' ? content
   : Array.isArray(content) ? content.map(part => part?.type === 'text' ? String(part.text ?? '') : '').filter(Boolean).join('\n') : '';
 const bounded = (value: string, limit = 2000) => value.length > limit ? `${value.slice(0, limit - 1)}…` : value;
 
+/** One reported token count: a bare number, or `{ tokens }` — the shapes providers report. */
+const tokenCount = (value: any): number | null => typeof value === 'number' && Number.isFinite(value) ? value
+  : value && typeof value === 'object' && typeof value.tokens === 'number' && Number.isFinite(value.tokens) ? value.tokens : null;
+/** The usage a message end reports, when it reports one: the call's input and output tokens (GY-401). */
+export const usageOf = (value: unknown): { input: number; output: number } | undefined => {
+  if (!value || typeof value !== 'object') return undefined;
+  const input = tokenCount((value as any).input), output = tokenCount((value as any).output);
+  return input === null && output === null ? undefined : { input: input ?? 0, output: output ?? 0 };
+};
+
 /** One Pi JSONL record as a runner event; null for the streaming noise a record does not keep. */
 export function piEvent(record: any, at: string): RunEvent | null {
   switch (record?.type) {
     case 'session': return { kind: 'session', at, id: String(record.id ?? '') };
-    case 'message_end': return { kind: 'message', at, role: String(record.message?.role ?? 'unknown'), text: bounded(text(record.message?.content)), stopReason: record.message?.stopReason ?? null, error: record.message?.errorMessage ?? null };
+    case 'message_end': {
+      const usage = usageOf(record.message?.usage);
+      return { kind: 'message', at, role: String(record.message?.role ?? 'unknown'), text: bounded(text(record.message?.content)), stopReason: record.message?.stopReason ?? null, error: record.message?.errorMessage ?? null, ...(usage ? { usage } : {}) };
+    }
     case 'tool_execution_start': return { kind: 'tool-start', at, tool: String(record.toolName ?? ''), call: String(record.toolCallId ?? '') };
     case 'tool_execution_end': return { kind: 'tool-end', at, tool: String(record.toolName ?? ''), call: String(record.toolCallId ?? ''), error: record.isError === true, text: bounded(text(record.result?.content)) };
     case 'auto_retry_start': return { kind: 'retry', at, attempt: Number(record.attempt ?? 0), error: bounded(String(record.errorMessage ?? '')) };
