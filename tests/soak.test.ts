@@ -1,7 +1,8 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -12,13 +13,15 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { processJob } from '../src/github.js';
 import { Refusal, type Principal, type Work } from '../src/model.js';
-import { approverSessionName, decisionInput, masterConfigSchema, mergeExecutor, type MasterConfig, type WorkerProfile } from '../src/master.js';
+import { approverSessionName, decisionInput, dispatchWork, masterConfigSchema, mergeExecutor, atomicPrivateWrite, loadMasterConfig, setupMaster, type MasterConfig, type WorkerProfile } from '../src/master.js';
+import { readAccountStartFailures, readProfileLaunchRecords, workerLaunchStatus } from '../src/master/dispatch.js';
 import { emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { Launcher } from '../src/daemon/cycle.js';
 import { successorWidening } from '../src/model/successors.js';
 import { systemInvariants, type InvariantCheck } from '../src/model/invariants.js';
 import { performSelfUpgrade, type SelfUpgradeOutcome } from '../src/daemon/upgrade.js';
 import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } from './helpers/soak-world.js';
+import { expandTypedCommand } from './helpers/launch-shell.js';
 
 /**
  * GY-404: per-item gates cannot catch faults that emerge from interaction over time, so this runs
@@ -66,6 +69,97 @@ const plan = {
 };
 const file = (n: number) => `src/soak/item-${n}.ts`;
 
+// ---------------------------------------------------------------------------
+// The failover day (GY-417): the dispatch path is the real `dispatchWork` on a real master root,
+// with one launch profile whose preferred account's OpenCode runtime never comes up. Everything the
+// launcher reads outside Herdr is real — the credential homes, the account ledger beside the
+// coordinator's credential file, the launch records — and Herdr is this world.
+// ---------------------------------------------------------------------------
+
+/** What one real dispatch recorded, sampled the way master status reads it between cycles. */
+interface LaunchSample { key: string; failures: Awaited<ReturnType<typeof readAccountStartFailures>>; attention: Awaited<ReturnType<typeof workerLaunchStatus>> }
+type Dispatched = Awaited<ReturnType<typeof dispatchWork>>;
+/** The failover day's inputs and outputs, threaded through `simulateDay` and back to the test. */
+interface Failover { root: string; master: MasterConfig; profile: WorkerProfile; world: FailoverWorld; dispatches: Dispatched[]; samples: LaunchSample[]; worktrees: string[] }
+
+/**
+ * The Herdr side of the failover day: the panes the real `dispatchWork` creates live in the same
+ * SimulatedHerdr the loop reads. An account whose runtime is in `broken` draws the echoed launch
+ * command for ever — the runtime never comes up, and the launcher closes its pane at the start
+ * bound; any other account's runtime reports ready at once. `healthyEverywhere` ends the broken
+ * run, so a later launch starts on the preferred account and clears its failure count.
+ */
+class FailoverWorld {
+  /** The runtime kind of every `pane run`, in order: the launches the world actually served. */
+  kinds: string[] = [];
+  /** Panes of runtimes in the broken set that the launcher closed at the start bound. */
+  closedBrokenPanes = 0;
+  launched = 0;
+  private readonly typed = new Map<string, string>();
+  private readonly kindsByPane = new Map<string, string>();
+  private readonly herdrInstance = new SimulatedHerdr();
+  private panes = 0;
+  now = clock.now();
+  constructor(private broken: Set<string>) {}
+  get herdr() { return this.herdrInstance; }
+  healthyEverywhere() { this.broken.clear(); }
+  wait = (ms: number) => { this.now += ms; };
+  bounds() { return { clock: () => this.now, wait: this.wait }; }
+  run = (command: string, args: string[]): string => {
+    if (command !== 'herdr') throw new Error(`Unexpected command ${command}`);
+    const json = (result: unknown) => JSON.stringify({ result });
+    const kind = (pane: string) => this.kindsByPane.get(pane);
+    const healthy = (pane: string) => { const runtime = kind(pane); return !!runtime && !this.broken.has(runtime); };
+    if (args[0] === 'tab' && args[1] === 'create') {
+      const pane = this.herdr.open(`pending-${++this.panes}`, 'unknown');
+      this.herdr.agents.get(pane)!.agent = null;
+      return json({ root_pane: { pane_id: pane, tab_id: `w9:t${this.panes}` } });
+    }
+    if (args[0] === 'pane' && args[1] === 'run') {
+      const runtime = expandTypedCommand(args[3]).kind;
+      this.kindsByPane.set(args[2], runtime); this.typed.set(args[2], args[3]); this.kinds.push(runtime);
+      return '';
+    }
+    if (args[0] === 'pane' && args[1] === 'read') return healthy(args[2]) ? `${kind(args[2])} ready\n` : `vish@host ~/code/project ❯ ${this.typed.get(args[2]) ?? ''}\n`;
+    if (args[0] === 'pane' && args[1] === 'list') return json({ panes: this.herdr.list().map(agent => ({ pane_id: agent.pane_id })) });
+    if (args[0] === 'pane' && args[1] === 'close') {
+      if (kind(args[2]) && this.broken.has(kind(args[2])!)) this.closedBrokenPanes += 1;
+      this.herdr.close(args[2]);
+      return json({});
+    }
+    if (args[0] === 'agent' && args[1] === 'get') return healthy(args[2]) ? json({ agent: { pane_id: args[2], agent: kind(args[2]), agent_status: 'idle' } }) : JSON.stringify({ error: { code: 'agent_not_found', message: `agent target ${args[2]} not found` } });
+    if (args[0] === 'agent' && args[1] === 'rename') { const agent = this.herdr.agents.get(args[2]); if (agent) agent.name = args[3]; return json({ agent }); }
+    if (args[0] === 'agent' && args[1] === 'list') return json({ agents: this.herdr.list() });
+    return json({});
+  };
+}
+
+/** The failover day's coordinator: a real master root with an OpenCode and a Claude account logged in, and one launch profile naming them in that order. */
+async function failoverInstalled() {
+  const root = await mkdtemp(join(tmpdir(), 'graphyard-soak-master-')), credentials = await mkdtemp(join(tmpdir(), 'graphyard-soak-credentials-'));
+  execFileSync('git', ['init', '-q', root]);
+  execFileSync('git', ['remote', 'add', 'origin', `https://github.com/${repository}.git`], { cwd: root });
+  const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository, baseBranch: 'main', githubAppId: 1234 }));
+  await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory: credentials, herdrWorkspace: 'wS' }, coordinatorStatus as typeof fetch);
+  const homes = await mkdtemp(join(tmpdir(), 'graphyard-soak-homes-'));
+  const opencodeHome = join(homes, 'opencode-a');
+  await mkdir(join(opencodeHome, 'opencode'), { recursive: true });
+  await writeFile(join(opencodeHome, 'opencode/auth.json'), JSON.stringify({ 'zai-coding-plan': { type: 'api', key: 'k' } }), { mode: 0o600 });
+  const claudeHome = join(homes, 'claude-b');
+  await mkdir(claudeHome, { recursive: true });
+  await writeFile(join(claudeHome, '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'claude-b-token', refreshToken: 'r', expiresAt: Date.now() + 5 * 3_600_000, subscriptionType: 'max' } }), { mode: 0o600 });
+  const credentialFile = join(credentials, 'worker.token');
+  await writeFile(credentialFile, 'worker-token-'.padEnd(40, 'x'), { mode: 0o600 });
+  const profile: WorkerProfile = { name: 'soak-failover', principal: 'worker-one', agentName: 'soak-worker-failover', mode: 'launch', kind: 'opencode', credentialFile, agentArgs: [], approvals: 'auto', environment: {}, accounts: ['opencode-a', 'claude-b'] };
+  const base = await loadMasterConfig(root);
+  await atomicPrivateWrite(join(root, '.graphyard/master.json'), { ...base, hostId: 'soak-host', autoMerge: true, mergeMethod: 'merge', baseBranch: 'main',
+    run: { ...(base.run ?? {}), proofWorkflow: 'acceptance.yml', intervalSeconds: 60 },
+    environments: [{ name: 'opencode-a', kind: 'opencode', home: opencodeHome }, { name: 'claude-b', kind: 'claude', home: claudeHome }], workers: [profile] });
+  const master = await loadMasterConfig(root);
+  const cleanup = async () => { await rm(root, { recursive: true, force: true }); await rm(credentials, { recursive: true, force: true }); await rm(homes, { recursive: true, force: true }); };
+  return { root, master, profile, cleanup };
+}
+
 let pgServer: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
 before(async () => {
   // An offset no other test file takes: two files sharing a port fail in their `before` hook.
@@ -102,45 +196,81 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
  * effects, standing for a change that breaks an invariant, so the soak shows it would fail.
  */
 let days = 0;
-async function simulateDay(options: { hours: number; regression?: 'approvers-left-open'; handApprovers?: boolean }) {
+async function simulateDay(options: { hours: number; regression?: 'approvers-left-open'; handApprovers?: boolean;
+  /** GY-417: dispatch through the real `dispatchWork` on a real master root with a two-account launch profile. */
+  failover?: Omit<Failover, 'profile'> }) {
   const dayStart = clock.now();
+  const failover = options.failover;
+  // The failover day is smaller on purpose: five items through the one real launch profile, with no
+  // rework, deaths, split or reviewer exhaustion — what it exercises is the repeated launch path.
+  const day: typeof plan = { ...plan, ...(failover ? { items: 5, rework: new Set<number>(), deaths: new Set<number>(), deploys: [45 * minute, 80 * minute], clean: 0, unstable: 0, slowRecompute: 0, exhaustedReviewer: 0, workMs: 5 * minute,
+    split: { at: Number.MAX_SAFE_INTEGER, item: 0 }, dirtyCheckout: { from: Number.MAX_SAFE_INTEGER, to: Number.MAX_SAFE_INTEGER } } : {}) };
   const github = new SimulatedGitHub({ repository, baseBranch: 'main', appId: 1234, ciAppId: 15368, reviewerApps, ciMs: 5 * minute, reviewMs: 3 * minute, firstPullRequest: 100 * ++days },
-    [...Array.from({ length: plan.items }, (_, index) => file(index + 1)), 'README.md']);
-  const herdr = new SimulatedHerdr();
+    [...Array.from({ length: day.items }, (_, index) => file(index + 1)), 'README.md']);
+  const herdr = failover ? failover.world.herdr : new SimulatedHerdr();
   const adapter = github.adapter();
   const moveClock = async (ms: number) => { clock.advance(ms); await store.pool.query('UPDATE simulated_clock SET offset_ms=$1', [clock.offsetMs]); };
   await moveClock(0);
 
   // ---- The fifteen items, created in the backlog and released one every fifteen minutes. ----
   const items: Work[] = [];
-  for (let n = 1; n <= plan.items; n++) {
+  for (let n = 1; n <= day.items; n++) {
     let work = await engine.execute(principals.operator, 'create', null, { title: `Soak item ${n}`, plannedFiles: [file(n)], criteria: [{ id: 'AC-1', text: `Item ${n} behaves`, proofs: [PROOF] }] }, id());
-    if (n === plan.exhaustedReviewer) work = await engine.execute(principals.operator, 'reviewpolicy', work.id, { provider: 'agent', expectedPolicyRevision: work.policyRevision, reason: 'Reviewed by the reviewer bots',
+    if (n === day.exhaustedReviewer) work = await engine.execute(principals.operator, 'reviewpolicy', work.id, { provider: 'agent', expectedPolicyRevision: work.policyRevision, reason: 'Reviewed by the reviewer bots',
       reviewerProfiles: [{ name: 'claude-reviewer', runtime: 'claude', reviewerApp: 'claude-reviewer' }, { name: 'cursor-reviewer', runtime: 'cursor', reviewerApp: 'cursor-reviewer' }] }, id());
     items.push(work);
   }
   const numberOf = (work: Pick<Work, 'key'>) => items.findIndex(item => item.key === work.key) + 1;
-  for (const n of plan.rework) github.verdicts.set(items[n - 1].key, ['CHANGES_REQUESTED']);
-  github.unstable.add(items[plan.unstable - 1].key); github.slowRecompute.add(items[plan.slowRecompute - 1].key);
-  github.exhaustedProfiles.add('claude-reviewer');
+  for (const n of day.rework) github.verdicts.set(items[n - 1].key, ['CHANGES_REQUESTED']);
+  if (day.unstable) github.unstable.add(items[day.unstable - 1].key);
+  if (day.slowRecompute) github.slowRecompute.add(items[day.slowRecompute - 1].key);
+  if (day.exhaustedReviewer) github.exhaustedProfiles.add('claude-reviewer');
 
   // ---- Workers: the loop dispatches, the simulated session claims, works, pushes and submits (or dies). ----
   interface Session { work: string; key: string; branch: string; profile: WorkerProfile; epoch: number; pane: string; pushAt: number; diesAt: number | null; state: 'working' | 'submitted' | 'dead' }
   const sessions: Session[] = [], lost: string[] = [];
   const attempts = new Map<string, number>();
   const principalOf = (profile: WorkerProfile): Principal => ({ id: profile.principal, role: 'worker' });
-  const dispatch: DaemonEffects['dispatch'] = async (work, profile) => {
-    const principal = principalOf(profile);
-    const claimed = await engine.execute(principal, 'claim', work.id, {}, id());
-    const epoch = claimed.epoch, key = work.key, n = numberOf(work);
-    // A rework attempt pushes to the pull request already linked, from a fresh workspace.
-    const branch = work.candidate?.branch ?? `graphyard/${key.toLowerCase()}-${epoch}`;
-    await engine.execute(principal, 'workspace', work.id, { epoch, host: 'soak-host', path: `/tmp/soak/${key.toLowerCase()}-${epoch}`, branch }, id());
-    const attempt = (attempts.get(key) ?? 0) + 1; attempts.set(key, attempt);
-    const pane = herdr.open(profile.agentName);
-    sessions.push({ work: work.id, key, branch, profile, epoch, pane, pushAt: clock.now() + plan.workMs, diesAt: plan.deaths.has(n) && attempt === 1 ? clock.now() + plan.deathAfterMs : null, state: 'working' });
-    return { key, epoch };
-  };
+  const dispatch: DaemonEffects['dispatch'] = failover
+    ? async (work, profile, free, snapshot) => {
+      // The real dispatch path (GY-417): the launcher claims through the engine, launches through
+      // the world's Herdr, and falls forward to the profile's next account when the preferred
+      // account's runtime never comes up. The day's fourth dispatch finds the account healthy, so
+      // the same account starts and clears its run of failures.
+      const principal = principalOf(profile), world = failover.world;
+      world.launched += 1;
+      if (world.launched === 4) world.healthyEverywhere();
+      let epoch = 0;
+      const result = await dispatchWork(failover.root, work, profile, free, world.run, snapshot.work,
+        async () => {
+          const claimed = await engine.execute(principal, 'claim', work.id, {}, id());
+          epoch = claimed.epoch;
+          const path = await mkdtemp(join(tmpdir(), 'graphyard-soak-launch-'));
+          failover.worktrees.push(path);
+          await engine.execute(principal, 'workspace', work.id, { epoch, host: 'soak-host', path, branch: `graphyard/${work.key.toLowerCase()}-${epoch}` }, id());
+          return { epoch, path, base: github.tip };
+        },
+        async (_root, key, claimedEpoch) => { await engine.execute(principal, 'release', key, { epoch: claimedEpoch }, id()); },
+        5_000, snapshot.now, { start: world.bounds(), agents: () => herdr.list() });
+      failover.dispatches.push(result);
+      failover.samples.push({ key: work.key, failures: await readAccountStartFailures(failover.master), attention: await workerLaunchStatus(failover.root, failover.master) });
+      // The launched session works its request in the pane the launcher created and submits like
+      // any session of the day; the world's tick renews its lease and pushes its head.
+      sessions.push({ work: work.id, key: work.key, branch: `graphyard/${work.key.toLowerCase()}-${epoch}`, profile, epoch, pane: result.pane!, pushAt: clock.now() + day.workMs, diesAt: null, state: 'working' });
+      return result;
+    }
+    : async (work, profile) => {
+      const principal = principalOf(profile);
+      const claimed = await engine.execute(principal, 'claim', work.id, {}, id());
+      const epoch = claimed.epoch, key = work.key, n = numberOf(work);
+      // A rework attempt pushes to the pull request already linked, from a fresh workspace.
+      const branch = work.candidate?.branch ?? `graphyard/${key.toLowerCase()}-${epoch}`;
+      await engine.execute(principal, 'workspace', work.id, { epoch, host: 'soak-host', path: `/tmp/soak/${key.toLowerCase()}-${epoch}`, branch }, id());
+      const attempt = (attempts.get(key) ?? 0) + 1; attempts.set(key, attempt);
+      const pane = herdr.open(profile.agentName);
+      sessions.push({ work: work.id, key, branch, profile, epoch, pane, pushAt: clock.now() + day.workMs, diesAt: day.deaths.has(n) && attempt === 1 ? clock.now() + day.deathAfterMs : null, state: 'working' });
+      return { key, epoch };
+    };
   const workersTick = async (now: number) => {
     for (const session of sessions.filter(entry => entry.state === 'working')) {
       if (session.diesAt !== null && now >= session.diesAt) { herdr.kill(session.pane); session.state = 'dead'; continue; }
@@ -168,7 +298,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     const unjudged = hand.get(decision);
     if (unjudged) {
       unjudged.launches += 1;
-      if (unjudged.key === items[plan.items - 1].key && unjudged.launches === 1) { unjudged.refused += 1; throw new Error('the agent registry for the approver role is unreachable: timeout'); }
+      if (unjudged.key === items[day.items - 1].key && unjudged.launches === 1) { unjudged.refused += 1; throw new Error('the agent registry for the approver role is unreachable: timeout'); }
       const agentName = approverSessionName(work, decision), pane = herdr.open(agentName);
       pending.push(async () => { herdr.status(pane, 'done'); });
       return { agentName, pane };
@@ -259,7 +389,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   });
 
   // ---- The day. ----
-  const state = emptyDaemonState(config);
+  const state = emptyDaemonState(failover?.master ?? config);
   /** The cursor's upgrade actions and the refusal's attempts, sampled every cycle the checkout stood refused. */
   const refusalSamples: { keys: number; attempts: number }[] = [];
   // Session launches run beside the cycle (GY-616): the loop carries one launcher across its
@@ -272,16 +402,16 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   for (let elapsed = 0; elapsed <= options.hours * hour;) {
     const now = clock.now();
     // Scheduled events: releases, the file split on main, the deploys.
-    while (released < plan.items && elapsed >= released * plan.releaseEveryMs) await engine.execute(principals.operator, 'ready', items[released++].id, {}, id());
-    if (!split && elapsed >= plan.split.at) {
+    while (released < day.items && elapsed >= released * day.releaseEveryMs) await engine.execute(principals.operator, 'ready', items[released++].id, {}, id());
+    if (!split && elapsed >= day.split.at) {
       split = true;
-      const from = file(plan.split.item), successors = [`src/soak/item-${plan.split.item}-a.ts`, `src/soak/item-${plan.split.item}-b.ts`];
+      const from = file(day.split.item), successors = [`src/soak/item-${day.split.item}-a.ts`, `src/soak/item-${day.split.item}-b.ts`];
       const commit = github.commit(`Split ${from}\n\nGraphyard-Successor: ${from} -> ${successors.join(', ')}`, [...github.files.filter(path => path !== from), ...successors]);
       github.successions.push(...successors.map(to => ({ from, to, commit: commit.sha, similarity: 70 })));
     }
     // GY-551: twenty minutes in, the master requests a release of the last two items by hand and
     // puts each to an approver session it launches itself; neither session judges it.
-    if (options.handApprovers && elapsed === 20 * minute) for (const [n, ending] of [[plan.items, 'vanishes'], [plan.items - 1, 'stops']] as const) {
+    if (options.handApprovers && elapsed === 20 * minute) for (const [n, ending] of [[day.items, 'vanishes'], [day.items - 1, 'stops']] as const) {
       const current = (await store.list()).find(item => item.id === items[n - 1].id)!;
       const decision = await api(principals.operatorAgent, 'POST', `work/${current.id}/decide`, { action: 'release', input: decisionInput('release', current, {}), reason: `Soak: a hand-requested release of ${current.key} its approver never judges` });
       hand.set(decision.id, { key: current.key, launches: 0, refused: 0 });
@@ -289,7 +419,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       // Each ends a minute after the loop first lists it.
       pending.push(async () => { pending.push(async () => { if (ending === 'vanishes') herdr.kill(pane); else herdr.status(pane, 'done'); }); });
     }
-    const deploying = deploys < plan.deploys.length && elapsed >= plan.deploys[deploys];
+    const deploying = deploys < day.deploys.length && elapsed >= day.deploys[deploys];
     if (deploying) { production.build = sha('build', ++deploys); production.sha = github.tip; production.deploys.push({ at: now, build: production.build, sha: production.sha }); }
     // The world moves: GitHub, then the sessions. A deploy restarts the control plane once the
     // sessions have renewed: for the rest of that minute nothing reaches it, the loop included.
@@ -300,7 +430,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       await engine.reconcile();
       for (let guard = 0; guard < 200 && await jobsDue(); guard++) await processJob(engine, adapter);
       try {
-        const result = await runCycle(config, state, effects, clock.now, launcher); cycles++;
+        const result = await runCycle(failover?.master ?? config, state, effects, clock.now, launcher); cycles++;
         reportedDispatches += result.actions.filter(action => action.kind === 'dispatch' && action.state === 'done').length;
         escalations.push(...result.actions.filter(action => action.kind === 'escalation').map(action => action.detail));
         for (const watch of Object.values(state.approvals)) if (hand.has(watch.decision) && watch.exhaustedAt) spent.add(watch.decision);
@@ -327,7 +457,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   }
 
   const final = (await store.list()).filter(item => items.some(entry => entry.id === item.id));
-  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, herdr, hand, escalations, spent, upgrades, refusalSamples, checkout };
+  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, herdr, hand, escalations, spent, upgrades, refusalSamples, checkout, failover };
 }
 
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 180_000 }, async () => {
@@ -398,6 +528,67 @@ test('unit:soak-invariants-hold — hand-launched approvers that vanish or stop 
   assert.equal([...hand.values()].reduce((total, entry) => total + entry.refused, 0), 1, 'one relaunch was refused by a registry timeout, and retried');
 });
 
+test('unit:soak-invariants-hold — start failures on the real dispatch path fall forward across the day: three consecutive failures of one account across items raise one attention item, a later start on the account clears it, and every failed pane is closed at its bound', { timeout: 240_000 }, async () => {
+  // GY-417: account failover and the failure ledger repeat per dispatch, so the real loop runs a
+  // day whose every dispatch goes through `dispatchWork` on a master root whose OpenCode account's
+  // runtime never comes up: each launch falls forward to the Claude account, is recorded, and is
+  // bounded — the failed pane is closed at the start bound and the claim is released. The fourth
+  // dispatch finds the account healthy: it starts, and the ledger and its attention item clear.
+  const { root, master, profile, cleanup } = await failoverInstalled();
+  const world = new FailoverWorld(new Set(['opencode']));
+  const worktrees: string[] = [];
+  try {
+    const { final, violations, failures, lost, reportedDispatches, sessions, failover } = await simulateDay({ hours: 2, failover: { root, master, world, dispatches: [], samples: [], worktrees } });
+    assert.ok(failover, 'the day ran the failover scenario');
+    assert.deepEqual(final.filter(item => item.stage !== 'done' || !item.delivery).map(item => `${item.key} ${item.stage}`), [], 'all five items are delivered');
+    assert.deepEqual(violations, [], 'every system invariant holds across the real launches');
+    assert.deepEqual(failures, [], 'no cycle failed');
+    assert.deepEqual(lost, [], 'no worker lost its lease');
+    assert.equal(reportedDispatches, sessions.length, 'each settled dispatch launch was reported to a cycle');
+    assert.equal(world.launched, 5, 'every item of the day was dispatched through the real path');
+    assert.deepEqual(world.kinds, ['opencode', 'claude', 'opencode', 'claude', 'opencode', 'claude', 'opencode', 'opencode'],
+      `three launches fell forward to the second account, the last two started on the preferred one: ${world.kinds.join(', ')}`);
+    assert.equal(world.closedBrokenPanes, 3, 'each runtime that never started had its pane closed at the start bound');
+    assert.equal(failover!.dispatches.length, 5);
+
+    // Every fallback dispatch named the account that failed and the one that took the launch.
+    for (const [index, dispatched] of failover!.dispatches.entries()) {
+      if (index < 3) {
+        assert.ok(dispatched.fallback!.note.startsWith('opencode-a failed to start: ') && dispatched.fallback!.note.endsWith('; launched on claude-b'), dispatched.fallback!.note);
+        assert.equal(dispatched.account!.environment, 'claude-b');
+      } else {
+        assert.equal(dispatched.fallback, null, 'a dispatch whose preferred account starts records no fallback');
+        assert.equal(dispatched.account!.environment, 'opencode-a');
+      }
+    }
+
+    // The ledger grew one failure per launch across items, raised exactly one attention item at
+    // three in a row — three items, still one item, never more — and cleared on the healthy start.
+    const counts = failover!.samples.map(sample => sample.failures['opencode-a']?.failures ?? 0);
+    assert.deepEqual(counts, [1, 2, 3, 0, 0], `one consecutive failure per launch across items: ${counts.join(', ')}`);
+    const raised = failover!.samples.map(sample => sample.attention.items.length);
+    assert.deepEqual(raised, [0, 0, 1, 0, 0], `one attention item, exactly at three consecutive failures: ${raised.join(', ')}`);
+    assert.equal(new Set(failover!.samples.map(sample => sample.key)).size, 5, 'the failing launches ran on different items');
+    const attention = failover!.samples[2].attention.items[0];
+    assert.equal(attention.subject, 'opencode-a never starts');
+    assert.ok(attention.text.includes('failed to start 3 launches in a row'), attention.text);
+    assert.ok(attention.text.includes('opencode-a (runtime opencode)'), attention.text);
+    const row = failover!.samples[2].attention.rows[profile.name];
+    assert.ok(row.fallback!.startsWith('opencode-a failed to start: ') && row.fallback!.endsWith('; launched on claude-b'), row.fallback!);
+    assert.equal(failover!.samples[3].attention.rows[profile.name].fallback, null, 'the healthy start turned the row\'s fallback off');
+
+    // The last dispatch record and the ledger agree: the account started, nothing is held against it.
+    const record = (await readProfileLaunchRecords(root, [profile]))[profile.name];
+    assert.equal(record.account, 'opencode-a');
+    assert.equal(record.runtime, 'opencode');
+    assert.deepEqual(record.failedAccounts, []);
+    assert.deepEqual(await readAccountStartFailures(master), {}, 'the healthy start cleared the account\'s run of failures');
+  } finally {
+    await cleanup();
+    for (const path of worktrees) await rm(path, { recursive: true, force: true });
+  }
+});
+
 test('unit:soak-invariants-hold — a loop change that breaks an invariant fails the soak: approver sessions the loop no longer closes are named within the hour', { timeout: 120_000 }, async () => {
   // The regression GY-403 was: approvers finished, nobody closed them. Here the loop's close reports
   // success and closes nothing, which no per-item gate of any change would notice.
@@ -407,3 +598,4 @@ test('unit:soak-invariants-hold — a loop change that breaks an invariant fails
   // The violation is a fault of its class on the loop's record, which files one item when it recurs.
   assert.equal(state.faults.instances.filter(instance => instance.kind === 'invariant:lingering-sessions' && instance.faultClass === 'session-liveness').length, 1);
 });
+
