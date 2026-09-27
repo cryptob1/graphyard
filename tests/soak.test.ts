@@ -27,7 +27,8 @@ import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } f
  * clock for a simulated day, and asserts after every cycle that every system invariant
  * (src/model/invariants.ts) holds. Fifteen items pass through it: released every fifteen minutes so
  * a merge lands about every fifteen, three sent back by their reviewer, two whose worker dies, two
- * production deploys, a file split on main that re-plans an item, one pull request GitHub reports
+ * production deploys, a file split on main that re-plans an item, one pull request merged by hand
+ * outside the queue that another candidate's landing check reconciles (GY-756), one pull request GitHub reports
  * CLEAN at once and one UNSTABLE, a reviewer bot out of quota that fails over, and the loop's
  * between-cycles self-upgrade (GY-437) against a simulated coordinator checkout that stands dirty
  * across the second deploy for a while. Every one of the fifteen must be delivered. The loop
@@ -63,6 +64,9 @@ const plan = {
   items: 15, releaseEveryMs: 15 * minute, workMs: 20 * minute,
   rework: new Set([3, 7, 11]), deaths: new Set([5, 9]), deathAfterMs: 8 * minute,
   deploys: [2 * hour + 30 * minute, 5 * hour], dirtyCheckout: { from: 4 * hour + 50 * minute, to: 6 * hour }, split: { at: 45 * minute, item: 12 }, clean: 2, unstable: 4, slowRecompute: 8, exhaustedReviewer: 6,
+  // GY-756: a pull request somebody merges on GitHub by hand, a minute after it is opened, inside a
+  // direct-merge window the operator opened for exactly that minute.
+  outOfQueue: { item: 10, afterMs: minute },
 };
 const file = (n: number) => `src/soak/item-${n}.ts`;
 
@@ -268,6 +272,15 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   const launcher = new Launcher();
   const violations: string[] = [], observed = new Set<string>(), failures: string[] = [], escalations: string[] = [], spent = new Set<string>();
   let released = 0, split = false, deploys = 0, cycles = 0, reportedDispatches = 0;
+  // Peers `processJob` reconciled from another item's landing check (GY-744), as `KEY merged|unmerged`.
+  const reconciled: string[] = [];
+  const reconcileLanded = engine.reconcileLanded;
+  engine.reconcileLanded = async (...args) => {
+    const saved = await reconcileLanded.apply(engine, args);
+    reconciled.push(...saved.map(item => `${item.key} ${item.observation?.merged ? 'merged' : 'unmerged'}`));
+    return saved;
+  };
+  let outside: { key: string; sha: string; at: number } | null = null;
   const jobsDue = async () => Number((await store.pool.query('SELECT count(*) AS due FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now())')).rows[0].due);
   for (let elapsed = 0; elapsed <= options.hours * hour;) {
     const now = clock.now();
@@ -295,6 +308,17 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     // sessions have renewed: for the rest of that minute nothing reaches it, the loop included.
     github.tick(now);
     await workersTick(now);
+    // GY-756: the out-of-queue merge. Git shows it landed at once; its item records it unlanded
+    // until an observation — its own, or another candidate's landing check — reconciles it.
+    const byHand = [...github.prs.values()].find(pr => pr.key === items[plan.outOfQueue.item - 1].key && pr.open);
+    // It lands in a minute another open candidate is observed while its own item is not, so the
+    // landing check of that other candidate is what reconciles it, as it was for GY-744's peer.
+    const due = async () => new Set((await store.pool.query('SELECT work_id FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now())')).rows.map(row => row.work_id as string));
+    const handItem = items[plan.outOfQueue.item - 1];
+    if (!outside && !deploying && byHand && now - byHand.createdAt >= plan.outOfQueue.afterMs && await due().then(ids => !ids.has(handItem.id) && [...github.prs.values()].some(pr => pr.open && pr !== byHand && ids.has(items.find(item => item.key === pr.key)!.id)))) {
+      engine.directMergeEnvironment = { since: new Date(now).toISOString(), until: new Date(now + minute).toISOString(), reason: 'Soak: an operator merges one pull request by hand', setBy: 'environment', enabledAt: new Date(now).toISOString(), source: 'environment', event: null };
+      outside = { key: byHand.key, sha: github.mergeOutside(byHand, now).sha, at: now };
+    }
     if (!deploying) {
       for (const act of pending.splice(0)) await act();
       await engine.reconcile();
@@ -326,13 +350,14 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     elapsed += step; await moveClock(step);
   }
 
+  engine.reconcileLanded = reconcileLanded; engine.directMergeEnvironment = null;
   const final = (await store.list()).filter(item => items.some(entry => entry.id === item.id));
-  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, herdr, hand, escalations, spent, upgrades, refusalSamples, checkout };
+  return { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, herdr, hand, escalations, spent, upgrades, refusalSamples, checkout };
 }
 
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 180_000 }, async () => {
   const began = performance.now();
-  const { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, state, upgrades, refusalSamples, checkout } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
+  const { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, state, upgrades, refusalSamples, checkout } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
   const undelivered = final.filter(item => item.stage !== 'done' || !item.delivery);
   assert.deepEqual(undelivered.map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
@@ -349,6 +374,16 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.ok(github.merges.some(entry => entry.key === items[plan.slowRecompute - 1].key && entry.mode === 'auto-merge'), 'one GitHub reported BLOCKED when asked was set to auto-merge, and GitHub merged it once it recomputed');
   assert.equal(final.reduce((total, item) => total + (item.pipeline?.reworkRounds ?? 0), 0), plan.rework.size, 'three rework rounds');
   assert.equal(sessions.filter(session => session.state === 'dead').length, plan.deaths.size, 'two workers died');
+  // GY-756: the pull request merged by hand outside the queue was found landed by another
+  // candidate's landing check while its item recorded it unlanded, reconciled by `processJob` at
+  // once, and delivered on the merge commit GitHub made; every peer a landing check named is
+  // reconciled once, not re-observed on every cycle after.
+  const outOfQueue = items[plan.outOfQueue.item - 1].key;
+  assert.ok(outside && github.merges.some(entry => entry.key === outOfQueue && entry.mode === 'outside' && entry.sha === outside.sha), `${outOfQueue} was merged by hand: ${JSON.stringify(github.merges)}`);
+  assert.ok(github.landedReports.some(report => report.endsWith(`-> ${outOfQueue}`) && !report.startsWith(`${outOfQueue} `)), `another candidate's landing check found ${outOfQueue} landed: ${github.landedReports.join(', ')}`);
+  assert.ok(reconciled.includes(`${outOfQueue} merged`), `processJob reconciled ${outOfQueue} from that landing check: ${reconciled.join(', ')}`);
+  assert.equal(final.find(item => item.key === outOfQueue)!.delivery?.mergeSha, outside!.sha, `${outOfQueue} was delivered on the merge made outside the queue`);
+  assert.deepEqual(reconciled.filter((entry, index) => reconciled.indexOf(entry) !== index), [], `no landed peer was reconciled twice: ${reconciled.join(', ')}`);
   // Every dispatch the launcher settled was reported by a later cycle (GY-616): one dispatch-done
   // per session, none lost between the hand-off and the drain.
   assert.equal(reportedDispatches, sessions.length, 'each settled dispatch launch was reported to a cycle');

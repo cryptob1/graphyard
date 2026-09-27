@@ -82,7 +82,9 @@ export class SimulatedGitHub {
   tip: string;
   prs = new Map<number, PullRequest>();
   /** Every merge GitHub performed, in order, with the time it did. */
-  merges: { key: string; pr: number; sha: string; at: number; state: string; mode: 'immediate' | 'auto-merge' }[] = [];
+  merges: { key: string; pr: number; sha: string; at: number; state: string; mode: 'immediate' | 'auto-merge' | 'outside' }[] = [];
+  /** Every landed peer an observation reported, as `observed KEY -> landed KEY` (GY-756). */
+  landedReports: string[] = [];
   /** Reviewers' plans per item: the verdict each successive review of it gives. */
   verdicts = new Map<string, ('APPROVED' | 'CHANGES_REQUESTED')[]>();
   /** Reviewer profiles that are out of quota: a request dispatched to one is answered with a usage-limit verdict. */
@@ -158,7 +160,9 @@ export class SimulatedGitHub {
     if (check?.conclusion !== 'success') return 'BLOCKED';
     return now - check.at >= (this.slowRecompute.has(pr.key) ? 6 * minute : 0) ? pr.settledState : 'BLOCKED';
   }
-  private merge(pr: PullRequest, now: number, mode: 'immediate' | 'auto-merge') {
+  /** A merge somebody made on GitHub by hand, outside Graphyard's queue: nothing asked for it. */
+  mergeOutside(pr: PullRequest, now: number) { this.merge(pr, now, 'outside'); return pr.merged!; }
+  private merge(pr: PullRequest, now: number, mode: 'immediate' | 'auto-merge' | 'outside') {
     const state = this.mergeState(pr, now);
     // A head that already contains the base tip lands its own tree, as GitHub's merge commit does.
     const head = this.commits.get(pr.head)!, landsTree = this.contains(pr.head, this.tip);
@@ -173,9 +177,14 @@ export class SimulatedGitHub {
     const adapter = {
       config: { repository: options.repository, base: options.baseBranch, appId: options.appId, installationId: 1, reviewerApps: options.reviewerApps },
       reviewerAppFor: (profile: { reviewerApp?: string; runtime?: string } | null | undefined) => profile ? options.reviewerApps.find(app => app.id === profile.reviewerApp && app.runtime === profile.runtime) : undefined,
-      async observe(work: Work): Promise<Observation> {
+      async observe(work: Work, all: Work[] = []): Promise<Observation> {
         const pr = world.pr(work), now = clock.now();
         const ci = now - pr.pushed.get(pr.head)! >= options.ciMs;
+        // The landing check as the real adapter answers it (GY-744): every other open candidate
+        // whose item still records it unlanded while git shows its head on the base branch tip.
+        const landed = all.filter(peer => peer.id !== work.id && peer.stage !== 'done' && peer.candidate && peer.submission?.pr === peer.candidate.pr && !peer.observation?.merged && world.contains(world.tip, peer.candidate.sha))
+          .map(peer => ({ key: peer.key, pr: peer.candidate!.pr, head: peer.candidate!.sha, mergeSha: world.prs.get(peer.candidate!.pr)?.merged?.sha ?? null }));
+        world.landedReports.push(...landed.map(entry => `${work.key} -> ${entry.key}`));
         return {
           clockOffset: { min: 0, max: 0 }, prState: pr.open ? 'open' : 'closed', draft: false, prCreatedAt: new Date(pr.createdAt).toISOString(),
           candidate: { sha: pr.head, baseSha: pr.base, pr: pr.number, branch: pr.branch, author: pr.author, createdAt: new Date(pr.createdAt).toISOString() },
@@ -187,6 +196,7 @@ export class SimulatedGitHub {
           merged: !!pr.merged, mergeSha: pr.merged?.sha ?? null, mergedAt: pr.merged ? new Date(pr.merged.at).toISOString() : null,
           mergeable: pr.open, conflicting: false, baseTip: world.tip, baseTree: world.tree, baseTipContained: world.contains(pr.head, world.tip),
           protected: true, files: pr.files, scopeFiles: [], at: new Date(now).toISOString(),
+          landing: { base: world.tip, files: [], carried: [], foreign: [], landed },
         };
       },
       async publishSpeculativeTip(work: Work, placement: QueuePlacement): Promise<QueueSpeculation> {
