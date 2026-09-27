@@ -92,6 +92,26 @@ export function ciConcurrencyAdvisories(checks: string[], workflows: WorkflowFil
   }));
 }
 
+/**
+ * Advisories for parallel-tips concurrency: when the merge queue validates multiple tips
+ * concurrently (parallelTips > 1) and the repository's workflows use per-pull-request
+ * concurrency, warn to ensure the CI concurrency limit is high enough. Returns an advisory
+ * suggesting the required concurrency capacity.
+ */
+export function parallelTipsAdvisories(parallelTips: number, checks: string[], workflows: WorkflowFile[]) {
+  if (!parallelTips || parallelTips === 1) return [];
+  const pullRequestWorkflows = workflows.filter(({ text }) => readWorkflow(text).pullRequest);
+  if (!pullRequestWorkflows.length) return [];
+  for (const { path, text } of pullRequestWorkflows) {
+    const workflow = readWorkflow(text);
+    if (!workflow.concurrency?.group) continue;
+    const jobsPerRun = workflow.jobs.length || 1;
+    const requiredConcurrency = parallelTips * jobsPerRun;
+    return [`The merge queue will validate ${parallelTips} tips concurrently. With ${jobsPerRun} job(s) per run from ${path}, this requires at least ${requiredConcurrency} concurrent runner slots. Ensure your GitHub Actions concurrency limit is set to at least ${requiredConcurrency}.`];
+  }
+  return [];
+}
+
 // ---- GitHub's merge queue (GY-258) -------------------------------------------------------------
 // GitHub executes merges and Graphyard only gates them: the base branch carries a merge queue whose
 // merge groups must pass `Graphyard / merge`, bound to the control-plane App. Branch protection has
@@ -189,7 +209,7 @@ export function withMergeSettings<T extends object>(protection: T, settings: Rep
   return protection;
 }
 
-export function protectionPlan(current: any, config: { repository: string; baseBranch: string; githubAppId: number }, work: Work[], rules: unknown = current?.[branchRules], workflows: WorkflowFile[] = readWorkflows()) {
+export function protectionPlan(current: any, config: { repository: string; baseBranch: string; githubAppId: number }, work: Work[], rules: unknown = current?.[branchRules], workflows: WorkflowFile[] = readWorkflows(), masterConfig?: { mergeQueue?: { parallelTips?: number } }) {
   const { protection, items } = requiredReviewProtection(work);
   const reviews = current?.required_pull_request_reviews, checks = current?.required_status_checks;
   const observed = { requiredApprovals: Number(reviews?.required_approving_review_count ?? 0), requireLastPushApproval: reviews?.require_last_push_approval === true, dismissStaleReviews: reviews?.dismiss_stale_reviews === true };
@@ -226,7 +246,11 @@ export function protectionPlan(current: any, config: { repository: string; baseB
     ...(repairBypass?.configured === false ? [`repair lane bypass on "${mergeQueueRulesetName}": ${JSON.stringify(repairBypass.observed)} to only App ${config.githubAppId} (Integration, pull_request)`] : []),
     ...(autoMerge && !autoMerge.enabled ? [`allow_auto_merge false to true (${config.repository} cannot have a merge queue, so GitHub merges through auto-merge)`] : []),
   ];
-  const advisories = ciConcurrencyAdvisories(work.filter(item => item.stage !== 'done').flatMap(item => item.policy.checks), workflows);
+  const requiredChecks = work.filter(item => item.stage !== 'done').flatMap(item => item.policy.checks);
+  const advisories = [
+    ...ciConcurrencyAdvisories(requiredChecks, workflows),
+    ...parallelTipsAdvisories(masterConfig?.mergeQueue?.parallelTips ?? 0, requiredChecks, workflows),
+  ];
   return { repository: config.repository, branch: config.baseBranch, mode: protection.mode, items, current: { ...observed, requireConversationResolution: conversationResolution }, desired: { ...protection, requireConversationResolution: false }, changes, blockers, advisories,
     // GitHub performs the merge through its queue (GY-258); null when the branch rules were not read.
     mergeQueue: queue ? { ...queue, ruleset: mergeQueueRuleset(config) } : null,
