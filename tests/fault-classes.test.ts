@@ -917,3 +917,38 @@ test('unit:recurring-class-item — daemonSummary reports faults under the polic
       if (value === undefined) delete process.env[name]; else process.env[name] = value;
   }
 });
+
+test('manual:review-followups-triaged — GY-466: the soak\'s simulated day cycles inside the fault observation interval, holding faultStep\'s between-observations branch under the invariants', async () => {
+  let controlPlaneReads = 0;
+  const effects = {
+    agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [], now: iso(0) }),
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
+    faultClassPolicy: policy, persist: async () => {},
+    controlPlane: async () => { controlPlaneReads++; return { github: true, heldJobs: 0, jobs: [] }; },
+    reportedAttention: async () => { return { items: [] }; },
+  } as unknown as DaemonEffects;
+  const state = emptyDaemonState(config());
+  const interval = config().run.intervalSeconds * 1000;
+
+  // Initial cycle observes and records loop cost/silence/budget
+  await runCycle(config(), state, effects, () => clock);
+  assert.equal(controlPlaneReads, 1, 'initial cycle reads control plane');
+
+  // Simulate a cycle that overran to trigger loop-cost fault
+  state.metrics.push({ cycle: state.cycle, at: iso(interval / 2), durationMs: 10 * interval, childWaitMs: 0, open: 0, actions: 0 } as never);
+
+  // Cycles within faultObservationIntervalMs should track loop health without expensive reads
+  const beforeThrottle = controlPlaneReads;
+  for (let t = interval; t < faultObservationIntervalMs; t += interval) {
+    await runCycle(config(), state, effects, () => clock + t);
+    assert.equal(controlPlaneReads, beforeThrottle, `throttled cycle at ${t}ms does not reread control plane`);
+  }
+
+  // Verify loop health faults are tracked during throttled cycles
+  const loopCostFaults = state.faults.instances.filter(f => f.kind === 'loop-cost');
+  assert.ok(loopCostFaults.length > 0, 'loop-cost faults are tracked in throttled cycles');
+
+  // After observation interval, control plane should be read again
+  await runCycle(config(), state, effects, () => clock + faultObservationIntervalMs);
+  assert.equal(controlPlaneReads, beforeThrottle + 1, 'control plane is read again after observation interval');
+});
