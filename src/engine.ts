@@ -33,7 +33,7 @@ import { beginAttempt, endAttempt, endLapsedAttempt, recordIntervention, recordR
 import { foldDecisions, type Decision } from './model/approval.js';
 import { coveringWindow, directMergeAuthorization, directMergeFromEnv, directMergeWindows, sweepDirectMerges, type DirectMergeWindow } from './direct-merge.js';
 import { repairAuditEvent, repairScopeRefusal, type RepairAudit } from './master/repair-lane.js';
-import { applyPostMerge, applyRevert, currentLane, defaultOptimisticMerge, optimisticEligibility, optimisticMergeEvent, type OptimisticRevert, type PostMergeVerdict } from './optimistic-merge.js';
+import { applyPostMerge, applyRevert, currentLane, defaultOptimisticExclude, defaultOptimisticMerge, optimisticEligibility, optimisticExcludeEvent, optimisticMergeEvent, parseOptimisticExclude, type OptimisticRevert, type PostMergeVerdict } from './optimistic-merge.js';
 import { defaultRerunFailedChecks, maxRerunFailedChecks } from './master/profiles.js';
 
 const epoch = z.number().int().positive();
@@ -463,6 +463,17 @@ export class Engine {
     const row = (await this.store.pool.query('SELECT (payload->>\'rerunFailedChecks\')::int AS reruns FROM events WHERE work_id IS NULL AND kind=$1 ORDER BY seq DESC LIMIT 1', [rerunFailedChecksEvent])).rows[0];
     this.rerunFailedChecks = Number.isSafeInteger(row?.reruns) && row.reruns >= 0 && row.reruns <= maxRerunFailedChecks ? row.reruns : defaultRerunFailedChecks;
     return this.rerunFailedChecks;
+  }
+  /**
+   * The repository's shared-infrastructure globs (GY-503): the master's `mergeQueue.optimisticExclude`
+   * as it last published it, read back with the batch size; the product defaults otherwise.
+   */
+  optimisticExclude: readonly string[] = defaultOptimisticExclude;
+  /** `mergeQueue.optimisticExclude` as the master last published it (POST /api/merge-queue), read back from the installation ledger, else the defaults. */
+  async loadOptimisticExclude() {
+    const row = (await this.store.pool.query('SELECT payload->\'optimisticExclude\' AS exclude FROM events WHERE work_id IS NULL AND kind=$1 ORDER BY seq DESC LIMIT 1', [optimisticExcludeEvent])).rows[0];
+    this.optimisticExclude = parseOptimisticExclude(row?.exclude) ?? defaultOptimisticExclude;
+    return this.optimisticExclude;
   }
   /**
    * Records the outcome of asking GitHub to rerun an owed check (GY-516), made by the integration
@@ -1906,14 +1917,14 @@ export class Engine {
     // behind, ejection is decided by prefix attribution, and the test and merge gates read the
     // window's validation instead of the batch's combined tip. An entry eligible past all of it
     // (GY-500) evaluates with the optimistic lane instead.
-    const result = evaluate(work, all, now, this.ciAppIds, { batchSize: this.mergeBatchSize, optimistic: this.optimisticMerge, parallelTips: this.parallelTips });
+    const result = evaluate(work, all, now, this.ciAppIds, { batchSize: this.mergeBatchSize, optimistic: this.optimisticMerge, optimisticExclude: this.optimisticExclude, parallelTips: this.parallelTips });
     if (work.stage !== result.stage) work.stageEnteredAt = now.toISOString();
     Object.assign(work, result);
     // The optimistic lane (GY-500) the merge gate just passed on: an unqueued candidate authorized
     // to merge holds it, with the time it first did. A merged head keeps the lane it merged on.
     if (!work.observation?.merged) {
       const lane = work.stage === 'merge' && !work.queue && work.gates.every(gate => gate.passed) && !work.violations.length
-        ? optimisticEligibility(work, all, { enabled: this.optimisticMerge, gatesPass: true }) : null;
+        ? optimisticEligibility(work, all, { enabled: this.optimisticMerge, gatesPass: true, exclude: this.optimisticExclude }) : null;
       work.optimistic = lane?.eligible ? currentLane(work, lane.lane, now) : null;
     }
     if (work.gates.some(g => !g.passed) || work.violations.length) work.mergeAuthorization = null;

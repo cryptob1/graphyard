@@ -489,13 +489,31 @@ export class SimulatedGitHub {
 // ---------------------------------------------------------------------------
 export class SimulatedHerdr {
   agents = new Map<string, HerdrAgent>();
+  /** Panes whose runtime has exited: the bare shells GY-842 reclaims, with the worktree they sit in. */
+  shells = new Map<string, string | undefined>();
   closed: string[] = [];
+  /** When each close was made, on the simulated clock: the drain, pass by pass. */
+  closedAt = new Map<string, number>();
   private panes = 0;
-  open(name: string, status = 'working') { const pane = `w1:p${++this.panes}`; this.agents.set(pane, { name, pane_id: pane, agent: 'claude', agent_status: status }); return pane; }
+  constructor(now: () => number = () => Date.now()) { this.now = now; }
+  private now: () => number;
+  open(name: string, status = 'working', cwd?: string) { const pane = `w1:p${++this.panes}`; this.agents.set(pane, { name, pane_id: pane, agent: 'claude', agent_status: status, cwd }); return pane; }
+  /** A pane with no agent in it that no session of this day's launched: the backlog a previous day left. */
+  shell(pane: string, cwd?: string) { this.shells.set(pane, cwd); }
   status(pane: string, status: string) { const agent = this.agents.get(pane); if (agent) agent.agent_status = status; }
-  /** A session that died: its pane is gone without anybody closing it. */
-  kill(pane: string) { this.agents.delete(pane); }
-  close(pane: string) { if (!this.agents.delete(pane)) throw new Error(`pane_not_found: ${pane}`); this.closed.push(pane); }
-  list(): HerdrAgent[] { return [...this.agents.values()].map(agent => ({ ...agent })); }
+  /** A runtime that died: its pane is left behind as a bare shell in the worktree it ran in. */
+  kill(pane: string) { const agent = this.agents.get(pane); this.shells.set(pane, agent?.cwd); this.agents.delete(pane); }
+  close(pane: string) {
+    if (!this.agents.has(pane) && !this.shells.has(pane)) throw Object.assign(new Error(`Herdr refused the operation: pane_not_found`), { herdrCode: 'pane_not_found' });
+    this.agents.delete(pane); this.shells.delete(pane); this.closed.push(pane); this.closedAt.set(pane, this.now());
+  }
+  /** The agent inventory: every session with its agent, and every bare shell with none. */
+  list(): HerdrAgent[] {
+    const named = [...this.agents.values()].map(agent => ({ ...agent }));
+    const bare = [...this.shells.keys()].map(pane => ({ pane_id: pane, agent: null as string | null, agent_status: 'unknown', cwd: this.shells.get(pane) }));
+    return [...named, ...bare];
+  }
+  /** The pane inventory (`herdr pane list`): every pane, with or without an agent in it. */
+  paneList(): { pane_id: string }[] { return [...new Set([...this.agents.keys(), ...this.shells.keys()])].map(pane_id => ({ pane_id })); }
   byName(name: string) { return [...this.agents.values()].find(agent => agent.name === name); }
 }
