@@ -25,11 +25,11 @@ Dispatch is optimistic (overlap holds nothing), smallest planned scope first; `g
 
 **A branch must never keep another item's unlanded commits.** Tips build from reviewed heads; ejection restores left branches (`baseRefresh.restore`). A tip behind an unlanded departed entry waits (`Restoring after predecessor ejection`) for its restored head; another item's carried files (`Carried from another item's tip`) are not rework. Git decides landing (`landing.landed`); landed peers deliver immediately.
 
-**A restore publishes or reports, never claims.** The restore reads the base branch tip at the restore itself — never the base a record or the candidate was bound to — and is recorded `restored` only after GitHub's own read-back shows the pull-request branch at the commit the restore produced. A push GitHub does not reflect (a refused write, branch protection, a branch left where it was) is `outcome: 'unpublished'` with the reason in `baseRefresh.restore.failure`; the loop retries it once, and the same failed result twice without the candidate changing is escalated on the record (`baseRefresh.restore.escalated`) instead of a third attempt. `master status` names the escalation on the item's attention line and under `branches.contaminated`.
+**A restore publishes or reports, never claims.** The restore reads the base tip at the restore itself — never a recorded base — and is `restored` only after a read-back shows GitHub's branch at the commit it produced. A push GitHub does not reflect is `outcome: 'unpublished'` with the reason in `baseRefresh.restore.failure`; the loop retries once, and the same failed result twice without the candidate changing escalates on the record (`baseRefresh.restore.escalated`) instead of a third attempt. `master status` names it on the attention line and under `branches.contaminated`.
 
 #### A contaminated branch
 
-Listed under `branches.contaminated`; run `master repair GY-42 REASON`. A restore that could not publish its result is retried once by the loop; an escalated one (`outcome: 'unpublished'` with `escalated` set) repeats no more — fix what GitHub refuses (usually branch protection or the App's contents permission, named in `restore.failure`), then `master repair GY-N REASON` requests the restore again.
+Listed under `branches.contaminated`; run `master repair GY-42 REASON`. An unpublished restore is retried once; an escalated one repeats no more — fix what GitHub refuses (named in `restore.failure`), then `master repair GY-N REASON` requests the restore again.
 
 A worker restores its own: `git reset --hard REVIEWED_HEAD`, `graphyard sync GY-N`, then `graphyard restore-branch GY-N EPOCH`.
 
