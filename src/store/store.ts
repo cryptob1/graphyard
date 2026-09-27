@@ -142,9 +142,6 @@ export class Store {
     } catch (error) {
       // An abandoned migration's connection is still busy: it is destroyed below, which rolls it back.
       if (aborted) throw aborted;
-      // The cancel can fail the lock wait before the watchdog's own pg_cancel_backend reply marks it
-      // cancelled: settle the watchdog first, or a 57014 it caused reads as an unexplained failure.
-      watching = false; clearTimeout(poll); await polling;
       await db.query('ROLLBACK').catch(() => {});
       // 55P03: a lock wait hit the time left; 57014 after the watchdog fired: it cancelled a lock wait past the deadline.
       const code = (error as { code?: string }).code;
