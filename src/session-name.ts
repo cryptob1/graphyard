@@ -64,13 +64,65 @@ export function nameForLaunch(retry: string, build: () => string) {
  * work key and decision id are.
  */
 export function sessionName(...parts: readonly string[]) {
-  const slug = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
-  const joined = parts.map(slug).filter(Boolean).join('-');
-  const full = /^[a-z]/.test(joined) ? joined : `gy-${joined}`;
+  const full = unshortenedName(parts);
   if (full.length <= sessionNameLimit) return assertSessionName(full);
   const digest = createHash('sha256').update(parts.join('\u0000')).digest('hex').slice(0, sessionNameDigestLength);
-  return assertSessionName(`${full.slice(0, sessionNameLimit - sessionNameDigestLength - 1).replace(/-+$/, '')}-${digest}`);
+  return assertSessionName(`${shortenedHead(full)}-${digest}`);
 }
+/** The parts joined and slugified, before the limit is applied. */
+function unshortenedName(parts: readonly string[]) {
+  const slug = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  const joined = parts.map(slug).filter(Boolean).join('-');
+  return /^[a-z]/.test(joined) ? joined : `gy-${joined}`;
+}
+/** What a name the limit shortens keeps of the whole, ahead of its digest. */
+const shortenedHead = (full: string) => full.slice(0, sessionNameLimit - sessionNameDigestLength - 1).replace(/-+$/, '');
+/**
+ * Whether `name` is one `distinctSessionName([prefix], subject, id)` builds for some hexadecimal id
+ * — a decision's UUID. The tail is checked, not just the head: a configured session that merely
+ * starts with the head, `graphyard-approver-gy-5-worker`, is not one (its tail is not an id
+ * fragment). A subject too long to leave room for a fragment builds the digested fallback, which
+ * starts with as much of the prefix and subject as the limit keeps; that shortened head is all a
+ * name without its id can be recognised by, so two subjects that agree on it both claim the name.
+ */
+function isDistinctSessionName(prefix: string, subject: string, name: string) {
+  const head = sessionName(prefix, subject);
+  const room = Math.min(sessionNameLimit - head.length - 1, sessionNameDistinguisherLimit);
+  if (room >= sessionNameDistinguisher) {
+    const tail = name.startsWith(`${head}-`) ? name.slice(head.length + 1) : '';
+    return tail.length >= sessionNameDistinguisher && tail.length <= room && /^[0-9a-f]+$/.test(tail);
+  }
+  const shortened = shortenedHead(unshortenedName([prefix, subject]));
+  return name.length === shortened.length + 1 + sessionNameDigestLength && name.startsWith(`${shortened}-`) && /^[0-9a-f]+$/.test(name.slice(shortened.length + 1));
+}
+
+// ---- Approver session names ------------------------------------------------------------------
+/*
+ * One session name per decision, not per item. An item takes several decisions in its life — rework
+ * after a verdict, rework after a base conflict, a merge approval — and an approver stops when it
+ * has judged, leaving its tab listed. Named per item, that finished tab refused the launch of the
+ * next decision's approver until somebody closed it by hand.
+ *
+ * Per decision and inside the runtime's limit, both (GY-101): the fixed prefix and an eight-
+ * character decision fragment left four characters for the key, so every key from GY-10 up built a
+ * 33-character name no runtime would take and no approver could be launched at all. The key is
+ * kept whole now and the decision id takes what the limit leaves.
+ *
+ * Two decisions whose fragments match are one session: the second launch is refused as already
+ * visible, or adopted as the first decision's approver. So the full role word is kept only while it
+ * leaves at least `approverDistinguisher` characters of the decision id (one collision in ~16
+ * million per pair, against one in 65,536 at the four the generic floor accepts); past that the
+ * role word gives way to `gy-approver`, which affords the full eight for any key up to GY-12345678.
+ */
+export const approverDistinguisher = 6;
+const approverPrefix = (key: string) => sessionNameLimit - sessionName('graphyard-approver', key).length - 1 >= approverDistinguisher ? 'graphyard-approver' : 'gy-approver';
+export const approverSessionName = (work: { key: string }, decision: string) => distinctSessionName([approverPrefix(work.key)], work.key, decision);
+/**
+ * Whether `name` is an approver session `approverSessionName` builds for `key` and some decision:
+ * how a session nothing recorded — launched by hand, or its watch retired — is known by its name,
+ * judged by the same rule the launcher names it with (GY-441).
+ */
+export const isApproverSessionName = (key: string, name: string) => isDistinctSessionName(approverPrefix(key), key, name);
 /** The Herdr name of a configured profile's session, refused here rather than at its launch. */
 export const sessionNameField = z.string().trim().min(1).max(100).superRefine((name, context) => {
   const refusal = sessionNameRefusal(name);

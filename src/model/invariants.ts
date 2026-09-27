@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { mergeableNow } from '../merge-queue.js';
-import { sessionName } from '../session-name.js';
+import { isApproverSessionName } from '../session-name.js';
 import { isClosed } from './closure.js';
 import { standingEscalations } from './escalation.js';
 import type { FaultClass, FaultKind, FaultObservation } from './fault-classes.js';
@@ -106,13 +106,6 @@ export function followUpParent(work: Pick<Work, 'criteria' | 'dependencies' | 't
 /** Filed by the product rather than a person: a follow-up of an approval, a recurring fault class, or an intervention pattern. */
 export const machineFiled = (work: Pick<Work, 'criteria' | 'dependencies' | 'title' | 'origin'>) => followUpParent(work) !== null || !!work.origin?.faultClass || !!work.origin?.pattern;
 
-/**
- * The names every approver session for `key` can begin with (master/autonomy.ts
- * `approverSessionName` builds one as a role word kept whole, then the key, then the decision's
- * id): recognising an approver by these heads keeps the naming rule here in step with the
- * launcher instead of a second copy of it, so an item key in any format is matched.
- */
-const approverNameHeads = (key: string) => ['graphyard-approver', 'gy-approver'].map(prefix => `${sessionName(prefix, key)}-`);
 const open = (work: Work) => work.stage !== 'done' && !isClosed(work);
 const time = (value: string | null | undefined) => { const parsed = value ? Date.parse(value) : Number.NaN; return Number.isFinite(parsed) ? parsed : null; };
 const minutes = (ms: number) => `${Math.round(ms / 60_000)} min`;
@@ -158,12 +151,15 @@ export function checkInvariants(record: InvariantRecord, input: InvariantInput):
       if (settled !== null && now - settled > bound && listed(watch.agentName, watch.pane)) { lingering.push({ subject: watch.work, detail: `approver session ${watch.agentName ?? watch.pane} on ${watch.work}, ${minutes(now - settled)} after its decision settled` }); if (watch.agentName) named.add(watch.agentName); }
     }
     // An approver the loop no longer watches — launched by hand (`master approver`, GY-403), or its watch retired — is
-    // known by its name, which the launcher built from the item's key (master/autonomy.ts `approverSessionName`).
-    const approverHeads = work.map(item => ({ item, heads: approverNameHeads(item.key) }));
+    // known by its name, judged by the rule the launcher names it with (session-name.ts `isApproverSessionName`). A
+    // name shortened past its key can be claimed by more than one item; it lingers only once every claimant is settled.
     for (const agent of input.agents) {
-      const item = approverHeads.find(({ heads }) => heads.some(head => (agent.name ?? '').startsWith(head)))?.item;
-      const settled = item?.stage === 'done' ? time(item.delivery?.mergedAt) ?? time(item.closure?.at) : null;
-      if (item && settled !== null && now - settled > bound && !named.has(agent.name!)) lingering.push({ subject: item.key, detail: `approver session ${agent.name} on ${item.key}, ${minutes(now - settled)} after it was delivered` });
+      if (!agent.name || named.has(agent.name)) continue;
+      const items = work.filter(item => isApproverSessionName(item.key, agent.name!));
+      const settled = items.map(item => item.stage === 'done' ? time(item.delivery?.mergedAt) ?? time(item.closure?.at) : null);
+      if (!items.length || settled.some(at => at === null || now - at <= bound)) continue;
+      const latest = Math.max(...(settled as number[]));
+      lingering.push({ subject: items[0].key, detail: `approver session ${agent.name} on ${items.map(item => item.key).join(' or ')}, ${minutes(now - latest)} after it was delivered` });
     }
     judge('lingering-sessions', `no session open ${limits.sessionAfterSettleMinutes} min after its item is delivered or its decision settled`,
       lingering.length ? `${lingering.length} session(s) still open, e.g. ${lingering[0].detail}` : 'no session outlived its item or decision', !lingering.length, lingering.map(entry => entry.subject));

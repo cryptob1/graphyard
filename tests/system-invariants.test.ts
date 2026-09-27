@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import type { Work } from '../src/model.js';
-import { masterConfigSchema, type MasterConfig } from '../src/master.js';
+import { approverSessionName, masterConfigSchema, type MasterConfig } from '../src/master.js';
+import { isApproverSessionName } from '../src/session-name.js';
 import { daemonSummary, emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { candidateKey } from '../src/daemon/reconcile.js';
 import { checkInvariants, emptyInvariantRecord, followUpProof, invariantDefaults, invariantFaultClass, invariantFaultKind, invariantFaults, systemInvariants, type InvariantInput, type SystemInvariant } from '../src/model/invariants.js';
@@ -128,6 +129,25 @@ test('unit:system-invariants-checked — each invariant driven over its threshol
   assert.equal(verdict(byName, 'lingering-sessions').holds, false);
   assert.match(verdict(byName, 'lingering-sessions').reading, /approver session graphyard-approver-gy-5-0a1b2c3d on GY-5, 41 min after it was delivered/);
   assert.deepEqual(verdict(byName, 'lingering-sessions').subjects, ['GY-5'], 'an approver for an item not delivered is not lingering');
+  // GY-441: the name is judged by the launcher's own rule, tail included. A configured session that merely begins
+  // like an approver is not one, and an approver whose key is too long for a decision fragment — named by the
+  // shortened, digested fallback — is still recognised.
+  const decision = '4cb51514-4cb5-4f21-9b0e-0f2a6c8d4e15';
+  const lookalike = checkInvariants(emptyInvariantRecord(), { work: [delivered('GY-5', 41 * minute)], now: clock, agents: [{ name: 'graphyard-approver-gy-5-worker' }, { name: 'graphyard-approver-gy-5-0a1b2c3d-x' }] });
+  assert.equal(verdict(lookalike, 'lingering-sessions').holds, true, 'a session named like an approver, but with no decision fragment, is not one');
+  for (const key of ['GY-1', 'GY-999', 'GY-1000', 'GY-12345678', 'ACME_ops.42', `GY-${'9'.repeat(13)}`, `GY-${'9'.repeat(37)}`]) {
+    const name = approverSessionName({ key }, decision);
+    assert.equal(isApproverSessionName(key, name), true, `${key}: ${name} is recognised as its approver`);
+    assert.equal(isApproverSessionName(`${key}7`, name), key.length > 12, `${key}: ${name} is claimed by ${key}7 only when both are shortened alike`);
+    const long = checkInvariants(emptyInvariantRecord(), { work: [delivered(key, 41 * minute)], now: clock, agents: [{ name }] });
+    assert.equal(verdict(long, 'lingering-sessions').holds, false, `${key}: its lingering approver ${name} is named`);
+  }
+  // A shortened name two items both claim lingers only once neither can still be judging.
+  const [shared, sibling] = [`GY-${'9'.repeat(13)}`, `GY-${'9'.repeat(12)}8`];
+  const claimed = approverSessionName({ key: shared }, decision);
+  assert.equal(isApproverSessionName(sibling, claimed), true);
+  assert.equal(verdict(checkInvariants(emptyInvariantRecord(), { work: [delivered(shared, 41 * minute), item(sibling)], now: clock, agents: [{ name: claimed }] }), 'lingering-sessions').holds, true, 'the other claimant is still open');
+  assert.match(verdict(checkInvariants(emptyInvariantRecord(), { work: [delivered(shared, 41 * minute), delivered(sibling, 45 * minute)], now: clock, agents: [{ name: claimed }] }), 'lingering-sessions').reading, new RegExp(`approver session ${claimed} on ${shared} or ${sibling}, 41 min after`));
   // A head change of the candidate's own starts the refresh count over.
   const churn = emptyInvariantRecord();
   for (const n of [0, 1, 2, 3]) checkInvariants(churn, { work: [refreshed('GY-8', n)], now: clock + n * minute });

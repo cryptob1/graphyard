@@ -5,7 +5,7 @@ import { readFile, mkdir, lstat } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { z } from 'zod';
 import { type ChildRun, type ChildRunOptions, defaultChildRun } from '../child-runner.js';
-import { distinctSessionName, sessionNameLimit, sessionName, nameForLaunch } from '../session-name.js';
+import { approverSessionName, distinctSessionName, nameForLaunch } from '../session-name.js';
 import { localDirectory } from '../onboarding.js';
 import { broadScopeRefusals } from '../coordination.js';
 import { writeHarnessPermissions } from '../harness.js';
@@ -188,27 +188,8 @@ export async function restartMasterLoop(root: string, config: MasterConfig, lock
  * Launch the independent approver session for one decision: its own Herdr tab, its own
  * credential by path, the approver marker, and a prompt to judge — never to implement.
  */
-/**
- * One session name per decision, not per item. An item takes several decisions in its life — rework
- * after a verdict, rework after a base conflict, a merge approval — and an approver stops when it
- * has judged, leaving its tab listed. Named per item, that finished tab refused the launch of the
- * next decision's approver until somebody closed it by hand.
- *
- * Per decision and inside the runtime's limit, both (GY-101): the fixed prefix and an eight-
- * character decision fragment left four characters for the key, so every key from GY-10 up built a
- * 33-character name no runtime would take and no approver could be launched at all. The key is
- * kept whole now and the decision id takes what the limit leaves.
- */
-/**
- * Two decisions whose fragments match are one session: the second launch is refused as already
- * visible, or adopted as the first decision's approver. So the full role word is kept only while it
- * leaves at least `approverDistinguisher` characters of the decision id (one collision in ~16
- * million per pair, against one in 65,536 at the four the generic floor accepts); past that the
- * role word gives way to `gy-approver`, which affords the full eight for any key up to GY-12345678.
- */
-export const approverDistinguisher = 6;
-export const approverSessionName = (work: Pick<Work, 'key'>, decision: string) =>
-  distinctSessionName(sessionNameLimit - sessionName('graphyard-approver', work.key).length - 1 >= approverDistinguisher ? ['graphyard-approver'] : ['gy-approver'], work.key, decision);
+/** One session name per decision, inside the runtime's limit: the rule lives with the other names (session-name.ts). */
+export { approverDistinguisher, approverSessionName } from '../session-name.js';
 /**
  * The names an approver's and an escalation handler's exhaustion is held under when the session
  * ran on no named account: the runtime's own login, which every launch of the role shares.
