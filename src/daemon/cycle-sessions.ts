@@ -393,11 +393,11 @@ export async function closeStep(cycle: Cycle) {
 }
 
 /** A worker's implementation handle, written by the loop: the one record `master status` and the item's history show of it. */
-function workerHandle(cycle: Cycle, item: Work, profile: WorkerProfile, epoch: number, pane: string, outcome: string, finished: boolean) {
+function workerHandle(cycle: Cycle, item: Work, profile: WorkerProfile, epoch: number, pane: string | null, outcome: string, finished: boolean) {
   const { config, effects } = cycle;
   return effects.recordSession?.(item, { id: `${profile.principal}:${epoch}`, kind: 'implementation', principal: profile.principal, runtime: profile.kind ?? profile.mode, host: config.hostId,
     ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}),
-    pane, attach: `herdr pane attach ${pane}${config.herdrWorkspace ? ` --workspace ${config.herdrWorkspace}` : ''}`,
+    ...(pane ? { pane, attach: `herdr pane attach ${pane}${config.herdrWorkspace ? ` --workspace ${config.herdrWorkspace}` : ''}` } : {}),
     subject: `${item.key}: ${item.title}`.slice(0, 300), state: finished ? 'finished' : 'running', outcome: outcome.slice(0, 500) }).catch(() => {}) ?? Promise.resolve();
 }
 
@@ -407,7 +407,7 @@ function workerHandle(cycle: Cycle, item: Work, profile: WorkerProfile, epoch: n
  * (which ends the lease, so the dispatch step claims the item again next cycle and the next
  * attempt's request names that commit), its supervisor is stopped and its pane closed.
  */
-async function endWorkerAttempt(cycle: Cycle, item: Work, profile: WorkerProfile, epoch: number, pane: string, reason: string, observed: string) {
+async function endWorkerAttempt(cycle: Cycle, item: Work, profile: WorkerProfile, epoch: number, pane: string | null, reason: string, observed: string) {
   const { state, effects, now, performed } = cycle;
   const preserved = await preserveInterruptedAttempt(state, effects, item, epoch, profile, observed, now, performed);
   if (preserved && preserved.state !== 'done') throw new Error(`its attempt could not be ended on the record: ${preserved.detail}`);
@@ -416,9 +416,9 @@ async function endWorkerAttempt(cycle: Cycle, item: Work, profile: WorkerProfile
   try {
     if (scope && effects.stopSupervisor) { await effects.stopSupervisor({ id: item.id, key: item.key, epoch, owner: profile.principal, profile: profile.name, agentName: profile.agentName, scope, leaseExpiresAt: item.lease!.expiresAt }, 'SIGTERM'); stop = `its supervisor (pid ${scope.pid}) was stopped through ${scope.unit}`; }
   } catch (error) { stop = `its supervisor could not be signalled (${message(error)}) and stops on the ended lease`; }
-  await effects.closeSession(pane);
+  if (pane) await effects.closeSession(pane);
   await workerHandle(cycle, item, profile, epoch, pane, `closed as failed: ${reason}`, true);
-  return `the attempt ended on the record, ${stop}, pane ${pane} was closed, and ${item.key} is dispatched again`;
+  return `the attempt ended on the record, ${stop}${pane ? `, pane ${pane} was closed,` : ''} and ${item.key} is dispatched again`;
 }
 
 /** How long a worker holding a live lease may show no activity before it is re-prompted, and again after that before its item goes to a new attempt (GY-524). */
@@ -516,6 +516,8 @@ async function resumeStep(cycle: Cycle, failedOver: Set<string>) {
         await drop(keys.blocker, keys.scope);
         return;
       }
+      // Ensure the agent found by name still holds this pane (AC-1: re-prompts must route by pane, not agent name).
+      if (agent?.pane_id !== pane) return;
       if (status === 'working') { await entry(promptKey, 'done', `${item.key} epoch ${epoch}: ${changed}; ${profile.agentName} is already active, so it is not re-prompted`); await drop(keys.blocker, keys.scope); return; }
       if (!effects.promptSession || !readyToRetry(previous, state.cycle)) return;
       const attempts = (previous?.attempts ?? 0) + 1;
@@ -543,12 +545,14 @@ async function resumeStep(cycle: Cycle, failedOver: Set<string>) {
       const paneReason = checkPaneStillBelongs(item, epoch, pane);
       if (paneReason) {
         // The pane is gone or belongs to another item: end the attempt as idle and redispatch.
+        // Do not close the pane if it belongs to another item; only close our own pane if any (GY-852, AC-2).
         const reclaimKey = `resume:reclaim:${item.id}:${epoch}`, reclaimPrevious = state.actions[reclaimKey];
         if (reclaimPrevious?.state === 'done' || (reclaimPrevious && !readyToRetry(reclaimPrevious, state.cycle))) return;
         const reason = `idle with a live lease: pane ${pane} is gone since ${idle.at}; cannot re-prompt (${paneReason})`, attempts = (reclaimPrevious?.attempts ?? 0) + 1;
         await entry(reclaimKey, 'started', `${profile.agentName} on ${item.key} epoch ${epoch} is ${reason}; handing ${item.key} to a new attempt`, attempts);
         try {
-          const next = await endWorkerAttempt(cycle, item, profile, epoch, pane, reason, `ended without submitting: its session ${profile.agentName} was ${reason}`);
+          // Pass null for pane since it doesn't belong to this item; endWorkerAttempt will not close it.
+          const next = await endWorkerAttempt(cycle, item, profile, epoch, null, reason, `ended without submitting: its session ${profile.agentName} was ${reason}`);
           performed.push(await entry(reclaimKey, 'done', `${profile.agentName} on ${item.key} epoch ${epoch} was ${reason}; ${next}, keeping the attempt's branch`, attempts));
           await drop(keys.idle);
         } catch (error) {
