@@ -119,6 +119,7 @@ export async function retryLockFailures(
       if (!transient(error) || !retryable()) throw error;
       await rollback();
       await backoff(attempt);
+      if (!retryable()) throw error;
     }
   }
 }
@@ -198,11 +199,10 @@ export async function runStartupMigration(pool: Pool, options: { lockTimeoutMs?:
     const arm = () => {
       const attempt = ++armed;
       attemptDeadline = Math.min(deadline, Date.now() + attemptTimeout);
+      cancelledWaiting = false;
       poll = setTimeout(() => { polling = watch(pid, attempt); }, Math.max(0, attemptDeadline - Date.now()));
     };
     const disarm = async () => { armed++; clearTimeout(poll); await polling.catch(() => {}); };
-    const unchangedPrelude = recorded?.prelude === digests.prelude;
-    const unchangedTable = (name: string) => recorded?.tables?.[name] === digests.tables[name];
     // A failed attempt is judged once the watchdog's cancel, if one is in flight, has recorded what it did.
     const migrate = () => migrateOnce().catch(async error => { await polling.catch(() => {}); throw error; });
     const migrateOnce = async () => {
@@ -211,6 +211,12 @@ export async function runStartupMigration(pool: Pool, options: { lockTimeoutMs?:
       await db.query('BEGIN'); await db.query('SET LOCAL statement_timeout = 0');
       // The migration's own lock, never the coordination lock (GY-203): two migrations serialize beside live coordination.
       await step(waitingOn, 'SELECT pg_advisory_xact_lock($1)', [advisoryLocks.migration]);
+      if (Date.now() >= deadline) throw new Error(`Schema migration to generation ${schemaVersion} exceeded its ${timeout} ms deadline after acquiring the migration advisory lock, while waiting for ${waitingOn}; startup fails instead of outlasting the health check — retry the deploy when traffic decreases`, { cause: undefined });
+      const { rows: schemaRows } = await step('a lock on table graphyard_schema', 'SELECT COALESCE(MAX(version),0) AS version, obj_description(to_regclass(\'graphyard_schema\'),\'pg_class\') AS digest FROM graphyard_schema');
+      const recordedInTxn = { version: Number(schemaRows[0].version), ...recordedMigrationDigests(schemaRows[0].digest) };
+      const unchangedPrelude = recordedInTxn?.prelude === digests.prelude;
+      const unchangedTable = (name: string) => recordedInTxn?.tables?.[name] === digests.tables[name];
+      if (recordedInTxn.version > schemaVersion) throw newerSchema(recordedInTxn.version);
       if (!unchangedPrelude) await step('a lock on the migration\'s shared function graphyard_immutable', migrationPrelude);
       for (const { name, ddl } of tables) {
         if (unchangedTable(name)) continue;
