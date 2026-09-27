@@ -1,7 +1,7 @@
 <!-- page: Build integrations | 6 | E2E passes. -->
 # Evidence reuse and replay
 
-Reuse lets the newest compatible E2E pass stand for a new head.
+Reuse lets the newest compatible E2E pass stand for a new head under an operator policy.
 
 ## Reuse policy
 

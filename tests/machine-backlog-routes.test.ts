@@ -143,3 +143,31 @@ test('unit:machine-backlog-triaged — a triage release applies at once with its
   assert.equal(closed.triage?.state, 'applied');
   assert.equal(closed.triage?.decision, decision.id);
 });
+
+test('unit:triage-merge-atomic — a triage merge whose closure fails appends nothing to its target; once it can close, the findings and the closure land together (GY-513)', async () => {
+  const parentD = await ok(operator, 'work', { title: 'Parent D', plannedFiles: ['src/g.ts'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:d'] }] }) as Work;
+  const parentE = await ok(operator, 'work', { title: 'Parent E', plannedFiles: ['src/h.ts'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:e'] }] }) as Work;
+  const target = await followUp(parentD, 51, ['src/g.ts — the target finding']);
+  const source = await followUp(parentE, 52, ['src/h.ts — the merged finding']);
+  const proposed = await ok(coordinator, `work/${source.key}/triage`, { judgement: { outcome: 'merge', into: target.key, reason: 'The target covers it' } }) as Work;
+  const input = { kind: 'duplicate', ref: target.key, reason: `Merged into ${target.key}`, triageAt: proposed.triage!.at };
+  // A live worker lease refuses the closure after the approval: nothing of the merge may land.
+  const leased = { ...(await reload(source.key)), lease: { owner: worker.id, epoch: 1, expiresAt: new Date(Date.now() + 3_600_000).toISOString() } };
+  await store.pool.query('UPDATE work_items SET document=$2 WHERE id=$1', [source.id, JSON.stringify(leased)]);
+  const refusedDecision = await ok(operator, `work/${source.key}/decide`, { action: 'close', input, reason: 'triage judged it a duplicate' });
+  const failed = await ok(approver, `work/${source.key}/approve`, { decision: refusedDecision.id, reason: 'It is a duplicate' });
+  assert.equal(failed.state, 'failed', JSON.stringify(failed));
+  assert.equal(followUpEntries(await reload(target.key)).length, 1, 'the target holds no finding of an item that stayed open');
+  assert.equal(isClosed(await reload(source.key)), false);
+  // Without the lease the merge applies: the finding appended once, the item closed as its duplicate.
+  await store.pool.query('UPDATE work_items SET document=$2 WHERE id=$1', [source.id, JSON.stringify({ ...(await reload(source.key)), lease: null })]);
+  const decision = await ok(operator, `work/${source.key}/decide`, { action: 'close', input, reason: 'triage judged it a duplicate again' });
+  const approved = await ok(approver, `work/${source.key}/approve`, { decision: decision.id, reason: 'It is a duplicate' });
+  assert.equal(approved.state, 'applied', JSON.stringify(approved));
+  const merged = await reload(target.key);
+  assert.deepEqual(followUpEntries(merged).map(entry => entry.path), ['src/g.ts', 'src/h.ts']);
+  const closed = await reload(source.key);
+  assert.equal(closed.closure?.kind, 'duplicate');
+  assert.equal(closed.closure?.ref, target.key);
+  assert.equal(closed.triage?.state, 'applied');
+});

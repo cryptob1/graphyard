@@ -34,17 +34,39 @@ const triageTimeoutMs = (settings: Pick<ResearchSettings, 'timeoutMinutes'>) => 
 
 const clip = (text: string, limit: number) => text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
 
+/** How many open items the triage prompt lists as merge targets. */
+const openLimit = 60;
+const titleWords = (text: string) => new Set(text.toLowerCase().match(/[a-z0-9-]{4,}/g) ?? []);
+/**
+ * The open items a merge may target, most related first (GY-513): a follow-up item of the same
+ * parent, then an item the item's text names by key, then by how many title words it shares, then
+ * the most recently updated. On a large board the prompt lists only the head, so the likely target
+ * is never cut by board order.
+ */
+export function openCandidates(work: Work, all: readonly Work[]) {
+  const parent = followUpParent(work), text = `${work.title} ${work.description ?? ''}`, words = titleWords(work.title);
+  const rank = (item: Work) => [
+    parent && followUpParent(item) === parent ? 1 : 0,
+    new RegExp(`\\b${item.key}\\b`).test(text) ? 1 : 0,
+    [...titleWords(item.title)].filter(word => words.has(word)).length,
+  ];
+  return all.filter(item => item.stage !== 'done' && item.id !== work.id)
+    .map(item => ({ item, rank: rank(item) }))
+    .sort((a, b) => b.rank[0] - a.rank[0] || b.rank[1] - a.rank[1] || b.rank[2] - a.rank[2] || b.item.updatedAt.localeCompare(a.item.updatedAt))
+    .map(entry => entry.item);
+}
+
 /** The triage session's request: the item, the open and recently delivered items it may name, and the three outcomes. */
 export function triagePrompt(config: { repository: string }, work: Work, all: readonly Work[]) {
   const kind = machineKind(work) === 'review-follow-up' ? `review follow-ups of ${followUpParent(work)}` : 'a recurring fault class';
   const delivered = all.filter(item => isDelivered(item)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 40);
-  const open = all.filter(item => item.stage !== 'done' && item.id !== work.id).slice(0, 60);
+  const candidates = openCandidates(work, all), open = candidates.slice(0, openLimit);
   const findings = followUpParent(work) ? followUpEntries(work).slice(0, 60).map((entry, index) => `${index + 1}. ${entry.path ? `${entry.path}: ` : ''}${clip(entry.text, 400)}`).join(' ') : '';
   return `You are the Graphyard triage agent for ${config.repository}. The master loop filed ${work.key} (${work.type}, priority ${work.priority}) on its own, for ${kind}: ${work.title}. Nobody has judged it yet, and until someone does it sits unreleased in the backlog beside the operator's own items. `
     + `Its description: ${clip(work.description ?? '', 6000)} `
     + (findings ? `Its findings: ${findings} ` : '')
     + `Recently delivered items: ${delivered.map(item => `${item.key} ${clip(item.title, 120)}`).join('; ') || 'none'}. `
-    + `Other open items: ${open.map(item => `${item.key} [${item.stage}] ${clip(item.title, 120)}`).join('; ') || 'none'}. `
+    + `Other open items${candidates.length > open.length ? ` (the ${open.length} most related of ${candidates.length})` : ''}: ${open.map(item => `${item.key} [${item.stage}] ${clip(item.title, 120)}`).join('; ') || 'none'}. `
     + 'Read this checkout (the base branch) where it helps, and judge the item. Choose exactly one: release it with a priority from 0 (most urgent) to 4, when it names real work still worth doing; close it with a reason, naming as ref the delivered item that already fixed it, or with no ref when it is not worth doing; or merge it into another open item that already covers it, naming that item as into. '
     + 'A closure or merge is applied only after an independent approver agrees, so state the evidence it can check. This session is read-only and nobody reads it: do not edit, commit, push, claim work or ask anyone anything. '
     + `Then call the ${triageTool} tool exactly once with outcome, priority, ref or into as the outcome needs, and reason, and stop.`;

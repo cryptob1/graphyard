@@ -1,9 +1,9 @@
 import type pg from 'pg';
 import { demand, operatorCapability, type Principal, type Work } from '../model.js';
-import { isDelivered } from '../model/closure.js';
+import { closeSchema, isDelivered } from '../model/closure.js';
 import { appendedDescription, followUpAppendSchema, followUpEntries, followUpParent, mergeDuplicateFollowUps, mergeFollowUpEntries, triageRecordSchema, untriaged, type FollowUpEntry } from '../model/machine-backlog.js';
 import { save } from '../store.js';
-import { closeWork, settleOpenRequests } from './close.js';
+import { closeWorkIn, closureAncestry, settleOpenRequests } from './close.js';
 import { authenticated, digest, receipt } from './decisions.js';
 import type { Services } from './routes.js';
 
@@ -34,23 +34,27 @@ export async function appendFollowUps(services: Services, caller: Principal, id:
   return services.engine.store.transaction(async (db, now) => {
     const actor = await authenticated(services, db, now, caller);
     const replay = await receipt(db, actor, key, fingerprint); if (replay) return replay as unknown as { key: string; added: number };
-    const all = await readAll(db);
-    const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
-    masterOnly(actor, work, services, 'append review follow-ups');
-    const parent = followUpParent(work!);
-    demand(parent && work!.stage !== 'done', `${work!.key} is not an open follow-up item`, 409);
-    const { findings, added } = mergeFollowUpEntries(followUpEntries(work!), data.findings as FollowUpEntry[]);
-    if (added.length) {
-      work!.origin = { ...work!.origin, reviewFollowUps: { parent: parent!, findings } };
-      work!.description = appendedDescription(work!.description ?? '', added, `Added by a later approval of ${parent} (${data.reason.slice(0, 300)}):`);
-      services.engine.evaluate(work!, all, now);
-      await recordDispatch(services, db, work!, now);
-      await save(db, work!, actor.id, 'followups.appended', now, { parent, added: added.length, offered: data.findings.length, reason: data.reason });
-    }
-    const result = { key: work!.key, added: added.length, findings: findings.length };
+    const result = await appendFollowUpsIn(services, db, now, actor, id, data);
     await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
     return result;
   });
+}
+
+async function appendFollowUpsIn(services: Services, db: Db, now: Date, actor: Principal, id: string, data: ReturnType<typeof followUpAppendSchema.parse>) {
+  const all = await readAll(db);
+  const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
+  masterOnly(actor, work, services, 'append review follow-ups');
+  const parent = followUpParent(work!);
+  demand(parent && work!.stage !== 'done', `${work!.key} is not an open follow-up item`, 409);
+  const { findings, added } = mergeFollowUpEntries(followUpEntries(work!), data.findings as FollowUpEntry[]);
+  if (added.length) {
+    work!.origin = { ...work!.origin, reviewFollowUps: { parent: parent!, findings } };
+    work!.description = appendedDescription(work!.description ?? '', added, `Added by a later approval of ${parent} (${data.reason.slice(0, 300)}):`);
+    services.engine.evaluate(work!, all, now);
+    await recordDispatch(services, db, work!, now);
+    await save(db, work!, actor.id, 'followups.appended', now, { parent, added: added.length, offered: data.findings.length, reason: data.reason });
+  }
+  return { key: work!.key, added: added.length, findings: findings.length };
 }
 
 /** The ledger kind of the one-time follow-up migration; its presence is what makes a second run a no-op. */
@@ -127,24 +131,33 @@ export async function recordTriage(services: Services, caller: Principal, id: st
 
 /**
  * Apply an approved triage closure: a merge first appends the item's findings to the follow-up item
- * it merges into, then the item is closed (`closeWork`) with the triage record marked applied.
+ * it merges into, then the item is closed with the triage record marked applied. All three commit in
+ * one transaction (GY-513), so a failure never leaves the target holding the findings while the item
+ * it merged stays open.
  */
-export async function applyTriageClosure(services: Services, actor: Principal, workId: string, input: { kind: 'superseded' | 'obsolete' | 'duplicate'; ref: string | null; reason: string; triageAt: string }, decision: string, key: string) {
-  const all = await services.engine.store.list();
-  const work = all.find(item => item.id === workId); demand(work, 'Work item not found', 404);
-  const target = input.kind === 'duplicate' && input.ref ? all.find(item => item.key === input.ref) : undefined;
-  if (target && followUpParent(target) && target.stage !== 'done') {
-    const findings = followUpParent(work!) ? followUpEntries(work!) : [{ path: null, text: `${work!.key}: ${work!.title}`.slice(0, 2000) }];
-    if (findings.length) await appendFollowUps(services, actor, target.id, { findings: findings.slice(0, 200), reason: `merged from ${work!.key} by triage`.slice(0, 2000) }, `${key}:merge`.slice(0, 200));
-  }
-  const closed = await closeWork(services, actor, workId, { kind: input.kind, reason: input.reason, ...(input.ref ? { ref: input.ref } : {}) }, key);
-  await services.engine.store.transaction(async (db, now) => {
-    const current = (await db.query('SELECT document FROM work_items WHERE id=$1 FOR UPDATE', [workId])).rows[0]?.document as Work | undefined;
-    if (!current?.triage || current.triage.at !== input.triageAt || current.triage.state === 'applied') return;
-    current.triage = { ...current.triage, state: 'applied', decision };
-    await save(db, current, actor.id, 'triage.applied', now, { decision, closure: current.closure ?? null });
+export async function applyTriageClosure(services: Services, caller: Principal, workId: string, input: { kind: 'superseded' | 'obsolete' | 'duplicate'; ref: string | null; reason: string; triageAt: string }, decision: string, key: string) {
+  const close = closeSchema.parse({ kind: input.kind, reason: input.reason, ...(input.ref ? { ref: input.ref } : {}) });
+  const fingerprint = digest({ id: workId, triageClosure: input, decision });
+  const ancestry = await closureAncestry(services, close);
+  return services.engine.store.transaction(async (db, now) => {
+    const actor = await authenticated(services, db, now, caller);
+    const replay = await receipt(db, actor, key, fingerprint); if (replay) return replay as unknown as string;
+    const all = await readAll(db);
+    const work = all.find(item => item.id === workId); demand(work, 'Work item not found', 404);
+    const target = input.kind === 'duplicate' && input.ref ? all.find(item => item.key === input.ref) : undefined;
+    if (target && followUpParent(target) && target.stage !== 'done') {
+      const findings = followUpParent(work!) ? followUpEntries(work!) : [{ path: null, text: `${work!.key}: ${work!.title}`.slice(0, 2000) }];
+      if (findings.length) await appendFollowUpsIn(services, db, now, actor, target.id, followUpAppendSchema.parse({ findings: findings.slice(0, 200), reason: `merged from ${work!.key} by triage`.slice(0, 2000) }));
+    }
+    const closed = await closeWorkIn(services, db, now, actor, workId, close, ancestry);
+    if (closed.triage && closed.triage.at === input.triageAt && closed.triage.state !== 'applied') {
+      closed.triage = { ...closed.triage, state: 'applied', decision };
+      await save(db, closed, actor.id, 'triage.applied', now, { decision, closure: closed.closure ?? null });
+    }
+    const result = `Closed ${closed.key} as ${input.kind}${input.ref ? ` of ${input.ref}` : ''}`;
+    await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
+    return result;
   });
-  return `Closed ${closed.key} as ${input.kind}${input.ref ? ` of ${input.ref}` : ''}`;
 }
 
 /** A refused triage closure returns the item to triage: the next judgement starts its clock from the refusal. */

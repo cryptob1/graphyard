@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Work } from '../src/model.js';
 import { backlogCounts, machineKind, overdueTriage, triageDeadlineMs, untriaged, type TriageJudgement } from '../src/model/machine-backlog.js';
-import { clearTriageRuns, triageSettled, triageStep, triageTool, untriagedAttention } from '../src/triage.js';
+import { clearTriageRuns, openCandidates, triagePrompt, triageSettled, triageStep, triageTool, untriagedAttention } from '../src/triage.js';
 import { researchSettings } from '../src/research.js';
 import { neededDecision, routineDecision } from '../src/daemon/decisions.js';
 import { decisionInputs, decisionPrecondition } from '../src/model/approval.js';
@@ -98,6 +98,18 @@ test('unit:machine-backlog-triaged — the triage step judges each machine-filed
   const merge = { ...stale, triage: { judgement: { outcome: 'merge', into: 'GY-401', reason: 'the same findings' }, state: 'proposed', by: 'master', at } } as Work;
   assert.deepEqual(neededDecision(merge, { autoMerge: true })?.input, { kind: 'duplicate', ref: 'GY-401', reason: 'Merged into GY-401 by triage: the same findings', triageAt: at });
   assert.equal(neededDecision(stale, { autoMerge: true }), null, 'an item awaiting triage needs a judgement, not a decision');
+});
+
+test('unit:triage-prompt-ranks-targets — the triage prompt lists the likeliest merge targets first, not the board order, and says how many it left out (GY-513)', () => {
+  const filler = Array.from({ length: 80 }, (_, index) => item(`GY-${1000 + index}`, `Unrelated work ${index}`, hours(100 - index), { stage: 'ready' }));
+  const sibling = item('GY-2001', 'Follow-ups from the approved review of GY-259 (PR #230)', hours(200), { stage: 'backlog', origin: { reviewFollowUps: { parent: 'GY-259', findings: [] } } });
+  const named = item('GY-2002', 'Bound the retry loop', hours(300), { stage: 'ready' });
+  const self = item('GY-2003', 'Follow-ups from the approved review of GY-259 (PR #231)', hours(1), { description: '1. Finding with no thread: src/a.ts — see GY-2002, the retry is unbounded', origin: { reviewFollowUps: { parent: 'GY-259', findings: [{ path: 'src/a.ts', text: 'src/a.ts — see GY-2002' }] } } });
+  const ranked = openCandidates(self, [...filler, sibling, named, self]);
+  assert.deepEqual(ranked.slice(0, 2).map(entry => entry.key), ['GY-2001', 'GY-2002'], 'the same parent\'s follow-up item, then the item its text names');
+  const prompt = triagePrompt({ repository: 'owner/repo' }, self, [...filler, sibling, named, self]);
+  assert.match(prompt, /Other open items \(the 60 most related of 82\): GY-2001 /);
+  assert.match(prompt, /GY-2002 \[ready\] Bound the retry loop/);
 });
 
 test('unit:triage-concurrency-setting — run.research.triageConcurrency sets how many machine-filed items are triaged at once, defaulting to two', async t => {
