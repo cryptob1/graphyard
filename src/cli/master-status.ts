@@ -1,4 +1,5 @@
 import { leaseHealthStatus } from './lease-health-attention.js';
+import { workerLaunchStatus } from '../master/dispatch.js';
 import { probeCandidateConflicts } from '../conflicts.js';
 import { mergeQueueStatus } from '../master/profiles.js';
 import { landingAttention, optimisticStatus } from '../master/optimistic-attention.js';
@@ -92,6 +93,8 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const dispatch = 'error' in dispatchCursor ? { running: false, failures: [] as { requestId: string; kind: string; attempts: number; reason: string; at: string; nextAt: string }[], error: dispatchCursor.error } : withStuckRequests(dispatchSummary(dispatchCursor, Date.now(), master.run.dispatchIntervalSeconds * 1000, master.run.awaitReviewers ?? defaultAwaitReviewers.logins), stuck.stuck);
   // A dispatcher failing its tick launches nothing; it is named before the requests it is not launching.
   const dispatchItems = dispatchFailureAttention(dispatch);
+  const workerLaunches = await timedStep('worker launches', () => workerLaunchStatus(root, master));
+  dispatchItems.push(...workerLaunches.items);
   const containment = await timedStep('containment', () => assessContainment(snapshot.work, { hostId: master.hostId, observedAt: snapshot.now, clockOffset }));
   // Disk is reported from the host, not from the cursor: the loop may be stopped, and the volume
   // filling is what stops it. The plan is `master reclaim`'s, over the inventory the loop's reclaim
@@ -124,6 +127,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     snapshot.work, master.workers, runtime, Date.parse(snapshot.now)));
   // A check failed on the clock says so, against its budget; a routed scope request, its approver.
   const status = routedScopeStatus(await timedStep('timing failures', () => qualifyTimingFailures(sessions, snapshot.work, master.repository, ghCheckAnnotations(master.repository))), snapshot.work, cycling?.approvals);
+  for (const worker of status.workers) Object.assign(worker, workerLaunches.rows[worker.profile] ?? {});
   // Rework rounds by cause (GY-643), out-of-item causes removed; a failed read marks the section.
   try { status.speed.reworkRounds = await reworkRoundsWithOwnCauses(status.speed.reworkRounds, masterApi, snapshot); }
   catch (error) { sections.mark('rework causes', 'GET /api/events?kind=rework', error); }

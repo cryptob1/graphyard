@@ -10,6 +10,7 @@ import { atomicPrivateWrite, awaitRuntimeStart, dispatchWork, loadMasterConfig, 
 import { applyRegistryMutation, chooseSession, emptyRegistry, proposedRuntimes, type AgentRegistry, type FleetSession } from '../src/model/registry.js';
 import type { FleetClient, FleetProbe } from '../src/fleet.js';
 import { expandTypedCommand } from './helpers/launch-shell.js';
+import { masterStatusReport } from '../src/cli/master-status.js';
 
 // GY-417: a runtime's start is judged from the runtime's own screen, and a launch whose preferred
 // account's runtime never starts is visible in the fallback it made. OpenCode 1.18's start screen
@@ -195,6 +196,17 @@ test('unit:start-failure-fallback-visible — a launch whose preferred account\'
     assert.ok(items[0].text.includes('command still echoing'), 'the item carries the last start refusal');
     assert.equal(items[0].role, 'master');
     assert.match(items[0].next, /master environments --apply/);
+
+    // Exercise the public report too: persisted launch data must reach master status,
+    // not merely remain available through the record-reading helpers.
+    const report = await masterStatusReport(root, { ...master, workers: [profile] },
+      async path => path === 'work-snapshot' ? { work: [], now: new Date().toISOString() } : { decisions: [] },
+      { actor: { id: 'coordinator-1' } }, { commit: null });
+    const worker = report.workers.find(worker => worker.profile === profile.name) as unknown as { runtime: string; account: string; fallback: string };
+    assert.equal(worker.runtime, 'claude');
+    assert.equal(worker.account, 'claude-b');
+    assert.match(worker.fallback, /opencode-a failed to start: .*; launched on claude-b/);
+    assert.equal(report.attentionItems.filter(item => item.subject === 'opencode-a never starts').length, 1);
 
     // A launch on the account that starts clears its run of failures, and the attention with it.
     const healthy = await dispatch(new Set(['opencode']));
