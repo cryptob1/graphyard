@@ -55,6 +55,10 @@ A reviewer or producer is `awaiting acknowledgement` until 30 s of activity (`co
 
 When a live attempt's blocker or scope request resolves, its inactive session is re-prompted once (item, epoch, change, `complete GY-N EPOCH PR`), recorded on its handle. **Idle-with-lease** (30 quiet minutes, nothing open) shows on its handle with the pane, re-prompted once, then after 30 more handed to a new attempt on its branch. Sessions with an agentless pane, or whose item left build, close with a reason.
 
+### Panes are closed and reclaimed
+
+Every launch records its pane on the item's session handle; when the loop ends that session — finished, failed, ended by the loop, or a lead it cannot keep — it closes the pane in the same step and records the close. Research and triage runs are headless and open no pane. A per-cycle sweep is the backstop: it closes agentless panes Graphyard launched (by recorded pane id) whose session has ended or whose worktree no longer exists, once they have stood agentless past the launch bound (**120 s**; a runtime that has not started yet looks the same), at most **6** per pass. It never touches a pane Graphyard did not launch, a pane with an agent in it, or a pane whose worktree holds a live lease. Each pass records the host's pane count, the agentless Graphyard panes and the oldest on the loop cursor (`master status` `daemon.actions`), and raises attention there once agentless panes exceed **20** (`daemon.escalations`).
+
 ### The dispatcher's own state
 
 - **The dispatcher bounds its own state where it composes it**, each cut marked with an ellipsis.
