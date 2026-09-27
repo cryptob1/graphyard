@@ -1,3 +1,4 @@
+import { optimisticMergeEvent } from '../../optimistic-merge.js';
 import { z } from 'zod';
 import { demand, type Work } from '../../model.js';
 import type { IntegrationJob } from '../../coordination.js';
@@ -68,7 +69,7 @@ export const statusRoutes = defineRoutes('status', [
         // that no longer cover the roster, what production serves against the base branch, and
         // the build/protocol the CLI checks before brokering a merge. Production names work
         // items across the repository, so a scoped operator agent does not see it.
-        delegationLimits: services.delegationLimits, build, production: actor.role === 'operator-agent' ? null : production?.status() ?? null, productionEnvironment, ciAppIds: engine.ciAppIds, mergeQueue: { batchSize: engine.mergeBatchSize, rerunFailedChecks: engine.rerunFailedChecks },
+        delegationLimits: services.delegationLimits, build, production: actor.role === 'operator-agent' ? null : production?.status() ?? null, productionEnvironment, ciAppIds: engine.ciAppIds, mergeQueue: { batchSize: engine.mergeBatchSize, optimistic: engine.optimisticMerge, rerunFailedChecks: engine.rerunFailedChecks },
         // The documentation policy this control plane stamps on new items, which doctor compares
         // with the checkout's committed graphyard.json (GY-293).
         documentation: engine.documentation,
@@ -120,7 +121,7 @@ export const statusRoutes = defineRoutes('status', [
     },
   },
   {
-    // The master loop publishes `mergeQueue.batchSize` from its own configuration (GY-330), which
+    // The master loop publishes `mergeQueue.batchSize` (GY-330) and `mergeQueue.optimistic` (GY-500) from its own configuration, which
     // lives only on the master's host: how many consecutive queue entries one combined tip
     // validates. Recorded once per change in the installation ledger and applied to every
     // evaluation from then on; a restarted server reads it back from there. `rerunFailedChecks`
@@ -130,14 +131,16 @@ export const statusRoutes = defineRoutes('status', [
       const { actor, services: { engine } } = context;
       demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
       const body = await parseJson(context, 4096, '{}');
-      const { batchSize, rerunFailedChecks } = body ?? {};
-      demand(batchSize !== undefined || rerunFailedChecks !== undefined, 'batchSize or rerunFailedChecks is required', 400);
+      const { batchSize, rerunFailedChecks, optimistic } = body ?? {};
+      demand(batchSize !== undefined || rerunFailedChecks !== undefined || optimistic !== undefined, 'batchSize, rerunFailedChecks or optimistic is required', 400);
       if (batchSize !== undefined) demand(Number.isSafeInteger(batchSize) && batchSize >= 1 && batchSize <= maxMergeBatchSize, `batchSize must be an integer from 1 to ${maxMergeBatchSize}`, 400);
       if (rerunFailedChecks !== undefined) demand(Number.isSafeInteger(rerunFailedChecks) && rerunFailedChecks >= 0 && rerunFailedChecks <= maxRerunFailedChecks, `rerunFailedChecks must be an integer from 0 to ${maxRerunFailedChecks}`, 400);
+      demand(optimistic === undefined || typeof optimistic === 'boolean', 'optimistic must be true or false', 400);
+      await engine.loadMergeBatchSize();
       let recorded = false;
       // Each value is applied only once the ledger holds it (GY-384): a failed INSERT leaves the
       // evaluation on the recorded value and the master unpublished, so its next cycle retries.
-      const record = async (kind: string, field: string, value: number, previous: number, apply: () => void) => {
+      const record = async (kind: string, field: string, value: number | boolean, previous: number | boolean, apply: () => void) => {
         const latest = (await engine.store.pool.query('SELECT 1 FROM events WHERE work_id IS NULL AND kind=$1 LIMIT 1', [kind])).rowCount;
         if (latest && previous === value) return apply();
         await engine.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, kind, JSON.stringify({ [field]: value, previous: latest ? previous : null })]);
@@ -146,7 +149,8 @@ export const statusRoutes = defineRoutes('status', [
       };
       if (batchSize !== undefined) await record(mergeBatchSizeEvent, 'batchSize', batchSize, await engine.loadMergeBatchSize(), () => { engine.mergeBatchSize = batchSize; });
       if (rerunFailedChecks !== undefined) await record(rerunFailedChecksEvent, 'rerunFailedChecks', rerunFailedChecks, await engine.loadRerunFailedChecks(), () => { engine.rerunFailedChecks = rerunFailedChecks; });
-      return { mergeQueue: { batchSize: engine.mergeBatchSize, rerunFailedChecks: engine.rerunFailedChecks }, recorded };
+      if (optimistic !== undefined) await record(optimisticMergeEvent, 'optimistic', optimistic, engine.optimisticMerge, () => { engine.optimisticMerge = optimistic; });
+      return { mergeQueue: { batchSize: engine.mergeBatchSize, optimistic: engine.optimisticMerge, rerunFailedChecks: engine.rerunFailedChecks }, recorded };
     },
   },
   {
