@@ -29,7 +29,7 @@ Tag `vX.Y.Z` publishes `ghcr.io/cryptob1/graphyard:X.Y.Z`. `/healthz` reports ve
 | `GRAPHYARD_GENERATED_FILES` | What `node scripts/check-docs.mjs --list` prints |
 | `GRAPHYARD_BUILD_SHA` | The image's source commit (Railway supplies `RAILWAY_GIT_COMMIT_SHA`) |
 | `GRAPHYARD_ARTIFACT_BACKEND` | `postgres` or `s3` ([artifacts](recovery.md#artifact-backends-capacity-and-migration)) |
-| `RAILWAY_API_TOKEN` | Optional; records failed or missing deployments as incidents |
+| `RAILWAY_API_TOKEN` | Optional; incident records and stalled-deploy re-triggering |
 
 Installers derive the four capacity limits from the deployed principals; an unset one is derived at start-up as `delegationLimits` drift.
 
@@ -46,6 +46,8 @@ Store its token as `GRAPHYARD_CI_PRODUCER_TOKEN`, with `GRAPHYARD_URL`, on the `
 ### Production deployment observation
 
 When the serving commit (`GRAPHYARD_BUILD_SHA`) changes, undeployed merges are compared once, recorded (`delivery.deployment-contained`, `production.deployment-pending`); a same-commit restart compares nothing. One unserved after five minutes is a `delivery.deployment-incident`; `master status` shows `main is N commits ahead of production`. Probe: `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`.
+
+With main ahead and no deploy in flight, the watch re-deploys the base-branch tip it compared against, at most hourly; the loop records throughput per release in `.graphyard/measurements/throughput`, without a master session.
 
 ## Backup, upgrade, rollback
 

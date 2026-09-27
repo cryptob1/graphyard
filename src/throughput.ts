@@ -1,4 +1,4 @@
-import { readdir, readFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { agentOwner, type AttentionItem } from './master.js';
 import { actionIdleMs, actionRetryDelay, type ActionRecord, type ActionRow } from './model/actions.js';
@@ -435,6 +435,44 @@ export async function readThroughputMeasurement(root: string, directory = throug
     catch { continue; }
   }
   return null;
+}
+
+/** How many recorded measurements are kept: the newest wins, and the history is bounded. */
+export const retainedThroughputMeasurements = 30;
+
+/**
+ * Appends one report the way `scripts/measure-throughput.mjs --record` writes it — one timestamped
+ * JSON file, which is what `master status` reads — and drops the oldest past the retention bound,
+ * by exact path. This is the loop's own write path (GY-393): the measurement the loop takes itself
+ * records through the same format and directory a manual run does, so a reader cannot tell them apart.
+ */
+export async function recordThroughputMeasurement(root: string, report: ThroughputReport, directory = throughputMeasurementDirectory, retain = retainedThroughputMeasurements): Promise<string> {
+  const path = join(root, directory);
+  await mkdir(path, { recursive: true });
+  const name = `${report.measuredAt.replace(/[:.]/g, '-')}.json`;
+  await writeFile(join(path, name), JSON.stringify(report, null, 2) + '\n');
+  const files = (await readdir(path)).filter(entry => entry.endsWith('.json')).sort();
+  for (const stale of files.slice(0, Math.max(0, files.length - retain))) await rm(join(path, stale));
+  return join(directory, name);
+}
+
+/**
+ * Whether the deployed release carries the claim's own merge commit — the fact that makes a
+ * measurement of it a measurement of the claim's executors rather than of whatever ran before.
+ * The daemon-loop twin of the measurement script's `claimContainment`: the same inputs, the same
+ * answers, over an awaited child runner instead of a synchronous one, so the loop's measurement
+ * and a manual one cannot disagree about whether the release was eligible.
+ */
+export async function claimContainmentFrom({ revision, mergeSha, claim, repository }: { revision: string | null; mergeSha: string | null; claim: string; repository: string },
+  run: (command: string, args: string[]) => string | Promise<string>): Promise<{ contains: boolean | null; reason: string | null }> {
+  if (!revision || revision === 'unknown') return { contains: null, reason: 'the deployed release reports no build revision' };
+  if (!mergeSha) return { contains: null, reason: `${claim} records no merge commit to compare the deployed revision against` };
+  if (mergeSha.toLowerCase() === revision.toLowerCase()) return { contains: true, reason: null };
+  try { await run('git', ['-C', repository, 'merge-base', '--is-ancestor', mergeSha, revision]); return { contains: true, reason: null }; }
+  catch (error: any) {
+    if (error?.status === 1) return { contains: false, reason: `${mergeSha.slice(0, 12)} is not an ancestor of the deployed ${revision.slice(0, 12)}` };
+    return { contains: null, reason: `git could not compare ${mergeSha.slice(0, 12)} with the deployed ${revision.slice(0, 12)} from ${repository}: ${(error?.stderr || error?.message || `exit ${error?.status}`).toString().trim().slice(0, 200)}` };
+  }
 }
 
 export interface ThroughputVisibility {

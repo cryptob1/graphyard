@@ -4,7 +4,7 @@ import { mergedWithoutAuthorization, unauthorizedMergeViolation, approvedMerge, 
 import { type Work } from '../model.js';
 import { queueSequencingReason } from '../merge-queue.js';
 import type { DaemonAction } from './state.js';
-import { boundDeployment, deploymentObservationSchema, maxProofAttempts, message } from './state.js';
+import { boundDeployment, deploymentObservationSchema, maxProofAttempts, maxThroughputMeasurementAttempts, message } from './state.js';
 import { candidateKey, decisionKey } from './reconcile.js';
 import { missingProofs } from './metrics.js';
 import { readyToRetry } from './sessions.js';
@@ -173,7 +173,7 @@ export async function mergeStep(cycle: Cycle) {
 
 /** Step 7: verify what is actually deployed, and request the smoke proofs deliveries ask for. */
 export async function deploymentStep(cycle: Cycle) {
-  const { config, state, effects, now, snapshot, performed, isolate } = cycle;
+  const { config, state, effects, now, clock, snapshot, performed, isolate } = cycle;
   // 7. Verify what is actually deployed. This is an observation, never a gate: Graphyard already
   //    marked the work Done on an observed merge, and a lagging rollout must stay visible as lag.
   const delivered = snapshot.work.filter(item => item.stage === 'done' && item.delivery)
@@ -196,11 +196,36 @@ export async function deploymentStep(cycle: Cycle) {
   //      publication is retried next cycle and holds nothing else back.
   if (effects.publishProductionEnvironment) await effects.publishProductionEnvironment().catch(() => undefined);
 
+  // 7a''. The post-deploy throughput measurement (GY-393). The delivered claim used to be verified
+  //       only by a command routed to a master session, and no master session is routinely running:
+  //       the measurement was never taken, so a delivered claim stayed unproven while production
+  //       drifted past it. This loop takes it itself, once per release, against exactly the release
+  //       the observation above saw serving — the report is recorded under
+  //       `.graphyard/measurements/throughput` in the measurement script's own format, so
+  //       `master status` reads a loop-taken measurement exactly as it reads a manual one. A
+  //       recorded shortfall stays standing: the loop measures honestly, it never relaxes a budget.
+  const observed = state.deployment;
+  if (effects.measureThroughput && delivered.length && observed?.sha) {
+    const key = `measurement:throughput:${observed.sha}`;
+    const previous = state.actions[key], attempts = previous?.attempts ?? 0;
+    if (attempts < maxThroughputMeasurementAttempts && readyToRetry(previous, state.cycle)) {
+      await record(state, key, { kind: 'deployment', work: null, principal: null, state: 'started',
+        detail: `Measuring the throughput claim against the release ${observed.sha.slice(0, 12)} observed from ${observed.source}`, attempts: attempts + 1, cycle: state.cycle }, now(), effects.persist);
+      try {
+        const measured = await effects.measureThroughput({ work: snapshot.work, now: new Date(clock).toISOString(), sha: observed.sha });
+        state.throughput = { at: new Date(now()).toISOString(), revision: observed.sha, verdict: measured.verdict, file: measured.file, reason: measured.reason };
+        performed.push(await record(state, key, { kind: 'deployment', work: null, principal: null, state: 'done', detail: measured.reason, attempts: attempts + 1, cycle: state.cycle }, now(), effects.persist));
+      } catch (error) {
+        performed.push(await record(state, key, { kind: 'deployment', work: null, principal: null, state: 'failed',
+          detail: `Could not measure the throughput claim against ${observed.sha.slice(0, 12)}: ${message(error)}`, attempts: attempts + 1, cycle: state.cycle }, now(), effects.persist));
+      }
+    }
+  }
+
   // 7b. The second confidence layer. For each delivery whose policy asks for a smoke proof: record
   //     the observation on Graphyard once the release serves its merge, ask the provider to run the
   //     trusted smoke workflow against exactly that commit, and escalate a failed verdict with
   //     rollback guidance. The loop never produces the verdict: the workflow's producer does.
-  const observed = state.deployment;
   for (const item of delivered.filter(candidate => deploySmokeRequired(candidate.policy))) await isolate('smoke', item, item.key, async () => {
     const delivery = item.delivery!;
     if (!delivery.deployment) {

@@ -320,6 +320,16 @@ export const daemonStateSchema = z.object({
   profiles: z.record(z.string(), z.object({ failures: z.number().int().min(0), reason: z.string().max(500).nullable(), cooldownUntil: z.string().nullable() }).strict()).default({}),
   metrics: z.array(cycleMetricsSchema).default([]),
   deployment: deploymentObservationSchema.nullable().default(null),
+  /**
+   * The last post-deploy throughput measurement the loop itself took (GY-393): against which
+   * release, when, with what verdict, and the file it was recorded to under
+   * `.graphyard/measurements/throughput`. The figures live in the file; this says the claim was
+   * measured against the release now serving without a master session having to run the script.
+   */
+  throughput: z.object({
+    at: z.string(), revision: z.string().max(40).nullable(), verdict: z.string().max(20),
+    file: z.string().max(500).nullable(), reason: z.string().max(500).nullable(),
+  }).strict().nullable().default(null),
   /** The release the running loop process loaded, recorded by each process at its startup (GY-437). */
   release: loopReleaseSchema.nullable().default(null),
   /** The between-cycles self-upgrade's progress (GY-437). */
@@ -362,6 +372,8 @@ export const daemonStateSchema = z.object({
 export type DaemonState = z.infer<typeof daemonStateSchema>;
 
 export const retainedActions = 500, retainedMetrics = 100, profileCooldownMs = 600_000, maxProofAttempts = 3, retainedScopeDecisions = 200;
+/** How many times the loop tries to take one release's post-deploy throughput measurement before it leaves the claim's attention standing for a master or an operator. */
+export const maxThroughputMeasurementAttempts = 3;
 export const retainedSamples = 200, retainedClocks = 500;
 /** Reclamation scans the worktree directory, so it runs on its own bounded interval, not every cycle. */
 export const reclaimIntervalMs = 600_000;
@@ -459,6 +471,7 @@ export function boundDaemonState(state: DaemonState): DaemonState {
   }
   for (const profile of Object.values(state.profiles)) profile.reason = cut(profile.reason, 500);
   if (state.deployment) state.deployment = boundDeployment(state.deployment);
+  if (state.throughput) state.throughput = { ...state.throughput, revision: cut(state.throughput.revision, 40), verdict: cut(state.throughput.verdict, 20), file: cut(state.throughput.file, 500), reason: cut(state.throughput.reason, 500) };
   if (state.upgrade) {
     state.upgrade.refused = state.upgrade.refused ? { ...state.upgrade.refused, reason: cut(state.upgrade.refused.reason, 500) } : null;
     if (state.upgrade.pending) state.upgrade.pending = { ...state.upgrade.pending, from: cut(state.upgrade.pending.from, 40), to: cut(state.upgrade.pending.to, 40) };
