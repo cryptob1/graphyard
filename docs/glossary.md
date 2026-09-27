@@ -39,13 +39,19 @@ A *reviewer* is a non-author GitHub identity approving the exact head; a *proof 
 
 **Canonical usage:** *reviewer*, *proof producer*.
 
-### 7. Graphyard control plane
+### 7. Risk lane
+
+An item's risk classification that determines which gates are required for delivery. Lanes are determined from the paths the change touches and are shown in `status`.
+
+**Canonical usage:** *low-lane*, *medium-lane*, *high-lane*.
+
+### 8. Graphyard control plane
 
 The server, database, dashboard and CLI.
 
 **Canonical usage:** Graphyard *records*, *refuses*, *authorizes*; it never *runs* a session.
 
-### 8. Herdr runtime
+### 9. Herdr runtime
 
 The supervisor that launches sessions and reports their liveness.
 

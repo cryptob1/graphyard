@@ -3,6 +3,48 @@ import { deploySmokeProof, proofSchema } from './proof.js';
 import { postMergeProofRefusal } from './post-merge-proofs.js';
 import { distinct, reviewProviders, reviewerProfileSchema } from './review.js';
 
+export type Lane = 'low' | 'medium' | 'high';
+
+export function determineLane(paths: string[]): Lane {
+  if (!paths.length) return 'medium';
+
+  const highRiskPatterns = [
+    /^migrations\/schema/,
+    /^auth\/credentials/,
+    /^deploy\/install/,
+    /^src\/server\/routes/,
+  ];
+
+  const lowRiskPatterns = [
+    /^tests\//,
+    /^docs\//,
+  ];
+
+  const highRiskPaths = paths.filter(p => highRiskPatterns.some(pattern => pattern.test(p)));
+
+  // If any high-risk path is touched, it's high lane
+  if (highRiskPaths.length > 0) return 'high';
+
+  // If only docs or tests are changed, it's low lane
+  if (paths.every(p => lowRiskPatterns.some(pattern => pattern.test(p)))) return 'low';
+
+  // Single-module changes: all paths share common leading directory parts
+  // e.g., all in src/model/ or all in src/cli/ are single-module
+  if (paths.length > 0) {
+    const parts = paths.map(p => p.split('/'));
+    let commonDepth = 0;
+    for (let i = 0; i < Math.min(...parts.map(p => p.length)); i++) {
+      if (parts.every(p => p[i] === parts[0][i])) commonDepth = i + 1;
+      else break;
+    }
+    // If all paths share at least 2 directory levels (e.g., src/model/) it's single-module low-risk
+    if (commonDepth >= 2) return 'low';
+  }
+
+  // Everything else is medium
+  return 'medium';
+}
+
 // Bootstrap mode: an operator may defer a criterion's proofs for the single change that
 // introduces the harness those proofs depend on. The proof is never dropped. It becomes a
 // standing obligation on the named contract paths, and the next change touching those paths

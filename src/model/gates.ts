@@ -10,6 +10,7 @@ import { carriedApproval, evidenceBindsCandidate } from './carry.js';
 import { placeInQueue, type MergeQueueSettings } from './queue.js';
 import { regressionRefusals } from '../regression-guard.js';
 import { mechanicalFailure, mechanicalVerdicts } from './mechanical-proofs.js';
+import { determineLane, type Lane } from './policy.js';
 
 // Pure evaluation: neither worker assertions nor UI state can authorize progression.
 declare module './work.js' {
@@ -24,14 +25,33 @@ declare module './work.js' {
 /** The merge gate's refusal while GitHub has not computed a pull request's mergeability (GY-548). */
 export const mergeabilityComputingRefusal = 'GitHub is computing mergeability against the current base; the next observation reads it again';
 
+function getLane(work: Work): Lane {
+  const paths = work.observation?.scopeFiles?.map(f => f.path) ?? work.observation?.files ?? [];
+  return determineLane(paths);
+}
+
+export interface SpeedTargets {
+  low: number; // ms
+  medium: number; // ms
+  high: number; // ms
+}
+
+export const defaultSpeedTargets: SpeedTargets = {
+  low: 30 * 60 * 1000, // 30 min
+  medium: 60 * 60 * 1000, // 60 min
+  high: 4 * 60 * 60 * 1000, // 4 hours
+};
+
 /**
  * `mergeQueue` names the settings the queue evaluates by: `batchSize`, the parallel-tip `parallelTips`
  * window (GY-498) and `optimistic` (GY-500). Without it the queue is validated batch by batch (GY-330),
  * as every caller that names no settings expects.
  */
-export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[], mergeQueue?: number | MergeQueueSettings): { stage: Stage; gates: Gate[]; violations: string[]; queue: QueueEntry | null; queueSequence: number; queueEjection: QueueEjection | null; queueHistory: QueueHistoryEntry[] } {
+export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[], mergeQueue?: number | MergeQueueSettings): { stage: Stage; gates: Gate[]; violations: string[]; queue: QueueEntry | null; queueSequence: number; queueEjection: QueueEjection | null; queueHistory: QueueHistoryEntry[]; lane: Lane; speedTarget: number } {
   const gates: Gate[] = [];
   const add = (name: string, reasons: string[]) => gates.push({ name, passed: reasons.length === 0, reasons });
+  const lane = getLane(work);
+  const speedTarget = defaultSpeedTargets[lane];
   const dependencies = work.dependencies.filter(id => all.find(w => w.id === id)?.stage !== 'done');
   add('ready', [...(!work.ready ? ['Not released from backlog'] : []), ...dependencies.map(id => `Dependency ${all.find(w => w.id === id)?.key ?? id} is unfinished`), ...(work.blocker ? [work.blocker] : [])]);
   const candidate = work.candidate;
@@ -87,10 +107,14 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[],
     const revoked = work.evidence.some(e => e.proof === proof && e.trusted && !!e.revocation && evidenceBindsCandidate(work, e) && e.policyRevision === work.policyRevision);
     return `${proof} needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy${scenario ? `; scenario v${scenario.revision} in ${scenario.environment}` : ''}${revoked && !currentEvidence(work, proof, now) ? '; previously accepted evidence was revoked' : ''}`;
   };
+  // Low-lane items skip producer-runnable proofs (unit and integration) and manual attestations
+  const isProducerRunnable = (proof: string) => /^(unit|integration):/.test(proof);
+  const isManualAttestation = (proof: string) => /^manual:/.test(proof);
+  const isRequiredProof = (proof: string) => lane !== 'low' || (!isProducerRunnable(proof) && !isManualAttestation(proof));
   // A bootstrap criterion's proofs are deferred here and required of the next change that
   // touches the same contract; review, CI and every other criterion still gate this one.
   for (const ac of work.criteria.filter(criterion => !criterion.bootstrap)) for (const proof of ac.proofs) {
-    if (unproven(proof)) reasons.push(`${ac.id}: ${demanded(proof)}`);
+    if (isRequiredProof(proof) && unproven(proof)) reasons.push(`${ac.id}: ${demanded(proof)}`);
   }
   for (const obligation of inheritedObligations(work, all)) {
     if (unproven(obligation.proof)) reasons.push(`Bootstrap obligation inherited from ${obligation.key} ${obligation.criterionId}: ${demanded(obligation.proof)}`);
@@ -132,5 +156,5 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[],
   let stage: Stage = !work.ready ? 'backlog' : !work.submission ? (work.lease && Date.parse(work.lease.expiresAt) > now.getTime() ? 'build' : 'ready') : (first?.name === 'ready' ? 'build' : first?.name as Stage ?? 'merge');
   // Delivery history stays complete; later observations cannot rewrite it.
   if (work.stage === 'done') stage = 'done';
-  return { stage, gates, violations, queue: queueState.queue, queueSequence: queueState.queueSequence, queueEjection: queueState.ejection, queueHistory: queueState.history };
+  return { stage, gates, violations, queue: queueState.queue, queueSequence: queueState.queueSequence, queueEjection: queueState.ejection, queueHistory: queueState.history, lane, speedTarget };
 }

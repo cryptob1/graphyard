@@ -14,6 +14,16 @@ Graphyard decides whether work may advance; runtimes such as Herdr run the sessi
 
 A card stops at its first refusing gate, naming what is missing; nothing sets a stage directly.
 
+## Risk lanes: fast path for low-risk changes
+
+Changes are classified into risk lanes based on which paths they touch:
+
+- **Low-lane**: test-only, docs-only, or single-module changes. Required gates: CI green + one approving review. Speed target: 30 min.
+- **Medium-lane**: cross-module changes. Adds producer-run proofs (unit and integration tests). Speed target: 60 min.
+- **High-lane**: schema migrations, credentials, deploy scripts, or public API changes. Requires full ceremony: all proofs, producer evidence, manual attestations, and approver decisions. Speed target: 4 hours.
+
+Lanes are determined from the PR's changed paths and shown in `graphyard status`; each lane's speed target tracks delivery time.
+
 ![Bootstrap versus normal operation: one supervised worker, then a fleet with separate credentials.](diagrams/bootstrap-vs-normal.svg)
 
 Text equivalent: in bootstrap the human operator supervises one worker while gates are activated; normally the master dispatches to many workers, each with its own credential and worktree, while reviewers and producers judge candidates under the same gates.
