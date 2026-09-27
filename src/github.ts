@@ -2340,12 +2340,13 @@ export function observationThroughputStatus(coordinator: { githubBudget?: ({ thr
  * budget (its non-304 requests), which is what the worker returns its paced slot with (GY-567).
  */
 export async function processJob(engine: Engine, github: GitHub, spent?: (charged: number) => void): Promise<boolean> {
-  // The batch size and the rerun count (GY-516) are the master's configuration, published to the
-  // installation ledger; a restarted server reads them back here before the next evaluation it runs.
+  // The batch size, the rerun count (GY-516) and the optimistic exclude globs (GY-503) are the
+  // master's configuration, published to the installation ledger; a restarted server reads them
+  // back here before the next evaluation it runs.
   const readAt = batchSizeRead.get(engine);
   if (readAt === undefined || Date.now() - readAt >= mergeBatchSizeRefreshMs) {
     batchSizeRead.set(engine, Date.now());
-    await Promise.all([engine.loadMergeBatchSize(), engine.loadRerunFailedChecks()]).catch(() => batchSizeRead.delete(engine));
+    await Promise.all([engine.loadMergeBatchSize(), engine.loadRerunFailedChecks(), engine.loadOptimisticExclude()]).catch(() => batchSizeRead.delete(engine));
   }
   // The main guard (GY-500) is the installation's, not a job's: it runs here on its own interval,
   // and a failure of it is recorded and retried on the next interval, never failing a job.

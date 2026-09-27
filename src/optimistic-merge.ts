@@ -14,6 +14,7 @@
 // engine records the lane, the post-merge verdicts and the revert; the GitHub job loop runs the
 // guard (`guardMain` in github.ts). The same records feed master status and Insights.
 import type { Work } from './model/work.js';
+import { documentationGlobMatches } from './model/documentation-glob.js';
 import { recordRework } from './pipeline-speed.js';
 
 declare module './model/work.js' {
@@ -38,21 +39,53 @@ declare module './model/work.js' {
 export const defaultOptimisticMerge = true;
 /** The installation-ledger event the control plane reads the published setting back from (beside `merge-queue.batch-size`). */
 export const optimisticMergeEvent = 'merge-queue.optimistic';
+/** The installation-ledger event the control plane reads the published exclude globs back from (GY-503). */
+export const optimisticExcludeEvent = 'merge-queue.optimistic-exclude';
 
 // ---- Eligibility (AC-1) --------------------------------------------------------------------------
 
-const lockfiles = new Set(['package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lock', 'bun.lockb', 'Cargo.lock', 'go.sum', 'poetry.lock', 'Gemfile.lock', 'composer.lock']);
 /**
- * Shared infrastructure: files whose change can break any test anywhere, so disjointness by file
- * says nothing about them. A change to one never merges optimistically, and neither does anything
- * whose base changed one since its own run.
+ * Shared infrastructure, as product defaults (GY-503): globs in the documentation-path syntax
+ * (src/model/documentation-glob.ts, `**` across segments, `*` within one, a trailing `/` a tree)
+ * for the manifests and lockfiles, CI configuration, test helpers and schema and migration
+ * directories whose change can break any test anywhere, so disjointness by file says nothing
+ * about them. They fit most repositories and name no one repository's files: a repository tunes
+ * them in `mergeQueue.optimisticExclude` (master config, published beside `optimistic`), and
+ * onboarding writes the defaults there so they are named and editable per repository.
  */
-export const optimisticInfrastructure = ['package.json', 'lockfiles', '.github/', 'tests/helpers/', 'src/model/work.ts', 'schema, store table and migration files'] as const;
-export function sharedInfrastructure(path: string): boolean {
-  const name = path.slice(path.lastIndexOf('/') + 1);
-  return name === 'package.json' || lockfiles.has(name) || path.startsWith('.github/') || path.startsWith('tests/helpers/') || path === 'src/model/work.ts'
-    || /(^|\/)migrations?\//i.test(path) || /(^|\/)[^/]*migration[^/]*$/i.test(name) || /^schema([.-][^/]*)?$/i.test(name) || /(^|\/)schemas?\//i.test(path)
-    || path === 'src/store/tables.ts' || path.startsWith('src/store/tables/');
+export const defaultOptimisticExclude = [
+  // Manifests: a dependency, script or build change can break every test anywhere.
+  '**/package.json', '**/go.mod', '**/Cargo.toml', '**/pyproject.toml', '**/Gemfile', '**/composer.json', '**/pom.xml', '**/build.gradle', '**/build.gradle.kts', '**/*.csproj',
+  // Lockfiles: the resolved dependency tree they pin is what the manifest change resolves to.
+  '**/package-lock.json', '**/npm-shrinkwrap.json', '**/pnpm-lock.yaml', '**/bun.lock', '**/bun.lockb', '**/*.lock', '**/go.sum',
+  // CI configuration: what the required suite runs as changes with it.
+  '.github/', '.gitlab-ci.yml', '.circleci/', '.buildkite/', '.woodpecker/', '.drone.yml', 'azure-pipelines.yml', 'cloudbuild.yaml', 'Jenkinsfile',
+  // Test helpers: shared setup every test file loads.
+  'tests/helpers/', 'test/helpers/', '**/conftest.py', '**/jest.setup.*', '**/vitest.setup.*',
+  // Schema and migration directories: what the store and every integration test stand on.
+  '**/migrations/', '**/migration/', '**/migrate/', '**/*migration*', '**/schema*', '**/schemas/',
+] as const;
+
+/** The globs an exclude list must satisfy: repository-relative, one path segment or tree each, bounded like the documentation paths are. */
+export function parseOptimisticExclude(value: unknown): string[] | null {
+  if (!Array.isArray(value) || value.length > 100) return null;
+  const globs: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== 'string') return null;
+    const glob = entry.trim();
+    if (!glob || glob.length > 200 || /[\s\u0000-\u001f]/.test(glob) || glob.startsWith('/') || glob.split('/').some(segment => segment === '.' || segment === '..')) return null;
+    globs.push(glob);
+  }
+  return [...new Set(globs)];
+}
+
+/**
+ * Whether `path` touches shared infrastructure under the repository's exclude globs: any configured
+ * glob names it, or — configured none — a product default does. A change to one never merges
+ * optimistically, and neither does anything whose base changed one since its own run.
+ */
+export function sharedInfrastructure(path: string, globs: readonly string[] = defaultOptimisticExclude): boolean {
+  return globs.some(glob => documentationGlobMatches(glob, path));
 }
 
 /** What made an entry eligible, recorded on the item while it holds the optimistic lane and kept on its merge. */
@@ -85,8 +118,9 @@ const listed = (paths: string[]) => paths.length > 6 ? `${paths.slice(0, 6).join
  * - no other item's optimistic merge is in flight on an overlapping file, and main is not red
  *   from an optimistic merge still being traced or reverted.
  */
-export function optimisticEligibility(work: Work, all: Work[], input: { enabled: boolean; gatesPass: boolean }): OptimisticEligibility {
+export function optimisticEligibility(work: Work, all: Work[], input: { enabled: boolean; gatesPass: boolean; exclude?: readonly string[] }): OptimisticEligibility {
   const reasons: string[] = [];
+  const exclude = input.exclude ?? defaultOptimisticExclude;
   const candidate = work.candidate, observation = work.observation;
   if (!input.enabled) reasons.push('Optimistic merge is off (mergeQueue.optimistic is false)');
   if (!input.gatesPass) reasons.push('Not every gate passes on its own head');
@@ -104,10 +138,10 @@ export function optimisticEligibility(work: Work, all: Work[], input: { enabled:
   else {
     const overlap = files.filter(path => baseChanges.includes(path));
     if (overlap.length) reasons.push(`Its files overlap changes merged since its base ${candidate.baseSha.slice(0, 12)}: ${listed(overlap)}`);
-    const infrastructure = baseChanges.filter(sharedInfrastructure);
+    const infrastructure = baseChanges.filter(path => sharedInfrastructure(path, exclude));
     if (infrastructure.length) reasons.push(`The base changed shared infrastructure since ${candidate.baseSha.slice(0, 12)}: ${listed(infrastructure)}`);
   }
-  const own = files.filter(sharedInfrastructure);
+  const own = files.filter(path => sharedInfrastructure(path, exclude));
   if (own.length) reasons.push(`It changes shared infrastructure: ${listed(own)}`);
   for (const other of all) {
     if (other.id === work.id || !other.optimistic || other.stage === 'done' || other.observation?.merged) continue;
