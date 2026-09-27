@@ -25,8 +25,10 @@ const item = (key: string): Work => ({
   key, title: `Fixture ${key}`, type: 'feature', stage: 'done', priority: 1, plannedFiles: ['src/'],
   createdAt: at(-3 * day), updatedAt: at(-1 * min), stageEnteredAt: at(-1 * min),
   criteria: [], evidence: [], gates: [], violations: [], workspaces: [], sessions: [], dependencies: [],
-  submission: { epoch: 1, pr: 400 }, delivery: { pr: 400, mergeSha: key.padEnd(40, 'f'), mergedAt: at(0), mergedAtRepository: at(0) },
+  submission: { epoch: 1, pr: 400 }, delivery: { mergeSha: key.padEnd(40, 'f'), mergedAt: at(0), mergedAtRepository: at(0), authorizationRevision: 1 },
   policy: { checks: ['test', 'typecheck'], review: true }, observation: null,
+  revision: 1, policyRevision: 1, ready: true, epoch: 1, reworkRequested: false, scenarioRequirements: [],
+  lease: null, candidate: null, blocker: null, description: '',
 });
 
 function fact(workId: string, key: string, kind: string, at_ms: number, details: any = {}): FlowFact {
@@ -196,7 +198,7 @@ test('unit:stage-percentiles-computed — staging-only deployment leaves merge�
 });
 
 test('unit:stage-percentiles-computed — empty dataset gives n=0, met null, bottleneck null', () => {
-  const result = stageSpeed(dataset([]), []);
+  const result = stageSpeed(dataset([]));
 
   for (const stage of result.stages) {
     assert.equal(stage.n, 0);

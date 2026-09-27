@@ -1,4 +1,5 @@
 import type { Work } from './model.js';
+import type { StageSpeedResult } from './flow-analytics.js';
 
 /**
  * Pipeline speed: how long an item spends being implemented versus waiting, how many rework
@@ -331,6 +332,8 @@ export interface PipelineSpeedSummary {
    */
   coverage: { delivered: number; measured: number; awaitingBackfill: number; eventsPruned: number; noSubmission: number;
     items: { key: string; mergedAt: string; coverage: SpeedCoverage }[]; complete: boolean; statement: string };
+  /** Per-stage speed targets and measurements (GY-880): added at runtime by master status. */
+  stages?: StageSpeedResult;
 }
 /**
  * The periodic measurement: submit→merge p50/p90 over every delivery with a recorded submission
