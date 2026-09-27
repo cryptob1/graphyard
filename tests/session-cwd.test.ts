@@ -1,89 +1,390 @@
-import { describe, test } from 'node:test';
+// GY-866: no session Graphyard launches starts where the master starts. Every role's launch is
+// built here the way the loop builds it — the real launch functions against a stubbed Herdr — and
+// the pane's `--cwd`, the launch files' checkout and the runtime's recorded working folder must be
+// the session's own managed checkout (or its assigned worktree, or the loop's scratch checkout for
+// the sessions that have none), never the coordinator checkout. The coordinator checkout's own
+// guard is exercised the way the loop and an executor run it: a dirty tree or a moved HEAD is
+// attention naming the paths, the HEAD and the sessions whose panes point at the checkout, and
+// nothing self-upgrades or claims from it until it is clean and back at the commit the loop runs.
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve, sep } from 'node:path';
+import { generateKeyPairSync } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
+import type { Work } from '../src/model.js';
+import type { ActionRow } from '../src/model/actions.js';
+import { coordinatorCheckoutRefusal, readCoordinatorCheckout } from '../src/master/profiles.js';
+import { worktreeRoot } from '../src/install/worktree-root.js';
+import { atomicPrivateWrite, dispatchWork, launchApprover, launchEscalationHandler, loadMasterConfig, masterConfigSchema, setupMaster, type MasterConfig, type WorkerProfile } from '../src/master.js';
+import { bindReviewer, launchReview, saveReviewerProfile } from '../src/reviewer.js';
+import { controlPlaneHandlers, type ControlPlaneEffects } from '../src/executor.js';
+import { emptyDaemonState, runDaemon, type DaemonEffects } from '../src/master-daemon.js';
+import type { HerdrAgent } from '../src/master/herdr.js';
+import type { Runner } from '../src/runner/types.js';
+import type { EscalationContext } from '../src/model/escalation-context.js';
+import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
 
-// Helper to read source files and verify implementation
-async function readSourceFile(filename: string): Promise<string> {
-  const modulePath = new URL('../src/' + filename, import.meta.url);
-  return readFile(modulePath, 'utf-8');
+const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
+const sha40 = (label: string) => label.replace(/[^a-f0-9]/g, '0').padEnd(40, 'f').slice(0, 40);
+const H = sha40('a1'), B = sha40('b1'), C1 = sha40('c1'), C2 = sha40('d2');
+const at = '2026-09-24T10:00:00.000Z';
+const hour = 3_600_000;
+const iso = (offsetMs: number) => new Date(Date.parse('2030-01-01T00:00:00Z') + offsetMs).toISOString();
+const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
+const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } });
+const mint = async () => ({ token: 'ghs_review_session_token', expiresAt: new Date(Date.now() + 3_500_000).toISOString() });
+
+function observation(candidate: { sha: string; baseSha: string }): Work['observation'] {
+  return { candidate: { ...candidate, pr: 866, branch: 'graphyard/gy-866-7', author: 'implementer' }, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true,
+    files: ['src/a.ts'], scopeFiles: [], at: new Date().toISOString(), prState: 'open', draft: false, baseTip: candidate.baseSha, baseTree: sha40('7b'), baseTipContained: true } as Work['observation'];
+}
+function work(overrides: Partial<Work> = {}): Work {
+  const candidate = { sha: H, baseSha: B, pr: 866, branch: 'graphyard/gy-866-7', author: 'implementer' };
+  return { id: 'work-866', key: 'GY-866', title: 'Sessions start in their own checkout', description: '', type: 'feature', priority: 0, dependencies: [], plannedFiles: ['src/'],
+    criteria: [{ id: 'AC-1', text: 'Own checkout', proofs: ['unit:session-cwd-own-checkout'] }],
+    policy: { checks: ['test'], review: true, reviewProvider: 'github' }, stage: 'review', revision: 7, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1,
+    lease: null, workspaces: [{ host: 'h', path: '/w/gy-866', branch: 'graphyard/gy-866-7', epoch: 1, owner: 'implementer' }], candidate, submission: { epoch: 1, pr: 866 }, reworkRequested: false, scenarioRequirements: [], evidence: [],
+    observation: observation(candidate), blocker: null, gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: true, reasons: [] }, { name: 'review', passed: false, reasons: ['Independent approval of the current commit is required'] }], violations: [], ...overrides } as Work;
+}
+const ready = () => work({ stage: 'ready', lease: null, submission: null, candidate: null, observation: null, gates: [{ name: 'ready', passed: true, reasons: [] }] });
+/** A machine-filed backlog item awaiting triage (GY-402). */
+const machineFiled = (): Work => ({ ...ready(), id: 'work-901', key: 'GY-901', title: 'Recurring flaky faults: test shard', stage: 'backlog', ready: false,
+  origin: { faultClass: 'flaky-shard' }, createdAt: iso(0) } as unknown as Work);
+
+/**
+ * A master installed in a throwaway repository — the coordinator checkout of these tests — with
+ * its credentials beside it, an approver and an operator-agent, and the managed worktree root
+ * pointed at its own temporary directory. The repository holds one commit, so a release commit
+ * exists for the loop's scratch checkout.
+ */
+async function installed(options: { research?: boolean } = {}) {
+  const directory = await mkdtemp(join(tmpdir(), 'graphyard-session-cwd-'));
+  const credentials = await mkdtemp(join(tmpdir(), 'graphyard-session-cwd-credentials-'));
+  execFileSync('git', ['init', '-q', '-b', 'main', directory]);
+  await writeFile(join(directory, '.gitignore'), '.graphyard/\n');
+  await mkdir(join(directory, 'src'), { recursive: true });
+  await mkdir(join(directory, 'tests'), { recursive: true });
+  await mkdir(join(directory, 'bin'), { recursive: true });
+  await writeFile(join(directory, 'src', 'loop.ts'), 'export const loop = 1;\n');
+  await writeFile(join(directory, 'bin', 'graphyard.mjs'), '#!/usr/bin/env node\n');
+  const git = (...args: string[]) => execFileSync('git', ['-C', directory, ...args], { stdio: 'ignore' });
+  git('config', 'user.email', 't@example.com');
+  git('config', 'user.name', 'T');
+  git('remote', 'add', 'origin', 'https://github.com/owner/project.git');
+  await setupMaster(directory, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: join(directory, 'bin', 'graphyard.mjs'), credentialDirectory: credentials, herdrWorkspace: 'wC' }, coordinatorStatus as typeof fetch);
+  await bindReviewer(directory, { appId: 5678, installationId: 91011, slug: 'graphyard-reviewer', privateKey, credentialDirectory: join(credentials, 'reviewers') }, async () => ({ repository: 'owner/project', permissions: { metadata: 'read', contents: 'read', pull_requests: 'write' } }));
+  const token = async (name: string) => { const file = join(credentials, `${name}.token`); await writeFile(file, `${name}-token-`.padEnd(40, 'x'), { mode: 0o600 }); return file; };
+  const config = await loadMasterConfig(directory);
+  await atomicPrivateWrite(join(directory, '.graphyard/master.json'), { ...config, approver: { id: 'graphyard-approver-project', credentialFile: await token('approver') }, operatorAgent: { id: 'graphyard-operator-project', credentialFile: await token('operator') }, ...(options.research ? { run: { ...config.run, research: { command: 'pi' } } } : {}) });
+  git('add', '.');
+  git('commit', '-q', '-m', 'base');
+  const head = execFileSync('git', ['-C', directory, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+  const fullConfig = await loadMasterConfig(directory);
+  return { root: directory, head, token, config: fullConfig, cleanup: async () => {
+    await rm(directory, { recursive: true, force: true });
+    await rm(credentials, { recursive: true, force: true });
+  } };
 }
 
-// AC-1: unit:session-cwd-own-checkout
-// Every session Graphyard launches for a role other than the master (reviewer, producer, approver,
-// escalation handler, research, triage) is started with its pane cwd and process cwd set to its
-// own managed checkout (or, for sessions with no checkout, a scratch directory outside the
-// coordinator checkout); no launch passes the coordinator checkout as a cwd.
-describe('AC-1: session-cwd-own-checkout', () => {
-  test('reviewer session uses its own checkout, not coordinator checkout', async () => {
-    const source = await readSourceFile('reviewer.ts');
-    // Verify reviewer pane is created with checkout.directory, not root
-    assert.ok(source.includes("'--cwd', checkout.directory"), 'reviewer pane uses checkout.directory for --cwd');
-    // Verify reviewer session is started with cwd: checkout.directory
-    assert.ok(source.includes('cwd: checkout.directory'), 'reviewer session uses checkout.directory for cwd');
-    assert.ok(!source.includes('cwd: root'), 'reviewer session does not use root for cwd');
-  });
+/** A Herdr stub whose runtimes start at once; it records every `tab create` line and every expanded launch. */
+function herdr() {
+  const typed: ReturnType<typeof expandTypedCommand>[] = [], tabs: string[][] = [], pasted: string[] = [];
+  let panes = 0;
+  const run = (_command: string, args: string[]) => {
+    if (args[0] === 'tab' && args[1] === 'create') { panes++; tabs.push(args); return JSON.stringify({ result: { root_pane: { pane_id: `pane-${panes}`, tab_id: `tab-${panes}` } } }); }
+    if (args[0] === 'pane' && args[1] === 'run') typed.push(expandTypedCommand(args[3]));
+    if (args[0] === 'agent' && args[1] === 'prompt') pasted.push(args[3]);
+    return startedAtOnce(args) ?? JSON.stringify({ result: {} });
+  };
+  return { run, typed, tabs, pasted };
+}
+const paneCwd = (tab: string[]) => { const index = tab.indexOf('--cwd'); return index >= 0 ? tab[index + 1] : null; };
+/** The checkout the launch files were written in: the stem's path before its `.graphyard/launch/` segment. */
+const checkoutOfStem = (stem: string | null) => stem && stem.includes(`${sep}.graphyard${sep}launch${sep}`) ? stem.slice(0, stem.indexOf(`${sep}.graphyard${sep}launch${sep}`)) : null;
+/** Outside the coordinator checkout: another tree altogether, or Graphyard's own managed area under `.graphyard/`. */
+const outsideCoordinator = (path: string, coordinatorRoot: string) => {
+  const directory = resolve(path), base = resolve(coordinatorRoot);
+  return directory !== base && (!directory.startsWith(`${base}${sep}`) || directory.startsWith(`${base}${sep}.graphyard${sep}`));
+};
 
-  test('approver session uses its own checkout, not coordinator checkout', async () => {
-    const source = await readSourceFile('master/autonomy.ts');
-    // Extract launchApprover function
-    const approverSection = source.substring(source.indexOf('export async function launchApprover'));
-    // Verify approver allocates managed checkout
-    assert.ok(approverSection.includes('allocateManagedCheckout'), 'approver allocates managed checkout');
-    // Verify approver pane uses checkout.directory
-    assert.ok(approverSection.includes("'--cwd', checkout.directory"), 'approver pane uses checkout.directory');
-    // Verify approver session uses checkout.directory for cwd
-    assert.ok(approverSection.includes('cwd: checkout.directory'), 'approver session uses checkout.directory for cwd');
-    // Verify settleCheckout is called on error
-    assert.ok(approverSection.includes('settleCheckout'), 'approver cleans up checkout on error');
-  });
-
-  test('escalation handler session uses its own checkout, not coordinator checkout', async () => {
-    const source = await readSourceFile('master/autonomy.ts');
-    // Extract launchEscalationHandler function
-    const handlerSection = source.substring(source.indexOf('export async function launchEscalationHandler'));
-    // Verify handler allocates managed checkout
-    assert.ok(handlerSection.includes('allocateManagedCheckout'), 'escalation handler allocates managed checkout');
-    // Verify handler pane uses checkout.directory
-    assert.ok(handlerSection.includes("'--cwd', checkout.directory"), 'escalation handler pane uses checkout.directory');
-    // Verify handler session uses checkout.directory for cwd
-    assert.ok(handlerSection.includes('cwd: checkout.directory'), 'escalation handler session uses checkout.directory for cwd');
-    // Verify settleCheckout is called on error
-    assert.ok(handlerSection.includes('settleCheckout'), 'escalation handler cleans up checkout on error');
-  });
-
-  test('producer session uses its own checkout, not coordinator checkout', async () => {
-    const source = await readSourceFile('master/dispatch.ts');
-    // Extract launchWorker function
-    const workerSection = source.substring(source.indexOf('async function launchWorker'));
-    // Verify worker pane uses prepared.path (the worktree)
-    assert.ok(workerSection.includes("'--cwd', prepared.path"), 'worker pane uses prepared.path (worktree)');
-    // Verify worker session uses cwd: prepared.path
-    assert.ok(workerSection.includes('cwd: prepared.path'), 'worker session uses prepared.path for cwd');
-    // This isolates the producer/worker in its own worktree, outside the coordinator checkout
-  });
+/** Effects both the loop's guard and the steps read: a snapshot over `work`, and stubs for everything else. */
+function loopEffects(work: unknown[], overrides: Record<string, unknown> = {}): DaemonEffects & ControlPlaneEffects {
+  const base = {
+    agents: () => [] as never[],
+    credentials: async (profiles: { name: string }[]) => Object.fromEntries(profiles.map(item => [item.name, { available: true, reason: null }])),
+    workerCredentials: async () => ({}), producerCredentials: async () => ({}),
+    mutate: async () => ({}), dispatchWorker: async () => ({}), launchReview: async () => ({}), launchProducer: async () => ({}), merge: async () => ({}),
+    snapshot: async () => ({ work: work as Work[], now: iso(0) }),
+    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+    observeDeployment: async () => ({ source: 'unavailable' as const, sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
+    recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+  };
+  return { ...base, ...overrides } as DaemonEffects & ControlPlaneEffects;
+}
+const loopOptions = (fixture: { root: string }, extra: Partial<Parameters<typeof runDaemon>[3]> = {}) => ({
+  once: true, intervalMs: 5, identity: { pid: process.pid, host: 'machine-a' }, signals: [] as NodeJS.Signals[], log: () => {}, ...extra,
 });
 
-// AC-2: unit:coordinator-checkout-drift-detected
-// The loop checks the coordinator checkout each cycle: when HEAD is not the commit it runs or
-// the tree is dirty, it records attention naming the paths, the HEAD and the sessions whose
-// checkouts or panes point at it, and does not self-upgrade or restart from it until it is clean.
-describe('AC-2: coordinator-checkout-drift-detected', () => {
-  test('loop detects and records coordinator checkout drift via upgrade.refused', async () => {
-    const source = await readSourceFile('daemon/run.ts');
-    // Verify coordinatorCheckoutRefusal is imported and used
-    assert.ok(source.includes('coordinatorCheckoutRefusal'), 'daemon imports coordinatorCheckoutRefusal');
-    assert.ok(source.includes('import'), 'daemon imports from profiles.js');
-    // This function checks the coordinator checkout each cycle and refuses upgrades if drifted
-  });
+test('unit:session-cwd-own-checkout — a reviewer session opens its pane and starts its runtime in its own managed checkout, never in the coordinator checkout', async () => {
+  const fixture = await installed();
+  try {
+    const { root, cleanup } = fixture;
+    const home = await mkdtemp(join(tmpdir(), 'graphyard-session-cwd-claude-home-'));
+    try {
+      const stub = herdr();
+      await saveReviewerProfile(root, { name: 'reviewer-claude', agentName: 'review-claude-1', kind: 'claude', environment: { CLAUDE_CONFIG_DIR: home } });
+      await launchReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: stub.run, mint, requestId: 'review-request' });
+      assert.equal(stub.tabs.length, 1, 'one Herdr tab is created for the review');
+      const pane = paneCwd(stub.tabs[0]);
+      assert.ok(pane, 'the reviewer pane is created with an explicit --cwd');
+      assert.ok(outsideCoordinator(pane!, root), `the reviewer pane opens outside the coordinator checkout, not ${pane}`);
+      const sessionCheckout = checkoutOfStem(stub.typed[0].stem);
+      assert.ok(sessionCheckout, 'the launch files are written in a checkout of their own');
+      assert.ok(outsideCoordinator(sessionCheckout!, root), 'the launch files live outside the coordinator checkout');
+      assert.equal(resolve(pane!), resolve(sessionCheckout!), 'the pane opens exactly where the session checkout is');
+      // The process-level folder the runtime starts in is the session checkout too: the launch's
+      // cwd is what the folder-trust step records, and it records the checkout and only it.
+      const projects = JSON.parse(await readFile(join(home, '.claude.json'), 'utf8')).projects as Record<string, { hasTrustDialogAccepted?: boolean }>;
+      assert.equal(projects[realpathSync(resolve(sessionCheckout!))]?.hasTrustDialogAccepted, true, 'the runtime starts in the session checkout');
+      assert.equal(projects[realpathSync(resolve(root))], undefined, 'the coordinator checkout is never recorded as the folder the runtime starts in');
+    } finally { await rm(home, { recursive: true, force: true }); }
+    await cleanup();
+  } finally { await fixture.cleanup(); }
+});
 
-  test('drift attention is reported in master status when upgrade is refused', async () => {
-    const profilesSource = await readSourceFile('master/profiles.ts');
-    // Verify coordinatorCheckoutRefusal function exists and implements drift detection
-    assert.ok(profilesSource.includes('export function coordinatorCheckoutRefusal'), 'coordinatorCheckoutRefusal is exported');
-    // Verify it checks for dirty state and HEAD divergence
-    assert.ok(profilesSource.includes('CoordinatorCheckout'), 'function accepts CoordinatorCheckout type');
-    // The function returns a refusal message when drift is detected, which prevents self-upgrade
-    // and causes the loop to record attention with the paths and HEAD information
-  });
+test('unit:session-cwd-own-checkout — an approver session opens its pane and starts its runtime in a managed checkout of its own, never in the coordinator checkout', async () => {
+  const fixture = await installed();
+  try {
+    const { root, cleanup } = fixture;
+    const stub = herdr();
+    await launchApprover(root, work(), 'decision-1', 'claude', { agents: [], available: true }, stub.run);
+    assert.equal(stub.tabs.length, 1, 'one Herdr tab is created for the approver');
+    const pane = paneCwd(stub.tabs[0]);
+    assert.ok(pane, 'the approver pane is created with an explicit --cwd');
+    assert.ok(outsideCoordinator(pane!, root), `the approver pane opens outside the coordinator checkout, not ${pane}`);
+    assert.equal(existsSync(pane!), true, 'the approver pane opens in a checkout that exists');
+    const sessionCheckout = checkoutOfStem(stub.typed[0].stem);
+    assert.equal(resolve(pane!), resolve(sessionCheckout!), 'the pane opens exactly where the approver checkout is');
+    await cleanup();
+  } finally { await fixture.cleanup(); }
+});
+
+test('unit:session-cwd-own-checkout — an escalation handler opens its pane and starts its runtime in a managed checkout of its own, never in the coordinator checkout', async () => {
+  const fixture = await installed();
+  try {
+    const { root, config, cleanup } = fixture;
+    const stub = herdr();
+    const context = { key: 'GY-866', escalation: { trigger: 'requirement-weakening' }, fingerprint: 'f'.repeat(64) } as unknown as EscalationContext;
+    await launchEscalationHandler(root, config, context, 'claude', [], stub.run);
+    assert.equal(stub.tabs.length, 1, 'one Herdr tab is created for the handler');
+    const pane = paneCwd(stub.tabs[0]);
+    assert.ok(pane, 'the escalation handler pane is created with an explicit --cwd');
+    assert.ok(outsideCoordinator(pane!, root), `the escalation handler pane opens outside the coordinator checkout, not ${pane}`);
+    assert.equal(existsSync(pane!), true, 'the escalation handler pane opens in a checkout that exists');
+    assert.deepEqual(stub.pasted, [], 'the handler takes its request on its command line, never a paste');
+    await cleanup();
+  } finally { await fixture.cleanup(); }
+});
+
+test('unit:session-cwd-own-checkout — a worker session opens its pane in its assigned worktree, never in the coordinator checkout', async () => {
+  const fixture = await installed();
+  try {
+    const { root, cleanup } = fixture;
+    const stub = herdr();
+    const profile: WorkerProfile = { name: 'worker-oc', principal: 'worker-a', agentName: 'eng-oc', mode: 'launch', kind: 'opencode', credentialFile: await fixture.token('worker'), agentArgs: [], approvals: 'auto', environment: {} };
+    const assigned = await mkdtemp(join(tmpdir(), 'graphyard-session-cwd-worktree-'));
+    try {
+      await dispatchWork(root, ready(), profile, [], stub.run, [ready()], async () => ({ epoch: 4, path: assigned, base: 'c'.repeat(40) }), async () => {}, 5_000);
+      assert.equal(stub.tabs.length, 1, 'one Herdr tab is created for the worker');
+      const pane = paneCwd(stub.tabs[0]);
+      assert.ok(pane, 'the worker pane is created with an explicit --cwd');
+      assert.equal(resolve(pane!), resolve(assigned), 'the worker pane opens in its assigned worktree');
+      assert.ok(outsideCoordinator(pane!, root), 'the assigned worktree is outside the coordinator checkout');
+    } finally { await rm(assigned, { recursive: true, force: true }); }
+    await cleanup();
+  } finally { await fixture.cleanup(); }
+});
+
+test('unit:session-cwd-own-checkout — the loop starts its research and triage sessions in a managed scratch checkout of the release it runs, never in the coordinator checkout', async () => {
+  const fixture = await installed({ research: true });
+  try {
+    const { root, head, config, cleanup } = fixture;
+    const managedRoot = worktreeRoot(root, config);
+    const started: { prompt: string; cwd: string; tool: string; holdsRelease: boolean }[] = [];
+    const runner: Runner = {
+      name: 'stub',
+      start: (prompt, options) => {
+        // The moment the session starts is the moment its checkout must already hold the code.
+        started.push({ prompt, cwd: options.cwd, tool: options.tool, holdsRelease: existsSync(join(options.cwd, 'src', 'loop.ts')) });
+        return { id: 'run-1', events: [], onEvent: () => () => {}, cancel: () => {},
+          result: async () => ({ ok: false as const, failure: { reason: 'cancelled' as const, detail: 'the test stub settles at once' }, payloads: [] }) };
+      },
+    };
+    const researchEvents: unknown[] = [], triageEvents: unknown[] = [];
+    // The production wiring hands the loop's own checkout as the research cwd; the loop must
+    // replace it with the scratch checkout before any session starts.
+    const effects = loopEffects([ready(), machineFiled()], {
+      loadedRelease: { commit: head, dirty: false },
+      recordResearch: async (item: Work, event: unknown) => { researchEvents.push({ key: item.key, event }); },
+      recordTriage: async (item: Work, event: unknown) => { triageEvents.push({ key: item.key, event }); },
+      research: { cwd: root, runner },
+    });
+    const logs: string[] = [];
+    await runDaemon(config, emptyDaemonState(config), effects, loopOptions(fixture));
+    assert.equal(started.length, 2, 'one research session and one triage session start');
+    for (const run of started) {
+      assert.ok(!run.cwd.startsWith(resolve(root)), `no research or triage session starts in the coordinator checkout (${run.cwd})`);
+      assert.ok(run.cwd.startsWith(resolve(managedRoot)), `the session starts under the managed worktree root (${run.cwd})`);
+      const name = run.cwd.split(sep).at(-2);
+      assert.match(name!, /^graphyard-approval-loop-scratch-/, 'the session starts in the loop scratch checkout');
+      assert.ok(run.holdsRelease, 'the scratch checkout holds the release the loop runs, so the session reads real code');
+    }
+    assert.equal(started[0].cwd, started[1].cwd, 'research and triage share the one scratch checkout this loop allocated');
+    assert.equal(existsSync(started[0].cwd), false, 'the scratch checkout is settled when the loop that allocated it stops');
+    assert.ok(researchEvents.length >= 1, 'the research run is recorded on the item');
+    assert.ok(triageEvents.length === 0, 'a run that settles without a judgement records no triage judgement');
+    await cleanup();
+  } finally { await fixture.cleanup(); }
+});
+
+test('unit:coordinator-checkout-drift-detected — the loop cycles nothing from a dirty coordinator checkout and raises attention naming the paths', async () => {
+  const fixture = await installed();
+  try {
+    const { root, config, cleanup } = fixture;
+    const original = await readFile(join(root, 'src', 'loop.ts'), 'utf8');
+    await writeFile(join(root, 'src', 'loop.ts'), `${original}\nexport const halfFinished = true;\n`);
+    await writeFile(join(root, 'tests', 'scratch.test.ts'), 'import { test } from "node:test";\n');
+    const checkout = await readCoordinatorCheckout(root);
+    assert.match(coordinatorCheckoutRefusal(checkout, 'the master loop')!, /refuses to start, self-upgrade or restart/);
+    let upgrades = 0;
+    const state = emptyDaemonState(config);
+    const refused = await runDaemon(config, state, loopEffects([], { selfUpgrade: async () => { upgrades++; return { outcome: 'skipped' as const, reason: 'nothing deployed yet' }; } }), loopOptions(fixture));
+    assert.deepEqual(refused.cycles, [], 'the loop cycles nothing from a dirty checkout');
+    assert.equal(upgrades, 0, 'the self-upgrade never runs from a dirty checkout');
+    const escalation = state.actions['escalation:dirty-checkout'];
+    assert.ok(escalation, 'the refusal is raised as attention');
+    assert.match(escalation.detail, /src\/loop\.ts/);
+    assert.match(escalation.detail, /tests\//, 'the untracked test directory is named');
+    // Clean again: the loop starts, and the refusal stops describing anything.
+    await writeFile(join(root, 'src', 'loop.ts'), original);
+    await rm(join(root, 'tests', 'scratch.test.ts'));
+    const resumed = await runDaemon(config, emptyDaemonState(config), loopEffects([], { selfUpgrade: async () => { upgrades++; return { outcome: 'skipped' as const, reason: 'nothing deployed yet' }; } }), loopOptions(fixture));
+    assert.equal(resumed.cycles.length, 1, 'a cleaned checkout starts the loop');
+    assert.equal(upgrades, 1, 'the self-upgrade runs again on a clean checkout');
+    await cleanup();
+  } finally { await fixture.cleanup(); }
+});
+
+test('unit:coordinator-checkout-drift-detected — the loop checks the checkout every cycle: a tree that turns dirty under a running loop is attention, and the self-upgrade waits', async () => {
+  const fixture = await installed();
+  try {
+    const { config, cleanup } = fixture;
+    let cycle = 0;
+    const checkout = async () => {
+      cycle++;
+      // The startup read sees a clean checkout at C1; the cycle's own guard reads the tree the
+      // attempt half-finished.
+      return cycle === 1 ? { root: fixture.root, commit: C1, modified: [] as string[], untracked: [] as string[] }
+        : { root: fixture.root, commit: C1, modified: ['src/loop.ts'], untracked: ['tests/scratch.test.ts'] };
+    };
+    let upgrades = 0;
+    const state = emptyDaemonState(config);
+    await runDaemon(config, state, loopEffects([], { selfUpgrade: async () => { upgrades++; return { outcome: 'skipped' as const, reason: 'nothing deployed yet' }; } }),
+      loopOptions(fixture, { checkout }));
+    assert.equal(upgrades, 0, 'the self-upgrade is skipped from the cycle the tree turned dirty');
+    const escalation = state.actions['escalation:dirty-checkout'];
+    assert.ok(escalation, 'the turned-dirty tree is raised as attention');
+    assert.match(escalation.detail, /src\/loop\.ts/);
+    await cleanup();
+  } finally { await fixture.cleanup(); }
+});
+
+test('unit:coordinator-checkout-drift-detected — a HEAD that moves under a running loop is attention naming the HEAD and the sessions whose panes point at the checkout, and nothing self-upgrades from it', async () => {
+  const fixture = await installed();
+  try {
+    const { root, config, cleanup } = fixture;
+    let phase = 0;
+    const checkout = async () => {
+      phase++;
+      return { root, commit: phase === 1 ? C1 : C2, modified: [] as string[], untracked: [] as string[] };
+    };
+    let upgrades = 0;
+    const agents: HerdrAgent[] = [
+      { name: 'review-claude-1', pane_id: 'wC:p1', agent: 'claude', cwd: root },
+      { name: 'produce-claude-2', pane_id: 'wC:p2', agent: 'claude', cwd: join(root, '.graphyard', 'checkouts', 'graphyard-review-gy-1-abcdef1-12345678') },
+      { name: 'eng-oc', pane_id: 'wC:p3', agent: 'opencode', cwd: undefined },
+    ];
+    const state = emptyDaemonState(config);
+    await runDaemon(config, state, loopEffects([], { agents: async () => agents, selfUpgrade: async () => { upgrades++; return { outcome: 'skipped' as const, reason: 'nothing deployed yet' }; } }),
+      loopOptions(fixture, { checkout }));
+    assert.equal(upgrades, 0, 'the self-upgrade is skipped while HEAD is not the commit the loop runs');
+    const escalation = state.actions['escalation:dirty-checkout'];
+    assert.ok(escalation, 'the moved HEAD is raised as attention');
+    assert.match(escalation.detail, new RegExp(`moved from ${C1.slice(0, 12)} to ${C2.slice(0, 12)}`), 'the attention names the HEAD it expects and the HEAD it found');
+    assert.ok(escalation.detail.includes('review-claude-1 (pane wC:p1'), 'the session whose pane points at the checkout is named');
+    assert.ok(escalation.detail.includes(`cwd ${root}`), 'the pane cwd is named');
+    assert.ok(!escalation.detail.includes('produce-claude-2'), 'a session in its own managed checkout is not named');
+    await cleanup();
+  } finally { await fixture.cleanup(); }
+});
+
+test('unit:coordinator-checkout-drift-detected — the loop\u2019s own alignment is the one HEAD move it sanctions: the next cycle expects the HEAD the alignment left behind', async () => {
+  const fixture = await installed();
+  try {
+    const { config, cleanup } = fixture;
+    let phase = 0;
+    const stop = { fire: () => {} };
+    const fakeProcess = { on: (event: string, handler: () => void) => { if (event === 'SIGTERM') stop.fire = handler; }, off: () => {} } as unknown as NodeJS.Process;
+    const checkout = async () => {
+      phase++;
+      // startup, cycle 1's guard, the alignment's own read, then cycle 2's guard — the commit the
+      // alignment left behind reads as expected from then on.
+      // reads 1-2 are the startup read and cycle 1's guard at the loaded commit; read 3 is the alignment's own read of the commit it moved to.
+      return { root: fixture.root, commit: phase <= 2 ? C1 : C2, modified: [] as string[], untracked: [] as string[] };
+    };
+    const upgrades: number[] = [];
+    let alignments = 0;
+    const state = emptyDaemonState(config);
+    const effects = loopEffects([], { selfUpgrade: async () => {
+      alignments++;
+      if (alignments === 1 && phase === 2) { upgrades.push(phase); return { outcome: 'upgraded' as const, from: C1, to: C2, code: false, executors: null, self: false }; }
+      return { outcome: 'skipped' as const, reason: 'already aligned' };
+    } });
+    const stopTimer = setTimeout(() => stop.fire(), 40);
+    void stopTimer;
+    await runDaemon(config, state, effects, { intervalMs: 5, identity: { pid: process.pid, host: 'machine-a' }, signals: ['SIGTERM'], process: fakeProcess, checkout, log: () => {} });
+    clearTimeout(stopTimer);
+    assert.deepEqual(upgrades, [2], 'the alignment ran once on the clean checkout');
+    assert.ok(alignments >= 2, 'the next cycle offered the alignment again and it found nothing to move');
+    assert.equal(state.actions['escalation:dirty-checkout'], undefined, 'the alignment\u2019s own HEAD move raises no drift attention');
+    assert.ok(phase >= 4, 'the loop checked the coordinator checkout on every cycle');
+    await cleanup();
+  } finally { await fixture.cleanup(); }
+});
+
+test('unit:coordinator-checkout-drift-detected — an executor refuses every claim on a dirty coordinator checkout, and runs once it is clean', async () => {
+  const fixture = await installed();
+  try {
+    const { root, config, cleanup } = fixture;
+    const original = await readFile(join(root, 'src', 'loop.ts'), 'utf8');
+    await writeFile(join(root, 'src', 'loop.ts'), `${original}\nexport const halfFinished = true;\n`);
+    await writeFile(join(root, 'tests', 'scratch.test.ts'), 'import { test } from "node:test";\n');
+    const row = { id: 'a1', key: 'GY-852', work: 'w1', kind: 'dispatch', inputs: { kind: 'dispatch', target: 'implementation', epoch: 3 } } as unknown as ActionRow;
+    let snapshotReads = 0;
+    const dirtyHandlers = controlPlaneHandlers(() => config, loopEffects([], { snapshot: async () => { snapshotReads++; return { work: [] as Work[], now: iso(0) }; } }));
+    const run = (handler: unknown, action: unknown) => (handler as (action: unknown, identity: unknown) => Promise<unknown>)(action, { id: 'exec', host: 'machine-a' });
+    await assert.rejects(run(dirtyHandlers.dispatch!, row), (error: Error) => /holds uncommitted work/.test(error.message) && /src\/loop\.ts/.test(error.message));
+    assert.equal(snapshotReads, 0, 'a refused executor reads nothing and runs nothing');
+    await writeFile(join(root, 'src', 'loop.ts'), original);
+    await rm(join(root, 'tests', 'scratch.test.ts'));
+    const claimed = { key: 'GY-852', id: 'w1', lease: { epoch: 3, owner: 'graphyard-claude-1', expiresAt: iso(hour) }, plannedFiles: ['src/loop.ts'] };
+    const cleanHandlers = controlPlaneHandlers(() => ({ ...config, url: '' }), loopEffects([claimed]));
+    await assert.rejects(run(cleanHandlers.dispatch!, row), /no worker profile can take GY-852/, 'with a clean checkout the executor handler runs');
+    await cleanup();
+  } finally { await fixture.cleanup(); }
 });
