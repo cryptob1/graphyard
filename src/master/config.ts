@@ -281,11 +281,11 @@ export async function saveProducerProfile(root: string, profileInput: unknown, v
  * writes it, and the master's harness grants no direct edit of master.json, so flipping autoMerge
  * or re-pointing a credential can never be a routine master action.
  */
-export const masterOwnedRunFields = ['intervalSeconds', 'dispatchIntervalSeconds', 'proofWorkflow', 'smokeWorkflow', 'deploymentUrl', 'deploymentShaField', 'productionEnvironment', 'reviewerProfile', 'producerTimeoutMinutes', 'awaitReviewersMinutes', 'acknowledgementSeconds', 'quotaCeilingPercent'] as const;
-const masterClearableRunFields = ['proofWorkflow', 'smokeWorkflow', 'deploymentUrl', 'productionEnvironment', 'reviewerProfile', 'awaitReviewersMinutes', 'quotaCeilingPercent'] as const;
+export const masterOwnedRunFields = ['intervalSeconds', 'dispatchIntervalSeconds', 'proofWorkflow', 'smokeWorkflow', 'deploymentUrl', 'deploymentShaField', 'productionEnvironment', 'reviewerProfile', 'producerTimeoutMinutes', 'awaitReviewersMinutes', 'acknowledgementSeconds', 'faultObservationSeconds', 'quotaCeilingPercent'] as const;
+const masterClearableRunFields = ['proofWorkflow', 'smokeWorkflow', 'deploymentUrl', 'productionEnvironment', 'reviewerProfile', 'awaitReviewersMinutes', 'faultObservationSeconds', 'quotaCeilingPercent'] as const;
 export interface MasterOwnedSettings {
   intervalSeconds?: number | null; dispatchIntervalSeconds?: number | null; proofWorkflow?: string | null; smokeWorkflow?: string | null;
-  deploymentUrl?: string | null; deploymentShaField?: string | null; productionEnvironment?: string | null; reviewerProfile?: string | null; producerTimeoutMinutes?: number | null; awaitReviewersMinutes?: number | null; acknowledgementSeconds?: number | null; quotaCeilingPercent?: number | null;
+  deploymentUrl?: string | null; deploymentShaField?: string | null; productionEnvironment?: string | null; reviewerProfile?: string | null; producerTimeoutMinutes?: number | null; awaitReviewersMinutes?: number | null; acknowledgementSeconds?: number | null; faultObservationSeconds?: number | null; quotaCeilingPercent?: number | null;
   accounts?: { profile: string; accounts: string[] }[];
 }
 

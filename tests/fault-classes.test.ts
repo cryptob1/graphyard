@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -11,7 +11,7 @@ import { classifyAttention, faultCatalogue, faultClasses, faultClassOf, faultCla
 import { workOriginSchema } from '../src/model/interventions.js';
 import { escalationTriggers, type Work } from '../src/model.js';
 import { agentOwner, controlPlaneAttention, installationSources, masterConfigSchema, workAttentionCauses, type AttentionItem, type MasterConfig } from '../src/master.js';
-import { cycleFailureAttentionAfter, cycleFaults, daemonActionFaultKind, daemonActionKinds, daemonEffects, daemonSummary, emptyDaemonState, endFailingRuns, fileRecurringFaultClasses, herdrFaultKinds, loopAttention, loopLiveness, noteConfigReload, noteCycleFailure, noteWatchdog, onceAnnotations, faultObservationIntervalMs, pruneDaemonState, reconcilePendingActions, retainedActions, runCycle, storeAction, timingFaultAttention, type DaemonEffects } from '../src/master-daemon.js';
+import { cycleFailureAttentionAfter, cycleFaults, daemonActionFaultKind, daemonActionKinds, daemonEffects, daemonSummary, emptyDaemonState, endFailingRuns, fileRecurringFaultClasses, herdrFaultKinds, loopAttention, loopLiveness, noteConfigReload, noteCycleFailure, noteWatchdog, onceAnnotations, faultObservationIntervalMs, faultObservationMs, pruneDaemonState, reconcilePendingActions, retainedActions, runCycle, storeAction, timingFaultAttention, type DaemonEffects } from '../src/master-daemon.js';
 import { attributeAttention, derivedAttention, faulted } from '../src/master-status.js';
 import type { ResourceReading } from '../src/master-resources.js';
 import { predictQueue } from '../src/merge-queue.js';
@@ -886,4 +886,42 @@ test('unit:recurring-class-item — daemonSummary reports faults under the polic
     for (const [name, value] of [['GRAPHYARD_FAULT_CLASS_THRESHOLD', previous.threshold], ['GRAPHYARD_FAULT_CLASS_WINDOW_HOURS', previous.windowHours]] as const)
       if (value === undefined) delete process.env[name]; else process.env[name] = value;
   }
+});
+
+// GY-708: follow-ups from the approved review of GY-368.
+test('unit:recurring-class-item — a lone listed fault fixed as another of its kind appears ends, and the other opens', () => {
+  const record = { instances: [] as FaultInstance[], open: {} as Record<string, string>, failing: {} as Record<string, string> };
+  const missing = (permission: string) => statusFaults({ github: true, appPermissions: { attention: [`The App lacks ${permission}: write (missing for 5m)`] } })[0];
+  assert.equal(trackFaults(record, [missing('Checks')], iso(0)).length, 1);
+  assert.deepEqual(trackFaults(record, [missing('Pull requests')], iso(60_000)).map(entry => entry.text), ['The App lacks Pull requests: write (missing for 5m)'],
+    'the granted permission ended; the one now missing is a fault of its own');
+  assert.equal(record.instances.length, 2, 'two causes count twice toward their class');
+  assert.equal(record.instances[0].text, 'The App lacks Checks: write (missing for 5m)', 'the ended instance still describes its own fault');
+  // A single-line source (a work item's one blocker) still carries a restated line over.
+  const blocker = (text: string) => ({ kind: 'blocker' as const, faultClass: 'stalled-gate' as const, subject: 'GY-1', text });
+  trackFaults(record, [blocker('npm test fails on a missing fixture')], iso(120_000));
+  assert.deepEqual(trackFaults(record, [blocker('Waiting on the fixture upload')], iso(180_000)), []);
+});
+
+test('unit:recurring-class-item — the fault observation interval is the install\'s to tune', async () => {
+  assert.equal(faultObservationMs(config()), faultObservationIntervalMs, 'unset, the shipped default');
+  assert.equal(faultObservationMs({ run: { ...config().run, faultObservationSeconds: 300 } } as MasterConfig), 300_000);
+  assert.equal(masterConfigSchema.safeParse({ ...config(), run: { ...config().run, faultObservationSeconds: 901 } }).success, false);
+  let reads = 0;
+  const effects = {
+    agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [], now: iso(0) }),
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
+    faultClassPolicy: policy, persist: async () => {},
+    controlPlane: async () => { reads++; return { github: true, heldJobs: 0, jobs: [] }; },
+    reportedAttention: async () => ({ items: [] }),
+  } as unknown as DaemonEffects;
+  const everyCycle = { ...config(), run: { ...config().run, faultObservationSeconds: 0 } } as MasterConfig, state = emptyDaemonState(everyCycle);
+  for (let round = 0; round < 3; round++) await runCycle(everyCycle, state, effects, () => clock + round * 1000);
+  assert.equal(reads, 3, '0 observes, and judges the invariants, on every cycle');
+});
+
+test('unit:recurring-class-item — the guide says invariants are judged per fault observation', async () => {
+  const guide = await readFile(new URL('../docs/master-agent.md', import.meta.url), 'utf8');
+  const section = guide.slice(guide.indexOf('### System invariants'), guide.indexOf('## Research before build'));
+  for (const fragment of ['each fault observation, not each cycle', 'run.faultObservationSeconds']) assert.ok(section.includes(fragment), `docs/master-agent.md § System invariants states ${fragment}`);
 });

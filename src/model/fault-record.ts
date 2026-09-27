@@ -1,6 +1,6 @@
 // Concern: the loop's fault record (GY-173) — which observations are one standing fault, when one ends,
 // and each failing action's run, bounded. The catalogue and classification stay in fault-classes.ts.
-import type { FaultInstance, FaultObservation } from './fault-classes.js';
+import type { FaultInstance, FaultKind, FaultObservation } from './fault-classes.js';
 import { wording } from './fault-wording.js';
 
 /** The loop's record: every instance it retains, the one each standing fault is, and each failing action's run. */
@@ -19,8 +19,11 @@ function retain(record: FaultRecord) { // drops the oldest past the bound: first
  * is a new instance (n of one kind on one subject are n); one no longer observed has ended — unless the cycle's reads were `partial` (all of them, or a set of kinds), when an unread source ends nothing. Returns what opened. A fault is its kind, subject and wording less the figures that move while it stands (ages, counts, times): one fixed while another of its kind appears on the subject ends, and the other opens.
  * The one exception is a kind that stands once on its subject and is observed once again, reworded: with nothing to tell
  * it from, it is the same fault whose line changed (a blocker restated, an attention line's reason updated), so it keeps its
- * instance rather than counting one cause twice toward its class.
+ * instance rather than counting one cause twice toward its class. A listed kind is not reworded (GY-708): its source names
+ * each fault in its own line (one per missing permission, failed job, unserved action), so a different line on the subject
+ * is a different fault even when it stands alone — one fixed as another appears ends, and the other opens.
  */
+export const listedFaultKinds: ReadonlySet<string> = new Set<FaultKind>(['app-permissions', 'delegation-limits', 'production', 'integration-job', 'executor']);
 export function trackFaults(record: FaultRecord, observations: readonly FaultObservation[], at: string, partial: boolean | ReadonlySet<string> = false): FaultInstance[] {
   const opened: FaultInstance[] = [], seen = new Set<string>(), repeats = new Map<string, number>();
   const where = (kind: string, subject: string) => `${kind}|${subject.slice(0, 200)}`, observed = new Map<string, number>(), standingOn = new Map<string, string[]>();
@@ -29,7 +32,7 @@ export function trackFaults(record: FaultRecord, observations: readonly FaultObs
   for (const observation of observations) { // identical faults on one subject stand as that many instances, as the dashboard counts them
     const subject = observation.subject.slice(0, 200), base = `${observation.kind}|${subject}|${wording(observation.text)}`, nth = repeats.get(base) ?? 0, key = nth ? `${base}#${nth}` : base;
     repeats.set(base, nth + 1); seen.add(key);
-    const alone = standingOn.get(where(observation.kind, subject)), reworded = !record.open[key] && observed.get(where(observation.kind, subject)) === 1 && alone?.length === 1 ? alone[0] : undefined;
+    const alone = standingOn.get(where(observation.kind, subject)), reworded = !record.open[key] && !listedFaultKinds.has(observation.kind) && observed.get(where(observation.kind, subject)) === 1 && alone?.length === 1 ? alone[0] : undefined;
     if (reworded) { record.open[key] = record.open[reworded]; delete record.open[reworded]; }
     const standing = record.open[key] ? record.instances.find(entry => entry.id === record.open[key]) : undefined;
     if (standing) { standing.lastSeenAt = at; standing.text = observation.text.slice(0, 500); continue; }

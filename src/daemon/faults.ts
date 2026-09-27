@@ -166,12 +166,16 @@ export function faultRecurrenceReport(state: Pick<DaemonState, 'faults'>, policy
  * How often the loop reads the sources standing faults are observed from: the control plane's status, the attention
  * `master status` adds and Herdr's inventory. They cost API and filesystem reads, and a fault that stands is one instance
  * however often it is seen, so a cycle inside this interval of the last observation reads none of them. A fault that
- * stood and cleared between two observations goes unseen, which counts nothing early toward a class.
+ * stood and cleared between two observations goes unseen, which counts nothing early toward a class. The system
+ * invariants are judged on the same observations, so what `master status` reports of them is at most this old.
+ * The default; `run.faultObservationSeconds` tunes it (0 observes every cycle), and an interval at or below the
+ * loop's own `run.intervalSeconds` observes every cycle, since no two cycles fall inside it.
  */
 export const faultObservationIntervalMs = 60_000;
+export const faultObservationMs = (config: Pick<MasterConfig, 'run'>) => (config.run.faultObservationSeconds ?? faultObservationIntervalMs / 1000) * 1000;
 /**
  * Step 7b: classify what this cycle saw standing wrong and file one item per recurring class.
- * Standing faults are observed at most once per faultObservationIntervalMs; failed actions are noted as
+ * Standing faults are observed, and the invariants judged, at most once per faultObservationMs; failed actions are noted as
  * they happen, so every cycle still ends silent failing runs and files a class that reached its threshold.
  * A read that fails makes the cycle partial: faults its source would have shown were not
  * observed, so none standing ends this cycle (and none reopens as a new instance next cycle).
@@ -182,7 +186,7 @@ export async function faultStep(cycle: Cycle, assessments: Record<string, Contai
   const { config, state, effects, now, snapshot, clock, performed, agents, credentials } = cycle;
   // The cadence is the loop's own time, as the reads it spaces out are: the snapshot's clock need not move between cycles.
   const policy = effects.faultClassPolicy ?? faultClassPolicyFromEnv(process.env), last = state.faults.observedAt ? Date.parse(state.faults.observedAt) : Number.NaN, local = now();
-  if (local >= last && local - last < faultObservationIntervalMs) { // a local clock that went back observes again
+  if (local >= last && local - last < faultObservationMs(config)) { // a local clock that went back observes again
     endFailingRuns(state, policy, clock);
     return fileRecurringFaultClasses(state, effects, snapshot.work, clock, now, performed);
   }
