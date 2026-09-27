@@ -1192,10 +1192,11 @@ export class GitHub {
     const predicted = !!speculative && speculative !== branch.tip && speculation!.baseTree !== branch.tree && speculation!.predecessors.length > 0 && await this.contains(branch.tip, speculative);
     const base = predicted ? speculative! : branch.tip;
     const sameTree = base === bound || !!speculative && speculation!.baseTree === branch.tree;
-    // The pull request's own diff is taken against the live branch, which does not hold the
-    // entries ahead yet: a file one of them adds and this head drops appears in it nowhere. What
-    // landing on a predicted base does is that base compared with the head that contains it.
-    const landed = predicted ? await this.landingDiff(base, head) : sameTree ? null : files;
+    // Use the landing base's merge base with the head, not the two endpoint trees (or a PR
+    // file list computed against another base). A path only the base changed is inherited by
+    // a three-way merge; it is not this candidate restoring its older copy of that path.
+    // Recompute even for an unchanged head: an old observation may contain a false refusal.
+    const landed = predicted || !sameTree ? await this.landingDiff(base, head, predicted ? undefined : files) : null;
     const landing: LandingCheck = { base, ...(landed ? { files: await this.compareScope(work.plannedFiles ?? [], landed, base, budget) } : {}) };
     if (!peers) return landing;
     const open = peers.filter(peer => peer.id !== work.id && peer.stage !== 'done' && !!peer.submission && !!peer.candidate && peer.candidate.sha !== head
@@ -1274,10 +1275,20 @@ export class GitHub {
     for (const parent of Array.isArray(detail?.parents) ? detail.parents : []) if (typeof parent?.sha === 'string' && await this.blobAt(path, parent.sha) === delivered) return true;
     return false;
   }
-  /** The provider's file records for `base...head`; a list at the cap ends with a record nothing was compared for, which the guard refuses. */
-  private async landingDiff(base: string, head: string): Promise<any[]> {
-    const comparison = await this.request(`/compare/${base}...${head}`);
+  /**
+   * Only changes the head makes since its merge base with the landing commit can affect the
+   * landing tree. Explicitly compare from that ancestor: an endpoint diff also lists the base's
+   * own new changes in reverse. A missing merge-base answer retains the conservative comparison;
+   * it never licenses dropping a file. A capped list remains unverified, even after filtering.
+   */
+  private async landingDiff(base: string, head: string, fallback?: any[]): Promise<any[]> {
+    let comparison = await this.request(`/compare/${base}...${head}`);
+    const ancestor = comparison?.merge_base_commit?.sha;
+    if (typeof ancestor === 'string' && /^[a-f0-9]{40}$/.test(ancestor) && ancestor !== base)
+      comparison = await this.request(`/compare/${ancestor}...${head}`);
     demand(Array.isArray(comparison?.files), `GitHub did not list the files changed between ${base.slice(0, 12)} and ${head.slice(0, 12)}`, 502);
+    // Without ancestry metadata, retain all changes the previous live-base check knew about.
+    if (!ancestor && fallback) comparison = { files: [...new Map([...comparison.files, ...fallback].map(file => [file.filename, file])).values()] };
     return comparison.files.length < compareFileCap ? comparison.files
       : [...comparison.files, { filename: `(the comparison lists ${compareFileCap} files or more; the rest were not compared)`, status: 'unchanged', additions: 0, deletions: 0, uncompared: true }];
   }

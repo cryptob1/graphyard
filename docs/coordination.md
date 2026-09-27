@@ -29,6 +29,8 @@ The gate is the reviewer's approval of the exact head plus required CI; threads 
 
 ### Keep current with `graphyard sync`
 
+The landing check compares the candidate's changes since its merge base with the commit it would land on (the live base or its predicted queue base). A file changed only on the base is inherited by the merge and is never counted as the candidate reverting it. Actual out-of-scope deletions and rewrites remain refused. Every observation recomputes this check, so a stale landing refusal clears on the next successful observation without a new push.
+
 Before any push, `graphyard sync GY-N` merges `origin/BASE` (never a rebase), regenerates, commits and prints the same classification. Restore an out-of-scope file with `git checkout BASE_TIP -- PATH`.
 
 ### Generated files never conflict
