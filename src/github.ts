@@ -1911,6 +1911,7 @@ function mergeRequiredChecks(checks: { name: unknown; appId: unknown }[]): { nam
     merged.set(check.name, { name: check.name, appId: known && (known.appId === null || known.appId !== appId) ? null : appId });
   }
   return [...merged.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
 
 /**
  * The GitHub answers the landing check reads: compare listings, a pull request record, blob
