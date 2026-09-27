@@ -268,14 +268,33 @@ export function landingRegressions(work: Pick<Work, 'id' | 'plannedFiles'> & Car
 }
 
 /**
+ * Every refused conclusion a queued tip's tree shows, against its bound base and where it would
+ * land, before any carried-items excusal. A file the observation could not compare is not a
+ * reported conclusion and appears here never; this is what tells the queue a stale tip (GY-568)
+ * holds unlanded work at all, so it leaves for its branch restore instead of being rebuilt over
+ * files it still carries.
+ */
+export function staleTipRegressions(work: Pick<Work, 'id' | 'plannedFiles'> & CarriedSubject, observation: Pick<Observation, 'scopeFiles' | 'landing' | 'candidate'>, all: Work[], generated: readonly string[] = generatedFiles): { base: string; text: string }[] {
+  return regressionsOf(work, observation, all, generated, () => false, () => false);
+}
+
+/**
  * Every reported regression of a queued tip, against its bound base and where it would land, as
  * the merge queue's ejection names them. A file the observation could not compare is not a
- * reported conclusion: it holds the build gate and ejects nothing.
+ * reported conclusion: it holds the build gate and ejects nothing. A file carried from another
+ * item's unlanded commits on this head (GY-871) is excused by the same carried-items exclusion
+ * `regressionRefusals` applies, so an entry that passed the build gate is never ejected over the
+ * files it excused: the two checks agree on every out-of-plan file.
  */
-export function queuedRegressions(work: Pick<Work, 'id' | 'plannedFiles'>, observation: Pick<Observation, 'scopeFiles' | 'landing' | 'candidate'>, all: Work[], generated: readonly string[] = generatedFiles): { base: string; text: string }[] {
-  const bound = classifyScope(work.plannedFiles ?? [], observation.scopeFiles ?? [], generated).filter(finding => finding.refused && finding.kind !== 'unverified')
+export function queuedRegressions(work: Pick<Work, 'id' | 'plannedFiles'> & CarriedSubject, observation: Pick<Observation, 'scopeFiles' | 'landing' | 'candidate'>, all: Work[], generated: readonly string[] = generatedFiles): { base: string; text: string }[] {
+  const carried = carriedItems(work, observation, all);
+  return regressionsOf(work, observation, all, generated, path => !!carriedBy(path, carried, all).length, entry => !!entry.carried?.length);
+}
+
+function regressionsOf(work: Pick<Work, 'id' | 'plannedFiles'> & CarriedSubject, observation: Pick<Observation, 'scopeFiles' | 'landing' | 'candidate'>, all: Work[], generated: readonly string[], pathExcused: (path: string) => boolean, entryCarried: (entry: LandingRegression) => boolean): { base: string; text: string }[] {
+  const bound = classifyScope(work.plannedFiles ?? [], observation.scopeFiles ?? [], generated).filter(finding => finding.refused && finding.kind !== 'unverified' && !pathExcused(finding.path))
     .map(finding => ({ base: observation.candidate.baseSha, text: describeRefusal(finding, all) }));
-  return [...bound, ...landingRegressions(work, observation, all, generated).filter(entry => entry.adverse).map(entry => ({ base: entry.base, text: entry.text }))];
+  return [...bound, ...landingRegressions(work, observation, all, generated).filter(entry => entry.adverse && !entryCarried(entry)).map(entry => ({ base: entry.base, text: entry.text }))];
 }
 
 /**
