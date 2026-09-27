@@ -251,7 +251,7 @@ test('unit:tip-flake-rerun-configurable — mergeQueue.rerunFailedChecks default
   assert.deepEqual(reconcileCheckReruns(item, [15368], 2, new Date()).transitions.map(entry => [entry.kind, entry.rerun.failedRunId]), [['check.rerun.owed', 62]]);
 });
 
-test('GY-731: gate, rerun hold and rework select the same trusted run by ID', async () => {
+test('manual:review-followups-triaged GY-731.1: gate, rerun hold and rework select the same trusted run by ID', async () => {
   await clearQueue();
   const main = sha40('b731'), head = sha40('a731');
   let work = await submitted('Trusted rerun selection');
@@ -280,7 +280,7 @@ test('GY-731: gate, rerun hold and rework select the same trusted run by ID', as
   assert.equal(routineDecision(step.work, { autoMerge: true }, Date.now()), null);
 });
 
-test('GY-731: custom and empty CI trust configurations reach downstream rework decisions', async () => {
+test('manual:review-followups-triaged GY-731.2: custom and empty CI trust configurations reach downstream rework decisions', async () => {
   await clearQueue();
   const custom = new Engine(store, [777], 120, 'owner/project');
   let work = await submitted('Custom CI rerun selection');
@@ -299,7 +299,7 @@ test('GY-731: custom and empty CI trust configurations reach downstream rework d
   assert.equal(refusalAction(work, 'test', gate(work, 'test').reasons[0]), 'resync');
 });
 
-test('GY-731: owed reruns expire without a visible run and are never requested twice', async () => {
+test('manual:review-followups-triaged GY-731.4: owed reruns expire without a visible run and are never requested twice', async () => {
   await clearQueue();
   let work = await submitted('Lost rerun request');
   const candidate = { sha: sha40('a733'), baseSha: sha40('b733') };
@@ -317,7 +317,7 @@ test('GY-731: owed reruns expire without a visible run and are never requested t
   assert.equal(visible.reruns[0].state, 'requested', 'a visible run may finish past the visibility bound');
 });
 
-test('GY-731: a known missing Actions grant holds the job before calling GitHub', async () => {
+test('manual:review-followups-triaged GY-731.3: a known missing Actions grant holds the job before calling GitHub', async () => {
   await clearQueue();
   let work = await submitted('Missing rerun permission');
   const candidate = { sha: sha40('a734'), baseSha: sha40('b734') };
@@ -334,7 +334,7 @@ test('GY-731: a known missing Actions grant holds the job before calling GitHub'
 });
 
 
-test('GY-731: unqueued terminal rerun outcomes stay visible and classify as rework', async () => {
+test('manual:review-followups-triaged GY-731.2b: unqueued terminal rerun outcomes stay visible and classify as rework', async () => {
   await clearQueue();
   let work = await submitted('Rerun outcome visibility');
   const candidate = { sha: sha40('a735'), baseSha: sha40('b735') };
