@@ -349,7 +349,8 @@ export function attestationDecision(work: Work): RoutineDecision | null {
  * speculative merge conflicts. An ejection whose base the control plane has not yet tried to
  * bring the head onto waits for that attempt first: a clean refresh republishes the head and it
  * re-enters the queue with no round at all, and a conflicting one is named by `baseRefreshConflict`.
- * The binding names the head and the base tip, so a base that moves on is a fresh ground.
+ * The binding names the head and the base tip, so a base that moves on is a fresh ground; for a
+ * queue ejection that tip is the base the conflicting merge was attempted onto, as recorded.
  * An ejection whose speculative base held predecessors is no conflict with the base (GY-321): merging
  * the base resolves nothing, so no round is asked; the entry waits for those predecessors
  * and re-enters with the same head (model/queue.ts, `predecessorWait`).
@@ -362,8 +363,13 @@ export function syncConflict(work: Work): { reason: string; binding: string } | 
   if (observation.conflicting && !work.queue)
     return { reason: `GitHub reports that candidate ${candidate.sha.slice(0, 12)} conflicts with base branch tip ${tip.slice(0, 12)}`, binding: `${candidate.sha}:sync:${tip}` };
   const ejection = work.queueEjection;
-  if (ejection && !work.queue && ejection.sha === candidate.sha && ejection.policyRevision === work.policyRevision && speculativeConflict(ejection) && !ejection.predecessors?.length && !pendingBaseRefresh(work))
-    return { reason: `the merge queue ejected candidate ${candidate.sha.slice(0, 12)}: ${ejection.reason} (base branch tip ${tip.slice(0, 12)})`, binding: `${candidate.sha}:queue-conflict:${ejection.sequence}:${tip}` };
+  if (ejection && !work.queue && ejection.sha === candidate.sha && ejection.policyRevision === work.policyRevision && speculativeConflict(ejection) && !ejection.predecessors?.length && !pendingBaseRefresh(work)) {
+    // The base the speculative merge was actually attempted onto, as the ejection recorded it
+    // (GY-252); the observed tip only for a record that named none (GY-583).
+    const base = ejection.conflict?.base ?? tip;
+    const moved = base === tip ? '' : `; the base branch tip is now ${tip.slice(0, 12)}`;
+    return { reason: `the merge queue ejected candidate ${candidate.sha.slice(0, 12)}: ${ejection.reason} (base branch tip ${base.slice(0, 12)}${moved})`, binding: `${candidate.sha}:queue-conflict:${ejection.sequence}:${base}` };
+  }
   return null;
 }
 /** The resolve decision a standing control-plane lease-loss calls for (see `supersededLeaseLoss`), or null. */
