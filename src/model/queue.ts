@@ -1,4 +1,4 @@
-import { baseRefreshConflict, defaultMergeBatchSize, describeTipWindow, ejectedTipRestore, ejectionReason, nextQueueSequence, pendingBaseRefresh, pendingRestore, predictQueue, predecessorWait, predecessorWaitText, queueHistoryLimit, queueBatch, queuePlacement, sameMergeBatch, sameTips, stuckBatchMs, windowBatchView } from '../merge-queue.js';
+import { baseRefreshConflict, defaultMergeBatchSize, describeTipWindow, ejectedTipRestore, ejectionReason, mergeRefusalEjectionPrefix, standingMergeRefusal, nextQueueSequence, pendingBaseRefresh, pendingRestore, predictQueue, predecessorWait, predecessorWaitText, queueHistoryLimit, queueBatch, queuePlacement, sameMergeBatch, sameTips, stuckBatchMs, windowBatchView } from '../merge-queue.js';
 import type { QueueEjection, QueueHistoryEntry, QueuePlacement } from '../merge-queue.js';
 import type { Work } from './work.js';
 import { behindBaseHold } from './behind-base.js';
