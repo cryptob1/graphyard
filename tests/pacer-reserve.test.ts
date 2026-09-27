@@ -154,3 +154,60 @@ test('unit:per-token-budget-projection — master status shows each token\'s rem
   assert.match(items[0].text, /GitHub token incident \(the one observation is paced on\): 120 requests remain until 2026-09-26T15:28:57.000Z, spent at 121\/min .* 5 remain at the reset, below the 500-request merge-path reserve/);
   assert.equal(githubBudgetAttention({ githubBudget: { ...githubBudget, tokens: [healthy] } }, now).filter(item => /GitHub token/.test(item.text)).length, 0, 'a token that keeps its reserve raises nothing');
 });
+
+// GY-726. Follow-ups from the review of GY-690.
+
+test('unit:token-rotation-carries-budget — a rotated installation token inherits the old token\'s header series, charges and in-flight pace', () => {
+  const budgets = new TokenBudgets();
+  const now = Date.parse('2026-09-26T15:00:00Z'), resetAt = now + 30 * minute;
+  // Two minutes of the old token's series: 60 requests a minute, 40 of them by callers in other processes.
+  for (let index = 0; index <= 12; index++) budgets.read('old', { limit: 5000, remaining: 3000 - index * 10, used: 2000 + index * 10, resetAt, at: now - 2 * minute + index * 10_000 });
+  for (let index = 0; index < 40; index++) budgets.charge('old', now - 2 * minute + index * 3000 + 1, false);
+  const slot = budgets.pace('old', 12, now, mergePathReserve);
+  assert.ok(slot.settle, 'the old token has budget to start a job');
+  const before = budgets.rates('old', now);
+  assert.equal(Math.round(before.total * minute), 60);
+  budgets.rotate('old', 'new');
+  // The first minute after the rotation reads the same series, not this process's own charges alone.
+  assert.deepEqual(budgets.rates('new', now), before, 'the header series carries across a rotation that keeps the reset');
+  assert.equal(budgets.pacer('new').inFlight, 12, 'the old pacer\'s in-flight estimate is carried over');
+  assert.equal(budgets.reading('new', now)?.remaining, 2880);
+  // A request still in flight on the old token charges the same budget and settles on the same pacer.
+  budgets.charge('old', now + 1, true);
+  slot.settle(1, now + 1);
+  assert.equal(budgets.pacer('new').inFlight, 0);
+  budgets.read('new', { limit: 5000, remaining: 2870, used: 2130, resetAt, at: now + 1000 });
+  const report = budgets.report(now + 1000, mergePathReserve, 'new');
+  assert.deepEqual(report.map(token => [token.token, token.current, token.remaining]), [['new', true, 2870]], 'one entry for the installation, under the token in use');
+});
+
+test('unit:token-ledger-prunes-without-status — stale token entries are dropped by reads and charges, without master status being read', () => {
+  const budgets = new TokenBudgets();
+  const start = Date.parse('2026-09-26T15:00:00Z');
+  // Eight hourly tokens with no rotation recorded (separate clients), each read and charged, then left behind.
+  for (let hour = 0; hour < 8; hour++) {
+    const at = start + hour * 60 * minute, token = `token-${hour}`;
+    for (let index = 0; index < 100; index++) { budgets.read(token, { limit: 5000, remaining: 5000 - index, used: index, resetAt: at + 59 * minute, at: at + index * 1000 }); budgets.charge(token, at + index * 1000, false); }
+  }
+  const entries = (budgets as any).entries as Map<string, unknown>;
+  assert.deepEqual([...entries.keys()], ['token-7'], 'only the token whose reading is in force is held');
+  // Rotations whose entries are gone are forgotten too.
+  budgets.rotate('token-7', 'token-8');
+  budgets.charge('token-8', start + 9 * 60 * minute, false);
+  budgets.charge('token-9', start + 11 * 60 * minute, false);
+  assert.deepEqual([...entries.keys()], ['token-9']);
+  assert.equal((budgets as any).successors.size, 0);
+});
+
+test('unit:token-rotation-carries-budget — the client hands the ledger entry to the token it refreshes to', async () => {
+  const budgets = new TokenBudgets();
+  const github = new GitHub({ repository: 'owner/project', base: 'main', appId: 1, installationId: 2, privateKey: 'not-used' }, budgets);
+  const now = Date.now();
+  budgets.read(tokenIdentity('token-old'), { limit: 5000, remaining: 1234, used: 3766, resetAt: now + 30 * minute, at: now });
+  Object.assign(github, { token: 'token-old', appHeaders: () => ({}) });
+  const fetched = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(JSON.stringify({ token: 'token-new', expires_at: new Date(now + 60 * minute).toISOString(), permissions: {} }), { status: 201 })) as typeof fetch;
+  try { await (github as any).refreshToken(); } finally { globalThis.fetch = fetched; }
+  assert.equal(budgets.reading(tokenIdentity('token-new'), now)?.remaining, 1234);
+  assert.deepEqual(budgets.report(now, mergePathReserve).map(token => token.token), [tokenIdentity('token-new')]);
+});
