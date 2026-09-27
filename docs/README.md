@@ -18,7 +18,6 @@ Start with the numbered path; the other pages are references to open when a task
 - [Master-agent operating mode](master-agent.md) — loop, dispatch, merges.
 - [Master-agent sessions](master-agent-sessions.md) — profiles, accounts, launches.
 - [Master-agent reference](master-agent-reference.md) — scheduling, executors, GitHub administration.
-- [Session confinement of the coordinator checkout (GY-888)](session-confinement.md) — OS-level confinement of the coordinator checkout: what stays writable, and the launch refusal when it cannot be applied.
 - [Operations and recovery](operations.md) — checklist and incident tree.
 - [Operations reference](operations-reference.md) — recovery procedures and limits.
 - [Coordination](coordination.md) — criteria, overlap and scope.

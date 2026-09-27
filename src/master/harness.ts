@@ -182,7 +182,10 @@ export async function startMaster(root: string, kind: WorkerProfile['kind'], age
       : `No browser profile is configured, so App permission updates, installation acceptance, and page-only protection changes are not yet yours: master status records that as a setup attention item owned by the operator, naming node ${config.cliPath} master init --token-stdin --browser-profile PROFILE as what makes them yours. Never ask the operator for it in chat; leave that item to master status and keep routing the rest of the work.`;
     // The master starts on its own request too; a runtime without that contract is prompted
     // after start, with the text last and the confirmation following it.
-    ({ delivery } = await startAgentSession(name, kind, created.pane, launch.args, `${prompt} ${reviewInstruction} ${administrationInstruction} ${mergeInstruction}`, run, { directory: root, confirm: 'follow', retry: masterRetry, environment: launch.environment }));
+    // The master is not one of the confined roles (GY-888): it runs the loop's own configuration,
+    // administration and browser-flow commands from the coordinator root, and its harness rules
+    // above remain what bounds it. Every other launched session carries the OS-level confinement.
+    ({ delivery } = await startAgentSession(name, kind, created.pane, launch.args, `${prompt} ${reviewInstruction} ${administrationInstruction} ${mergeInstruction}`, run, { directory: root, confirm: 'follow', retry: masterRetry, environment: launch.environment, confinement: false }));
   } catch (error) {
     const malformedTab = (error as any)?.herdrTab as string | undefined;
     if (pane || tabId || malformedTab) try { await stopCreatedHerdrTab(pane, tabId ?? malformedTab, run); }
@@ -262,7 +265,6 @@ export function coordinatorWriteDenials(coordinatorRoot: string): HarnessRule[] 
 }
 export function workerHarnessPlan(input: { cliPath: string; branch: string; baseBranch: string; credentialHome: string }): HarnessPlan {
   const cli = `node ${input.cliPath}`;
-  const coordinatorRoot = coordinatorCheckoutRoot(input.cliPath);
   const allow: HarnessRule[] = [
     ...['status', 'sync', 'restore-branch', 'complete', 'blocked', 'heartbeat', 'events', 'diagnose'].map(command => ({ rule: `Bash(${cli} ${command}:*)`, why: `The worker's own ${command} command on its claimed item; the server checks the lease epoch.` })),
     { rule: `Bash(git push origin ${input.branch})`, why: 'Push the assigned branch; Graphyard observes it as the candidate head.' },
@@ -311,17 +313,9 @@ export function workerHarnessPlan(input: { cliPath: string; branch: string; base
     [`* ${input.baseBranch} *`, 'The base branch moves only through the guarded merge.'],
     [`*refs/heads/${input.baseBranch}*`, 'The base branch moves only through the guarded merge, in its full ref spelling too.'],
   ];
-  const coordinatorGitCommands: HarnessRule[] = !coordinatorRoot || coordinatorRoot === '/' ? [] : [
-    { rule: `Bash(git -C ${coordinatorRoot}:* commit:*)`, why: 'The coordinator checkout is not writable; commit there would modify the loop that owns it (GY-888).' },
-    { rule: `Bash(git -C ${coordinatorRoot}:* checkout:*)`, why: 'The coordinator checkout is not writable; switching branches there would affect the running loop (GY-888).' },
-    { rule: `Bash(git -C ${coordinatorRoot}:* merge:*)`, why: 'The coordinator checkout is not writable; merge there would affect the running loop (GY-888).' },
-    { rule: `Bash(cd ${coordinatorRoot}:* && git commit:*)`, why: 'The coordinator checkout is not writable; commit there would modify the loop that owns it (GY-888).' },
-    { rule: `Bash(cd ${coordinatorRoot}:* && git checkout:*)`, why: 'The coordinator checkout is not writable; switching branches there would affect the running loop (GY-888).' },
-  ];
   const deny: HarnessRule[] = [
     ...push.flatMap(([form, why]) => [{ rule: `Bash(git push ${form})`, why }, { rule: `Bash(git -* push ${form})`, why: `${why} Also behind git's global options.` }]),
     ...coordinatorWriteDenials(coordinatorCheckoutRoot(input.cliPath)),
-    ...coordinatorGitCommands,
     { rule: 'Bash(git rebase:*)', why: 'sync merges the base branch; a rebase would re-resolve files outside the planned files.' },
     { rule: 'Bash(gh pr merge:*)', why: 'Workers never merge; the control plane\'s merge gate decides.' },
     { rule: 'Bash(gh pr review:*)', why: 'Workers never review their own work.' },

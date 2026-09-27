@@ -1,130 +1,97 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execSync } from 'node:child_process';
-import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { closeSync, mkdirSync, mkdtempSync, openSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { workerProfileSchema } from '../src/master.js';
-import { workerConfinementRefusal } from '../src/master/profiles.js';
-import { runtimeSandboxes } from '../src/worker-sandbox.js';
+import { dirname, join } from 'node:path';
+import { coordinatorConfinement, coordinatorConfinementRefusal, sessionMountNamespaceWorks, workerConfinementRefusal } from '../src/master/profiles.js';
+import { prepareConfinedGitPaths } from '../src/master/launch.js';
 
-const isLinux = process.platform === 'linux';
+// GY-888: every session the launcher starts — worker, reviewer, producer and approver — is
+// launched so that the coordinator checkout is unwritable at the OS level, shell commands
+// included. A runtime with a workspace-write sandbox is confined by its sandbox; every other
+// runtime runs inside a bubblewrap mount namespace that mounts the checkout read-only and
+// re-exposes only the session's own worktree and the shared Git areas it writes. A launch that
+// can carry no confinement is refused with the reason named, never started unconfined.
 
-// GY-888: Workers and all session types are confined at the OS level so that shell commands
-// cannot write to, commit in, or switch branches of the coordinator checkout by any means.
-// Confinement is applied through bind mounts on Linux, runtime-specific sandboxing for others.
+/** A coordinator checkout with a linked assignment worktree under it, exactly as the launcher prepares them. */
+function coordinatorFixture(base: string) {
+  const root = join(base, 'coordinator');
+  const run = (...args: string[]) => execFileSync('git', ['-C', root, ...args], { stdio: 'ignore' });
+  mkdirSync(join(root, 'src'), { recursive: true });
+  writeFileSync(join(root, 'src', 'loop.ts'), 'export const loop = 1;\n');
+  run('init', '-b', 'main');
+  run('config', 'user.email', 'graphyard@localhost');
+  run('config', 'user.name', 'Graphyard');
+  run('add', '.');
+  run('commit', '-m', 'coordinator');
+  const worktree = join(root, '.graphyard', 'worktrees', 'session');
+  mkdirSync(dirname(worktree), { recursive: true });
+  run('worktree', 'add', '-b', 'graphyard/gy-888-1', worktree, 'main');
+  prepareConfinedGitPaths(root);
+  return { root, worktree };
+}
 
-test('unit:coordinator-write-blocked-for-shell — shell commands cannot write to or commit in the coordinator checkout through read-only permissions', async () => {
-  if (!isLinux) {
-    console.log('Skipping shell command test on non-Linux platform');
-    return;
-  }
-
-  const tmpRoot = await realpath(await mkdtemp(join(tmpdir(), 'graphyard-os-confinement-')));
+test('unit:coordinator-write-blocked-for-shell — every runtime kind launches confined, and a confined shell cannot write, commit in or switch the coordinator checkout', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'graphyard-confinement-'));
   try {
-    // Create a minimal coordinator checkout structure with read-only permissions
-    const roCoordinator = join(tmpRoot, 'ro-coordinator');
-
-    await mkdir(join(roCoordinator, 'src'), { recursive: true });
-    await mkdir(join(roCoordinator, 'bin'), { recursive: true });
-    await mkdir(join(roCoordinator, '.git'), { recursive: true });
-
-    await writeFile(join(roCoordinator, 'bin', 'graphyard.mjs'), '#!/usr/bin/env node\n');
-    await writeFile(join(roCoordinator, 'src', 'loop.ts'), 'export const loop = 1;\n');
-    await writeFile(join(roCoordinator, '.git', 'config'), '[core]\n');
-
-    // Make the coordinator directory and its contents read-only (simulating read-only mount)
-    execSync(`chmod -R a-w "${roCoordinator}"`, { stdio: 'pipe' });
-
-    try {
-      // Test 1: Writing a file must fail with Permission denied or Read-only error
-      let writeError = '';
-      let writeFailed = false;
-      try {
-        execSync(`touch "${join(roCoordinator, 'test-write')}"`, { stdio: 'pipe', encoding: 'utf8' });
-      } catch (e: any) {
-        writeFailed = true;
-        writeError = e.stderr ? e.stderr.toString() : e.stdout ? e.stdout.toString() : String(e);
+    const { root, worktree } = coordinatorFixture(base);
+    // Every runtime kind builds a launch whose confinement is present, by the mechanism its runtime supports.
+    for (const [kind, args] of [['claude', []], ['cursor', []], ['opencode', []], ['pi', []], ['codex', ['--sandbox', 'workspace-write']]] as [string, string[]][]) {
+      const confinement = await coordinatorConfinement({ kind, args, coordinatorRoot: root, sessionDirectory: worktree, platform: 'linux', mountNamespaceWorks: true });
+      assert.ok(confinement, `${kind} launches confined`);
+      if (kind === 'codex') {
+        assert.equal(confinement.mechanism, 'runtime-sandbox', 'the codex workspace-write sandbox is the confinement');
+        assert.deepEqual(confinement.wrapper, [], 'the runtime sandbox needs no wrapper words');
+      } else {
+        assert.equal(confinement.mechanism, 'read-only-mount');
+        assert.ok(confinement.wrapper.includes('--ro-bind') && confinement.wrapper.includes(root), `${kind} binds the coordinator checkout read-only`);
+        assert.ok(confinement.wrapper.includes('--bind') && confinement.wrapper.includes(worktree), `${kind} re-exposes the session's own worktree writable`);
+        assert.ok(confinement.wrapper.at(-1) === '--', `${kind}'s wrapper leaves the runtime command itself in place`);
       }
-      assert(writeFailed, 'touch command must fail on read-only directory');
-      // assertion that write operations to read-only mounted coordinator checkout fail with Permission denied or Read-only error
-      assert(writeError.includes('Permission denied') || writeError.includes('Read-only'), `Write operation error must include "Permission denied" or "Read-only" but got: ${writeError}`);
-
-      // Test 2: Writing via cd should also fail
-      let cdWriteFailed = false;
-      try {
-        execSync(`cd "${roCoordinator}" && touch test-write-cd`, { stdio: 'pipe', encoding: 'utf8' });
-      } catch {
-        cdWriteFailed = true;
-      }
-      assert(cdWriteFailed, 'write via cd must fail on read-only coordinator');
-
-      // Test 3: Git operations must fail (commit in particular)
-      let gitFailed = false;
-      let gitError = '';
-      try {
-        execSync(`cd "${roCoordinator}" && git init && git config user.email test@test.com && git config user.name Test && git add . && git commit -m "test"`, { stdio: 'pipe', encoding: 'utf8' });
-      } catch (e: any) {
-        gitFailed = true;
-        gitError = e.stderr ? e.stderr.toString() : e.stdout ? e.stdout.toString() : String(e);
-      }
-      assert(gitFailed, 'git operations must fail on read-only coordinator');
-      assert(gitError.includes('Permission denied') || gitError.includes('Read-only') || gitError.includes('fatal:'), `Git error must include failure indicator but got: ${gitError}`);
-    } finally {
-      // Restore write permissions for cleanup
-      execSync(`chmod -R u+w "${roCoordinator}"`, { stdio: 'pipe' });
     }
+    // A codex runtime without its workspace-write sandbox carries the mount namespace instead: it is never launched unconfined.
+    const unconfinedCodex = await coordinatorConfinement({ kind: 'codex', args: ['--sandbox', 'danger-full-access'], coordinatorRoot: root, sessionDirectory: worktree, platform: 'linux', mountNamespaceWorks: true });
+    assert.equal(unconfinedCodex?.mechanism, 'read-only-mount', 'a codex sandbox turned off falls back to the read-only mount');
+    // On Linux with the namespaces available, run a shell command inside the confinement itself.
+    if (process.platform !== 'linux' || !(await sessionMountNamespaceWorks())) return;
+    const confinement = await coordinatorConfinement({ kind: 'claude', args: [], coordinatorRoot: root, sessionDirectory: worktree });
+    assert.equal(confinement?.mechanism, 'read-only-mount');
+    const probe = [
+      'if touch "$1/coordinator-write-probe" 2>/tmp/.gy-probe-1; then echo WRITE-ALLOWED; else echo WRITE-BLOCKED; tail -1 /tmp/.gy-probe-1; fi',
+      'if git -C "$1" -c user.email=g@l -c user.name=g commit --allow-empty -m probe 2>/tmp/.gy-probe-2; then echo COMMIT-ALLOWED; else echo COMMIT-BLOCKED; tail -1 /tmp/.gy-probe-2; fi',
+      'if git -C "$1" checkout -b gy-888-escape 2>/tmp/.gy-probe-3; then echo CHECKOUT-ALLOWED; else echo CHECKOUT-BLOCKED; tail -1 /tmp/.gy-probe-3; fi',
+      'touch "$2/session-write-probe" && git -C "$2" -c user.email=g@l -c user.name=g commit --allow-empty -m probe && echo SESSION-WROTE',
+    ].join('\n');
+    const run = spawnSync(confinement.wrapper[0], [...confinement.wrapper.slice(1, -1), '/bin/sh', '-c', probe, 'sh', root, worktree],
+      { encoding: 'utf8', timeout: 60_000, killSignal: 'SIGKILL' });
+    assert.equal(run.status, 0, `the confined shell ran and its session worktree worked: ${run.stderr}`);
+    for (const marker of ['WRITE-BLOCKED', 'COMMIT-BLOCKED', 'CHECKOUT-BLOCKED', 'SESSION-WROTE']) assert.ok(run.stdout.includes(marker), `${marker} was expected: ${run.stdout}`);
+    for (const marker of ['WRITE-ALLOWED', 'COMMIT-ALLOWED', 'CHECKOUT-ALLOWED']) assert.ok(!run.stdout.includes(marker), `${marker} must never happen: ${run.stdout}`);
+    assert.match(run.stdout, /Read-only file system/, `writing the checkout is refused by the mount itself: ${run.stdout}`);
   } finally {
-    await rm(tmpRoot, { recursive: true, force: true });
+    rmSync(base, { recursive: true, force: true });
   }
 });
 
-test('unit:unconfined-launch-refused — launches without proper confinement are refused by workerConfinementRefusal', async () => {
-  // Create test profiles
-  const base = { mode: 'launch' as const, approvals: 'auto' as const, principal: 'graphyard-worker-1', credentialFile: '/tmp/worker.token', agentArgs: [], environment: {} };
-
-  // Test 1: Codex without workspace-write sandbox must be refused
-  const codexNoSandbox = workerProfileSchema.parse({ ...base, name: 'codex-worker', agentName: 'graphyard-codex-1', kind: 'codex' as const, agentArgs: ['--sandbox', 'danger-full-access'] });
-  const codexRefusal = workerConfinementRefusal(codexNoSandbox);
-  assert(codexRefusal !== null, 'Codex without workspace-write sandbox must be refused');
-  assert(codexRefusal.includes('workspace-write'), `Codex refusal must mention workspace-write but got: ${codexRefusal}`);
-
-  // Test 2: Claude with bypass permissions must be refused
-  const claudeBypass = workerProfileSchema.parse({ ...base, name: 'claude-worker', agentName: 'graphyard-claude-1', kind: 'claude' as const, agentArgs: ['--dangerously-skip-permissions'] });
-  const claudeRefusal = workerConfinementRefusal(claudeBypass);
-  assert(claudeRefusal !== null, 'Claude with bypass permissions must be refused');
-  assert(claudeRefusal.includes('--dangerously-skip-permissions'), `Claude refusal must mention --dangerously-skip-permissions but got: ${claudeRefusal}`);
-
-  // Test 3: OpenCode without external_directory deny must be refused
-  const opencodeNoRestriction = workerProfileSchema.parse({ ...base, name: 'opencode-worker', agentName: 'graphyard-opencode-1', kind: 'opencode' as const, environment: { OPENCODE_PERMISSION: '{"edit":"allow","external_directory":"allow"}' } });
-  const opencodeRefusal = workerConfinementRefusal(opencodeNoRestriction);
-  assert(opencodeRefusal !== null, 'OpenCode with external_directory allow must be refused');
-  assert(opencodeRefusal.includes('external_directory'), `OpenCode refusal must mention external_directory but got: ${opencodeRefusal}`);
-
-  // Test 4: Valid configurations must NOT be refused
-  const claudeValid = workerProfileSchema.parse({ ...base, name: 'claude-worker', agentName: 'graphyard-claude-1', kind: 'claude' as const });
-  const claudeOk = workerConfinementRefusal(claudeValid);
-  assert(claudeOk === null, `Claude with default args must not be refused but got: ${claudeOk}`);
-
-  const codexValid = workerProfileSchema.parse({ ...base, name: 'codex-worker', agentName: 'graphyard-codex-1', kind: 'codex' as const, agentArgs: ['--sandbox', 'workspace-write'] });
-  const codexOk = workerConfinementRefusal(codexValid);
-  assert(codexOk === null, `Codex with workspace-write must not be refused but got: ${codexOk}`);
-
-  const opencodeValid = workerProfileSchema.parse({ ...base, name: 'opencode-worker', agentName: 'graphyard-opencode-1', kind: 'opencode' as const, environment: { OPENCODE_PERMISSION: '{"edit":"allow","bash":"allow","webfetch":"allow","external_directory":"deny"}' } });
-  const opencodeOk = workerConfinementRefusal(opencodeValid);
-  assert(opencodeOk === null, `OpenCode with external_directory deny must not be refused but got: ${opencodeOk}`);
-
-  // Test 5: Verify the runtime sandbox mode detection works correctly
-  // assertions that launch configurations without proper confinement are refused by workerConfinementRefusal: Codex without workspace-write sandbox, Claude with --dangerously-skip-permissions, OpenCode with external_directory allow
-  const codexWSMode = runtimeSandboxes.codex?.mode(['--sandbox', 'workspace-write']);
-  assert(codexWSMode === 'workspace-write', `Codex must correctly identify workspace-write mode but got: ${codexWSMode}`);
-  const codexFullMode = runtimeSandboxes.codex?.mode(['--sandbox', 'danger-full-access']);
-  assert(codexFullMode === null, `Codex must correctly identify unrestricted mode but got: ${codexFullMode}`);
-  const codexShortMode = runtimeSandboxes.codex?.mode(['-s', 'workspace-write']);
-  assert(codexShortMode === 'workspace-write', `Codex must recognize -s shorthand but got: ${codexShortMode}`);
-
-  // Test 6: Multiple bypass flags must be refused
-  const multiBypass = workerProfileSchema.parse({ ...base, name: 'claude-worker', agentName: 'graphyard-claude-1', kind: 'claude' as const, agentArgs: ['--dangerously-skip-permissions', '--permission-mode', 'auto'] });
-  const multiRefusal = workerConfinementRefusal(multiBypass);
-  assert(multiRefusal !== null, 'Claude with bypass flag must be refused even with other args');
+test('unit:unconfined-launch-refused — a launch that cannot apply the confinement is refused with the reason named, never started unconfined', async () => {
+  const confined = { kind: 'claude', args: [] as string[], coordinatorRoot: '/coordinator', sessionDirectory: '/coordinator/wt' };
+  // No mount namespace without Linux, without bubblewrap, or on a host that refuses the namespaces.
+  const darwin = await coordinatorConfinementRefusal({ ...confined, platform: 'darwin' });
+  assert.match(darwin!, /never starts a session unconfined/);
+  assert.match(darwin!, /darwin/);
+  const noBwrap = await coordinatorConfinementRefusal({ ...confined, platform: 'linux', bwrap: null });
+  assert.match(noBwrap!, /bubblewrap/);
+  const refusedNamespaces = await coordinatorConfinementRefusal({ ...confined, platform: 'linux', mountNamespaceWorks: false });
+  assert.match(refusedNamespaces!, /namespaces/);
+  // The builder carries the same refusal: it never returns an unconfined launch.
+  await assert.rejects(() => coordinatorConfinement({ ...confined, platform: 'darwin', mountNamespaceWorks: true }), /never starts a session unconfined/);
+  // A runtime with a workspace-write sandbox of its own needs neither Linux nor bubblewrap.
+  assert.equal(await coordinatorConfinementRefusal({ kind: 'codex', args: ['--sandbox', 'workspace-write'], coordinatorRoot: '/coordinator', sessionDirectory: '/coordinator/wt', platform: 'darwin' }), null);
+  // A worker profile that would turn its runtime's own confinement off is still refused at the launch (GY-857).
+  assert.match(workerConfinementRefusal({ kind: 'claude', agentArgs: ['--dangerously-skip-permissions'] })!, /--dangerously-skip-permissions/);
+  assert.match(workerConfinementRefusal({ kind: 'codex', agentArgs: ['--sandbox', 'danger-full-access'] })!, /workspace-write/);
+  assert.match(workerConfinementRefusal({ kind: 'opencode', environment: { OPENCODE_PERMISSION: '{"edit":"allow","external_directory":"allow"}' } })!, /external_directory/);
+  assert.equal(workerConfinementRefusal({ kind: 'claude', agentArgs: [] }), null);
+  assert.equal(workerConfinementRefusal({ kind: 'codex', agentArgs: ['--sandbox', 'workspace-write'] }), null);
 });

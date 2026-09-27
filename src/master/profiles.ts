@@ -1,6 +1,7 @@
 // Concern: worker, reviewer and producer profiles, the master config schema, and profile session naming.
 import { createHash } from 'node:crypto';
-import { dirname, isAbsolute, resolve, sep } from 'node:path';
+import { existsSync, statSync } from 'node:fs';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
 import { defaultChildRun } from '../child-runner.js';
 import { pathScopeContains } from '../model/scope.js';
@@ -12,6 +13,7 @@ import { narrowRoleRuntimeSchema, piRuntimeSchema } from '../runner/payloads.js'
 import { researchSettingsSchema } from '../research.js';
 import { sessionNameField, sessionNameLimit, assertSessionName, sessionNameDigestLength, SessionNameRefusedError } from '../session-name.js';
 import { invariantThresholdsSchema } from '../model/invariants.js';
+import { runtimeSandboxes } from '../worker-sandbox.js';
 
 const safeEnvironment = z.record(
   z.string().regex(/^[A-Z_][A-Z0-9_]*$/)
@@ -477,3 +479,106 @@ export function coordinatorCheckoutRefusal(checkout: CoordinatorCheckout, subjec
 export const dirtyCheckoutEscalation = (refusal: string, leases: DirtyCheckoutLease[]) => leases.length
   ? `${refusal}. The paths match the planned files of ${leases.length === 1 ? 'one live lease' : `${leases.length} live leases`}: ${leases.map(lease => `${lease.key} epoch ${lease.epoch} (${lease.owner}): ${lease.paths.join(', ')}`).join('; ')}`
   : refusal;
+
+// ---- OS-level confinement of the coordinator checkout (GY-888) -----------------------------------
+//
+// GY-857's harness rules are a prompt policy, and shell commands (`cp`, `sed`, `git commit`,
+// `git checkout`) never matched them: workers moved the coordinator checkout four times in one
+// day through plain Bash. GY-888 makes the checkout unwritable at the OS level for every session
+// the launcher starts — worker, reviewer, producer and approver — by carrying the confinement on
+// the launch itself, in whatever the runtime supports:
+//
+// - a runtime whose filesystem sandbox leaves every ungranted path read-only (codex under
+//   `workspace-write`, enforced by workerConfinementRefusal) IS the confinement: the checkout's
+//   working tree is never among the granted paths;
+// - every other runtime runs inside a bubblewrap mount namespace in which the coordinator checkout
+//   is bind-mounted read-only, and only what the session's own work needs is re-exposed writable
+//   on top: its own directory (the assigned worktree or allocated checkout) and the shared Git
+//   areas a linked worktree writes — the object store, the per-worktree admin, the `graphyard/`
+//   branch namespace with its reflogs, remote-tracking refs and FETCH_HEAD — never the checkout's
+//   source tree, its index, or the refs of branches only the guarded merge moves.
+//
+// A launch that cannot apply the confinement is refused with the reason named, never started
+// unconfined, exactly like a contained install (GY-174): install bubblewrap, or let the runtime
+// carry a workspace-write sandbox. The master session is not among the confined roles — it runs
+// the loop's own configuration and administration commands from the coordinator root, and is
+// bound by its own harness rules instead.
+
+/** How a launch keeps the coordinator checkout unwritable for the session it starts. */
+export interface CoordinatorConfinement {
+  /** Which mechanism applies: the runtime's own filesystem sandbox, or a read-only mount namespace. */
+  mechanism: 'runtime-sandbox' | 'read-only-mount';
+  /** Words placed before the runtime command to apply the confinement; empty for the runtime's own sandbox. */
+  wrapper: readonly string[];
+  /** What the confinement holds, for the launch record. */
+  detail: string;
+}
+
+export interface ConfinementInput {
+  kind: string;
+  args: readonly string[];
+  coordinatorRoot: string;
+  sessionDirectory: string;
+  /** Defaults to this host's platform. */
+  platform?: string;
+  /** The bubblewrap executable; null when it is known absent, `bwrap` (the PATH lookup) when unset. */
+  bwrap?: string | null;
+  /** Overrides the availability probe (tests); when absent, the probe runs once and is cached. */
+  mountNamespaceWorks?: boolean;
+}
+const withinCheckout = (path: string, root: string) => { const from = relative(root, path); return from !== '' && from !== '..' && !from.startsWith(`..${sep}`) && !isAbsolute(from); };
+/** Whether `path` is a directory (or nothing); symlinks to directories count, as bwrap binds resolve them. */
+const isDirectoryPath = (path: string) => { try { return statSync(path).isDirectory(); } catch { return false; } };
+
+/** Whether bubblewrap can build the mount namespace here; a host may refuse unprivileged namespaces. Probed through the asynchronous runner once per executable and cached. */
+export async function sessionMountNamespaceWorks(bwrap = 'bwrap'): Promise<boolean> {
+  if (!mountNamespaceProbes.has(bwrap)) {
+    const probe = defaultChildRun(bwrap, ['--dev-bind', '/', '/', '--', 'true'], { timeoutMs: 20_000 }).then(() => true).catch(() => false);
+    mountNamespaceProbes.set(bwrap, probe);
+  }
+  return mountNamespaceProbes.get(bwrap)!;
+}
+const mountNamespaceProbes = new Map<string, Promise<boolean>>();
+
+/** Why a launch of `kind` cannot keep the coordinator checkout unwritable at the OS level, or null. A runtime sandbox of its own needs neither Linux nor bubblewrap. */
+export async function coordinatorConfinementRefusal(input: ConfinementInput): Promise<string | null> {
+  if (runtimeSandboxes[input.kind]?.mode([...input.args]) === 'workspace-write') return null;
+  const bwrap = input.bwrap === undefined ? 'bwrap' : input.bwrap;
+  const platform = input.platform ?? process.platform;
+  const head = `A ${input.kind} session cannot be launched with the coordinator checkout at ${input.coordinatorRoot} unwritable at the OS level`;
+  if (platform !== 'linux') return `${head}: the read-only mount namespace it would run in needs Linux, this host is ${platform}, and the runtime carries no filesystem sandbox of its own. Graphyard never starts a session unconfined; run sessions on a Linux host or grant the runtime a workspace-write sandbox.`;
+  if (!bwrap) return `${head}: bubblewrap (bwrap) is not installed and the runtime carries no filesystem sandbox of its own. Graphyard never starts a session unconfined; install bubblewrap (e.g. apt install bubblewrap) or grant the runtime a workspace-write sandbox.`;
+  if (!(input.mountNamespaceWorks ?? await sessionMountNamespaceWorks(bwrap))) return `${head}: this host refuses the unprivileged namespaces bubblewrap needs, and the runtime carries no filesystem sandbox of its own. Graphyard never starts a session unconfined; allow unprivileged user namespaces on this host or grant the runtime a workspace-write sandbox.`;
+  return null;
+}
+
+/**
+ * The confinement a launch of `kind` carries, or null when there is no coordinator checkout to
+ * confine (the launcher does not run from one). Throws the coordinatorConfinementRefusal reason
+ * when the kind can carry none: a launch is never started unconfined. The shared Git paths are
+ * re-exposed only where they already exist — the launcher prepares the missing ones
+ * (launch.ts prepareConfinedGitPaths) before building the launch.
+ */
+export async function coordinatorConfinement(input: ConfinementInput): Promise<CoordinatorConfinement | null> {
+  if (runtimeSandboxes[input.kind]?.mode([...input.args]) === 'workspace-write')
+    return { mechanism: 'runtime-sandbox', wrapper: [], detail: `the ${input.kind} workspace-write sandbox keeps every path but the assigned worktree and the Git directories granted beside it read-only, the coordinator checkout's working tree among them` };
+  const refusal = await coordinatorConfinementRefusal(input);
+  if (refusal) throw new Error(refusal);
+  const root = resolve(input.coordinatorRoot), directory = resolve(input.sessionDirectory);
+  const gitDir = join(root, '.git');
+  const sharedDirectories = [
+    join(gitDir, 'objects'), join(gitDir, 'worktrees'), join(gitDir, 'refs', 'remotes'),
+    join(gitDir, 'refs', 'heads', 'graphyard'), join(gitDir, 'logs', 'refs', 'heads', 'graphyard'),
+  ].filter(isDirectoryPath);
+  const fetchHead = join(gitDir, 'FETCH_HEAD');
+  const shared = [...sharedDirectories, ...(existsSync(fetchHead) && !isDirectoryPath(fetchHead) ? [fetchHead] : [])];
+  const own = withinCheckout(directory, root) ? [directory] : [];
+  const bwrap = input.bwrap ?? 'bwrap';
+  // The session keeps the whole host exactly as it is (--dev-bind / /); only the coordinator
+  // checkout is re-mounted read-only over it, and the session's own Git paths are re-exposed
+  // writable on top: bubblewrap applies each bind in order, so the later ones shadow the ro one.
+  const wrapper = [bwrap, '--dev-bind', '/', '/', '--ro-bind', root, root,
+    ...[...shared, ...own].flatMap(path => ['--bind', path, path]), '--'];
+  return { mechanism: 'read-only-mount', wrapper,
+    detail: `the coordinator checkout at ${root} is bind-mounted read-only for the session; only ${[...own, ...shared].join(', ') || 'nothing'} are re-exposed writable, so no shell command can write, commit in or switch the checkout` };
+}

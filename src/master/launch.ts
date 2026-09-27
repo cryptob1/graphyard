@@ -1,14 +1,16 @@
 // Concern: launching an agent session — request files, start observation, prompt delivery and acknowledgement.
 import { createHash } from 'node:crypto';
-import { mkdirSync, writeFileSync, chmodSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, writeFileSync } from 'node:fs';
+import { basename, join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { type ChildRun, childRunner, defaultChildRun } from '../child-runner.js';
 import { assertSessionName, SessionNameRefusedError } from '../session-name.js';
 import { requestPlaceholder, type RegisteredLaunch, assertLaunchable, LaunchRefusedError, nonInteractiveLaunch } from '../harness.js';
 import { withAutonomyContract } from '../autonomy.js';
+import { underTestRunner } from '../supervisor.js';
 import type { PartialWork } from '../model/capacity.js';
 import { type ConsentPrompt, detectConsentPrompt, settingsWarning, type ConsentAnswer, sameConsentPrompt } from '../consent-prompt.js';
+import { coordinatorCheckoutRoot, coordinatorConfinement, coordinatorConfinementRefusal, type CoordinatorConfinement, type ConfinementInput } from './profiles.js';
 import type { MasterRun } from './profiles.js';
 import { type HerdrAgent, herdrJson, herdrRun, stopCreatedHerdrTab } from './herdr.js';
 
@@ -98,15 +100,55 @@ export function writeLaunchFiles(directory: string, name: string, text: { role?:
   };
   return { stem, role: write('role', text.role), request: write('request', text.request) };
 }
-/** The command line typed into the pane: the stem binding, then `prefix` (a supervisor), the runtime, its arguments and the file references. */
-export function launchCommand(kind: string, args: string[], files: LaunchFiles, prefix: string[] = []) {
+
+// ---- The confinement a session launch carries (GY-888) -------------------------------------------
+//
+// Every session the launcher starts — worker, reviewer, producer and approver — runs so that the
+// coordinator checkout this launcher itself runs from is unwritable at the OS level: a codex
+// workspace-write sandbox confines it by leaving it ungranted, every other runtime runs inside a
+// bubblewrap mount namespace that bind-mounts the checkout read-only (see profiles.ts). A launch
+// that can carry no confinement is refused with the reason named, never started unconfined. The
+// master session opts out (`confinement: false`): it runs the loop's own configuration and
+// administration commands from the coordinator root, under its own harness rules.
+
+/** The coordinator checkout the launching process itself runs from, or null under the test runner or when this is not the Graphyard CLI: nothing is confined there. */
+export const launcherCoordinatorRoot = (argv1: string | undefined = process.argv[1]): string | null => {
+  if (!argv1 || underTestRunner() || basename(argv1) !== 'graphyard.mjs') return null;
+  const root = coordinatorCheckoutRoot(argv1);
+  return root && root !== '/' ? root : null;
+};
+/**
+ * The shared Git paths a confined session's linked worktree writes that may not exist yet — the
+ * `graphyard/` branch namespace and its reflogs — plus an empty FETCH_HEAD for the fetches a
+ * reviewer or producer runs from the coordinator root. Each is created before the confinement is
+ * built, so coordinatorConfinement re-exposes it; the launcher itself is not confined.
+ */
+export function prepareConfinedGitPaths(root: string): void {
+  const gitDir = join(root, '.git');
+  if (!existsSync(gitDir)) return;
+  for (const path of [join(gitDir, 'refs', 'heads', 'graphyard'), join(gitDir, 'logs', 'refs', 'heads', 'graphyard')]) mkdirSync(path, { recursive: true });
+  const fetchHead = join(gitDir, 'FETCH_HEAD');
+  if (!existsSync(fetchHead)) closeSync(openSync(fetchHead, 'a'));
+}
+/** The confinement the launch of `kind` carries, or null when nothing needs confining; throws the named refusal when the kind can carry none. */
+export async function sessionConfinement(kind: string, args: readonly string[], options: { cwd?: string; directory: string }): Promise<CoordinatorConfinement | null> {
+  const root = launcherCoordinatorRoot();
+  if (!root) return null;
+  const input: ConfinementInput = { kind, args, coordinatorRoot: root, sessionDirectory: resolve(options.cwd ?? options.directory) };
+  const refusal = await coordinatorConfinementRefusal(input);
+  if (refusal) throw new Error(refusal);
+  prepareConfinedGitPaths(root);
+  return coordinatorConfinement(input);
+}
+/** The command line typed into the pane: the stem binding, then `prefix` (a supervisor), `wrap` (the coordinator confinement), the runtime, its arguments and the file references. */
+export function launchCommand(kind: string, args: string[], files: LaunchFiles, prefix: string[] = [], wrap: readonly string[] = []) {
   const role = files.role ? launchRoleContracts[kind]?.(roleReference) : undefined;
   const own = launchRequestContracts[kind];
   const request = files.request && own ? own(requestReference) : undefined;
   // A registry runtime's request goes where its contract places `{request}`; a built-in one drops the marker.
   const placed = args.map(argument => argument !== requestPlaceholder ? shellWord(argument) : files.request && !own ? requestReference : null).filter((word): word is string => word !== null);
   const binding = role || request || placed.includes(requestReference) ? [`${launchVariable}=${shellWord(files.stem)};`] : [];
-  const runtime = [...prefix.map(shellWord), kind, ...placed, ...(role ? [role] : []), ...(request ? [request] : [])].join(' ');
+  const runtime = [...prefix.map(shellWord), ...wrap.map(shellWord), kind, ...placed, ...(role ? [role] : []), ...(request ? [request] : [])].join(' ');
   let command = [...binding, runtime].join(' ');
   // The runtime's flags can name long paths (a producer's checkout and the shared Git directory as
   // Codex writable roots), so a line over the bound moves them into `STEM.launch`, beside the other
@@ -269,6 +311,8 @@ export async function awaitRuntimeStart(pane: string, kind: string, command: str
  * the runtime says about its arguments (GY-101).
  */
 export interface SessionStart extends PromptDelivery, StartBounds { directory: string; role?: string | null; prefix?: string[]; confirm?: 'inline' | 'follow'; retry?: string; contract?: RegisteredLaunch | null;
+  /** Opts this launch out of the coordinator confinement (GY-888): only the master session, which runs the loop's own commands from the coordinator root, does. */
+  confinement?: false;
   /** Called once the command line is in the pane: from then on a supervisor may be running there (GY-273). */ onRun?: () => void;
   /** The pane's working directory, where the runtime starts (`directory` unless the tab opened elsewhere), and the environment its tab carries: what the runtime's `trust` step records the folder in. */ cwd?: string; environment?: Record<string, string> }
 export async function startAgentSession(name: string, kind: string, pane: string, args: string[], text: string, run: ChildRun | undefined, options: SessionStart) {
@@ -282,12 +326,16 @@ export async function startAgentSession(name: string, kind: string, pane: string
   // A runtime whose trust prompt no flag suppresses has its working directory recorded as trusted
   // first, or the launch is refused naming it (GY-184): nothing is typed into a session that would wait.
   const trust = await nonInteractiveLaunch[kind]?.trust?.(options.cwd ?? options.directory, options.environment ?? {}, args);
+  // The coordinator checkout is unwritable for this session at the OS level (GY-888), or the
+  // launch is refused with the reason named — never started unconfined. A failure here is a
+  // launch failure like any other: the caller releases the claim and closes what it created.
+  const confinement = options.confinement === false ? null : await sessionConfinement(kind, args, options);
   // Every session carries the autonomy contract: in its role file when the runtime loads one,
   // otherwise at the start of its first request (GY-184).
   const carried = withAutonomyContract(!!launchRoleContracts[kind], { request: text, role: options.role });
   text = carried.request;
   const files = writeLaunchFiles(options.directory, name, { role: carried.role, request: text });
-  const command = launchCommand(kind, args, files, options.prefix);
+  const command = launchCommand(kind, args, files, options.prefix, confinement?.wrapper ?? []);
   await herdrRun(['pane', 'run', pane, command], run);
   options.onRun?.();
   const log = options.log ?? (line => process.stderr.write(`${line}\n`));
@@ -313,6 +361,7 @@ export async function startAgentSession(name: string, kind: string, pane: string
   // The request is already the runtime's own first argument, so nothing waits to be pasted: a
   // session held on a consent dialog reads it once the dialog is answered.
   return { delivery, command, files, trust: trust ?? null, consent: started.consent, awaiting: started.awaiting ? { ...started.awaiting, request: null as string | null, named } : undefined,
+    confinement,
     started: { state: started.awaiting ? 'awaiting consent' as const : 'started' as const, detail: started.detail, waitedMs: started.waitedMs, extended: started.extended } };
 }
 
