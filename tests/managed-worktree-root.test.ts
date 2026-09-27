@@ -157,7 +157,7 @@ test('integration:managed-worktree-root — producer and reviewer checkouts are 
     const elsewhere = sessionCheckout('/srv/graphyard/worktrees/project-0123456789ab', 'proof', 'GY-88', H, randomUUID());
     for (const text of [producerPrompt(config, binding, { principal: 'proof-runner' }, elsewhere), producerPrompt({ repository: 'owner/project', cliPath: launcher }, binding, { principal: 'proof-runner' }),
       reviewPrompt(config, binding, elsewhere), reviewPrompt(config, binding)]) assert.equal(text.includes('/tmp'), false, 'a generated prompt never names /tmp');
-    assert.ok(producerPrompt({ repository: 'owner/project', cliPath: launcher }, binding, { principal: 'proof-runner' }).includes(resolve(homedir(), '.local/share/graphyard/worktrees')), 'a previewed prompt names the default root');
+    assert.ok(producerPrompt({ repository: 'owner/project', cliPath: launcher }, binding, { principal: 'proof-runner' }).includes(join(dataDirectory(process.env), 'worktrees')), 'a previewed prompt names the default root the environment configures');
     const sources = fileURLToPath(new URL('../src/', import.meta.url));
     // master.ts and master-daemon.ts re-export their modules under master/ and daemon/ (GY-177).
     const split = async (directory: string) => (await readdir(join(sources, directory))).filter(name => name.endsWith('.ts')).map(name => `${directory}/${name}`);

@@ -11,7 +11,7 @@ import type { SessionHandleInput } from '../model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from '../request-settlement.js';
 import { type ResourceReclaimReport, reclaimResources, dispatchRefusal } from '../master-resources.js';
 import { RefusedResponse } from '../model/refusal.js';
-import { mergeBatchSize } from '../master/profiles.js';
+import { mergeBatchSize, mergeParallelTips, optimisticExcludeGlobs, optimisticMergeEnabled, rerunFailedChecks } from '../master/profiles.js';
 import type { CapacityRole, PartialWork } from '../model/capacity.js';
 import { readProducerLedger, saveProducerLedger, independentProducerProfiles, launchProducer, reclaimCheckouts } from '../producer.js';
 import { followUpThreadIds, readReviewLedger, updateReviewLedger, launchReview } from '../reviewer.js';
@@ -22,6 +22,7 @@ import { registeredLaunch } from '../model/session-state.js';
 import { readApproverLaunches } from '../master/autonomy.js';
 import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type ContainmentAssessment, type EscalationSession, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, type MergeExecutor, agentToken, approverRoleHealth, decisionInput, escalationRoleHealth, launchApprover, launchEscalationHandler, readApproverLaunch, readEscalationSessions, saveEscalationSession, verifiedContext, listHerdrAgents, readEnvironmentLog, selectionKey, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, mergeExecutor, reclaimWorktrees, removeReclaimableWorktrees, writeWorktreeInventoryCache, reclaimIdleMs, writeFailure, assessContainment, herdrJson } from '../master.js';
 import { annotatePaneShell } from '../quarantine.js';
+import { listHerdrPanes } from '../master/herdr.js';
 import { probeSupervisorAbsence } from '../containment-probe.js';
 import { httpFleetClient, reconcileFleetSessions, settledRecordSessions } from '../fleet.js';
 import { type ContainmentRetention, type DaemonAction, type DaemonState, type LoopRelease, storeAction, type DeploymentObservation, message, writeDaemonState } from './state.js';
@@ -103,8 +104,11 @@ export interface DaemonEffects {
    */
   publishProductionEnvironment?: () => Promise<unknown>;
   /**
-   * Publishes `mergeQueue.batchSize` (GY-330) to the control plane, whose merge queue batches by
-   * it; sent only on a change, and read at the start of every cycle so a reconfiguration applies
+   * Publishes `mergeQueue.batchSize` (GY-330), `mergeQueue.parallelTips` (GY-498),
+   * `mergeQueue.rerunFailedChecks`, `mergeQueue.optimistic` (GY-500) and `mergeQueue.optimisticExclude`
+   * (GY-503) to the control plane, whose merge queue batches and validates its window by the first
+   * two, lets disjoint entries past it by the third and judges shared infrastructure by the last;
+   * sent only on a change, and read at the start of every cycle so a reconfiguration applies
    * before the next merge.
    */
   publishMergeBatchSize?: () => Promise<unknown>;
@@ -241,6 +245,12 @@ export interface DaemonEffects {
   /** Herdr's agent inventory, read asynchronously: an empty list when Herdr cannot be read. */
   agents: () => HerdrAgent[] | Promise<HerdrAgent[]>;
   /**
+   * The host's pane inventory (`herdr pane list`, GY-842): every pane this host's runtime holds,
+   * with or without an agent in it, for the pane count the agent inventory cannot give. A loop
+   * wired without it reports no pane count; the sweep judges presence from the agent inventory.
+   */
+  panes?: () => Promise<{ panes: { pane_id?: string }[]; available: boolean }>;
+  /**
    * The same session inventory with whether it could be read at all. A Herdr that cannot be
    * reached reports no sessions, and stopping a supervisor on that would kill live work, so the
    * orphan step acts only on an inventory that says it is available.
@@ -336,7 +346,7 @@ export const promptDigest = (text: string) => createHash('sha256').update(text).
  * becomes claimable only once its partial work is on the record. Nothing is preserved for an
  * attempt that submitted — its work is on the pull request — or one the quota path already kept.
  */
-export async function preserveInterruptedAttempt(state: DaemonState, effects: DaemonEffects, item: Work, epoch: number, profile: WorkerProfile | undefined, observed: string, now: () => number, performed: DaemonAction[]) {
+export async function preserveInterruptedAttempt(state: DaemonState, effects: DaemonEffects, item: Work, epoch: number, profile: WorkerProfile | undefined, observed: string, now: () => number, performed: DaemonAction[], options: { endsBlocker?: true } = {}) {
   if (!effects.reportCapacity) return null;
   const key = preserveKey(item, epoch), previous = state.actions[key];
   if (previous?.state === 'done' || (previous && !readyToRetry(previous, state.cycle))) return previous;
@@ -345,7 +355,7 @@ export async function preserveInterruptedAttempt(state: DaemonState, effects: Da
   await record(state, key, { kind: 'preserve', work: item.key, principal, epoch, state: 'started', detail: `Keeping what attempt ${epoch} of ${item.key} left in its worktree: ${observed}`, attempts, cycle: state.cycle }, now(), effects.persist);
   try {
     const partialWork = await effects.preserveWork?.(item, epoch, 'interrupted before it could submit') ?? { state: 'not-applicable' as const, detail: 'this loop has no access to the attempt worktree' };
-    await effects.reportCapacity(item, { event: 'exhausted', cause: 'interrupted', role: 'worker', epoch, profile: profile?.name ?? principal ?? 'unknown', account: null, runtime: profile?.kind ?? null, reason: observed.slice(0, 500), resetsAt: null, partialWork });
+    await effects.reportCapacity(item, { event: 'exhausted', cause: 'interrupted', role: 'worker', epoch, profile: profile?.name ?? principal ?? 'unknown', account: null, runtime: profile?.kind ?? null, reason: observed.slice(0, 500), resetsAt: null, partialWork, ...options });
     const where = partialWork.commit ? ` at ${partialWork.commit.slice(0, 12)}${partialWork.branch ? ` on ${partialWork.branch}` : ''}${partialWork.path ? ` (${partialWork.path})` : ''}` : '';
     return performed[performed.push(await record(state, key, { kind: 'preserve', work: item.key, principal, epoch, state: 'done', detail: `${item.key} attempt ${epoch} ${observed}. Partial work ${partialWork.state}${where}${partialWork.detail ? `: ${partialWork.detail}` : ''}; the attempt ended on the record and the next attempt's request names the commit`, attempts, cycle: state.cycle }, now(), effects.persist)) - 1];
   } catch (error) {
@@ -495,10 +505,11 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   // The same route, as the same requester: only the identity that asked may take a request back.
   const withdraw: DaemonEffects['withdraw'] = (work, decision, reason) => asOperatorAgent('POST', `work/${work.id}/decide`, { action: 'withdraw', decision, reason });
   const decisions: DaemonEffects['decisions'] = work => asOperatorAgent('GET', `work/${encodeURIComponent(work.id)}/decisions`);
-  let publishedEnvironment: string | null = null, publishedBatchSize: number | null = null;
+  let publishedEnvironment: string | null = null, publishedMergeQueue: string | null = null;
   const persistLoop = (state: DaemonState) => writeDaemonState(current(), state);
   return {
     agents: () => listHerdrAgents(run).catch(() => []),
+    panes: async () => { try { return { panes: await listHerdrPanes(run), available: true }; } catch { return { panes: [], available: false }; } },
     // A reviewer or producer session ends with its ledger record (GY-205): its Herdr name is not one the registry session determines.
     reconcileSessions: async (runtime, finished) => {
       const settled = new Map(finished);
@@ -620,10 +631,11 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       publishedEnvironment = environment;
     },
     publishMergeBatchSize: async () => {
-      const batchSize = mergeBatchSize(current());
-      if (batchSize === publishedBatchSize) return;
-      await mutate('merge-queue', { batchSize });
-      publishedBatchSize = batchSize;
+      const config = { batchSize: mergeBatchSize(current()), optimistic: optimisticMergeEnabled(current()), parallelTips: mergeParallelTips(current()), rerunFailedChecks: rerunFailedChecks(current()), optimisticExclude: optimisticExcludeGlobs(current()) };
+      const published = JSON.stringify(config);
+      if (published === publishedMergeQueue) return;
+      await mutate('merge-queue', config);
+      publishedMergeQueue = published;
     },
     recordDeployment: (work, observation) => mutate(`work/${work.id}/deployment`, { sha: observation.sha, mergeSha: work.delivery!.mergeSha, source: observation.source, observedAt: observation.observedAt }),
     requestSmoke: async work => {

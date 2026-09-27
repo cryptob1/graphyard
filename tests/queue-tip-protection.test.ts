@@ -151,6 +151,9 @@ before(async () => {
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'owner/project'); engine.controlPlaneAppId = 1234;
+  // These entries test the queue itself; optimistic merge (GY-500) would let a disjoint one past it,
+  // so it is off, recorded as the master publishes it (the job loop reads it back from the ledger).
+  await store.pool.query("INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,'test','merge-queue.optimistic','{\"optimistic\":false}')"); await engine.loadMergeBatchSize();
   engine.principals = [operator, worker, coordinator, producer];
 });
 after(async () => { if (store) await store.close(); if (database) await database.stop(); });

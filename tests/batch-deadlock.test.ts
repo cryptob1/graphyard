@@ -10,6 +10,7 @@ import { describeMergeBatches, predictQueue, queueRef } from '../src/merge-queue
 import { diagnose } from '../src/coordination.js';
 import { buildMasterStatus } from '../src/master/status.js';
 import { CHECK_NAME, Refusal, ReconciliationRetry, type Principal, type Work } from '../src/model.js';
+import { optimisticMergeEvent } from '../src/optimistic-merge.js';
 
 // GY-506: the merge-queue deadlock. Every test is named for the proof it produces.
 
@@ -116,6 +117,11 @@ before(async () => {
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'owner/project'); engine.controlPlaneAppId = 1234;
+  // These tests prove queue mechanics (GY-506), so the lane is published off the way the master
+  // publishes it (POST /api/merge-queue): with optimistic merge on (GY-500, default on), a lone
+  // disjoint candidate is eligible and never enters the queue at all, and every job re-reads the
+  // ledger setting, so a field assignment would not survive the first observation.
+  await store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', ['graphyard', optimisticMergeEvent, JSON.stringify({ optimistic: false, previous: null })]);
   engine.principals = [operator, worker, producer];
 });
 after(async () => { if (store) await store.close(); if (database) await database.stop(); });
@@ -165,12 +171,14 @@ test('unit:batch-tip-published-from-stale-state — the GY-438 state (batch test
   behind = await validated(repo, github, behind);
   const headEntry = head.queue!, behindEntry = behind.queue!;
   assert.ok(headEntry.sequence < behindEntry.sequence, 'the head holds the earlier sequence');
-  // The tick re-evaluates every entry, so the head's stored batch view names both members.
+  // The tick re-evaluates every entry, so the head's stored view names the tip it merges behind:
+  // under the parallel-tip window (GY-498) the head's own tip, which holds the head alone.
   await engine.reconcile();
   head = await reload(head); behind = await reload(behind);
-  // The deadlock state, as GY-438 stood: the head batch is 'testing' with no published tip, and
+  // The deadlock state, as GY-438 stood: the head is 'testing' with no published tip, and
   // the observation is over an hour old with the base branch two merges ahead of it.
-  assert.deepEqual([head.queue!.batch?.state, head.queue!.batch?.tip, head.queue!.batch?.members], ['testing', null, [head.key, behind.key]]);
+  assert.deepEqual([head.queue!.batch?.state, head.queue!.batch?.tip, head.queue!.batch?.members], ['testing', null, [head.key]]);
+  assert.deepEqual(behind.queue!.tips?.map(tip => [tip.position, tip.entries, tip.tip]), [[1, [head.key], null], [2, [head.key, behind.key], null]], 'the entry behind merges behind both unpublished tips');
   const moved1 = repo.commit([main], 'Merge pull request #1 from other'); repo.refs.set('heads/main', moved1);
   const moved2 = repo.commit([moved1], 'Merge pull request #2 from other'); repo.refs.set('heads/main', moved2);
   const staleAt = new Date(Date.now() - 65 * 60_000).toISOString();
@@ -254,51 +262,57 @@ test('unit:no-observation-recorded — every claimed job that saves no observati
 
 test('unit:stuck-batch-dissolved — a batch in testing with no published tip for over ten minutes is dissolved: its members validate singly in their existing order and the head publishes its own tip', async () => {
   await clearQueue();
-  const repo = new Repo(), github = repo.adapter();
-  const main = repo.commit([], 'main'); repo.refs.set('heads/main', main);
-  const items: Work[] = [];
-  for (const title of ['Stuck first', 'Stuck second', 'Stuck third', 'Stuck fourth']) {
-    let item = await submitted(repo, title, () => repo.change([main], `feat: ${title}`, [`src/${title.slice(6).toLowerCase()}.ts`]));
-    items.push(await validated(repo, github, item));
-  }
-  const [first, second, third, fourth] = items;
-  const members = items.map(item => item.key);
-  const stuck = await reload(first);
-  assert.deepEqual([stuck.queue!.batch?.batch, stuck.queue!.batch?.state, stuck.queue!.batch?.tip], [1, 'testing', null], 'the head batch is testing with no published tip');
-  // The batch has been wedged in that state for over ten minutes.
-  stuck.queue!.batchStall = { since: new Date(Date.now() - 11 * 60_000).toISOString() };
-  await store.pool.query('UPDATE work_items SET document=$2 WHERE id=$1', [stuck.id, JSON.stringify(stuck)]);
-  const dissolved = await cycle(github, first);
-  assert.ok(dissolved.queue!.batchDissolved, 'the stuck batch was dissolved');
-  assert.deepEqual(dissolved.queue!.batchDissolved!.members, members, 'naming every member');
-  const history = (dissolved.queueHistory ?? []).filter(entry => entry.event === 'dissolved');
-  assert.equal(history.length, 1);
-  assert.match(history[0].reason!, /sat in testing with no published tip for 11 minutes.*single-entry queue positions/);
-  assert.equal((await events(dissolved, 'queue.batch-dissolved')).length, 1, 'the dissolution is recorded on the ledger');
-  // From here the members are single-entry batches, in their existing order, re-predicted in turn.
-  const all = await store.list();
-  const views = describeMergeBatches(all, predictQueue(all, Date.now()), engine.mergeBatchSize, engine.ciAppIds);
-  assert.deepEqual(members.map(key => views.get(key)!.members), members.map(key => [key]), 'each member validates alone');
-  assert.deepEqual(members.map(key => views.get(key)!.batch), [1, 2, 3, 4], 'in their existing queue order');
-  assert.match(views.get(first.key)!.summary, /dissolved from a stuck batch/);
-  // The head then publishes its own tip, and the entries behind theirs, one at a time: each
-  // publication is followed by the observation that makes the tip the next entry's predicted base.
-  const published: (string | null)[] = [];
-  for (const item of items) {
-    await cycle(github, await reload(item));
-    const after = await cycle(github, await reload(item));
-    published.push(after.queue!.speculation?.tip ?? null);
-    assert.ok(after.queue!.speculation?.tip, `${item.key} published its own tip`);
-  }
-  assert.equal(new Set(published).size, members.length, 'every member was re-predicted onto its own tip');
-  // One member leaving the queue ends the dissolution: the marker goes with the delivery that
-  // takes it, no live entry keeps validating singly because of it, and the surviving batch is a
-  // plain one again.
-  await store.pool.query("UPDATE work_items SET document=(document-'queue')||'{\"stage\":\"done\"}' WHERE id=$1", [first.id]);
-  const rest = (await store.list()).filter(item => item.stage !== 'done');
-  assert.ok(rest.every(item => !item.queue?.batchDissolved), 'no live entry still carries the dissolution');
-  const resumed = describeMergeBatches(rest, predictQueue(rest, Date.now()), engine.mergeBatchSize, engine.ciAppIds);
-  assert.doesNotMatch(resumed.get(second.key)!.summary, /dissolved from a stuck batch/, 'the surviving batch is a plain one again');
+  // Dissolution belongs to the batch plan (GY-330): the parallel-tip window (GY-498) already
+  // validates every entry on its own tip, so this test runs the engine on the batch plan.
+  const window = { tips: engine.parallelTips, load: engine.loadParallelTips };
+  engine.parallelTips = 0; engine.loadParallelTips = async () => engine.parallelTips = 0;
+  try {
+    const repo = new Repo(), github = repo.adapter();
+    const main = repo.commit([], 'main'); repo.refs.set('heads/main', main);
+    const items: Work[] = [];
+    for (const title of ['Stuck first', 'Stuck second', 'Stuck third', 'Stuck fourth']) {
+      let item = await submitted(repo, title, () => repo.change([main], `feat: ${title}`, [`src/${title.slice(6).toLowerCase()}.ts`]));
+      items.push(await validated(repo, github, item));
+    }
+    const [first, second, third, fourth] = items;
+    const members = items.map(item => item.key);
+    const stuck = await reload(first);
+    assert.deepEqual([stuck.queue!.batch?.batch, stuck.queue!.batch?.state, stuck.queue!.batch?.tip], [1, 'testing', null], 'the head batch is testing with no published tip');
+    // The batch has been wedged in that state for over ten minutes.
+    stuck.queue!.batchStall = { since: new Date(Date.now() - 11 * 60_000).toISOString() };
+    await store.pool.query('UPDATE work_items SET document=$2 WHERE id=$1', [stuck.id, JSON.stringify(stuck)]);
+    const dissolved = await cycle(github, first);
+    assert.ok(dissolved.queue!.batchDissolved, 'the stuck batch was dissolved');
+    assert.deepEqual(dissolved.queue!.batchDissolved!.members, members, 'naming every member');
+    const history = (dissolved.queueHistory ?? []).filter(entry => entry.event === 'dissolved');
+    assert.equal(history.length, 1);
+    assert.match(history[0].reason!, /sat in testing with no published tip for 11 minutes.*single-entry queue positions/);
+    assert.equal((await events(dissolved, 'queue.batch-dissolved')).length, 1, 'the dissolution is recorded on the ledger');
+    // From here the members are single-entry batches, in their existing order, re-predicted in turn.
+    const all = await store.list();
+    const views = describeMergeBatches(all, predictQueue(all, Date.now()), engine.mergeBatchSize, engine.ciAppIds);
+    assert.deepEqual(members.map(key => views.get(key)!.members), members.map(key => [key]), 'each member validates alone');
+    assert.deepEqual(members.map(key => views.get(key)!.batch), [1, 2, 3, 4], 'in their existing queue order');
+    assert.match(views.get(first.key)!.summary, /dissolved from a stuck batch/);
+    // The head then publishes its own tip, and the entries behind theirs, one at a time: each
+    // publication is followed by the observation that makes the tip the next entry's predicted base.
+    const published: (string | null)[] = [];
+    for (const item of items) {
+      await cycle(github, await reload(item));
+      const after = await cycle(github, await reload(item));
+      published.push(after.queue!.speculation?.tip ?? null);
+      assert.ok(after.queue!.speculation?.tip, `${item.key} published its own tip`);
+    }
+    assert.equal(new Set(published).size, members.length, 'every member was re-predicted onto its own tip');
+    // One member leaving the queue ends the dissolution: the marker goes with the delivery that
+    // takes it, no live entry keeps validating singly because of it, and the surviving batch is a
+    // plain one again.
+    await store.pool.query("UPDATE work_items SET document=(document-'queue')||'{\"stage\":\"done\"}' WHERE id=$1", [first.id]);
+    const rest = (await store.list()).filter(item => item.stage !== 'done');
+    assert.ok(rest.every(item => !item.queue?.batchDissolved), 'no live entry still carries the dissolution');
+    const resumed = describeMergeBatches(rest, predictQueue(rest, Date.now()), engine.mergeBatchSize, engine.ciAppIds);
+    assert.doesNotMatch(resumed.get(second.key)!.summary, /dissolved from a stuck batch/, 'the surviving batch is a plain one again');
+  } finally { engine.parallelTips = window.tips; engine.loadParallelTips = window.load; }
 });
 
 test('unit:batch-view-stable — a re-derived batch view equal in content keeps the stored queue entry, so reconciling a queued entry no longer rewrites its document', { timeout: 60_000 }, async () => {
@@ -320,4 +334,31 @@ test('unit:batch-view-stable — a re-derived batch view equal in content keeps 
   assert.deepEqual(after.queue.batch, stored.queue.batch, 'the stored batch view stands');
   // The queue ref namespace is untouched by any of this.
   assert.match(queueRef(work.key), /^refs\/graphyard\/queue\//);
+});
+
+test('unit:parallel-speculative-tips — publication wakes the next leased job before the predecessor CI finishes', async () => {
+  await clearQueue();
+  const repo = new Repo(), github = repo.adapter();
+  const main = repo.commit([], 'main'); repo.refs.set('heads/main', main);
+  let head = await submitted(repo, 'Parallel head', () => repo.change([main], 'feat: first', ['src/first.ts']));
+  let behind = await submitted(repo, 'Parallel successor', () => repo.change([main], 'feat: second', ['src/second.ts']));
+  head = await validated(repo, github, head);
+  behind = await validated(repo, github, behind);
+  const request = github.request.bind(github);
+  github.request = async (path, method, body) => {
+    const response = await request(path, method, body);
+    const check = path.match(/^\/commits\/([a-f0-9]{40})\/check-runs/);
+    if (check && response?.check_runs)
+      return { ...response, check_runs: response.check_runs.map((run: any) => ({ ...run, status: 'in_progress', conclusion: null })) };
+    return response;
+  };
+  // cycle parks every other job an hour out, so publication must explicitly wake its successor.
+  head = await cycle(github, head);
+  assert.ok(head.queue?.speculation?.tip);
+  assert.ok(new Date((await jobRow(behind)).available_at).getTime() <= Date.now(), 'the successor is due immediately after publication');
+  head = await cycle(github, head);
+  assert.ok(head.observation!.checks.every(run => run.result === 'in_progress'), 'the predecessor tip has no CI verdict yet');
+  behind = await cycle(github, behind);
+  assert.ok(behind.queue?.speculation?.tip, 'the successor publishes while predecessor CI runs');
+  assert.equal(behind.queue!.speculation!.base, head.queue!.speculation!.tip);
 });

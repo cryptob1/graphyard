@@ -11,6 +11,8 @@ import { message, orphanObservationSchema } from './state.js';
 import { closeKey } from './reconcile.js';
 import { boundDetail } from './decisions.js';
 import { clearProfileFailure, orphanedSupervisors, readyToRetry } from './sessions.js';
+import { clearedBefore, clearedBlockerKey, reblockedKey, reblockedReason } from './reblocked-attempts.js';
+import { paneAlreadyGone } from '../request-settlement.js';
 import { blockedPromptAnswers, blockedPromptFailMs, blockedPromptSettleMs, failoverKey, handlerSettleMs, launchAppearanceMs, launcherRetry, promptDigest, type LaunchedSession, preserveInterruptedAttempt, record, stoppedStates } from './effects.js';
 import type { Cycle } from './cycle.js';
 
@@ -413,18 +415,19 @@ function workerHandle(cycle: Cycle, item: Work, profile: WorkerProfile, epoch: n
  * (which ends the lease, so the dispatch step claims the item again next cycle and the next
  * attempt's request names that commit), its supervisor is stopped and its pane closed.
  */
-async function endWorkerAttempt(cycle: Cycle, item: Work, profile: WorkerProfile, epoch: number, pane: string, reason: string, observed: string) {
+async function endWorkerAttempt(cycle: Cycle, item: Work, profile: WorkerProfile, epoch: number, pane: string | null, reason: string, observed: string, options: { endsBlocker?: true } = {}) {
   const { state, effects, now, performed } = cycle;
-  const preserved = await preserveInterruptedAttempt(state, effects, item, epoch, profile, observed, now, performed);
+  const preserved = await preserveInterruptedAttempt(state, effects, item, epoch, profile, observed, now, performed, options);
   if (preserved && preserved.state !== 'done') throw new Error(`its attempt could not be ended on the record: ${preserved.detail}`);
   const scope = item.containmentQuarantine?.epoch === epoch && item.containmentQuarantine.owner === profile.principal ? item.containmentQuarantine.scope : undefined;
   let stop = 'its supervisor stops on the ended lease';
   try {
     if (scope && effects.stopSupervisor) { await effects.stopSupervisor({ id: item.id, key: item.key, epoch, owner: profile.principal, profile: profile.name, agentName: profile.agentName, scope, leaseExpiresAt: item.lease!.expiresAt }, 'SIGTERM'); stop = `its supervisor (pid ${scope.pid}) was stopped through ${scope.unit}`; }
   } catch (error) { stop = `its supervisor could not be signalled (${message(error)}) and stops on the ended lease`; }
-  await effects.closeSession(pane);
-  await workerHandle(cycle, item, profile, epoch, pane, `closed as failed: ${reason}`, true);
-  return `the attempt ended on the record, ${stop}, pane ${pane} was closed, and ${item.key} is dispatched again`;
+  // A session already gone from Herdr has no pane left to close (GY-867 ends such attempts too).
+  if (pane) await effects.closeSession(pane);
+  await workerHandle(cycle, item, profile, epoch, pane ?? 'none', `closed as failed: ${reason}`, true);
+  return `the attempt ended on the record, ${stop}, ${pane ? `pane ${pane} was closed` : 'no pane was left to close'}, and ${item.key} is dispatched again`;
 }
 
 /** How long a worker holding a live lease may show no activity before it is re-prompted, and again after that before its item goes to a new attempt (GY-524). */
@@ -487,12 +490,32 @@ async function resumeStep(cycle: Cycle, failedOver: Set<string>) {
     const scopeDetail = request ? `${item.key} epoch ${epoch} waits on its scope request of ${request.at} for ${request.paths.join(', ')}, and ${profile.agentName} is re-prompted once it is answered` : null;
     if (blockerDetail && state.actions[keys.blocker]?.detail !== boundDetail(blockerDetail)) await entry(keys.blocker, 'waiting', blockerDetail);
     if (scopeDetail && state.actions[keys.scope]?.detail !== boundDetail(scopeDetail)) await entry(keys.scope, 'waiting', scopeDetail);
+    // GY-867: blocked again on an epoch whose blocker was already cleared once. Re-prompting the
+    // same session again would only repeat the cycle, so the attempt ends and the item goes on.
+    const cleared = item.blocker && !request ? clearedBefore(state, item, epoch) : null;
+    if (cleared) {
+      const key = reblockedKey(item, epoch), previous = state.actions[key];
+      if (previous?.state === 'done' || (previous && !readyToRetry(previous, state.cycle))) return;
+      const reason = reblockedReason(item, epoch, cleared, item.blocker!), attempts = (previous?.attempts ?? 0) + 1;
+      await entry(key, 'started', `${profile.agentName} on ${item.key} ${reason}; ending the attempt`, attempts);
+      try {
+        const next = await endWorkerAttempt(cycle, item, profile, epoch, pane, reason, reason, { endsBlocker: true });
+        performed.push(await entry(key, 'done', `${profile.agentName} on ${item.key} ${reason}; ${next}, keeping the attempt's branch and ending the blocker it recorded`, attempts));
+        await drop(keys.blocker, keys.idle);
+      } catch (error) {
+        performed.push(await entry(key, 'failed', `${profile.agentName} on ${item.key} ${reason}, but its attempt could not be ended: ${message(error)}`, attempts));
+      }
+      return;
+    }
     if (item.blocker || request) { await drop(keys.idle); return; }
 
     // 1e. Nothing is open any more: what the attempt waited on was resolved.
     const waited = [state.actions[keys.blocker], state.actions[keys.scope]].filter((action): action is DaemonAction => action?.state === 'waiting');
     if (waited.length) {
       const blocker = state.actions[keys.blocker]?.detail.split(blockerMarker)[1];
+      // Remembered for the epoch: a second block after this clearance ends the attempt (GY-867).
+      if (state.actions[keys.blocker]?.state === 'waiting' && !state.actions[clearedBlockerKey(item, epoch)])
+        await entry(clearedBlockerKey(item, epoch), 'done', blocker ? `"${blocker.slice(0, 300)}"` : 'its earlier blocker');
       const changed = [state.actions[keys.blocker] ? `its blocker${blocker ? ` ("${blocker.slice(0, 300)}")` : ''} was cleared` : null, state.actions[keys.scope] ? scopeChange(item) : null].filter(Boolean).join(', and ');
       const promptKey = `resume:prompt:${item.id}:${epoch}:${waited[0].at}`, previous = state.actions[promptKey];
       if (previous && previous.state !== 'failed') { await drop(keys.blocker, keys.scope); return; }
@@ -556,8 +579,10 @@ async function resumeStep(cycle: Cycle, failedOver: Set<string>) {
  * 1g. An implementation session over while its handle still says running (GY-524): its item has
  * left build, the stage it was launched for, or Herdr detects no agent in its pane — the runtime is
  * no longer the pane's foreground process. The pane is matched on its own coordinate, never on the
- * profile's agent name, which the profile's next session reuses in another pane. The handle is
- * closed with the reason, so no reader counts it running.
+ * profile's agent name, which the profile's next session reuses in another pane. The session ends
+ * with the reason, so no reader counts it running, and its pane is closed in the same step — the
+ * runtime already left, so the pane is a bare shell holding a pty — and the close is recorded with
+ * the end (GY-842). A pane that is already gone is recorded as such, not as a failure.
  */
 async function closeExitedWorkerSessions(cycle: Cycle, runtime: { agents: HerdrAgent[]; available: boolean } | null) {
   const { config, state, effects, snapshot, clock, now, performed, isolate } = cycle;
@@ -579,8 +604,15 @@ async function closeExitedWorkerSessions(cycle: Cycle, runtime: { agents: HerdrA
     await isolate('close', item, handle.id, async () => {
       const entry = (outcome: 'done' | 'failed', detail: string) => record(state, key, { kind: 'close', work: item.key, principal: handle.principal, state: outcome, detail, attempts, cycle: state.cycle }, now(), effects.persist);
       try {
-        await effects.recordSession!(item, { id: handle.id, kind: 'implementation', runtime: handle.runtime, host: handle.host, subject: handle.subject, state: 'finished', outcome: `closed by the loop: ${found}`.slice(0, 500) });
-        performed.push(await entry('done', `Closed implementation session ${handle.id} of ${item.key}${handle.pane ? ` (pane ${handle.pane})` : ''}: ${found}`));
+        // The pane goes first, so the record never says finished beside a pane still standing. A
+        // close that fails leaves the handle running: the step is retried whole on a later cycle.
+        let closed = '';
+        if (handle.pane) {
+          try { await effects.closeSession(handle.pane); closed = `; pane ${handle.pane} closed`; }
+          catch (error) { if (!paneAlreadyGone(error)) throw error; closed = `; pane ${handle.pane} was already gone`; }
+        }
+        await effects.recordSession!(item, { id: handle.id, kind: 'implementation', runtime: handle.runtime, host: handle.host, subject: handle.subject, state: 'finished', outcome: `closed by the loop: ${found}${closed}`.slice(0, 500) });
+        performed.push(await entry('done', `Closed implementation session ${handle.id} of ${item.key}${handle.pane ? ` (pane ${handle.pane})` : ''}: ${found}${closed}`));
       } catch (error) {
         performed.push(await entry('failed', `Could not close implementation session ${handle.id} of ${item.key}: ${message(error)}`));
       }

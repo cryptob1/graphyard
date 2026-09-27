@@ -244,6 +244,7 @@ test('integration:stall-raises-attention — a stalled row is raised as an atten
   assert.ok(raised[0].text.includes(busy), 'and the unchanged reason it keeps failing with');
   assert.match(raised[0].text, new RegExp(`${actionStallThreshold} attempts in a row`));
   assert.match(raised[0].text, /and it has been open \d+s over 3 attempt\(s\)/);
+  assert.equal(raised[0].kind, 'stalled-action', 'the builder names its kind, so a rewording never leaves the line unclassified (GY-729)');
   assert.equal(raised[0].role, 'master', 'resolved by an agent, never left to a human to notice');
   assert.equal(raised[0].human, false);
   assert.match(raised[0].next, /Clear what that reason names/);
