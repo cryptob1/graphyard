@@ -223,16 +223,7 @@ export async function probeSupervisorAbsence(target: SupervisorProbeTarget, deps
         if (owner !== 'target' && membership !== 'inside' && (owner === 'other' || assignmentOf(pid) === 'other')) attributed.push(pid);
         else { holding.push(pid); describe(pid, unit); }
       }
-      const truncated = holding.length > 200 || attributed.length > 200;
-      const scope: { unit: string; activeState: string; processes: number[]; attributed: number[]; processesCount?: number; attributedCount?: number; truncated: boolean } = {
-        unit, activeState,
-        processes: holding.slice(0, 200),
-        attributed: attributed.slice(0, 200),
-        truncated,
-      };
-      if (holding.length > 200) scope.processesCount = holding.length;
-      if (attributed.length > 200) scope.attributedCount = attributed.length;
-      scopes.push(scope);
+      scopes.push({ unit, activeState, processes: holding, attributed });
     } catch (error) { unverifiable.push(`Containment scope ${unit} could not be inspected: ${detail(error)}`); }
   }
   return record();
