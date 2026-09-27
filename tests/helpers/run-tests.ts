@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { readdirSync, readFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseShard, readDurations, shardFiles } from '../../scripts/ci-tests.mjs';
@@ -100,7 +100,11 @@ export async function runTests(options: RunOptions = {}): Promise<RunResult> {
   // The browser window is the dev server's port and the sentinel above it that holds the window.
   const reservation = await reserveTestPorts(options.browser ? { first: defaultBrowserPort, span: 2, last: 65_000, ...options.ports } : { ...nestedFirst(), ...options.ports });
   try {
-    const set = options.browser ? { GRAPHYARD_BROWSER_PORT: String(reservation.base) } : testPortEnvironment(reservation.base);
+    // The suite's managed checkouts live inside the tree it runs from (ignored by .graphyard/): a worker's
+    // sandbox can write nowhere else, and the default ~/.local/share/graphyard failed every checkout there (GY-498).
+    const dataHome = resolve(cwd, '.graphyard/test-data');
+    mkdirSync(dataHome, { recursive: true });
+    const set = { ...(options.browser ? { GRAPHYARD_BROWSER_PORT: String(reservation.base) } : testPortEnvironment(reservation.base)), GRAPHYARD_DATA_HOME: dataHome };
     const environment = isolatedTestEnvironment(options.environment ?? process.env, set);
     const [command, commandArgs] = options.browser || !selection
       ? [process.execPath, [fileURLToPath(import.meta.resolve('@playwright/test/cli')), 'test', ...args]]
