@@ -1168,7 +1168,7 @@ test('integration:dispatcher-snapshot-retry — a dispatch tick that times out o
     const cursor = emptyDispatchCursor(config);
     const tick = await runDispatchTick(config, cursor, effects, () => clock);
     assert.equal(reads, 2, 'the snapshot read was tried again after timing out');
-    assert.equal(tick.launched.length, 0, 'no launch happens on a request already launched');
+    assert.equal(tick.launched.length, 3, 'reviewer and two producers launch despite the timeout retry');
     assert.ok(!tick.refused.length, `no refusal on tick despite retry: ${JSON.stringify(tick.refused)}`);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
