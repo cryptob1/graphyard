@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import type { Engine } from './engine.js';
 import { demand, pathScopeContains, standingEscalations, type Principal, type Stage, type Work } from './model.js';
+import { scopeRefusalBlocker } from './model/scope.js';
 import { interventionKindLabel, interventionKinds, interventionWindows, judgementVerdictLabel, type Intervention, type InterventionKind, type InterventionPattern, type InterventionPolicy, type InterventionReport, type InterventionRecordInput, type InterventionWindow, type Judgement, type JudgementInput } from './model/interventions.js';
 import type { Store } from './store.js';
 import { boundedSnapshot } from './store/bounded-snapshot.js';
@@ -41,6 +42,8 @@ export interface InterventionLedgerRow {
   /** The stage the item's latest earlier row recorded: the stage the item was in when this row's command ran. */
   stageBefore?: string | null;
   work?: { key?: string | null; stage?: string | null; title?: string | null; epoch?: number | null; blocker?: string | null; plannedFiles?: string[] | null; quarantine?: unknown; escalations?: { trigger: string; at: string; reason: string; actor: string }[] | null; candidate?: { sha: string; pr: number } | null; submission?: { epoch: number; pr: number } | null } | null;
+  /** A row of the straddle read (`readInterventionSeed`): folded for state only, never emitted. */
+  seed?: true;
 }
 type Db = { query: pg.Pool['query'] };
 /** A provider or ledger instant in the one form the report compares: ISO with milliseconds. */
@@ -57,9 +60,27 @@ const workOf = (document: Record<string, any> | null): InterventionLedgerRow['wo
   Object.fromEntries(workFields.map(([name, field]) => [name, document?.[field] ?? null])) as InterventionLedgerRow['work'];
 
 /**
+ * The exact window statement `readInterventionLedger` sends, with its parameters: the kinds the
+ * fold reads, one row past the limit (so the caller can say it truncated), the item to narrow to,
+ * and the instant a window opens. The window's rows must come from the (kind, created_at) index,
+ * and the test holds this statement — not a lookalike — to that index (GY-432). It projects a
+ * whole row's document to the fields the fold reads and carries a delta row's delta as stored;
+ * no document is rebuilt in SQL (GY-491) — the rows read below reconstruct each document once.
+ */
+export const interventionLedgerQuery = (limit: number, workId: string | null = null, since: string | null = null): { text: string; values: unknown[] } => ({
+  text: `SELECT seq, work_id, actor, kind, created_at, payload->'details' AS details,
+      CASE WHEN kind LIKE 'decision.%' OR kind IN ('intervention.recorded','judgement.recorded') THEN payload ELSE NULL END AS top,
+      payload ? 'work' AS whole, ${projectedWork("payload->'work'")} AS work, CASE WHEN payload ? 'work' THEN NULL ELSE payload->'delta' END AS delta
+    FROM events WHERE kind = ANY($1) AND ($3::uuid IS NULL OR work_id=$3) AND ($4::timestamptz IS NULL OR created_at >= $4::timestamptz) ORDER BY seq DESC LIMIT $2`,
+  values: [[...interventionLedgerKinds], limit + 1, workId, since],
+});
+
+/**
  * The newest `limit` rows of the kinds the fold reads, in ledger order; with `since`, only those
  * written from that instant on (GY-422). A report reads its window this way — the rows come from
- * the (kind, created_at) index, so a ledger of any age costs what the window holds.
+ * the (kind, created_at) index, so a ledger of any age costs what the window holds — and the
+ * window's exact statement is `interventionLedgerQuery`, which the test explains against that
+ * index (GY-432).
  *
  * Nothing is rebuilt per row (GY-491). Three set reads, then one pass in ledger order:
  * - the window's rows, with a whole row's document projected to the fields the fold reads and a
@@ -77,14 +98,24 @@ const workOf = (document: Record<string, any> | null): InterventionLedgerRow['wo
  */
 export async function readInterventionLedger(db: Db, options: { limit?: number; workId?: string | null; since?: string | null } = {}): Promise<{ rows: InterventionLedgerRow[]; truncated: boolean }> {
   const limit = options.limit ?? interventionLedgerLimit;
-  const result = await db.query(`SELECT seq, work_id, actor, kind, created_at, payload->'details' AS details,
-      CASE WHEN kind LIKE 'decision.%' OR kind IN ('intervention.recorded','judgement.recorded') THEN payload ELSE NULL END AS top,
-      payload ? 'work' AS whole, ${projectedWork("payload->'work'")} AS work, CASE WHEN payload ? 'work' THEN NULL ELSE payload->'delta' END AS delta
-    FROM events WHERE kind = ANY($1) AND ($3::uuid IS NULL OR work_id=$3) AND ($4::timestamptz IS NULL OR created_at >= $4::timestamptz) ORDER BY seq DESC LIMIT $2`,
-  [[...interventionLedgerKinds], limit + 1, options.workId ?? null, options.since ?? null]);
+  const query = interventionLedgerQuery(limit, options.workId ?? null, options.since ?? null);
+  const result = await db.query(query.text, query.values);
   const truncated = result.rows.length > limit;
-  const window = result.rows.slice(0, limit).reverse();
+  return { rows: await readLedgerDocuments(db, result.rows.slice(0, limit).reverse()), truncated };
+}
 
+/**
+ * The documents behind a read's rows (GY-491): each delta row's edits applied to its snapshot's
+ * projection (`applyWorkDelta`, the twin of the SQL `graphyard_event_work`), each item's stage
+ * timeline across its span of the rows, then one pass in ledger order — three set reads whatever
+ * the rows hold, no document rebuilt per row. Shared by the window read and the straddle read
+ * (GY-432), which hand in their rows oldest-first and are mapped identically. The stage before a
+ * row is the stage of the item's newest earlier row that carries a document, whole or as a delta.
+ * A delta is only ever written on the item's newest whole row and only when the stage is
+ * unchanged (`appendSave`, under the coordination lock every ledger write takes), so that stage
+ * is the stage of the item's newest earlier whole row — read from the timeline.
+ */
+async function readLedgerDocuments(db: Db, window: any[]): Promise<InterventionLedgerRow[]> {
   // The full snapshots the window's deltas extend, once each.
   const bases = new Map<number, { workId: string | null; work: Record<string, any> | null }>();
   const baseSeqs = [...new Set(window.flatMap(row => row.work_id && isObject(row.delta) && Number.isSafeInteger(Number(row.delta.base)) ? [Number(row.delta.base)] : []))];
@@ -109,7 +140,7 @@ export async function readInterventionLedger(db: Db, options: { limit?: number; 
 
   // One pass in ledger order: each item's timeline is walked forward alongside its rows.
   const cursors = new Map<string, number>();
-  const rows = window.map((row): InterventionLedgerRow => {
+  return window.map((row): InterventionLedgerRow => {
     const seq = Number(row.seq);
     let document: Record<string, any> | null = null;
     if (row.whole) document = row.work ?? null;
@@ -134,7 +165,50 @@ export async function readInterventionLedger(db: Db, options: { limit?: number; 
     return { seq, workId: row.work_id, actor: row.actor, kind: row.kind, at: instant(updatedAt, new Date(row.created_at).toISOString()), details: row.details, payload: row.top ?? undefined,
       work: row.whole || document ? workOf(document) : null, stageBefore };
   });
-  return { rows, truncated };
+}
+
+/** How far the straddle read reaches for one report: the newest rows before the window, bounded. */
+export const interventionLedgerSeedLimit = 2_000;
+/**
+ * The straddle read's candidate statement (GY-432): the newest rows of the fold's kinds written
+ * before `until`, read per kind in the (kind, created_at) index's own order — newest first,
+ * stopping at the bound — and cut to the newest `limit` overall. One row past the limit, so the
+ * caller can say it truncated. The bound is a row comparison on (kind, created_at), which only
+ * that index can take as its condition: written as `created_at < until`, the planner may walk the
+ * (created_at) index instead, filtering on kind, and a kind with no rows then walks the whole
+ * ledger before the window — 800 ms over the scale test's 200,000 events, against 10 ms here.
+ */
+export const interventionLedgerSeedQuery = (limit: number, until: string): { text: string; values: unknown[] } => ({
+  text: `SELECT b.seq, b.created_at FROM unnest($1::text[]) AS k(kind) CROSS JOIN LATERAL (SELECT e.seq, e.created_at FROM events e WHERE e.kind = k.kind AND (e.kind, e.created_at) < (k.kind, $2::timestamptz) ORDER BY e.kind DESC, e.created_at DESC LIMIT $3) b ORDER BY b.created_at DESC LIMIT $3`,
+  values: [[...interventionLedgerKinds], until, limit + 1],
+});
+/**
+ * The straddle read's wide statement: exactly the candidate rows, one index lookup each — never a
+ * walk of the ledger. The columns are the window read's (`interventionLedgerQuery`), so both
+ * reads' rows reach `readLedgerDocuments` in one shape.
+ */
+export const interventionLedgerSeedRowsQuery = `SELECT seq, work_id, actor, kind, created_at, payload->'details' AS details,
+    CASE WHEN kind LIKE 'decision.%' OR kind IN ('intervention.recorded','judgement.recorded') THEN payload ELSE NULL END AS top,
+    payload ? 'work' AS whole, ${projectedWork("payload->'work'")} AS work, CASE WHEN payload ? 'work' THEN NULL ELSE payload->'delta' END AS delta
+  FROM events WHERE seq = ANY($1::bigint[])`;
+/**
+ * The straddle (GY-432): needs recorded before a window opened, whose pairing lands inside it, are
+ * folded silently ahead of the window's rows so their wait is measured from the moment the product
+ * needed someone. The rows come back newest-first; the caller sorts them with the window's rows by
+ * seq before folding. Their documents come back the way the window's do (GY-491): set reads and
+ * one pass, never a per-row rebuild in SQL.
+ */
+export async function readInterventionSeed(db: Db, options: { limit?: number; until: string }): Promise<{ rows: InterventionLedgerRow[]; truncated: boolean }> {
+  const limit = options.limit ?? interventionLedgerSeedLimit;
+  const query = interventionLedgerSeedQuery(limit, options.until);
+  const candidates = await db.query(query.text, query.values);
+  const truncated = candidates.rows.length > limit;
+  const seqs = candidates.rows.slice(0, limit).map(row => String(row.seq));
+  if (!seqs.length) return { rows: [], truncated };
+  const wide = await db.query(interventionLedgerSeedRowsQuery, [seqs]);
+  const bySeq = new Map(wide.rows.map(row => [String(row.seq), row]));
+  const rows = await readLedgerDocuments(db, seqs.flatMap(seq => { const row = bySeq.get(seq); return row ? [row] : []; }).reverse());
+  return { rows: rows.map(row => ({ ...row, seed: true as const })), truncated };
 }
 
 interface Ask { seq: number; at: string; stage: Stage | null; kind: 'scope-request' | 'blocked-report'; blocked: string; paths: string[]; trigger?: string; sources: { seq: number; kind: string }[] }
@@ -157,7 +231,7 @@ const text = (value: unknown, fallback = '') => typeof value === 'string' && val
  * open — an ask the fold saw opened but whose item no longer carries a blocker was met by a
  * command the fold does not read, so it is not reported as waiting.
  */
-export function foldInterventions(rows: InterventionLedgerRow[], work: readonly Work[], now: string): { interventions: Intervention[]; judgements: Judgement[] } {
+export function foldInterventions(rows: InterventionLedgerRow[], work: readonly Work[], now: string, options: { since?: string | null } = {}): { interventions: Intervention[]; judgements: Judgement[] } {
   const items = new Map(work.map(item => [item.id, item]));
   const states = new Map<string, WorkState>();
   const state = (id: string): WorkState => {
@@ -168,6 +242,7 @@ export function foldInterventions(rows: InterventionLedgerRow[], work: readonly 
   const interventions: Intervention[] = [], judgements: Judgement[] = [];
   const named = (id: string | null) => { if (!id) return null; const item = items.get(id), entry = states.get(id); return { id, key: item?.key ?? entry?.key ?? id, title: item?.title ?? entry?.title ?? '' }; };
   const emit = (row: InterventionLedgerRow, kind: InterventionKind, fields: { requestedAt: string; blocked: string; stage: Stage | null; resolvedAt: string | null; resolvedBy: string | null; resolution: string | null; trigger?: string; sources: { seq: number; kind: string }[]; id?: string; source?: Intervention['source'] }) => {
+    if (row.seed) return;
     const resolvedAt = fields.resolvedAt;
     interventions.push({ id: fields.id ?? `${kind}:${row.workId ?? 'global'}:${fields.sources[0]?.seq ?? fields.requestedAt}`, kind, source: fields.source ?? 'ledger', work: named(row.workId), stage: fields.stage, blocked: fields.blocked, ...(fields.trigger ? { trigger: fields.trigger } : {}),
       requestedAt: fields.requestedAt, resolvedAt, waitedMs: ms(fields.requestedAt, resolvedAt ?? now), resolvedBy: fields.resolvedBy, resolution: fields.resolution, sources: fields.sources });
@@ -175,12 +250,14 @@ export function foldInterventions(rows: InterventionLedgerRow[], work: readonly 
   for (const row of rows) {
     const details = row.details ?? {};
     if (row.kind === 'judgement.recorded') {
+      if (row.seed) continue;
       const judged = row.payload ?? {};
       const item = work.find(candidate => candidate.origin?.judgement?.id === judged.id);
       judgements.push({ id: judged.id, verdict: judged.verdict, text: judged.text, work: judged.work ? { id: judged.work.id, key: judged.work.key, title: items.get(judged.work.id)?.title ?? judged.work.title ?? '' } : null, page: judged.page ?? null, by: row.actor, at: judged.at ?? row.at, item: item ? { id: item.id, key: item.key, stage: item.stage } : null, seq: row.seq });
       continue;
     }
     if (row.kind === 'intervention.recorded') {
+      if (row.seed) continue;
       const recorded = row.payload ?? {};
       const requestedAt = text(recorded.since, recorded.at ?? row.at);
       interventions.push({ id: recorded.id ?? `recorded:${row.seq}`, kind: recorded.kind, source: 'recorded', work: recorded.work ? named(recorded.work.id) ?? { id: recorded.work.id, key: recorded.work.key, title: '' } : null, stage: stageOf(recorded.stage), blocked: text(recorded.blocked), ...(recorded.trigger ? { trigger: recorded.trigger } : {}),
@@ -327,25 +404,37 @@ export function foldInterventions(rows: InterventionLedgerRow[], work: readonly 
     }
   }
   // What is still open, settled against the current record so a need met by a command the fold
-  // does not read is never reported as waiting.
-  for (const [id, entry] of states) {
-    const item = items.get(id);
-    if (!item || item.stage === 'done') continue;
-    const row = { seq: 0, workId: id, actor: '', kind: 'open', at: now, details: {} };
+  // does not read is never reported as waiting. A need the rows never carried but the snapshot
+  // still shows (GY-432) is seeded from the document: one recorded before the read's reach began
+  // ages in the report instead of vanishing at the window's edge. Where the document carries no
+  // instant for it, it opens at `since`, the oldest instant this reading speaks of.
+  for (const item of work) {
+    if (item.stage === 'done') continue;
+    const entry = states.get(item.id) ?? state(item.id);
+    const request = item.scopeRequest;
+    if (request?.decision?.state === 'refused' && !entry.asks.some(ask => ask.kind === 'scope-request'))
+      entry.asks.push({ seq: 0, at: request.at, stage: item.stage, kind: 'scope-request', blocked: request.paths?.length ? `files outside plannedFiles: ${request.paths.join(', ')}` : 'a requirements change', paths: request.paths ?? [], trigger: 'refused-by-loop', sources: [] });
+    if (item.blocker && !(request && item.blocker.startsWith(scopeRefusalBlocker)) && !entry.asks.some(ask => ask.kind === 'blocked-report'))
+      entry.asks.push({ seq: 0, at: options.since ?? now, stage: item.stage, kind: 'blocked-report', blocked: item.blocker, paths: [], sources: [] });
+    if (item.humanRequest && !item.humanRequest.answer && entry.human?.id !== item.humanRequest.id)
+      entry.human = { seq: 0, at: item.humanRequest.at, id: item.humanRequest.id, kind: item.humanRequest.kind, needed: item.humanRequest.needed, stage: item.stage };
+    if (item.containmentQuarantine && !entry.quarantine)
+      entry.quarantine = { seq: 0, at: item.containmentQuarantine.at, epoch: item.containmentQuarantine.epoch, concernAt: item.containmentQuarantine.leaseExpiresAt ?? item.containmentQuarantine.at, stage: item.stage };
+    const row = { seq: 0, workId: item.id, actor: '', kind: 'open', at: now, details: {} };
     const open = (kind: InterventionKind, fields: Parameters<typeof emit>[2]) => emit(row, kind, { ...fields, resolvedAt: null, resolvedBy: null, resolution: null });
     // An undecided scope request is the loop's to answer within minutes; only one the loop refused waits on a person.
     if (item.blocker || item.scopeRequest) for (const ask of entry.asks) {
       if (ask.kind === 'scope-request' && !ask.trigger) continue;
       open(ask.kind === 'scope-request' ? 'scope-widening' : 'escalation', { requestedAt: ask.at, blocked: ask.blocked, stage: ask.stage, resolvedAt: null, resolvedBy: null, resolution: null, trigger: ask.trigger ?? ask.kind, sources: ask.sources });
     }
-    if (entry.reworkDecision) open('rework', { id: `rework:${id}:${entry.reworkDecision.id}`, requestedAt: entry.reworkDecision.at, blocked: item.candidate ? `candidate ${item.candidate.sha.slice(0, 12)} (PR #${item.candidate.pr})` : `attempt ${item.epoch}`, stage: entry.reworkDecision.stage, resolvedAt: null, resolvedBy: null, resolution: null, trigger: 'decision', sources: [{ seq: entry.reworkDecision.seq, kind: 'decision.requested' }] });
+    if (entry.reworkDecision) open('rework', { id: `rework:${item.id}:${entry.reworkDecision.id}`, requestedAt: entry.reworkDecision.at, blocked: item.candidate ? `candidate ${item.candidate.sha.slice(0, 12)} (PR #${item.candidate.pr})` : `attempt ${item.epoch}`, stage: entry.reworkDecision.stage, resolvedAt: null, resolvedBy: null, resolution: null, trigger: 'decision', sources: [{ seq: entry.reworkDecision.seq, kind: 'decision.requested' }] });
     if (entry.bypass) open('bypass', { requestedAt: entry.bypass.at, blocked: entry.bypass.blocked, stage: entry.bypass.stage, resolvedAt: null, resolvedBy: null, resolution: null, trigger: 'refused-reconciliation', sources: [{ seq: entry.bypass.seq, kind: 'merge.reconciliation.refused' }] });
     if (entry.quarantine?.concernAt && item.containmentQuarantine) open('containment-settlement', { requestedAt: entry.quarantine.concernAt, blocked: `containment fence of epoch ${entry.quarantine.epoch}`, stage: entry.quarantine.stage, resolvedAt: null, resolvedBy: null, resolution: null, trigger: 'unsettled', sources: [{ seq: entry.quarantine.seq, kind: 'quarantine' }] });
     for (const escalation of standingEscalations(item)) {
       const known = entry.escalations.get(`${escalation.trigger}@${escalation.at}`);
-      open('escalation', { id: `escalation:${id}:${escalation.trigger}@${escalation.at}`, requestedAt: escalation.at, blocked: escalation.reason, stage: known?.stage ?? entry.stage, resolvedAt: null, resolvedBy: null, resolution: null, trigger: escalation.trigger, sources: known ? [{ seq: known.seq, kind: 'raised' }] : [] });
+      open('escalation', { id: `escalation:${item.id}:${escalation.trigger}@${escalation.at}`, requestedAt: escalation.at, blocked: escalation.reason, stage: known?.stage ?? entry.stage, resolvedAt: null, resolvedBy: null, resolution: null, trigger: escalation.trigger, sources: known ? [{ seq: known.seq, kind: 'raised' }] : [] });
     }
-    if (entry.human && item.humanRequest?.id === entry.human.id) open('human-only-decision', { id: `human-only-decision:${id}:${entry.human.id}`, requestedAt: entry.human.at, blocked: entry.human.needed, stage: entry.human.stage, resolvedAt: null, resolvedBy: null, resolution: null, trigger: entry.human.kind, sources: [{ seq: entry.human.seq, kind: 'human.requested' }] });
+    if (entry.human && item.humanRequest?.id === entry.human.id) open('human-only-decision', { id: `human-only-decision:${item.id}:${entry.human.id}`, requestedAt: entry.human.at, blocked: entry.human.needed, stage: entry.human.stage, resolvedAt: null, resolvedBy: null, resolution: null, trigger: entry.human.kind, sources: [{ seq: entry.human.seq, kind: 'human.requested' }] });
   }
   interventions.sort((a, b) => b.requestedAt.localeCompare(a.requestedAt) || (b.sources[0]?.seq ?? 0) - (a.sources[0]?.seq ?? 0));
   return { interventions, judgements };
@@ -425,7 +514,7 @@ export async function openPatternItems(engine: Engine, policy: InterventionPolic
   const now = options.now ?? snapshot.now;
   // Detection reads the policy window of the ledger and nothing older (GY-422).
   const { rows, truncated } = await readInterventionLedger(engine.store.reportPool, { limit: options.limit, since: windowStart(now, policy.windowDays) });
-  const folded = foldInterventions(rows, snapshot.work, now);
+  const folded = foldInterventions(rows, snapshot.work, now, { since: windowStart(now, policy.windowDays) });
   const opened: Work[] = [];
   for (const pattern of detectPatterns(folded.interventions, snapshot.work, policy, now)) {
     if (pattern.item || pattern.unlinked.length < policy.threshold) continue;
@@ -525,15 +614,24 @@ const windowStart = (now: string, days: number) => new Date(Date.parse(now) - da
  * reported over the window. It is bounded by its window in SQL (GY-422): the ledger rows are those
  * written inside the report window or the recurrence policy's, whichever reaches further back, and
  * the snapshot is the bounded one — open items whole, settled deliveries as the summaries the
- * report reads (key, title, stage, origin, delivery). A signal whose need was recorded before the
- * window opened is outside its reach; `ledger.since` says where the reach begins.
+ * report reads (key, title, stage, origin, delivery).
+ *
+ * What the window alone would lose, the read keeps two ways (GY-432). The straddle — a bounded
+ * read of the newest rows written before the window — folds silently ahead of the window's rows,
+ * so a need recorded before the window and resolved inside it still pairs, its wait measured from
+ * the moment the product needed someone; and a need still open that even the straddle cannot see
+ * is seeded from the snapshot, aging in the report from the instant the document carries, or from
+ * the window's edge where it carries none. `ledger.since` says where the reach begins.
  */
 export async function readInterventionReport(store: Store, policy: InterventionPolicy, options: { days?: InterventionWindow; kind?: InterventionKind | null; stage?: Stage | null; work?: string | null; limit?: number } = {}) {
   const days = options.days ?? 30;
   const snapshot = await boundedSnapshot(store.reportPool);
   const since = windowStart(snapshot.now, Math.max(days, policy.windowDays));
-  const { rows, truncated } = await readInterventionLedger(store.reportPool, { limit: options.limit, since });
-  const folded = foldInterventions(rows, snapshot.work, snapshot.now);
+  const [window, seed] = await Promise.all([
+    readInterventionLedger(store.reportPool, { limit: options.limit, since }),
+    readInterventionSeed(store.reportPool, { limit: interventionLedgerSeedLimit, until: since }),
+  ]);
+  const folded = foldInterventions([...seed.rows, ...window.rows].sort((a, b) => a.seq - b.seq), snapshot.work, snapshot.now, { since: windowStart(snapshot.now, days) });
   const report = computeInterventionReport(folded, snapshot.work, policy, { days, now: snapshot.now, kind: options.kind, stage: options.stage, work: options.work });
-  return { ...report, ledger: { rows: rows.length, truncated, oldest: rows[0]?.at ?? null, since }, kinds: interventionKinds, windows: interventionWindows };
+  return { ...report, ledger: { rows: window.rows.length, truncated: window.truncated, oldest: window.rows[0]?.at ?? null, since, seed: { rows: seed.rows.length, truncated: seed.truncated, until: since } }, kinds: interventionKinds, windows: interventionWindows };
 }
