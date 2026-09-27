@@ -103,3 +103,19 @@ test('unit:one-followup-per-parent — a parent whose follow-up item was closed 
   assert.equal(retried.item, undefined);
   assert.equal(control.created.length, 2);
 });
+
+test('unit:one-followup-per-parent — the same finding cited under another spelling of its path is one finding: a leading ./, doubled or back slashes, and another casing (GY-431)', () => {
+  const finding = { path: 'src/model/cycle-triage.ts', text: 'src/model/cycle-triage.ts:12 — the retry is unbounded' };
+  const spellings: FollowUpEntry[] = [
+    { path: './src/model/cycle-triage.ts', text: './src/model/cycle-triage.ts:40 — The retry is unbounded.' },
+    { path: 'src/model/cycle-triage.ts', text: '`./src/model/cycle-triage.ts` - the retry is unbounded' },
+    { path: 'SRC/Model/Cycle-Triage.ts', text: 'SRC/Model/Cycle-Triage.ts:7 — the retry is unbounded' },
+    { path: 'src\\model//cycle-triage.ts', text: 'src\\model//cycle-triage.ts: the retry is unbounded' },
+  ];
+  for (const spelling of spellings) assert.equal(followUpEntryKey(spelling), followUpEntryKey(finding), `${spelling.path} names the same finding`);
+  const merged = mergeFollowUpEntries([finding], spellings);
+  assert.deepEqual({ held: merged.findings.length, added: merged.added.length }, { held: 1, added: 0 }, 'no respelling is kept twice');
+  // Another path, or a leading token that is not the finding's path, still reads as its own finding.
+  assert.notEqual(followUpEntryKey({ path: 'src/model/cycle-triage.tsx', text: 'the retry is unbounded' }), followUpEntryKey(finding));
+  assert.notEqual(followUpEntryKey({ path: 'src/model/cycle-triage.ts', text: 'src/other.ts:12 — the retry is unbounded' }), followUpEntryKey(finding));
+});
