@@ -19,7 +19,7 @@ Keep cycling: status, dispatch, review, merge, deployment verification — stop 
 
 Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions. `controlPlane.production` flags main ahead of production.
 
-`master run` runs this loop under the `graphyard-master.service` unit; restart it when `daemon.liveness` is `stalled` or `absent`, never from a dirty checkout.
+`master run` runs this loop under the `graphyard-master.service` unit; restart it (`systemctl --user restart graphyard-master`) when `daemon.liveness` is `stalled` or `absent`, never from a dirty checkout.
 
 ### System-driven items
 
@@ -60,9 +60,7 @@ A build-gate pass gets, in `autoDispatch`, one producer request per proof group 
 
 **Concurrency is per role.** A profile's `concurrency` (1–20, default 1) caps its simultaneous sessions, each with a name unique to its request above one; it applies without a restart, lowering it drains sessions first (`longestWaitMs`), and a role starved ten minutes counts in `counts.concurrencyStarved`.
 
-**Requests always settle.** A gone pane (`pane_not_found`) closes. No request outlives its own token: expired, unreported by Herdr, it settles `expired`; a pending one counts in `dispatch.sessionReconcile.stuck`. Unanswered sessions relaunch elsewhere (12 per request, then `dispatch.abandoned`); an unposted reviewer is reminded first.
-
-**Every role fails over on spent quota** or waits as one `capacity` line.
+**Requests always settle.** A gone pane (`pane_not_found`) closes. No request outlives its own token: expired, unreported by Herdr, it settles `expired`; a pending one counts in `dispatch.sessionReconcile.stuck`. Unanswered sessions relaunch elsewhere (12 per request, then `dispatch.abandoned`).
 
 The master never launches reviews or producers by hand, except `master review GY-N [PROFILE]` once the loop stops relaunching.
 

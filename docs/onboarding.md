@@ -21,9 +21,9 @@ Commit `AGENTS.md`, `.gitignore`, `graphyard.json`; never `.graphyard/`.
 
 ### What the generated instructions authorize
 
-The managed `AGENTS.md` section states that **every session Graphyard launches receives its instruction as the session's own first request, on the runtime's command line, never as pasted text**; only the same launcher pastes later (the loop's re-prompt, the reviewer's reminder), acted on without confirmation.
+The managed `AGENTS.md` section states that **every session Graphyard launches receives its instruction as the session's own first request, on the runtime's command line, never as pasted text**; the only later paste (the loop's single re-prompt, or the reviewer's reminder) comes from the same launcher and is acted on without confirmation.
 
-Agents treat bracketed paste as untrusted data (prompt injection); Claude Code also gets `--append-system-prompt-file`. The role files under `.graphyard/harness/` hold permissions, not instructions.
+Agents treat bracketed paste as untrusted data (prompt injection), so sessions start without anybody sending `go`; Claude Code also gets `--append-system-prompt-file`. The role files under `.graphyard/harness/` hold permissions, not instructions.
 
 ### Connect an account
 
