@@ -165,7 +165,13 @@ export const exhaustionReportSchema = z.object({
   reason: z.string().trim().min(1).max(500),
   resetsAt: instant.nullable(),
   partialWork: partialWorkSchema,
-}).strict().refine(report => report.role !== 'worker' || report.epoch !== undefined, 'A worker exhaustion names the attempt epoch it ends');
+  /**
+   * GY-867: the loop ended this worker attempt because it blocked again after its blocker was
+   * cleared. The blocker that attempt recorded ends with it, so the item is dispatched again.
+   */
+  endsBlocker: z.literal(true).optional(),
+}).strict().refine(report => report.role !== 'worker' || report.epoch !== undefined, 'A worker exhaustion names the attempt epoch it ends')
+  .refine(report => !report.endsBlocker || (report.role === 'worker' && report.cause === 'interrupted'), 'Only an interrupted worker attempt ends the blocker it recorded');
 export type ExhaustionReport = z.infer<typeof exhaustionReportSchema>;
 
 export const capacityAccountSchema = z.object({
