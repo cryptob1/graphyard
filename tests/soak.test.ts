@@ -18,6 +18,11 @@ import { Launcher } from '../src/daemon/cycle.js';
 import { successorWidening } from '../src/model/successors.js';
 import { systemInvariants, type InvariantCheck } from '../src/model/invariants.js';
 import { performSelfUpgrade, type SelfUpgradeOutcome } from '../src/daemon/upgrade.js';
+import { resetFollowUpMigration } from '../src/daemon/cycle-triage.js';
+import { followUpItem, followUpTriageProof, type FollowUpFinding } from '../src/review-threads.js';
+import { followUpParent } from '../src/model/machine-backlog.js';
+import { clearTriageRuns, triageTool } from '../src/triage.js';
+import type { Run, RunOptions, RunResult, Runner } from '../src/runner/types.js';
 import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } from './helpers/soak-world.js';
 
 /**
@@ -30,7 +35,12 @@ import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } f
  * production deploys, a file split on main that re-plans an item, one pull request GitHub reports
  * CLEAN at once and one UNSTABLE, a reviewer bot out of quota that fails over, and the loop's
  * between-cycles self-upgrade (GY-437) against a simulated coordinator checkout that stands dirty
- * across the second deploy for a while. Every one of the fifteen must be delivered. The loop
+ * across the second deploy for a while. The day is also research-configured (`run.research`) and
+ * carries the machine-filed backlog (GY-402): it starts from one follow-up item an earlier approval
+ * of one item filed, the loop's first cycle asks for the one-time migration on the research account,
+ * an approval mid-day files one more finding as the parent's fresh follow-up, and the triage step
+ * judges each follow-up through its typed tool, every closure applied once the approver agrees.
+ * Every one of the fifteen must be delivered. The loop
  * carries one `Launcher` across its cycles (GY-616), as `runDaemon` does, so session launches run
  * beside the cycle — outliving it, holding their profile from hand-off, and reported by the next
  * cycle — and the invariants hold on that detached path. A change to the loop that breaks an
@@ -55,7 +65,7 @@ const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url))
 const config: MasterConfig = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: launcher, repository, baseBranch: 'main', githubAppId: 1234,
   hostId: 'soak-host', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers,
   operatorAgent: { id: principals.operatorAgent.id, credentialFile: '/outside/operator.token' }, approver: { id: principals.approver.id, credentialFile: '/outside/approver.token' },
-  run: { proofWorkflow: 'acceptance.yml', intervalSeconds: 60 } });
+  run: { proofWorkflow: 'acceptance.yml', intervalSeconds: 60, research: {} } });
 
 /** The day, in simulated time from the start. */
 const start = Date.parse('2031-06-02T08:00:00Z');
@@ -63,6 +73,8 @@ const plan = {
   items: 15, releaseEveryMs: 15 * minute, workMs: 20 * minute,
   rework: new Set([3, 7, 11]), deaths: new Set([5, 9]), deathAfterMs: 8 * minute,
   deploys: [2 * hour + 30 * minute, 5 * hour], dirtyCheckout: { from: 4 * hour + 50 * minute, to: 6 * hour }, split: { at: 45 * minute, item: 12 }, clean: 2, unstable: 4, slowRecompute: 8, exhaustedReviewer: 6,
+  // The item whose review carries a finding beyond its criteria (GY-402): its follow-ups are triaged.
+  followUp: 13,
 };
 const file = (n: number) => `src/soak/item-${n}.ts`;
 
@@ -103,6 +115,9 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
  */
 let days = 0;
 async function simulateDay(options: { hours: number; regression?: 'approvers-left-open'; handApprovers?: boolean }) {
+  // Each day is a fresh loop process: the one-time follow-up migration is asked once per process,
+  // and no triage run of a previous day is still counted in flight.
+  resetFollowUpMigration(); clearTriageRuns();
   const dayStart = clock.now();
   const github = new SimulatedGitHub({ repository, baseBranch: 'main', appId: 1234, ciAppId: 15368, reviewerApps, ciMs: 5 * minute, reviewMs: 3 * minute, firstPullRequest: 100 * ++days },
     [...Array.from({ length: plan.items }, (_, index) => file(index + 1)), 'README.md']);
@@ -123,6 +138,19 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   for (const n of plan.rework) github.verdicts.set(items[n - 1].key, ['CHANGES_REQUESTED']);
   github.unstable.add(items[plan.unstable - 1].key); github.slowRecompute.add(items[plan.slowRecompute - 1].key);
   github.exhaustedProfiles.add('claude-reviewer');
+
+  // ---- The machine-filed backlog (GY-402): the parent whose review carries a follow-up finding. ----
+  const parent = items[plan.followUp - 1];
+  // Each day starts with the follow-up an approval of this parent filed before the day began, in
+  // the shape items carried before the origin did: its findings live in the numbered description.
+  await engine.execute(principals.operator, 'create', null, {
+    title: `Follow-ups from the approved review of ${parent.key} (PR #900)`,
+    description: `The independent reviewer approved ${parent.key} at a head before this day (review 9000) and judged this finding FOLLOW-UP: beyond the item's criteria. Graphyard filed it here.\n\n1. Finding with no thread: ${file(plan.followUp)}:55 — the item's worker submits a head that already contains the base tip, so the merge lands the whole tree`,
+    type: 'chore', priority: 2, dependencies: [parent.id],
+    criteria: [{ id: 'AC-1', text: 'Each follow-up listed in the description is addressed in code, or declined with a recorded reason.', proofs: [followUpTriageProof] }],
+    producerProofs: [followUpTriageProof], plannedFiles: [file(plan.followUp)],
+    reason: `Follow-ups named by an earlier approval of ${parent.key}`,
+  }, id());
 
   // ---- Workers: the loop dispatches, the simulated session claims, works, pushes and submits (or dies). ----
   interface Session { work: string; key: string; branch: string; profile: WorkerProfile; epoch: number; pane: string; pushAt: number; diesAt: number | null; state: 'working' | 'submitted' | 'dead' }
@@ -186,6 +214,19 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     });
   };
 
+  // ---- Triage sessions (GY-402): the loop starts them for the machine-filed backlog on the research account. ----
+  const triageStarts: { prompt: string; options: RunOptions<unknown> }[] = [];
+  const research: Runner = {
+    name: 'pi',
+    start<T>(prompt: string, options: RunOptions<T>): Run<T> {
+      triageStarts.push({ prompt, options: options as RunOptions<unknown> });
+      const result: RunResult<T> = options.tool === triageTool
+        ? { ok: true, tool: options.tool, payload: options.validate({ outcome: 'close', reason: 'Not worth doing: the finding names the soak\'s simulated world, not the change under coordination' }), payloads: [] }
+        : { ok: false, failure: { reason: 'no-payload', detail: 'the soak research account answers only the triage tool' }, payloads: [] };
+      return { id: `triage-${triageStarts.length}`, events: [], onEvent: () => () => {}, cancel: () => {}, result: () => Promise.resolve(result) };
+    },
+  };
+
   // ---- Production: two deploys, each a new control-plane build serving the base tip it was cut from. ----
   const production = { build: sha('build', 0), sha: github.tip, deploys: [] as { at: number; build: string; sha: string }[] };
   const snapshot = async () => { const read = await store.coordinationSnapshot(); return { work: read.work, now: read.now, jobs: read.jobs }; };
@@ -203,6 +244,9 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     herdr: () => ({ agents: herdr.list(), available: true }),
     credentials: async profiles => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])),
     snapshot, dispatch, requestProof, approver, merge,
+    research: { cwd: '/soak/coordinator', runner: research },
+    recordTriage: (work, body) => api(principals.coordinator, 'POST', `work/${work.id}/triage`, body),
+    migrateFollowUps: () => api(principals.operatorAgent, 'POST', 'followups/migrate', {}),
     closeSession: pane => { if (options.regression === 'approvers-left-open' && /approver/.test(herdr.agents.get(pane)?.name ?? '')) return; herdr.close(pane); },
     decide: (work, action, reason, input = {}) => api(principals.operatorAgent, 'POST', `work/${work.id}/decide`, { action, input: decisionInput(action, work, input), reason }),
     decisions: work => api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(work.id)}/decisions`),
@@ -267,7 +311,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   // handed it over — here, before the simulated clock moves on.
   const launcher = new Launcher();
   const violations: string[] = [], observed = new Set<string>(), failures: string[] = [], escalations: string[] = [], spent = new Set<string>();
-  let released = 0, split = false, deploys = 0, cycles = 0, reportedDispatches = 0;
+  let released = 0, split = false, deploys = 0, cycles = 0, reportedDispatches = 0, approvalFiled = false;
   const jobsDue = async () => Number((await store.pool.query('SELECT count(*) AS due FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now())')).rows[0].due);
   for (let elapsed = 0; elapsed <= options.hours * hour;) {
     const now = clock.now();
@@ -297,6 +341,19 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     await workersTick(now);
     if (!deploying) {
       for (const act of pending.splice(0)) await act();
+      // The parent's approval carries one finding beyond its criteria (the soak's reviewer answers
+      // with one): the dispatcher files it as the parent's follow-up — a fresh item here, since the
+      // day's triage judged and closed the parent's migrated one within its first minutes.
+      if (!approvalFiled) {
+        const candidate = (await store.list()).find(item => item.id === parent.id)!.candidate;
+        const pr = candidate ? github.prs.get(candidate.pr) : undefined;
+        const verdict = pr?.reviews.find(review => review.state === 'APPROVED' && review.sha === candidate!.sha);
+        if (candidate && pr && verdict) {
+          approvalFiled = true;
+          const finding: FollowUpFinding = { path: file(plan.followUp), line: 55, text: `${file(plan.followUp)}:55 — the simulated reviewer answers one verdict per head, so a second verdict inside the CI window is never judged` };
+          await engine.execute(principals.operatorAgent, 'create', null, followUpItem({ key: parent.key, workId: parent.id, pr: pr.number, sha: candidate.sha, reviewId: verdict.id }, [], [finding]), id());
+        }
+      }
       await engine.reconcile();
       for (let guard = 0; guard < 200 && await jobsDue(); guard++) await processJob(engine, adapter);
       try {
@@ -327,12 +384,13 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   }
 
   const final = (await store.list()).filter(item => items.some(entry => entry.id === item.id));
-  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, herdr, hand, escalations, spent, upgrades, refusalSamples, checkout };
+  const followUps = (await store.list()).filter(item => followUpParent(item) !== null);
+  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, herdr, hand, escalations, spent, upgrades, refusalSamples, checkout, followUps, triageStarts };
 }
 
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 180_000 }, async () => {
   const began = performance.now();
-  const { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, state, upgrades, refusalSamples, checkout } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
+  const { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, state, upgrades, refusalSamples, checkout, followUps, triageStarts } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
   const undelivered = final.filter(item => item.stage !== 'done' || !item.delivery);
   assert.deepEqual(undelivered.map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
@@ -374,6 +432,24 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.equal(state.upgrade.alignedRelease, production.deploys[1].sha, 'the loop stands aligned with the last deployed release');
   assert.equal(state.release?.commit, checkout.head, 'the re-executed loop reports the release the checkout holds');
   assert.ok(Object.keys(state.actions).filter(key => key.startsWith('upgrade:')).length <= production.deploys.length + 1, `the cursor holds one upgrade action per deploy and one refusal: ${Object.keys(state.actions).filter(key => key.startsWith('upgrade:')).join(', ')}`);
+  // The machine-filed backlog (GY-402) against the live loop: the loop asked for the one-time
+  // follow-up migration on its first cycle and the control plane answered through the route, the
+  // pre-day follow-up and the approval's fresh one were each judged in a triage session through the
+  // typed tool, and every proposed closure was applied once the approver agreed.
+  assert.equal(state.actions['followups:migration']?.state, 'done', 'the loop asked for the one-time follow-up migration on its first cycle');
+  assert.match(state.actions['followups:migration']?.detail ?? '', /^Merged 0 duplicate follow-up items/, `the control plane answered through the migration route: ${state.actions['followups:migration']?.detail}`);
+  assert.deepEqual(triageStarts.map(start => start.options.tool), [triageTool, triageTool], 'a triage session for each machine-filed item: the pre-day follow-up and the approval\'s fresh one');
+  assert.ok(triageStarts.every(start => start.options.env?.GRAPHYARD_PI_ROLE === 'triage' && /You are the Graphyard triage agent for owner\/project/.test(start.prompt)), 'each triage session runs in the triage role and is asked to judge its item');
+  const [legacy, filed] = followUps.sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.key.localeCompare(b.key));
+  assert.equal(followUps.length, 2, `the day holds the pre-day follow-up and the approval's fresh one: ${followUps.map(item => item.key).join(', ')}`);
+  assert.deepEqual(followUps.map(item => [item.stage, item.candidate === null]), [['done', true], ['done', true]], 'each follow-up is judged and closed without ever being built');
+  assert.equal(legacy.origin?.reviewFollowUps, undefined, 'the pre-day follow-up predates the origin: its findings live in the description');
+  assert.ok(triageStarts[0]!.prompt.includes(`1. src/soak/item-${plan.followUp}.ts:`), 'its triage session was shown the findings, read from the numbered description');
+  assert.equal(legacy.triage?.state, 'applied', 'the pre-day follow-up was triaged');
+  assert.equal(legacy.closure?.kind, 'obsolete', 'and closed once the approver agreed');
+  assert.equal(filed.origin?.reviewFollowUps?.parent, items[plan.followUp - 1].key, 'the approval\'s finding was filed as the parent\'s follow-up');
+  assert.ok(filed.origin?.reviewFollowUps?.findings[0]?.text.includes('a second verdict inside the CI window'), 'the item holds the finding the approval carried');
+  assert.equal(filed.triage?.state, 'applied', 'the approval\'s follow-up was triaged too');
   const seconds = (performance.now() - began) / 1000;
   assert.ok(seconds < 120, `the day runs well inside the three minutes the CI test job allows it (${seconds.toFixed(1)} s)`);
 });

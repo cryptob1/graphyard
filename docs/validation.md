@@ -27,4 +27,4 @@ Only a measured, whole-run `matched` target with verified artifacts and settled 
 
 ## Report formats
 
-The bundle pins `reportFormat`: `graphyard-playwright-v1` (default; every offline-enumerated test ran exactly once and passed) or `junit-xml-v1` (every inventory identity, `sha256(suitePath ␟ classname ␟ name)`, appears once as passed and the counts agree). Skips, retries, timeouts and miscounts fail. `graphyard runner verify-report junit-xml-v1 inventory.json report.xml` previews a verdict.
+The bundle pins `reportFormat`: `graphyard-playwright-v1` (default; every offline-enumerated test ran exactly once and passed) or `junit-xml-v1` (every inventory identity, `sha256(suitePath ␟ classname ␟ name)`, appears once as passed and the counts agree). Skips, retries, timeouts and miscounts fail. `graphyard runner verify-report junit-xml-v1 inventory.json report.xml` previews a verdict without recording evidence.
