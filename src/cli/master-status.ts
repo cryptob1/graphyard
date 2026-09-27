@@ -1,5 +1,6 @@
 import { leaseHealthStatus } from './lease-health-attention.js';
-import { probeCandidateConflicts } from '../conflicts.js';
+import { probeCandidateConflictsWithBudget } from '../conflicts.js';
+import { dataDirectory } from '../install/worktree-root.js';
 import { mergeQueueStatus } from '../master/profiles.js';
 import { landingAttention, optimisticStatus } from '../master/optimistic-attention.js';
 import { humanOnlyStatusRow, type HumanRequestRow } from '../model/human-request.js';
@@ -120,7 +121,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   // Reviewer and producer profiles go in with their concurrency (GY-107): status reports, per
   // role, sessions running against the limit and the longest wait for a slot.
   const mergeQueue = mergeQueueStatus(master, snapshot, coordinator);
-  const sessions = await timedStep('build status', () => nameOrphanSupervisors(nameUnresolvedThreads(buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews, master.baseBranch, coordinator, { producers, failures: dispatch.failures, retries }, probeCandidateConflicts(root, snapshot.work), { reviewers: master.reviewers, producers: master.producers }, master.cliPath, mergeQueue), snapshot.work, agentOwner),
+  const sessions = await timedStep('build status', async () => nameOrphanSupervisors(nameUnresolvedThreads(buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews, master.baseBranch, coordinator, { producers, failures: dispatch.failures, retries }, await probeCandidateConflictsWithBudget(root, snapshot.work, dataDirectory()), { reviewers: master.reviewers, producers: master.producers }, master.cliPath, mergeQueue), snapshot.work, agentOwner),
     snapshot.work, master.workers, runtime, Date.parse(snapshot.now)));
   // A check failed on the clock says so, against its budget; a routed scope request, its approver.
   const status = routedScopeStatus(await timedStep('timing failures', () => qualifyTimingFailures(sessions, snapshot.work, master.repository, ghCheckAnnotations(master.repository))), snapshot.work, cycling?.approvals);

@@ -144,13 +144,25 @@ export async function probeCandidateConflictsWithBudget(root: string, work: Work
     return result;
   };
 
+  // Pre-populate cache from disk
+  const candidates = openCandidates(work);
+  for (let i = 0; i < candidates.length; i++) {
+    for (let j = i + 1; j < candidates.length; j++) {
+      const left = candidates[i], right = candidates[j];
+      const key = getCacheKey(left.candidate!.sha, right.candidate!.sha);
+      const cached = await readCache(cacheDir, left.candidate!.sha, right.candidate!.sha);
+      if (cached !== undefined) {
+        cache.set(key, cached);
+      }
+    }
+  }
+
   const startTime = Date.now();
   const elapsedMs = () => Date.now() - startTime;
 
   const report = candidateConflicts(work, probeWithCache, { timeoutMs, elapsedMs });
 
   // Write cache to disk
-  const candidates = openCandidates(work);
   for (let i = 0; i < candidates.length; i++) {
     for (let j = i + 1; j < candidates.length; j++) {
       const left = candidates[i], right = candidates[j];
