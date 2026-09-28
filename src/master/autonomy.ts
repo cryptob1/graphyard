@@ -131,9 +131,26 @@ export function attestationExercise(work: Pick<Work, 'criteria' | 'candidate'>, 
  */
 export const attestConfirmation = (baseSha?: string) =>
   `An attest decision carries an exercise record (criterion, behaviour removed, executed, result fail) that is yours to confirm: before approving it, run its proof against the candidate base${baseSha ? ` ${baseSha}` : ''} — the tree without the change — and see it fail, and against the candidate and see it pass; refuse it otherwise. The record states only that the proof fails there with at least one case executed, so say in your approval reason what you ran on each tree, how many cases executed, and the failure you saw. `;
-/** The Pi approver's prompt, with the attestation confirmation before its call to decide. */
+/** The Pi approver's prompt, with the attestation confirmation before its call to decide; the caller guards it on the decision being an attest (carriesAttestation, GY-535). */
 export const piApproverWithAttestation = (config: MasterConfig, work: Work, decision: string, repository?: string) =>
   piApproverPrompt(config, work.key, decision, config.approver!.id, repository).replace('Then call the graphyard_decide tool', `${attestConfirmation(work.candidate?.baseSha)}Then call the graphyard_decide tool`);
+/**
+ * GY-535. Whether an approver's prompt carries the attestation confirmation: only an attest
+ * decision's, the only one whose record names a proof its approver must run, so any other approver
+ * told to confirm an exercise record would assert an audit nobody measured. The action is read from
+ * the decision ledger with the master's credential; an item without a candidate carries no attest
+ * (decisionInput builds attest only for one) and answers without the read. A ledger that cannot be
+ * read keeps the confirmation in place — an attest that lost its instruction is a gate quietly
+ * dropped, which an unreadable lookup must not cause — and the launch is never failed for it.
+ */
+async function carriesAttestation(config: MasterConfig, work: Work, decision: string, fetcher: AutonomyFetch): Promise<boolean> {
+  if (!work.candidate) return false;
+  try {
+    const response = await fetcher(`${config.url}/api/work/${encodeURIComponent(work.id)}/decisions`, { headers: { Authorization: `Bearer ${await readCredentialFile(config.credentialFile)}` }, signal: AbortSignal.timeout(2_000) });
+    if (!response.ok) throw new Error(`the decision ledger answered ${response.status}`);
+    return ((await response.json()) as { decisions?: { id: string; action: string }[] }).decisions?.some(entry => entry.id === decision && entry.action === 'attest') ?? false;
+  } catch { return true; }
+}
 /** With automatic merging off, the guarded merge runs only for a candidate an approver agent approved. */
 export function approvedMerge<T extends { action: string; state: string; input: any; approvedBy: string | null }>(work: Work, decisions: T[]): T | null {
   return decisions.find(decision => decision.action === 'merge' && decision.state === 'applied' && !!work.candidate
@@ -302,12 +319,12 @@ export const approverSessionId = (decision: string) => `approver:${decision}`;
  * treat as the run's worktree and let it remove files in. The directory goes when the run ends,
  * and a reclaim pass takes back one a dead master left behind.
  */
-async function startHeadlessApprover(root: string, config: MasterConfig, work: Work, decision: string, name: string, token: string, runner: Runner, headless: { fetcher?: typeof fetch; filesystem?: FilesystemProbe }) {
+async function startHeadlessApprover(root: string, config: MasterConfig, work: Work, decision: string, attest: boolean, name: string, token: string, runner: Runner, headless: { fetcher?: typeof fetch; filesystem?: FilesystemProbe }) {
   const checkout = await allocateManagedCheckout(root, config, 'approval', work.key, work.candidate?.sha ?? '0'.repeat(40), randomUUID(), headless.filesystem);
   let started: ReturnType<typeof startNarrowRun>;
   try {
     started = startNarrowRun({ runner, name, role: 'approver', work: work.key, subject: decision, checkout: checkout.directory,
-      prompt: piApproverWithAttestation(config, work, decision, root),
+      prompt: attest ? piApproverWithAttestation(config, work, decision, root) : piApproverPrompt(config, work.key, decision, config.approver!.id, root),
       options: approverRunOptions(checkout.directory, decision, { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: config.approver!.credentialFile, GRAPHYARD_HOST_ID: config.hostId }, piRuntimeSchema.parse(config.run.pi ?? {}).approverTimeoutMinutes * 60_000),
       apply: async result => result.ok ? [await applyDecision(config.url, token, work, result.payload, headless.fetcher)] : [] });
   } catch (error) { await settleCheckout(root, checkout.directory); throw error; }
@@ -325,6 +342,8 @@ export async function launchApprover(root: string, work: Work, decision: string,
   const config = await loadMasterConfig(root);
   const { agents } = herdr;
   const token = await agentToken(root, config, 'approver');
+  // GY-535: the attestation confirmation is an attest decision's instruction alone.
+  const attest = await carriesAttestation(config, work, decision, headless.fetcher ?? fetch);
   const retry = `graphyard master approver ${work.key} ${decision} [AGENT_KIND]`;
   const name = nameForLaunch(retry, () => approverSessionName(work, decision));
   if (agents.some(agent => agent.name === name)) throw new Error(`Approver session ${name} is already visible in Herdr; let it finish or close it first`);
@@ -338,7 +357,7 @@ export async function launchApprover(root: string, work: Work, decision: string,
   const registry = explicitKind ? null : await selectFleetSession(config, 'approver', { name: approverProfile, principal: config.approver!.id }, await heldAwareProbe(config, { runtime: herdr, ...probe, work: work.key }));
   if (registry && registry.account.kind === 'pi') {
     let started: Awaited<ReturnType<typeof startHeadlessApprover>>;
-    try { started = await startHeadlessApprover(root, config, work, decision, name, token, headless.runner ?? registryRunner(registry.account), headless); }
+    try { started = await startHeadlessApprover(root, config, work, decision, attest, name, token, headless.runner ?? registryRunner(registry.account), headless); }
     catch (error) { await registry.release(`approver run for ${work.key} failed to start: ${failureText(error).slice(0, 300)}`); throw error; }
     // The run is the session: the registry's slot is given back the moment it ends.
     // Its outcome counts toward the account's runs without a result (GY-446).
@@ -350,7 +369,7 @@ export async function launchApprover(root: string, work: Work, decision: string,
       run: started.record, settled: settled as Promise<RunRecord> | undefined };
   }
   if (!registry && !explicitKind && narrowRoleRuntime(config.run, 'approver') === 'pi') {
-    const started = await startHeadlessApprover(root, config, work, decision, name, token, headless.runner ?? narrowRunner(config.run.pi), headless);
+    const started = await startHeadlessApprover(root, config, work, decision, attest, name, token, headless.runner ?? narrowRunner(config.run.pi), headless);
     return { agentName: name, work: work.key, decision, identity: config.approver!.id, pane: null as string | null, runtime: 'pi' as const, delivery: 'request' as RequestDelivery, focusChanged: false, session: null, account: null,
       run: started.record, settled: started.settled as Promise<RunRecord> | undefined };
   }
@@ -380,7 +399,7 @@ export async function launchApprover(root: string, work: Work, decision: string,
   catch (error) { await selected?.release(`approver launch for ${work.key} failed: ${failureText(error).slice(0, 300)}`); throw error; }
   const cli = `node ${config.cliPath}`;
   let delivery: RequestDelivery | undefined;
-  const prompt = `You are the independent Graphyard approver for ${config.repository}, acting as ${config.approver!.id}. Judge decision ${decision} on ${work.key}: run ${cli} master decisions ${work.key}, read the item with ${cli} status ${work.key}, its pull request and history, and weigh the requester's reason against the item's criteria and the operator's goals. ${attestConfirmation(work.candidate?.baseSha)}If it is justified, run ${cli} master approve ${work.key} ${decision} "YOUR REASON". If not, record the refusal: run ${cli} master refuse ${work.key} ${decision} "YOUR REASON" — a decline is recorded, never expressed by exiting. Never approve a decision you requested, implemented, or produced evidence for; never edit, push, merge, review, or submit evidence. Stop when the decision is judged.`;
+  const prompt = `You are the independent Graphyard approver for ${config.repository}, acting as ${config.approver!.id}. Judge decision ${decision} on ${work.key}: run ${cli} master decisions ${work.key}, read the item with ${cli} status ${work.key}, its pull request and history, and weigh the requester's reason against the item's criteria and the operator's goals. ${attest ? attestConfirmation(work.candidate?.baseSha) : ''}If it is justified, run ${cli} master approve ${work.key} ${decision} "YOUR REASON". If not, record the refusal: run ${cli} master refuse ${work.key} ${decision} "YOUR REASON" — a decline is recorded, never expressed by exiting. Never approve a decision you requested, implemented, or produced evidence for; never edit, push, merge, review, or submit evidence. Stop when the decision is judged.`;
   let pane: string | undefined, tabId: string | undefined;
   try {
     const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root, '--label', `Approver · ${work.key}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', `GRAPHYARD_TOKEN_FILE=${config.approver!.credentialFile}`, '--env', 'GRAPHYARD_APPROVER=1', '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, ...Object.entries(launch.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'], run));
