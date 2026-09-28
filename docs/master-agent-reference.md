@@ -41,7 +41,7 @@ Protection reconciles via `master protection --apply`; where only a page exists,
 | `installation-accept` | Accepts pending permission requests |
 | `protection` | Reconciles branch protection |
 
-Each flow records `record.json` under `.graphyard/master-actions/`, appending to `ledger.json`. Approving its *Confirm access* GitHub Mobile code on the device is human-only. The master never stores the profile's cookies, and must never use a merge bypass, push code or read a worker credential.
+Each flow records `record.json` under `.graphyard/master-actions/`, appending `ledger.json`. Approving its *Confirm access* GitHub Mobile code on the device is human-only. The master never stores the profile's cookies, and must never use a merge bypass, push code or read a worker credential.
 
 ## Harness permissions
 
@@ -51,9 +51,9 @@ A harness classifier refuses routine administration; `master harness claude --ap
 
 Each item has one typed action (`nextAction`): `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment` or `escalate`. Executors claim rows under their own credential; `escalate` and `request-rework` are judgements (`actions.needsHuman`). `graphyard init` starts `graphyard-executor@N` user units; `master executors restart` moves them to the current release. After a verified deployment the loop moves a clean detached checkout to the base tip between cycles (else `upgrade` attention); `src/`, `scripts/`, `bin/` or `package.json` changes restart executors, then the loop. `releaseLag` flags >1-delivery lag past 10 minutes. A moved checkout exits the executor 0 for systemd to restart; one killed mid-action is named, with its item, in `master status`.
 
-A `resync` completes only on a fresh observation. The executor calls `POST /api/work/:id/resync` with `{ since }`; the server wakes the item's observation job, answering `observed`, `observedAt` and its `job` (`availableAt`, `lockedUntil`, `attempts`, `error`, `heldUntil`, `heldReason`). `wake: false` only reads. The claim never waits: unobserved, it fails with `no observation newer than the claim was saved`, its job's condition, and backs off; a later claim completes once one exists. Three stall it (`master status`). Row bookkeeping never refuses an observation read before it; other changes do.
+A `resync` completes only on a fresh observation. The executor calls `POST /api/work/:id/resync` with `{ since }`; the server wakes the item's observation job, answering `observed`, `observedAt` and its `job` (`availableAt`, `lockedUntil`, `attempts`, `error`, `heldUntil`, `heldReason`). `wake: false` only reads. The claim never waits: unobserved, it fails with `no observation newer than the claim was saved` and backs off; a later claim completes once one exists. Three stall it (`master status`). Row bookkeeping never refuses an observation read before it; other changes do.
 
-Three failures with an unchanged reason mark a row stalled rather than retrying: once in no count and no list, it shows in `actions.stalled` and on the item's own card; backoff, doubling from one minute, never outlives it. Eight escalate it (half-hourly); ticks requeue ownerless items (`liveness.violations`).
+Three failures with an unchanged reason mark a row stalled rather than retrying (a fleet that looks idle): once in no count and no list, it shows in `actions.stalled` and on the item's own card; backoff, doubling from one minute, never outlives it. Eight escalate it (half-hourly); ticks requeue ownerless items (`liveness.violations`).
 
 ### Loop failure recovery
 
@@ -61,11 +61,11 @@ A failed snapshot read retries once after 0.5–1.5 s; a failed cycle waits min(
 
 ## Resources and disk
 
-`resourceRegistry` declares every bounded resource, reported under `resources` ([remedies](operations-reference.md#control-plane-resources)). The loop `git worktree remove`s finished worktrees (`run.reclaimIdleHours`; never dirty/unpushed), `run.worktreeRemovalLimit`/cycle, logging `.graphyard/worktree-reclaim.jsonl`; `disk` attention below `run.diskThresholdGb`. Review and proof checkouts live under `run.worktreeRoot` (default `~/.local/share/graphyard/worktrees/REPOSITORY-ID`). Agentless panes a Graphyard launch on this host left behind are swept each cycle (6/pass, 120 s launch bound, never foreign/agent/live-lease panes); counts on `daemon.actions`, attention past 20 agentless, and a drained backlog recorded as drained ([panes](master-agent-sessions.md#panes-are-closed-and-reclaimed)).
+`resourceRegistry` declares every bounded resource, reported under `resources` ([remedies](operations-reference.md#control-plane-resources)). The loop `git worktree remove`s finished worktrees (`run.reclaimIdleHours`; never dirty/unpushed), `run.worktreeRemovalLimit`/cycle, logging `.graphyard/worktree-reclaim.jsonl`; `disk` attention below `run.diskThresholdGb`. Review and proof checkouts live under `run.worktreeRoot` (default `~/.local/share/graphyard/worktrees/REPOSITORY-ID`). Agentless panes a Graphyard launch on this host left behind are swept each cycle (6/pass, 120 s launch bound, never foreign/agent/live-lease panes); counts on `daemon.actions`, attention past 20 agentless, a drained backlog recorded as drained ([panes](master-agent-sessions.md#panes-are-closed-and-reclaimed)).
 
 ## Recovery
 
-A dead supervisor fences its item; `containment` lists each surviving process's pid, cmdline and cwd. With `settleable: true` run `master settle-containment GY-N REASON`; otherwise stop the recorded scope unit (`containment.scope`) and request `rework`.
+A dead supervisor fences its item; `containment` lists each surviving process's pid, cmdline, cwd. With `settleable: true` run `master settle-containment GY-N REASON`; otherwise stop the recorded scope unit (`containment.scope`) and request `rework`.
 
 An unexplained lapsed lease raises `lease-loss` (`blocked-awaiting-operator`/`stopped-by-attestation` are history); any admin settles an explained one with `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"` ([settling](delegation.md#who-may-settle-what)). 
 
@@ -79,4 +79,4 @@ A request is `unanswered-request` only 5 minutes (`settledAnswerGraceMs`) after 
 
 ## Pipeline speed
 
-Target: submit→merge p50 ≤ 30 minutes and p90 ≤ 60 minutes over ten-plus deliveries. Each row's `speed` carries `executionMs`, `waitMs`, `reworkRounds` and `interventions`; `speed.submitToMerge` gives the verdict. `node scripts/measure-pipeline-speed.mjs` records what `manual:speed-target-met` reads.
+Target: submit→merge p50 ≤ 30 minutes and p90 ≤ 60 minutes over ten-plus deliveries. Each row's `speed` carries `executionMs`, `waitMs`, `reworkRounds`, `interventions`; `speed.submitToMerge` gives the verdict. `node scripts/measure-pipeline-speed.mjs` records what `manual:speed-target-met` reads.
