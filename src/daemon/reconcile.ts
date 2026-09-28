@@ -1,6 +1,7 @@
 // Concern: cursor action keys, and reconciling pending actions against Graphyard after a restart.
 import type { Work } from '../model.js';
 import { type ScopeRequestState, unplannedPaths } from '../model/scope.js';
+import { widenedPlannedFiles } from '../model/scope-collapse.js';
 import type { WorkerProfile } from '../master.js';
 import { faultActionKey, storeAction, type DaemonAction, type DaemonActionKind, type DaemonState } from './state.js';
 import { openFaultClassItem, type FaultClass } from '../model/fault-classes.js';
@@ -89,11 +90,21 @@ export const decisionKey = (work: Work, decision: Pick<RoutineDecision, 'action'
 /** One decision per request: the instant the worker recorded it identifies the ask. */
 export const scopeKey = (work: Work, request: ScopeRequestState) => `scope:${work.id}:${request.epoch}:${request.at}`;
 /**
- * The requirements revision that widens `work` by `paths` in answer to `request`. It names the
- * request it answers and the head its findings were read for, so the control plane refuses it once a
- * claim or a lease end has cleared that request, or a push has replaced that head, while the loop
- * was still reading the findings it is grounded on.
+ * The requirements revision that widens `work` by `paths` in answer to `request`, or null when no
+ * fold represents the widening within the plannedFiles cap: the loop refuses before posting rather
+ * than send a revision the schema would reject on every retry (GY-630). It names the request it
+ * answers and the head its findings were read for, so the control plane refuses it once a claim or
+ * a lease end has cleared that request, or a push has replaced that head, while the loop was still
+ * reading the findings it is grounded on.
  */
+export const answeringWidening = (work: Work, request: ScopeRequestState, paths: string[], reason: string) => {
+  const wide = widenedPlannedFiles(work, paths);
+  return !wide.representable ? null : {
+    expectedPolicyRevision: work.policyRevision, criteria: work.criteria, dependencies: work.dependencies,
+    plannedFiles: wide.plannedFiles, exclusiveResources: work.exclusiveResources ?? [], producerProofs: work.producerProofs ?? [],
+    reason, answers: { epoch: request.epoch, at: request.at, sha: work.candidate?.sha ?? null } };
+};
+
 /**
  * When the control plane recorded the answer to a routed scope request (GY-176): the approval or
  * refusal event's own time, else the item's `scopeDecision` for that same request, written in the
@@ -121,8 +132,3 @@ export function scopeOutcomeAnswered(work: Work, request: { epoch: number; at: s
   const at = Date.parse((approved ? judged.approvedAt : judged.refusal?.at) ?? '');
   return Number.isFinite(at) && at >= clock ? 'pending' : 'unanswered';
 }
-
-export const answeringWidening = (work: Work, request: ScopeRequestState, paths: string[], reason: string) => ({
-  expectedPolicyRevision: work.policyRevision, criteria: work.criteria, dependencies: work.dependencies,
-  plannedFiles: [...new Set([...(work.plannedFiles ?? []), ...paths])], exclusiveResources: work.exclusiveResources ?? [], producerProofs: work.producerProofs ?? [],
-  reason, answers: { epoch: request.epoch, at: request.at, sha: work.candidate?.sha ?? null } });
