@@ -5,9 +5,12 @@ import { evaluate, laneRequirements } from '../src/model/gates.js';
 import type { Observation, Work } from '../src/model/work.js';
 
 // GY-883: risk lanes. The ceremony an item runs is decided by the risk of what it changes:
-// low lands on its required CI checks and one approving review, medium adds its producer-run
-// proofs, high keeps today's full path. The lane is decided by the shipped path policy in
-// src/model/policy.ts and rides the one landability verdict in src/model/gates.ts.
+// low lands once its criteria are proven, its required CI checks are green and one approving
+// review stands, medium adds the change's producer-run proofs, high adds manual attestations.
+// The lane never removes a proof the item's criteria name — no lane weakens a task's
+// requirements — and rework approval is required in every lane. The lane is decided by the
+// shipped path policy in src/model/policy.ts and rides the one landability verdict in
+// src/model/gates.ts.
 
 const head = 'c'.repeat(40), base = 'd'.repeat(40);
 
@@ -34,17 +37,21 @@ const verdict = (work: Work) => evaluate(work, [work], new Date(), [15368]);
 const acceptance = (work: Work) => verdict(work).gates.find(gate => gate.name === 'acceptance')!;
 
 // AC-1: the shipped path policy assigns every item a lane: high for migrations/schema,
-// auth/credentials, deploy/install and the public API; low for test-only, docs-only and
-// single-module changes; medium for the rest.
+// auth/credentials, the public API and the repository's installation and deployment surfaces;
+// low for test-only, docs-only and single-module changes; medium for the rest.
 test('unit:risk-lane-assigned — the shipped path policy classifies high-risk paths as high', () => {
   assert.equal(determineLane(['migrations/schema/001_initial.sql']), 'high');
   assert.equal(determineLane(['auth/credentials/oauth.ts']), 'high');
   assert.equal(determineLane(['deploy/install/setup.sh']), 'high');
   assert.equal(determineLane(['src/server/routes/work.ts']), 'high', 'the public API is high-risk');
+  assert.equal(determineLane(['src/install/secrets.ts']), 'high', 'the installation surface is high-risk');
+  assert.equal(determineLane(['deploy/helm/graphyard/templates/secret.yaml']), 'high', 'the deployment tree is high-risk');
+  assert.equal(determineLane(['Dockerfile']), 'high', 'the image build is high-risk');
+  assert.equal(determineLane(['compose.yaml']), 'high', 'the compose deployment is high-risk');
   // One high-risk path is enough, whatever else changed beside it.
   assert.equal(determineLane(['docs/notes.md', 'tests/x.test.ts', 'migrations/schema/002_add.sql']), 'high');
   // A high-risk path is never lowered by the single-module or docs rules.
-  assert.equal(determineLane(['src/server/routes/work.ts', 'src/server/routes/other.ts']), 'high');
+  assert.equal(determineLane(['src/install/secrets.ts', 'src/install/limits.ts']), 'high');
 });
 
 test('unit:risk-lane-assigned — test-only, docs-only and single-module changes are low', () => {
@@ -61,47 +68,33 @@ test('unit:risk-lane-assigned — everything else is medium, and an unknown chan
   assert.equal(determineLane(['src/model/policy.ts', 'src/cli/main.ts']), 'medium');
   assert.equal(determineLane(['src/model/gates.ts', 'tests/risk-lanes.test.ts', 'docs/glossary.md']), 'medium');
   assert.equal(determineLane(['src/a.ts', 'src/b.ts']), 'medium', 'sharing only src/ is not one module');
+  // The shared prefix stops at the first divergent segment: a shared basename is not a shared module.
+  assert.equal(determineLane(['src/model/index.ts', 'src/cli/index.ts']), 'medium', 'src/model/ and src/cli/ are two modules despite the shared tail');
+  assert.equal(determineLane(['src/a/run.ts', 'src/b/run.ts', 'src/c/run.ts']), 'medium', 'every file sharing a basename is still three modules');
   assert.equal(determineLane(['package.json']), 'medium');
   assert.equal(determineLane([]), 'medium');
   assert.equal(determineLane(['src/model/policy.ts', 'deploy/install/setup.sh']), 'high', 'high wins over the single-module rule');
 });
 
-// AC-2: each lane's required set. Low lands on required CI and one approving review — producer-run
-// proofs and manual attestations are not required of it, and its reworks need no approver decision.
-// Medium adds its producer proofs. High keeps today's full path.
+// AC-2: each lane's required set — the ceremony the lane itself adds beside an item's authored
+// criteria. No lane removes a proof the criteria name, so every lane keeps rework approval: the
+// two-party decision invariant never varies.
 test('unit:lane-sets-required-gates — the shipped required set of each lane', () => {
-  assert.deepEqual(laneRequirements('low'), { producerProofs: false, manualAttestations: false, reworkApprover: false });
-  assert.deepEqual(laneRequirements('medium'), { producerProofs: true, manualAttestations: false, reworkApprover: false });
+  assert.deepEqual(laneRequirements('low'), { producerProofs: false, manualAttestations: false, reworkApprover: true });
+  assert.deepEqual(laneRequirements('medium'), { producerProofs: true, manualAttestations: false, reworkApprover: true });
   assert.deepEqual(laneRequirements('high'), { producerProofs: true, manualAttestations: true, reworkApprover: true });
 });
 
-test('unit:lane-sets-required-gates — a low-lane item lands on CI and one review, proofs unrequired', () => {
-  const work = item(['src/model/policy.ts']);
-  const result = verdict(work);
-  assert.equal(result.lane, 'low');
-  const gate = acceptance(work);
-  assert.equal(gate.passed, true, `low lane should not demand its criteria proofs: ${gate.reasons.join('; ')}`);
-  assert.deepEqual(gate.reasons, []);
-});
-
-test('unit:lane-sets-required-gates — medium adds its producer proofs, manual attestations stay unrequired', () => {
-  const work = item(['src/model/policy.ts', 'src/cli/main.ts']);
-  const result = verdict(work);
-  assert.equal(result.lane, 'medium');
-  const gate = acceptance(work);
-  assert.equal(gate.passed, false);
-  assert.deepEqual(gate.reasons.filter(reason => reason.includes('unit:core-flow')).length, 1, 'medium requires its producer-run proof');
-  assert.equal(gate.reasons.some(reason => reason.includes('manual:safety-attestation')), false, 'medium does not require manual attestations');
-});
-
-test('unit:lane-sets-required-gates — high keeps today\'s full path', () => {
-  const work = item(['migrations/schema/002_add.sql']);
-  const result = verdict(work);
-  assert.equal(result.lane, 'high');
-  const gate = acceptance(work);
-  assert.equal(gate.passed, false);
-  assert.equal(gate.reasons.some(reason => reason.includes('unit:core-flow')), true, 'high requires producer-run proofs');
-  assert.equal(gate.reasons.some(reason => reason.includes('manual:safety-attestation')), true, 'high requires manual attestations');
+test('unit:lane-sets-required-gates — a criterion-named proof is required in every lane, low included', () => {
+  for (const [paths, lane] of [[['src/model/policy.ts'], 'low'], [['src/model/a.ts', 'src/cli/b.ts'], 'medium'], [['auth/credentials/a.ts'], 'high']] as [string[], Lane][]) {
+    const work = item(paths);
+    const result = verdict(work);
+    assert.equal(result.lane, lane);
+    const gate = acceptance(work);
+    assert.equal(gate.passed, false, `${lane} never waives a criterion-named proof`);
+    assert.equal(gate.reasons.some(reason => reason.includes('unit:core-flow')), true, `${lane} requires the criterion's producer-run proof`);
+    assert.equal(gate.reasons.some(reason => reason.includes('manual:safety-attestation')), true, `${lane} requires the criterion's attestation`);
+  }
 });
 
 test('unit:lane-sets-required-gates — an e2e proof stays required in every lane', () => {
@@ -130,20 +123,23 @@ test('unit:lane-sets-required-gates — a bootstrap obligation inherited from an
 });
 
 // AC-3: lanes are inputs to the single landability verdict, not separate required-check sets; the
-// per-lane speed targets are shipped and reported beside the lane.
-test('unit:lanes-feed-verdict — the lane changes which facts the one verdict requires', () => {
-  for (const [paths, lane, unitRequired, manualRequired] of [
-    [['tests/only.test.ts'], 'low', false, false],
-    [['src/model/a.ts', 'src/cli/b.ts'], 'medium', true, false],
-    [['deploy/install/a.sh'], 'high', true, true],
-  ] as [string[], Lane, boolean, boolean][]) {
+// verdict takes the item's lane and reports it with the lane's speed target. What the lane must
+// never take out of the verdict is a criterion-named proof: the required facts are the criteria's
+// in every lane.
+test('unit:lanes-feed-verdict — the one verdict requires the criteria in every lane and rides the lane\'s target', () => {
+  for (const [paths, lane] of [
+    [['tests/only.test.ts'], 'low'],
+    [['src/model/a.ts', 'src/cli/b.ts'], 'medium'],
+    [['deploy/install/a.sh'], 'high'],
+  ] as [string[], Lane][]) {
     const work = item(paths);
     const result = verdict(work);
     assert.equal(result.lane, lane);
+    assert.equal(result.speedTarget, laneSpeedTargets[lane], `${lane} reports its own speed target beside the lane`);
     const gate = result.gates.find(gate => gate.name === 'acceptance')!;
-    assert.equal(gate.reasons.some(reason => reason.includes('unit:core-flow')), unitRequired, `${lane}: producer proof required = ${unitRequired}`);
-    assert.equal(gate.reasons.some(reason => reason.includes('manual:safety-attestation')), manualRequired, `${lane}: manual attestation required = ${manualRequired}`);
-    assert.equal(gate.passed, !unitRequired && !manualRequired, `${lane}: acceptance passes exactly when nothing is required`);
+    assert.equal(gate.passed, false, `${lane}: the verdict still requires the criteria's facts`);
+    assert.equal(gate.reasons.some(reason => reason.includes('unit:core-flow')), true, `${lane}: producer proof required`);
+    assert.equal(gate.reasons.some(reason => reason.includes('manual:safety-attestation')), true, `${lane}: attestation required`);
   }
 });
 

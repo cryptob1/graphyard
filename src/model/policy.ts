@@ -14,8 +14,16 @@ import { distinct, reviewProviders, reviewerProfileSchema } from './review.js';
 export const lanes = ['low', 'medium', 'high'] as const;
 export type Lane = typeof lanes[number];
 
-/** The shipped high-risk path policy: any changed path under one of these makes the change high. */
-export const highRiskPaths = [/^migrations\/schema/, /^auth\/credentials/, /^deploy\/install/, /^src\/server\/routes/] as const;
+/**
+ * The shipped high-risk path policy: any changed path under one of these makes the change high.
+ * The installation and deployment surfaces are the repository's own: installation changes go
+ * through `src/install/` and deployment through the `deploy/` tree, the Dockerfile and
+ * compose.yaml, beside the schema, credential and public-API paths.
+ */
+export const highRiskPaths = [
+  /^migrations\/schema/, /^auth\/credentials/, /^src\/server\/routes/,
+  /^src\/install\//, /^deploy\//, /^Dockerfile(\.|$)/, /^compose\.ya?ml$/,
+] as const;
 
 /** The shipped low-risk path policy: a change only of tests or of docs is low. */
 export const testOnlyPaths = /(^|\/)(tests?|__tests__)\/|\.test\.[A-Za-z]+$|\.spec\.[A-Za-z]+$/;
@@ -24,9 +32,11 @@ export const docsOnlyPaths = /^docs\/|(^|\/)README\.md$|^AGENTS\.md$|\.mdx?$/;
 /**
  * The lane one change rides in, from the shipped path policy: any high-risk path makes the change
  * high; a change only of tests or only of docs is low; a change kept inside one module — every
- * path sharing the same first two segments, such as `src/model/` — is low; everything else is
+ * path sharing the same leading segments, such as `src/model/` — is low; everything else is
  * medium. An unknown change (no paths at all) is medium: the default lane asks for proofs until
- * the policy can see the change is small.
+ * the policy can see the change is small. The shared prefix counts only up to the first segment
+ * where the paths diverge: `src/model/index.ts` and `src/cli/index.ts` share `src/` and nothing
+ * past it, so they are two modules, not one.
  */
 export function determineLane(paths: readonly string[]): Lane {
   const changed = [...new Set(paths)];
@@ -34,8 +44,10 @@ export function determineLane(paths: readonly string[]): Lane {
   if (changed.some(path => highRiskPaths.some(pattern => pattern.test(path)))) return 'high';
   if (changed.every(path => testOnlyPaths.test(path) || docsOnlyPaths.test(path))) return 'low';
   const segments = changed.map(path => path.split('/').filter(Boolean));
-  const common = segments[0].filter((segment, index) => segments.every(parts => parts[index] === segment)).length;
-  return common >= 2 ? 'low' : 'medium';
+  const first = segments[0];
+  let shared = 0;
+  while (shared < first.length && segments.every(parts => parts[shared] === first[shared])) shared++;
+  return shared >= 2 ? 'low' : 'medium';
 }
 
 /**

@@ -10,7 +10,7 @@ import { exactApproval, exhaustedReviewerProfiles, reviewProviderOf, reviewerPro
 import { carriedApproval, evidenceBindsCandidate } from './carry.js';
 import { placeInQueue, type MergeQueueSettings } from './queue.js';
 import { regressionRefusals } from '../regression-guard.js';
-import { mechanicalFailure, mechanicalProof, mechanicalVerdicts, evidenceProves, attestedProof } from './mechanical-proofs.js';
+import { mechanicalFailure, mechanicalVerdicts, evidenceProves, attestedProof } from './mechanical-proofs.js';
 import { determineLane, laneSpeedTargets, type Lane } from './policy.js';
 
 // Pure evaluation: neither worker assertions nor UI state can authorize progression.
@@ -30,17 +30,19 @@ export const mergeabilityComputingRefusal = 'GitHub is computing mergeability ag
 
 /**
  * What each lane's landability asks for beyond the gates every lane keeps (ready, build, review,
- * test, merge): which proof families are required evidence, and whether a rework round waits for
- * an approved two-party decision. Low lands on its required CI checks and one approving review —
- * catch-and-revert suits it; medium adds its producer-run proofs; high keeps today's full path.
- * A lane only decides which facts the verdict requires of the item, and weakens no criterion
- * otherwise: a recorded proof failure still returns the head in every lane, and a bootstrap
- * obligation inherited from an earlier delivery is never waived.
+ * test, merge): which proof families the lane itself demands of the change, and whether a rework
+ * round waits for an approved two-party decision. The lane only ever adds ceremony beside an
+ * item's authored criteria — it never removes a proof the criteria name, in any lane: a path
+ * heuristic must not weaken a task's requirements. Low therefore lands once its criteria are
+ * proven, its required CI checks are green and one approving review stands — the lane itself adds
+ * nothing; medium adds the change's producer-run proofs; high adds manual attestations too.
+ * Rework approval is required in every lane: the two-party decision invariant is the repository's
+ * standing authority contract and never varies by lane.
  */
 export interface LaneRequirements { producerProofs: boolean; manualAttestations: boolean; reworkApprover: boolean }
 export function laneRequirements(lane: Lane): LaneRequirements {
-  return lane === 'low' ? { producerProofs: false, manualAttestations: false, reworkApprover: false }
-    : lane === 'medium' ? { producerProofs: true, manualAttestations: false, reworkApprover: false }
+  return lane === 'low' ? { producerProofs: false, manualAttestations: false, reworkApprover: true }
+    : lane === 'medium' ? { producerProofs: true, manualAttestations: false, reworkApprover: true }
     : { producerProofs: true, manualAttestations: true, reworkApprover: true };
 }
 
@@ -75,8 +77,6 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[],
   // the item's lane, decides which facts it requires, and reports the lane with its speed target.
   const lane = itemLane(work);
   const speedTarget = laneSpeedTargets[lane];
-  const required = laneRequirements(lane);
-  const laneRequires = (proof: string) => attestedProof(proof) ? required.manualAttestations : mechanicalProof(proof) ? required.producerProofs : true;
   const dependencies = work.dependencies.filter(id => all.find(w => w.id === id)?.stage !== 'done');
   add('ready', [...(!work.ready ? ['Not released from backlog'] : []), ...dependencies.map(id => `Dependency ${all.find(w => w.id === id)?.key ?? id} is unfinished`), ...(work.blocker ? [work.blocker] : [])]);
   const candidate = work.candidate;
@@ -136,10 +136,11 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[],
   };
   // A bootstrap criterion's proofs are deferred here and required of the next change that
   // touches the same contract; review, CI and every other criterion still gate this one.
-  // The lane decides which of the item's own criterion proofs the verdict requires; the
-  // inherited obligations below are never lane-waived.
+  // Every criterion-named proof is required in every lane (GY-883): the item's lane scales the
+  // ceremony beside its criteria, never the criteria themselves, and the inherited obligations
+  // below are likewise never waived.
   for (const ac of work.criteria.filter(criterion => !criterion.bootstrap)) for (const proof of ac.proofs) {
-    if (laneRequires(proof) && unproven(proof)) reasons.push(`${ac.id}: ${demanded(proof)}`);
+    if (unproven(proof)) reasons.push(`${ac.id}: ${demanded(proof)}`);
   }
   for (const obligation of inheritedObligations(work, all)) {
     if (unproven(obligation.proof)) reasons.push(`Bootstrap obligation inherited from ${obligation.key} ${obligation.criterionId}: ${demanded(obligation.proof)}`);

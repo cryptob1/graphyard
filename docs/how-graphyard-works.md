@@ -9,20 +9,20 @@ Graphyard decides whether work may advance; runtimes such as Herdr run the sessi
 2. **Build**: a worker claims a lease and worktree, and submits a PR.
 3. **Review**: an independent reviewer approves the exact commit.
 4. **Test**: Graphyard observes CI itself.
-5. **Acceptance**: granted producers report evidence for that commit — proofs the item's risk lane does not name are not required of it.
+5. **Acceptance**: granted producers report evidence for that commit — the proofs its criteria name are required of every lane.
 6. **Done**: Graphyard rechecks every gate, merges, and observes the merge.
 
 A card stops at its first refusing gate, naming what is missing; nothing sets a stage directly.
 
 ## Risk lanes
 
-Every item rides a **risk lane**, decided from the paths its change touches by the shipped path policy (`src/model/policy.ts`) and stamped on the item with its speed target, shown in `master status`: any path under `migrations/schema`, `auth/credentials`, `deploy/install` or the public API (`src/server/routes/`) rides **high**; a change only of tests or docs, or one kept inside a single module, rides **low**; everything else rides **medium**. The lane is an input to the one landability verdict (`src/model/gates.ts`), not a second set of gates: the verdict takes the item's lane and decides which facts it requires.
+Every item rides a **risk lane**, decided from the paths its change touches by the shipped path policy (`src/model/policy.ts`) and stamped on the item with its speed target, shown in `master status`: any path under `migrations/schema`, `auth/credentials`, the public API (`src/server/routes/`) or the repository's installation and deployment surfaces (`src/install/`, the `deploy/` tree, the Dockerfile, `compose.yaml`) rides **high**; a change only of tests or docs, or one kept inside one module — every path sharing the same leading segments, so `src/model/` is one module while `src/model/index.ts` beside `src/cli/index.ts` is two — rides **low**; everything else rides **medium**. The lane is an input to the one landability verdict (`src/model/gates.ts`), not a second set of gates: the verdict takes the item's lane and reports it with the lane's speed target.
 
-- **Low** lands with its required CI checks green and one approving review. Producer-run proofs and manual attestations are not required of it: a bad low-risk change is caught and reverted, not prevented.
-- **Medium** adds its producer-run proofs (`unit:`, `integration:`).
-- **High** keeps today's full path, manual attestations included; only the high lane names an approver decision among a rework round's required facts.
+- **Low** lands once its criteria are proven, its required CI checks are green and one approving review stands. The lane itself adds no ceremony beside the criteria: a bad low-risk change is caught and reverted, not prevented.
+- **Medium** adds the change's producer-run proofs (`unit:`, `integration:`).
+- **High** adds manual attestations too.
 
-The lane never weakens a criterion otherwise: a recorded proof failure still returns the head in every lane, and a bootstrap obligation inherited from an earlier delivery is never waived. Speed targets ship per lane — low p50 30 min, medium 60 min, high 4 h — and are reported beside the lane.
+The lane never weakens a criterion: every proof the item's criteria name is required in every lane, and rework stays a two-party decision — the master requests it and a separate approver approves it — in every lane, because that is the repository's standing authority contract. A recorded proof failure still returns the head in every lane, and a bootstrap obligation inherited from an earlier delivery is never waived. Speed targets ship per lane — low p50 30 min, medium 60 min, high 4 h — and are reported beside the lane.
 
 ![Bootstrap versus normal operation: one supervised worker, then a fleet with separate credentials.](diagrams/bootstrap-vs-normal.svg)
 
