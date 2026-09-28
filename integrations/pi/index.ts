@@ -318,21 +318,61 @@ export function guardCommand(command: string, context: GuardContext): GuardVerdi
 }
 
 /**
+ * GNU mktemp's options, parsed as mktemp parses them (GY-564): whether it creates a directory,
+ * whether it creates anything at all, and the directory a `-p`/`--tmpdir` names. An option it does
+ * not take, or more than one template, is `null` — a line nobody can say mktemp made.
+ */
+export function mktempOptions(words: string[]): { directory: boolean; dryRun: boolean; parent: string | null } | null {
+  let directory = false, dryRun = false, parent: string | null = null, templates = 0, options = true;
+  for (let index = 0; index < words.length; index++) {
+    const word = words[index];
+    if (options && word === '--') { options = false; continue; }
+    if (options && word.startsWith('--')) {
+      const [name, value] = word.includes('=') ? [word.slice(0, word.indexOf('=')), word.slice(word.indexOf('=') + 1)] : [word, null];
+      if (name === '--directory') directory = true;
+      else if (name === '--dry-run') dryRun = true;
+      else if (name === '--quiet') { /* no effect on what is created */ }
+      else if (name === '--tmpdir') parent = value;
+      else if (name === '--suffix') { if (value === null) index++; }
+      else return null;
+      continue;
+    }
+    if (options && word.startsWith('-') && word.length > 1) {
+      for (let at = 1; at < word.length; at++) {
+        const flag = word[at];
+        if (flag === 'd') directory = true;
+        else if (flag === 'u') dryRun = true;
+        else if (flag === 'q' || flag === 't') { /* quiet; template under the temporary root */ }
+        else if (flag === 'p') { parent = word.slice(at + 1) || words[++index] || null; if (parent === null) return null; break; }
+        else return null;
+      }
+      continue;
+    }
+    if (++templates > 1) return null;
+  }
+  return { directory, dryRun, parent };
+}
+
+/**
  * The directory a `mktemp -d` call printed. Only a command that is nothing but that one mktemp
  * invocation counts, and only its single line of output (GY-391): a line a second command printed
  * beside it (`mktemp -d && ls -d /tmp/*`) is not a directory the session created. The line is kept
- * only when it is a real directory under the temporary root.
+ * only when it is a real directory under the temporary root and, when `-p`/`--tmpdir` names a
+ * parent, under that parent — a `--tmpdir` template may carry slashes and mktemp creates only its
+ * final component, so an existing parent can hold it at any depth (GY-564).
  */
 export function mktempDirectories(command: string, output: string, root = tmpdir()): string[] {
   const segments = shellWords(command);
   if (segments.length !== 1) return [];
   const [program, ...words] = segments[0];
-  if (program.dynamic || program.value.split('/').pop() !== 'mktemp' || words.some(word => word.dynamic)) return [];
-  if (!words.some(word => word.value === '--directory' || /^-[A-Za-z]*d[A-Za-z]*$/.test(word.value))) return [];
+  if (program.dynamic || program.value.split('/').pop() !== 'mktemp' || words.some(word => word.dynamic || word.glob)) return [];
+  const options = mktempOptions(words.map(word => word.value));
+  if (!options?.directory || options.dryRun) return [];
   const lines = output.split('\n').map(line => line.trim()).filter(Boolean);
   if (lines.length !== 1) return [];
   const [line] = lines, base = resolve(root);
   if (!isAbsolute(line) || !inside(resolve(line), base) || resolve(line).split(sep).includes('..')) return [];
+  if (options.parent && (!isAbsolute(options.parent) || !inside(resolve(line), resolve(options.parent)))) return [];
   try { return statSync(line).isDirectory() ? [line] : []; } catch { return []; }
 }
 
