@@ -336,6 +336,10 @@ export async function closeStep(cycle: Cycle) {
     };
     await unblock(`${session.role} session ${session.agentName}`, `${session.role}:${session.record}`, agent, item, null, null, null, handle, async reason => {
       // The handle ends before any relaunch: a relaunch reopens the same handle for its new session.
+      // The handle update follows the close, as endWorkerAttempt orders it: if the close throws the
+      // pane is still open, so the handle stays running while the ledger records the failed close,
+      // and a retry writes it once the close succeeds (GY-472); writing it finished first would
+      // describe a session the loop never ended.
       if (!effects.endSession) { await effects.closeSession(agent.pane_id!); await handle(`closed as failed: ${reason}`, true); return 'its pane was closed and its request launches again on the next dispatch tick'; }
       await effects.endSession(session, `closed as failed: ${reason}`.slice(0, 500));
       await handle(`closed as failed: ${reason}`, true);
