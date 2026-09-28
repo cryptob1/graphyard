@@ -152,6 +152,12 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
       {events.length ? <ul className="activity-list">{events.slice(0, 3).map(event => <li key={event.seq}>{activityLabel(event.kind)} <small>· {formatAge(event.created_at, now)} ago</small></li>)}</ul> : <p className="muted">Nothing recorded yet.</p>}
       <details className="full-history"><summary>{historyLabel(events.length)}</summary><History key={item.id} events={events}/></details>
     </section>
+    {(item.origin?.reviewDigest?.entries?.length ?? 0) > 0 && <section className="panel review-digest" aria-label="Review digest"><h2>Review digest <small>{item.origin!.reviewDigest!.entries.length} improvement{item.origin!.reviewDigest!.entries.length === 1 ? '' : 's'}</small></h2>
+      <p className="muted">Improvements and refinements recorded from reviews but not filed as work items. Entries that recur across multiple parents are promoted to their own item.</p>
+      <ul className="digest-list">{item.origin!.reviewDigest!.entries.map((entry, index) => <li key={index} className={entry.promotedTo ? 'promoted' : ''}>
+        {entry.path && <code className="path">{entry.path}</code>} <span className="text">{entry.text}</span>{entry.promotedTo && <span className="promoted-to"> · promoted to <code>{entry.promotedTo}</code></span>}{entry.ref && <span className="ref">({entry.ref})</span>}
+      </li>)}</ul>
+    </section>}
     {admin && item.stage !== 'done' && <details className="edit-menu"><summary>Edit</summary>
       <p className="muted">These change the rules for this item and need fresh proof afterwards.</p>
       {item.policy.review && <>{!codexAvailable && <p className="muted">Codex review is unavailable. Verify the GitHub App connection and accept its required permission updates.</p>}

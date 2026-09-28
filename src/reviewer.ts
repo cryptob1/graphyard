@@ -104,6 +104,8 @@ export const reviewRecordSchema = z.object({
     keyReuse: z.enum(['linked', 'rekeyed']).optional(),
     /** The unchanged 4xx error the filing's consecutive attempts failed with, and when that run stopped its retries (retry-stop.ts). */
     clientError: z.object({ error: z.string().min(1).max(500), count: z.number().int().min(1) }).strict().optional(), stoppedAt: z.string().min(1).max(40).optional() }).optional(),
+  /** The launch carried the new DEFECT/IMPROVEMENT rule (GY-884): an approval classifies each finding as defect or improvement. */
+  classified: z.boolean().optional(),
   /** The launch prompt carried the criteria-only rule (GY-166): an approval must classify the listed threads, so one naming neither line vouches for none. */
   criteriaOnly: z.literal(true).optional(),
   /** The review history the launch prompt was built from (GY-167, reviewHistory): the head last reviewed, and the changes-requested rounds before this one. */
@@ -617,8 +619,11 @@ export async function launchReview(root: string, work: Work, profileName: string
     const requestedAt = now().toISOString();
     // Read before this launch's own record joins the ledger: the rounds before this one.
     const reviewRound = reviewHistory(ledger.reviews, binding, `${reviewerApp.slug}[bot]`);
+    // The launch carries the DEFECT/IMPROVEMENT rule (GY-884) when we have acceptance criteria.
+    const classified = !!work.criteria?.length;
     const record: ReviewRecord = reviewRecordSchema.parse({ id, key: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, reviewRound,
       profile: profile.name, agentName, pane: null, sessionDirectory, requestedAt, tokenExpiresAt: new Date(Date.parse(requestedAt) + 3_600_000).toISOString(), state: 'pending', launching: true,
+      ...(classified ? { classified } : {}),
       ...(dependencies.requestId ? { requestId: dependencies.requestId, attempt } : {}) });
     ledger.reviews.push(record);
     return { record };
@@ -1235,7 +1240,8 @@ async function fileApprovedFollowUp(record: ReviewRecord, verdict: NonNullable<R
     : filed.get(record.key) ?? openFollowUpItem(work, record.key)?.key;
   const filedNow = await fileFollowUpThreads({ repository, key: record.key, workId: item.id, pr: record.pr, sha: record.sha, reviewId: verdict.reviewId, reviewer, previous, store,
     ...(existing && append ? { existing, append } : {}),
-    ...(record.threadReadFailure ? {} : record.threadsListed ? { listed: record.threadsListed } : {}) }, run, resolving, now);
+    ...(record.threadReadFailure ? {} : record.threadsListed ? { listed: record.threadsListed } : {}),
+    ...(record.classified ? { classified: record.classified } : {}) }, run, resolving, now);
   if (filedNow.item) filed.set(record.key, filedNow.item);
   const outcome = { ...filedNow, ...(keyReuse && filedNow.item ? { keyReuse } : {}) };
   const failure = outcome.failure?.slice(0, 500), clientError = nextClientErrorRun(previous?.clientError, failure);

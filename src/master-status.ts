@@ -203,8 +203,9 @@ export async function derivedAttention(root: string, master: MasterConfig, maste
   // A machine-filed item no triage has judged within a day of filing (GY-402).
   const triage = untriagedAttention(snapshot);
   // The backlog split the way the operator reads it (GY-402): their own unreleased items apart from the machine-filed ones awaiting triage.
+  // Also digest counts: improvements recorded on parents but not filed as items (GY-884).
   const counts = backlogCounts(snapshot.work, now);
-  const backlog = { operatorBacklog: counts.operator, machineUntriaged: counts.machineUntriaged, machineTriageProposed: counts.machineProposed, untriagedOverdue: counts.overdue };
+  const backlog = { operatorBacklog: counts.operator, machineUntriaged: counts.machineUntriaged, machineTriageProposed: counts.machineProposed, untriagedOverdue: counts.overdue, digestEntries: counts.digestEntries, parentsWithDigest: counts.parentsWithDigest };
   // A loop retry stopped after one unchanged 4xx error on consecutive attempts (GY-598).
   const stoppedRetries = stoppedFollowUpAttention(observed.reviews);
   const host: AttentionItem[] = [];
