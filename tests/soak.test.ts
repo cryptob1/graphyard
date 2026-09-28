@@ -248,6 +248,17 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   // ---- The fifteen items, created in the backlog and released one every fifteen minutes. ----
   const releaseEveryMs = options.queued?.releaseEveryMs ?? plan.releaseEveryMs;
   const items: Work[] = [];
+  for (let n = 1; n <= plan.items + (options.scope ? 3 : 0); n++) {
+    // The scope scenarios carry their own intake: item wideRule plans twenty files under the
+    // directory its criterion names; item unrepresentable plans plannedFilesMax entries outside
+    // every directory of the one path its criterion implies.
+    const scopeIntake = options.scope && n === scopePlan.wideRule ? {
+        plannedFiles: [file(n), ...Array.from({ length: scopePlan.wideRulePlanned }, (_, index) => `${scopePlan.wideRuleDir}base-${padded(index)}.test.ts`)],
+        criteria: [{ id: 'AC-1', text: `Every file under ${scopePlan.wideRuleDir} behaves for item ${n}`, proofs: [PROOF] }] }
+      : options.scope && n === scopePlan.unrepresentable ? {
+        plannedFiles: bulk18,
+        criteria: [{ id: 'AC-1', text: `Item ${n} behaves, and ${scopePlan.unrepresentablePath} moves onto the shared helper too`, proofs: [PROOF] }] }
+      : {};
     let work = await engine.execute(principals.operator, 'create', null, { title: `Soak item ${n}`, plannedFiles: files(n), criteria: [{ id: 'AC-1', text: plan.scoped.has(n) ? `Item ${n} behaves, with its fixture ${fixture(n)}` : `Item ${n} behaves`, proofs: [PROOF] }], ...scopeIntake }, id());
     if (n === plan.exhaustedReviewer) work = await engine.execute(principals.operator, 'reviewpolicy', work.id, { provider: 'agent', expectedPolicyRevision: work.policyRevision, reason: 'Reviewed by the reviewer bots',
       reviewerProfiles: [{ name: 'claude-reviewer', runtime: 'claude', reviewerApp: 'claude-reviewer' }, { name: 'cursor-reviewer', runtime: 'cursor', reviewerApp: 'cursor-reviewer' }] }, id());
@@ -554,7 +565,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       return { source: 'endpoint', sha: production.sha, at: new Date(clock.now()).toISOString(), reason: null, deployed: serving.map(item => item.key), pending: delivered.filter(item => !serving.includes(item)).map(item => item.key) };
     },
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
-    recordSession, promptSession,
+    promptSession,
     exhaustedProofs: async () => [...abandoned.values()],
   };
   // The loop publishes the master's merge-queue settings each cycle they change (GY-330, GY-498,
