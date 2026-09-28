@@ -120,12 +120,18 @@ test('manual:fault-class-review-convergence — GY-288: one standing merge-base 
   assert.equal(trackFaults(record, [second, beside(second)], '2026-09-26T05:31:00.000Z').length, 1);
 });
 
-test('fault wording drops hex-shaped tokens with a digit, commit hashes or not, and keeps words', () => {
+test('fault wording drops every hex-shaped token, commit hashes or not, and keeps short words', () => {
   assert.equal(wording('base branch tip 0e2108cf789d advanced'), wording('base branch tip ab8fdf6cf47e advanced'));
   assert.equal(wording(`head ${sha40('1f1bc8b91d78')} dismissed`), 'head # dismissed');
-  // Any 7–40-character hex-shaped token with a digit is dropped, as documented — not only a hash.
+  // Any 7–40-character hex-shaped token is dropped, as documented — not only a hash.
   assert.equal(wording('lease beef1234 lapsed'), 'lease # lapsed');
-  // A word with no digit, or one too short to be a hash, keeps its letters.
-  assert.equal(wording('facade deadbeef stood'), 'facade deadbeef stood');
+  // Even a token with no digit is dropped: a 7–12-character short hash can be all letters, and a
+  // base-tip advance to another all-letter hash must not reopen the standing fault (GY-832).
+  assert.equal(wording('tip cafebabe advanced'), 'tip # advanced');
+  assert.equal(wording('tip cafebabe advanced'), wording('tip deadbeef advanced'));
+  // The match is case-insensitive: uppercase hex tokens are dropped too.
+  assert.equal(wording('head ABCDEF1 dismissed'), 'head # dismissed');
+  // A word too short to be a hash keeps its letters.
+  assert.equal(wording('facade stood'), 'facade stood');
   assert.equal(wording('run abc123 failed'), 'run abc # failed');
 });

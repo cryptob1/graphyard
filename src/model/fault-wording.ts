@@ -1,10 +1,12 @@
 /**
- * Hex-shaped tokens: 7–40 characters of 0–9 and a–f with a digit among them. That is every commit
- * hash Graphyard prints, and also any other id shaped like one (`beef1234`); both move while a
- * fault stands, as its digits do, so neither is part of its wording. A word with no digit
- * (`facade`, `deadbeef`) is not one.
+ * Hex-shaped tokens: 7–40 characters of 0–9 and a–f, lowercase or uppercase — the match is
+ * case-insensitive. That is every commit hash Graphyard prints, and also any other id shaped like
+ * one (`beef1234`); all move while a fault stands, as their digits do, so none is part of its
+ * wording. A 7–12-character short hash is all letters about one time in a thousand (`cafebabe`),
+ * so no-digit hex words (`deadbeef`) are dropped too: keeping one would let a base-tip advance to
+ * such a tip reopen a standing fault.
  */
-export const hexTokens = (text: string) => text.replace(/\b(?=[a-f]*\d)[0-9a-f]{7,40}\b/gi, '#');
+export const hexTokens = (text: string) => text.replace(/\b[0-9a-f]{7,40}\b/gi, '#');
 /** Wording less ages, counts and times: the key trackFaults read before GY-486. */
 export const figureless = (text: string) => (text.toLowerCase().replace(/\d+/g, '#').match(/[a-z]+|#/g) ?? []).map(word => word.replace(/s$/, ''))
   .filter(word => !/^(|i|are|wa|were|ha|have|m|h|d|w|second|minute|hour|day|week)$/.test(word)).join(' ').replace(/#( #)+/g, '#').slice(0, 300);
