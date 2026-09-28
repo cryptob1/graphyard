@@ -37,9 +37,9 @@ The gate requires `GITHUB_CI_APP_IDS` CI checks, current-head approval, trusted 
 
 ## Merge queue
 
-A failed required check reruns once on the unchanged head before rework or ejection; the newest check-run ID from configured CI Apps decides, ignoring other Apps' same-named checks. A required check failing on an unqueued head behind the base tip (never one the queue ejected) is brought onto that tip instead of rework (trigger `failed check behind base`, once per head); a surviving failure or conflict returns it to the worker; master status shows pending reruns and refreshes. A rerun expires after 15 minutes without a new run; a running check finishes. The App needs Actions: write; preflight diagnoses a missing grant.
+A failed required check reruns once on the unchanged head before rework or ejection; the newest check-run ID from configured CI Apps decides, ignoring same-named checks elsewhere. A required check failing on an unqueued head behind the base tip (never one the queue ejected) is brought onto that tip instead of rework (trigger `failed check behind base`, once per head); a surviving failure or conflict returns it to the worker; master status shows pending reruns and refreshes. A rerun expires after 15 minutes without a new run; a running check finishes. The App needs Actions: write; preflight diagnoses a missing grant.
 
-Once gated, the candidate's speculative tip on the candidate branch and `refs/graphyard/queue/KEY` binds every check, review and proof. A failed check, requested changes, a revoked proof, a conflict or rework ejects it to the back; one conflicting only with entries ahead re-enters unchanged once one lands or leaves. The App passes the check for an authorized head and merge group, asks GitHub to merge (queue, auto-merge or direct); protection decides; withdrawal dequeues. Without a queue, `CLEAN`, `UNSTABLE` and `HAS_HOOKS` PRs merge at once, head-bound.
+Once gated, the candidate's speculative tip on the candidate branch and `refs/graphyard/queue/KEY` binds every check, review and proof. A failed check, requested changes, a revoked proof, a conflict or rework ejects it to the back; one conflicting only with entries ahead of it re-enters unchanged once one lands or leaves. The App passes the check for an authorized head and merge group, asks GitHub to merge (queue, auto-merge or direct); protection decides; withdrawal dequeues. Without a queue, `CLEAN`, `UNSTABLE` and `HAS_HOOKS` PRs merge at once, head-bound.
 
 ### Bindings and carry
 
@@ -61,7 +61,7 @@ A protected `pull_request_target` workflow runs on every `graphyard/*` push: **p
 
 ## Post-deployment smoke proof
 
-With `"deploySmoke": true` the master dispatches the smoke install once the release serves the merge; failure marks it [delivered with failure](operations-reference.md#delivered-with-a-failed-smoke-proof).
+With `"deploySmoke": true` the master dispatches the smoke install once the release serves it; failure marks it [delivered with failure](operations-reference.md#delivered-with-a-failed-smoke-proof).
 
 ## Enforcement boundary
 
