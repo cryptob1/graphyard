@@ -71,15 +71,22 @@ export function timingSummary(record: TimingMeasurement[], failures: TimingFailu
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  const [recordFile, logFile] = process.argv.slice(2);
-  if (!recordFile) throw new Error('Usage: timing-report RECORD.jsonl [TEST.log]');
+  // One log per shard in CI (GY-499): the failed tests beside the timing-dependent ones are counted
+  // across every shard, and unknown when any shard's log is missing or has no summary.
+  const [recordFile, ...logFiles] = process.argv.slice(2);
+  if (!recordFile) throw new Error('Usage: timing-report RECORD.jsonl [TEST.log...]');
   const record = existsSync(recordFile) ? parseTimingRecord(readFileSync(recordFile, 'utf8')) : [];
-  const log = logFile && existsSync(logFile) ? readFileSync(logFile, 'utf8') : null;
-  // Every failed test by name, first: the observation compares them with the base branch's own
-  // runs to tell a base-branch breakage from the candidate's own failure (GY-793).
-  const failedTests = log === null ? null : failedTestsAnnotation(failedTestsFromLog(log) ?? []);
-  if (failedTests) console.log(failedTests);
-  const failures = timingFailures(record, log === null ? null : failedTestCount(log));
+  const logs = logFiles.map(file => existsSync(file) ? readFileSync(file, 'utf8') : null);
+  // Every failed test by name across every shard, first: the observation compares them with the
+  // base branch's own runs to tell a base-branch breakage from the candidate's own failure (GY-793).
+  // A missing shard log publishes no names and no count, like a run that failed before reporting.
+  if (logs.every(log => log !== null)) {
+    const failed = [...new Set(logs.flatMap(log => failedTestsFromLog(log!) ?? []))].sort();
+    const annotation = failedTestsAnnotation(failed);
+    if (annotation) console.log(annotation);
+  }
+  const counts = logs.map(log => log === null ? null : failedTestCount(log));
+  const failures = timingFailures(record, counts.length && counts.every(count => count !== null) ? counts.reduce<number>((sum, count) => sum + count!, 0) : null);
   for (const failure of failures) console.log(annotationCommand(failure));
   const summary = timingSummary(record, failures, readBaseline());
   if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, summary); else console.log(summary);
