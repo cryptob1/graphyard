@@ -13,7 +13,7 @@ Start with the numbered path; the other pages are references to open when a task
 ## Operate Graphyard
 
 - [Deployment](deployment.md) — variables, observation, backups.
-- [GitHub enforcement](github.md) — App, protection, merge queue, CI proofs.
+- [GitHub enforcement](github.md) — App, protection, queue, proofs.
 - [Reading the dashboard](dashboard.md) — pages and markers.
 - [Master-agent operating mode](master-agent.md) — loop, dispatch, merges.
 - [Master-agent sessions](master-agent-sessions.md) — profiles, accounts, launches.
