@@ -845,7 +845,7 @@ test('unit:soak-invariants-hold — after a restart the first request for a refu
   assert.deepEqual([...observed].sort(), [...systemInvariants].sort(), 'every invariant was observed, not merely left unread');
   assert.ok(restarted, 'the day included the scenario restart');
   assert.equal(refused.length, 2, 'both scenario refusals were judged');
-  assert.equal(final.reduce((total, item) => total + (item.pipeline?.reworkRounds ?? 0), 0), plan.rework.size + 3, 'the refusals added no rework rounds beyond the main day\'s own (review, the reverted merge, the failed rerun, the spent producer request)');
+  assert.equal(final.reduce((total, item) => total + (item.pipeline?.reworkRounds ?? 0), 0), plan.rework.size + 2, 'the refusals added no rework rounds beyond the main day\'s own (review, the reverted merge, and the spent producer request; the failed rerun is superseded by the out-of-queue merge)');
   for (const { key, decision } of refused) {
     const item = final.find(entry => entry.key === key)!;
     const history = (await api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(item.id)}/decisions`)).decisions as { id: string; action: string; state: string; input: any }[];
