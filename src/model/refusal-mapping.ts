@@ -4,6 +4,7 @@ import { standingEscalations } from './escalation.js';
 import { leadHoldRefusal } from './delegation.js';
 import type { Work } from './work.js';
 import type { NextActionKind } from './action-kinds.js';
+import { ciCheckName, ciCheckRefusalPattern } from './ci-refusal.js';
 
 /**
  * From a gate's refusal to the one action kind that answers it.
@@ -54,7 +55,7 @@ export const refusalRules: { gate: string | null; match: RegExp; kind: NextActio
   { gate: 'review', match: /^Outstanding change requests/, kind: 'request-rework' },
   { gate: 'review', match: /.*/, kind: 'request-review' },
   // test: a check that failed needs a new head; one that has not answered yet needs a fresh read.
-  { gate: 'test', match: /^Required CI check .+ has not passed on the current candidate(?:; rerun: [\s\S]*)?$/, kind: 'resync' },
+  { gate: 'test', match: ciCheckRefusalPattern, kind: 'resync' },
   // acceptance
   { gate: 'acceptance', match: /is no longer independent:/, kind: 'escalate' },
   { gate: 'acceptance', match: /needs trusted passing evidence/, kind: 'dispatch' },
@@ -130,8 +131,8 @@ export function reviewStandstill(work: Work, all: Work[] = [work], now = new Dat
  * review refusal standing over a head no review can be asked for (`reviewStandstill`).
  */
 export function refusalAction(work: Work, gate: string, refusal: string, all: Work[] = [work], now = new Date()): NextActionKind {
-  if (gate === 'test' && /^Required CI check (.+?) has not passed on the current candidate(?:; rerun: [\s\S]*)?$/.test(refusal)) {
-    const name = refusal.match(/^Required CI check (.+?) has not passed on the current candidate(?:; rerun: [\s\S]*)?$/)![1];
+  const name = gate === 'test' ? ciCheckName(refusal) : null;
+  if (name !== null) {
     const latest = requiredCheck(work, name);
     if (!latest || !failedCheckResults.includes(latest.result)) return 'resync';
     // A failure held by its one owed or running rerun (GY-516) is answered by the rerun's reading.
