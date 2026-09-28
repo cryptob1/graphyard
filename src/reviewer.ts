@@ -1233,7 +1233,7 @@ async function fileApprovedFollowUp(record: ReviewRecord, verdict: NonNullable<R
   // unless it is this approval's own earlier item, which a retried create links instead (GY-598).
   const existing = existingFollowUpItem(work, item, verdict.reviewId) ? undefined
     : filed.get(record.key) ?? openFollowUpItem(work, record.key)?.key;
-  const filedNow = await fileFollowUpThreads({ repository, key: record.key, workId: item.id, pr: record.pr, sha: record.sha, reviewId: verdict.reviewId, reviewer, previous, store,
+  const filedNow = await fileFollowUpThreads({ repository, key: record.key, workId: item.id, pr: record.pr, sha: record.sha, reviewId: verdict.reviewId, reviewer, previous, store, parent: item,
     ...(existing && append ? { existing, append } : {}),
     ...(record.threadReadFailure ? {} : record.threadsListed ? { listed: record.threadsListed } : {}) }, run, resolving, now);
   if (filedNow.item) filed.set(record.key, filedNow.item);

@@ -1,6 +1,6 @@
 import type { Work } from './model.js';
 import { isDelivered } from './model/closure.js';
-import { followUpEntries, followUpParent, machineKind, overdueTriage, triageAttention, triageJudgementSchema, untriaged, type TriageJudgement } from './model/machine-backlog.js';
+import { followUpEntries, followUpParent, machineKind, overdueTriage, parentIsShipped, triageAttention, triageJudgementSchema, untriaged, type TriageJudgement } from './model/machine-backlog.js';
 import { agentOwner, type AttentionItem } from './master/attention.js';
 import type { ResearchSettings } from './research.js';
 import type { Run, RunResult, Runner } from './runner/types.js';
@@ -79,7 +79,16 @@ export interface TriageStepInput {
 export function triageStep(input: TriageStepInput): TriageStepAction[] {
   const actions: TriageStepAction[] = [];
   if (!input.settings.enabled) return actions;
-  const waiting = input.work.filter(item => untriaged(item) && !live.has(item.id)).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  const waiting = input.work.filter(item => {
+    if (!untriaged(item) || live.has(item.id)) return false;
+    // GY-845: skip follow-up items whose parent hasn't shipped yet
+    const parentKey = followUpParent(item);
+    if (parentKey) {
+      const parent = input.work.find(w => w.key === parentKey);
+      if (parent && !parentIsShipped(parent)) return false;
+    }
+    return true;
+  }).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   for (const work of waiting) {
     if (live.size >= (input.settings.triageConcurrency ?? triageConcurrency)) break;
     const failed = failedAt.get(work.id);

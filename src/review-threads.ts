@@ -6,7 +6,8 @@
 // The reviewer's minted token never touches GraphQL: on 2026-09-23 its thread read failed, the
 // failure was swallowed, and the reviewer approved without judging or resolving any thread.
 import type { ChildRun } from './child-runner.js';
-import type { FollowUpEntry } from './model/machine-backlog.js';
+import { parentIsShipped, type FollowUpEntry } from './model/machine-backlog.js';
+import type { Work } from './model/work.js';
 
 /** An unresolved review thread as the reviewer's launch prompt names it: an input to the verdict, not a merge blocker. */
 export interface LaunchThread { id: string; author: string; path: string; line: number | null; outdated: boolean; excerpt: string; createdAt?: string; url?: string }
@@ -403,8 +404,11 @@ export function followUpItem(input: { key: string; workId: string; pr: number; s
  * is sent and repeated verbatim) and replies to no thread twice: before replying, the thread
  * is read for a reply already naming the item, so a reply whose record was lost is not posted again. Runs outside every
  * coordination transaction.
+ *
+ * If the parent is not shipped (GY-845), findings are stored as pendingFollowUps on the parent instead of
+ * filing a work item.
  */
-export async function fileFollowUpThreads(input: { repository: string; key: string; workId: string; pr: number; sha: string; reviewId: number; reviewer: string; previous?: FollowUpFiling; listed?: string[]; store?: FollowUpCreateStore; existing?: string; append?: AppendFollowUpFindings }, run: ChildRun, create: CreateFollowUpItem, now: Date): Promise<FollowUpFiling> {
+export async function fileFollowUpThreads(input: { repository: string; key: string; workId: string; pr: number; sha: string; reviewId: number; reviewer: string; previous?: FollowUpFiling; listed?: string[]; store?: FollowUpCreateStore; existing?: string; append?: AppendFollowUpFindings; parent?: Pick<Work, 'stage' | 'closure'> }, run: ChildRun, create: CreateFollowUpItem, now: Date): Promise<FollowUpFiling> {
   const previous = input.previous;
   const createKey = followUpCreateKey(input.repository, input.pr, input.reviewId);
   const base = { at: now.toISOString(), reviewId: input.reviewId, attempts: (previous?.attempts ?? 0) + 1 };
@@ -453,6 +457,11 @@ export async function fileFollowUpThreads(input: { repository: string; key: stri
     }
   }
   if (!threads.length && !findings.length) return { ...base, named, threads, findings, replied: [], resolved: [], refused, classified: true };
+  // GY-845: if the parent is not shipped, store findings in pendingFollowUps instead of filing an item.
+  const parentNotShipped = input.parent && !parentIsShipped(input.parent);
+  if (parentNotShipped) {
+    return { ...base, named, threads, findings, replied: [], resolved: [], refused, classified: true };
+  }
   let item = carried.item;
   if (!item) {
     const payload = pending?.item ?? followUpItem(input, threads, findings);
