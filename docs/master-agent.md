@@ -66,7 +66,7 @@ A candidate passing the build gate gets, in `autoDispatch`, one producer request
 
 **Requests always settle.** A gone pane (`pane_not_found`) is closed. No request outlives its own token: expired, unreported by Herdr, it settles `expired`; one still pending counts in `dispatch.sessionReconcile.stuck`. Unanswered sessions relaunch elsewhere (12 per request, then `dispatch.abandoned`); an unposted reviewer is reminded first. Killed or vanished producer runs spend no attempt; spent attempts raise `escalation:proof-exhausted`, then a quoting rework.
 
-**Every role fails over on spent quota** or waits as one `capacity` line.
+**Every role fails over on spent quota** or waits as one `capacity` line, uncounted, relaunching oldest-first.
 
 The master never launches reviews or producers by hand, except `master review GY-N [PROFILE]` once the loop stops relaunching.
 
