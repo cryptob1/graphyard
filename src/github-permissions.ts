@@ -5,19 +5,20 @@
  * else. Anything not declared here is not requested and is never silently relied upon.
  */
 export type PermissionLevel = 'read' | 'write' | 'admin';
-export type PermissionFeature = 'repository' | 'observation' | 'check' | 'review-dispatch' | 'comment-events' | 'merge-queue';
+export type PermissionFeature = 'repository' | 'observation' | 'check' | 'review-dispatch' | 'comment-events' | 'merge-queue' | 'check-rerun';
 export interface PermissionRequirement { permission: string; level: PermissionLevel; feature: PermissionFeature; reason: string }
 export interface PermissionShortfall { permission: string; required: PermissionLevel; granted: PermissionLevel | null; features: PermissionFeature[]; reasons: string[] }
 
 const levels: PermissionLevel[] = ['read', 'write', 'admin'];
-export const permissionLabels: Record<string, string> = { metadata: 'Metadata', contents: 'Contents', pull_requests: 'Pull requests', issues: 'Issues', checks: 'Checks', administration: 'Administration' };
+export const permissionLabels: Record<string, string> = { actions: 'Actions', metadata: 'Metadata', contents: 'Contents', pull_requests: 'Pull requests', issues: 'Issues', checks: 'Checks', administration: 'Administration' };
 export const featureLabels: Record<PermissionFeature, string> = {
   repository: 'repository access', observation: 'pull request observation', check: 'the required check',
-  'review-dispatch': 'review dispatch', 'comment-events': 'comment webhooks', 'merge-queue': 'the merge queue',
+  'check-rerun': 'failed CI reruns', 'review-dispatch': 'review dispatch', 'comment-events': 'comment webhooks', 'merge-queue': 'the merge queue',
 };
 
 /** The control-plane App: it observes, publishes the gate check, dispatches reviews, and lands the queue. */
 export const controlPlanePermissions: readonly PermissionRequirement[] = [
+  { permission: 'actions', level: 'write', feature: 'check-rerun', reason: 'rerun failed workflow jobs on the unchanged candidate' },
   { permission: 'metadata', level: 'read', feature: 'repository', reason: 'read the managed repository' },
   { permission: 'contents', level: 'read', feature: 'observation', reason: 'read commits, trees and pull request files' },
   { permission: 'contents', level: 'write', feature: 'merge-queue', reason: 'publish speculative merge-queue tips: the merge commit on the candidate branch and the `refs/graphyard/queue/*` ref that binds it' },
