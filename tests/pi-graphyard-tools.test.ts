@@ -1,8 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, rm, symlink } from 'node:fs/promises';
-import { join } from 'node:path';
-import graphyard, { guardCommand, mktempDirectories, systemPromptSection, type ExtensionApi, type ToolDefinition } from '../integrations/pi/index.js';
+import { mkdir, mkdtemp, readFile, rm, symlink } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { basename, dirname, join } from 'node:path';
+import graphyard, { guardCommand, mktempDirectories, mktempOptions, systemPromptSection, type ExtensionApi, type ToolDefinition } from '../integrations/pi/index.js';
 import { autonomyContract } from '../src/autonomy.js';
 import { decidePayloadSchema, evidencePayloadSchema } from '../src/runner/payloads.js';
 import { piArgs, piRunner } from '../src/runner/pi.js';
@@ -178,6 +179,24 @@ test('unit:pi-destructive-guard the tool-call guard refuses rm on a statically u
       for (const command of ['mktemp -d', 'mktemp -d -t x.XXXXXX', 'mktemp -dt x.XXXXXX', '/usr/bin/mktemp --directory', 'mktemp -qd'])
         assert.deepEqual(mktempDirectories(command, `${listed}\n`), [listed], command);
       assert.deepEqual(mktempDirectories('mktemp', `${listed}\n`), [], 'a file mktemp is not a directory the session created');
+      // GY-564: mktemp's options are parsed as mktemp parses them, not matched as any cluster holding a `d`.
+      for (const command of ['mktemp -du', 'mktemp --dry-run -d', 'mktemp -xd', 'mktemp --dump', 'mktemp -d a.XXXXXX b.XXXXXX', 'mktemp -pd', `mktemp -d -p ${tmpdir()}/elsewhere`, `mktemp -d --tmpdir=${tmpdir()}/elsewhere`, 'mktemp -d -p relative', 'mktemp -d /tmp/*'])
+        assert.deepEqual(mktempDirectories(command, `${listed}\n`), [], command);
+      for (const command of [`mktemp -d -p ${dirname(listed)}`, `mktemp -dp ${dirname(listed)} x.XXXXXX`, `mktemp -d --tmpdir=${dirname(listed)}`, 'mktemp -d --suffix .dir', 'mktemp -d --suffix=.dir -- x.XXXXXX'])
+        assert.deepEqual(mktempDirectories(command, `${listed}\n`), [listed], command);
+      // A --tmpdir template may carry slashes: mktemp creates only its final component, so the line
+      // counts when it is under the named parent at any depth (GY-564 review).
+      const nested = await mkdtemp(join(dirname(listed), 'existing-'));
+      const created = join(nested, 'run.abc123');
+      try {
+        await mkdir(created, { recursive: true });
+        for (const command of [`mktemp -d -p ${dirname(listed)} ${basename(nested)}/run.XXXXXX`, `mktemp -d --tmpdir=${dirname(listed)} ${basename(nested)}/run.XXXXXX`])
+          assert.deepEqual(mktempDirectories(command, `${created}\n`), [created], command);
+        assert.deepEqual(mktempDirectories(`mktemp -d -p ${join(nested, 'deeper')} x.XXXXXX`, `${created}\n`), [], 'still under the named parent');
+      } finally { await rm(nested, { recursive: true, force: true }); }
+      assert.deepEqual(mktempOptions(['-dqt', 'x.XXXXXX']), { directory: true, dryRun: false, parent: null });
+      assert.deepEqual(mktempOptions(['-p/var/tmp', '-d']), { directory: true, dryRun: false, parent: '/var/tmp' });
+      assert.equal(mktempOptions(['--tmpdir-ish']), null);
     } finally { await rm(listed, { recursive: true, force: true }); }
 
     // Symbolic links are followed as rm follows them: a trailing slash on a link to a directory outside deletes outside.

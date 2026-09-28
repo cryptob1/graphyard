@@ -7,6 +7,7 @@ import { assertOutsideRepository, ensureTokens, fingerprint, generateToken, inst
 import { principalSchema } from '../src/server.js';
 import { REDACTED } from '../src/install/types.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { parkRule } from '../src/model/human-request.js';
 
 async function scratch() { return temporaryDirectory('secrets'); }
 
@@ -22,6 +23,29 @@ test('every principal token is crypto-random, role-scoped, and at least 32 chara
   assert.deepEqual(principals.at(-1)!.proofs, ['integration:claim-safety']);
   assert.ok(!plannedPrincipals('owner-project').some(principal => principal.role === 'producer'));
   assert.equal(workerPrincipals(principals).length, 3);
+});
+
+test('unit:install-declares-operator-human — the install declares the operator principal sessionKind human and every agent principal ai, so the operator can answer human-only requests from first sign-in', async () => {
+  const principals = plannedPrincipals('owner-project', { workers: 2, producerProofs: ['unit:install-apply-adapters'] });
+  const operator = principals.find(principal => principal.role === 'admin')!;
+  assert.equal(operator.sessionKind, 'human');
+  for (const principal of principals.filter(entry => entry !== operator)) {
+    assert.equal(principal.sessionKind, 'ai', `${principal.id} (${principal.role}) must be declared ai`);
+  }
+
+  const tokens = new Map(principals.map(principal => [principal.id, generateToken()]));
+  const variable = JSON.parse(principalsVariable(principals, tokens));
+  // The value the installer writes still matches the server's principal schema, and carries the
+  // declaration the server reads: it needs no manual deployment edit.
+  const parsed = principalSchema.parse(variable);
+  assert.equal(parsed.find(principal => principal.role === 'admin')!.sessionKind, 'human');
+  assert.ok(parsed.filter(principal => principal.role !== 'admin').every(principal => principal.sessionKind === 'ai'));
+
+  // That declaration is exactly what the needs-you surface judges: an undeclared operator is
+  // refused every human-only answer, a declared human one is accepted.
+  assert.match(parkRule.refuse({ id: operator.id, role: 'admin', sessionKind: 'undeclared' })!, /needs a declared human session/);
+  assert.equal(parkRule.refuse({ id: operator.id, role: 'admin', sessionKind: 'human' }), null);
+  assert.match(parkRule.refuse({ id: 'an-agent', role: 'worker', sessionKind: 'ai' })!, /Only the human operator/);
 });
 
 test('tokens are written once under the installation directory with mode 0600 and never rotate on re-apply', async () => {
