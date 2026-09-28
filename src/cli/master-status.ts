@@ -24,6 +24,7 @@ import { ghCheckAnnotations, qualifyTimingFailures } from './timing-failures.js'
 import { setupHealth } from './master-setup.js';
 import { stuckRequestReport, withStuckRequests } from './stuck-requests.js';
 import { nameUnresolvedThreads } from '../merge-queue.js';
+import { researchReport } from '../research.js';
 import { reworkRoundsWithOwnCauses } from '../flow-analytics.js';
 import { observationThroughputStatus } from '../github.js';
 import type { LoopSupervisorHost } from '../supervisor.js';
@@ -46,11 +47,10 @@ export { cycleBudget } from '../daemon/metrics.js';
 // `master scope` lives in its own module, read from here as it always was.
 export { approveScopeRequest } from './master-scope.js';
 
-// Observation throughput and the queue head's lag live beside the observation schedule they
-// read; the report reads them from here, as do the tests.
+// Observation throughput and the queue head's lag live beside the observation schedule they read.
 export { observationThroughputStatus };
 // The attention builders live beside each other in `status-attention.ts`; the report reads them
-// from here, as does everything that read them from here before the split.
+// from here.
 import { mergeStallAttention } from './status-attention.js';
 export { approverLaunchAttention, mergeStallAttention, nameOrphanSupervisors, orphanSupervisorAttention, stalledItemAttention, supervisorReclaimCommand } from './status-attention.js';
 export { humanNeededAttention, needsHumanActions, scopeRequestAttention } from './owed-report.js';
@@ -204,6 +204,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     // The inverted loop: what the control plane says each item needs, who is running it, and
     // every session it can be watched through.
     actions: needsHumanActions(actionReport(snapshot), owed.rows),
+    research: researchReport(master.run, snapshot.work, Date.parse(snapshot.now)),
     // Presence and supervision (GY-105) and the release each registered executor runs (GY-126).
     executors: { ...executors, ...releases, attention: [...executors.attention, ...releases.attention] }, sessions: sessionReport(snapshot),
     releaseLag: lag.report,

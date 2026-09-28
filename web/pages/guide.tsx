@@ -2,7 +2,7 @@ import Term from '../components/term';
 
 /**
  * "How Graphyard works" in under 300 words, opened from Help at the foot of the sidebar. It uses
- * the dashboard's own words — the five groups and the seven pull-request steps — and nothing else.
+ * the dashboard's own words — the five groups and the eight pull-request steps — and nothing else.
  * The long, precise version is docs/how-graphyard-works.md; this one is for a first visit.
  */
 export default function GuidePage() {
@@ -18,8 +18,9 @@ export default function GuidePage() {
       <li><strong>Backlog</strong>: not released yet, so no clock runs.</li>
     </ul>
     <p>Each tile on the Work page counts one group; press it to see just those items.</p>
-    <h2>Every <Term term="pull request">pull request</Term> takes seven steps</h2>
+    <h2>Every <Term term="pull request">pull request</Term> takes eight steps</h2>
     <ol>
+      <li><strong>Research</strong>: a cheap agent writes the brief the build starts from.</li>
       <li><strong>Build</strong>: a builder agent writes the change.</li>
       <li><strong>Validate</strong>: it only touches the files it planned to.</li>
       <li><strong>Test</strong>: the automated checks run.</li>

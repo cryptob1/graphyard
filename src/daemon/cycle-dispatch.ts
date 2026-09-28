@@ -20,7 +20,7 @@ import { researchHold, researchRunner, researchSettings, researchStep } from '..
 
 /** Step 4: dispatch claimable work under capacity, and report base refreshes of in-flight candidates. */
 export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profileHealth>, assessments: Record<string, ContainmentAssessment>) {
-  const { config, state, effects, now, snapshot, clock, performed, isolate, agents, credentials, open } = cycle;
+  const { config, state, effects, now, snapshot, clock, performed, isolate, agents, credentials, open, timings } = cycle;
   // 4. Dispatch claimable work to a healthy profile. The launcher claims under the worker's own
   //    identity; the daemon never holds a lease. An unhealthy profile is skipped, not waited on.
   //    Planned-file overlap never holds an item (dispatch is optimistic: the merge queue and a
@@ -58,6 +58,10 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
   //     within its time limit. A run that fails or times out is recorded and the item is built
   //     without a brief; research never holds an item past its bound. It runs only once
   //     `run.research` names the research account: an unconfigured loop dispatches as before.
+  //     The loop publishes whether it researches, so the dashboard shows a released feature's
+  //     Research step as skipped where no run will start (GY-434); a failed publication is retried
+  //     next cycle and holds nothing back.
+  if (effects.publishResearch) await timings.step('research settings', () => effects.publishResearch!().catch(() => undefined));
   const held = new Set([...held885, ...new Set(offered.filter(item => researchHold(item, clock)).map(item => item.id))]);
   if (effects.recordResearch && effects.research && config.run?.research) await isolate('dispatch', null, 'research', async () => {
     const settings = researchSettings(config.run);

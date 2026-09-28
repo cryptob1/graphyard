@@ -16,8 +16,8 @@ const unprefixed = (sentence: string) => sentence.replace(/^Stuck: /, '').replac
 
 /**
  * One item as a row of its group (GY-161): key, title, one line saying why it is where it is, the
- * seven pull-request steps while it moves, who acts next as a role, and — only for moving work —
- * how long it has held the step those seven show (`stepHeld`), red past the one configured
+ * eight pull-request steps while it moves, who acts next as a role, and — only for moving work —
+ * how long it has held the step those eight show (`stepHeld`), red past the one configured
  * threshold. On a phone the same element lays out as a card. The pull request is linked once, on the row's second line; the open
  * control and that link are siblings, never nested, so each stays a separate keyboard stop.
  */

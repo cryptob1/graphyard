@@ -30,8 +30,7 @@ import { answeringWidening } from './reconcile.js';
 import { type OrphanSupervisor, readyToRetry, stopWatchSupervisor } from './sessions.js';
 import { neededDecision, type ExhaustedProof, type RoutineDecisionAction } from './decisions.js';
 import type { FaultClassPolicy, FaultKind, faultClassItem } from '../model/fault-classes.js';
-import type { ControlPlaneStatus } from '../master.js';
-import { readCredentialFile } from '../master.js';
+import { readCredentialFile, type ControlPlaneStatus } from '../master.js';
 import { onceAnnotations, timingFaultAttention, type ReportedAttention } from './faults.js';
 import type { daemonSummary } from './run.js';
 import { observeDeployment } from './deployment.js';
@@ -39,7 +38,7 @@ import { detectLoopSupervisorUnit, performSelfUpgrade, type SelfUpgradeOutcome }
 import { readRelease, restartExecutors } from '../executor-fleet.js';
 import { serverCallName, timedCall, timedFetch, timedRun } from '../master/timings.js';
 import type { RunRecord, Runner } from '../runner/types.js';
-import type { ResearchEvent } from '../research.js';
+import { researchConfigured, type ResearchEvent } from '../research.js';
 import { diagnosticianRole, type DiagnosticianEffects } from './diagnosis.js';
 import { diagnosticianSettings } from '../runner/payloads.js';
 import { piRunner } from '../runner/pi.js';
@@ -55,6 +54,20 @@ export const stoppedStates = ['idle', 'done', 'blocked'];
 export const launcherRetry = (error: unknown) => { const retryAt = (error as { retryAt?: unknown } | null)?.retryAt; return typeof retryAt === 'string' ? retryAt : null; };
 export const failoverKey = (role: CapacityRole, work: Work, attempt: string | number) => `failover:${role}:${work.id}:${attempt}`;
 export const capacityKey = (role: CapacityRole) => `capacity:${role}`;
+/**
+ * A publication the loop runs every cycle but sends only on a change: the value is remembered once
+ * the control plane accepted it, so a failed send is retried next cycle and a steady value sends
+ * nothing. A restarted loop sends once more; the control plane records only a change (GY-434).
+ */
+export function changePublisher<T>(read: () => T, send: (value: T) => Promise<unknown>) {
+  let published: { value: T } | null = null;
+  return async () => {
+    const value = read();
+    if (published && published.value === value) return;
+    await send(value);
+    published = { value };
+  };
+}
 
 export interface DaemonEffects {
   closeSession: (pane: string) => void | Promise<void>;
@@ -117,6 +130,12 @@ export interface DaemonEffects {
    * before the next merge.
    */
   publishMergeBatchSize?: () => Promise<unknown>;
+  /**
+   * Publishes whether this loop researches items before build (`run.research`, GY-434), so the
+   * dashboard reads a released feature's Research step as pending only where a run will start;
+   * sent only on a change.
+   */
+  publishResearch?: () => Promise<unknown>;
   /** Asks the provider to run the trusted smoke workflow against the observed deployment. */
   requestSmoke: (work: Work) => void | Promise<void>;
   /**
@@ -688,6 +707,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       await mutate('merge-queue', config);
       publishedMergeQueue = published;
     },
+    publishResearch: changePublisher(() => researchConfigured(current().run), configured => mutate('research-settings', { configured })),
     recordDeployment: (work, observation) => mutate(`work/${work.id}/deployment`, { sha: observation.sha, mergeSha: work.delivery!.mergeSha, source: observation.source, observedAt: observation.observedAt }),
     exhaustedProofs: async () => Object.entries((await readDispatchCursor(root, current(), () => {})).abandoned).filter(([, entry]) => entry.kind === 'producer')
       .map(([requestId, entry]) => ({ requestId, work: entry.work, sha: entry.sha, group: entry.group ?? null, proofs: entry.proofs ?? [], attempts: entry.attempts, reason: entry.reason })),
