@@ -19,7 +19,7 @@ Sessions run in no-approval mode (`"approvals": "auto"`): `--permission-mode byp
 
 ### The coordinator checkout is confined at the OS level
 
-Every launched session (worker, reviewer, producer, approver, headless included) runs so the coordinator checkout is unwritable to shell commands (GY-888). A codex `--sandbox workspace-write` is the confinement only while every path it grants that touches the checkout or its `.git` stays inside the session's own worktree and worktree admin directory; a workspace or `--add-dir` holding the checkout or the common Git directory (as a worker's commit grant does) gives up that claim. Every other launch carries the bubblewrap wrapper: the checkout bind-mounted read-only, PIDs unshared, `/proc` fresh, the host's process-launch channels hidden (the session bus socket, the systemd manager directories, `/run/dbus` — no `systemd-run` can start the write outside the namespace), and only the session's own directory and worktree admin re-exposed beside the shared Git areas (objects, `graphyard/` branches, remote refs, `FETCH_HEAD`). A launch that cannot apply the confinement (bubblewrap missing, a non-Linux host, namespaces refused, a confinement-off profile, a checkout it cannot derive) is refused, naming the reason. The master session is exempt (it runs the loop's own commands there). The loop and executors never start from an uncommitted checkout; escalation names the dirty paths.
+Every launched session runs with the coordinator checkout unwritable to shell commands (GY-888). A codex `--sandbox workspace-write` confines only while every granted path touching the checkout or its `.git` stays inside the session's worktree and its admin directory; any wider grant gives up that claim. Every other launch runs under bubblewrap: the checkout bind-mounted read-only, PIDs unshared, `/proc` fresh, launch channels hidden (session bus socket, systemd manager directories, `/run/dbus`), and only the session's own and worktree-admin directories re-exposed beside the shared Git areas (objects, `graphyard/` branches, remote refs, `FETCH_HEAD`). A launch that cannot apply it (bubblewrap missing, non-Linux, namespaces refused, a confinement-off profile, an underivable checkout) is refused with the reason. The master session is exempt (the loop's commands run there). The loop and executors never start from an uncommitted checkout; escalation names the dirty paths.
 
 ## Accounts and failover
 
@@ -53,11 +53,11 @@ A runtime stopped on a first-run prompt is **`awaiting consent`**. The launcher 
 
 ### Acknowledgement, the one re-prompt, and never started
 
-A reviewer or producer is `awaiting acknowledgement` until 30 s of activity (`counts.dispatchAwaiting`). Quiet after `run.acknowledgementSeconds` (default 90), it is re-prompted once; settling resultless makes it **`never started`**, relaunched without retry cost; three exhaust the request (`retry.neverStarted`).
+A reviewer or producer is `awaiting acknowledgement` until 30 s of activity (`counts.dispatchAwaiting`). Quiet after `run.acknowledgementSeconds` (default 90), it is re-prompted once; settling resultless makes it **`never started`**, relaunched cost-free; three exhaust the request (`retry.neverStarted`).
 
 ### Resume, idle-with-lease and exited sessions
 
-When a live attempt's blocker or scope request resolves, its inactive session is re-prompted once (item, epoch, change, the complete command); blocking again on that epoch ends the attempt, and a fresh session, preferably another runtime, takes over. **Idle-with-lease** (30 quiet minutes, nothing open) is re-prompted once, then handed to a new attempt on its branch.
+When a live attempt's blocker or scope request resolves, its inactive session is re-prompted once (item, epoch, change, `complete`); blocking again on that epoch ends the attempt, and a fresh session, preferably another runtime, takes over. **Idle-with-lease** (30 quiet minutes, nothing open) is re-prompted once, then handed to a new attempt on its branch.
 
 ### Panes are closed and reclaimed
 
