@@ -217,7 +217,7 @@ export default function FleetPage({ api, status }: Pick<Dashboard, 'api' | 'stat
   const cancel = async (id: string) => { try { await api(`agent-registry/connect/${id}/cancel`, { reason: 'Cancelled from Settings › Agents' }); await load(); } catch (error) { setFormError((error as Error).message); } };
   /** Take a failed connect's card off this page for this browser; the ledger record is untouched. */
   const remove = (id: string) => setRemoved(current => { const next = [...new Set([...current, id])]; try { localStorage.setItem('graphyard.removedConnects', JSON.stringify(next)); } catch { /* a private window keeps it for the session */ } return next; });
-  /** Retry reconnects the same provider on the same host: an api key is sealed again (it was never stored), a subscription login starts afresh. */
+  /** Retry reconnects the same provider on the same host: an api key is sealed again (it was never stored), a subscription login starts afresh. Admins only, like answering the login code: retrying re-enters the credential; coordinators keep inspect, cancel and remove. */
   const retry = (failed: ConnectView) => setWizard({ ...closedWizard, open: true, provider: failed.provider, host: failed.host });
   /** The card's 'change': open Advanced and name the account in the role editor's order. */
   const changeRoles = (account: string) => {
