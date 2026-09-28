@@ -127,3 +127,25 @@ test('unit:verify-mergeability-wait-bounded — final verification waits on GitH
   assert.deepEqual(ids(mergeabilityComputingRefusal), ['mergeability-computing']);
   assert.deepEqual(ids(notMergeable), ['not-mergeable']);
 });
+
+test('manual:review-followups-triaged — each follow-up from the approved review of GY-548 (PR #293) is addressed in code: the total mergeability wait in verify() is one observation\'s, never two, and the pending computation keeps its own catalogue id and example, apart from a real refusal', async () => {
+  // Follow-up 1 (src/github.ts verify): a pull request that stays null waits out GitHub's
+  // computation once across both observations of verify(), so the total wait in final
+  // verification stays within one observation's bound instead of doubling it.
+  const work = { id: 'id-GY-548', key: 'GY-548', policy: { review: false, checks: ['test'] }, plannedFiles: ['src/feature.ts'], submission: { pr: PR, epoch: 1 }, policyRevision: 1, observation: null } as unknown as Work;
+  const oneObservation = 1 + mergeabilityRetries + 1;
+  const computing = provider([null]);
+  const verified = await computing.github.verify(work);
+  assert.equal(verified.mergeabilityUnknown, true);
+  assert.ok(computing.reads.length < oneObservation * 2, `verify() made ${computing.reads.length} mergeability reads of a never-settling pull request; two waiting observations would make ${oneObservation * 2}`);
+  assert.equal(computing.reads.length, oneObservation + 2, 'only the first observation waits out the computation; the second reads once and confirms');
+
+  // Follow-up 2 (src/model/refusal-catalogue.ts): the computing refusal has its own catalogue id
+  // and example, so UI and metrics that group by id never count a pending computation as a refusal.
+  const shapes = (text: string) => gateRefusalCatalogue.filter(entry => entry.gate === 'merge' && entry.match.test(text));
+  const pending = shapes(mergeabilityComputingRefusal), conflict = shapes(notMergeable);
+  assert.deepEqual(pending.map(entry => entry.id), ['mergeability-computing']);
+  assert.deepEqual(conflict.map(entry => entry.id), ['not-mergeable']);
+  assert.notEqual(pending[0].example, conflict[0].example, 'a pending computation and a real refusal stay apart by example too');
+  assert.equal(refusalRuleFor('merge', mergeabilityComputingRefusal)?.kind, 'resync', 'a pending computation is still only ever answered by a fresh read');
+});
