@@ -3,7 +3,7 @@
 
 ## Master coordination loop
 
-Restart `graphyard master run` freely; it never dispatches twice. `master status` → `daemon` gives health and `cycleTime`; `journalctl --user -u graphyard-master` is the log. `daemon.metrics.timings` times steps and calls over 1s; a cycle over 60 s raises `loop` attention naming the three slowest. Launches run beside cycles (`run.launchConcurrency`, default 3). Failed requests log route and SQL.
+Restart `graphyard master run` freely; it never dispatches twice. `master status` → `daemon` gives health and `cycleTime`; `journalctl --user -u graphyard-master` logs. `daemon.metrics.timings` times steps and calls over 1s; a cycle over 60 s raises `loop` attention. Launches run beside cycles (`run.launchConcurrency`, default 3). Failed requests log route and SQL.
 
 ### Perpetual master loop
 
@@ -11,7 +11,7 @@ Restart `graphyard master run` freely; it never dispatches twice. `master status
 
 ## Lost worker before submission
 
-A lease expires 120 seconds after the last heartbeat, or one further lease period after a recorded server-side renewal fault; the next claim, a higher epoch, keeps the worktree. An unexplained lapse raises `lease-loss` ([classification](protocol/leases.md#how-a-lease-ends)), blocking merge until [settled](delegation.md#who-may-settle-what).
+A lease expires 120 seconds after the last heartbeat — one further lease period after a recorded server-side renewal fault; the next claim, a higher epoch, keeps the worktree. An unexplained lapse raises `lease-loss` ([classification](protocol/leases.md#how-a-lease-ends)), blocking merge until [settled](delegation.md#who-may-settle-what).
 
 ## Supervisor died leaving a containment quarantine
 
@@ -35,7 +35,7 @@ A required check failing on a tip or head reruns once per sha (*rerun failed job
 
 `x-ratelimit-remaining`/`-limit`/`-reset` project exhaustion (`projectedExhaustionAt`).
 
-A projected exhaustion above the reserve is shown as `github-budget-projection` and counts toward no fault class; below the reserve, or paused, it is the `github-budget` observation fault.
+A projected exhaustion above the reserve is shown, uncounted, as `github-budget-projection`; below the reserve or paused it is the `github-budget` observation fault.
 
 ### Observation cadence by state
 
@@ -64,7 +64,7 @@ A rate-limit `403`/`429` pauses requests; gates read stale until it lifts: nothi
 
 ### Reading the budget
 
-`graphyard status` → `githubBudget`; `master status` raises `github` attention.
+`graphyard status` (or `GET /api/status`) → `githubBudget`.
 
 ### Webhook liveness
 
@@ -76,7 +76,7 @@ Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROF
 
 ## Bootstrap mode for a self-proving change
 
-A `policy:bootstrap` holder adds `"bootstrap": {"reason": "…", "contractPaths": ["src/herdr/recovery.ts"]}` to that criterion. Other gates apply; `e2e:` proofs cannot be deferred; the next item touching those paths owes it (`graphyard obligations`).
+A `policy:bootstrap` holder adds `"bootstrap": {"reason": "…", "contractPaths": ["src/herdr/recovery.ts"]}` to that criterion; other gates apply, `e2e:` proofs cannot be deferred, and the next item touching those paths owes it (`graphyard obligations`).
 
 ## Delivered with a failed smoke proof
 
@@ -88,7 +88,7 @@ A merge production never served is a `delivery.deployment-incident` ([observatio
 
 ## Merge bypass
 
-An ungated merge is a permanent violation: repair access, open a follow-up item, never backfill evidence. An admin opens a direct-merge window with `graphyard operator direct-merges on --since ISO REASON`.
+An ungated merge is a permanent violation: repair access, open a follow-up item, never backfill evidence; an admin opens a direct-merge window with `graphyard operator direct-merges on --since ISO REASON`.
 
 ## Credentials
 
@@ -109,7 +109,7 @@ graphyard grants grant ci "integration:*,unit:*" "CI proofs"
 
 ## Scale limits
 
-`GRAPHYARD_RECONCILE_BATCH_MS` (default 250) sizes reconcile batches; `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (default 4, ≤ half pool) share one pace per token: budget above reserve, minus others' spend, paced to reset. Claims: head `max(2,batchSize,parallelTips)` band, in-flight merges, never-observed submissions, five-minute-due jobs, review/rework waits, running sessions (earlier if tight), `available_at`; tight, idle items await webhooks. `observationThroughput` reports budget, pace, head lag, oldest unobserved submission. Heartbeat, claim, `complete` and `blocked` own the lease pool; `leaseHealth` (`GET /api/status`) reports heartbeat p50/p95 and failures.
+`GRAPHYARD_RECONCILE_BATCH_MS` (default 250) sizes reconcile batches; `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (default 4, ≤ half pool) share one pace per token: budget above reserve, minus others' spend, paced to reset. Claims: head `max(2,batchSize,parallelTips)` band, in-flight merges, never-observed submissions, five-minute-due jobs, review/rework waits, running sessions (earlier if tight), `available_at`; tight, idle items await webhooks. `observationThroughput` reports budget, pace, head lag, oldest unobserved submission. Heartbeat, claim, `complete` and `blocked` own the lease pool; `leaseHealth` reports heartbeat p50/p95 and failures.
 
 ### Concurrent reconciliation
 
