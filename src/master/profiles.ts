@@ -1,6 +1,6 @@
 // Concern: worker, reviewer and producer profiles, the master config schema, and profile session naming.
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
 import { defaultChildRun } from '../child-runner.js';
@@ -562,8 +562,21 @@ const sandboxWritableScope = (args: readonly string[], sessionDirectory: string)
  */
 const runtimeSandboxConfines = (input: ConfinementInput): boolean => {
   if (runtimeSandboxes[input.kind]?.mode([...input.args]) !== 'workspace-write') return false;
-  const root = resolve(input.coordinatorRoot);
-  return !sandboxWritableScope(input.args, input.sessionDirectory).some(path => path === root || withinCheckout(root, path));
+  const root = resolve(input.coordinatorRoot), git = join(root, '.git');
+  const own = resolve(input.sessionDirectory);
+  const admin = sessionGitAdminDirectory(own, root);
+  // What the sandbox may grant inside the checkout: the session's own worktree and its own worktree
+  // admin directory — never the checkout itself. A session whose workspace IS the checkout root
+  // therefore has no exemption at all.
+  const exempt = [...(own !== root ? [own] : []), ...(admin && admin !== root ? [admin] : [])];
+  const inside = (path: string, directory: string) => path === directory || withinCheckout(path, directory);
+  const overlaps = (path: string, directory: string) => path === directory || withinCheckout(directory, path) || withinCheckout(path, directory);
+  // A grant disqualifies when it touches the checkout or its Git administrative state outside the
+  // exemption — a worker launch grants the common `.git` so the runtime can commit, and that grant
+  // would leave coordinator refs, index and reflogs writable; such a launch carries the mount
+  // wrapper, which re-exposes only the session's own Git paths (GY-888, review finding).
+  return !sandboxWritableScope(input.args, input.sessionDirectory).some(path =>
+    (overlaps(path, root) || overlaps(path, git)) && !exempt.some(zone => inside(path, zone)));
 };
 
 /** The linked-worktree administrative directory the session's own directory writes through, or null when it is not a linked worktree of the coordinator checkout. A linked worktree points at its admin through its `.git` file, so this reads the pointer rather than asking git. Pinning one session's Git admin, instead of the whole `.git/worktrees`, keeps concurrent assignments' worktree metadata unwritable to each other (GY-888). */
@@ -580,13 +593,44 @@ export const sessionGitAdminDirectory = (sessionDirectory: string, root: string)
 };
 
 /**
+ * The bubblewrap words that hide the host's process-launch channels under paths that exist: each
+ * named directory is replaced by an empty one, and each bus socket by a device that no client can
+ * connect to. Through the session bus a confined process could otherwise ask the user's systemd
+ * manager (`systemd-run --user`) — or the system one over `/run/dbus` (`systemd-run --system`) — to
+ * start a helper outside this mount namespace and write the underlying, writable coordinator
+ * checkout, which a fresh `/proc` alone does not close (GY-888, review finding). Candidates that
+ * would hide a protected path are dropped.
+ */
+export const processLaunchMaskWords = (
+  targets: { directories?: readonly string[]; busSockets?: readonly string[] },
+  protect: readonly string[],
+): readonly string[] => {
+  const hides = (path: string) => !protect.some(p => p === path || withinCheckout(p, path));
+  const directories = [...new Set((targets.directories ?? []).filter(path => isAbsolute(path) && isDirectoryPath(path) && hides(path)))];
+  const sockets = [...new Set((targets.busSockets ?? []).filter(path => isAbsolute(path) && existsSync(path) && !isDirectoryPath(path) && hides(path)))];
+  return [...directories.flatMap(path => ['--tmpfs', path]), ...sockets.flatMap(path => ['--ro-bind', '/dev/null', path])];
+};
+/**
+ * The host's own process-launch channels that exist here: the systemd manager directories and
+ * session-bus sockets of the user's runtime directory (`/run/user/<uid>`, `$XDG_RUNTIME_DIR`) and
+ * the system bus directory. Whether a candidate may be hidden is `processLaunchMaskWords`'s call.
+ */
+export const hostProcessLaunchTargets = (uid: number | undefined = process.getuid?.(), env: NodeJS.ProcessEnv = process.env): { directories: string[]; busSockets: string[] } => {
+  const runtimeDirectories = [...new Set([uid === undefined ? null : `/run/user/${uid}`, env.XDG_RUNTIME_DIR || null]
+    .filter((path): path is string => !!path && isAbsolute(path)).map(path => { try { return realpathSync(path); } catch { return path; } }))];
+  const directories = [...runtimeDirectories.map(directory => join(directory, 'systemd')), '/run/dbus', '/var/run/dbus'];
+  return { directories, busSockets: runtimeDirectories.map(directory => join(directory, 'bus')) };
+};
+
+/**
  * The bubblewrap words that run a session with the coordinator checkout unwritable (GY-888): the
  * whole host exactly as it is, the checkout bind-mounted read-only over it, and only what the
  * session's own work needs re-exposed writable on top — bubblewrap applies each bind in order, so
  * the later ones shadow the read-only one. The namespace also unshares PIDs and mounts a fresh
  * `/proc`, so another process's `/proc/<pid>/root` is not a route back to the writable checkout
- * (the escape `containedInstall` closes for installs); a session keeps the network and its own
- * process tree. The wrapper ends with `--`, so the runtime command follows it.
+ * (the escape `containedInstall` closes for installs), and the host's process-launch channels are
+ * hidden so no command can start the write outside the namespace; a session keeps the network and
+ * its own process tree. The wrapper ends with `--`, so the runtime command follows it.
  */
 export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDirectory: string; bwrap?: string | null }): readonly string[] {
   const root = resolve(input.coordinatorRoot), directory = resolve(input.sessionDirectory);
@@ -600,7 +644,8 @@ export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDi
   const shared = [...sharedDirectories, ...(existsSync(fetchHead) && !isDirectoryPath(fetchHead) ? [fetchHead] : [])];
   const own = withinCheckout(directory, root) ? [directory] : [];
   const bwrap = input.bwrap ?? 'bwrap';
-  return [bwrap, '--unshare-pid', '--dev-bind', '/', '/', '--proc', '/proc', '--ro-bind', root, root,
+  const masks = processLaunchMaskWords(hostProcessLaunchTargets(), [root, directory]);
+  return [bwrap, '--unshare-pid', '--dev-bind', '/', '/', ...masks, '--proc', '/proc', '--ro-bind', root, root,
     ...[...shared, ...own].flatMap(path => ['--bind', path, path]), '--'];
 }
 

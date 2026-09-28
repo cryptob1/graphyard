@@ -1,10 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { closeSync, mkdirSync, mkdtempSync, openSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { bwrapOnPath, coordinatorConfinement, coordinatorConfinementRefusal, sessionMountNamespaceWorks, workerConfinementRefusal } from '../src/master/profiles.js';
+/** Whether `path` is a directory; mirrors the launcher's own check for re-exposed paths. */
+const isDirectory = (path: string) => { try { return statSync(path).isDirectory(); } catch { return false; } };
+import { bwrapOnPath, coordinatorConfinement, coordinatorConfinementRefusal, hostProcessLaunchTargets, processLaunchMaskWords, sessionMountNamespaceWorks, workerConfinementRefusal } from '../src/master/profiles.js';
 import { headlessConfinementWrapper, launcherCoordinatorRoot, launcherRootUndetermined, prepareConfinedGitPaths, sessionConfinement, startAgentSession } from '../src/master/launch.js';
 import { confiningSpawn } from '../src/runner/roles.js';
 import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
@@ -40,17 +42,20 @@ test('unit:coordinator-write-blocked-for-shell — every runtime kind launches c
   const base = mkdtempSync(join(tmpdir(), 'graphyard-confinement-'));
   try {
     const { root, worktree } = coordinatorFixture(base);
-    // Every runtime kind builds a launch whose confinement is present, by the mechanism its runtime supports.
+    // Every runtime kind builds a launch whose confinement is present, by the mechanism its runtime
+    // supports. `bwrap` is named explicitly so these words do not depend on the host's PATH.
+    const build = (kind: string, args: string[], sessionDirectory: string = worktree) =>
+      coordinatorConfinement({ kind, args, coordinatorRoot: root, sessionDirectory, platform: 'linux', mountNamespaceWorks: true, bwrap: 'bwrap' });
     for (const [kind, args] of [['claude', []], ['cursor', []], ['opencode', []], ['pi', []], ['codex', ['--sandbox', 'workspace-write']]] as [string, string[]][]) {
-      const confinement = await coordinatorConfinement({ kind, args, coordinatorRoot: root, sessionDirectory: worktree, platform: 'linux', mountNamespaceWorks: true });
+      const confinement = await build(kind, args);
       assert.ok(confinement, `${kind} launches confined`);
       if (kind === 'codex') {
         assert.equal(confinement.mechanism, 'runtime-sandbox', 'the codex workspace-write sandbox is the confinement');
         assert.deepEqual(confinement.wrapper, [], 'the runtime sandbox needs no wrapper words');
       } else {
         assert.equal(confinement.mechanism, 'read-only-mount', `${kind} uses read-only-mount mechanism`);
-        const roIdx = confinement.wrapper.indexOf('--ro-bind');
-        assert.ok(roIdx >= 0 && confinement.wrapper[roIdx + 1] === root && confinement.wrapper[roIdx + 2] === root, `${kind} binds ${root} read-only with correct arguments`);
+        const rootIdx = confinement.wrapper.indexOf(root);
+        assert.ok(rootIdx > 0 && confinement.wrapper[rootIdx - 1] === '--ro-bind' && confinement.wrapper[rootIdx + 1] === root, `${kind} binds ${root} read-only with correct arguments`);
         const worktreeIdx = confinement.wrapper.indexOf(worktree);
         assert.ok(worktreeIdx > 0 && confinement.wrapper[worktreeIdx - 1] === '--bind', `${kind} re-exposes ${worktree} with --bind`);
         assert.equal(confinement.wrapper.at(-1), '--', `${kind}'s wrapper ends with --`);
@@ -63,23 +68,30 @@ test('unit:coordinator-write-blocked-for-shell — every runtime kind launches c
       }
     }
     // A codex runtime without its workspace-write sandbox carries the mount namespace instead: it is never launched unconfined.
-    const unconfinedCodex = await coordinatorConfinement({ kind: 'codex', args: ['--sandbox', 'danger-full-access'], coordinatorRoot: root, sessionDirectory: worktree, platform: 'linux', mountNamespaceWorks: true });
+    const unconfinedCodex = await build('codex', ['--sandbox', 'danger-full-access']);
     assert.equal(unconfinedCodex?.mechanism, 'read-only-mount', 'a codex sandbox turned off falls back to the read-only mount');
     // A codex workspace-write sandbox is NOT the confinement when a path it grants would hold the
     // checkout: a terminal reviewer or producer runs from the coordinator root, and a --add-dir
     // may name it — those launches carry the mount wrapper like any other runtime.
-    const workspaceRoot = await coordinatorConfinement({ kind: 'codex', args: ['--sandbox', 'workspace-write'], coordinatorRoot: root, sessionDirectory: root, platform: 'linux', mountNamespaceWorks: true });
+    const workspaceRoot = await build('codex', ['--sandbox', 'workspace-write'], root);
     assert.equal(workspaceRoot?.mechanism, 'read-only-mount', 'codex running from the coordinator root is mount-confined, not sandbox-confined');
-    const addDirRoot = await coordinatorConfinement({ kind: 'codex', args: ['--sandbox', 'workspace-write', '--add-dir', root], coordinatorRoot: root, sessionDirectory: worktree, platform: 'linux', mountNamespaceWorks: true });
+    const addDirRoot = await build('codex', ['--sandbox', 'workspace-write', '--add-dir', root]);
     assert.equal(addDirRoot?.mechanism, 'read-only-mount', 'a codex --add-dir naming the checkout gives up the sandbox claim');
-    const addDirOutside = await coordinatorConfinement({ kind: 'codex', args: ['--sandbox', 'workspace-write', '--add-dir', worktree], coordinatorRoot: root, sessionDirectory: worktree, platform: 'linux', mountNamespaceWorks: true });
+    const addDirOutside = await build('codex', ['--sandbox', 'workspace-write', '--add-dir', worktree]);
     assert.equal(addDirOutside?.mechanism, 'runtime-sandbox', 'a codex --add-dir outside the checkout keeps the sandbox claim');
-    assert.ok(await coordinatorConfinementRefusal({ kind: 'codex', args: ['--sandbox', 'workspace-write'], coordinatorRoot: root, sessionDirectory: root, platform: 'darwin' }), 'a codex workspace holding the checkout is refused where no mount namespace can be built');
+    // A worker launch grants the coordinator's common Git directory so its runtime can commit —
+    // that grant covers the coordinator's own refs, index and reflogs, so it gives up the sandbox
+    // claim and carries the mount wrapper, which re-exposes only the session's own Git paths.
+    const addDirGitAdmin = await build('codex', ['--sandbox', 'workspace-write', '--add-dir', join(root, '.git')]);
+    assert.equal(addDirGitAdmin?.mechanism, 'read-only-mount', 'a codex --add-dir of the coordinator Git admin gives up the sandbox claim');
+    const addDirForeignAdmin = await build('codex', ['--sandbox', 'workspace-write', '--add-dir', join(root, '.git', 'worktrees')]);
+    assert.equal(addDirForeignAdmin?.mechanism, 'read-only-mount', 'a codex --add-dir covering every assignment\'s admin directory gives up the sandbox claim');
+    assert.ok(await coordinatorConfinementRefusal({ kind: 'codex', args: ['--sandbox', 'workspace-write'], coordinatorRoot: root, sessionDirectory: root, platform: 'darwin', bwrap: 'bwrap' }), 'a codex workspace holding the checkout is refused where no mount namespace can be built');
     // A session directory that is not itself a linked worktree (a headless producer's checkout)
     // keeps the whole worktrees area writable, because it creates worktrees of its own.
     const producerDirectory = join(root, '.graphyard', 'producer-checkout');
     mkdirSync(producerDirectory, { recursive: true });
-    const producer = await coordinatorConfinement({ kind: 'pi', args: [], coordinatorRoot: root, sessionDirectory: producerDirectory, platform: 'linux', mountNamespaceWorks: true });
+    const producer = await build('pi', [], producerDirectory);
     assert.ok(producer, 'the producer checkout launches confined');
     assert.ok(producer.wrapper.includes(join(root, '.git', 'worktrees')), 'a session that creates worktrees keeps the worktrees area writable');
     assert.ok(producer.wrapper.includes(producerDirectory), 'the producer checkout is re-exposed writable');
@@ -88,12 +100,27 @@ test('unit:coordinator-write-blocked-for-shell — every runtime kind launches c
     assert.ok(await sessionMountNamespaceWorks(), 'mount namespaces work on this Linux host');
     const confinement = await coordinatorConfinement({ kind: 'claude', args: [], coordinatorRoot: root, sessionDirectory: worktree });
     assert.equal(confinement?.mechanism, 'read-only-mount');
+    // The host's process-launch channels are hidden where they exist, so no command inside the
+    // namespace can ask a host manager to start the write outside it.
+    const launchTargets = hostProcessLaunchTargets();
+    for (const directory of launchTargets.directories.filter(path => isDirectory(path))) {
+      const maskIdx = confinement.wrapper.indexOf(directory);
+      assert.ok(maskIdx > 0 && confinement.wrapper[maskIdx - 1] === '--tmpfs', `the namespace hides the process-launch directory ${directory}`);
+    }
+    for (const socket of launchTargets.busSockets.filter(path => existsSync(path) && !isDirectory(path))) {
+      const socketIdx = confinement.wrapper.indexOf(socket);
+      assert.ok(socketIdx > 0 && confinement.wrapper[socketIdx - 2] === '--ro-bind' && confinement.wrapper[socketIdx - 1] === '/dev/null', `the namespace replaces the bus socket ${socket} with an unconnectable device`);
+    }
+    assert.ok(processLaunchMaskWords({ directories: ['/run/user/4242/systemd', '/run/dbus', '/run/dbus'], busSockets: ['/run/user/4242/bus', '/run/user/4242/nested'] }, [root]).length > 0, 'the mask words are built for channels that exist');
+    assert.ok(processLaunchMaskWords({ directories: [root, base] }, [root]).length === 0, 'a candidate that would hide a protected path is dropped');
+    assert.ok(processLaunchMaskWords({ directories: [worktree] }, [worktree]).length === 0, 'the session\'s own directory is never hidden either');
     const probe = [
       'if touch "$1/coordinator-write-probe" 2>/tmp/.gy-probe-1; then echo WRITE-ALLOWED; else echo WRITE-BLOCKED; tail -1 /tmp/.gy-probe-1; fi',
       'if git -C "$1" -c user.email=g@l -c user.name=g commit --allow-empty -m probe 2>/tmp/.gy-probe-2; then echo COMMIT-ALLOWED; else echo COMMIT-BLOCKED; tail -1 /tmp/.gy-probe-2; fi',
       'if git -C "$1" checkout -b gy-888-escape 2>/tmp/.gy-probe-3; then echo CHECKOUT-ALLOWED; else echo CHECKOUT-BLOCKED; tail -1 /tmp/.gy-probe-3; fi',
       'git -C "$1" reset --hard >/dev/null 2>/tmp/.gy-probe-4 && echo RESET-ALLOWED || { echo RESET-BLOCKED; tail -1 /tmp/.gy-probe-4; }',
       'escaped=0; for d in /proc/[0-9]*; do if test -w "$d/root$1/src"; then escaped=1; fi; done; test "$escaped" = 0 && echo PROC-ISOLATED || echo PROC-ESCAPE',
+      'if systemd-run --user --quiet true 2>/tmp/.gy-probe-5; then echo SYSTEMD-ALLOWED; else echo SYSTEMD-BLOCKED; fi',
       'touch "$2/session-write-probe" && git -C "$2" -c user.email=g@l -c user.name=g commit --allow-empty -m probe && echo SESSION-WROTE',
     ].join('\n');
     const run = spawnSync(confinement.wrapper[0], [...confinement.wrapper.slice(1, -1), '/bin/sh', '-c', probe, 'sh', root, worktree],
@@ -105,12 +132,14 @@ test('unit:coordinator-write-blocked-for-shell — every runtime kind launches c
     assert.ok(run.stdout.includes('CHECKOUT-BLOCKED'), 'git checkout in coordinator checkout is blocked');
     assert.ok(run.stdout.includes('RESET-BLOCKED'), 'git reset in coordinator checkout is blocked');
     assert.ok(run.stdout.includes('PROC-ISOLATED'), 'no process in the namespace exposes a writable coordinator view through /proc');
+    assert.ok(run.stdout.includes('SYSTEMD-BLOCKED'), 'a host manager cannot be asked to start the write outside the namespace');
     assert.ok(run.stdout.includes('SESSION-WROTE'), 'session worktree is writable');
     assert.ok(!run.stdout.includes('WRITE-ALLOWED'), 'write to coordinator is never allowed');
     assert.ok(!run.stdout.includes('COMMIT-ALLOWED'), 'commit in coordinator is never allowed');
     assert.ok(!run.stdout.includes('CHECKOUT-ALLOWED'), 'checkout in coordinator is never allowed');
     assert.ok(!run.stdout.includes('RESET-ALLOWED'), 'reset in coordinator is never allowed');
     assert.ok(!run.stdout.includes('PROC-ESCAPE'), 'the /proc route back to the checkout is closed');
+    assert.ok(!run.stdout.includes('SYSTEMD-ALLOWED'), 'the systemd-run route outside the namespace is never open');
     assert.match(output, /Read-only file system/, 'operations fail with read-only filesystem error');
   } finally {
     rmSync(base, { recursive: true, force: true });
@@ -130,7 +159,9 @@ test('unit:unconfined-launch-refused — a launch that cannot apply the confinem
   assert.match(noBwrap!, /bubblewrap/, 'refusal message mentions bubblewrap');
   assert.match(noBwrap!, /not installed/, 'refusal message says bubblewrap is not installed');
 
-  const refusedNamespaces = await coordinatorConfinementRefusal({ ...confined, platform: 'linux', mountNamespaceWorks: false });
+  // With bubblewrap present but the namespaces refused, the refusal names the namespaces: the
+  // bwrap-missing reason above is only reached when bubblewrap itself is absent.
+  const refusedNamespaces = await coordinatorConfinementRefusal({ ...confined, platform: 'linux', bwrap: '/usr/bin/bwrap', mountNamespaceWorks: false });
   assert.ok(refusedNamespaces !== null, 'refused mount namespaces must be refused');
   assert.match(refusedNamespaces!, /namespaces/, 'refusal message mentions namespaces');
   assert.match(refusedNamespaces!, /refuses/, 'refusal message indicates the host refuses namespaces');
