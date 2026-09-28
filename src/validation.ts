@@ -1,4 +1,5 @@
 import { createHash, createPublicKey, randomUUID } from 'node:crypto';
+import { recordScenarioRun } from './test-runs.js';
 import { z } from 'zod';
 import { isDeepStrictEqual } from 'node:util';
 import type pg from 'pg';
@@ -581,6 +582,7 @@ export class Validation {
       const evidence: Evidence = { id: randomUUID(), proof: c.proof, sha: c.sourceSha, baseSha: c.baseSha, policyRevision: c.policyRevision, producer: actor.id, trusted: !unexercised, result: result.passed ? 'pass' : 'fail', executed: data.executed, skipped: data.skipped, at: now.toISOString(), ...(expiresAt ? { expiresAt } : {}), artifacts: evidenceArtifacts, scenarioRevision: c.scenario.revision, environment: c.scenario.environment, validation: { candidateId: c.id, requestId: r.id, attemptId: a!.id }, attribution,
         ...(data.exercise ? { exercise: data.exercise } : {}), ...(unexercised ? { unexercised } : {}) };
       w.evidence.push(evidence);
+      await recordScenarioRun(db, w, evidence);
       if (unexercised) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [w.id, actor.id, 'evidence.exercise.refused',
         JSON.stringify({ details: { proof: c.proof, criteria: attachedCriteria(w, all, c.proof), behaviour: data.exercise?.behaviour ?? null, sha: c.sourceSha, requestId: r.id, attemptId: a!.id, reason: unexercised } })]);
       await appendAttribution(db, now, { workId: w.id, workKey: w.key, proof: c.proof, environmentId: c.environment.id, candidateId: c.id, requestId: r.id, attemptId: a!.id, kind: 'evidence-bound', dedupe: `evidence-bound:${evidence.id}`,
