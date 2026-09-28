@@ -419,6 +419,12 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   const seenTips = new Set<string>();
   let released = 0, split = false, noticed = false, deploys = 0, cycles = 0, reportedDispatches = 0;
   const starved: string[] = [];
+  // GY-691: the stuck-batch fault is a batch-plan fault (dissolution belongs to the batch plan,
+  // GY-330), and the batch plan is what a master runs before it publishes a parallel-tip window
+  // (GY-498). The main day therefore runs its stuck-batch stretch on the batch plan — pinning the
+  // window the way the batch-plan units do — and restores the published window once the dissolved
+  // head has re-predicted and published its own tip.
+  let pinned: { tips: number; load: typeof engine.loadParallelTips } | null = null, restored = true;
   const jobsDue = async () => Number((await store.pool.query('SELECT count(*) AS due FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now())')).rows[0].due);
   for (let elapsed = 0; elapsed <= options.hours * hour;) {
     const now = clock.now();
@@ -442,6 +448,20 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       ? new Set([...github.prs.values()].filter(pr => pr.open).map(pr => pr.head)) : new Set<string>();
     // A change landed on main outside Graphyard, moving the base under candidates already pushed.
     if (!noticed && elapsed >= plan.notice) { noticed = true; github.commit('Add NOTICE to the base branch', [...github.files, 'NOTICE']); }
+    // GY-691: ten minutes before the wedge can form the main day runs the batch plan the stuck-batch
+    // dissolution belongs to, and restores the published window ten minutes after GitHub recovers,
+    // once the dissolved head has re-predicted and published its own tip.
+    if (mainDay) {
+      if (!pinned && elapsed >= plan.stuckBatch.at - 10 * minute) {
+        pinned = { tips: engine.parallelTips, load: engine.loadParallelTips };
+        engine.parallelTips = 0; engine.loadParallelTips = async () => engine.parallelTips = 0;
+        restored = false;
+      }
+      if (pinned && !restored && stuck && clock.now() >= stuck.at + plan.stuckBatch.forMs + 10 * minute) {
+        restored = true;
+        engine.loadParallelTips = pinned.load; engine.parallelTips = pinned.tips;
+      }
+    }
     // GY-551: twenty minutes in, the master requests a release of the last two items by hand and
     // puts each to an approver session it launches itself; neither session judges it.
     if (options.handApprovers && elapsed === 20 * minute) for (const [n, ending] of [[plan.items, 'vanishes'], [plan.items - 1, 'stops']] as const) {
@@ -597,6 +617,8 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.ok(!github.commits.get(github.tip)!.broken, 'main is green at the end of the day');
   // The loop published its merge-queue settings exactly once for the whole day — on a change, not
   // every cycle (GY-330, GY-498, GY-500, GY-516) — and each setting reached the installation ledger.
+  // (The stuck-batch stretch (GY-691) runs the batch plan by pinning the engine's window, as the
+  // batch-plan units do; it publishes nothing.)
   assert.equal(mergeQueuePosts.length, 1, `one publication, not one per cycle: ${JSON.stringify(mergeQueuePosts)}`);
   assert.deepEqual(mergeQueuePosts[0].settings, { batchSize: 4, optimistic: true, optimisticExclude: [...defaultOptimisticExclude], parallelTips: 4, rerunFailedChecks: 1 });
   const published = await store.pool.query(`SELECT kind, payload FROM events WHERE kind LIKE 'merge-queue.%' AND created_at >= $1 ORDER BY seq`, [new Date(dayStart).toISOString()]);
