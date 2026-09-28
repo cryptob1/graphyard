@@ -18,7 +18,7 @@ import { githubFromEnv, mergeBandQueueDepth } from './github.js';
 import { regressionRefusals } from './regression-guard.js';
 import { ciFamilyAllows, ciProofFamilies, ciRunBindingSchema, ciRunRefusal, isCiProducer, refuseCiProducer, staleCiAttemptRefusal, type CiRunObservation } from './model/ci-proofs.js';
 import { decideScopeRequest, liveScopeWidening, scopeRefusalBlocker, type ScopeDecision } from './model/scope.js';
-import { mergedScopeRequest, plannedFilesCovered } from './model/scope-collapse.js';
+import { mergedScopeRequest, plannedFilesCovered, widenedPlannedFiles } from './model/scope-collapse.js';
 import { configuredDocumentation, documentationObligation, recordDocumentationSubmission, type DocumentationPolicy } from './model/documentation.js';
 import { liveDispatchHandleIds, reconcileAutoDispatch, type DispatchTransition } from './model/dispatch.js';
 import { reconcileReviewConflict, type ReviewConflictTransition } from './model/review-conflict.js';
@@ -238,8 +238,10 @@ function applyScopeDecision(work: Work, request: NonNullable<Work['scopeRequest'
   work.scopeRequest = verdict.state === 'approved' ? null : { ...request, decision };
   if (verdict.state === 'approved') {
     // Non-weakening intent the item already carried: applied to the live attempt, which
-    // keeps its lease and its containment fence exactly as an operator widening would.
-    work.plannedFiles = [...new Set([...(work.plannedFiles ?? []), ...verdict.paths])];
+    // keeps its lease and its containment fence exactly as an operator widening would. A wide
+    // ask is folded into directory entries, as a routed one is, rather than overrun the cap;
+    // an ask no fold represents was refused by the rule above, never applied past the cap.
+    work.plannedFiles = widenedPlannedFiles(work, verdict.paths).plannedFiles;
     work.policyRevision++;
     work.formalReviewResetRequired = true; work.formalReviewBaseline = undefined;
     work.observation = null; work.mergeAuthorization = null; work.reviewRequest = null;
@@ -529,16 +531,26 @@ export class Engine {
    * observed and that observation saved, so the ordinary delivery path records it merged, with its
    * merge commit, now rather than whenever its own observation comes round — and the stale state
    * that named it unlanded does not recur. A failure is logged and left to that later observation.
+   *
+   * GY-756. The peer is re-read before it is observed, so several observations in one round that
+   * name the same peer do not each observe it from their own stale snapshot: once one has saved, the
+   * rest find it delivered, or already observed at this head against this base tip, and skip it.
+   * A peer that is not merged (its commits reached the branch while its pull request closed
+   * unmerged) has that observation saved all the same, so it is not re-observed on every cycle
+   * until the base branch moves.
    */
   async reconcileLanded(observation: Observation | null, all: Work[], observer = this.submissionObserver) {
     const reconciled: Work[] = [];
     if (!observer) return reconciled;
     for (const entry of observation?.landing?.landed ?? []) {
-      const peer = all.find(item => item.key === entry.key && item.stage !== 'done' && item.submission?.pr === entry.pr);
-      if (!peer) continue;
+      const known = all.find(item => item.key === entry.key);
+      if (!known) continue;
       try {
+        const peer: Work | undefined = (await this.store.pool.query('SELECT document FROM work_items WHERE id=$1', [known.id])).rows[0]?.document;
+        if (!peer || peer.stage === 'done' || peer.submission?.pr !== entry.pr) continue;
+        if (peer.observation && peer.observation.candidate.sha === entry.head && observation!.baseTip && peer.observation.baseTip === observation!.baseTip) continue;
         const seen = await observer(peer, all);
-        if (seen.merged) reconciled.push(await this.observe(peer.id, peer.revision, seen));
+        reconciled.push(await this.observe(peer.id, peer.revision, seen));
       } catch (error) {
         console.error(`[landing] reconciling ${entry.key}'s landed pull request #${entry.pr} failed: ${(error as Error).message}`);
       }
