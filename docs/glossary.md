@@ -65,7 +65,7 @@ The supervisor that launches sessions and reports their liveness.
 
 ## Risk lane
 
-Every item rides one — `low`, `medium` or `high` — decided by the shipped path policy (`src/model/policy.ts`) from the paths its change touches; the landability verdict takes it and reports it with its speed target. The lane scales the ceremony beside an item's criteria and never removes a proof the criteria name. Per-lane speed targets ship beside it. See [risk lanes](how-graphyard-works.md#risk-lanes).
+Every item rides one — `low`, `medium` or `high` — decided by the shipped path policy (`src/model/policy.ts`) from the paths its change touches (both endpoints of a rename); the landability verdict takes it, decides which facts it requires of the change, and reports it with its speed target. Low is landable on its required CI checks and one approving review with its producer-run proofs and manual attestations not demanded; medium adds its producer proofs; high adds manual attestations. A family the lane does not scale (`e2e:`), an inherited obligation and a recorded failure hold in every lane. Per-lane speed targets ship beside it. See [risk lanes](how-graphyard-works.md#risk-lanes).
 
 ## Who decides
 

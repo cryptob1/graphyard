@@ -3,6 +3,7 @@ import type { DispatchRequest, ReviewState } from './dispatch.js';
 import { currentEvidence } from './evidence.js';
 import { evidenceBindsCandidate } from './carry.js';
 import { requiredProofs } from './bootstrap.js';
+import { itemLane, laneDemandsProof } from './policy.js';
 
 /**
  * Which required proofs a machine settles, and what the evidence bound to the head says of each
@@ -45,13 +46,24 @@ export const evidenceProves = (proof: string, evidence: { result: string; execut
   evidence.result === 'pass' && evidence.skipped === 0 && (attestedProof(proof) || evidence.executed > 0);
 
 export type ProofOutcome = 'proven' | 'unproven' | 'failed';
-/** Every automatable required proof with what the trusted evidence bound to this head says about it. */
+/** Every automatable required proof with what the trusted evidence bound to this head says about it.
+ *
+ * The item's lane scales its own criteria's ceremony beside the verdict (GY-883 AC-2): a criterion
+ * proof the lane does not demand — a low item's producer-run proofs and manual attestations, a
+ * medium item's attestations — is judged here only where trusted evidence already failed on it, so
+ * a low item's review is not held for proofs nobody demands of it and no producer session is
+ * dispatched for them. What the lane never lifts: an inherited obligation, and a recorded failure —
+ * both hold in every lane.
+ */
 export function automatableOutcomes(work: Work, all: Work[], now: Date): { proof: string; group: ProducerGroup; outcome: ProofOutcome; producer?: string }[] {
+  const lane = itemLane(work);
+  // Only the change's own criterion proofs ride the lane; an inherited obligation is never lifted.
+  const own = new Set(work.criteria.filter(criterion => !criterion.bootstrap).flatMap(criterion => criterion.proofs));
   return requiredProofs(work, all).filter(proof => automatableProof(work, proof)).map(proof => {
     const evidence = currentEvidence(work, proof, now);
     const outcome: ProofOutcome = !evidence ? 'unproven' : evidenceProves(proof, evidence) ? 'proven' : 'failed';
     return { proof, group: producerGroupOf(proof), outcome, ...(evidence ? { producer: evidence.producer } : {}) };
-  });
+  }).filter(entry => entry.outcome === 'failed' || !own.has(entry.proof) || laneDemandsProof(lane, entry.proof));
 }
 
 /** One mechanical proof of the head, read as the criteria that name it read it. */

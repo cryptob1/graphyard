@@ -18,10 +18,13 @@ export type Lane = typeof lanes[number];
  * The shipped high-risk path policy: any changed path under one of these makes the change high.
  * The installation and deployment surfaces are the repository's own: installation changes go
  * through `src/install/` and deployment through the `deploy/` tree, the Dockerfile and
- * compose.yaml, beside the schema, credential and public-API paths.
+ * compose.yaml. The schema and credential surfaces are the repository's real ones: the database
+ * schema and its persistence layer under `src/store/`, authentication and principals under
+ * `src/server/`, beside the public-API routes.
  */
 export const highRiskPaths = [
-  /^migrations\/schema/, /^auth\/credentials/, /^src\/server\/routes/,
+  /^migrations\/schema/, /^auth\/credentials/,
+  /^src\/store\//, /^src\/server\/(routes|auth|principals)/,
   /^src\/install\//, /^deploy\//, /^Dockerfile(\.|$)/, /^compose\.ya?ml$/,
 ] as const;
 
@@ -56,6 +59,54 @@ export function determineLane(paths: readonly string[]): Lane {
  * smaller the change, the faster it is expected to land.
  */
 export const laneSpeedTargets: Record<Lane, number> = { low: 30 * 60_000, medium: 60 * 60_000, high: 4 * 60 * 60_000 };
+
+/**
+ * What each lane's landability asks for beyond the gates every lane keeps (ready, build, review,
+ * test, merge): which proof families the lane itself demands of the change, and whether a rework
+ * round waits for an approved two-party decision. The lane decides which of the change's own
+ * criterion proofs are demanded of it — GY-883 AC-2: a low-lane item is landable with its required
+ * CI checks green and one approving review, its producer-run proofs and manual attestations not
+ * required of it; medium adds its producer proofs; high keeps the full path. What no lane ever
+ * removes: the families the lane does not scale (`e2e:`), a proof a delivered change deferred and
+ * this item inherited, and a recorded failure — those hold in every lane, because a path heuristic
+ * must not weaken a task's standing requirements. Rework approval is required in every lane: the
+ * two-party decision invariant is the repository's standing authority contract and never varies by
+ * lane.
+ */
+export interface LaneRequirements { producerProofs: boolean; manualAttestations: boolean; reworkApprover: boolean }
+export function laneRequirements(lane: Lane): LaneRequirements {
+  return lane === 'low' ? { producerProofs: false, manualAttestations: false, reworkApprover: true }
+    : lane === 'medium' ? { producerProofs: true, manualAttestations: false, reworkApprover: true }
+    : { producerProofs: true, manualAttestations: true, reworkApprover: true };
+}
+
+/** Whether the lane demands one proof family of the change: the producer-run `unit:` and `integration:` proofs from medium, `manual:` attestations from high, every other family in every lane. */
+export function laneDemandsFamily(lane: Lane, family: string): boolean {
+  const requirements = laneRequirements(lane);
+  return family === 'unit' || family === 'integration' ? requirements.producerProofs
+    : family === 'manual' ? requirements.manualAttestations
+    : true;
+}
+export const laneDemandsProof = (lane: Lane, proof: string) => laneDemandsFamily(lane, proof.slice(0, Math.max(0, proof.indexOf(':'))));
+
+/**
+ * The changed paths an item's lane is decided from: every observed scope file's path and, for a
+ * rename, both of its endpoints — a rename out of a high-risk tree is a change to the high-risk
+ * surface whatever its destination, so the source rides beside it. The observation's file list is
+ * the diff when no scope was read at all; an empty scope list is no paths, the unknown change that
+ * defaults to medium.
+ */
+export function observedPaths(observation: { scopeFiles?: readonly { path: string; previousPath?: string }[] | null; files?: readonly string[] } | null | undefined): string[] {
+  if (!observation) return [];
+  return observation.scopeFiles
+    ? observation.scopeFiles.flatMap(file => file.previousPath && file.previousPath !== file.path ? [file.path, file.previousPath] : [file.path])
+    : [...(observation.files ?? [])];
+}
+
+/** The lane of the change an item carries: the diff its observation holds; unknown stays medium. */
+export function itemLane(work: { observation?: Parameters<typeof observedPaths>[0] }): Lane {
+  return determineLane(observedPaths(work.observation));
+}
 
 // Bootstrap mode: an operator may defer a criterion's proofs for the single change that
 // introduces the harness those proofs depend on. The proof is never dropped. It becomes a

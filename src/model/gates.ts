@@ -11,7 +11,7 @@ import { carriedApproval, evidenceBindsCandidate } from './carry.js';
 import { placeInQueue, type MergeQueueSettings } from './queue.js';
 import { regressionRefusals } from '../regression-guard.js';
 import { mechanicalFailure, mechanicalVerdicts, evidenceProves, attestedProof } from './mechanical-proofs.js';
-import { determineLane, laneSpeedTargets, type Lane } from './policy.js';
+import { itemLane, laneDemandsProof, laneRequirements, laneSpeedTargets, type Lane } from './policy.js';
 
 // Pure evaluation: neither worker assertions nor UI state can authorize progression.
 declare module './work.js' {
@@ -28,30 +28,9 @@ export const mergeabilityComputingRefusal = 'GitHub is computing mergeability ag
 
 // ---- Risk lanes (GY-883) -------------------------------------------------------------------------
 
-/**
- * What each lane's landability asks for beyond the gates every lane keeps (ready, build, review,
- * test, merge): which proof families the lane itself demands of the change, and whether a rework
- * round waits for an approved two-party decision. The lane only ever adds ceremony beside an
- * item's authored criteria — it never removes a proof the criteria name, in any lane: a path
- * heuristic must not weaken a task's requirements. Low therefore lands once its criteria are
- * proven, its required CI checks are green and one approving review stands — the lane itself adds
- * nothing; medium adds the change's producer-run proofs; high adds manual attestations too.
- * Rework approval is required in every lane: the two-party decision invariant is the repository's
- * standing authority contract and never varies by lane.
- */
-export interface LaneRequirements { producerProofs: boolean; manualAttestations: boolean; reworkApprover: boolean }
-export function laneRequirements(lane: Lane): LaneRequirements {
-  return lane === 'low' ? { producerProofs: false, manualAttestations: false, reworkApprover: true }
-    : lane === 'medium' ? { producerProofs: true, manualAttestations: false, reworkApprover: true }
-    : { producerProofs: true, manualAttestations: true, reworkApprover: true };
-}
-
-/** The lane of the change the item carries: the diff its observation holds; unknown stays medium. */
-function itemLane(work: Work): Lane {
-  const observation = work.observation;
-  const observed = observation ? observation.scopeFiles ? observation.scopeFiles.map(file => file.path) : observation.files : [];
-  return determineLane(observed);
-}
+// The per-lane required set lives with the path policy it scales (model/policy.ts); the verdict
+// here is one of its readers.
+export { laneRequirements };
 
 /**
  * The test-gate lift the merge queue's validation pays for (GY-332): a tip the queue accounts for
@@ -136,10 +115,14 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[],
   };
   // A bootstrap criterion's proofs are deferred here and required of the next change that
   // touches the same contract; review, CI and every other criterion still gate this one.
-  // Every criterion-named proof is required in every lane (GY-883): the item's lane scales the
-  // ceremony beside its criteria, never the criteria themselves, and the inherited obligations
-  // below are likewise never waived.
+  // The lane decides which of the change's own criterion proofs are demanded of it (GY-883
+  // AC-2): a low-lane item lands on its required CI checks and one approving review with its
+  // producer-run proofs and manual attestations not demanded, medium adds its producer proofs,
+  // high keeps the full path. What the lane never lifts is a family it does not scale (`e2e:`)
+  // or an inherited obligation — both are demanded in every lane, and a recorded failure still
+  // returns the head in every lane.
   for (const ac of work.criteria.filter(criterion => !criterion.bootstrap)) for (const proof of ac.proofs) {
+    if (!laneDemandsProof(lane, proof)) continue;
     if (unproven(proof)) reasons.push(`${ac.id}: ${demanded(proof)}`);
   }
   for (const obligation of inheritedObligations(work, all)) {
