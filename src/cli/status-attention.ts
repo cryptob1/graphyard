@@ -9,20 +9,30 @@ import { baseBreakHold, describeBaseBreak } from '../master/base-break-refresh.j
 export { nameOrphanSupervisors, orphanSupervisorAttention, supervisorReclaimCommand } from './orphan-supervisors.js';
 
 /**
- * One attention item per requested decision whose approver could not be launched (GY-101). A
- * decision changes nothing until a session judges it, and a launch the runtime refuses — for a
+ * One attention item per requested decision whose approver could not be launched (GY-101, GY-849).
+ * A decision changes nothing until a session judges it, and a launch the runtime refuses — for a
  * name it will not take, a credential it cannot read, a workspace that is gone — leaves the watch
- * standing with a session that never started. `master status` used to show that as a decision
- * "waiting for approver session NAME to judge it", naming a session nobody could find. It is
- * named here as what it is, with the loop's own refusal and the command that launches it again.
+ * standing with a session that never started. A launch that fails due to approver capacity
+ * (all accounts spent, role concurrency limit reached) is not counted against the launch bound;
+ * the loop relaunches it when capacity frees, oldest decision first. `master status` shows both
+ * as needing attention: one awaiting relaunch, one waiting for a slot.
  */
 export function approverLaunchAttention(daemon: {
-  approvals?: { key: string; work: string; action: string; decision: string; agentName: string | null; launches: number; launchedAt: string | null; requestedAt: string; settledAt: string | null }[];
+  approvals?: { key: string; work: string; action: string; decision: string; agentName: string | null; launches: number; launchedAt: string | null; requestedAt: string; settledAt: string | null; capacity?: string | null }[];
   actions?: { key: string; kind: string; state: string; detail: string; at: string }[];
 }): AttentionItem[] {
   const actions = daemon.actions ?? [];
   return (daemon.approvals ?? []).flatMap(watch => {
     if (watch.settledAt) return [];
+    // GY-849: Decisions waiting for approver capacity (not counted against launch attempts) are
+    // shown as waiting for a slot with the live sessions holding the role, not as stalled.
+    if (watch.capacity) {
+      // GY-849: the wait is the loop's to clear — it relaunches the decision itself, oldest
+      // waiting decision first, once an account or slot frees — so the remedy names no command:
+      // a hand `master approver` here would race the relaunch the watch already covers.
+      return [{ subject: watch.work, text: `${watch.work} is waiting for approver capacity to relaunch ${watch.action} decision ${watch.decision}: ${watch.capacity}`,
+        ...agentOwner('master', `nothing to run: the loop relaunches ${watch.decision} itself, oldest waiting decision first, when capacity frees`, 'approver') }];
+    }
     // The loop records a refused launch under the decision it was requested for (the request that
     // could not reach an approver) or under that launch's own key (a replacement that could not).
     const since = Date.parse(watch.launchedAt ?? watch.requestedAt);

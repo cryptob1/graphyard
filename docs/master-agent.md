@@ -27,7 +27,7 @@ Unless created `"systemDriven": false`, an item refuses hand `dispatch`, `merge`
 
 ### Base-branch breakages
 
-CI's `test` run annotates its failed tests (`graphyard-failed-tests:`). A head whose every failing test fails on its built-against base but not on the tip records `baseBreak`: no rework; the observation job merges the tip in (trigger `base breakage`), waking the item's own observation for a rework decision's fresh reading. `master status` names test, breaking base, fixing tip.
+CI's `test` run annotates its failed tests (`graphyard-failed-tests:`). A head whose every failing test fails on its built-against base but not on the tip records `baseBreak`: no rework; the job merges the tip in (trigger `base breakage`), waking its observation for a rework decision's fresh reading. `master status` names test, breaking base, fixing tip.
 
 ### Session liveness is reconciled, not trusted
 
@@ -70,7 +70,7 @@ A candidate passing the build gate gets, in `autoDispatch`, one producer request
 
 **Requests always settle.** A gone pane (`pane_not_found`) is closed. No request outlives its own token: expired, unreported by Herdr, it settles `expired`; one still pending counts in `dispatch.sessionReconcile.stuck`. Unanswered sessions relaunch elsewhere (12 per request, then `dispatch.abandoned`); an unposted reviewer is reminded first. Killed or vanished producer runs spend no attempt; spent attempts raise `escalation:proof-exhausted`, then a quoting rework.
 
-**Every role fails over on spent quota** or waits as one `capacity` line.
+**Every role fails over on spent quota** or waits as one `capacity` line, uncounted, relaunching oldest-first.
 
 The master never launches reviews or producers by hand, except `master review GY-N [PROFILE]` once the loop stops relaunching.
 
