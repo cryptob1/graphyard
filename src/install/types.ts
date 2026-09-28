@@ -1,12 +1,14 @@
 export const providers = ['railway', 'hetzner', 'docker-host', 'compose'] as const;
 export type Provider = (typeof providers)[number];
 export type Role = 'admin' | 'coordinator' | 'worker' | 'reader' | 'producer';
+/** The session kind a principal declares, as the server's principal schema accepts it. */
+export type DeclaredSessionKind = 'human' | 'ai';
 
 /** Every rendered secret becomes this exact string, in plan output, logs, and summaries. */
 export const REDACTED = '[redacted]';
 export const SERVER_PORT = 4310;
 
-export interface PlannedPrincipal { id: string; role: Role; proofs?: string[] }
+export interface PlannedPrincipal { id: string; role: Role; sessionKind?: DeclaredSessionKind; proofs?: string[] }
 export interface EnvValue { name: string; value: string; secret: boolean }
 export interface PlanValue { name: string; value: string; secret: boolean; fingerprint?: string; note?: string }
 export interface PlanDrift { action: string; field: string; expected: string; observed: string }

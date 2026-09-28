@@ -21,7 +21,7 @@ import { bindReviewer, launchReview, saveReviewerProfile } from '../src/reviewer
 import { NoHealthyAccountError, atomicPrivateWrite, buildMasterStatus, dispatchWork, launchApprover, loadMasterConfig, selectAccount, setupMaster, type EnvironmentProbe } from '../src/master.js';
 import { applyRegistryMutation, chooseSession, emptyRegistry, fleetRoles, fleetView, foldObservation, launchGraceMs, proposedRuntimes, sessionEnded, settleSessions, type AgentRegistry as Registry, type FleetSession, type FleetView } from '../src/model/registry.js';
 import type { Principal, Work } from '../src/model.js';
-import { FleetOverview } from '../web/pages/fleet.js';
+import { FleetOverview, pastesCredential } from '../web/pages/fleet.js';
 import { views, visibleViews } from '../web/pages/index.js';
 import { expandTypedCommand, requestOf, startedAtOnce } from './helpers/launch-shell.js';
 
@@ -196,7 +196,11 @@ test('integration:agent-registry-model — the control plane stores runtimes wit
   const posted = [...page.matchAll(/=> [`']agent-registry\/([^`']+)[`']/g)].map(match => `/api/agent-registry/${match[1].replace(/\$\{field\(form, 'collection'\)\}/, 'accounts').replace(/\$\{[^}]+\}/g, 'name')}`);
   assert.ok(posted.length >= 6, 'runtime, model, account, role, quota and remove forms');
   // GY-397: the browser's credential check reads the launch data only; the audit reason is prose that may name a token prefix.
-  assert.match(page, /form\.entries\(\)\]\.some\(\(\[name, value\]\) => name !== 'reason' && typeof value === 'string' && value\.split\([^)]*\)\.some\(looksLikeSecret\)/);
+  const formOf = (fields: Record<string, string>) => { const form = new FormData(); for (const [name, value] of Object.entries(fields)) form.append(name, value); return form; };
+  assert.equal(pastesCredential(formOf({ tools: 'Read, sk-ant-api03-abcdefghijklmnop', reason: 'Pasting a key by mistake' })), true, 'a secret in launch data is refused');
+  assert.equal(pastesCredential(formOf({ home: 'sk-ant-api03-abcdefghijklmnop', reason: 'r' })), true);
+  assert.equal(pastesCredential(formOf({ tools: 'Read, Grep', reason: 'Rotated sk-ant-api03-abcdefghijklmnop out of the old home' })), false, 'a secret-shaped audit reason is still accepted');
+  assert.equal(pastesCredential(formOf({ tools: 'Read, Grep', reason: 'Plain reason' })), false);
   for (const path of posted) assert.ok(served.some(route => typeof route === 'string' ? route === path : route.test(path)), `${path} is served`);
   assert.ok(visibleViews({ status: { actor: { role: 'admin' } }, features: {} } as any).some(view => view.id === 'agents') && !visibleViews({ status: { actor: { role: 'worker' } }, features: {} } as any).some(view => view.id === 'agents'));
   assert.ok(views.some(view => view.id === 'agents'));
