@@ -8,7 +8,7 @@ import { temporaryDirectories, underTestRunner } from '../supervisor.js';
 import { defaultMergeBatchSize, defaultParallelTips, maxMergeBatchSize, maxParallelTips, mergeQueueInsights } from '../merge-queue.js';
 import { defaultOptimisticMerge, defaultOptimisticExclude } from '../optimistic-merge.js';
 import type { Work } from '../model/work.js';
-import { narrowRoleRuntimeSchema, piRuntimeSchema } from '../runner/payloads.js';
+import { diagnosticianSettingsSchema, narrowRoleRuntimeSchema, piRuntimeSchema } from '../runner/payloads.js';
 import { researchSettingsSchema } from '../research.js';
 import { sessionNameField, sessionNameLimit, assertSessionName, sessionNameDigestLength, SessionNameRefusedError } from '../session-name.js';
 import { invariantThresholdsSchema } from '../model/invariants.js';
@@ -301,6 +301,10 @@ export const masterRunSchema = z.object({
   // `intervalMinutes` (10 by default) to find stuck and overdue work and fix it through its
   // sanctioned commands — its model, stronger fallback model, and time limit.
   doctor: doctorSettingsSchema.optional(),
+  // The diagnostician (GY-439): the headless Pi session that turns each recurring-fault item into
+  // its root cause and a fix item — its model, stronger fallback model, time limit, the bound an
+  // invariant violation stands before it is diagnosed, and the commands that read its log excerpts.
+  diagnostician: diagnosticianSettingsSchema.optional(),
 }).strict();
 export type MasterRun = z.infer<typeof masterRunSchema>;
 

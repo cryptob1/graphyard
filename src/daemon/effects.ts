@@ -41,6 +41,8 @@ import { serverCallName, timedCall, timedFetch, timedRun } from '../master/timin
 import type { RunRecord, Runner } from '../runner/types.js';
 import type { ResearchEvent } from '../research.js';
 import { doctorRole, doctorSessionArgs, doctorSettings, type DoctorEffects } from './doctor.js';
+import { diagnosticianRole, type DiagnosticianEffects } from './diagnosis.js';
+import { diagnosticianSettings } from '../runner/payloads.js';
 
 import { piRunner } from '../runner/pi.js';
 import { registryHeadlessLaunch, registryRunner } from '../runner/roles.js';
@@ -302,6 +304,7 @@ export interface DaemonEffects {
    */
   fileFaultClass?: (input: ReturnType<typeof faultClassItem>, key: string) => Promise<Work>;
   /**
+  /**
    * The pipeline doctor (GY-711): its settings, the runners of its primary and fallback runs, and
    * filing and run recording as the master's operator-agent identity. Absent while
    * `run.doctor.enabled` is false or the operator-agent identity is missing: the loop then runs
@@ -313,6 +316,13 @@ export interface DaemonEffects {
    * loop read (GY-711 remedy 2): only for a scope refusal plannedFiles already covers.
    */
   unblock?: (work: Work, reason: string) => Promise<Work>;
+  /**
+   * The diagnostician (GY-439): its settings, the runners of its primary and fallback runs, the
+   * excerpts it reads, and filing and deciding as the master's operator-agent identity. Absent while
+   * `run.diagnostician.enabled` is false or the operator-agent or approver identity is missing:
+   * recurring-fault items are then filed and left for the master, as before.
+   */
+  diagnostician?: DiagnosticianEffects;
   /** The recurrence rule; the environment's (GRAPHYARD_FAULT_CLASS_*) or the shipped default when absent. */
   faultClassPolicy?: FaultClassPolicy;
   /**
@@ -527,6 +537,36 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   // The same route, as the same requester: only the identity that asked may take a request back.
   const withdraw: DaemonEffects['withdraw'] = (work, decision, reason) => asOperatorAgent('POST', `work/${work.id}/decide`, { action: 'withdraw', decision, reason });
   const decisions: DaemonEffects['decisions'] = work => asOperatorAgent('GET', `work/${encodeURIComponent(work.id)}/decisions`);
+  /**
+   * The diagnostician's effects under the live configuration (GY-439). Its first run takes the
+   * registry's diagnostician role when an operator defines one, else Pi on `run.diagnostician.model`;
+   * the fallback run is Pi on the stronger `fallbackModel`. The excerpts are the loop journal, the
+   * server log when a command for it is configured, and `gh pr view` of each named pull request.
+   */
+  const diagnostician = (config: MasterConfig): DiagnosticianEffects => {
+    const settings = diagnosticianSettings(config.run);
+    const lines = async (command: string[]) => String(await run(command[0], command.slice(1))).split('\n');
+    return {
+      settings, cwd: root,
+      runner: async (attempt, subject) => {
+        if (attempt === 'primary') {
+          const fleet = await selectFleetSession(config, diagnosticianRole, { name: diagnosticianRole, principal: config.operatorAgent!.id }, { work: subject.work?.key });
+          if (fleet) { const launch = registryHeadlessLaunch(fleet.account); return { runner: registryRunner(fleet.account), runtime: launch.command, model: launch.model, release: fleet.release }; }
+        }
+        const model = attempt === 'primary' ? settings.model : settings.fallbackModel;
+        return { runner: piRunner({ command: settings.command, model }), runtime: 'pi', model };
+      },
+      context: async (_subject, numbers) => ({
+        journal: await lines(settings.journalCommand).catch(error => [`(the loop journal could not be read with ${settings.journalCommand.join(' ')}: ${message(error)})`]),
+        serverLog: settings.serverLogCommand ? await lines(settings.serverLogCommand).catch(error => [`(the server log could not be read with ${settings.serverLogCommand!.join(' ')}: ${message(error)})`])
+          : ['(no run.diagnostician.serverLogCommand is configured, so no server log excerpt was read)'],
+        pullRequests: await Promise.all(numbers.map(async number => ({ number, state: await Promise.resolve(run('gh', ['pr', 'view', String(number), '--repo', config.repository, '--json', 'number,title,state,isDraft,mergeable,mergeStateStatus,headRefOid,baseRefName,reviewDecision,statusCheckRollup']))
+          .then(output => JSON.parse(String(output)), (error: unknown) => ({ error: message(error) })) }))),
+      }),
+      file: (input, key) => asOperatorAgent('POST', 'work', input, key) as Promise<Work>,
+      decide: (work, action, reason, input) => asOperatorAgent('POST', `work/${work.id}/decide`, { action, input: decisionInput(action, work, input), reason }),
+    };
+  };
   let publishedEnvironment: string | null = null, publishedMergeQueue: string | null = null;
   /**
    * The doctor's effects under the live configuration (GY-711). Its primary run takes the
@@ -744,6 +784,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       // A required check red on the clock is named as master status names it, after buildMasterStatus.
       return { ...reported, items: [...reported.items, ...await timingFaultAttention(work, current().repository, annotations)] };
     },
+    // The diagnostician acts only through the two identities a two-party decision needs (GY-439).
+    get diagnostician() { const config = current(); return config.operatorAgent && config.approver && diagnosticianSettings(config.run).enabled ? diagnostician(config) : undefined; },
     get fileFaultClass() { return current().operatorAgent ? (input: ReturnType<typeof faultClassItem>, key: string) => asOperatorAgent('POST', 'work', input, key) as Promise<Work> : undefined; },
     // The doctor acts only through the operator-agent identity, and only its sanctioned commands (GY-711).
     get unblock() { return current().operatorAgent ? (work: Work, reason: string) => asOperatorAgent('POST', `work/${work.id}/unblock`, { reason, expectedRevision: work.revision }) as Promise<Work> : undefined; },

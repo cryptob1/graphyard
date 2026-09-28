@@ -110,12 +110,14 @@ export interface FleetAccount extends FleetAccountInput { quota: ObservedQuota; 
 /** The roles setup proposes and a configured registry is expected to name. */
 export const fleetRoles = ['worker', 'reviewer', 'producer', 'approver', 'escalation-handler'] as const;
 /**
- * Every role the registry may define: the proposed ones, and the doctor (GY-711), which finds stuck
- * and overdue work every ten minutes and fixes it through its sanctioned commands. The doctor runs
- * headless on Pi from `run.doctor` until an operator names accounts for it here, so it is never
- * proposed and never reported missing.
+ * Every role the registry may define: the proposed ones, the diagnostician (GY-439), which turns a
+ * recurring-fault item into its root cause and a fix item, and the doctor (GY-711), which finds
+ * stuck and overdue work every ten minutes and fixes it through its sanctioned commands. The
+ * diagnostician runs headless on Pi from `run.diagnostician` and the doctor from `run.doctor`,
+ * each until an operator names accounts for it here, so neither is proposed and neither is
+ * reported missing.
  */
-export const registryRoles = [...fleetRoles, 'doctor'] as const;
+export const registryRoles = [...fleetRoles, 'diagnostician', 'doctor'] as const;
 export type FleetRoleName = typeof registryRoles[number];
 /**
  * How every session of a role is launched, whichever account serves it (GY-170): the runtime

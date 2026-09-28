@@ -4,14 +4,14 @@ import { readFile, writeFile, rename, chmod } from 'node:fs/promises';
 import { resolve, dirname, basename } from 'node:path';
 import { z } from 'zod';
 import { runRecordSchema } from '../runner/types.js';
-
+import { diagnosisRecordSchema, diagnosisSettled, retainedDiagnoses } from '../runner/payloads.js';
 import { type MasterConfig, assertOutsideWorktrees, writeFailure, diskExhaustionMessage, reclaimAdvice } from '../master.js';
 import { boundDetail } from './decisions.js';
 import { classified, faultClasses, faultInstanceSchema, noteActionOutcome, type FaultKind } from '../model/fault-classes.js';
 import { timingsSchema } from '../master/timings.js';
 import { emptyInvariantRecord, invariantRecordSchema } from '../model/invariants.js';
 
-export const daemonActionKinds = ['close', 'dispatch', 'review', 'refresh', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session', 'reclaim', 'decision', 'scope', 'settle', 'failover', 'capacity', 'human', 'preserve', 'fault'] as const;
+export const daemonActionKinds = ['close', 'dispatch', 'review', 'refresh', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session', 'reclaim', 'decision', 'scope', 'settle', 'failover', 'capacity', 'human', 'preserve', 'fault', 'diagnosis'] as const;
 export type DaemonActionKind = typeof daemonActionKinds[number];
 /** A failed action is a pipeline fault; its kind in the fault catalogue (GY-173) follows the action's kind. */
 export const daemonActionFaultKind = (kind: DaemonActionKind) => `action:${kind}` as FaultKind;
@@ -398,6 +398,7 @@ export const daemonStateSchema = z.object({
   faults: z.object({ instances: z.array(faultInstanceSchema).default([]), open: z.record(z.string(), z.string()).default({}), failing: z.record(z.string(), z.string()).default({}), observedAt: z.string().optional() }).strict()
     .default(() => ({ instances: [], open: {}, failing: {} })),
   /**
+  /**
    * The pipeline doctor's last runs (GY-711, src/daemon/doctor.ts): each with what it found, did
    * and filed, and the runs it took. The newest is kept whole; the list is bounded below.
    */
@@ -410,6 +411,11 @@ export const daemonStateSchema = z.object({
     /** When the approver remedy last read each open item's decision history, by item id. */
     decisionsCheckedAt: z.record(z.string(), z.string()).default({}),
   }).strict().default(() => ({ runs: [], unposted: [], pendingFiles: [], decisionsCheckedAt: {} })),
+  /**
+   * Per recurring-fault item key or invariant-violation instance id, the diagnostician run the loop
+   * launched for it and what became of the diagnosis (GY-439, src/daemon/diagnosis.ts).
+   */
+  diagnoses: z.record(z.string(), diagnosisRecordSchema).default(() => ({})),
   /**
    * The system invariants (GY-404): what the loop carries between cycles to judge them — base
    * refreshes per candidate, when each merge candidate was first seen mergeable, the builds and lease
@@ -485,6 +491,10 @@ export function pruneDaemonState(state: DaemonState) {
       state.doctor.runs = state.doctor.runs.filter(entry => !drop.has(entry.at));
     }
   }
+  // A settled diagnosis is kept for the report; the oldest settled ones go past the bound, never one still in flight.
+  const settledDiagnoses = Object.entries(state.diagnoses).filter(([, entry]) => diagnosisSettled(entry)).sort((a, b) => Date.parse(a[1].updatedAt) - Date.parse(b[1].updatedAt));
+  const diagnosisExcess = Object.keys(state.diagnoses).length - retainedDiagnoses;
+  if (diagnosisExcess > 0) for (const [key] of settledDiagnoses.slice(0, diagnosisExcess)) delete state.diagnoses[key];
   return state;
 }
 
