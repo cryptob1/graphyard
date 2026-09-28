@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { hostname } from 'node:os';
 import { stableJson } from './model/stable-json.js';
 import { z } from 'zod';
 import type { PoolClient } from 'pg';
@@ -370,11 +371,44 @@ type GracedLease = Lease & { renewalFault?: { at: string; error: string } };
 export class RenewalFault extends Refusal {
   constructor(message: string, readonly grace: { at: string; graceUntil: string; now: string } | null) { super(message, 503); }
 }
+/** The SQLSTATE classes a failed renewal may blame on the server (GY-671): connection exceptions,
+ * insufficient resources, program limits, operator intervention (statement timeouts among them),
+ * system errors and internal errors. Client-caused classes — bad data, constraint violations,
+ * syntax, privileges, serialization and deadlock — are the request's own and earn nothing. */
+const renewalFaultSqlClasses = new Set(['08', '53', '54', '57', '58', 'XX']);
+/** The connection-level failures a renewal may blame on the server, named by message or errno. */
+const renewalFaultMessage = /connection|terminated|timed? ?out|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|socket hang up/i;
+/** The connection errnos a failed renewal may blame on the server, whatever its message says. */
+const renewalFaultErrnos = /^ECONN(RESET|REFUSED|ABORTED)|^ETIMEDOUT$|^EPIPE$|^E(HOST|NET)UNREACH$|^EAI_AGAIN$/;
+/**
+ * What a failed renewal blames on the server, or null when it may not (GY-558, narrowed by
+ * GY-671): only infrastructure trouble — lost or timed-out connections, statement timeouts and
+ * the database's server-error classes — never a programming error. A TypeError in a heartbeat
+ * must surface as the bug it is instead of silently extending the lease it broke, so anything
+ * this cannot name as the server's fault is answered as a refusal, with no grace and no record.
+ */
+export function renewalFaultOf(error: unknown): string | null {
+  if (error instanceof Refusal) return error.status >= 500 ? `HTTP ${error.status}: ${error.message}` : null;
+  if (error instanceof z.ZodError) return null;
+  const code = (error as { code?: unknown } | null)?.code;
+  if (typeof code === 'string') {
+    if (renewalFaultErrnos.test(code)) return `${code}: ${(error as Error).message}`;
+    if (/^[0-9A-Z]{5}$/.test(code)) return renewalFaultSqlClasses.has(code.slice(0, 2)) ? `SQLSTATE ${code}: ${(error as Error).message}` : null;
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  return renewalFaultMessage.test(message) ? message : null;
+}
 /** How far back heartbeat health looks, and the p95 latency above which `master status` raises it (GY-558). */
 export const leaseHealthWindowMs = 10 * 60_000, heartbeatLatencyAttentionMs = 5_000;
 /**
  * Heartbeat latency and the renewals refused or failed server-side, over the last ten minutes in
- * this server process (GY-558), reported by GET /api/status as `leaseHealth`.
+ * this server process (GY-558), reported by GET /api/status as `leaseHealth`. The window is one
+ * process's own, and the report says so (`scope` and `process`, GY-671): a multi-replica
+ * deployment serves renewals from every replica and each reports separately, so fleet-wide p95
+ * and failure counts are the per-replica reports compared, not one number. Aggregating them in
+ * the server was declined there — it needs cross-replica state the store does not hold and would
+ * put metric writes beside the coordination path — so the attention item repeats the caveat
+ * whenever it is raised, naming the process that measured it.
  */
 export class LeaseHealth {
   private samples: { at: number; ms: number; outcome: 'renewed' | 'refused' | 'failed' }[] = [];
@@ -394,10 +428,11 @@ export class LeaseHealth {
     const percentile = (p: number) => sorted.length ? sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(p * sorted.length) - 1))] : null;
     const p50Ms = percentile(0.5), p95Ms = percentile(0.95);
     const refused = this.samples.filter(sample => sample.outcome === 'refused').length, failed = this.samples.filter(sample => sample.outcome === 'failed').length;
+    const reportedBy = `${hostname()}/${process.pid}`;
     const attention = p95Ms !== null && p95Ms > heartbeatLatencyAttentionMs
-      ? `Lease renewals are slow: heartbeat p95 ${p95Ms} ms (p50 ${p50Ms} ms) over the last 10 minutes exceeds ${heartbeatLatencyAttentionMs} ms across ${sorted.length} renewal(s), ${failed} failed server-side and ${refused} refused; a renewal slower than the lease loses it — find what holds the coordination lock or the lease pool in the server logs`
+      ? `Lease renewals are slow: heartbeat p95 ${p95Ms} ms (p50 ${p50Ms} ms) over the last 10 minutes exceeds ${heartbeatLatencyAttentionMs} ms across ${sorted.length} renewal(s), ${failed} failed server-side and ${refused} refused; a renewal slower than the lease loses it — find what holds the coordination lock or the lease pool in the server logs. This window is one server process's own (${reportedBy}); a multi-replica deployment reports each replica separately, so slow renewals served by other replicas are missing here.`
       : null;
-    return { windowMs: leaseHealthWindowMs, renewals: sorted.length, p50Ms, p95Ms, refused, failed, thresholdMs: heartbeatLatencyAttentionMs, attention };
+    return { windowMs: leaseHealthWindowMs, renewals: sorted.length, p50Ms, p95Ms, refused, failed, thresholdMs: heartbeatLatencyAttentionMs, attention, scope: 'process' as const, process: reportedBy };
   }
 }
 
@@ -588,8 +623,11 @@ export class Engine {
   }
   /**
    * Run one command. A renewal is timed and counted in `leaseHealth` (GY-558), and one that fails
-   * server-side — a connection or statement timeout, a lost connection — is recorded against its
-   * lease (`recordRenewalFault`) and answered 503 with the grace that record earned.
+   * server-side — what `renewalFaultOf` blames on the server: a connection or statement timeout,
+   * a lost connection, the database's server-error classes — is recorded against its lease
+   * (`recordRenewalFault`) and answered 503 with the grace that record earns. Any other failure,
+   * a programming error included, is refused without a grace, so bugs surface instead of
+   * extending the lease they broke (GY-671).
    */
   async execute(actor: Principal, command: Command, id: string | null, input: unknown, key: string, context: { observation?: Observation; ciRun?: CiRunObservation | null; attestation?: EvidenceAttestation } = {}) {
     if (command !== 'heartbeat') return this.executeCommand(actor, command, id, input, key, context);
@@ -599,7 +637,7 @@ export class Engine {
       this.leaseHealth.record('renewed', Date.now() - started.getTime());
       return work;
     } catch (error) {
-      const fault = !(error instanceof Refusal && error.status < 500) && !(error instanceof z.ZodError);
+      const fault = renewalFaultOf(error) !== null;
       this.leaseHealth.record(fault ? 'failed' : 'refused', Date.now() - started.getTime());
       if (!fault || !id) throw error;
       throw await this.recordRenewalFault(actor, id, Number((input as { epoch?: unknown } | null)?.epoch), started, error);
@@ -608,12 +646,17 @@ export class Engine {
   /** Heartbeat latency and the renewals refused or failed server-side, in this server process (GY-558). */
   readonly leaseHealth = new LeaseHealth();
   /**
-   * Record a renewal that failed server-side inside its lease's expiry window (GY-558), on the
-   * lease pool and without the coordination lock: a `lease.renewal-failed` event naming the owner,
-   * epoch and the time the renewal arrived. `renewalGrace` then keeps the lease valid until the next
-   * successful renewal or one further lease period from that time, whichever comes first. A record
-   * the database refuses is retried in the background until that period has passed. The returned
-   * refusal carries the grace, so the worker's supervisor keeps retrying through it.
+   * Record a renewal that failed server-side inside its lease's expiry window (GY-558): a
+   * `lease.renewal-failed` event naming the owner, epoch and the time the renewal arrived,
+   * written without the coordination lock. `renewalGrace` then keeps the lease valid until the
+   * next successful renewal or one further lease period from that time, whichever comes first.
+   * The record is written on the main pool, not the lease pool (GY-671): the lease pool is
+   * reserved for the lease commands, and the very exhaustion that failed the renewal must not
+   * also fail the record of it. A record the database refuses is retried in the background until
+   * that period has passed. The refusal carries the grace the record earns even before it has
+   * landed (GY-671) — the same one period from the renewal's arrival `renewalGrace` will grant
+   * once it does — so the worker's supervisor extends its local deadline as far as the server
+   * will hold the lease, instead of stopping at the old deadline while the server still keeps it.
    */
   private async recordRenewalFault(actor: Principal, id: string, epoch: number, at: Date, error: unknown) {
     const reason = (error instanceof Error ? error.message : String(error)).slice(0, 300);
@@ -621,7 +664,7 @@ export class Engine {
     const payload = JSON.stringify({ owner: actor.id, epoch, at: at.toISOString(), error: reason });
     const until = at.getTime() + this.leaseSeconds * 1000;
     // Only a live lease of this owner and epoch earns a grace; the refusal says what it earned.
-    const write = async () => (await this.store.leasePool.query(`WITH live AS (
+    const write = async () => (await this.store.pool.query(`WITH live AS (
         SELECT id, CASE WHEN document->'lease' ? 'renewalFault' THEN (document->'lease'->>'expiresAt')::timestamptz
           ELSE GREATEST((document->'lease'->>'expiresAt')::timestamptz, $7::timestamptz) END AS grace_until
         FROM work_items WHERE (id::text=$1 OR document->>'key'=$1) AND document->'lease'->>'owner'=$2
@@ -635,10 +678,11 @@ export class Engine {
       const retry = () => setTimeout(() => { if (Date.now() < until) write().catch(retry); }, 1000).unref();
       retry();
     }
-    const grace = recorded ? { at: at.toISOString(), graceUntil: recorded.grace_until.toISOString(), now: recorded.now.toISOString() } : null;
+    const grace = recorded ? { at: at.toISOString(), graceUntil: recorded.grace_until.toISOString(), now: recorded.now.toISOString() }
+      : unrecorded !== null ? { at: at.toISOString(), graceUntil: new Date(until).toISOString(), now: new Date().toISOString() } : null;
     return new RenewalFault(grace
-      ? `Lease renewal failed server-side (${reason}); the failure is recorded and the lease stays valid until ${grace.graceUntil} or the next successful renewal`
-      : `Lease renewal failed server-side (${reason})${unrecorded ? `; the failure could not be recorded yet (${unrecorded.slice(0, 200)})` : '; no live lease of this owner and epoch was found to keep'}`, grace);
+      ? `Lease renewal failed server-side (${reason}); ${unrecorded === null ? 'the failure is recorded and the lease stays valid' : 'the record is being retried and the lease is kept'} until ${grace.graceUntil} or the next successful renewal`
+      : `Lease renewal failed server-side (${reason}); no live lease of this owner and epoch was found to keep`, grace);
   }
   /**
    * A lease past its expiry that a recorded server-side renewal fault still covers (GY-558): the
