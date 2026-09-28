@@ -26,7 +26,7 @@ Running rows offer:
 
 ## The status sentence
 
-Rows show **Research, Build, Validate, Test, Review, Prove, Merge, Deploy**. Research: **current** while live, **done** with a brief, else **skipped** (failed, bug, `research: false`, built briefless, unconfigured). Merged items read *Merged*, then *Live* once production serves it (counted this week). Moving and Blocked rows past thirty minutes turn overdue.
+Rows show **Research, Build, Validate, Test, Review, Prove, Merge, Deploy**. Research: **current** while live, **done** with a brief, else **skipped** (failed, bug, `research: false`, briefless, unconfigured). Merged items read *Merged*, then *Live* once production serves it (counted this week). Moving and Blocked rows past thirty minutes turn overdue.
 
 ## An item page
 

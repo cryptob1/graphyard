@@ -50,7 +50,7 @@ Each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `linge
 
 ## Research and diagnosis
 
-With `run.research` set (`model`, `timeoutMinutes` 15, `tokenBudget`), a feature (or `"research": true`) gets one read-only Pi briefing per revision. Product questions: Needs you; build follows the recommendation, a differing answer reworks, failure never blocks. `master status` `research`: `live`, `waiting`, `failed`; the loop posts `research.configured` to `POST /api/research-settings` on each change.
+With `run.research` set (`model`, `timeoutMinutes` 15, `tokenBudget`), a feature (or `"research": true`) gets one read-only Pi briefing per revision. Product questions: Needs you; build follows the recommendation, a differing answer reworks, failure never blocks. `master status` `research`: `live`, `waiting`, `failed`; the loop posts `research.configured` to `POST /api/research-settings` per change.
 
 `Recurring <class> faults` items, `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`: `model`/`fallbackModel`/`serverLogCommand`/registry role); approved decisions release its fix or close-as-duplicate; post-delivery recurrences re-file.
 

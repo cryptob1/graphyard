@@ -47,11 +47,10 @@ export { cycleBudget } from '../daemon/metrics.js';
 // `master scope` lives in its own module, read from here as it always was.
 export { approveScopeRequest } from './master-scope.js';
 
-// Observation throughput and the queue head's lag live beside the observation schedule they
-// read; the report reads them from here, as do the tests.
+// Observation throughput and the queue head's lag live beside the observation schedule they read.
 export { observationThroughputStatus };
 // The attention builders live beside each other in `status-attention.ts`; the report reads them
-// from here, as does everything that read them from here before the split.
+// from here.
 import { mergeStallAttention } from './status-attention.js';
 export { approverLaunchAttention, mergeStallAttention, nameOrphanSupervisors, orphanSupervisorAttention, stalledItemAttention, supervisorReclaimCommand } from './status-attention.js';
 export { humanNeededAttention, needsHumanActions, scopeRequestAttention } from './owed-report.js';
