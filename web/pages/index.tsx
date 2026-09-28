@@ -13,20 +13,19 @@ import ValidationView from '../validation';
 import ReleasesView from '../releases';
 import ProofGrantsView from '../grants';
 import InsightsPage from './insights-flow';
+import TestsPage from './tests';
 import { readsFlowAnalytics } from '../step-moves';
 
 /**
  * The one navigation (GY-161): the sidebar and nothing beside it. Every page belongs to one of
  * these entries; a section with more than one visible page shows its pages as a row of sub-page
- * links above the content (web/components/top-bar.tsx), never repeating a sidebar entry. Tests is
- * planned (GY-162): it is listed so the navigation matches the approved design, and opens nothing
- * until it ships.
+ * links above the content (web/components/top-bar.tsx), never repeating a sidebar entry.
  */
 export const sections = [
   { id: 'work', icon: 'work', label: 'Work' },
   { id: 'workers', icon: 'workers', label: 'Workers' },
   { id: 'shipped', icon: 'shipped', label: 'Shipped' },
-  { id: 'tests', icon: 'tests', label: 'Tests', planned: 'GY-162' },
+  { id: 'tests', icon: 'tests', label: 'Tests' },
   { id: 'insights', icon: 'insights', label: 'Insights' },
   { id: 'settings', icon: 'settings', label: 'Settings' },
 ] as const;
@@ -70,6 +69,9 @@ export const views: readonly View[] = [
   // analytics detail behind one Show details toggle. It reads the flow analytics routes, which an
   // operator agent's scoped API refuses, so that role is not offered it.
   { id: 'insights', icon: '◷', label: 'Insights', section: 'insights', visible: dashboard => readsFlowAnalytics(role(dashboard)), render: dashboard => <InsightsPage {...dashboard}/> },
+  // Every test case with its latest trusted result and history (GY-162). It is shown even before the
+  // first run, as never run, rather than hidden; operator agents' scoped API refuses its read.
+  { id: 'tests', icon: '⚗', label: 'Tests', section: 'tests', visible: dashboard => role(dashboard) !== 'operator-agent', render: dashboard => <TestsPage api={dashboard.api} canEdit={role(dashboard) === 'admin'} setView={dashboard.setView}/> },
   { id: 'scenarios', icon: '✓', label: 'Test cases', section: 'settings', render: dashboard => <ScenarioLibrary api={dashboard.api} canEdit={role(dashboard) === 'admin'}/> },
   { id: 'grants', icon: '⚷', label: 'Proof authority', section: 'settings', render: dashboard => <ProofGrantsView api={dashboard.api} work={dashboard.work} canEdit={role(dashboard) === 'admin'}/> },
   { id: 'automation', icon: '◇', label: 'Operator automation', section: 'settings', adminOnly: true, visible: dashboard => configured(dashboard.features.automation), render: dashboard => <AutomationPage operatorAgents={dashboard.operatorAgents} operatorAgentsError={dashboard.operatorAgentsError} setView={dashboard.setView}/> },
