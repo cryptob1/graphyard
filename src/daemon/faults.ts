@@ -2,7 +2,7 @@
 // structural item filed per recurring class.
 import { createHash } from 'node:crypto';
 import type { Work } from '../model.js';
-import { classified, classifyAttention, faultClasses, faultClassItem, faultClassPolicyFromEnv, recurringClasses, statusFaults, trackFaults, workFaults, type FaultClassPolicy, type FaultKind, type FaultObservation } from '../model/fault-classes.js';
+import { classified, classifyAttention, faultClasses, faultClassItem, faultClassPolicyFromEnv, recurringClasses, scopeRequestState, statusFaults, trackFaults, workFaults, type FaultClassPolicy, type FaultKind, type FaultObservation } from '../model/fault-classes.js';
 import { buildMasterStatus, diskThresholdBytes, type AttentionItem, type ContainmentAssessment, type ControlPlaneStatus, type HerdrAgent, type MasterConfig } from '../master.js';
 import { worktreeRootMinFreeBytes } from '../install/worktree-root.js';
 import { qualifyTimingFailures, type CheckAnnotations } from '../cli/timing-failures.js';
@@ -71,7 +71,9 @@ export function cycleFaults(state: DaemonState, work: Work[], now: number, sourc
   // lines from the same status: the status's copy of those lines is not a second fault (distinct faults of one kind stay distinct).
   const derivedKinds = new Set(derived.map(fault => `${fault.kind}|${fault.subject}`));
   if (sources.status || sources.jobs?.length) derived.push(...statusFaults({ github: true, ...sources.status, jobs: sources.jobs ?? [] }).filter(fault => !(sources.reported && fault.kind === 'executor') && !derivedKinds.has(`${fault.kind}|${fault.subject}`)));
-  const shown = new Set(own.map(fault => `${fault.subject}|${fault.kind}`));
+  // An item's own record decides whether its live scope request is a fault yet (scopeRequestState): the rule-refusal line
+  // master status derives for it while it is still being decided is not a second way to count it.
+  const shown = new Set([...own.map(fault => `${fault.subject}|${fault.kind}`), ...work.filter(item => scopeRequestState(item, now) === 'deciding').map(item => `${item.key}|scope-request`)]);
   return [...own, ...derived.filter(fault => ![fault.kind, ...(restatements[fault.kind] ?? [])].some(kind => shown.has(`${fault.subject}|${kind}`)))];
 }
 /**
