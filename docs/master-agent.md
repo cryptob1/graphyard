@@ -14,12 +14,12 @@ Keep cycling: status, dispatch, review, merge, deployment verification. Stop onl
 1. `master status` on startup and events.
 2. `master run` dispatches ready work in `schedule.order`.
 3. Merge exact candidates passing every gate; rework findings.
-4. `master verify-deployment GY-N` after delivery ([refusals](operations-reference.md#perpetual-master-loop)). Railway: set `productionEnvironment`.
+4. `master verify-deployment GY-N` after delivery ([refusals](operations-reference.md#perpetual-master-loop)).
 5. Close finished agent sessions; repeat.
 
 Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions. `controlPlane.production` flags main ahead of production.
 
-`master run` is the `graphyard-master.service` unit ([supervision](onboarding.md#the-loop-must-be-supervised)); restart it (`systemctl --user restart graphyard-master`) when `daemon.liveness` is `stalled` or `absent`, never from a dirty checkout ([sessions](master-agent-sessions.md#workers-are-write-confined-to-their-worktree)).
+`master run` is the `graphyard-master.service` unit; restart it (`systemctl --user restart graphyard-master`) when `daemon.liveness` is `stalled` or `absent`, never from a dirty checkout.
 
 ### System-driven items
 
@@ -68,7 +68,7 @@ A candidate passing the build gate gets, in `autoDispatch`, one producer request
 
 **Concurrency is per role.** A profile's `concurrency` (1–20, default 1) caps its simultaneous sessions, each with a name unique to its request above one. It applies without a restart; lowering it drains sessions first (`longestWaitMs`); a role starved ten minutes counts in `counts.concurrencyStarved`.
 
-**Requests always settle.** A gone pane (`pane_not_found`) is closed. No request outlives its own token: expired, unreported by Herdr, it settles `expired`; one still pending counts in `dispatch.sessionReconcile.stuck`. Unanswered sessions relaunch elsewhere (12 per request, then `dispatch.abandoned`); an unposted reviewer is reminded first. Killed or vanished producer runs spend no attempt; spent attempts raise `escalation:proof-exhausted`, then a quoting rework.
+A gone pane (`pane_not_found`) is closed. No request outlives its own token: expired, unreported by Herdr, it settles `expired`; one still pending counts in `dispatch.sessionReconcile.stuck`. Unanswered sessions relaunch elsewhere (12 per request, then `dispatch.abandoned`); an unposted reviewer is reminded first. Killed or vanished producer runs spend no attempt; spent attempts raise `escalation:proof-exhausted`, then a quoting rework.
 
 **Every role fails over on spent quota** or waits as one `capacity` line, uncounted, relaunching oldest-first.
 

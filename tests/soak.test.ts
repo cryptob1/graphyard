@@ -17,6 +17,7 @@ import { mergeBatchSize, mergeParallelTips, optimisticExcludeGlobs, optimisticMe
 import { answeringWidening, emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { plannedFilesMax, type ScopeRequestState } from '../src/model/scope.js';
 import { diagnosticianSettings, diagnosisSettled } from '../src/runner/payloads.js';
+import { stoppedStates } from '../src/daemon/effects.js';
 import type { RunOptions, RunResult, Runner } from '../src/runner/types.js';
 import type { DiagnosticianEffects } from '../src/daemon/diagnosis.js';
 import { Launcher } from '../src/daemon/cycle.js';
@@ -30,7 +31,6 @@ import { queuePlacement } from '../src/merge-queue.js';
 import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } from './helpers/soak-world.js';
 import { doctorRunEvent } from '../src/server/routes/status.js';
 import type { DoctorEffects } from '../src/daemon/doctor.js';
-import type { Runner } from '../src/runner/types.js';
 
 /**
  * GY-404: per-item gates cannot catch faults that emerge from interaction over time, so this runs
@@ -443,6 +443,14 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   const capacityLaunched: { decision: string; key: string; elapsed: number }[] = [];
   let capacityWaiters: { decision: string; key: string; requestedAt: string }[] | null = null;
   const approver: DaemonEffects['approver'] = async (work, decision) => {
+    // As production's launchApprover, a session of this name still live in Herdr refuses the
+    // launch, whatever asked for it: the doctor's approver remedy (GY-711) and the loop's own
+    // supervision share this effect, and two live sessions for one decision would judge it twice.
+    // A stopped session's pane lingers until the sweep closes it; its relaunch opens a fresh pane,
+    // as the sweep-then-relaunch pair does.
+    const name = approverSessionName(work, decision);
+    if (herdr.list().some(agent => agent.name === name && !stoppedStates.includes(agent.agent_status ?? '')))
+      throw new Error(`Approver session ${name} is already live in Herdr; let it finish or close it first`);
     if (options.capacityWait && clock.now() - dayStart >= options.capacityWait.from && clock.now() - dayStart < options.capacityWait.to) {
       capacityRefused.push({ decision, key: work.key, elapsed: clock.now() - dayStart });
       throw Object.assign(new Error('No healthy agent account for the approver: every approver account is spent until its quota resets'), { capacityExhausted: true });
@@ -459,8 +467,13 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     const agentName = approverSessionName(work, decision), pane = herdr.open(agentName);
     approverPanes.push(pane);
     pending.push(async () => {
+      const current = (await api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(work.id)}/decisions`)).decisions.find((entry: { id: string; state: string }) => entry.id === decision);
+      // A session relaunched onto a decision judged while it was being launched finds the decision
+      // applied and exits without judging: the judge itself refuses a second verdict, and the day
+      // must not die on what a real session would simply see.
+      if (!current || current.state !== 'requested') { herdr.status(pane, 'done'); return; }
       const refuseDue = !!options.refuseReworkOf?.includes(numberOf(work)) && !refused.some(entry => entry.key === work.key)
-        && (await api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(work.id)}/decisions`)).decisions.some((entry: { id: string; action: string }) => entry.id === decision && entry.action === 'rework');
+        && current.action === 'rework';
       if (refuseDue) {
         await api(principals.approver, 'POST', `work/${work.id}/approve`, { action: 'refuse', decision, reason: `Refused: ${work.key}'s rework rests on grounds this approver does not accept` });
         refused.push({ key: work.key, decision });
