@@ -83,7 +83,10 @@ const plan = {
   // GY-842: review panes of a previous day, standing agentless with their worktrees deleted.
   leftovers: 8,
   rework: new Set([3, 7, 11]), deaths: new Set([5, 9]), deathAfterMs: 8 * minute,
-  deploys: [2 * hour + 30 * minute, 5 * hour], dirtyCheckout: { from: 4 * hour + 50 * minute, to: 6 * hour }, split: { at: 45 * minute, item: 12 }, clean: 2, unstable: 4, slowRecompute: 8, exhaustedReviewer: 6, attested: 10,
+  // GY-521: the attested item is one whose first head is review-reworked, so its unproducible
+  // manual proof is the only thing standing on the fresh head and the optimistic lane is free to
+  // carry the breaksMain scenario on item 10, whose acceptance passes without the loop's attest.
+  deploys: [2 * hour + 30 * minute, 5 * hour], dirtyCheckout: { from: 4 * hour + 50 * minute, to: 6 * hour }, split: { at: 45 * minute, item: 12 }, clean: 2, unstable: 4, slowRecompute: 8, exhaustedReviewer: 6, attested: 3,
   /** GY-500: the item whose first head breaks main after its optimistic merge, and the items that change shared infrastructure and so queue. */
   breaksMain: 10, infrastructure: new Set([13, 14]),
   // GY-516: a flake on a speculative tip whose one rerun passes, and one whose rerun fails again.

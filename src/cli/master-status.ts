@@ -201,7 +201,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     // The inverted loop: what the control plane says each item needs, who is running it, and
     // every session it can be watched through.
     actions: needsHumanActions(actionReport(snapshot), owed.rows),
-    // Attestations the loop requests (GY-521), never needsHuman.
+    // GY-521.
     loopDecisions: { attestations: loopAttestations(snapshot, cycling?.approvals ?? []) },
     // Presence and supervision (GY-105) and the release each registered executor runs (GY-126).
     executors: { ...executors, ...releases, attention: [...executors.attention, ...releases.attention] }, sessions: sessionReport(snapshot),
