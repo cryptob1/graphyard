@@ -1011,8 +1011,14 @@ export function ejectionReason(work: Work, ciAppIds: number[], all: Work[] = [],
   const threads = conversationProtectionRefusal(work);
   if (threads) return threads;
   // Evidence binds the tip exactly or carried across a Graphyard-authored tip; either way a
-  // failure or a withdrawal of it is an adverse conclusion about this tip.
-  const proof = work.evidence.find(item => item.trusted && item.result === 'fail' && evidenceBindsCandidate(work, item) && item.policyRevision === work.policyRevision);
+  // failure or a withdrawal of it is an adverse conclusion about this tip. One record is not:
+  // a trusted `manual:` proof whose executed is 0 (GY-868) judged nothing — it is the unexercised
+  // finding the gates read it as (producerManualFailures excludes it), answered by the attestation
+  // the loop requests for it exact or carried (unexercisedFindings reads the carry), so the entry
+  // is held for that attestation rather than ejected for a failure no rework would ever be
+  // requested for (GY-875).
+  const proof = work.evidence.find(item => item.trusted && item.result === 'fail' && evidenceBindsCandidate(work, item) && item.policyRevision === work.policyRevision
+    && !(item.proof.startsWith('manual:') && item.executed === 0));
   if (proof) return `Proof ${proof.proof} failed on speculative tip ${tip}`;
   // A withdrawn proof is an explicit adverse conclusion, not a missing one: the entry leaves the
   // queue instead of holding its position while everything behind it waits.
