@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, readFile } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -147,9 +147,9 @@ test('unit:conflict-probe-budgeted: the probe stops at its wall-clock budget and
   let probes = 0;
   const probe = () => { probes++; return []; };
   let clockCalls = 0;
-  // The clock reads 0 while the budget is fresh and 50 ms from the second pair on: against a
-  // 10 ms budget exactly the first pair is probed and the other 14 are left unprobed.
-  const budget = { timeoutMs: 10, elapsedMs: () => (clockCalls++ < 2 ? 0 : 50) };
+  // The clock reads 0 for the first pair and 50 ms from the second on: against a 10 ms budget
+  // exactly the first pair is probed and the other 14 are left unprobed.
+  const budget = { timeoutMs: 10, elapsedMs: () => (clockCalls++ < 1 ? 0 : 50) };
 
   const report = candidateConflicts(work, probe, budget);
   assert.equal(probes, 1, `Expected the budget to cut the run off after the first pair, got ${probes} probes`);
@@ -165,7 +165,7 @@ test('unit:conflict-probe-budgeted: each unprobed pair carries its reason, and a
   let probes = 0;
   const probe = (a: string, b: string) => { probes++; return a === work[0].candidate!.sha ? null : []; };
   let clockCalls = 0;
-  const budget = { timeoutMs: 10, elapsedMs: () => (clockCalls++ < 2 ? 0 : 50) };
+  const budget = { timeoutMs: 10, elapsedMs: () => (clockCalls++ < 1 ? 0 : 50) };
 
   const unprobedReasons: Record<string, string> = {};
   const report = candidateConflicts(work, probe, budget, unprobedReasons);
@@ -250,6 +250,154 @@ test('unit:conflict-probe-budgeted: master status still returns every other sect
   const row = (key: string) => status.work.find(entry => entry.key === key)!;
   assert.deepEqual(row('GY-left').conflicts, { candidates: [], files: [], unprobed: ['GY-right'], probed: true }, 'the unprobed pair is named, never reported conflict-free');
   assert.deepEqual(row('GY-right').conflicts, { candidates: [], files: [], unprobed: ['GY-left'], probed: true });
+});
+
+test('unit:conflict-probe-budgeted: the fetch is inside the budget — it is killed at the deadline, the report still answers, and nothing is invented', async () => {
+  const dataRoot = await mkdtemp(join(tmpdir(), 'conflict-fetch-budget-'));
+  const gitRoot = await mkdtemp(join(tmpdir(), 'conflict-fetch-budget-git-'));
+  try {
+    gitInit(gitRoot);
+    const work: Work[] = [];
+    for (let i = 1; i <= 3; i++) work.push(workWithFiles(`GY-${i}`, ['src/common.ts'], String(i).padStart(40, String(i))));
+
+    const fetchTimeouts: number[] = [];
+    let catFileCalls = 0, mergeTreeCalls = 0;
+    // A fetch that wants 5 s and is killed at whatever the budget hands it, the way execFileSync
+    // kills the real git; with nothing fetched, no head is present and no probe may run.
+    const slowFetchRun = (command: string, args: string[], timeoutMs?: number): string => {
+      if (command === 'git' && args[2] === 'fetch') {
+        fetchTimeouts.push(timeoutMs ?? 60_000);
+        block(Math.min(5_000, fetchTimeouts[0] + 50));
+        const error = new Error('fake git fetch killed at the budget deadline') as Error & { killed?: boolean };
+        error.killed = true;
+        throw error;
+      }
+      if (command === 'git' && args[2] === 'cat-file') { catFileCalls++; throw new Error('head was never fetched'); }
+      if (command === 'git' && args[2] === 'merge-tree') { mergeTreeCalls++; return ''; }
+      return '';
+    };
+
+    const started = Date.now();
+    const result = await probeCandidateConflictsWithBudget(gitRoot, work, dataRoot, slowFetchRun, 400);
+    const elapsed = Date.now() - started;
+
+    assert.equal(fetchTimeouts.length, 1, 'the fetch ran once');
+    assert.ok(fetchTimeouts[0] > 0 && fetchTimeouts[0] <= 400, `the fetch is handed the remaining budget, not the 60 s default, got ${fetchTimeouts[0]}ms`);
+    assert.ok(elapsed < 2_000, `the report answers at the budget even though the fetch wanted 5 s, took ${elapsed}ms`);
+    assert.equal(result.available, false, 'a fetch killed at the deadline is reported unavailable');
+    assert.match(result.reason!, /could not be fetched: fake git fetch killed/);
+    assert.equal(catFileCalls, 0, 'no presence check runs once the budget is spent by the fetch');
+    assert.equal(mergeTreeCalls, 0, 'no merge-tree runs once the budget is spent by the fetch');
+    const keys = work.map(item => item.key);
+    assert.deepEqual(unprobedPairs(result.report, keys), new Set(allPairs(work.length).map(([i, j]) => pairKey(keys[i], keys[j]))), 'every overlapping pair is accounted for');
+    for (const [, reason] of Object.entries(result.unprobedReasons)) {
+      assert.equal(reason, BUDGET_EXHAUSTED_REASON, 'the pairs the spent fetch left are named with the budget reason');
+    }
+    for (const key of keys) assert.deepEqual(result.report[key].conflicts, [], 'nothing is reported as a conflict without a probe');
+  } finally {
+    await rm(dataRoot, { recursive: true, force: true });
+    await rm(gitRoot, { recursive: true, force: true });
+  }
+});
+
+test('unit:conflict-probe-budgeted: the fetch pays the budget first — the probe phase gets only what the fetch left', async () => {
+  const dataRoot = await mkdtemp(join(tmpdir(), 'conflict-fetch-first-'));
+  const gitRoot = await mkdtemp(join(tmpdir(), 'conflict-fetch-first-git-'));
+  try {
+    gitInit(gitRoot);
+    const work: Work[] = [];
+    for (let i = 1; i <= 6; i++) work.push(workWithFiles(`GY-${i}`, ['src/common.ts'], String(i).padStart(40, String(i))));
+
+    const mergeTreeAllotted: number[] = [];
+    let mergeTreeCalls = 0;
+    // A fetch that takes 300 ms of a 400 ms budget, then succeeds; the first merge-tree wants 5 s
+    // and honours whatever it is handed, the way execFileSync kills the real git at its timeout.
+    const run = (command: string, args: string[], timeoutMs?: number): string => {
+      if (command === 'git' && args[2] === 'fetch') { block(300); return ''; }
+      if (command === 'git' && args[2] === 'cat-file') return '';
+      if (command === 'git' && args[2] === 'merge-tree') {
+        mergeTreeCalls++;
+        const wanted = 5_000, allotted = timeoutMs ?? 60_000;
+        mergeTreeAllotted.push(allotted);
+        block(Math.min(wanted, allotted + 50));
+        if (allotted < wanted) {
+          const error = new Error('fake git killed at the budget deadline') as Error & { killed?: boolean; status?: number | null };
+          error.killed = true;
+          error.status = null;
+          throw error;
+        }
+        return '';
+      }
+      return '';
+    };
+
+    const started = Date.now();
+    const result = await probeCandidateConflictsWithBudget(gitRoot, work, dataRoot, run, 400);
+    const elapsed = Date.now() - started;
+
+    assert.equal(mergeTreeCalls, 1, `the probe phase starts on the remainder and stops at the deadline, got ${mergeTreeCalls} merge-tree calls`);
+    assert.ok(mergeTreeAllotted[0] < 400, `the first merge-tree gets only what the fetch left, not the whole budget, got ${mergeTreeAllotted[0]}ms`);
+    assert.ok(elapsed < 2_000, `the report answers inside the budget even though each call wanted 5 s, took ${elapsed}ms`);
+    assert.equal(result.available, true, 'the fetch completed inside the budget');
+
+    const keys = work.map(item => item.key);
+    assert.equal(result.unprobedReasons[pairKey(keys[0], keys[1])], PROBE_FAILED_REASON, 'the pair whose merge-tree was killed at the deadline is named with the failure reason');
+    const budgeted = Object.entries(result.unprobedReasons).filter(([, reason]) => reason === BUDGET_EXHAUSTED_REASON);
+    assert.equal(budgeted.length, 14, 'the pairs the remaining budget never reached are named with the budget reason');
+    assert.deepEqual(unprobedPairs(result.report, keys), new Set(allPairs(work.length).map(([i, j]) => pairKey(keys[i], keys[j]))), 'every pair is accounted for');
+    for (const key of keys) assert.deepEqual(result.report[key].conflicts, [], 'nothing probed-through is invented: no conflicts are reported');
+  } finally {
+    await rm(dataRoot, { recursive: true, force: true });
+    await rm(gitRoot, { recursive: true, force: true });
+  }
+});
+
+test('unit:conflict-probe-overlap-only-cached: a pair the disk cache answers is reported however far the budget is spent', async () => {
+  const dataRoot = await mkdtemp(join(tmpdir(), 'conflict-cache-budget-'));
+  const gitRoot = await mkdtemp(join(tmpdir(), 'conflict-cache-budget-git-'));
+  try {
+    gitInit(gitRoot);
+    const shaA = '1'.repeat(40), shaB = '2'.repeat(40);
+    const work = [
+      workWithFiles('GY-1', ['src/a.ts'], shaA),
+      workWithFiles('GY-2', ['src/a.ts'], shaB),
+    ];
+
+    // The pair's answer, cached by an earlier call: a real conflict over src/a.ts.
+    await mkdir(join(dataRoot, 'conflict-probes'), { recursive: true });
+    await writeFile(join(dataRoot, 'conflict-probes', [shaA, shaB].sort().join('-') + '.json'), JSON.stringify({ result: ['src/a.ts'], at: '2030-01-01T00:00:00Z' }), 'utf8');
+
+    let catFileCalls = 0, mergeTreeCalls = 0;
+    // A fetch that eats the whole budget and is killed: the disk cache read has already run, so
+    // the pair is still reported, and no git call may reach for the heads it never fetched.
+    const slowFetchRun = (command: string, args: string[], timeoutMs?: number): string => {
+      if (command === 'git' && args[2] === 'fetch') {
+        block(Math.min(5_000, (timeoutMs ?? 60_000) + 50));
+        const error = new Error('fake git fetch killed at the budget deadline') as Error & { killed?: boolean };
+        error.killed = true;
+        throw error;
+      }
+      if (command === 'git' && args[2] === 'cat-file') { catFileCalls++; throw new Error('head was never fetched'); }
+      if (command === 'git' && args[2] === 'merge-tree') { mergeTreeCalls++; return ''; }
+      return '';
+    };
+
+    const started = Date.now();
+    const result = await probeCandidateConflictsWithBudget(gitRoot, work, dataRoot, slowFetchRun, 400);
+    const elapsed = Date.now() - started;
+
+    assert.ok(elapsed < 2_000, `the cached answer is reported without waiting on the fetch it did not need, took ${elapsed}ms`);
+    assert.equal(result.available, false, 'the failed fetch is still named');
+    assert.equal(catFileCalls, 0, 'a cached pair is answered from the cache, not re-probed');
+    assert.equal(mergeTreeCalls, 0, 'a cached pair is answered from the cache, not re-probed');
+    assert.deepEqual(result.report['GY-1'].conflicts, [{ key: 'GY-2', files: ['src/a.ts'] }], 'the cached conflict is reported even with the budget spent');
+    assert.deepEqual(result.report['GY-2'].conflicts, [{ key: 'GY-1', files: ['src/a.ts'] }]);
+    assert.deepEqual(result.report['GY-1'].unprobed, [], 'a cached pair is never left unprobed');
+    assert.deepEqual(result.unprobedReasons, {});
+  } finally {
+    await rm(dataRoot, { recursive: true, force: true });
+    await rm(gitRoot, { recursive: true, force: true });
+  }
 });
 
 test('unit:conflict-probe-null-uncached: an unavailable head is probed again once it becomes available', async () => {

@@ -51,7 +51,11 @@ function filesOverlap(filesA: readonly string[], filesB: readonly string[]): boo
   );
 }
 
-export interface ProbeBudget { timeoutMs?: number; elapsedMs?: () => number }
+/** A probe the budget may consult without charging it: the pair's cached answer, or `undefined` when it has none. */
+export type CachedProbe = (a: string, b: string) => string[] | null | undefined;
+/** The budget a probe loop runs under. `elapsedMs` reads budget consumption from the budget's own
+ *  opening — not from when the loop starts — so every phase inside it counts against the same budget. */
+export interface ProbeBudget { timeoutMs?: number; elapsedMs?: () => number; peek?: CachedProbe }
 
 function getCachePath(cacheDir: string, shaA: string, shaB: string): string {
   const key = [shaA, shaB].sort().join('-');
@@ -71,12 +75,15 @@ async function writeCache(cacheDir: string, shaA: string, shaB: string, result: 
 export function candidateConflicts(work: Work[], probe: ConflictProbe, budget?: ProbeBudget, unprobedReasons?: UnprobedReasons): Record<string, ConflictReport> {
   const candidates = openCandidates(work);
   const report: Record<string, ConflictReport> = Object.fromEntries(candidates.map(item => [item.key, { conflicts: [], unprobed: [] }]));
-  const startTime = budget?.elapsedMs?.() ?? 0;
   const timeoutMs = budget?.timeoutMs ?? Infinity;
   const mark = (left: Work, right: Work, reason: string) => {
     report[left.key].unprobed.push(right.key);
     report[right.key].unprobed.push(left.key);
     if (unprobedReasons) unprobedReasons[[left.key, right.key].sort().join('|')] = reason;
+  };
+  const record = (left: Work, right: Work, files: string[]) => {
+    report[left.key].conflicts.push({ key: right.key, files });
+    report[right.key].conflicts.push({ key: left.key, files });
   };
 
   for (let i = 0; i < candidates.length; i++) {
@@ -90,9 +97,20 @@ export function candidateConflicts(work: Work[], probe: ConflictProbe, budget?: 
         continue;
       }
 
-      // The budget bounds the probing phase: once it is spent the remaining overlapping pairs are
-      // named unprobed with the reason, never as conflict-free
-      if (budget?.elapsedMs && budget.elapsedMs() - startTime > timeoutMs) {
+      // A pair the cache can answer is the report however far the budget is spent: only the
+      // uncached remainder pays the budget check.
+      const cached = budget?.peek?.(left.candidate!.sha, right.candidate!.sha);
+      if (cached !== undefined) {
+        if (cached === null) { mark(left, right, PROBE_FAILED_REASON); continue; }
+        if (cached.length) record(left, right, cached);
+        continue;
+      }
+
+      // The budget bounds the probing phase: the clock handed in measures from the budget's
+      // opening, so work that ran before this loop — a fetch, a cache read — counts against it
+      // too. Once it is spent the remaining overlapping pairs are named unprobed with the
+      // reason, never as conflict-free
+      if (budget?.elapsedMs && budget.elapsedMs() >= timeoutMs) {
         mark(left, right, BUDGET_EXHAUSTED_REASON);
         continue;
       }
@@ -100,7 +118,7 @@ export function candidateConflicts(work: Work[], probe: ConflictProbe, budget?: 
       const files = probe(left.candidate!.sha, right.candidate!.sha);
       if (files === null) { mark(left, right, PROBE_FAILED_REASON); continue; }
       if (!files.length) continue;
-      report[left.key].conflicts.push({ key: right.key, files }); report[right.key].conflicts.push({ key: left.key, files });
+      record(left, right, files);
     }
   }
   return report;
@@ -112,7 +130,9 @@ const gitRun: Run = (command, args, timeoutMs) => execFileSync(command, args, { 
 /**
  * Bring every open candidate head into this checkout. One fetch of the registered PR branches;
  * a head that is still missing afterwards (force-pushed, branch deleted, network down) is left
- * for the probe to report as unprobed. Nothing here writes a worktree or a local branch.
+ * for the probe to report as unprobed. Nothing here writes a worktree or a local branch. Within
+ * the budgeted probe the run handed in is bounded, so the fetch — a network call — takes only
+ * what the budget still has and a fetch the deadline kills is reported, never retried here.
  */
 export function fetchCandidateHeads(root: string, work: Work[], run: Run = gitRun): { fetched: boolean; reason: string | null } {
   const branches = [...new Set(openCandidates(work).map(item => item.candidate!.branch).filter(Boolean))];
@@ -143,11 +163,25 @@ export function gitConflictProbe(root: string, run: Run = gitRun): ConflictProbe
  * back or written, so neither pass grows with the backlog beyond the pairs the budget can reach.
  * A `null` result — a head that was not present when probed — is held only in memory for this call
  * and never persisted: the head may arrive with the next fetch, and a persisted null would pin the
- * pair as unprobed until one of its heads changed. The budget bounds each git call as well as the
- * space between pairs, and every pair left unprobed is named with its reason.
+ * pair as unprobed until one of its heads changed. The whole call answers inside its budget: the
+ * clock opens before any work, the candidate-head fetch is a network git call like any other and
+ * is killed at the deadline, and every pair left unprobed is named with its reason. The disk
+ * cache is read before the fetch — the reads are local and stop once the budget is spent — so a
+ * pair it can answer is reported even when the fetch has eaten the rest of the budget.
  */
 export async function probeCandidateConflictsWithBudget(root: string, work: Work[], dataDir: string, run: Run = gitRun, timeoutMs: number = 10_000): Promise<ConflictProbeResult> {
-  const fetched = fetchCandidateHeads(root, work, run);
+  // The budget opens before anything runs, the fetch included: every git call this function makes
+  // is handed only the time the budget still has, so no single call — the fetch above all — can
+  // hold the report past it.
+  const startedAt = Date.now();
+  const deadline = startedAt + timeoutMs;
+  const spent = () => Date.now() - startedAt > timeoutMs;
+  const boundedRun: Run = (command, args) => {
+    // A call that would outlive the deadline is killed at it, so one slow git invocation cannot
+    // hold the report past the budget; the killed call lands in unprobed with its reason.
+    return run(command, args, Math.max(1, deadline - Date.now()));
+  };
+
   const cache = new Map<string, string[] | null>();
   const getCacheKey = (a: string, b: string) => [a, b].sort().join('-');
 
@@ -167,25 +201,25 @@ export async function probeCandidateConflictsWithBudget(root: string, work: Work
   };
 
   // Pre-populate the in-memory cache from disk for the pairs the probe can reach: the ones whose
-  // planned or changed files overlap. Cached answers stay available even once the budget is spent.
+  // planned or changed files overlap. The reads are local and stop once the budget is spent; the
+  // pairs this loop answers stay answerable however far the budget is spent afterwards, the fetch
+  // included.
   const candidates = openCandidates(work);
-  for (let i = 0; i < candidates.length; i++) {
+  overlap: for (let i = 0; i < candidates.length; i++) {
     for (let j = i + 1; j < candidates.length; j++) {
       const left = candidates[i], right = candidates[j];
       const leftFiles = left.plannedFiles ?? [], rightFiles = right.plannedFiles ?? [];
       if (leftFiles.length && rightFiles.length && !filesOverlap(leftFiles, rightFiles)) continue;
+      if (spent()) break overlap;
       const cached = readCached(left.candidate!.sha, right.candidate!.sha);
       if (cached !== undefined && cached !== null) cache.set(getCacheKey(left.candidate!.sha, right.candidate!.sha), cached);
     }
   }
 
-  const startedAt = Date.now();
-  const deadline = startedAt + timeoutMs;
-  const boundedRun: Run = (command, args) => {
-    // A call that would outlive the deadline is killed at it, so one slow merge-tree cannot hold
-    // the report past the budget; the killed call lands in unprobed with the failure reason.
-    return run(command, args, Math.max(1, deadline - Date.now()));
-  };
+  // The heads come in second, on the time the cache reads have left: a fetch the deadline kills
+  // leaves its heads absent, and the probe reports those pairs unprobed rather than conflict-free.
+  const fetched = fetchCandidateHeads(root, work, boundedRun);
+
   const base = gitConflictProbe(root, boundedRun);
 
   const writes: Array<[string, string]> = [];
@@ -197,9 +231,13 @@ export async function probeCandidateConflictsWithBudget(root: string, work: Work
     cache.set(key, result);
     return result;
   };
+  const peekCached: CachedProbe = (a, b) => {
+    const key = getCacheKey(a, b);
+    return cache.has(key) ? cache.get(key)! : undefined;
+  };
 
   const unprobedReasons: UnprobedReasons = {};
-  const report = candidateConflicts(work, probeWithCache, { timeoutMs, elapsedMs: () => Date.now() - startedAt }, unprobedReasons);
+  const report = candidateConflicts(work, probeWithCache, { timeoutMs, elapsedMs: () => Date.now() - startedAt, peek: peekCached }, unprobedReasons);
 
   // Write cache to disk; a null result is never persisted (see above).
   for (const [a, b] of writes) {
