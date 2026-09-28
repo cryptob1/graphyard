@@ -37,7 +37,7 @@ The gate requires `GITHUB_CI_APP_IDS` CI checks, current-head approval, trusted 
 
 ## Merge queue
 
-A failed required check is rerun once on the unchanged head before rework or ejection. Gate and rework decisions take the newest check-run ID from the configured CI Apps, ignoring other Apps' same-named checks. Master status shows the pending rerun and outcome outside the queue. An owed or accepted rerun expires after 15 minutes without a new run; a running check finishes. The App needs Actions: write — preflight diagnoses a missing grant and rerun requests hold until accepted.
+A failed required check reruns once on the unchanged head before rework or ejection. Gate and rework decisions take the newest check-run ID from configured CI Apps, ignoring other Apps' same-named checks. Master status shows pending reruns and outcomes outside the queue. An owed or accepted rerun expires after 15 minutes without a new run; a running check finishes. The App needs Actions: write — preflight diagnoses a missing grant and rerun requests hold until accepted.
 
 Once gated, the candidate's speculative tip, pushed onto the candidate branch and `refs/graphyard/queue/KEY`, binds every check, review and proof. A failed check, requested changes, a revoked proof, a conflict or rework ejects it to the back. One conflicting only with entries ahead of it re-enters unchanged once one lands or leaves. The App passes the check for an authorized head and merge group and asks GitHub to merge (queue, auto-merge or direct); protection decides; withdrawal dequeues. Without a queue, `CLEAN`, `UNSTABLE` and `HAS_HOOKS` PRs merge at once, head-bound.
 
@@ -53,7 +53,7 @@ Above one, each entry validates on its own tip: defaults mean four tips at once 
 
 ### Optimistic merges
 
-`mergeQueue.optimistic` (default on, independent of `mergeQueue.rerunFailedChecks`): a green entry disjoint from base changes and shared infrastructure lands head-bound, unqueued; a main guard [reverts](master-agent.md#repair-lane) and reopens culprits (`master status`: `optimisticMerge`). Each repository's shared infrastructure is the master config's `mergeQueue.optimisticExclude` globs — onboarding writes product defaults (manifests and lockfiles, CI config, test helpers, schema and migration directories) — so a change to an excluded path never merges optimistically, nor anything whose base changed one since its own run; `optimistic: false` turns the lane off.
+`mergeQueue.optimistic` (default on, independent of `mergeQueue.rerunFailedChecks`): a green entry disjoint from base changes and shared infrastructure lands head-bound, unqueued; a main guard [reverts](master-agent.md#repair-lane) and reopens culprits (`master status`: `optimisticMerge`). Each repository's shared infrastructure is the master config's `mergeQueue.optimisticExclude` globs — onboarding writes product defaults (manifests and lockfiles, CI config, test helpers, schema and migration directories) — so a change to an excluded path never merges optimistically, nor anything whose base changed one since its run; `optimistic: false` turns the lane off.
 
 ### Proofs in CI
 
