@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { demand, stages } from '../../model.js';
+import { plannedFilesMax } from '../../model/scope.js';
 import { interventionKinds, interventionRecordSchema, interventionWindows, judgementSchema, type InterventionWindow } from '../../model/interventions.js';
 import { judgementToWork, openPatternItems, readInterventionReport, recordIntervention, recordJudgement } from '../../interventions.js';
 import { defineRoutes, parseJson } from '../routes.js';
@@ -14,7 +15,7 @@ const reportQuerySchema = z.object({
 const workFromJudgementSchema = z.object({
   title: z.string().trim().min(1).max(200).optional(),
   criteria: z.array(z.object({ id: z.string().min(1).max(20), text: z.string().min(1).max(4000), proofs: z.array(z.string()).min(1).max(20) }).strict()).min(1).max(50).optional(),
-  plannedFiles: z.array(z.string().min(1).max(500)).max(100).optional(),
+  plannedFiles: z.array(z.string().min(1).max(500)).max(plannedFilesMax).optional(),
   priority: z.number().int().min(0).max(4).optional(),
 }).strict();
 

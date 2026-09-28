@@ -8,6 +8,9 @@ import { loadConnection, hostIdSchema } from '../repository-setup.js';
 import { readCredentialFile } from '../master.js';
 import { isConfirmedCoordinationRefusal } from '../quarantine.js';
 
+/** How long one CLI request waits (2026-09-27: the full work snapshot reached 19 MB and ~31 s, so a 30 s bound failed every read of it, including workers' sync and complete; GY-864 bounds those reads). */
+export const cliRequestTimeoutMs = 120_000;
+
 export type Connection = Awaited<ReturnType<typeof loadConnection>>;
 
 /**
@@ -59,7 +62,7 @@ export async function createContext(command: string, id: string | undefined, arg
   const api = async (path: string, data?: unknown, requestId = process.env.GRAPHYARD_REQUEST_ID ?? randomUUID()) => {
     const token = await individualToken();
     if (!token) throw new Error('Set GRAPHYARD_TOKEN to your individual credential');
-    const response = await fetch(`${base}/api/${path}`, { method: data === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': requestId }, body: data === undefined ? undefined : JSON.stringify(data), signal: AbortSignal.timeout(30_000) });
+    const response = await fetch(`${base}/api/${path}`, { method: data === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': requestId }, body: data === undefined ? undefined : JSON.stringify(data), signal: AbortSignal.timeout(cliRequestTimeoutMs) });
     const body = await response.json();
     if (!response.ok) { const error = new Error(JSON.stringify(body)); (error as any).confirmedRefusal = isConfirmedCoordinationRefusal(response.status, body); (error as any).status = response.status; throw error; }
     return body;

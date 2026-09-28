@@ -111,11 +111,14 @@ test('unit:resume-prompt-after-unblock — one re-prompt after a blocker clears 
     assert.match(log.prompts[1], /its scope request was applied: plannedFiles now include src\/b\.ts/);
     assert.ok(log.prompts[1].includes(`complete GY-252 1 255`), 'the pull request Graphyard has seen is named in the command');
 
-    // A worker already active is not re-prompted: the resolution is consumed without a paste.
-    item.current = [held({ blocker: 'waiting on a decision' })];
+    // A worker already active is not re-prompted: the resolution is consumed without a paste. This
+    // is a fresh attempt (epoch 2): blocking again on epoch 1 after its clearance would end that
+    // attempt instead (GY-867, tests/reblocked-attempt.test.ts).
+    const second = { epoch: 2, lease: { owner: 'alpha-principal', epoch: 2, expiresAt: iso(minutes(600)) }, lastAssignment: { owner: 'alpha-principal', epoch: 2, claimedAt: iso(170_000) } } as Partial<Work>;
+    item.current = [held({ ...second, blocker: 'waiting on a decision' })];
     await runCycle(master, state, effects, () => clock + 180_000);
     agent.agent_status = 'working';
-    item.current = [held()];
+    item.current = [held(second)];
     await runCycle(master, state, effects, () => clock + 210_000);
     agent.agent_status = 'idle';
     await runCycle(master, state, effects, () => clock + 240_000);
