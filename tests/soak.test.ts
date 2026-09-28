@@ -316,8 +316,10 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     const principal = principalOf(profile);
     const claimed = await engine.execute(principal, 'claim', work.id, {}, id());
     const epoch = claimed.epoch, key = work.key, n = numberOf(work);
-    // A rework attempt pushes to the pull request already linked, from a fresh workspace.
-    const branch = work.candidate?.branch ?? `graphyard/${key.toLowerCase()}-${epoch}`;
+    // A rework attempt pushes to the pull request already linked, from a fresh workspace: the
+    // branch the standing submission's workspace used, which the engine demands a re-registered
+    // workspace on a submitted item reuse — as when a submitted attempt's lease is reclaimed.
+    const branch = work.candidate?.branch ?? work.workspaces.find(entry => entry.epoch === work.submission?.epoch)?.branch ?? `graphyard/${key.toLowerCase()}-${epoch}`;
     const path = `/tmp/soak/${key}-${epoch}`;
     await engine.execute(principal, 'workspace', work.id, { epoch, host: 'soak-host', path, branch }, id());
     const attempt = (attempts.get(key) ?? 0) + 1; attempts.set(key, attempt);
