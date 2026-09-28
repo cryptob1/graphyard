@@ -44,7 +44,7 @@ Each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `linge
 
 ### The pipeline doctor
 
-Every `run.doctor.intervalMinutes` (default 10) the loop launches the **doctor**: headless Pi, the master's read access, sanctioned commands only (`scope`, `requirements`, `unblock`, `decide` + `approver`, `settle-containment`, `close`, `create`, `release`) on a bash-and-report-tool session; evidence: open items oldest-first, truncation disclosed. A run posts one event per affected item plus a summary to `/api/doctor` (`intent:create`, in-scope; `master status`); unactionable findings escalate or file deduplicated P0/P1 faults; refused filings retry. Each cycle the loop settles a submitted attempt's lapsed fence, clears a covered blocker, relaunches an approver unanswered 10 minutes. Off: `run.doctor.enabled=false`.
+Every `run.doctor.intervalMinutes` the loop launches the **doctor**: sanctioned commands only (`scope`, `requirements`, `unblock`, `decide`+`approver`, `settle-containment`, `close`, `create`, `release`); a run posts a per-item event and summary, unactionable findings escalate or file deduplicated faults; each cycle it settles a submitted attempt's lapsed fence, clears a covered blocker, relaunches an approver unanswered. Off: `run.doctor.enabled=false`.
 
 ## Research before build
 

@@ -112,7 +112,7 @@ Onboarding also writes `mergeQueue.optimisticExclude` into `.graphyard/master.js
 
 ### The pipeline doctor (on by default)
 
-A **doctor** (headless Pi, or the registry's `doctor` role) runs every 10 minutes (`run.doctor.intervalMinutes`), fixing stuck work through the master's [sanctioned commands](master-agent.md#the-pipeline-doctor) — never merge, dispatch, evidence or leases; off: `"run": {"doctor": {"enabled": false}}`.
+A **doctor** (headless Pi, or the `doctor` role) runs every 10 minutes (`run.doctor.intervalMinutes`) through [sanctioned commands](master-agent.md#the-pipeline-doctor); off: `run.doctor.enabled=false`.
 
 ## 4. Prove the first PR
 
