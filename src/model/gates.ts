@@ -9,7 +9,7 @@ import { exactApproval, exhaustedReviewerProfiles, reviewProviderOf, reviewerPro
 import { carriedApproval, evidenceBindsCandidate } from './carry.js';
 import { placeInQueue, type MergeQueueSettings } from './queue.js';
 import { regressionRefusals } from '../regression-guard.js';
-import { mechanicalFailure, mechanicalVerdicts } from './mechanical-proofs.js';
+import { mechanicalFailure, mechanicalProof, mechanicalVerdicts, evidenceProves } from './mechanical-proofs.js';
 
 // Pure evaluation: neither worker assertions nor UI state can authorize progression.
 declare module './work.js' {
@@ -76,16 +76,19 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[],
     return latestCheck(checks)?.result !== 'success';
   }).map(name => `Required CI check ${name} has not passed on the current candidate`));
   const reasons: string[] = [];
+  // GY-895: the pass rule is per family — a manual: proof is judged as an attestation, so its
+  // trusted pass proves it whatever it executed, while a unit or integration proof keeps the
+  // title-count rule (executed counts the cases whose titles carry the proof id).
   const unproven = (proof: string) => {
     const evidence = currentEvidence(work, proof, now);
-    return !evidence || evidence.result !== 'pass' || evidence.executed < 1 || evidence.skipped !== 0;
+    return !evidence || !evidenceProves(proof, evidence);
   };
   const demanded = (proof: string) => {
     const scenario = work.scenarioRequirements?.find(s => s.proof === proof);
     // Name an explicit revocation: an operator otherwise cannot tell a revoked
     // candidate apart from one that was never proven.
     const revoked = work.evidence.some(e => e.proof === proof && e.trusted && !!e.revocation && evidenceBindsCandidate(work, e) && e.policyRevision === work.policyRevision);
-    return `${proof} needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy${scenario ? `; scenario v${scenario.revision} in ${scenario.environment}` : ''}${revoked && !currentEvidence(work, proof, now) ? '; previously accepted evidence was revoked' : ''}`;
+    return `${proof} needs trusted passing evidence, with${mechanicalProof(proof) ? ' executed > 0 and' : ''} skipped = 0, for this candidate and policy${scenario ? `; scenario v${scenario.revision} in ${scenario.environment}` : ''}${revoked && !currentEvidence(work, proof, now) ? '; previously accepted evidence was revoked' : ''}`;
   };
   // A bootstrap criterion's proofs are deferred here and required of the next change that
   // touches the same contract; review, CI and every other criterion still gate this one.
