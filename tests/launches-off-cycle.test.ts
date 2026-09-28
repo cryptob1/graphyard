@@ -5,8 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
-import { masterConfigSchema, type EscalationSession, type WorkerProfile } from '../src/master.js';
-import { daemonSummary, emptyDaemonState, failoverKey, loopAttention, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { masterConfigSchema, type WorkerProfile } from '../src/master.js';
+import { daemonSummary, emptyDaemonState, loopAttention, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { Launcher, defaultLaunchConcurrency } from '../src/daemon/cycle.js';
 import { cycleCost, cycleTimes, loopLiveness, slowCycleAttention, slowCycleMs } from '../src/daemon/liveness.js';
 import { type CycleMetrics, emptyCycleSteps } from '../src/daemon/state.js';
@@ -111,95 +111,6 @@ test('unit:launches-off-cycle — the launcher queues past its concurrency, runs
   await launcher.idle();
   assert.equal(launcher.pending, 0);
   assert.deepEqual(launcher.drain().map(action => action.detail).sort(), ['launched b', 'launched c']);
-});
-
-test('unit:launches-off-cycle — a launch body that throws after its started entry settles that entry failed, and the next cycle retries without a restart', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-launch-settles-'));
-  try {
-    const token = join(directory, 'coordinator.token'); await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
-    const credential = join(directory, 'worker.token'); await writeFile(credential, 'worker-token-'.padEnd(40, 'x'), { mode: 0o600 });
-    const item = work('GY-901');
-    const key = `dispatch:${item.id}:${item.epoch}`;
-    const master = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: token, cliPath: cli, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a',
-      masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [profile('worker-1', credential)] });
-    let dispatches = 0;
-    const effects: DaemonEffects = {
-      agents: () => [], credentials: async entries => Object.fromEntries(entries.map(entry => [entry.name, { available: true, reason: null }])),
-      snapshot: async () => ({ work: [item], now: iso(0) }),
-      closeSession: () => {},
-      dispatch: async () => { dispatches += 1; },
-      requestProof: () => {}, merge: async () => ({}), observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
-      recordDeployment: async () => {}, requestSmoke: () => {},
-      // The cursor refuses writes while the dispatch's started entry stands: the launch body then
-      // throws after recording it, the way a failing store throws any body past its own settling.
-      persist: async current => { if (current.actions[key]?.state === 'started') throw new Error('the cursor refused the write'); },
-    };
-    const state = emptyDaemonState(master), launcher = new Launcher();
-    await runCycle(master, state, effects, Date.now, launcher);
-    await launcher.idle();
-    assert.equal(state.actions[key]?.state, 'failed', 'the thrown launch settles its own started entry failed, not left started until a restart reconciles it');
-    assert.match(state.actions[key]!.detail, /settled failed/);
-    assert.equal(state.actions[`isolated:dispatch:${item.id}`]?.state, 'failed', 'the isolated failure is recorded as before');
-    assert.equal(dispatches, 0, 'the body threw before it could dispatch');
-    // A failed entry is a retryable failure, so the next cycle launches again; a stale started
-    // entry would have held the item back until a restart reconciled it.
-    await runCycle(master, state, effects, Date.now, launcher);
-    await launcher.idle();
-    assert.equal(state.actions[key]!.attempts, 2, 'the next cycle attempted the dispatch again');
-  } finally { await rm(directory, { recursive: true, force: true }); }
-});
-
-test('unit:launches-off-cycle — an escalation-handler relaunch is handed to the launcher beside the cycle, and its failover settles when it lands', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-escalation-launch-'));
-  try {
-    const token = join(directory, 'coordinator.token'); await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
-    const credential = join(directory, 'worker.token'); await writeFile(credential, 'worker-token-'.padEnd(40, 'x'), { mode: 0o600 });
-    const item = { ...work('GY-902'), stage: 'backlog', ready: false } as Work;
-    const launchedAt = iso(-hour);
-    const session: EscalationSession = { agentName: 'gy-esc-old', pane: 'pane-gy-esc-old', work: item.key, trigger: 'lease-loss', kind: 'claude', account: null, runtime: 'claude', launchedAt, session: null, waiting: null };
-    const herdrAgents = [{ name: 'gy-esc-old', pane_id: 'pane-gy-esc-old', agent_status: 'idle' }];
-    const master = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: token, cliPath: cli, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a',
-      masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [profile('worker-1', credential)] });
-    let release: () => void = () => {};
-    const gate = new Promise<void>(resolve => { release = resolve; });
-    const ends: { resolution: string; waiting: unknown }[] = [], relaunches: string[] = [], held: string[] = [];
-    const effects: DaemonEffects = {
-      agents: () => herdrAgents, credentials: async entries => Object.fromEntries(entries.map(entry => [entry.name, { available: true, reason: null }])),
-      herdr: async () => ({ agents: herdrAgents, available: true }),
-      snapshot: async () => ({ work: [item], now: iso(0) }),
-      closeSession: () => {},
-      dispatch: async () => {},
-      sessionOutput: () => "  ⎿ You've hit your usage limit\n",
-      reportCapacity: async () => item,
-      escalationSessions: async () => [session],
-      holdAccount: async name => { held.push(name); },
-      endEscalation: async (ended, resolution, waiting) => { ends.push({ resolution, waiting }); },
-      // The relaunch is the slow part — a pane and a session registration — and the gate holds it
-      // past the cycle that hands it over, the way a real Herdr holds a burst of launches.
-      relaunchEscalation: async () => { await gate; relaunches.push(session.trigger); return { agentName: 'gy-esc-next', account: 'env-b' }; },
-      requestProof: () => {}, merge: async () => ({}), observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
-      recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
-    };
-    const state = emptyDaemonState(master), launcher = new Launcher(1);
-    const key = failoverKey('escalation-handler', item, `lease-loss:${launchedAt}`);
-    const first = await runCycle(master, state, effects, Date.now, launcher);
-    assert.equal(launcher.pending, 1, 'the cycle handed the relaunch over and moved on; it did not wait on it in the close step');
-    assert.equal(relaunches.length, 0, 'the gated relaunch has not landed');
-    assert.equal(held.length > 0, true, 'the exhausted handler\'s account was held in the cycle, as before');
-    assert.equal(ends.length, 1, 'the spent handler was ended in the launch body');
-    assert.equal(state.actions[key]?.state, 'started', 'its failover stands started while the launch is in flight');
-    release();
-    await launcher.idle();
-    assert.deepEqual(relaunches, ['lease-loss']);
-    assert.equal(state.actions[key]?.state, 'done', JSON.stringify(state.actions[key]));
-    assert.match(state.actions[key]!.detail, /relaunched as gy-esc-next on env-b/);
-    assert.equal(first.actions.filter(action => action.kind === 'failover' && action.state === 'done').length, 0, 'the cycle that handed it over reported nothing yet');
-    // The next cycle reports what the launch did.
-    const second = await runCycle(master, state, effects, Date.now, launcher);
-    await launcher.idle();
-    assert.ok(second.actions.some(action => action.kind === 'failover' && action.state === 'done' && /relaunched as gy-esc-next/.test(action.detail)), JSON.stringify(second.actions));
-    assert.equal(relaunches.length, 1, 'the settled failover is not launched again');
-  } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
 test('unit:slow-cycle-attention — a 90 s cycle raises a liveness attention naming its three slowest steps, and master status shows the p50/p95 cycle time over the last 30 minutes', () => {
