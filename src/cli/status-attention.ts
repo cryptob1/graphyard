@@ -26,8 +26,11 @@ export function approverLaunchAttention(daemon: {
     // GY-849: Decisions waiting for approver capacity (not counted against launch attempts) are
     // shown as waiting for a slot with the live sessions holding the role, not as stalled.
     if (watch.capacity) {
+      // GY-849: the wait is the loop's to clear — it relaunches the decision itself, oldest
+      // waiting decision first, once an account or slot frees — so the remedy names no command:
+      // a hand `master approver` here would race the relaunch the watch already covers.
       return [{ subject: watch.work, text: `${watch.work} is waiting for approver capacity to relaunch ${watch.action} decision ${watch.decision}: ${watch.capacity}`,
-        ...agentOwner('master', `graphyard master approver ${watch.work} ${watch.decision} [AGENT_KIND] when capacity frees`, 'approver') }];
+        ...agentOwner('master', `nothing to run: the loop relaunches ${watch.decision} itself, oldest waiting decision first, when capacity frees`, 'approver') }];
     }
     // The loop records a refused launch under the decision it was requested for (the request that
     // could not reach an approver) or under that launch's own key (a replacement that could not).

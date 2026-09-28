@@ -103,7 +103,15 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     const name = approverSessionName(item, watch.decision), seen = await sessions();
     // A session a master started for the same decision (`master approver`) is the approver it has.
     const listed = adopt && seen.available ? seen.agents.find(agent => agent.name === name) : undefined;
-    if (!listed && approversSpent) { Object.assign(watch, { agentName: null, pane: null }); return `the decision waits: ${capacityWait()}`; }
+    if (!listed && approversSpent) {
+      // GY-849: a request that lands while every account is spent is a capacity wait like a refused
+      // launch. It is marked and persisted here, so the decision joins the oldest-first relaunch
+      // queue and its relaunch runs through the one-at-a-time guard, instead of staying unmarked
+      // and racing a marked older waiter for the first account that frees.
+      Object.assign(watch, { agentName: null, pane: null, capacity: capacityWait().slice(0, 500) });
+      await effects.persist(state);
+      return `the decision waits: ${capacityWait()}`;
+    }
     // An adopted session keeps the account its launch chose: that is the account it spends.
     const adopted = listed ? await effects.approverLaunch?.(name).catch(() => null) ?? null : null;
     // A session the watch still holds past its close attempts is ended before the watch forgets it.
@@ -341,7 +349,12 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       // fails leaves the watch behind, so the next cycle sees a decision with no session and
       // launches again, inside the same bound.
       // A retired watch's approver is judging this decision already; supervision relaunches it if it ends.
-      const how = prior?.agentName ? `kept approver session ${prior.agentName}, already judging it under the earlier binding` : await launch(item, watch, true);
+      // A watch that carried a capacity wait over the re-key keeps its place in the oldest-first
+      // queue (GY-849): while another waiter's relaunch is queued or running on the launcher, this
+      // one hands off nothing and is made again on a later cycle, through the guarded relaunch path.
+      const how = prior?.agentName ? `kept approver session ${prior.agentName}, already judging it under the earlier binding`
+        : watch.capacity && capacityRelaunchWaits(watch) ? 'held its capacity wait behind the relaunch already in flight'
+        : await launch(item, watch, true);
       performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${standing ? `Adopted decision ${requested.id} (${decision.action}), already standing on ${item.key},` : `Requested decision ${requested.id} (${decision.action}) for ${item.key}`} and ${how}: ${reason}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
     } catch (error) {
       performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'failed', detail: `Could not put the ${decision.action} decision for ${item.key} to an approver: ${message(error)}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
