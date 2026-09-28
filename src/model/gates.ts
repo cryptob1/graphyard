@@ -25,6 +25,18 @@ declare module './work.js' {
 /** The merge gate's refusal while GitHub has not computed a pull request's mergeability (GY-548). */
 export const mergeabilityComputingRefusal = 'GitHub is computing mergeability against the current base; the next observation reads it again';
 
+/**
+ * The test-gate lift the merge queue's validation pays for (GY-332): a tip the queue accounts for
+ * covers exactly the CI-pending refusals, so only those leave the test gate; any other refusal is
+ * the candidate's own, stays, and keeps the gate failed. `null` lifts nothing: no validation
+ * running, no refusals paid.
+ */
+export function settleTestGate(test: Gate, validating: string[] | null): void {
+  if (!validating) return;
+  test.reasons = test.reasons.filter(reason => !ciPendingReason(reason));
+  test.passed = !test.reasons.length;
+}
+
 export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[], mergeBatchSize?: number): { stage: Stage; gates: Gate[]; violations: string[]; queue: QueueEntry | null; queueSequence: number; queueEjection: QueueEjection | null; queueHistory: QueueHistoryEntry[] } {
   const gates: Gate[] = [];
   const add = (name: string, reasons: string[]) => gates.push({ name, passed: reasons.length === 0, reasons });
@@ -120,7 +132,7 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[],
   // accounts for are lifted; any other test-gate refusal stands.
   const test = gates.find(g => g.name === 'test')!;
   const validating = tipValidation(work, queueState.queue, test.reasons);
-  if (validating) { test.reasons = test.reasons.filter(reason => !ciPendingReason(reason)); test.passed = !test.reasons.length; }
+  settleTestGate(test, validating);
   // GitHub's `mergeable: null` is a computation it has not finished, not a refusal (GY-548): it is
   // named as such and read again on the next observation. A queued entry is not held on it at
   // all: what merges is its speculative tip, and that tip's own CI and merge decide.

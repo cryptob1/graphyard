@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { GitHub, patchId } from '../src/github.js';
 import { ciPendingReason, queueRef, tipValidation, type MergeBatchView, type QueueSpeculation } from '../src/merge-queue.js';
+import { settleTestGate } from '../src/model/gates.js';
 import { ciCheckName, ciCheckRefusal } from '../src/model/ci-refusal.js';
 import { gateRefusalCatalogue } from '../src/model/refusal-catalogue.js';
 import { carriedApproval, currentCarry, decideCarry, describeGround, evidenceBindsCandidate, type CarryInput, type Evidence, type TipMerge, type Work } from '../src/model.js';
@@ -142,10 +143,31 @@ test('unit:diff-bound-carry — only a CI-pending test-gate refusal is relabelle
   // A refusal of another shape is the candidate's own: it is never wrapped as queue progress.
   assert.equal(tipValidation(work, queue, [other]), null);
   assert.deepEqual(tipValidation(work, queue, [pending, other]), [`Merge queue is validating speculative tip ${TIP.slice(0, 12)}: ${pending}`]);
+  // The production lift itself (src/model/gates.ts settleTestGate): what the tip pays for leaves
+  // the test gate, what it does not stays and keeps the gate failed. Replacing the lift with the
+  // old blanket `reasons = []; passed = true` would drop `other`, failing these assertions.
+  const gate = (reasons: string[]) => ({ name: 'test', passed: reasons.length === 0, reasons });
+  const mixed = gate([pending, other]);
+  settleTestGate(mixed, tipValidation(work, queue, [pending, other]));
+  assert.deepEqual(mixed.reasons, [other], 'the test gate keeps the non-CI refusal');
+  assert.equal(mixed.passed, false, 'a retained refusal keeps the test gate failed');
   // A batch behind the head requires nothing of its tip: `[]`, and the gate lifts only the CI-pending refusal.
   const waiting = { batch: 2, size: 1, members: ['GY-7'], tip: null, underTest: null, state: 'waiting', step: { kind: 'wait' }, summary: '' } as unknown as MergeBatchView;
   assert.deepEqual(tipValidation(work, { ...queue, batch: waiting }, [pending, other]), []);
-  assert.deepEqual([pending, other].filter(reason => !ciPendingReason(reason)), [other], 'the test gate keeps the non-CI refusal');
+  const batchWaiting = gate([pending, other]);
+  settleTestGate(batchWaiting, tipValidation(work, { ...queue, batch: waiting }, [pending, other]));
+  assert.deepEqual(batchWaiting.reasons, [other], 'the batch-waiting path keeps the non-CI refusal too');
+  assert.equal(batchWaiting.passed, false);
+  // With the tip paying for every refusal the gate raised, the gate clears and passes; with no
+  // validation running at all, nothing is lifted.
+  const cleared = gate([pending]);
+  settleTestGate(cleared, tipValidation(work, queue, [pending]));
+  assert.deepEqual(cleared.reasons, []);
+  assert.equal(cleared.passed, true);
+  const standing = gate([other]);
+  settleTestGate(standing, tipValidation(work, queue, [other]));
+  assert.deepEqual(standing.reasons, [other], 'no tip validation, no lift');
+  assert.equal(standing.passed, false);
 });
 
 test('unit:diff-bound-carry — the CI-pending refusal is worded once and every reader matches the gate\'s wording (GY-332)', () => {
