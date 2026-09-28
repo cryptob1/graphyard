@@ -579,7 +579,7 @@ export async function relaySubscriptionLogin(provider: ConnectProvider, home: st
       asking = true;
       void options.answer!().then(code => { if (code && !answered && !settled) { answered = true; child.stdin?.end(`${code.trim()}\n`); } }, () => {}).finally(() => { asking = false; });
     };
-    const polling = setInterval(() => { if (settled) return; ask(); void seen().then(there => { if (there) finish({ ...(printed() ?? { url: null, code: null }), loggedIn: true, error: null }); }); void (options.isCancelled?.() ?? Promise.resolve(false)).then(cancelled => { if (cancelled) finish({ ...(printed() ?? { url: null, code: null }), loggedIn: false, error: 'The connect was cancelled' }); }); }, pollMs);
+    const polling = setInterval(() => { if (settled) return; ask(); void seen().then(there => { if (there) finish({ ...(printed() ?? { url: null, code: null }), loggedIn: true, error: null }); }); void (options.isCancelled?.() ?? Promise.resolve(false)).then(cancelled => { if (cancelled) finish({ ...(printed() ?? { url: null, code: null }), loggedIn: false, error: 'The connect was cancelled' }); }, () => { /* a failed cancellation poll leaves the login running, as the answer poll does */ }); }, pollMs);
     limit.unref?.(); polling.unref?.();
     child.on('error', error => finish({ ...(printed() ?? { url: null, code: null }), loggedIn: false, error: `${login.command} failed: ${error instanceof Error ? error.message : 'unknown reason'}` }));
     child.on('close', status => { void seen().then(there => {

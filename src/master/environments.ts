@@ -644,46 +644,36 @@ export async function setupAgentEnvironments(root: string, input: { directory?: 
 
 /** The host's connect key: the private half stays beside the coordinator credential, never sent anywhere. */
 const connectKeyPath = (credentialFile: string, file?: string) => file ?? resolve(dirname(credentialFile), `${basename(credentialFile).replace(/\.token$/, '')}.connect.key`);
-/** Load this host's connect key pair, creating it on first use; the public half is what the control plane holds. */
+/** Load this host's connect key pair, creating it on first use under an exclusive create; the public half is what the control plane holds. */
 export async function hostKeyPair(credentialFile: string, file?: string): Promise<{ privateKey: KeyObject; publicKey: string }> {
   const path = connectKeyPath(credentialFile, file);
-  const lockPath = `${path}.lock`;
+  const read = async () => {
+    const stored = JSON.parse(await readFile(path, 'utf8')); // a corrupt file throws instead of silently rotating the key
+    if (typeof stored?.privateKey !== 'string') throw new Error(`The connect key at ${path} is malformed; restore or remove it by hand.`);
+    const privateKey = createPrivateKey(stored.privateKey), publicKey = createPublicKey(privateKey).export({ format: 'der', type: 'spki' }).toString('base64');
+    return { privateKey, publicKey };
+  };
   try {
-    const stored = JSON.parse(await readFile(path, 'utf8'));
-    if (typeof stored?.privateKey === 'string') {
-      const privateKey = createPrivateKey(stored.privateKey);
-      return { privateKey, publicKey: createPublicKey(privateKey).export({ format: 'der', type: 'spki' }).toString('base64') };
-    }
-  } catch (error) {
-    if (!(error instanceof Error && error.code === 'ENOENT')) throw error;
-  }
-  let lockFile: Promise<void> | undefined;
+    return await read();
+  } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
+  // Two slots starting together converge on one key: exactly one exclusive create wins; a loser waits out the winner's write and adopts its key.
+  const pair = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
   try {
-    lockFile = writeFile(lockPath, '', { flag: 'wx' }).catch(() => undefined);
-    await lockFile;
-    try {
-      const stored = JSON.parse(await readFile(path, 'utf8'));
-      if (typeof stored?.privateKey === 'string') {
-        const privateKey = createPrivateKey(stored.privateKey);
-        return { privateKey, publicKey: createPublicKey(privateKey).export({ format: 'der', type: 'spki' }).toString('base64') };
-      }
-    } catch (error) {
-      if (!(error instanceof Error && error.code === 'ENOENT')) throw error;
-    }
-    const pair = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
-    await atomicPrivateText(path, `${JSON.stringify({ privateKey: pair.privateKey.export({ format: 'pem', type: 'pkcs8' }).toString() }, null, 2)}\n`);
+    await writeFile(path, `${JSON.stringify({ privateKey: pair.privateKey.export({ format: 'pem', type: 'pkcs8' }).toString() }, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
     return { privateKey: pair.privateKey, publicKey: pair.publicKey.export({ format: 'der', type: 'spki' }).toString('base64') };
-  } finally {
-    try { await rm(lockPath).catch(() => undefined); } catch {}
+  } catch (error: any) { if (error.code !== 'EEXIST') throw error; }
+  for (let wait = 0; wait < 20; wait++) {
+    await new Promise(resolve => setTimeout(resolve, 50)); try { return await read(); } catch (error: any) { if (error.code !== 'ENOENT' && error.name !== 'SyntaxError') throw error; }
   }
+  throw new Error(`The connect key at ${path} stayed unreadable after another writer created it.`);
 }
 
 /**
  * Open what the browser sealed to this host's public key: an ephemeral ECDH P-256 key, an HKDF over
  * the shared secret (salted with the host key itself, info naming the scheme), and AES-256-GCM with
  * the tag appended — the same construction `web/seal.ts` runs in the browser, so the control plane
- * in between holds nothing that can open the payload. P-256 is the portable WebCrypto choice across
- * Node.js and browsers; both implementations are cross-tested so the sealed box is trustworthy.
+ * in between holds nothing that can open the payload. P-256 (not the brief's X25519) is the recorded
+ * departure: the portable WebCrypto choice, both implementations cross-tested.
  */
 export function unsealToHost(privateKey: KeyObject, sealed: { ephemeral: string; iv: string; ciphertext: string }): string {
   const ephemeral = createPublicKey({ key: Buffer.from(sealed.ephemeral, 'base64'), format: 'der', type: 'spki' });

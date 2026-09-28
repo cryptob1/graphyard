@@ -46,7 +46,7 @@ function SignInCode({ connect, onAnswer }: { connect: ConnectView; onAnswer: (id
 }
 
 /** One connect in flight or finished: what the provider's login printed, and why it failed when it did. */
-export function ConnectCard({ connect, onCancel, onAnswer }: { connect: ConnectView; onCancel?: (id: string) => void; onAnswer?: (id: string, code: string) => Promise<void> }) {
+export function ConnectCard({ connect, onCancel, onAnswer, onRetry, onRemove }: { connect: ConnectView; onCancel?: (id: string) => void; onAnswer?: (id: string, code: string) => Promise<void>; onRetry?: (connect: ConnectView) => void; onRemove?: (id: string) => void }) {
   return <div className="criterion" data-connect={connect.id} data-provider={connect.provider}>
     <strong className={connect.state === 'failed' ? 'amber' : undefined}>{connect.provider} · {stateText(connect)}{connect.name ? ` · ${connect.name}` : ''}</strong>
     {(connect.url || connect.code) && <p data-connect-login={connect.state}>{connect.state === 'waiting-login' ? 'Finish the sign-in in your own browser:' : 'Signed in'}{connect.url ? <> <a href={connect.url} rel="noreferrer">{connect.url}</a></> : null}{connect.url && connect.code ? ' · code ' : connect.code ? ' code ' : null}{connect.code ? <code data-connect-code>{connect.code}</code> : null}</p>}
@@ -55,10 +55,8 @@ export function ConnectCard({ connect, onCancel, onAnswer }: { connect: ConnectV
     {connect.placement && <p className="muted" data-connect-placement>Joins by default: {connect.placement.join(', ')}</p>}
     <p className="muted">On {connect.host} · asked {when(connect.at)}</p>
     {openState(connect.state) && onCancel && <button data-cancel-connect onClick={() => onCancel(connect.id)}>Cancel</button>}
-    {connect.state === 'failed' && onCancel && <>
-      <button data-retry-connect onClick={() => onCancel(connect.id)}>Retry</button>
-      <button data-remove-connect onClick={() => onCancel(connect.id)}>Remove</button>
-    </>}
+    {connect.state === 'failed' && onRetry && <button data-retry-connect title="Connect this provider again on this host" onClick={() => onRetry(connect)}>Retry</button>}
+    {connect.state === 'failed' && onRemove && <button data-remove-connect title="Take this card off this page; the record stays in the ledger" onClick={() => onRemove(connect.id)}>Remove</button>}
   </div>;
 }
 
@@ -81,14 +79,14 @@ export const policyText = (policy: RolePolicy | undefined) => {
 };
 
 /** The Agents page body, pure over the view so it renders the same in a test as in the browser. */
-export function FleetOverview({ fleet, connects = [], onChangeRoles, onCancelConnect, onAnswerConnect }: { fleet: FleetView; connects?: ConnectView[]; onChangeRoles?: (account: string) => void; onCancelConnect?: (id: string) => void; onAnswerConnect?: (id: string, code: string) => Promise<void> }) {
+export function FleetOverview({ fleet, connects = [], onChangeRoles, onCancelConnect, onAnswerConnect, onRetryConnect, onRemoveConnect }: { fleet: FleetView; connects?: ConnectView[]; onChangeRoles?: (account: string) => void; onCancelConnect?: (id: string) => void; onAnswerConnect?: (id: string, code: string) => Promise<void>; onRetryConnect?: (connect: ConnectView) => void; onRemoveConnect?: (id: string) => void }) {
   const running = fleet.sessions.filter(session => !session.endedAt);
   const byName = new Map(connects.filter(connect => connect.name).map(connect => [connect.name!, connect]));
   return <>
     {!fleet.configured && <div className="notice">No role is configured yet, so sessions still launch from each host's local profiles. Connect an account below — or run <code>graphyard master registry propose --apply</code> on a host whose agent CLIs are logged in.</div>}
     {fleet.attention.map(line => <div role="alert" className="notice danger" key={line}>{line}</div>)}
     <section><div className="section-title"><h2>Accounts <span className="count">{fleet.accounts.length}</span></h2></div>
-      {connects.map(connect => <ConnectCard key={connect.id} connect={connect} onCancel={onCancelConnect} onAnswer={onAnswerConnect}/>)}
+      {connects.map(connect => <ConnectCard key={connect.id} connect={connect} onCancel={onCancelConnect} onAnswer={onAnswerConnect} onRetry={onRetryConnect} onRemove={onRemoveConnect}/>)}
       {fleet.accounts.map(account => <AccountCard key={account.name} account={account} connect={byName.get(account.name)} onChangeRoles={onChangeRoles}/>)}
       {!fleet.accounts.length && !connects.length && <p>No account is connected yet. Connect an account above: pick a provider, paste its key or finish its sign-in — no shell, no configuration files.</p>}
     </section>
@@ -150,6 +148,9 @@ export default function FleetPage({ api, status }: Pick<Dashboard, 'api' | 'stat
   const [providers, setProviders] = useState<ConnectProviderView[]>([]);
   const [hosts, setHosts] = useState<ConnectHostView[]>([]);
   const [wizard, setWizard] = useState<WizardState>(closedWizard);
+  // A removed failed connect comes off this page for this browser (the ledger keeps the record):
+  // the control plane holds no removal action for a finished connect, so the page keeps the ids here.
+  const [removed, setRemoved] = useState<string[]>(() => { try { return JSON.parse(typeof localStorage === 'undefined' ? '[]' : localStorage.getItem('graphyard.removedConnects') ?? '[]') as string[]; } catch { return []; } });
   const [loadError, setLoadError] = useState('');
   const [formError, setFormError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -214,6 +215,10 @@ export default function FleetPage({ api, status }: Pick<Dashboard, 'api' | 'stat
     await load();
   };
   const cancel = async (id: string) => { try { await api(`agent-registry/connect/${id}/cancel`, { reason: 'Cancelled from Settings › Agents' }); await load(); } catch (error) { setFormError((error as Error).message); } };
+  /** Take a failed connect's card off this page for this browser; the ledger record is untouched. */
+  const remove = (id: string) => setRemoved(current => { const next = [...new Set([...current, id])]; try { localStorage.setItem('graphyard.removedConnects', JSON.stringify(next)); } catch { /* a private window keeps it for the session */ } return next; });
+  /** Retry reconnects the same provider on the same host: an api key is sealed again (it was never stored), a subscription login starts afresh. */
+  const retry = (failed: ConnectView) => setWizard({ ...closedWizard, open: true, provider: failed.provider, host: failed.host });
   /** The card's 'change': open Advanced and name the account in the role editor's order. */
   const changeRoles = (account: string) => {
     if (advanced.current) advanced.current.open = true;
@@ -228,7 +233,7 @@ export default function FleetPage({ api, status }: Pick<Dashboard, 'api' | 'stat
     {fleet && canEdit && <section><div className="section-title"><h2>Connect an account</h2>{!wizard.open && <button className="connect-button" data-connect-account onClick={() => setWizard({ ...closedWizard, open: true, host: hosts[0]?.host ?? null })}>Connect an account</button>}</div>
       {wizard.open && <ConnectWizard providers={providers} hosts={hosts} wizard={wizard} setWizard={setWizard} onConnect={id => void connect(id, wizard.host ?? hosts[0]?.host ?? '', wizard.key)} onClose={() => setWizard(closedWizard)}/>}
     </section>}
-    {fleet && <FleetOverview fleet={fleet} connects={connects} onChangeRoles={canEdit ? changeRoles : undefined} onCancelConnect={canEdit ? id => void cancel(id) : undefined} onAnswerConnect={status?.actor?.role === 'admin' ? answer : undefined}/>}
+    {fleet && <FleetOverview fleet={fleet} connects={connects.filter(connect => !removed.includes(connect.id))} onChangeRoles={canEdit ? changeRoles : undefined} onCancelConnect={canEdit ? id => void cancel(id) : undefined} onAnswerConnect={status?.actor?.role === 'admin' ? answer : undefined} onRetryConnect={canEdit ? retry : undefined} onRemoveConnect={canEdit ? remove : undefined}/>}
     {fleet && canEdit && <section><details className="advanced more-details" ref={advanced}><summary>Advanced: runtimes, models, roles and policies</summary>
       <p className="muted">Everything below names where a login lives — never the credential. Connect accounts at the top of the page; use this only to shape the fleet itself. Every change is recorded with its reason.</p>
       {formError && <p role="alert" className="amber">{formError}</p>}
