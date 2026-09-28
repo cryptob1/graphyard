@@ -647,23 +647,43 @@ const connectKeyPath = (credentialFile: string, file?: string) => file ?? resolv
 /** Load this host's connect key pair, creating it on first use; the public half is what the control plane holds. */
 export async function hostKeyPair(credentialFile: string, file?: string): Promise<{ privateKey: KeyObject; publicKey: string }> {
   const path = connectKeyPath(credentialFile, file);
+  const lockPath = `${path}.lock`;
   try {
     const stored = JSON.parse(await readFile(path, 'utf8'));
     if (typeof stored?.privateKey === 'string') {
       const privateKey = createPrivateKey(stored.privateKey);
       return { privateKey, publicKey: createPublicKey(privateKey).export({ format: 'der', type: 'spki' }).toString('base64') };
     }
-  } catch { /* first use */ }
-  const pair = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
-  await atomicPrivateText(path, `${JSON.stringify({ privateKey: pair.privateKey.export({ format: 'pem', type: 'pkcs8' }).toString() }, null, 2)}\n`);
-  return { privateKey: pair.privateKey, publicKey: pair.publicKey.export({ format: 'der', type: 'spki' }).toString('base64') };
+  } catch (error) {
+    if (!(error instanceof Error && error.code === 'ENOENT')) throw error;
+  }
+  let lockFile: Promise<void> | undefined;
+  try {
+    lockFile = writeFile(lockPath, '', { flag: 'wx' }).catch(() => undefined);
+    await lockFile;
+    try {
+      const stored = JSON.parse(await readFile(path, 'utf8'));
+      if (typeof stored?.privateKey === 'string') {
+        const privateKey = createPrivateKey(stored.privateKey);
+        return { privateKey, publicKey: createPublicKey(privateKey).export({ format: 'der', type: 'spki' }).toString('base64') };
+      }
+    } catch (error) {
+      if (!(error instanceof Error && error.code === 'ENOENT')) throw error;
+    }
+    const pair = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+    await atomicPrivateText(path, `${JSON.stringify({ privateKey: pair.privateKey.export({ format: 'pem', type: 'pkcs8' }).toString() }, null, 2)}\n`);
+    return { privateKey: pair.privateKey, publicKey: pair.publicKey.export({ format: 'der', type: 'spki' }).toString('base64') };
+  } finally {
+    try { await rm(lockPath).catch(() => undefined); } catch {}
+  }
 }
 
 /**
  * Open what the browser sealed to this host's public key: an ephemeral ECDH P-256 key, an HKDF over
  * the shared secret (salted with the host key itself, info naming the scheme), and AES-256-GCM with
  * the tag appended — the same construction `web/seal.ts` runs in the browser, so the control plane
- * in between holds nothing that can open the payload.
+ * in between holds nothing that can open the payload. P-256 is the portable WebCrypto choice across
+ * Node.js and browsers; both implementations are cross-tested so the sealed box is trustworthy.
  */
 export function unsealToHost(privateKey: KeyObject, sealed: { ephemeral: string; iv: string; ciphertext: string }): string {
   const ephemeral = createPublicKey({ key: Buffer.from(sealed.ephemeral, 'base64'), format: 'der', type: 'spki' });
@@ -711,7 +731,7 @@ export interface ConnectAccountOptions {
   /** Test overrides: the smoke prompt's runner, where login homes, the host key and the master file live, and every bound. */
   runner?: ChildRun; root?: string; keyFile?: string; masterFile?: string; pollMs?: number; loginTimeoutMs?: number; smokeTimeoutMs?: number;
 }
-const connectOpen = (state: string) => state === 'pending' || state === 'claimed' || state === 'connecting';
+const connectOpen = (state: string) => state === 'pending' || state === 'claimed' || state === 'connecting' || state === 'waiting-login';
 /**
  * The host's half of connecting an account: register this host's public key, take the connect
  * requests addressed to it, and carry each one from sealed payload or provider login to a
@@ -771,7 +791,8 @@ export async function processConnectAccounts(config: Pick<MasterConfig, 'url' | 
           const sealed = current.find(entry => entry.id === connect.id)?.answerSealed;
           return sealed ? unsealToHost(privateKey, sealed) : null;
         };
-        const relay = await relaySubscriptionLogin(provider, home, { ...options, onPrinted: printed => announced.push(waiting(printed)), ...(awaitingCode ? { answer } : {}) });
+        const isCancelled = async () => { const { connects: current } = await fleetRequest(config, `agent-registry/connect/requests?host=${encodeURIComponent(config.hostId!)}`, { fetch: fetcher }) as { connects: ConnectAssignment[] }; return !current.some(entry => entry.id === connect.id && (entry.state === 'claimed' || entry.state === 'connecting' || entry.state === 'waiting-login')); };
+        const relay = await relaySubscriptionLogin(provider, home, { ...options, onPrinted: printed => announced.push(waiting(printed)), ...(awaitingCode ? { answer } : {}), isCancelled });
         await Promise.allSettled(announced);
         if (!announced.length && (relay.url || relay.code)) await waiting(relay);
         if (!relay.loggedIn) { await report(false, relay.error ?? 'the login did not complete'); continue; }

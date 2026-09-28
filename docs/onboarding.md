@@ -27,28 +27,15 @@ Agents treat bracketed paste as untrusted data (prompt injection), so sessions s
 
 ### Connect an account
 
-Settings › **Agents** › **Connect an account**: pick a provider; paste a key (sealed to the host's public key in the browser — the server relays ciphertext only) or start a login. The host writes the provider's auth file (0600) and smoke-tests that provider and model; the card shows the result. A subscription login shows its URL and code while waiting — finish it in your browser; for Claude, **Paste the code** its page shows (**Cancel** stops it). The host's executor must run: strong accounts join worker and reviewer, cheap ones approver and producer; research joins when the host makes the account's wrapper its research command; **change** edits roles. The shell steps below remain for scripted setups.
+Settings › **Agents** › **Connect an account**: pick a provider; paste a key (sealed to the host's public key in the browser — the server relays ciphertext only) or start a login. The host writes the provider's auth file (0600) and smoke-tests that provider and model; the card shows the result. A subscription login shows its URL and code while waiting — finish it in your browser; for Claude, **Paste the code** its page shows (**Cancel** stops it). The host's executor must run: strong accounts join worker and reviewer, cheap ones approver and producer; research joins when the host makes the account's wrapper its research command; **change** edits roles. For scripted setups, use the CLI reference below.
 
 ### Agent environments
 
-Each account's login home under `~/.coding_agents` is selected by `CLAUDE_CONFIG_DIR` (Claude Code), `CODEX_HOME` (Codex), `XDG_DATA_HOME` (OpenCode) or `CURSOR_CONFIG_DIR` (Cursor). Tokens go in `~/.config/graphyard/workers/` and `producers/` (mode 0600). Then:
-
-```sh
-node "$GRAPHYARD_CLI" master environments --create claude,codex --apply  # new login homes
-CLAUDE_CONFIG_DIR=~/.coding_agents/claude-a claude                       # /login once
-node "$GRAPHYARD_CLI" master environments --apply                        # report quota, write profiles
-```
-
-Profiles default to [`"approvals": "auto"`](master-agent-sessions.md#approval-modes) (trade-off: unattended sessions); `"prompt"` is refused at launch.
+Each account's login home under `~/.coding_agents` is selected by `CLAUDE_CONFIG_DIR` (Claude Code), `CODEX_HOME` (Codex), `XDG_DATA_HOME` (OpenCode) or `CURSOR_CONFIG_DIR` (Cursor). Profiles default to [`"approvals": "auto"`](master-agent-sessions.md#approval-modes) (trade-off: unattended sessions); `"prompt"` is refused at launch. See [`master environments`](../CLI.md#master-environments) in the CLI reference for scripted setup commands.
 
 ### Configure the fleet
 
-The **agent registry** (Settings › **Agents**) records runtimes, accounts, roles and policies, proposed from `~/.coding_agents`:
-
-```sh
-node "$GRAPHYARD_CLI" master registry propose
-node "$GRAPHYARD_CLI" master registry propose --apply
-```
+The **agent registry** (Settings › **Agents**) records runtimes, accounts, roles and policies, proposed from `~/.coding_agents`. See [`master registry`](../CLI.md#master-registry) in the CLI reference for the available commands.
 
 ### Add a runtime
 

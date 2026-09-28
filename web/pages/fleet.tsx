@@ -55,13 +55,17 @@ export function ConnectCard({ connect, onCancel, onAnswer }: { connect: ConnectV
     {connect.placement && <p className="muted" data-connect-placement>Joins by default: {connect.placement.join(', ')}</p>}
     <p className="muted">On {connect.host} · asked {when(connect.at)}</p>
     {openState(connect.state) && onCancel && <button data-cancel-connect onClick={() => onCancel(connect.id)}>Cancel</button>}
+    {connect.state === 'failed' && onCancel && <>
+      <button data-retry-connect onClick={() => onCancel(connect.id)}>Retry</button>
+      <button data-remove-connect onClick={() => onCancel(connect.id)}>Remove</button>
+    </>}
   </div>;
 }
 
 /** One account as the registry sees it: what it runs, which roles it serves, what it is doing, and why it cannot launch when it cannot. */
 export function AccountCard({ account, connect, onChangeRoles }: { account: FleetAccountView; connect?: ConnectView; onChangeRoles?: (account: string) => void }) {
   return <div className="criterion" data-account={account.name}>
-    <strong className={account.eligible ? undefined : 'amber'}>{account.name} · {account.runtime} · {account.model}{account.modelId ? ` (${account.modelId})` : ''} · {account.eligible ? 'eligible' : 'ineligible'}</strong>
+    <strong className={account.eligible ? undefined : 'amber'}>{account.name} · {account.runtime} · {account.model}{account.modelId ? ` (${account.modelId})` : ''}{ connect?.provider ? ` · ${connect.provider}` : '' } · {account.eligible ? 'eligible' : 'ineligible'}</strong>
     {account.ineligible && <p role="status" className="amber">Ineligible: {account.ineligible}</p>}
     <p>Roles: {account.roles.length ? account.roles.map(entry => `${entry.role} (${entry.preference} of ${entry.of})`).join(', ') : 'none'} · Live sessions: {account.liveSessions.length ? account.liveSessions.map(session => `${session.role}${session.work ? ` on ${session.work}` : ''} since ${when(session.since)}`).join('; ') : 'none'}{account.maxSessions !== null ? ` (limit ${account.maxSessions})` : ''}{onChangeRoles && <> <button data-change-roles={account.name} onClick={() => onChangeRoles(account.name)}>change</button></>}</p>
     <p>Quota: {account.quota}{account.usage.length ? ` — ${account.usage.map(entry => `${entry.window} ${entry.percent}%`).join(', ')}` : ''} · Resets: {when(account.resetsAt)} · Login: {account.loggedIn === null ? 'not observed' : account.loggedIn ? 'logged in' : 'logged out'} · Observed {when(account.observedAt)}{account.quotaSource === 'operator' ? ' (marked by an operator)' : ''}</p>
