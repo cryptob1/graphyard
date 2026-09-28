@@ -27,12 +27,29 @@ export const producerGroupOf = (proof: string): ProducerGroup => proof.slice(0, 
  */
 export const mechanicalProof = (proof: string) => /^(unit|integration):/.test(proof);
 
+/**
+ * Which proofs are judged as attestations rather than counted from titles (GY-895): only the
+ * `manual:` family. Every other family — `unit:`, `integration:`, `e2e:` — keeps the title rule,
+ * so the exception never widens past the family the attestation rule was written for.
+ */
+export const attestedProof = (proof: string) => proof.startsWith('manual:');
+
+/**
+ * Whether one proof's trusted record reads as a pass (GY-895). A proof outside `manual:` keeps
+ * the title rule: executed counts the test cases whose titles carry the proof id, so a pass with
+ * none executed judged nothing. A `manual:` proof is judged as an independent attestation, never
+ * counted from titles, so its trusted pass proves it whatever it executed — the rule the producer
+ * prompts already state, which the scoring now applies too.
+ */
+export const evidenceProves = (proof: string, evidence: { result: string; executed: number; skipped: number }) =>
+  evidence.result === 'pass' && evidence.skipped === 0 && (attestedProof(proof) || evidence.executed > 0);
+
 export type ProofOutcome = 'proven' | 'unproven' | 'failed';
 /** Every automatable required proof with what the trusted evidence bound to this head says about it. */
 export function automatableOutcomes(work: Work, all: Work[], now: Date): { proof: string; group: ProducerGroup; outcome: ProofOutcome; producer?: string }[] {
   return requiredProofs(work, all).filter(proof => automatableProof(work, proof)).map(proof => {
     const evidence = currentEvidence(work, proof, now);
-    const outcome: ProofOutcome = !evidence ? 'unproven' : evidence.result === 'pass' && evidence.executed > 0 && evidence.skipped === 0 ? 'proven' : 'failed';
+    const outcome: ProofOutcome = !evidence ? 'unproven' : evidenceProves(proof, evidence) ? 'proven' : 'failed';
     return { proof, group: producerGroupOf(proof), outcome, ...(evidence ? { producer: evidence.producer } : {}) };
   });
 }
