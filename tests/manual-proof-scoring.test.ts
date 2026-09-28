@@ -149,7 +149,7 @@ test('unit:no-rework-on-manual-zero-executed — a manual record with executed =
 
 test('unit:manual-proof-not-title-counted — the guides state the manual pass rule', () => {
   const coordination = readFileSync(fileURLToPath(new URL('../docs/coordination.md', import.meta.url)), 'utf8');
-  assert.match(coordination, /judged, never counted from test titles/);
+  assert.match(coordination, /judged, not title-counted/);
   assert.match(coordination, /whatever it executed/);
-  assert.match(coordination, /a `unit:`\/`integration:`\/`e2e:` pass — needs `executed > 0`/);
+  assert.match(coordination, /`unit:`\/`integration:`\/`e2e:` need `executed > 0`/);
 });
