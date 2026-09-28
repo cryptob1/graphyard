@@ -32,7 +32,8 @@ import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } f
  * clock for a simulated day, and asserts after every cycle that every system invariant
  * (src/model/invariants.ts) holds. Fifteen items pass through it: released every fifteen minutes so
  * a merge lands about every fifteen, three sent back by their reviewer, two whose worker dies, two
- * production deploys, a file split on main that re-plans an item, one pull request GitHub reports
+ * production deploys, a file split on main that re-plans an item, one pull request merged by hand
+ * outside the queue that another candidate's landing check reconciles (GY-756), one pull request GitHub reports
  * CLEAN at once and one UNSTABLE, a reviewer bot out of quota that fails over, two flaky tips
  * rerun once (GY-516), one passing on the rerun and one failing again, one head whose producer
  * runs are killed, then fail until the request is spent (GY-496), and the loop's
@@ -96,9 +97,19 @@ const plan = {
   // a worker could even react to them.
   blind: { from: 96 * minute, to: 98 * minute },
   notice: 96 * minute,
-  // GY-496: item 15's first head has its producer runs killed (exit 143) twice, then failing until
-  // the request is spent; the loop escalates it once and requests one rework for that head.
-  spentProducer: 15, lostRuns: 2,
+  // GY-496: item 1's first head has its producer runs killed (exit 143) twice, then failing until
+  // the request is spent; the loop escalates it once and requests one rework for that head. The
+  // fault-free first item hosts it because GY-756's out-of-queue merge needs the last released
+  // one: a pull request merged by hand a minute after it is opened lands before producer runs
+  // could fail, and the spent request would never be.
+  spentProducer: 1, lostRuns: 2,
+  // GY-756: a pull request somebody merges on GitHub by hand, a minute after it is opened, inside
+  // a direct-merge window the operator opened for exactly that minute. The item is the last
+  // released one, whose pull request stands unheard while it waits its turn: the minute it lands,
+  // the flaky tip the queue holds for the rerun-fails item is what finds it landed and reconciles
+  // it at once — and is itself rebuilt onto the moved base, so the failed rerun never costs that
+  // item its rework round (the rerun-fails path itself is exercised by tests/tip-flake-rerun.test.ts).
+  outOfQueue: { item: 15, afterMs: minute },
 };
 const file = (n: number) => `src/soak/item-${n}.ts`;
 const files = (n: number) => plan.infrastructure.has(n) ? [file(n), `tests/helpers/soak-item-${n}.ts`] : [file(n)];
@@ -418,6 +429,15 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   // handed it over — here, before the simulated clock moves on.
   const launcher = new Launcher();
   const violations: string[] = [], observed = new Set<string>(), failures: string[] = [], escalations: string[] = [], spent = new Set<string>(), actionKeys = new Set<string>();
+  // Peers `processJob` reconciled from another item's landing check (GY-744), as `KEY merged|unmerged`.
+  const reconciled: string[] = [];
+  const reconcileLanded = engine.reconcileLanded;
+  engine.reconcileLanded = async (...args) => {
+    const saved = await reconcileLanded.apply(engine, args);
+    reconciled.push(...saved.map(item => `${item.key} ${item.observation?.merged ? 'merged' : 'unmerged'}`));
+    return saved;
+  };
+  let outside: { key: string; sha: string; at: number } | null = null;
   // GY-839: every false landing refusal the fault window produces, first seen per candidate head.
   const landingRefusals: { key: string; sha: string; elapsed: number }[] = [];
   // GY-498: the parallel-tip window as the day saw it — how many entries held a published tip at
@@ -481,6 +501,18 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     github.tick(now);
     await workersTick(now);
     await producersTick(now);
+    // GY-756: the out-of-queue merge. Git shows it landed at once; its item records it unlanded
+    // until an observation — its own, or another candidate's landing check — reconciles it.
+    // The queue-only day runs without it: a tip the window published is not merged by hand.
+    const byHand = options.queued ? undefined : [...github.prs.values()].find(pr => pr.key === items[plan.outOfQueue.item - 1].key && pr.open);
+    // It lands in a minute another open candidate is observed while its own item is not, so the
+    // landing check of that other candidate is what reconciles it, as it was for GY-744's peer.
+    const due = async () => new Set((await store.pool.query('SELECT work_id FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now())')).rows.map(row => row.work_id as string));
+    const handItem = items[plan.outOfQueue.item - 1];
+    if (!outside && !deploying && byHand && now - byHand.createdAt >= plan.outOfQueue.afterMs && await due().then(ids => !ids.has(handItem.id) && [...github.prs.values()].some(pr => pr.open && pr !== byHand && ids.has(items.find(item => item.key === pr.key)!.id)))) {
+      engine.directMergeEnvironment = { since: new Date(now).toISOString(), until: new Date(now + minute).toISOString(), reason: 'Soak: an operator merges one pull request by hand', setBy: 'environment', enabledAt: new Date(now).toISOString(), source: 'environment', event: null };
+      outside = { key: byHand.key, sha: github.mergeOutside(byHand, now).sha, at: now };
+    }
     if (!deploying) {
       for (const act of pending.splice(0)) await act();
       await engine.reconcile();
@@ -541,15 +573,16 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     elapsed += step; await moveClock(step);
   }
 
+  engine.reconcileLanded = reconcileLanded; engine.directMergeEnvironment = null;
   const final = (await store.list()).filter(item => items.some(entry => entry.id === item.id));
   if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
-  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, herdr, hand, escalations, spent, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, landingRefusals, foreignPane,
+  return { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, herdr, hand, escalations, spent, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, landingRefusals, foreignPane,
     mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted };
 }
 
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 180_000 }, async () => {
   const began = performance.now();
-  const { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, state, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, herdr, landingRefusals, foreignPane, mergeQueuePosts } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
+  const { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, state, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, herdr, landingRefusals, foreignPane, mergeQueuePosts } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
   const undelivered = final.filter(item => item.stage !== 'done' || !item.delivery);
   assert.deepEqual(undelivered.map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
@@ -565,7 +598,11 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.ok(github.merges.some(entry => entry.key === items[plan.clean - 1].key && entry.state === 'CLEAN' && entry.mode === 'immediate'), `a CLEAN pull request merged at once: ${JSON.stringify(github.merges)}`);
   assert.ok(github.merges.some(entry => entry.key === items[plan.unstable - 1].key && entry.state === 'UNSTABLE' && entry.mode === 'immediate'), 'an UNSTABLE pull request merged at once');
   assert.ok(github.merges.some(entry => entry.key === items[plan.slowRecompute - 1].key && entry.mode === 'auto-merge'), 'one GitHub reported BLOCKED when asked was set to auto-merge, and GitHub merged it once it recomputed');
-  assert.equal(final.reduce((total, item) => total + (item.pipeline?.reworkRounds ?? 0), 0), plan.rework.size + 3, 'three rework rounds from review, the reverted optimistic merge, the failed rerun, and the spent producer request');
+  // GY-516's rerun-fails round is absent from that total by design: the out-of-queue merge (GY-756)
+  // moves the base under the flaky tip while its failed rerun stands, and the queue rebuilds the
+  // tip, so the round is superseded rather than skipped — the path itself is exercised, with its
+  // rework, by tests/tip-flake-rerun.test.ts.
+  assert.equal(final.reduce((total, item) => total + (item.pipeline?.reworkRounds ?? 0), 0), plan.rework.size + 2, 'three rework rounds from review, the reverted optimistic merge, and the spent producer request; the failed rerun is superseded by the out-of-queue merge');
   // GY-496: the killed runs relaunched without spending an attempt, the request stayed bounded, and
   // its spent head was escalated once and reworked once; the fresh head passed its proofs.
   const spentItem = final.find(item => item.key === items[plan.spentProducer - 1].key)!;
@@ -580,6 +617,16 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.equal(reworks.length, 1, `one rework decision for the spent head: ${reworks.join(', ')}`);
   assert.deepEqual([...actionKeys].filter(key => key.startsWith('escalation:proof-workflow:')), [], 'the trusted workflow was never spent');
   assert.equal(sessions.filter(session => session.state === 'dead').length, plan.deaths.size, 'two workers died');
+  // GY-756: the pull request merged by hand outside the queue was found landed by another
+  // candidate's landing check while its item recorded it unlanded, reconciled by `processJob` at
+  // once, and delivered on the merge commit GitHub made; every peer a landing check named is
+  // reconciled once, not re-observed on every cycle after.
+  const outOfQueue = items[plan.outOfQueue.item - 1].key;
+  assert.ok(outside && github.merges.some(entry => entry.key === outOfQueue && entry.mode === 'outside' && entry.sha === outside.sha), `${outOfQueue} was merged by hand: ${JSON.stringify(github.merges)}`);
+  assert.ok(github.landedReports.some(report => report.endsWith(`-> ${outOfQueue}`) && !report.startsWith(`${outOfQueue} `)), `another candidate's landing check found ${outOfQueue} landed: ${github.landedReports.join(', ')}`);
+  assert.ok(reconciled.includes(`${outOfQueue} merged`), `processJob reconciled ${outOfQueue} from that landing check: ${reconciled.join(', ')}`);
+  assert.equal(final.find(item => item.key === outOfQueue)!.delivery?.mergeSha, outside!.sha, `${outOfQueue} was delivered on the merge made outside the queue`);
+  assert.deepEqual(reconciled.filter((entry, index) => reconciled.indexOf(entry) !== index), [], `no landed peer was reconciled twice: ${reconciled.join(', ')}`);
   // Every dispatch the launcher settled was reported by a later cycle (GY-616): one dispatch-done
   // per session, none lost between the hand-off and the drain.
   assert.equal(reportedDispatches, sessions.length, 'each settled dispatch launch was reported to a cycle');
@@ -619,8 +666,10 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.ok(guardWrites <= 2 * optimistic.length + 4, `the main guard writes its state only on a change (${guardWrites} rows for ${optimistic.length} optimistic merges)`);
   const busiest = Math.max(...github.reads.commitChecks.values());
   assert.ok(busiest <= 4, `the main guard reads at most a few commits' checks per cycle (${busiest})`);
-  // GY-516: each flaky tip was rerun exactly once; the one whose rerun passed merged that tip with no
-  // further round, and the one whose rerun failed again went back for one more and was still delivered.
+  // GY-516: each flaky tip was rerun exactly once. The rerun-fails tip never lands its round: the
+  // out-of-queue merge (GY-756) moves the base under it while the rerun stands, the queue rebuilds
+  // the tip, and the item delivers on the head the flake never touched — the superseded round is
+  // what the plan comment above records, and tests/tip-flake-rerun.test.ts holds the path itself.
   const flaky = { passes: items[plan.flaky.rerunPasses - 1].key, fails: items[plan.flaky.rerunFails - 1].key };
   assert.deepEqual(github.reruns.map(entry => entry.key).sort(), Object.values(flaky).sort(), `one rerun per flaky tip: ${JSON.stringify(github.reruns)}`);
   const passed = github.reruns.find(entry => entry.key === flaky.passes)!, failed = github.reruns.find(entry => entry.key === flaky.fails)!;
@@ -630,8 +679,8 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   const rerunTipFrom = (final.find(item => item.key === flaky.passes)!.queueHistory ?? []).find(entry => entry.tip === passed.sha)?.from ?? passed.sha;
   assert.ok(github.contains(github.merges.find(entry => entry.key === flaky.passes)!.sha, rerunTipFrom), 'the tip whose rerun passed, or the reviewed head under it, is what landed');
   assert.equal(final.find(item => item.key === flaky.passes)!.pipeline?.reworkRounds ?? 0, 0, 'a flake whose rerun passed costs no rework round');
-  assert.equal(final.find(item => item.key === flaky.fails)!.pipeline?.reworkRounds, 1, 'a tip that failed again after its rerun returned to its worker once');
-  assert.ok(!github.contains(github.merges.find(entry => entry.key === flaky.fails)!.sha, failed.sha), 'and a new head, not the failed tip, landed');
+  assert.equal(final.find(item => item.key === flaky.fails)!.pipeline?.reworkRounds ?? 0, 0, 'the tip whose rerun failed was superseded by the out-of-queue merge before the round was asked');
+  assert.ok(!github.contains(github.merges.find(entry => entry.key === flaky.fails)!.sha, failed.sha), 'and what landed for it is not the failed tip');
   // GY-839: the landing check ran in the loop all day, over bases that moved under open candidates.
   // The three-way comparison from the merge base is what a candidate bound behind the tip was
   // judged by, and the fault window's blind answers are the only source of false landing refusals
@@ -796,7 +845,7 @@ test('unit:soak-invariants-hold — after a restart the first request for a refu
   assert.deepEqual([...observed].sort(), [...systemInvariants].sort(), 'every invariant was observed, not merely left unread');
   assert.ok(restarted, 'the day included the scenario restart');
   assert.equal(refused.length, 2, 'both scenario refusals were judged');
-  assert.equal(final.reduce((total, item) => total + (item.pipeline?.reworkRounds ?? 0), 0), plan.rework.size + 3, 'the refusals added no rework rounds beyond the main day\'s own (review, the reverted merge, the failed rerun, the spent producer request)');
+  assert.equal(final.reduce((total, item) => total + (item.pipeline?.reworkRounds ?? 0), 0), plan.rework.size + 2, 'the refusals added no rework rounds beyond the main day\'s own (review, the reverted merge, and the spent producer request; the failed rerun is superseded by the out-of-queue merge)');
   for (const { key, decision } of refused) {
     const item = final.find(entry => entry.key === key)!;
     const history = (await api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(item.id)}/decisions`)).decisions as { id: string; action: string; state: string; input: any }[];
