@@ -77,7 +77,7 @@ With a pass, the producer records `"exercise"`: the same proof run with the crit
 "exercise":{"criterion":"AC-1","behaviour":"the lease expiry check in claim()","result":"fail","executed":4}
 ```
 
-A pass is trusted only when that stripped run failed with a case executed; otherwise it is recorded as not exercising its criterion rather than as passing (`unexercised`, `evidence.exercise.refused`). Rework applies to automated proofs only: when every proof a unit or integration group has left is such a finding, the next action is `request-rework`, naming proof, criterion, surviving mutation, `master status` naming the rework, not an unanswered request. An unexercised `manual:` proof is never reworked: the loop re-requests `decide attest`, whose `exercise` record (the proof fails on that base) the approver confirms by running and describes in its approval reason.
+A pass is trusted only when that stripped run failed with a case executed; otherwise it is recorded as not exercising its criterion rather than as passing (`unexercised`, `evidence.exercise.refused`). Rework applies to automated proofs only: when every proof a unit or integration group has left is such a finding, the next action is `request-rework`, naming proof, criterion, surviving mutation, `master status` naming the rework, not silence. An unexercised `manual:` proof is never reworked: the loop re-requests `decide attest`, whose `exercise` record (it fails on the candidate base) the approver confirms by running and describes in its approval reason.
 
 ## Guarded merges
 
