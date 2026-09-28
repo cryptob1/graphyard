@@ -358,6 +358,20 @@ export async function doctorStep(cycle: Cycle) {
       }
       await applyDoctorRun(cycle, doctor, current, outcome.report, now);
     })
+    // The catch above settled the run itself; a throw while applying the settled report reaches
+    // only here. Leaving the run `running` with `live` cleared would suppress every later cycle
+    // until the lost-run bound expires and post an unhandled rejection, so the run is recorded as
+    // failed and posted from this terminal handler instead.
+    .catch(async error => {
+      const current = state.doctor.runs.find(entry => entry.at === run.at);
+      if (!current || current.state !== 'running') return;
+      current.state = 'failed';
+      current.detail = `Applying the report failed: ${message(error)}`.slice(0, 1000);
+      try {
+        await record(state, `doctor:${current.at}`, { kind: 'fault', work: null, principal: null, state: 'failed', detail: current.detail, attempts: 1, cycle: state.cycle }, now(), effects.persist);
+        await postRun(cycle, doctor, current, now);
+      } catch { /* the failed run stands on the cursor; a persist failure past this point is reaped by the lost-run bound */ }
+    })
     .finally(() => { live = null; });
 }
 

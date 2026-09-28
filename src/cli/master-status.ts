@@ -198,7 +198,9 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     // Each session ledger's bound, retention and the room left for live sessions (GY-131).
     ledgers: { reviews: sessionLedgerHeadroom(reviewRecords, reviewLedgerSpec), producers: sessionLedgerHeadroom(producerRecords, producerLedgerSpec) },
     // GY-711 doctor runs: what the control plane accepted, else the loop cursor's recent runs.
-    doctor: coordinator?.doctor ?? cycling?.doctor?.recent ?? null,
+    // The accepted list starts empty, not absent, so the fallback is length-aware: an empty array
+    // hides the cursor's running and failed-to-post runs behind it.
+    doctor: coordinator?.doctor?.length ? coordinator.doctor : cycling?.doctor?.recent ?? null,
     // The inverted loop: what the control plane says each item needs, who is running it, and
     // every session it can be watched through.
     actions: needsHumanActions(actionReport(snapshot), owed.rows),

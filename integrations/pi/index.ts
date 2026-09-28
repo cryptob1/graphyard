@@ -182,11 +182,15 @@ export const doctorSanctionedCommands = ['scope', 'requirements', 'unblock', 'de
 export const doctorReadOnlyCommands = ['status', 'decisions', 'context', 'guide', 'board'] as const;
 /**
  * The read-only programs a doctor may consult, each with the options that would make it write, run
- * another program or reach past the checkout, refused by name (`sort -o`, `rg --pre`).
+ * another program or reach past the checkout, refused by name (`sort -o`, `rg --pre`). GNU accepts
+ * unique prefixes of its long options (`sort --out=leaked.txt` for `--output`), so `sort` refuses
+ * every long option those options' first letters name — `--output`, `--compress-program`,
+ * `--temporary-directory`, and `--check`, whose o/c/t space they share — and every short-option
+ * cluster carrying the same letters (`-ro`, `-ofile`, `-T dir`).
  */
 const doctorReadPrograms = new Map<string, RegExp | null>([
   ['cat', null], ['ls', null], ['head', null], ['tail', null], ['grep', null], ['wc', null], ['jq', null], ['diff', null], ['stat', null],
-  ['rg', /^--pre(?:=|-glob|$)/], ['sort', /^(?:-o|--output|--compress-program)/],
+  ['rg', /^--pre(?:=|-glob|$)/], ['sort', /^(?:-[^-]*[oT]|--[oct][a-z-]*(?:=.*)?)/],
 ]);
 /** Options git's read subcommands take that write a file or run a configured program. */
 const gitWriting = /^(?:--output|--ext-diff|--textconv|--open-files-in-pager|-O$)/;
@@ -250,10 +254,16 @@ export function doctorSegmentAllowed(words: ShellWord[], context: DoctorGuardCon
   let allowed = reads !== undefined && !rest.some(word => reads?.test(word.value));
   if (program === 'git') allowed = gitRead(rest.map(word => word.value));
   if (program === 'gh') {
-    // gh reads the configured repository only: `-R`/`--repo` selects another repository and a
-    // github.com URL names one, so both are refused rather than resolved against the checkout.
-    const override = rest.find(word => { const value = word.value; return value.startsWith('-R') || value.startsWith('--repo') || value.includes('github.com'); });
-    if (override) return { allow: false, reason: doctorRefusal(`gh ${override} (gh reads the repository this checkout serves; no repository override)`) };
+    // gh reads the repository this checkout serves only: a `-R`/`--repo` flag or its prefix, any
+    // URL — any scheme, any host, any letter case (`https://GitHub.com/…`, `git://…`, an enterprise
+    // host) — an scp-style `git@host:path` or `host.tld:path`, or any `github.`-containing word
+    // names a repository another way, so all are refused rather than resolved against the checkout.
+    const override = rest.find(word => {
+      const value = word.value;
+      return value.startsWith('-R') || value.startsWith('--rep') || value.includes('://')
+        || /^git@/i.test(value) || /github\./i.test(value) || /^[\w.-]*\w\.[\w.-]+:\w/.test(value);
+    });
+    if (override) return { allow: false, reason: doctorRefusal(`gh ${override.value} (gh reads the repository this checkout serves; no repository override)`) };
     allowed = ghReads.get(rest[0]?.value ?? '')?.has(rest[1]?.value ?? '') ?? false;
   }
   if (!allowed) return { allow: false, reason: doctorRefusal(`${program}${rest[0] ? ` ${rest[0].value}` : ''}`) };

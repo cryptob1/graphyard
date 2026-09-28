@@ -136,12 +136,31 @@ test('unit:doctor-scheduled-and-scoped — the doctor runs every ten minutes by 
     ['a foreign PR URL', words('gh', 'pr', 'view', 'https://github.com/other/private/pull/5')],
     ['rg --pre', words('rg', '--pre', 'sh', 'x')],
     ['sort -o', words('sort', '-o', 'src/x.ts', 'README.md')],
+    // GNU accepts unique prefixes of long options, and short options cluster: every abbreviation
+    // of an option that writes, runs a program or writes temporaries is refused too.
+    ['sort --output', words('sort', '--output', 'src/x.ts', 'README.md')],
+    ['sort --output attached', words('sort', '--output=src/x.ts', 'README.md')],
+    ['sort --out abbreviation', words('sort', '--out=package.json', 'package.json')],
+    ['sort --o abbreviation', words('sort', '--o=package.json', 'package.json')],
+    ['sort --compress-program abbreviation', words('sort', '--compress-p=sh', 'README.md')],
+    ['sort --temporary-directory abbreviation', words('sort', '--temp', '/outside', 'README.md')],
+    ['sort -T short form', words('sort', '-T', '/outside', 'README.md')],
+    ['sort -ofile attached', words('sort', '-ofile', 'README.md')],
+    ['sort clustered -ro', words('sort', '-ro', 'src/x.ts', 'README.md')],
+    ['sort clustered -uTo', words('sort', '-uTo', 'src/x.ts', 'README.md')],
+    ['a foreign PR URL upper-case host', words('gh', 'pr', 'view', 'https://GITHUB.COM/other/private/pull/5')],
+    ['a foreign PR URL another host', words('gh', 'pr', 'view', 'https://github.evil.com/other/private/pull/5')],
+    ['a foreign PR URL git protocol', words('gh', 'pr', 'view', 'git://github.com/other/private/pull/5')],
+    ['an scp-style override', words('gh', 'pr', 'view', 'github.com:other/private')],
+    ['a git@ override', words('gh', 'pr', 'view', 'git@github.com:other/private')],
+    ['a --rep abbreviation', words('gh', 'pr', 'list', '--rep', 'other/private')],
   ];
   for (const [label, segment] of refused) assert.equal(doctorSegmentAllowed(segment, guard).allow, false, `${label} is refused`);
   for (const line of ['cat README.md > leaked.txt', 'cat "$GRAPHYARD_TOKEN_FILE" >> x', 'grep x README.md 2>&1', 'jq . < /etc/passwd']) assert.equal(doctorRedirects(line), true, `${line} redirects`);
   for (const line of ["grep '->' README.md", 'jq ".a > 1" x.json', 'gh pr view 12 && git log -1']) assert.equal(doctorRedirects(line), false, `${line} does not redirect`);
   for (const segment of [words('node', master.cliPath, 'master', 'status'), words('git', 'branch', '--show-current'), words('git', 'branch', '--list', 'graphyard/*'), words('git', 'worktree', 'list'),
-    words('git', 'diff', 'main...HEAD'), words('gh', 'pr', 'checks', '12'), words('rg', 'doctor', 'src'), words('cat', `${process.cwd()}/README.md`)])
+    words('git', 'diff', 'main...HEAD'), words('gh', 'pr', 'checks', '12'), words('gh', 'pr', 'view', '12'), words('rg', 'doctor', 'src'),
+    words('sort', '--stable', '--sort=human', 'README.md'), words('sort', '-r', '-n', 'README.md'), words('sort', '--parallel=4', 'README.md'), words('sort', '--random-source=seed', 'README.md'), words('cat', `${process.cwd()}/README.md`)])
     assert.deepEqual(doctorSegmentAllowed(segment, guard), { allow: true }, `${segment.map(word => word.value).join(' ')} is a read inside the checkout`);
   assert.equal(doctorSegmentAllowed(words('node', master.cliPath, 'master', 'merge', 'GY-74'), guard).allow, false, 'the named CLI still refuses merge');
 
@@ -301,6 +320,28 @@ test('unit:doctor-run-recorded — a doctor run records one event per item it fo
   assert.deepEqual(releasedEarly, ['the primary doctor run ended'], 'the selected session is released without starting');
   assert.deepEqual(fifth.state.doctor.runs[0].runs.map(entry => entry.result), ['cancelled'], 'the interrupted attempt is recorded as cancelled');
   assert.equal(fifth.state.doctor.runs[0].state, 'failed', 'with no report, the run is recorded failed, not left running');
+  clearDoctorRuns();
+
+  // A report that cannot be applied — here, the cursor refusing to persist while the run's events
+  // are recorded — reaches the chain after the settled run's own catch is gone, so the terminal
+  // handler records the run as failed and posts it: it never stands `running` with `live` cleared,
+  // suppressing later cycles past the lost-run bound, and no rejection goes unhandled.
+  const failingReport = { findings: [{ subject: 'GY-74', check: 'blocked' as const, detail: 'blocked 14 min on a scope refusal', unactionable: false }], actions: [], filed: [] };
+  const unappliable: DoctorEffects = { ...doctor, runner: () => Promise.resolve({ runtime: 'pi', model: 'test/model', release: async () => {}, runner: {
+    name: 'pi', start: (_prompt: string, options: { tool: string }) => ({
+      id: 'run', events: [], onEvent: () => () => {}, cancel: () => {},
+      result: async () => ({ ok: true as const, tool: options.tool, payload: failingReport, payloads: [failingReport] }),
+    }) } as unknown as Runner }) };
+  let persistFailures = 1;
+  const applied: string[] = [];
+  const unapplied = cycle(work, { doctor: unappliable, effects: { persist: async () => { if (persistFailures-- > 0) throw new Error('the cursor is momentarily unwritable'); applied.push('persisted'); } } });
+  await doctorStep(unapplied);
+  await doctorRunsSettled();
+  const unappliedRun = unapplied.state.doctor.runs[0];
+  assert.equal(unappliedRun.state, 'failed', 'a run whose apply threw is recorded failed, not left running');
+  assert.match(unappliedRun.detail, /Applying the report failed/, 'the run names why its report was not applied');
+  assert.ok(Object.values(unapplied.state.actions).some(action => action.state === 'failed' && /Applying the report failed/.test(action.detail)), 'the apply failure is recorded as an event');
+  assert.deepEqual(applied, ['persisted'], 'the record of the failed run persisted after the momentary refusal');
   clearDoctorRuns();
 
   // A filing the control plane did not accept is kept on the cursor and filed again on a later
