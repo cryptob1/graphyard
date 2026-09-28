@@ -17,21 +17,21 @@ Commit `AGENTS.md`, `.gitignore`, `graphyard.json`; never `.graphyard/`. Without
 
 ### Documentation policy
 
-`init --scan --apply` writes found documentation paths (`docs/`, `site/`, `README*`, `CHANGELOG*`) to `graphyard.json` (`{"documentation":{"paths":["site/"],"changelog":"CHANGELOG.md"}}`). Deploy the printed `GRAPHYARD_DOCUMENTATION` (default `docs/`, `README.md`, `AGENTS.md`); `doctor` reports `documentation.drift` if the committed file differs. Features and bugs carry *Documentation reflects this change*: a diff there or `complete --no-docs "WHY"`, reviewer-judged.
+`init --scan --apply` writes found documentation paths to `graphyard.json` (`{"documentation":{"paths":["site/"],"changelog":"CHANGELOG.md"}}`). Deploy the printed `GRAPHYARD_DOCUMENTATION` (default `docs/`, `README.md`, `AGENTS.md`); `doctor` reports `documentation.drift` if the committed file differs. Features and bugs carry *Documentation reflects this change*: a diff there or `complete --no-docs "WHY"`, reviewer-judged.
 
 ### What the generated instructions authorize
 
-The managed `AGENTS.md` section states that **every session Graphyard launches receives its instruction as the session's own first request, on the runtime's command line, never as pasted text**; the only later paste (the loop's single re-prompt, or the reviewer's reminder) comes from the same launcher and is acted on without confirmation.
+The managed `AGENTS.md` section states that **every session Graphyard launches receives its instruction as the session's own first request, never as pasted text**; the only later paste (the loop's single re-prompt, or the reviewer's reminder) comes from the same launcher, acted on without confirmation.
 
 Agents treat bracketed paste as untrusted data (prompt injection), so sessions start without anybody sending `go`; Claude Code also gets `--append-system-prompt-file`. The role files under `.graphyard/harness/` hold permissions, not instructions.
 
 ### Connect an account
 
-Settings › **Agents** › **Connect an account**: pick a provider; paste a key (sealed to the host's public key in the browser — the server relays ciphertext only) or start a login. The host writes the provider's auth file (0600) and smoke-tests provider and model; the card shows the result. A subscription login shows its URL and code — finish it in your browser; for Claude, **Paste the code** its page shows (**Cancel** stops it). **Retry** on a failed card is admins-only: it re-enters the credential. The host's executor must run: strong accounts join worker and reviewer, cheap ones approver and producer; research joins when the host makes the account's wrapper its research command; **change** edits roles. The shell steps below remain for scripted setups.
+Settings › **Agents** › **Connect an account**: pick a provider; paste a key (sealed to the host's public key; the server relays ciphertext only) or start a login. The host writes the provider's auth file (0600), smoke-tests provider and model. A subscription login shows its URL and code — finish it in your browser; for Claude, **Paste the code** its page shows. **Retry** on a failed card is admins-only: it re-enters the credential. The host's executor must run: strong accounts join worker and reviewer, cheap ones approver and producer; research joins when the host makes the account's wrapper its research command; **change** edits roles.
 
 ### Agent environments
 
-Each account's `~/.coding_agents` login home is selected by `CLAUDE_CONFIG_DIR` (Claude Code), `CODEX_HOME` (Codex), `XDG_DATA_HOME` (OpenCode) or `CURSOR_CONFIG_DIR` (Cursor). Tokens go in `~/.config/graphyard/workers/` and `producers/` (mode 0600). Then:
+Each account's `~/.coding_agents` login home comes from `CLAUDE_CONFIG_DIR` (Claude), `CODEX_HOME` (Codex), `XDG_DATA_HOME` (OpenCode) or `CURSOR_CONFIG_DIR` (Cursor). Tokens go in `~/.config/graphyard/workers/` and `producers/` (mode 0600). Then:
 
 ```sh
 node "$GRAPHYARD_CLI" master environments --create claude,codex --apply  # new login homes
@@ -91,7 +91,7 @@ Each candidate needs one review and one producer session per proof group; `"conc
 "reviewers":[{"name":"claude-reviewer","agentName":"review-claude","kind":"claude","accounts":["claude-a","claude-b"],"concurrency":3}]
 ```
 
-Adding workers? For worker count `W` and `G` proof groups: `⌈W / 2⌉` review slots and `G × ⌈W / 2⌉` producer slots over ≥ 2 producer principals. Watch `longestWaitMs`.
+Adding workers? For worker count `W` and `G` proof groups: `⌈W / 2⌉` review and `G × ⌈W / 2⌉` producer slots over ≥ 2 producer principals. Watch `longestWaitMs`.
 
 ## 3. Start the master
 
@@ -102,9 +102,9 @@ node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST   # now installs th
 node "$GRAPHYARD_CLI" master start codex     # or: master start claude
 ```
 
-Run it as an OS identity whose GitHub credentials workers cannot read. `--browser-profile` is the Chrome profile signed in to GitHub as admin (`master browser`); *Confirm access* in GitHub Mobile stays human-only. Add the reviewer with `master reviewer setup` and `master reviewer add PROFILE` ([Claude](../examples/master/claude-reviewer.json) template); its manifest flow is the only App confirmation.
+Run it as an OS identity whose GitHub credentials workers cannot read. `--browser-profile` is the Chrome profile signed in to GitHub as admin (`master browser`); *Confirm access* in GitHub Mobile stays human-only. Add the reviewer with `master reviewer setup` and `master reviewer add PROFILE` ([Claude](../examples/master/claude-reviewer.json)); its manifest flow is the only App confirmation.
 
-Onboarding also writes `mergeQueue.optimisticExclude` into `.graphyard/master.json`: the [shared-infrastructure](github.md#optimistic-merges) globs — manifests and lockfiles, CI config, test helpers, schema and migration directories — never merged optimistically over. Tune the list there; re-runs keep it, and a list you never touched keeps reading as the current product defaults, so defaults added later cover the repository too (GY-925); `mergeQueue.optimistic: false` turns the lane off.
+Onboarding also writes `mergeQueue.optimisticExclude` into `.graphyard/master.json`: the [shared-infrastructure](github.md#optimistic-merges) globs — manifests and lockfiles, CI config, test helpers, schema and migration directories — never merged optimistically over. Tune the list there; re-runs keep it; an untouched list reads as the current product defaults; later defaults cover the repository too; `mergeQueue.optimistic: false` turns the lane off.
 
 ### The loop must be supervised
 
@@ -114,7 +114,7 @@ Onboarding also writes `mergeQueue.optimisticExclude` into `.graphyard/master.js
 
 `graphyard doctor --profile through-merge` names every missing piece. `master run` dispatches a small item; the loop merges once branch protection requires `Graphyard / merge`. `"systemDriven": false` allows [hand actions](master-agent.md#system-driven-items).
 
-CI workflows should cancel superseded pull-request runs: group each by `${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}` with `cancel-in-progress: ${{ github.event_name == 'pull_request' }}`; runs on main are never cancelled. `graphyard master protection` lists each required check whose workflow lacks cancel-in-progress under `advisories`.
+CI workflows should cancel superseded pull-request runs: grouped by `${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}` with `cancel-in-progress: ${{ github.event_name == 'pull_request' }}`; runs on main are never cancelled. `graphyard master protection` lists each required check whose workflow lacks cancel-in-progress under `advisories`.
 
 ## What stays manual
 
