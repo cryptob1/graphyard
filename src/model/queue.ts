@@ -99,25 +99,25 @@ export function placeInQueue(work: Work, all: Work[], now: Date, ciAppIds: numbe
       const stalledSince = queue.batchDissolved && queue.batchStall ? Math.max(Date.parse(queue.batchDissolved.at), Date.parse(queue.batchStall.since)) : NaN;
       if (stuck && now.getTime() - stalledSince >= stuckBatchMs)
         stalledAfterDissolution = `Merge queue head ${work.key} has sat in testing with no published tip since its stuck batch was dissolved at ${queue.batchDissolved!.at} (GY-506); a single-entry batch cannot be dissolved further, so the queue behind it waits on this entry's tip being published: read graphyard diagnose ${work.key} for the observation job's recorded reason`;
-    }
-    // The dissolution holds while every member it named is still queued; one that left (merged,
-    // or ejected) ends it and the ordinary batch plan resumes for the rest.
-    if (queue.batchDissolved) {
-      const members = queue.batchDissolved.members;
-      const live = (key: string) => key === work.key ? !!queue : all.some(item => item.id !== work.id && item.queue && item.stage !== 'done' && item.key === key);
-      if (!members.every(live)) {
-        const { batchDissolved: _dissolved, ...entry } = queue;
-        queue = entry; mutated = true;
+      // The dissolution holds while every member it named is still queued; one that left (merged,
+      // or ejected) ends it and the ordinary batch plan resumes for the rest.
+      if (queue.batchDissolved) {
+        const members = queue.batchDissolved.members;
+        const live = (key: string) => key === work.key ? !!queue : all.some(item => item.id !== work.id && item.queue && item.stage !== 'done' && item.key === key);
+        if (!members.every(live)) {
+          const { batchDissolved: _dissolved, ...entry } = queue;
+          queue = entry; mutated = true;
+        }
       }
-    }
-    // The derived view replaces the stored one only when it differs in content. Postgres jsonb
-    // stores object keys shortest-first and the derived view names `batch` last, so rewriting an
-    // equal view changed the document's key order — and the reconcile pass, seeing a difference,
-    // re-saved every queued entry every pass (GY-506): every in-flight observation then lost the
-    // revision race and its job was rescheduled, silently, without one. An equal view is kept.
-    if (mutated || !sameMergeBatch(queue.batch ?? null, batch)) {
-      const { batch: _previous, ...entry } = queue;
-      queue = batch ? { ...entry, batch } : entry;
+      // The derived view replaces the stored one only when it differs in content. Postgres jsonb
+      // stores object keys shortest-first and the derived view names `batch` last, so rewriting an
+      // equal view changed the document's key order — and the reconcile pass, seeing a difference,
+      // re-saved every queued entry every pass (GY-506): every in-flight observation then lost the
+      // revision race and its job was rescheduled, silently, without one. An equal view is kept.
+      if (mutated || !sameMergeBatch(queue.batch ?? null, batch)) {
+        const { batch: _previous, ...entry } = queue;
+        queue = batch ? { ...entry, batch } : entry;
+      }
     }
   }
   const reasons = placement ? [...(stalledAfterDissolution ? [stalledAfterDissolution] : []), ...placement.reasons]
