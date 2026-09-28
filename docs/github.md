@@ -44,9 +44,9 @@ Reviews and proofs bind one head, base and policy revision. The queue head's tip
 
 ### Parallel tips
 
-`mergeQueue.parallelTips` (master config, default 4, published via `POST /api/merge-queue`) stacked tips test at once; entries merge in order once every tip through theirs passes. Set it to 1 for serial validation. Each publication wakes successors; in-flight tips receive frequent verdict reads. After any configured failed-check rerun, a failing tip ejects its entry once those ahead pass; later tips rebuild. `master status` and Merge step list them.
+`mergeQueue.parallelTips` (master config, default 4, published via `POST /api/merge-queue`) stacked tips test at once; entries merge in order once every tip through theirs passes. Each publication wakes successors; in-flight tips receive frequent verdict reads. After any configured failed-check rerun, a failing tip ejects its entry once those ahead pass; later tips rebuild. `master status` and Merge step list them.
 
-Under a window wider than one, every entry validates on its own tip: the defaults (4 and 4) therefore mean four entry tips at once, not one four-entry batch — one CI duration covers four positions instead of one, at the cost of their concurrent CI and a discarded suffix on a failure. `parallelTips: 1` restores the batched behaviour; `batchSize` still widens the observation band and the wake depth.
+Under a window wider than one, every entry validates on its own tip: the defaults (4 and 4) mean four entry tips at once, not one four-entry batch — one CI duration covers four positions instead of one, costing their concurrent CI and a discarded suffix on a failure. `parallelTips: 1` restores the batched behaviour; `batchSize` still widens the observation band and the wake depth.
 
 ### Optimistic merges
 
