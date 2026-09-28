@@ -573,6 +573,13 @@ export function disprovedConflict(work: Pick<Work, 'baseRefresh' | 'policyRevisi
   return stale && stale.head === observation.candidate.sha && stale.base === observation.baseTip && stale.policyRevision === work.policyRevision ? stale : null;
 }
 /**
+ * The observation with its conflict disproved by `stale` (GY-375): it reads mergeable and not
+ * conflicting, and GitHub's raw reading is kept beside that under `disproved` (GY-390).
+ */
+export function withDisprovedConflict<T extends Pick<Observation, 'mergeable' | 'conflicting' | 'disproved'>>(observation: T, stale: StaleMergeability): T {
+  return { ...observation, mergeable: true, conflicting: false, disproved: { mergeable: observation.mergeable, conflicting: !!observation.conflicting, reading: stale.reading } };
+}
+/**
  * A branch that carried another item's unlanded commits, and what the control plane did about it.
  *
  * A speculative tip is a merge of the item's own reviewed head and the tip of the entry ahead of
@@ -1052,9 +1059,17 @@ export function ejectionReason(work: Work, ciAppIds: number[], all: Work[] = [],
   // finding the gates read it as (producerManualFailures excludes it), answered by the attestation
   // the loop requests for it exact or carried (unexercisedFindings reads the carry), so the entry
   // is held for that attestation rather than ejected for a failure no rework would ever be
-  // requested for (GY-875).
+  // requested for (GY-875). GY-910: that attestation is requested only for a proof a criterion of
+  // this item names (attestationDecision, attestationExercise). A proof inherited from a bootstrap
+  // obligation is named by no local criterion, and for it nothing can request that attestation —
+  // proofRework excludes every unexercised manual finding and the proof group's failed state
+  // refuses a producer relaunch — so holding the entry for it would keep this entry and every
+  // entry behind it queued forever. The hold exempts only an attestable proof; any other
+  // executed = 0 record is the adverse conclusion it reads as and ejects, so the order moves and
+  // the control plane restores the branch.
   const proof = work.evidence.find(item => item.trusted && item.result === 'fail' && evidenceBindsCandidate(work, item) && item.policyRevision === work.policyRevision
-    && !(item.proof.startsWith('manual:') && item.executed === 0));
+    && !(item.proof.startsWith('manual:') && item.executed === 0
+      && work.criteria.some(criterion => criterion.proofs.includes(item.proof))));
   if (proof) return `Proof ${proof.proof} failed on speculative tip ${tip}`;
   // A withdrawn proof is an explicit adverse conclusion, not a missing one: the entry leaves the
   // queue instead of holding its position while everything behind it waits.
