@@ -9,11 +9,11 @@ One sidebar: **Work**, **Workers**, **Shipped**, **Tests**, **Insights**, **Sett
 
 Each open item is in one group: **Needs you** (only you may decide), **Blocked**, **Moving**, **Up next** or **Backlog**; a tile counts and filters one group.
 
-`GET /api/board` serves the groups: `group`, `stage`, `owner`, `actor` (a role), `command`, `since`, `overdue`. `master status` lists the master's as `board.owed`.
+`GET /api/board` serves the groups: `group`, `stage`, `owner`, `actor`, `command`, `since`, `overdue`. `master status` lists the master's as `board.owed`.
 
 ## Needs you
 
-`graphyard login` prints a single-use, ten-minute sign-in link for the operator's human session; others get **Sign in as the operator**. Requests offer choice buttons and notes; **Provide now** seals credentials for `unseal GY-N`. A refused answer keeps everything typed in the form for the retry; the card clears only once the answer succeeds.
+`graphyard login` prints the operator's single-use, ten-minute sign-in link; others get **Sign in as the operator**. Requests offer choice buttons and notes; **Provide now** seals credentials for `unseal GY-N`; a refused answer keeps the form.
 
 ## Workers
 
@@ -28,7 +28,7 @@ Running rows offer:
 
 ## The status sentence
 
-Rows show **Build, Validate, Test, Review, Prove, Merge, Deploy**; a merged item reads *Merged*, *Live* once production serves it. Moving and Blocked rows past thirty minutes turn overdue.
+Rows show **Build, Validate, Test, Review, Prove, Merge, Deploy**; merged reads *Merged*, *Live* once production serves it. Moving and Blocked rows past thirty minutes turn overdue.
 
 ## An item page
 
@@ -36,4 +36,4 @@ Below the summary: **What is left**, **Requirements** (✓ or ○ per criterion)
 
 ## Insights
 
-Headline numbers, **Flow** (Now columns show 12 dots, **+N more**; medians survive a failed replay), landed per day, merges/hour, queue wait, time spent, [optimistic merges](github.md#optimistic-merges); **Show details** holds shipping pulse, PR-to-production (`POST /api/production-observations`, `master verify-deployment`) and flow analytics. **Shipped** holds **Interventions**, **Validation**, **Releases**; `GRAPHYARD_INTERVENTION_PATTERNS=1` file repeats as `bug` items; missing values read `Unavailable`.
+Headline numbers, **Flow** (Now columns show 12 dots, **+N more**), landed per day, merges/hour, queue wait, time spent, [optimistic merges](github.md#optimistic-merges); **Show details** holds shipping pulse, PR-to-production (`POST /api/production-observations`, `master verify-deployment`) and flow analytics. **Shipped** holds **Interventions**, **Validation**, **Releases**; `GRAPHYARD_INTERVENTION_PATTERNS=1` file repeats as `bug` items; missing values read `Unavailable`.
