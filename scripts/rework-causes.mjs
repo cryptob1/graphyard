@@ -1,10 +1,11 @@
 // Rework-round causes (GY-643). Reads the work snapshot with a read-capable credential, takes the
 // last N delivered items (100 by default), reads every `rework` ledger row their submissions can
 // hold, classifies each round from the recorded reason alone (src/flow-analytics.ts, loaded
-// through tsx so the script and `master status` can never disagree), and reports the share of
-// each cause. The three largest causes are each linked to an open fix item — one is filed through
-// POST /api/work when none exists and the credential may create work; a refusal is reported with
-// the exact payload instead of swallowed.
+// through tsx: the classifier, the population's bounded paged read and the round attribution are
+// the one implementation `master status` uses, so the two can never disagree), and reports the
+// share of each cause. The three largest causes are each linked to an open fix item — one is filed
+// through POST /api/work when none exists and the credential may create work; a refusal is
+// reported with the exact payload instead of swallowed.
 //
 //   GRAPHYARD_URL=… GRAPHYARD_TOKEN=… node scripts/rework-causes.mjs [--items 100] [--record DIR] [--json] [--no-file]
 //
@@ -13,15 +14,21 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-/** Open-item title keywords each cause's fix item is found by (case-insensitive `includes`). */
+/**
+ * Open-item title keywords each cause's fix item is found by (case-insensitive `includes`). Every
+ * list names the exact phrase `filingPayload` generates for the cause, so a fix item this script
+ * filed on an earlier run is always found again instead of duplicated, and only a genuinely
+ * related open item stands in for one: a title that merely mentions the cause's word ("proof",
+ * "conflict", any cause-specific "… rework rounds" title for `other`) never matches (GY-725).
+ */
 export const fixItemKeywords = {
   'own-change': ['review finding'],
   'base-breakage': ['base breakage'],
-  'conflict': ['conflict'],
+  'conflict': ['conflict with the base', 'merge conflict'],
   'docs-budget': ['docs budget'],
-  'lost-approval-or-proof': ['lost approval', 'proof'],
-  'ci-flake': ['flake'],
-  'other': [],
+  'lost-approval-or-proof': ['lost approval', 'proof expired', 'evidence fail'],
+  'ci-flake': ['ci flake', 'ci-flake'],
+  'other': ['the other rework rounds'],
 };
 
 export function parseArguments(argv) {
@@ -41,21 +48,20 @@ export function parseArguments(argv) {
 /** The accepted merge instant of a delivered item, on the repository clock when the delivery carried it there. */
 const mergedAt = item => item.stage === 'done' && item.delivery ? item.delivery.mergedAtRepository ?? item.delivery.mergedAt ?? null : null;
 
+// The analytics pieces are TypeScript and shared with `master status`: the classifier, the bounded
+// paged `rework` read (one reader, no page constants here) and the round attribution (GY-725).
+const { recentDelivered, classify, summarize, attribute: attributeReworkRounds, readReworkEventRows } = await analytics();
+
 /**
  * Rounds per delivered item: every `rework` row for the item at or after its first submission —
- * the same rule the pipeline timeline counts by (`recordRework`). Items with no recorded
- * submission are reported as unmeasured rather than silently dropped.
+ * the same rule the pipeline timeline counts by (`recordRework`), attributed by the shared
+ * implementation in src/flow-analytics.ts. Items with no recorded submission are reported as
+ * unmeasured rather than silently dropped.
  */
 export function attributeRounds(delivered, events, classify) {
-  return delivered.map(item => {
-    const submittedAt = item.pipeline?.submittedAt ?? null;
-    const submitted = !!submittedAt && Number.isFinite(Date.parse(submittedAt));
-    const rounds = submitted ? events.filter(event => event.work_id === item.id && Number.isFinite(Date.parse(event.created_at)) && Date.parse(event.created_at) >= Date.parse(submittedAt))
-      .map(event => ({ workId: item.id, key: item.key, seq: String(event.seq),
-        at: event.created_at instanceof Date ? event.created_at.toISOString() : String(event.created_at),
-        ...classify(String(event.details?.reason ?? '')) })) : [];
-    return { key: item.key, mergedAt: mergedAt(item), measured: submitted, rounds };
-  });
+  return delivered.map(item => ({ key: item.key, mergedAt: mergedAt(item),
+    measured: !!item.pipeline?.submittedAt && Number.isFinite(Date.parse(item.pipeline.submittedAt)),
+    rounds: attributeReworkRounds(item, events, classify) }));
 }
 
 /** The open fix item a cause links to: the oldest open item whose title names the cause. */
@@ -90,7 +96,6 @@ export function render(report) {
   for (const entry of report.largest) lines.push(`  ${String(Math.round((entry.share ?? 0) * 100)).padStart(3)}%  ${entry.label}: ${entry.count} round${entry.count === 1 ? '' : 's'}`);
   for (const fix of report.fix) {
     if (fix.item) lines.push(`  fix item for ${fix.cause}: ${fix.item.key} — ${fix.item.title}`);
-    else if (fix.filing) lines.push(`  no open fix item for ${fix.cause}; file with POST /api/work: ${JSON.stringify(fix.filing)}`);
     else if (fix.filed) lines.push(`  filed fix item for ${fix.cause}: ${fix.filed.key ?? `refused (${fix.filed.reason})`}`);
   }
   return lines.join('\n');
@@ -116,30 +121,15 @@ export async function fileFixItem(base, token, payload, post = fetch) {
 }
 const randomId = () => `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
-/** Bounded paged read of the window's `rework` rows (small `details` payloads, no work documents). */
-const pageLimit = 300, pageBound = 10;
-export async function readReworkEvents(api, since) {
-  const rounds = [];
-  let cursor = null, complete = false, pages = 0;
-  while (cursor !== null || pages === 0) {
-    const params = new URLSearchParams({ kind: 'rework', order: 'asc', payload: 'details', view: 'history', limit: String(pageLimit) });
-    if (since) params.set('since', since);
-    if (cursor) params.set('cursor', cursor);
-    const history = await api(`events?${params}`);
-    rounds.push(...(history.events ?? []));
-    pages++;
-    complete = !history.page?.hasMore;
-    cursor = complete ? null : history.page?.nextCursor ?? null;
-    if (pages >= pageBound) break;
-  }
-  return { rounds, complete, pages };
-}
+/** The bounded paged read of the window's `rework` rows, shared with `master status` (GY-725). */
+export const readReworkEvents = readReworkEventRows;
 
 /** The analytics pieces are TypeScript; tsx is a runtime dependency of the CLI already. */
 export async function analytics() {
   const { tsImport } = await import('tsx/esm/api');
   const module = await tsImport('../src/flow-analytics.ts', import.meta.url);
-  return { recentDelivered: module.recentDelivered, classify: module.classifyReworkReason, summarize: module.summarizeReworkSplit };
+  return { recentDelivered: module.recentDelivered, classify: module.classifyReworkReason, summarize: module.summarizeReworkSplit,
+    attribute: module.attributeReworkRounds, readReworkEventRows: module.readReworkEventRows };
 }
 
 export async function main(argv = process.argv.slice(2), env = process.env) {
@@ -152,12 +142,11 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     if (!response.ok) throw new Error(`Graphyard refused ${path} (${response.status})`);
     return response.json();
   };
-  const { recentDelivered, classify, summarize } = await analytics();
   const snapshot = await api('work-snapshot');
   const population = recentDelivered(snapshot.work, options.items);
   const events = await readReworkEvents(api, population.since);
   const openItems = snapshot.work.filter(item => item.stage !== 'done' && !item.closure);
-  const entries = attributeRounds(population.items, events.rounds, classify);
+  const entries = attributeRounds(population.items, events.events, classify);
   const summary = summarize(entries);
   const largest = summary.largest.filter(entry => entry.count > 0).slice(0, 3);
   const report = { measuredAt: new Date(Date.parse(snapshot.now)).toISOString(),

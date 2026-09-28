@@ -1,4 +1,4 @@
-import { baseRefreshConflict, conversationProtectionRefusal, latestCheck, restoringAfterEjection, tipValidation } from '../merge-queue.js';
+import { baseRefreshConflict, conversationProtectionRefusal, requiredCheck, checkRerunStatus, restoringAfterEjection, tipValidation } from '../merge-queue.js';
 import type { QueueEjection, QueueEntry, QueueHistoryEntry } from '../merge-queue.js';
 import type { Gate, Stage, Work } from './work.js';
 import { escalationRefusals } from './escalation.js';
@@ -71,10 +71,9 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[],
     ...(!reviewPassed ? [reviewRefusal] : []),
     ...(changesRequested ? ['Outstanding change requests must be resolved through a new review'] : []),
   ] : []);
-  add('test', work.policy.checks.filter(name => {
-    const checks = current ? obs!.checks.filter(c => c.name === name && ciAppIds.includes(c.appId)) : [];
-    return latestCheck(checks)?.result !== 'success';
-  }).map(name => `Required CI check ${name} has not passed on the current candidate`));
+  const checkReasons = work.policy.checks.filter(name => requiredCheck(work, name, ciAppIds)?.result !== 'success')
+    .map(name => `Required CI check ${name} has not passed on the current candidate${current ? checkRerunStatus(work, name) : ''}`);
+  gates.push({ name: 'test', ciAppIds: [...ciAppIds], reasons: checkReasons, passed: checkReasons.length === 0 });
   const reasons: string[] = [];
   // GY-895: the pass rule is per family — a manual: proof is judged as an attestation, so its
   // trusted pass proves it whatever it executed, while every other proof keeps the title-count
