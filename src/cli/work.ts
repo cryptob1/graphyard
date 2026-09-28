@@ -56,6 +56,46 @@ export const workCommands = defineCommands([
     run: async ({ id, api, print }) => print(await api('work', JSON.parse(await readFile(id!, 'utf8')))),
   },
   {
+    name: 'promote-followup',
+    help: ['  promote-followup GY-N INDEX   Promote finding INDEX from follow-up GY-N to a new work item (operator)'],
+    async run({ id, args, api, print }) {
+      if (!args[0]) throw new Error('Usage: graphyard work promote-followup GY-N INDEX');
+      const index = Number(args[0]);
+      if (!Number.isInteger(index) || index < 1) throw new Error('INDEX must be a positive integer');
+
+      const snapshot = await api('work-snapshot');
+      const followupItem = snapshot.work.find((w: any) => w.id === id || w.key === id);
+      if (!followupItem) throw new Error(`Unknown follow-up item ${id}`);
+
+      const { followUpEntries } = await import('../model/machine-backlog.js');
+      const findings = followUpEntries(followupItem);
+      if (index > findings.length) throw new Error(`Finding ${index} not found (item has ${findings.length} findings)`);
+
+      const finding = findings[index - 1]!;
+      const parentId = followupItem.dependencies?.[0];
+      const parentItem = snapshot.work.find((w: any) => w.id === parentId);
+      if (!parentItem) throw new Error(`Parent item ${parentId} not found`);
+
+      const newWork = {
+        title: `Follow-up: ${finding.text.slice(0, 100)}`,
+        description: `From follow-up of ${parentItem.key}: ${finding.text}\n${finding.path ? `File: ${finding.path}` : ''}`,
+        type: 'chore' as const,
+        priority: 2,
+        dependencies: [parentItem.id],
+        criteria: [{ id: 'AC-1', text: `Address the finding: ${finding.text}`, proofs: [] }],
+        plannedFiles: finding.path ? [finding.path] : [],
+        reason: `Promoted from follow-up findings of ${followupItem.key}`,
+      };
+
+      const created = await api('work', newWork);
+      return print({
+        promoted: { key: followupItem.key, finding: index, text: finding.text },
+        created: created,
+        message: `Follow-up finding promoted to ${created.key}`,
+      });
+    },
+  },
+  {
     name: 'handoff',
     help: ['  handoff GY-N                 Show assigned workspace and supervisor command'],
     async run(context) {
