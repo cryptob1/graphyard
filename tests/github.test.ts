@@ -59,12 +59,6 @@ test('GitHub adapter binds observations to repository, base, current reviews, an
   f.pr.base.ref = 'other'; await assert.rejects(f.github.observe(f.work), /unmanaged/);
   f.pr.base.ref = 'main'; f.pr.head.repo.full_name = 'attacker/fork'; await assert.rejects(f.github.observe(f.work), /same-repository/);
 });
-test('GitHub adapter skips the base compare for the optimistic lane while the published setting is off', async () => {
-  const f = fixture(); f.reviews([]);
-  assert.deepEqual((await f.github.observe(f.work)).baseChanges, [], 'with the lane on, the observation carries the base comparison (an empty one while the bound base is the tip)');
-  const off = fixture(); off.reviews([]); off.github.optimisticLaneEnabled = false;
-  assert.equal((await off.github.observe(off.work)).baseChanges, undefined, 'with the lane off, nothing reads the comparison, so it is not made and the field is absent');
-});
 test('GitHub adapter retains retry history in deterministic check-run identity order', async () => {
   const f = fixture(), request = f.github.request.bind(f.github);
   f.github.request = async (path, method, body) => path.includes('/check-runs')

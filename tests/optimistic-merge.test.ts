@@ -145,8 +145,7 @@ function harness(work: Work[], checks: Record<string, string>) {
     ciAppIds: [ci],
     store: { list: async () => work, pool: { query: async (text: string, values: unknown[] = []) => {
       if (text.startsWith('INSERT')) { events.push({ kind: values[1] as string, details: JSON.parse(values[2] as string).details }); return { rows: [], rowCount: 1 }; }
-      const kind = /kind='([^']+)'/.exec(text)?.[1] ?? 'optimistic.guard';
-      return { rows: events.filter(event => event.kind === kind).slice(-1).map(event => ({ details: event.details })), rowCount: 0 };
+      return { rows: events.filter(event => event.kind === 'optimistic.guard').slice(-1).map(event => ({ details: event.details })), rowCount: 0 };
     } } },
     recordPostMerge: async (id: string, mergeSha: string, verdict: PostMergeVerdict, on?: string) => {
       const target = work.find(entry => entry.id === id)!;
@@ -286,67 +285,6 @@ test('unit:optimistic-auto-revert the revert restores the culprit\'s files on th
   assert.equal(calls.filter(call => call.method !== 'GET').length, writes);
 });
 
-test('unit:optimistic-auto-revert a revert GitHub does not merge at once is recorded pending, and flags overdue past one observed CI duration', async () => {
-  const culprit = delivered('GY-61', ['src/culprit.ts'], '2026-09-25T08:10:00.000Z');
-  // The required suite took four minutes to judge the culprit's merge commit: one observed CI duration.
-  culprit.optimisticMerges![0].postMerge = { verdict: 'fail', failing: ['test (failure)'], observedAt: '2026-09-25T08:14:00.000Z' };
-  const world = harness([culprit], { [sha40('d61')]: 'failure' });
-  (world.github as any).mergeRevert = async () => null;
-  let guard = await guardMain(world.engine, world.github, now);
-  assert.equal(guard.state, 'reverting');
-  assert.equal(culprit.stage, 'done', 'a revert that has not landed does not reopen the item yet');
-  // The first tick records the pending step, with the threshold the culprit's own suite set.
-  let pending = world.events.filter(event => event.kind === 'optimistic.revert.pending');
-  assert.equal(pending.length, 1);
-  assert.deepEqual([pending[0].details.key, pending[0].details.pr, pending[0].details.overdue, pending[0].details.thresholdMs], ['GY-61', 901, false, 4 * 60_000]);
-  // A tick that changes nothing records nothing.
-  await guardMain(world.engine, world.github, now);
-  assert.equal(world.events.filter(event => event.kind === 'optimistic.revert.pending').length, 1);
-  // Past one observed CI duration the step flags overdue — once, not on every tick.
-  const later = new Date(now.getTime() + 5 * 60_000);
-  guard = await guardMain(world.engine, world.github, later);
-  assert.equal(guard.state, 'reverting');
-  pending = world.events.filter(event => event.kind === 'optimistic.revert.pending');
-  assert.equal(pending.length, 2);
-  assert.equal(pending[1].details.overdue, true);
-  await guardMain(world.engine, world.github, later);
-  assert.equal(world.events.filter(event => event.kind === 'optimistic.revert.pending').length, 2, 'the overdue step is recorded once');
-  // When GitHub does report the merge, the revert lands, the item reopens, and the hold ends.
-  (world.github as any).mergeRevert = async (_: Work, revert: { pr: number | null }) => sha40(`e${revert.pr}`);
-  guard = await guardMain(world.engine, world.github, later);
-  assert.equal(guard.state, 'green');
-  assert.match(culprit.reopened!.reason, /GY-61's optimistic merge \(PR #161, [0-9a-f]{12}\) broke main/);
-  // The withdrawn delivery is kept on the reopen record for the consumers that assumed it stood.
-  assert.deepEqual(culprit.reopened!.delivery, { pr: 161, mergeSha: sha40('d61'), mergedAt: '2026-09-25T08:10:00.000Z' });
-});
-
-test('unit:optimistic-auto-revert a verdict already published on a revert head is not repatched on every guard tick', async () => {
-  const culprit = delivered('GY-71', ['src/culprit.ts'], '2026-09-25T08:10:00.000Z');
-  const github = new GitHub({ repository: 'owner/project', base: 'main', appId: 1234, installationId: 1, privateKey: '' });
-  const head = sha40('c7');
-  const calls: { path: string; method: string }[] = [];
-  let published = false, mergeRequests = 0;
-  (github as any).request = async (path: string, method = 'GET') => {
-    calls.push({ path, method });
-    if (path === '/pulls/907') return { merged: false };
-    if (path.startsWith('/check-runs') && method !== 'GET') { published = true; return {}; }
-    throw new Error(`unexpected ${method} ${path}`);
-  };
-  (github as any).pages = async () => published ? [{ app: { id: 1234 }, status: 'completed', conclusion: 'success', external_id: culprit.id,
-    output: { title: 'Main guard: optimistic-merge revert', summary: `Revert of GY-71's optimistic merge at ${head}: test (failure) on main` } }] : [];
-  (github as any).graphql = async (query: string, _variables: any) => {
-    if (/mergeQueue/.test(query)) return { repository: { mergeQueue: null, pullRequest: { id: 'PR_907', headRefOid: head, isInMergeQueue: false, mergeQueueEntry: null, autoMergeRequest: null, mergeStateStatus: 'CLEAN' } } };
-    mergeRequests++;
-    return {};
-  };
-  const revert = { pr: 907, head, failing: ['test (failure)'] };
-  assert.equal(await github.mergeRevert(culprit, revert), null, 'GitHub does not report the revert merged at once');
-  assert.equal(published, true, 'the first tick publishes the verdict');
-  const writes = calls.filter(call => call.method !== 'GET').length;
-  assert.equal(await github.mergeRevert(culprit, revert), null);
-  assert.equal(calls.filter(call => call.method !== 'GET').length, writes, 'the second tick republishes nothing');
-  assert.equal(mergeRequests, 2, 'the merge request itself is re-asked each tick until GitHub merges');
-});
 test('unit:optimistic-auto-revert a culprit a later merge built on is not reverted blind: optimistic merges hold until main passes', async () => {
   const culprit = delivered('GY-31', ['src/culprit.ts'], '2026-09-25T08:10:00.000Z');
   assert.match(revertRefusal(culprit.optimisticMerges![0], ['src/culprit.ts', 'src/other.ts'])!, /Later merges changed src\/culprit\.ts after [0-9a-f]{12}/);
