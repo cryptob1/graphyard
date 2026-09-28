@@ -11,29 +11,32 @@ import type { SessionHandleInput } from '../model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from '../request-settlement.js';
 import { type ResourceReclaimReport, reclaimResources, dispatchRefusal } from '../master-resources.js';
 import { RefusedResponse } from '../model/refusal.js';
-import { mergeBatchSize } from '../master/profiles.js';
+import { mergeBatchSize, mergeParallelTips, optimisticExcludeGlobs, optimisticMergeEnabled, rerunFailedChecks } from '../master/profiles.js';
 import type { CapacityRole, PartialWork } from '../model/capacity.js';
 import { readProducerLedger, saveProducerLedger, independentProducerProfiles, launchProducer, reclaimCheckouts } from '../producer.js';
 import { followUpThreadIds, readReviewLedger, updateReviewLedger, launchReview } from '../reviewer.js';
 import { type ReviewFinding, type SuccessionRead, readReviewFindings, basePaths, baseText, baseMentions, successionReader } from '../review-scope.js';
-import { defaultAwaitReviewers, launchedSessionHandle } from '../auto-dispatch.js';
+import { defaultAwaitReviewers, launchedSessionHandle, readDispatchCursor } from '../auto-dispatch.js';
 import type { DispatchRequest } from '../model/dispatch.js';
 import { registeredLaunch } from '../model/session-state.js';
 import { readApproverLaunches } from '../master/autonomy.js';
 import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type ContainmentAssessment, type EscalationSession, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, type MergeExecutor, agentToken, approverRoleHealth, decisionInput, escalationRoleHealth, launchApprover, launchEscalationHandler, readApproverLaunch, readEscalationSessions, saveEscalationSession, verifiedContext, listHerdrAgents, readEnvironmentLog, selectionKey, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, mergeExecutor, reclaimWorktrees, removeReclaimableWorktrees, writeWorktreeInventoryCache, reclaimIdleMs, writeFailure, assessContainment, herdrJson } from '../master.js';
 import { annotatePaneShell } from '../quarantine.js';
+import { listHerdrPanes } from '../master/herdr.js';
 import { probeSupervisorAbsence } from '../containment-probe.js';
 import { httpFleetClient, reconcileFleetSessions, settledRecordSessions } from '../fleet.js';
-import { type ContainmentRetention, type DaemonAction, type DaemonState, storeAction, type DeploymentObservation, message, writeDaemonState } from './state.js';
+import { type ContainmentRetention, type DaemonAction, type DaemonState, type LoopRelease, storeAction, type DeploymentObservation, message, writeDaemonState } from './state.js';
 import { answeringWidening } from './reconcile.js';
 import { type OrphanSupervisor, readyToRetry, stopWatchSupervisor } from './sessions.js';
-import { neededDecision, type RoutineDecisionAction } from './decisions.js';
+import { neededDecision, type ExhaustedProof, type RoutineDecisionAction } from './decisions.js';
 import type { FaultClassPolicy, FaultKind, faultClassItem } from '../model/fault-classes.js';
 import type { ControlPlaneStatus } from '../master.js';
 import { readCredentialFile } from '../master.js';
 import { onceAnnotations, timingFaultAttention, type ReportedAttention } from './faults.js';
 import type { daemonSummary } from './run.js';
 import { observeDeployment } from './deployment.js';
+import { detectLoopSupervisorUnit, performSelfUpgrade, type SelfUpgradeOutcome } from './upgrade.js';
+import { readRelease, restartExecutors } from '../executor-fleet.js';
 import { serverCallName, timedCall, timedFetch, timedRun } from '../master/timings.js';
 import type { RunRecord, Runner } from '../runner/types.js';
 import type { ResearchEvent } from '../research.js';
@@ -101,13 +104,35 @@ export interface DaemonEffects {
    */
   publishProductionEnvironment?: () => Promise<unknown>;
   /**
-   * Publishes `mergeQueue.batchSize` (GY-330) to the control plane, whose merge queue batches by
-   * it; sent only on a change, and read at the start of every cycle so a reconfiguration applies
+   * Publishes `mergeQueue.batchSize` (GY-330), `mergeQueue.parallelTips` (GY-498),
+   * `mergeQueue.rerunFailedChecks`, `mergeQueue.optimistic` (GY-500) and `mergeQueue.optimisticExclude`
+   * (GY-503) to the control plane, whose merge queue batches and validates its window by the first
+   * two, lets disjoint entries past it by the third and judges shared infrastructure by the last;
+   * sent only on a change, and read at the start of every cycle so a reconfiguration applies
    * before the next merge.
    */
   publishMergeBatchSize?: () => Promise<unknown>;
   /** Asks the provider to run the trusted smoke workflow against the observed deployment. */
   requestSmoke: (work: Work) => void | Promise<void>;
+  /**
+   * The producer requests the dispatcher has stopped attempting (GY-496), from its cursor: the loop
+   * escalates each and, a cycle later, requests the rework. Absent, nothing is escalated.
+   */
+  exhaustedProofs?: () => Promise<ExhaustedProof[]>;
+  /**
+   * GY-437: between cycles, aligns this checkout with the verified deployed release — fetches the
+   * base branch, checks out its tip when the checkout is a clean detached checkout, and, when the
+   * diff touches code the loop or the executors load, restarts the fleet and then re-executes the
+   * loop through its own supervisor. A loop wired without it keeps cycling exactly as before, on
+   * the release it loaded.
+   */
+  selfUpgrade?: (state: DaemonState) => Promise<SelfUpgradeOutcome>;
+  /**
+   * GY-437: the release this process loaded, read from its checkout when the effects are built at
+   * startup, before anything can move the checkout. The loop records it on the cursor over whatever
+   * a previous process left there; a loop wired without it reports none.
+   */
+  loadedRelease?: LoopRelease | null;
   /**
    * Removes the dependency directories of finished assignment worktrees. A loop configured
    * without it keeps cycling; it simply never reclaims. It touches no checkout, no branch, and
@@ -225,6 +250,12 @@ export interface DaemonEffects {
   /** Herdr's agent inventory, read asynchronously: an empty list when Herdr cannot be read. */
   agents: () => HerdrAgent[] | Promise<HerdrAgent[]>;
   /**
+   * The host's pane inventory (`herdr pane list`, GY-842): every pane this host's runtime holds,
+   * with or without an agent in it, for the pane count the agent inventory cannot give. A loop
+   * wired without it reports no pane count; the sweep judges presence from the agent inventory.
+   */
+  panes?: () => Promise<{ panes: { pane_id?: string }[]; available: boolean }>;
+  /**
    * The same session inventory with whether it could be read at all. A Herdr that cannot be
    * reached reports no sessions, and stopping a supervisor on that would kill live work, so the
    * orphan step acts only on an inventory that says it is available.
@@ -320,7 +351,7 @@ export const promptDigest = (text: string) => createHash('sha256').update(text).
  * becomes claimable only once its partial work is on the record. Nothing is preserved for an
  * attempt that submitted — its work is on the pull request — or one the quota path already kept.
  */
-export async function preserveInterruptedAttempt(state: DaemonState, effects: DaemonEffects, item: Work, epoch: number, profile: WorkerProfile | undefined, observed: string, now: () => number, performed: DaemonAction[]) {
+export async function preserveInterruptedAttempt(state: DaemonState, effects: DaemonEffects, item: Work, epoch: number, profile: WorkerProfile | undefined, observed: string, now: () => number, performed: DaemonAction[], options: { endsBlocker?: true } = {}) {
   if (!effects.reportCapacity) return null;
   const key = preserveKey(item, epoch), previous = state.actions[key];
   if (previous?.state === 'done' || (previous && !readyToRetry(previous, state.cycle))) return previous;
@@ -329,7 +360,7 @@ export async function preserveInterruptedAttempt(state: DaemonState, effects: Da
   await record(state, key, { kind: 'preserve', work: item.key, principal, epoch, state: 'started', detail: `Keeping what attempt ${epoch} of ${item.key} left in its worktree: ${observed}`, attempts, cycle: state.cycle }, now(), effects.persist);
   try {
     const partialWork = await effects.preserveWork?.(item, epoch, 'interrupted before it could submit') ?? { state: 'not-applicable' as const, detail: 'this loop has no access to the attempt worktree' };
-    await effects.reportCapacity(item, { event: 'exhausted', cause: 'interrupted', role: 'worker', epoch, profile: profile?.name ?? principal ?? 'unknown', account: null, runtime: profile?.kind ?? null, reason: observed.slice(0, 500), resetsAt: null, partialWork });
+    await effects.reportCapacity(item, { event: 'exhausted', cause: 'interrupted', role: 'worker', epoch, profile: profile?.name ?? principal ?? 'unknown', account: null, runtime: profile?.kind ?? null, reason: observed.slice(0, 500), resetsAt: null, partialWork, ...options });
     const where = partialWork.commit ? ` at ${partialWork.commit.slice(0, 12)}${partialWork.branch ? ` on ${partialWork.branch}` : ''}${partialWork.path ? ` (${partialWork.path})` : ''}` : '';
     return performed[performed.push(await record(state, key, { kind: 'preserve', work: item.key, principal, epoch, state: 'done', detail: `${item.key} attempt ${epoch} ${observed}. Partial work ${partialWork.state}${where}${partialWork.detail ? `: ${partialWork.detail}` : ''}; the attempt ended on the record and the next attempt's request names the commit`, attempts, cycle: state.cycle }, now(), effects.persist)) - 1];
   } catch (error) {
@@ -479,9 +510,11 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   // The same route, as the same requester: only the identity that asked may take a request back.
   const withdraw: DaemonEffects['withdraw'] = (work, decision, reason) => asOperatorAgent('POST', `work/${work.id}/decide`, { action: 'withdraw', decision, reason });
   const decisions: DaemonEffects['decisions'] = work => asOperatorAgent('GET', `work/${encodeURIComponent(work.id)}/decisions`);
-  let publishedEnvironment: string | null = null, publishedBatchSize: number | null = null;
+  let publishedEnvironment: string | null = null, publishedMergeQueue: string | null = null;
+  const persistLoop = (state: DaemonState) => writeDaemonState(current(), state);
   return {
     agents: () => listHerdrAgents(run).catch(() => []),
+    panes: async () => { try { return { panes: await listHerdrPanes(run), available: true }; } catch { return { panes: [], available: false }; } },
     // A reviewer or producer session ends with its ledger record (GY-205): its Herdr name is not one the registry session determines.
     reconcileSessions: async (runtime, finished) => {
       const settled = new Map(finished);
@@ -603,12 +636,15 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       publishedEnvironment = environment;
     },
     publishMergeBatchSize: async () => {
-      const batchSize = mergeBatchSize(current());
-      if (batchSize === publishedBatchSize) return;
-      await mutate('merge-queue', { batchSize });
-      publishedBatchSize = batchSize;
+      const config = { batchSize: mergeBatchSize(current()), optimistic: optimisticMergeEnabled(current()), parallelTips: mergeParallelTips(current()), rerunFailedChecks: rerunFailedChecks(current()), optimisticExclude: optimisticExcludeGlobs(current()) };
+      const published = JSON.stringify(config);
+      if (published === publishedMergeQueue) return;
+      await mutate('merge-queue', config);
+      publishedMergeQueue = published;
     },
     recordDeployment: (work, observation) => mutate(`work/${work.id}/deployment`, { sha: observation.sha, mergeSha: work.delivery!.mergeSha, source: observation.source, observedAt: observation.observedAt }),
+    exhaustedProofs: async () => Object.entries((await readDispatchCursor(root, current(), () => {})).abandoned).filter(([, entry]) => entry.kind === 'producer')
+      .map(([requestId, entry]) => ({ requestId, work: entry.work, sha: entry.sha, group: entry.group ?? null, proofs: entry.proofs ?? [], attempts: entry.attempts, reason: entry.reason })),
     requestSmoke: async work => {
       const config = current();
       await run('gh', ['workflow', 'run', config.run.smokeWorkflow!, '--repo', config.repository, '--ref', config.baseBranch,
@@ -671,7 +707,25 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // 180s against a cycle of at most 30s: a healthy loop would have to lose six in a row.
     // The keep-alive is a child too: it runs through the same runner, awaited on the event loop
     // and bounded like every other child, and a keep-alive that fails is logged by the loop.
+    // GY-437: the loop upgrades its own checkout between cycles. The executors come first,
+    // through the shipped restart command — a refusal (a claim in flight, another restart's
+    // fence) leaves the owed restarts on the cursor for the next cycle — and the loop
+    // re-executes itself only through the supervisor unit it actually runs under, detected from
+    // its own cgroup like an executor's.
+    loadedRelease: readRelease(root),
+    selfUpgrade: state => performSelfUpgrade(current(), state, {
+      root, run,
+      restartExecutors: to => restartExecutors(current(), { actions: () => asCoordinator('actions'), coordinatorCommit: to }),
+      restartSelf: async () => {
+        const unit = detectLoopSupervisorUnit();
+        if (!unit) throw new Error('this loop runs under no graphyard-master supervisor unit, so it cannot re-execute itself; run it under the packaged unit (examples/master/graphyard-master.service), or restart it by hand with systemctl --user restart graphyard-master');
+        // --no-block queues the restart and returns: the hand-off is systemd's stop signal, which
+        // the loop takes during its wait, not a call this process must survive.
+        await run('systemctl', ['--user', '--no-block', 'restart', unit]);
+      },
+      persist: persistLoop,
+    }),
     notify: async state => { await run('systemd-notify', state === 'ready' ? ['--ready'] : ['WATCHDOG=1']); },
-    persist: state => writeDaemonState(current(), state),
+    persist: persistLoop,
   };
 }

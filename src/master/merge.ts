@@ -5,6 +5,7 @@ import { type ChildRun, defaultChildRun } from '../child-runner.js';
 import { mergeOrder } from '../delegation.js';
 import { type Work, standingEscalations, evidenceIndependenceRefusals, nativeReviewRequired, CHECK_NAME, type CarriedApproval, carriedApproval } from '../model.js';
 import { conversationProtectionRefusal } from '../merge-queue.js';
+import { onOptimisticLane, optimisticLandingRefusal } from '../optimistic-merge.js';
 import { missingBaseAncestry, missingAncestryReason } from '../merge-base-ancestry.js';
 import type { MasterConfig } from './profiles.js';
 import { privateFile } from './config.js';
@@ -159,7 +160,7 @@ export async function repostCarriedApproval(config: MasterConfig, work: Work, ca
 }
 /**
  * What a guarded merge is bound to: the candidate head, its base, the policy revision, the published
- * queue tip and the all-gates authorization for exactly those. The whole-document revision is not
+ * queue tip or the optimistic lane (GY-500) and the all-gates authorization for exactly those. The whole-document revision is not
  * part of it: observations, bookkeeping and dispatch records bump the revision constantly, and a
  * merge refused for an unrelated write lost every race to its own background refreshes (GY-192).
  * Anything that changes what would be merged changes this binding and still refuses.
@@ -167,7 +168,7 @@ export async function repostCarriedApproval(config: MasterConfig, work: Work, ca
 export function mergeBinding(work: Work) {
   const speculation = work.queue?.speculation;
   return JSON.stringify([work.candidate?.sha ?? null, work.candidate?.baseSha ?? null, work.candidate?.pr ?? null, work.policyRevision,
-    speculation?.tip ?? null, speculation?.base ?? null, speculation?.baseTree ?? null,
+    speculation?.tip ?? null, speculation?.base ?? null, speculation?.baseTree ?? null, work.optimistic?.head ?? null, work.optimistic?.baseTip ?? null,
     work.mergeAuthorization?.sha ?? null, work.mergeAuthorization?.baseSha ?? null, work.mergeAuthorization?.policyRevision ?? null]);
 }
 /**
@@ -199,11 +200,20 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
   // from the ref itself inside assertQueuedLanding, because `baseRefOid` is a cached value.
   const pr = JSON.parse(await run('gh', ['pr', 'view', String(authorization.pr), '--repo', config.repository, '--json', 'headRefOid,baseRefName,state,isDraft']));
   if (pr.headRefOid !== authorization.sha || pr.baseRefName !== config.baseBranch || pr.state !== 'OPEN' || pr.isDraft) throw new Error(`${work.key} changed on GitHub before merge`);
-  await assertQueuedLanding(current, authorization, config.baseBranch, config.repository, run);
+  // An entry on its optimistic lane (GY-500) lands its own head past the queue: the base must still
+  // stand where its disjointness was judged, and its own base is an ancestor of that tip, so the
+  // merge base GitHub computes is the one it was approved on.
+  const optimistic = onOptimisticLane(current, authorization);
+  if (optimistic) {
+    const refusal = optimisticLandingRefusal(current, await readBaseTip(config.repository, config.baseBranch, run));
+    if (refusal) throw new Error(`${work.key} merge refused: ${refusal}`);
+  } else await assertQueuedLanding(current, authorization, config.baseBranch, config.repository, run);
   // A head without the base tip in its history is refused before any approval is re-posted: GitHub
-  // would dismiss it again as a merge-base change (GY-145).
-  const unancestored = missingBaseAncestry(current);
-  if (unancestored) throw new Error(`${work.key} merge refused: ${missingAncestryReason(unancestored)}`);
+  // would dismiss it again as a merge-base change (GY-145). An optimistic head keeps its own merge base.
+  if (!optimistic) {
+    const unancestored = missingBaseAncestry(current);
+    if (unancestored) throw new Error(`${work.key} merge refused: ${missingAncestryReason(unancestored)}`);
+  }
   // An approval the control plane carried onto its authored tip is re-posted through the reviewer
   // App first, so a native review requirement GitHub re-armed on the tip does not hold the queue.
   const carried = carriedApproval(current);

@@ -123,6 +123,12 @@ test('unit:queue-ejection-reworked — a candidate the merge queue ejected on a 
   assert.deepEqual(decided.map(entry => entry.action), ['rework']);
   assert.match(decided[0].reason, new RegExp(`base branch tip ${B2.slice(0, 12)}`));
   assert.deepEqual(approvers, [decisionId]);
+
+  // GY-252: the record's typed conflict flag decides, not the wording of its reason. A reworded
+  // conflict is still reworked; a flagged non-conflict whose reason reads like one is not.
+  const flagged = ejected({ queueEjection: { at: iso(-60_000), sequence: 12, reason: 'the tip could not be built', sha: H, policyRevision: 1, conflict: { base: B2 }, predecessors: [] } } as Partial<Work>);
+  assert.equal(routineDecision(flagged, { autoMerge: true }, clock)?.binding, `${H}:queue-conflict:12:${B2}`);
+  assert.equal(routineDecision(ejected({ queueEjection: { at: iso(-60_000), sequence: 12, reason, sha: H, policyRevision: 1, conflict: null } } as Partial<Work>), { autoMerge: true }, clock), null);
 });
 
 test('unit:no-actor-item-surfaced — a submitted item with no review, producer or rework request and no named wait is named in master status after five minutes', () => {
@@ -154,6 +160,12 @@ test('unit:no-actor-item-surfaced — a submitted item with no review, producer 
   const stuck = actorlessSubmissions([item({ ...orphanFields(), observation: conflicting(), baseRefresh: { from: { sha: H }, base: B2, policyRevision: 1, at: iso(-actorlessBoundMs - 60_000), head: H, conflict: null, merge: null, carry: null } } as Partial<Work>)], now);
   assert.equal(stuck.length, 1);
   assert.match(stuck[0].text, /missing a sync rework/);
+
+  // GY-252: a stalled observation is no named wait. When readings stop (the GitHub rate budget is
+  // exhausted, say), the item is still named, rather than every submitted one counting as accounted for.
+  const stale = actorlessSubmissions([item({ ...orphanFields(), observation: observation({ at: iso(-actorlessBoundMs - 30 * 60_000) }) })], now);
+  assert.equal(stale.length, 1, 'an observation older than two minutes accounts for nothing');
+  assert.match(stale[0].text, /missing a reviewer/);
 });
 function orphanFields(): Partial<Work> {
   return { evidence: proven(), observation: observation(), stageEnteredAt: iso(-actorlessBoundMs - 60_000) };
