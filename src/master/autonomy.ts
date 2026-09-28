@@ -188,11 +188,20 @@ export function previewPrincipalRotation(live: { id: string; role: string; lease
     ...humans.filter(next => next.role !== 'admin').map(next => `${next.id} (${next.role}) is an agent role and may not be declared human`)];
   return { kept: live.filter(principal => !dropped.includes(principal) && !changed.includes(principal)).map(principal => principal.id), added: proposed.filter(next => !live.some(principal => principal.id === next.id)).map(next => `${next.id} (${next.role})`), humans: humans.map(next => next.id), refusals, applicable: !refusals.length };
 }
+/**
+ * The roster `master principals --apply` would deploy, read from `.graphyard/credentials.json` and
+ * checked against the deployment's own schema (server/principals.ts): a `sessionKind` there is
+ * `human` or `ai` and nothing else, so a typo is refused at the preview instead of failing the
+ * redeployed server at start-up — with a valid human admin beside it, the preview alone would
+ * have called it applicable.
+ */
 export async function readProposedRoster(root: string) {
   const file = resolve(root, '.graphyard/credentials.json'); await privateFile(file);
   const parsed = JSON.parse(await readFile(file, 'utf8'));
   if (!Array.isArray(parsed) || !parsed.every(entry => typeof entry?.id === 'string' && typeof entry?.role === 'string')) throw new Error('.graphyard/credentials.json must be the principal array the deployment runs with');
-  return parsed.map(entry => ({ id: entry.id as string, role: entry.role as string, sessionKind: typeof entry.sessionKind === 'string' ? entry.sessionKind as string : null }));
+  const unknown = parsed.filter(entry => entry.sessionKind !== undefined && entry.sessionKind !== 'human' && entry.sessionKind !== 'ai').map(entry => entry.id);
+  if (unknown.length) throw new Error(`sessionKind is "human" or "ai", as the deployment parses it; ${unknown.join(', ')} would fail the redeployed server at start-up`);
+  return parsed.map(entry => ({ id: entry.id as string, role: entry.role as string, sessionKind: entry.sessionKind === 'human' || entry.sessionKind === 'ai' ? entry.sessionKind as string : null }));
 }
 
 /** Stop this host's master loop, if one runs, and start it again detached, logging beside the config. */

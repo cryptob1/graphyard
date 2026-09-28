@@ -13,7 +13,7 @@ const parked = { dependencies: [], plannedFiles: [], scenarioRequirements: [], i
   criteria: [{ id: 'AC-1', text: 'Proven live', proofs: ['unit:live'] }], evidence: [], gates: [], lease: null, blocker: `Waiting on a human-only decision (spending money or opening third-party accounts): ${request.needed}`, humanRequest: request, humanRequests: [] };
 const now = '2026-01-01T02:00:00Z';
 
-async function fixture(page: Page) {
+async function fixture(page: Page, options: { refuseAnswers?: boolean } = {}) {
   const posted: { path: string; body: any }[] = [];
   let work: any = parked;
   await page.route('**/api/**', async route => {
@@ -23,6 +23,7 @@ async function fixture(page: Page) {
     if (route.request().headers().authorization !== 'Bearer browser-human') return route.fulfill({ status: 401, json: { error: 'Rejected' } });
     if (method === 'POST') {
       const body = route.request().postDataJSON(); posted.push({ path, body });
+      if (options.refuseAnswers) return route.fulfill({ status: 403, json: { error: 'The requesting host key is invalid' } });
       const choice = request.choices.find(entry => entry.id === body.choice)!;
       work = { ...parked, blocker: null, humanRequest: null, humanRequests: [{ ...request, answer: { by: 'operator', at: now, outcome: choice.outcome, text: choice.label, waitedMs: 7_200_000, choice: { id: choice.id, label: choice.label }, note: null } }] };
       return route.fulfill({ json: work });
@@ -59,3 +60,19 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 375, height: 812 
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(viewport.width);
   });
 }
+
+test('a refused answer keeps everything the operator typed: the card clears only after the answer succeeds', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  const posted = await fixture(page, { refuseAnswers: true });
+  await page.goto('/#sign-in=one-time-code-from-graphyard-login');
+  await page.getByRole('button', { name: 'Every request and answer →' }).click();
+  const card = page.locator('.human-request');
+  // The choice that asks for words: typed, submitted, refused.
+  const note = card.getByRole('textbox', { name: 'Note for GY-7' });
+  await note.fill('Cap it at €30 and bill the staging project');
+  await card.getByRole('button', { name: 'Approve with a different cap…' }).click();
+  await expect(page.getByRole('alert')).toContainText('The requesting host key is invalid');
+  expect(posted.at(-1)).toEqual({ path: '/api/work/parked-work/answer', body: { request: request.id, choice: 'choice-2', note: 'Cap it at €30 and bill the staging project' } });
+  await expect(card).toHaveCount(1);
+  await expect(note).toHaveValue('Cap it at €30 and bill the staging project');
+});

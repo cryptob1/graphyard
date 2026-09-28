@@ -92,10 +92,15 @@ export function RequestCard({ row, refusal, busy, open, answer, send, signIn }: 
   const [secret, setSecret] = useState('');
   const post: HumanOnlyPost = row.answer.post;
   const choices = row.choices ?? [];
-  const submit = (body: Record<string, unknown>) => { if (text.trim()) void answer(text.trim(), body).then(() => setText('')); };
+  // A refused answer (the server declined it, the network dropped) is reported by the page's error
+  // notice and resolves normally, so nothing here clears on resolution: what the operator typed
+  // stays until this card leaves the page, which only the refresh after a successful answer does,
+  // when the request is no longer open. A credential cleared while its request still stands may
+  // be unrecoverable, so a failed submission keeps every field for the retry.
+  const submit = (body: Record<string, unknown>) => { if (text.trim()) void answer(text.trim(), body); };
   const choose = (choice: HumanOnlyChoice) => {
     const body = { ...choice.body, ...(choice.note && note.trim() ? { [choice.note]: note.trim() } : {}), ...(choice.input === 'secret' ? { secret } : {}) };
-    void (send ? send(body) : answer('', body)).then(() => { setNote(''); setSecret(''); });
+    void (send ? send(body) : answer('', body));
   };
   const ready = (choice: HumanOnlyChoice) => !busy && (choice.input !== 'text' || !!note.trim()) && (choice.input !== 'secret' || !!secret);
   return <div className="card human-request">

@@ -218,5 +218,12 @@ test('unit:operator-principal-declared-human — the install plan declares its o
     // An agent principal declared human is refused too: it could answer a human-only request itself.
     const agentHuman = await roster(deployed.map(principal => principal.role === 'worker' ? { ...principal, sessionKind: 'human' } : principal));
     assert.deepEqual(agentHuman.refusals, ['owner-project-worker-1 (worker) is an agent role and may not be declared human', 'owner-project-worker-2 (worker) is an agent role and may not be declared human']);
+    // An unknown session kind is refused before apply: the deployment parses `human` or `ai` and
+    // nothing else, and a typo'd kind beside a valid human admin would fail the redeployed server
+    // at start-up after the preview had already called the roster applicable.
+    for (const sessionKind of ['a1', 42, null]) {
+      await assert.rejects(roster(deployed.map(principal => principal.role === 'worker' ? { ...principal, sessionKind } : principal)), /sessionKind is "human" or "ai"/);
+    }
+    await assert.doesNotReject(roster(deployed.map(principal => ({ ...principal, sessionKind: undefined }))), 'an absent declaration stays allowed: the preview reports it');
   } finally { await fixture.cleanup(); }
 });

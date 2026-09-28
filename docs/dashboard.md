@@ -13,7 +13,7 @@ Each open item is in one group: **Needs you** (only you decide), **Blocked**, **
 
 ## Needs you
 
-`graphyard login` prints a single-use, ten-minute sign-in link for the operator's human session; others get **Sign in as the operator**. Requests offer choice buttons and notes; **Provide now** seals credentials for `unseal GY-N`.
+`graphyard login` prints a single-use, ten-minute sign-in link for the operator's human session; others get **Sign in as the operator**. Requests offer choice buttons and notes; **Provide now** seals credentials for `unseal GY-N`. A refused answer keeps everything typed in the form for the retry; the card clears only once the answer succeeds.
 
 ## Workers
 
