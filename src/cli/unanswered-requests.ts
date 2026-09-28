@@ -31,19 +31,21 @@ export function requestRemedyOwner(key: string, remedy: { decision: 'rework' | '
  */
 export function unansweredRequestAttention(rows: { key: string; dispatch: { review: RequestProgress | null; producers: RequestProgress[] } | null }[]): (AttentionItem & { requestId: string })[] {
   return rows.flatMap(row => unansweredRequests(row.dispatch).map(request => {
+    const subject = request.kind === 'review' ? 'Review request' : `Producer request for ${request.group ?? 'its'} proofs`;
+    const verdict = request.verdict ? `with verdict ${request.verdict}` : 'without a verdict';
+    const settled = `its session ${request.state} ${verdict} after attempt ${request.attempts} — ${request.resolution ?? 'no reason recorded'}`;
+    const next = request.next;
+    // Once the reader knows how long ago the session settled — so the grace has been measured —
+    // the decision its evidence calls for is the named answer, not an unanswered request.
+    if (next?.kind === 'decision' && request.settledMs !== null) return { subject: row.key, requestId: request.requestId, ...classified('request-remedy'),
+      text: `${subject} for ${row.key} awaits the ${next.decision} decision its evidence calls for, ${elapsed(request.sinceMs)} after it was requested: ${settled}; ${next.proofs.join(', ')} ${next.proofs.length === 1 ? 'was' : 'were'} recorded as not exercising ${next.proofs.length === 1 ? 'its criterion' : 'their criteria'} on this head, so no producer is launched for it again and the loop raises the ${next.decision} decision instead`,
+      ...requestRemedyOwner(row.key, next) };
     // A producer that recorded its proofs as not exercising their criterion answered the request
     // with a finding (GY-817): the head awaits rework, which the loop requests as it does for a
     // failing proof, and no producer is launched for it again.
     if (request.unexercised?.length) return { subject: row.key, requestId: request.requestId,
       text: `${row.key} is awaiting rework for a non-exercising proof: ${request.unexercised.join('; ')}. The ${request.group ?? 'producer'} proofs are a defect of the candidate's tests, as a failing proof is; the loop requests the rework decision and the next head is proven afresh`,
       ...agentOwner('master', `the loop requests the rework decision for ${row.key}, approved by the approver agent; graphyard master decide ${row.key} rework REASON only when the loop cannot`, 'approver') };
-    const subject = request.kind === 'review' ? 'Review request' : `Producer request for ${request.group ?? 'its'} proofs`;
-    const verdict = request.verdict ? `with verdict ${request.verdict}` : 'without a verdict';
-    const settled = `its session ${request.state} ${verdict} after attempt ${request.attempts} — ${request.resolution ?? 'no reason recorded'}`;
-    const next = request.next;
-    if (next?.kind === 'decision') return { subject: row.key, requestId: request.requestId, ...classified('request-remedy'),
-      text: `${subject} for ${row.key} awaits the ${next.decision} decision its evidence calls for, ${elapsed(request.sinceMs)} after it was requested: ${settled}; ${next.proofs.join(', ')} ${next.proofs.length === 1 ? 'was' : 'were'} recorded as not exercising ${next.proofs.length === 1 ? 'its criterion' : 'their criteria'} on this head, so no producer is launched for it again and the loop raises the ${next.decision} decision instead`,
-      ...requestRemedyOwner(row.key, next) };
     const scheduled = next?.kind === 'relaunch'
       ? `nothing is running for it, and attempt ${next.attempt} of ${next.limit} has been due on the loop's next dispatch tick since the session settled${request.settledMs === null ? '' : ` ${elapsed(request.settledMs)} ago`}`
       : 'nothing is running for it and no further attempt is scheduled';

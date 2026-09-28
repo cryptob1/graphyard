@@ -5,7 +5,7 @@
  */
 import type { Work } from './work.js';
 import type { DispatchKind, DispatchRequest } from './dispatch.js';
-import { currentEvidence } from './evidence.js';
+import { unexercisedFindings } from './mechanical-proofs.js';
 
 /** One live request as a reader joins it onto the session launched for it and that session's retry schedule. */
 export interface RequestProgress {
@@ -22,6 +22,8 @@ export interface RequestProgress {
    * for the head again and requests rework — or, for a `manual:` proof, the attestation again.
    */
   remedy?: RequestRemedy | null;
+  /** A producer request's proofs the producer recorded as not exercising their criterion on its head (GY-817), each as a rework names it. */
+  unexercised?: string[];
 }
 export interface RequestRemedy { decision: 'rework' | 'attest'; proofs: string[] }
 /** Every session one request may have in all, however each ended: the dispatch failure limit (auto-dispatch.ts). */
@@ -37,21 +39,6 @@ export const settledAnswerGraceMs = 5 * 60_000;
 /** Sessions whose request is relaunched on the widening retry schedule (producer.ts `sessionRetry`); every other settled state is relaunched on the next tick. */
 const retriedSessionStates = ['failed', 'expired'];
 
-/**
- * The producer's finding that a proof on this head does not exercise its criterion (GY-135): the
- * pass also held with the change removed. Such evidence is the worker's to fix, so the request is
- * never launched again for the head and the loop requests the rework instead (GY-193 AC-3).
- */
-export function unexercisedFindings(work: Work, sha: string | undefined = work.candidate?.sha, proofs?: readonly string[]): { proof: string; finding: string }[] {
-  if (!sha) return [];
-  const findings = new Map<string, string>();
-  for (const entry of work.evidence ?? []) {
-    if (!entry.unexercised || entry.sha !== sha || entry.policyRevision !== work.policyRevision || (proofs && !proofs.includes(entry.proof))) continue;
-    findings.set(entry.proof, entry.unexercised);
-  }
-  // A trusted pass recorded since answers the finding: the proof is proven on this head after all.
-  return [...findings].filter(([proof]) => !(sha === work.candidate?.sha && currentEvidence(work, proof)?.result === 'pass')).map(([proof, finding]) => ({ proof, finding }));
-}
 /** The decision a producer request waits on, or null when a session answers it (daemon/decisions.ts raises the decision). */
 export function requestRemedy(work: Work, request: Pick<DispatchRequest, 'kind' | 'sha' | 'proofs'>): RequestRemedy | null {
   if (request.kind !== 'producer') return null;
@@ -70,7 +57,7 @@ export const answeringVerdicts = ['APPROVED', 'CHANGES_REQUESTED'];
  * A live request whose session settled leaving its gate unsatisfied past the grace. `next` names
  * what answers it: the relaunch the loop owes it, the decision it waits on, or nothing at all.
  */
-export interface UnansweredRequest { requestId: string; kind: DispatchKind; group?: string; sinceMs: number; state: string; verdict: string | null; attempts: number; resolution: string | null;
+export interface UnansweredRequest { requestId: string; kind: DispatchKind; group?: string; sinceMs: number; state: string; verdict: string | null; attempts: number; resolution: string | null; unexercised?: string[];
   settledMs: number | null; next: UnansweredNext }
 export type UnansweredNext = { kind: 'relaunch'; attempt: number; limit: number } | ({ kind: 'decision' } & RequestRemedy) | null;
 
@@ -97,7 +84,8 @@ export function unansweredRequest(request: RequestProgress, kind: DispatchKind):
   const next: UnansweredNext = kind === 'producer' && request.remedy ? { kind: 'decision', ...request.remedy }
     : !retriedSessionStates.includes(session.state) && attempts < requestAttemptLimit ? { kind: 'relaunch', attempt: attempts + 1, limit: requestAttemptLimit } : null;
   return { requestId: request.requestId, kind, ...(request.group ? { group: request.group } : {}), sinceMs: request.sinceMs,
-    state: session.state, verdict: session.verdict ?? null, attempts, resolution: session.resolution ?? null, settledMs, next };
+    state: session.state, verdict: session.verdict ?? null, attempts, resolution: session.resolution ?? null, settledMs, next,
+    ...(request.unexercised?.length ? { unexercised: request.unexercised } : {}) };
 }
 
 /** One settled reviewer session as a status reader summarizes it (summarizeReviews), for the judgement below. */

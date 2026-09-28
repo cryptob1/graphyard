@@ -101,7 +101,7 @@ const signatures: [FaultKind, (subject: string, text: string) => boolean][] = [
   ['decision-unanswered', (_, text) => /^Decision \S+ \(\S+\) is unanswered/.test(text)],
   ['approver-launch', (_, text) => /is awaiting an approver for/.test(text)],
   ['request-remedy', (_, text) => /request for .+ awaits the \S+ decision its evidence calls for/.test(text)],
-  ['stalled-action', (_, text) => /action is stalled, not retrying/.test(text)],
+  ['stalled-action', (_, text) => /\S+ action is stalled\b/.test(text)],
   ['stalled-item', (_, text) => /has held its \S+ gate for .+ with no action named/.test(text)],
   ['actorless', (_, text) => /no rework request and no named wait/.test(text)], ['unanswered-request', (_, text) => /has stood unanswered for/.test(text)],
   ['stuck-request', (_, text) => /^\S+ request \S+ on \S+ \(session \S+\) is pending/.test(text)],
