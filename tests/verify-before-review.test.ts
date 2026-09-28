@@ -48,7 +48,8 @@ async function submitted(title: string, criteria: Work['criteria']) {
 }
 const observed = (item: Work, sha: string, extra: Partial<Observation> = {}): Observation => ({
   candidate: { sha, baseSha: B, pr: item.submission!.pr, branch: item.workspaces[0].branch, author: 'implementer' }, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true,
-  files: ['src/a.ts'], scopeFiles: [], at: new Date().toISOString(), prState: 'open', draft: false, baseTip: B, baseTree: sha40('7b'), baseTipContained: true, ...extra });
+  // GY-883: a public API path keeps the item in the high lane, which still demands the proofs review must wait for.
+  files: ['src/server/routes/a.ts'], scopeFiles: [{ path: 'src/server/routes/a.ts', status: 'added' as const, sha: 'f'.repeat(40), baseSha: null, additions: 1, deletions: 0, binary: false }], at: new Date().toISOString(), prState: 'open', draft: false, baseTip: B, baseTree: sha40('7b'), baseTipContained: true, ...extra });
 const prove = (item: Work, proof: string, sha: string, result: 'pass' | 'fail') =>
   engine.execute(producer, 'evidence', item.id, { proof, sha, baseSha: B, policyRevision: item.policyRevision, result, executed: 3, skipped: 0, ...(result === 'pass' ? { exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } } : {}) }, randomUUID());
 const gate = (item: Work, name: string) => item.gates.find(entry => entry.name === name)!;
