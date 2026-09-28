@@ -9,7 +9,7 @@ A criterion states an outcome and its proofs:
 {"id":"AC-1","text":"Retrying a confirmed booking produces exactly one SMS request","proofs":["integration:sms-idempotency"]}
 ```
 
-`unit:` and `integration:` proofs are producer-runnable on the exact head ([automatic dispatch](master-agent.md#automatic-dispatch-at-submit)). A `manual:` proof is attested through a two-party decision unless `producerProofs` lists it, making it producer-runnable; it is judged, never counted from test titles, so its trusted pass proves it whatever it executed, where a `unit:`/`integration:` pass needs `executed > 0`. `e2e:` proofs use the [validation runner](validation.md).
+`unit:` and `integration:` proofs are producer-runnable on the exact head ([automatic dispatch](master-agent.md#automatic-dispatch-at-submit)). A `manual:` proof is attested through a two-party decision unless `producerProofs` lists it, making it producer-runnable; it is judged, never counted from test titles, so its trusted pass proves it whatever it executed, where every other family — a `unit:`/`integration:`/`e2e:` pass — needs `executed > 0`. `e2e:` proofs use the [validation runner](validation.md).
 
 ## Revise requirements explicitly
 
