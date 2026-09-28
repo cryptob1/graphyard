@@ -1,4 +1,4 @@
-<!-- page: Operate Graphyard | 2 | App, protection, merge queue, CI proofs. -->
+<!-- page: Operate Graphyard | 2 | App, protection, queue, proofs. -->
 # GitHub enforcement
 
 ## App permissions
@@ -7,6 +7,7 @@ The control-plane App holds (`src/github-permissions.ts`):
 
 | Permission | Access | Needed to |
 | --- | --- | --- |
+| Actions | Read and write | rerun failed workflow jobs on the unchanged candidate (failed CI reruns) |
 | Administration | Read | inspect branch protection (pull request observation) |
 | Checks | Read and write | read CI check runs (pull request observation); publish `Graphyard / merge` on the exact candidate commit (the required check) |
 | Contents | Read and write | read commits, trees and pull request files (pull request observation); publish speculative merge-queue tips: the merge commit on the candidate branch and the `refs/graphyard/queue/*` ref that binds it (the merge queue) |
@@ -22,7 +23,7 @@ A reviewer App is never granted Contents: write, Checks, or Administration; work
 | Metadata | Read | read the managed repository (repository access) |
 | Pull requests | Read and write | post the verdict comment (review dispatch) |
 
-Grants are rechecked every five minutes and on a 403; a shortfall (`appPermissions`) holds its jobs, **not retried** (`integration-held`), until `master browser app-permissions` or `master browser installation-accept` fixes it.
+Grants are rechecked every five minutes and on 403s; a shortfall (`appPermissions`) holds its jobs, **not retried** (`integration-held`), until `master browser app-permissions` or `master browser installation-accept` fixes it.
 
 ## The reviewer App
 
@@ -30,41 +31,39 @@ Grants are rechecked every five minutes and on a 403; a shortfall (`appPermissio
 
 ## Require the check
 
-On the base branch require `Graphyard / merge` from this App, `strict` **off**, admin-enforced, no force pushes or deletion, workers without bypass ([repair lane](master-agent.md#repair-lane)); `master browser protection` reconciles it. `master protection --apply`, `install --apply`, `init --scan --apply` give organization repositories a merge queue requiring it, user-owned ones `allow_auto_merge`.
+On the base branch require `Graphyard / merge` from this App, `strict` **off**, admin-enforced, no force pushes or deletion, workers without bypass ([repair lane](master-agent.md#repair-lane)); `master browser protection` reconciles it.
 
-The gate requires `GITHUB_CI_APP_IDS` CI checks, current-head approval, trusted passing evidence, a mergeable non-draft PR and the queue head or the [optimistic lane](#optimistic-merges). Unknown mergeability (`null`) is re-read 3 times in 10 s, then refused.
+The gate requires `GITHUB_CI_APP_IDS` CI checks, current-head approval, trusted passing evidence, a mergeable non-draft PR and the queue head or the [optimistic lane](#optimistic-merges). Unknown mergeability is re-read 3 times in 10 s, then refused.
 
 ## Merge queue
 
-Once gated, a candidate's speculative tip, pushed onto the candidate branch and `refs/graphyard/queue/KEY`, binds every check, review and proof. A failed check, requested changes, a revoked proof, a conflict or rework ejects it to the back. One conflicting only with entries ahead of it re-enters unchanged once one lands or leaves. The App passes the check for an authorized head and merge group and asks GitHub to merge (queue, auto-merge or [direct](#direct-merges)); protection decides; withdrawal dequeues.
+A failed required check reruns once on the unchanged head before rework or ejection. Gate and rework decisions take the newest check-run ID from configured CI Apps, ignoring other Apps' same-named checks. Master status shows pending reruns and outcomes outside the queue. An owed or accepted rerun expires after 15 minutes without a new run; a running check finishes. The App needs Actions: write — preflight diagnoses a missing grant and rerun requests hold until accepted.
+
+Once gated, the candidate's speculative tip, pushed onto the candidate branch and `refs/graphyard/queue/KEY`, binds every check, review and proof. A failed check, requested changes, a revoked proof, a conflict or rework ejects it to the back. One conflicting only with entries ahead of it re-enters unchanged once one lands or leaves. The App passes the check for an authorized head and merge group and asks GitHub to merge (queue, auto-merge or direct); protection decides; withdrawal dequeues. Without a queue, `CLEAN`, `UNSTABLE` and `HAS_HOOKS` PRs merge at once, head-bound.
 
 ### Bindings and carry
 
-Reviews and proofs bind one head, base and policy revision. The queue head's tip merges moved bases: all carry if the clean merge kept the patch-id, else the approval if no reviewed file changed, disjoint-`scopeFiles` proofs. A republication reads the PR's reviews before force-pushing: an approval of the replaced tip carries onto a Graphyard-authored tip over the same author head and patch, and the App's own dismissal (patch unchanged) restores when observed — never a person's dismissal, moved author head or changed patch. Carried steps name their ground, carries and restores the review id and both tips; CI reruns. GitHub conflicts are test-merged; clean ones log `base.stale-mergeability`.
+Reviews and proofs bind one head, base and policy revision. The queue tip merges moved bases: all carry if the clean merge kept the patch-id, else the approval if no reviewed file changed, disjoint-`scopeFiles` proofs. A republication reads the PR's reviews before force-pushing: the replaced tip's approval carries onto a Graphyard-authored tip over the same author head and patch, the App's own dismissal (patch unchanged) restoring when observed — never a person's, a moved author head, or a changed patch. Carried steps name their ground; CI reruns. GitHub conflicts are test-merged; clean ones log `base.stale-mergeability`.
 
 Before merging, the reviewer App re-posts a carried approval onto the tip. When the carried review is gone from the PR (say it was given on an earlier PR), the re-post uses the same reviewer's latest approval of the head the tip was built from. A newer approval of that head, once observed, also replaces the carried binding (`review.carry-refreshed`). If no approval is usable, the merge reports `mergerefused` and the control plane clears the carried approval (`mergeRefusal.action: rereview`). The review gate then requests a fresh review of the tip, and the entry leaves the queue so the next one heads it; a fresh approval lets it re-enter. If the guarded merge refuses one candidate for the same reason for 10 minutes, the loop raises an escalation naming the reason and the next step, and reports it. The control plane then clears a carried approval, or else marks the candidate for a rework decision (`mergeRefusal.action: rework`) that the approver judges. The action is taken once per recovery phase: a cleared carried approval that a fresh approval answers re-arms the handling, so the same standing refusal moves the candidate on to the rework action instead of being retried for good, and a carry re-bound to another review is a phase of its own.
 
 ### Parallel tips
 
-`mergeQueue.parallelTips` (master config, default 4, published via `POST /api/merge-queue`) stacked tips test at once; entries merge in order once every tip through theirs passes. Set it to 1 for serial validation. Each publication wakes successors; in-flight tips receive frequent verdict reads. After any configured failed-check rerun, a failing tip ejects its entry once those ahead pass; later tips rebuild. `master status` and Merge step list them.
+`mergeQueue.parallelTips` (master config, default 4, published via `POST /api/merge-queue`) stacked tips test at once; entries merge in order once every tip through theirs passes. Each publication wakes successors, re-reading in-flight verdicts. After any configured failed-check rerun, a failing tip ejects its entry once those ahead pass; later tips rebuild. `master status` and Merge step list them.
 
-Under a window wider than one, every entry validates on its own tip: the defaults (4 and 4) therefore mean four entry tips at once, not one four-entry batch — one CI duration covers four positions instead of one, at the cost of their concurrent CI and a discarded suffix on a failure. `parallelTips: 1` restores the batched behaviour; `batchSize` still widens the observation band and the wake depth.
+Above one, each entry validates on its own tip: defaults mean four tips at once — one CI duration covers four positions, costing concurrent CI and a discarded suffix on failure; `parallelTips: 1` restores batching; `batchSize` still widens observation and wake depth.
 
 ### Optimistic merges
 
-`mergeQueue.optimistic` (default on, independent of `mergeQueue.rerunFailedChecks`): a green entry disjoint from base changes and shared infrastructure lands head-bound, unqueued; a main guard [reverts](master-agent.md#repair-lane) and reopens culprits (`master status`: `optimisticMerge`). Shared infrastructure is per repository: the master config's `mergeQueue.optimisticExclude` globs — written by onboarding with product defaults (manifests and lockfiles, CI config, test helpers, schema and migration directories) and kept on re-runs — replace them wholesale, so a change to an excluded path never merges optimistically, and neither does anything whose base changed one since its own run. `optimistic: false` turns the lane off for the repository.
-
-### Direct merges
-
-Without a queue, `CLEAN`, `UNSTABLE` and `HAS_HOOKS` PRs merge at once, head-bound.
+`mergeQueue.optimistic` (default on, independent of `mergeQueue.rerunFailedChecks`): a green entry disjoint from base changes and shared infrastructure lands head-bound, unqueued; a main guard [reverts](master-agent.md#repair-lane) and reopens culprits (`master status`: `optimisticMerge`). Each repository's shared infrastructure is the master config's `mergeQueue.optimisticExclude` globs — onboarding writes product defaults (manifests and lockfiles, CI config, test helpers, schema and migration directories) — so a change to an excluded path never merges optimistically, nor anything whose base changed one since its run; `optimistic: false` turns the lane off.
 
 ### Proofs in CI
 
-A protected `pull_request_target` workflow runs on every `graphyard/*` push: **plan** finds the item's `unit:*`/`integration:*` proofs, **exercise** runs one secret-free job on the candidate merged with its base, **publish** submits reports via the `ciRun`-bound [CI producer](deployment.md#ci-producer); queue tips too, dependencies cached. Manual proofs stay producer sessions.
+A protected `pull_request_target` workflow runs on every `graphyard/*` push: **plan** finds the item's `unit:*`/`integration:*` proofs, **exercise** runs one secret-free job on the base-merged candidate, **publish** reports via the `ciRun`-bound [CI producer](deployment.md#ci-producer); queue tips too, cached. Manual proofs stay producer sessions.
 
 ## Post-deployment smoke proof
 
-With `"deploySmoke": true`, the master dispatches the smoke-workflow install once the release serves the merge; failure marks it [delivered with failure](operations-reference.md#delivered-with-a-failed-smoke-proof).
+With `"deploySmoke": true` the master dispatches the smoke install once the release serves the merge; failure marks it [delivered with failure](operations-reference.md#delivered-with-a-failed-smoke-proof).
 
 ## Enforcement boundary
 

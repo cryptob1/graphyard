@@ -568,16 +568,17 @@ export async function readFlow(store: Store, query: FlowQuery): Promise<FlowData
  * The flow report cache (GY-705): each store's last computed flow report per window and filter
  * set, kept with the dataset it was computed from, so `GET /api/analytics/flow` and its
  * drill-downs answer from memory instead of re-reading a week of facts (about 6 s at 250 open
- * items). A report is served for at most `flowReportFreshMs`, and at once recomputed when the
- * flow moved under it: a new flow fact (every step change — a stage, gate, merge or delivery —
- * records one), a new deployment observation (`invalidateFlowReports`) or a new production-watch
- * pass.
+ * items). An idle report is served for at most `flowReportFreshMs`. Fact changes coalesce
+ * for `flowReportCoalesceMs` from the start of a read. Deployment observations invalidate
+ * immediately, and a new production-watch pass uses a different cache key.
  */
 export const flowReportFreshMs = 60_000;
+/** Bound fact-driven recomputations on busy boards; deployment invalidation still takes effect immediately. */
+export const flowReportCoalesceMs = 10_000;
 /** How many window-and-filter reports one store keeps; each holds its own bounded dataset. */
 export const flowReportPoolLimit = 8;
 export interface PooledFlowReport { dataset: FlowDataset; report: ReturnType<typeof computeFlow> }
-interface PoolEntry { read: Promise<PooledFlowReport>; at: number; lastFact: number }
+interface PoolEntry { read: Promise<PooledFlowReport>; at: number; lastFact: number; pending: boolean }
 const reportPools = new WeakMap<Store, Map<string, PoolEntry>>();
 /**
  * What a pooled report stands for: every query field `readFlow` and `computeFlow` read, and the
@@ -594,8 +595,8 @@ export function invalidateFlowReports(store: Store) { reportPools.get(store)?.cl
  * The flow report for `query` from the cache, computed on a miss. The bounded projection
  * catch-up runs first on every read — on the report pool (GY-491), like the read itself — so a
  * step event recorded since the cached report was computed becomes a newer flow fact and the
- * read recomputes; an idle flow is served from the cache. Concurrent misses share one
- * computation, and a failed one is never cached.
+ * read recomputes after the coalescing interval; an idle flow is served from the cache.
+ * Concurrent misses share one computation, and a failed one is never cached.
  */
 export async function pooledFlowReport(store: Store, query: FlowQuery): Promise<PooledFlowReport> {
   await projectFlow(store, { batches: 3, pool: store.reportPool });
@@ -603,11 +604,14 @@ export async function pooledFlowReport(store: Store, query: FlowQuery): Promise<
   const pool = reportPools.get(store) ?? reportPools.set(store, new Map()).get(store)!;
   const key = flowReportKey(query);
   const hit = pool.get(key);
-  if (hit && hit.lastFact === lastFact && Date.now() - hit.at < flowReportFreshMs) return hit.read;
-  const entry: PoolEntry = { at: Date.now(), lastFact, read: readFlow(store, query).then(dataset => ({ dataset, report: computeFlow(dataset, query) })) };
+  if (hit && (hit.pending || (Date.now() - hit.at < flowReportFreshMs &&
+    (hit.lastFact === lastFact || Date.now() - hit.at < flowReportCoalesceMs)))) return hit.read;
+  const entry: PoolEntry = { at: Date.now(), lastFact, pending: true, read: readFlow(store, query).then(dataset => ({ dataset, report: computeFlow(dataset, query) })) };
   pool.delete(key); pool.set(key, entry);
   while (pool.size > flowReportPoolLimit) pool.delete(pool.keys().next().value!);
-  entry.read.catch(() => { if (pool.get(key) === entry) pool.delete(key); });
+  entry.read.then(() => { entry.pending = false; }, () => {
+    if (pool.get(key) === entry) pool.delete(key);
+  });
   return entry.read;
 }
 
@@ -1607,10 +1611,13 @@ export function flowExport(report: FlowReport, drilldown: ReturnType<typeof flow
 // mechanical verification can hope to remove. Every other named class is a cause outside the
 // item's own change; `other` keeps a round the ledger text does not tie to a named class counted
 // rather than guessed away. Rules run in order and the first match wins, so a base-caused CI
-// failure is base breakage before it is anything else, and a docs-budget finding is the docs
-// budget before it is a review finding. A negated mention ("not a flake") never makes the round
-// that cause: the flake rules read negation, so an own-change round described as "not a flake"
-// is classified by the rest of its text.
+// failure is base breakage before it is anything else, a docs-budget finding is the docs budget
+// before it is a review finding, a conflict is the conflict before the lost approval its stale
+// approval also names (GY-725), and a round the text ties to the item's own change is own-change
+// before a flake or hang word in the same text makes it look like a flake. A negated mention
+// ("not a flake", "no hangs") never makes the round that cause: the flake and hang rules read
+// negation, so a deterministic failure described as "not a flake" is classified by the rest of
+// its text.
 
 export type ReworkCause = 'own-change' | 'base-breakage' | 'conflict' | 'docs-budget' | 'lost-approval-or-proof' | 'ci-flake' | 'other';
 
@@ -1645,31 +1652,8 @@ export const reworkCauseRules: ReworkCauseRule[] = [
   { cause: 'base-breakage', marker: 'base tip that broke the check', pattern: /\b(main|base) tip that broke\b/i },
   { cause: 'base-breakage', marker: 'failure comes from the base or main', pattern: /\b(failure|breakage)( is| comes)? from (the )?(base|main)\b/i },
   { cause: 'base-breakage', marker: 'base branch broken', pattern: /\bbase branch (is|was) broken\b/i },
-  { cause: 'lost-approval-or-proof', marker: 'proof does not exercise its criterion', pattern: /\bdoes not exercise (its|the|AC)\b/i },
-  { cause: 'lost-approval-or-proof', marker: 'evidence does not exercise its criterion', pattern: /evidence that does not exercise/i },
-  { cause: 'lost-approval-or-proof', marker: 'trusted fail recorded', pattern: /\brecorded (a )?trusted fail/i },
-  { cause: 'lost-approval-or-proof', marker: 'producer evidence failed', pattern: /\bproducer FAILED\b/ },
-  { cause: 'lost-approval-or-proof', marker: 'proof expired, stale, invalid or missing', pattern: /\bproofs?\b[^.\n]{0,60}\b(expired|stale|no longer|does not|invalid)\b/i },
-  { cause: 'lost-approval-or-proof', marker: 'evidence expired, stale, revoked or failed', pattern: /\bevidences?\b[^.\n]{0,80}\b(expired|stale|revoked|does not|missing|failing|fail)\b/i },
-  { cause: 'lost-approval-or-proof', marker: 'proof recorded as FAILED', pattern: /\bproof\b[^.\n]{0,140}\bFAILED\b/ },
-  { cause: 'lost-approval-or-proof', marker: 'approval dismissed, lost, void or stale', pattern: /\bapprovals?\b[^.\n]{0,60}\b(dismiss|lost|no longer|stale|void)/i },
-  { cause: 'lost-approval-or-proof', marker: 'candidate cannot hold an approval', pattern: /\bcannot hold an approval\b/i },
-  { cause: 'lost-approval-or-proof', marker: 'producer mutation check', pattern: /\bproducer mutation check\b/i },
-  { cause: 'lost-approval-or-proof', marker: 'failed proof returns the head', pattern: /\bfailed proof\b/i },
-  { cause: 'lost-approval-or-proof', marker: 'rounds stranded without evidence', pattern: /\bwithout (unit-proof )?evidence\b/i },
-  { cause: 'lost-approval-or-proof', marker: 'proof producer attempts exhausted', pattern: /\b(independent |unit-)?producer attempts?\b/i },
-  { cause: 'lost-approval-or-proof', marker: 'evidence missing or invalid', pattern: /\bevidence is (missing|invalid)\b/i },
-  { cause: 'lost-approval-or-proof', marker: 'only the evidence is owed', pattern: /\bonly the evidence\b/i },
-  { cause: 'lost-approval-or-proof', marker: 'trusted fail bound to the head', pattern: /\btrusted (fail|evidence .{0,60}fail)/i },
-  // A negated mention ("deterministic, not a flake", "not flaky", "no flakes") is not a flake:
-  // the lookbehinds keep the rule from firing on the word alone, so the round falls through to
-  // the own-change rules the text may name instead of being excluded from the split (GY-643).
-  { cause: 'ci-flake', marker: 'an unnegated flake named in the reason', pattern: /\b(?<!\bnot\b[^.\n]{0,20})(?<!\bnever\b[^.\n]{0,15})(?<!\bno\b[^.\n]{0,10})(?<!non-)(flake|flaky)s?\b/i },
-  { cause: 'ci-flake', marker: 'CI job hangs', pattern: /\bhangs\b/i },
-  { cause: 'ci-flake', marker: 'transient failure', pattern: /\btransient(ly)? (fail|blocked|refus)/i },
-  { cause: 'ci-flake', marker: 'launch-readiness flake', pattern: /\blaunch readiness\b/i },
-  { cause: 'ci-flake', marker: 'CI infrastructure named', pattern: /\bCI (infrastructure|runner|infra)\b/i },
-  { cause: 'ci-flake', marker: 'deterministic hang or kill', pattern: /\bdeterministic(ally)? .{0,30}(hang|kill|exit 1\d\d)/i },
+  // Conflict runs before lost-approval-or-proof: a base that moved under the candidate often
+  // dismisses the approval it held too, and the round is the conflict (GY-725).
   { cause: 'conflict', marker: 'conflicts with the base or main', pattern: /\bconflicts? with (the )?(base|main)\b/i },
   { cause: 'conflict', marker: 'conflicts with base branch tip', pattern: /conflicts with base branch tip/i },
   { cause: 'conflict', marker: 'conflict needs a sync to resolve', pattern: /without resolving a conflict/i },
@@ -1688,6 +1672,24 @@ export const reworkCauseRules: ReworkCauseRule[] = [
   { cause: 'conflict', marker: 'no longer mergeable against the base', pattern: /no longer mergeable against (the )?(current )?base/i },
   { cause: 'conflict', marker: 'candidate cannot be brought onto the base tip', pattern: /cannot be brought onto base (tip|branch tip)/i },
   { cause: 'conflict', marker: 'queue pushed a speculative tip', pattern: /queue pushed a (speculative )?tip/i },
+  { cause: 'lost-approval-or-proof', marker: 'proof does not exercise its criterion', pattern: /\bdoes not exercise (its|the|AC)\b/i },
+  { cause: 'lost-approval-or-proof', marker: 'evidence does not exercise its criterion', pattern: /evidence that does not exercise/i },
+  { cause: 'lost-approval-or-proof', marker: 'trusted fail recorded', pattern: /\brecorded (a )?trusted fail/i },
+  { cause: 'lost-approval-or-proof', marker: 'producer evidence failed', pattern: /\bproducer FAILED\b/ },
+  { cause: 'lost-approval-or-proof', marker: 'proof expired, stale, invalid or missing', pattern: /\bproofs?\b[^.\n]{0,60}\b(expired|stale|no longer|does not|invalid)\b/i },
+  { cause: 'lost-approval-or-proof', marker: 'evidence expired, stale, revoked or failed', pattern: /\bevidences?\b[^.\n]{0,80}\b(expired|stale|revoked|does not|missing|failing|fail)\b/i },
+  { cause: 'lost-approval-or-proof', marker: 'proof recorded as FAILED', pattern: /\bproof\b[^.\n]{0,140}\bFAILED\b/ },
+  { cause: 'lost-approval-or-proof', marker: 'approval dismissed, lost, void or stale', pattern: /\bapprovals?\b[^.\n]{0,60}\b(dismiss|lost|no longer|stale|void)/i },
+  { cause: 'lost-approval-or-proof', marker: 'candidate cannot hold an approval', pattern: /\bcannot hold an approval\b/i },
+  { cause: 'lost-approval-or-proof', marker: 'producer mutation check', pattern: /\bproducer mutation check\b/i },
+  { cause: 'lost-approval-or-proof', marker: 'failed proof returns the head', pattern: /\bfailed proof\b/i },
+  { cause: 'lost-approval-or-proof', marker: 'rounds stranded without evidence', pattern: /\bwithout (unit-proof )?evidence\b/i },
+  { cause: 'lost-approval-or-proof', marker: 'proof producer attempts exhausted', pattern: /\b(independent |unit-)?producer attempts?\b/i },
+  { cause: 'lost-approval-or-proof', marker: 'evidence missing or invalid', pattern: /\bevidence is (missing|invalid)\b/i },
+  { cause: 'lost-approval-or-proof', marker: 'only the evidence is owed', pattern: /\bonly the evidence\b/i },
+  { cause: 'lost-approval-or-proof', marker: 'trusted fail bound to the head', pattern: /\btrusted (fail|evidence .{0,60}fail)/i },
+  // Own-change runs before the CI rules: a hang or failure the text ties to what the candidate
+  // changed is the item's own round, however much it reads like infrastructure (GY-725).
   { cause: 'own-change', marker: 'reviewer requested changes', pattern: /requested changes on/i },
   { cause: 'own-change', marker: 'reviewer requested changes', pattern: /(review|reviewer) requested changes/i },
   { cause: 'own-change', marker: 'CHANGES_REQUESTED verdict', pattern: /\bCHANGES_REQUESTED\b/ },
@@ -1703,6 +1705,17 @@ export const reworkCauseRules: ReworkCauseRule[] = [
   { cause: 'own-change', marker: 'findings require another round', pattern: /\bfindings require (another|rework|a|resolution)\b/i },
   { cause: 'own-change', marker: 'out-of-scope regression', pattern: /\bout-of-scope regression\b/i },
   { cause: 'own-change', marker: 'carries its own edit', pattern: /\bcarries? (its )?own edit of\b/i },
+  // A negated mention ("deterministic, not a flake", "not flaky", "no flakes") is not a flake:
+  // the lookbehinds keep the rule from firing on the word alone, so a round the text already tied
+  // to the item's own change was classified above, and one no rule names stays `other` rather than
+  // being excluded from the split as a flake (GY-643). The hang rule reads negation the same way,
+  // but only in the words directly before it: "does not fail but hangs on CI" still hangs (GY-725).
+  { cause: 'ci-flake', marker: 'an unnegated flake named in the reason', pattern: /\b(?<!\bnot\b[^.\n]{0,20})(?<!\bnever\b[^.\n]{0,15})(?<!\bno\b[^.\n]{0,10})(?<!non-)(flake|flaky)s?\b/i },
+  { cause: 'ci-flake', marker: 'CI job hangs', pattern: /\b(?<!\bnot )(?<!\bnever )(?<!\bno )(?<!non-)hangs\b/i },
+  { cause: 'ci-flake', marker: 'transient failure', pattern: /\btransient(ly)? (fail|blocked|refus)/i },
+  { cause: 'ci-flake', marker: 'launch-readiness flake', pattern: /\blaunch readiness\b/i },
+  { cause: 'ci-flake', marker: 'CI infrastructure named', pattern: /\bCI (infrastructure|runner|infra)\b/i },
+  { cause: 'ci-flake', marker: 'deterministic hang or kill', pattern: /\bdeterministic(ally)? .{0,30}(hang|kill|exit 1\d\d)/i },
 ];
 
 /** The cause of one rework round, read from the recorded reason text alone. */
@@ -1765,19 +1778,96 @@ export type ReworkSplitSummary = ReturnType<typeof summarizeReworkSplit>;
  * The last `count` delivered items by accepted merge instant, and the earliest instant their
  * rework rounds can sit at: the first submission among them, so a bounded ledger read covers every
  * round the population holds. The accepted merge is the repository clock when the delivery carried
- * it, else the provider's — the same merge instant the pipeline-speed summary orders by.
+ * it, else the provider's — the same merge instant the pipeline-speed summary orders by. `tip` is
+ * the newest accepted merge in the population: a later delivery changes the population, so it keys
+ * the split cache (GY-725).
  */
-export function recentDelivered(work: Work[], count: number): { items: Work[]; since: string | null } {
+export function recentDelivered(work: Work[], count: number): { items: Work[]; since: string | null; tip: string | null } {
   const at = (item: Work) => time(item.stage === 'done' && item.delivery ? item.delivery.mergedAtRepository ?? item.delivery.mergedAt ?? '' : '');
   const delivered = work.filter(item => at(item) !== null).sort((a, b) => at(a)! - at(b)!);
   const items = delivered.slice(-Math.max(0, count));
   const submissions = items.map(item => item.pipeline?.submittedAt ?? null).filter((value): value is string => !!value && Number.isFinite(Date.parse(value)));
   const instants = [...items.map(item => at(item)!), ...submissions].map(value => Date.parse(String(value))).filter(Number.isFinite);
-  return { items, since: instants.length ? new Date(Math.min(...instants)).toISOString() : null };
+  return { items, since: instants.length ? new Date(Math.min(...instants)).toISOString() : null, tip: items.length ? new Date(at(items[items.length - 1])!).toISOString() : null };
 }
 
 /** Rework-cause ledger reads are bounded: pages of `kind=rework` rows per read (GY-643). */
 export const reworkEventPages = 10;
+
+/**
+ * One bounded paged read of the window's `kind=rework` rows: pages of `eventHistoryLimits.page`
+ * small `details` payloads, at most `pageBound` (default `reworkEventPages`) of them, earliest
+ * first. This is the one reader `master status` and scripts/rework-causes.mjs share — the script
+ * carries no page constants of its own any more — so the populations they classify can never drift
+ * on page size or bound (GY-725). A failed page read throws to the caller.
+ */
+export async function readReworkEventRows(readEvents: (path: string) => Promise<any>, since: string | null, pageBound = reworkEventPages): Promise<{ events: any[]; complete: boolean; pages: number }> {
+  const events: any[] = [];
+  let cursor: string | null = null, complete = false, pages = 0;
+  while (cursor !== null || pages === 0) {
+    const params = new URLSearchParams({ kind: 'rework', order: 'asc', payload: 'details', view: 'history', limit: String(eventHistoryLimits.page) });
+    if (since) params.set('since', since);
+    if (cursor) params.set('cursor', cursor);
+    const history = await readEvents(`events?${params}`);
+    events.push(...(history.events ?? []));
+    pages++;
+    complete = !history.page?.hasMore;
+    cursor = complete ? null : history.page?.nextCursor ?? null;
+    if (pages >= pageBound) break;
+  }
+  return { events, complete, pages };
+}
+
+/**
+ * The rework rounds one item holds from a read's rows: every `rework` row for the item at or after
+ * its first submission — the same rule the pipeline timeline counts by (`recordRework`) — each
+ * classified from its recorded reason alone. An item with no recorded submission holds none. The
+ * one attribution scripts/rework-causes.mjs uses too, so the script and `master status` split the
+ * same rows the same way (GY-725).
+ */
+export function attributeReworkRounds(item: Work, events: readonly any[], classify: (reason: string) => { cause: ReworkCause; marker: string | null }): ReworkRound[] {
+  const submittedAt = item.pipeline?.submittedAt ?? null;
+  if (!submittedAt || !Number.isFinite(Date.parse(submittedAt))) return [];
+  const rounds: ReworkRound[] = [];
+  for (const event of events) {
+    if (event.work_id !== item.id) continue;
+    const at = event.created_at instanceof Date ? event.created_at.toISOString() : String(event.created_at ?? '');
+    if (!Number.isFinite(Date.parse(at)) || Date.parse(at) < Date.parse(submittedAt)) continue;
+    rounds.push({ workId: item.id, key: item.key, seq: String(event.seq), at, ...classify(String(event.details?.reason ?? '')) });
+  }
+  return rounds;
+}
+
+/**
+ * The split cache (GY-725): the rework rounds of a delivered population are closed — a delivered
+ * item's rounds all precede its merge, and the ledger only appends — so the split computed for a
+ * population stays right until the population itself changes or reclassification rules do. Master
+ * status writes what it computed and reads it back for as long as it is fresh, the way the
+ * worktree inventory is cached, so a `master status` call costs one file read instead of a paged
+ * ledger walk. `tip` (the population's newest accepted merge) and the item bound key the entry;
+ * the freshness bound is generous against a reclassification-rules change. The file reads are
+ * dynamic imports so this module stays loadable where `node:fs` is not (the dashboard bundle).
+ */
+export const reworkSplitCacheTtlMs = 5 * 60_000;
+export interface ReworkSplitCache { at: string; items: number; tip: string | null; split: Record<string, any> }
+export async function readReworkSplitCache(root: string, tip: string | null, items: number, ttlMs = reworkSplitCacheTtlMs, now = Date.now()): Promise<ReworkSplitCache | null> {
+  try {
+    const { readFile } = await import('node:fs/promises');
+    const { resolve } = await import('node:path');
+    const parsed = JSON.parse(await readFile(resolve(root, '.graphyard/rework-splits.json'), 'utf8')) as Partial<ReworkSplitCache>;
+    if (!parsed.at || typeof parsed.at !== 'string' || !parsed.split || parsed.items !== items || (parsed.tip ?? null) !== (tip ?? null)) return null;
+    if (!Number.isFinite(Date.parse(parsed.at)) || now - Date.parse(parsed.at) > ttlMs) return null;
+    return parsed as ReworkSplitCache;
+  } catch { return null; }
+}
+export async function writeReworkSplitCache(root: string, cache: ReworkSplitCache) {
+  const { mkdir, rename, writeFile } = await import('node:fs/promises');
+  const { dirname, resolve } = await import('node:path');
+  const file = resolve(root, '.graphyard/rework-splits.json'), temporary = `${file}.${process.pid}.tmp`;
+  await mkdir(dirname(file), { recursive: true });
+  await writeFile(temporary, JSON.stringify(cache));
+  await rename(temporary, file);
+}
 
 /**
  * The rework rounds master status reports (GY-643 AC-2), with the split attached: the last `items`
@@ -1787,37 +1877,29 @@ export const reworkEventPages = 10;
  * paged read covers every round the population can hold; a bound it hit is disclosed, not hidden.
  * An item with no recorded submission holds no measurable round (`recordRework`'s own rule) and is
  * named as unmeasured. A failed events read throws, so the caller marks its section unavailable.
+ * Given a cache `root`, a fresh cached split for the same population is served from the one file
+ * read and carries `cached: true` with the instant it was computed; a computed split is written
+ * back (a failed write is swallowed — the cache is an optimization, never the report's source of
+ * truth).
  */
-export async function reworkRoundsWithOwnCauses<T extends Record<string, any>>(rounds: T, readEvents: (path: string) => Promise<any>, snapshot: { work: Work[]; now: string }, items = 100): Promise<T> {
+export async function reworkRoundsWithOwnCauses<T extends Record<string, any>>(rounds: T, readEvents: (path: string) => Promise<any>, snapshot: { work: Work[]; now: string }, items = 100, cache: { root: string; ttlMs?: number; now?: number } | null = null): Promise<T> {
   const population = recentDelivered(snapshot.work, items);
   if (!population.items.length) return rounds;
-  const byId = new Map(population.items.map(item => [item.id, item]));
-  const classified: ReworkRound[] = [];
-  let cursor: string | null = null, complete = false, pages = 0;
-  while (cursor !== null || pages === 0) {
-    const params = new URLSearchParams({ kind: 'rework', order: 'asc', payload: 'details', view: 'history', limit: String(eventHistoryLimits.page) });
-    if (population.since) params.set('since', population.since);
-    if (cursor) params.set('cursor', cursor);
-    const history = await readEvents(`events?${params}`);
-    for (const event of history.events ?? []) {
-      const item = byId.get(event.work_id);
-      if (!item) continue;
-      const at = event.created_at instanceof Date ? event.created_at.toISOString() : String(event.created_at ?? '');
-      const submittedAt = item.pipeline?.submittedAt ?? null;
-      if (!submittedAt || !Number.isFinite(Date.parse(at)) || Date.parse(at) < Date.parse(submittedAt)) continue;
-      classified.push({ workId: item.id, key: item.key, seq: String(event.seq), at, ...classifyReworkReason(String(event.details?.reason ?? '')) });
-    }
-    pages++;
-    complete = !history.page?.hasMore;
-    cursor = complete ? null : history.page?.nextCursor ?? null;
-    if (pages >= reworkEventPages) break;
+  if (cache) {
+    const cachedSplit = await readReworkSplitCache(cache.root, population.tip, items, cache.ttlMs, cache.now);
+    if (cachedSplit) return { ...rounds, ownChange: { ...cachedSplit.split, at: cachedSplit.at, cached: true } } as T;
   }
+  const { events: rows, complete, pages } = await readReworkEventRows(readEvents, population.since);
+  const classified = population.items.flatMap(item => attributeReworkRounds(item, rows, classifyReworkReason));
   const summary = summarizeReworkSplit(population.items.map(item => {
     const submittedAt = item.pipeline?.submittedAt ?? null;
     return { key: item.key, mergedAt: item.delivery ? item.delivery.mergedAtRepository ?? item.delivery.mergedAt ?? null : null,
       measured: !!submittedAt && Number.isFinite(Date.parse(submittedAt)),
       rounds: classified.filter(round => round.workId === item.id) };
   }));
-  return { ...rounds, ownChange: { ...summary, window: { since: population.since, until: snapshot.now }, eventsComplete: complete, pages,
-    statement: complete ? null : `The rework-cause read reached its ${reworkEventPages}-page bound: rounds recorded before the last row read were not examined, so the split is a floor.` } } as T;
+  const ownChange = { ...summary, window: { since: population.since, until: snapshot.now }, eventsComplete: complete, pages, cached: false,
+    at: new Date(cache?.now ?? Date.now()).toISOString(),
+    statement: complete ? null : `The rework-cause read reached its ${reworkEventPages}-page bound: rounds recorded before the last row read were not examined, so the split is a floor.` };
+  if (cache) await writeReworkSplitCache(cache.root, { at: ownChange.at, items, tip: population.tip, split: ownChange }).catch(() => {});
+  return { ...rounds, ownChange } as T;
 }
