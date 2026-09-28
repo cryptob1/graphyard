@@ -23,6 +23,7 @@ import { configuredDocumentation, documentationObligation, recordDocumentationSu
 import { liveDispatchHandleIds, reconcileAutoDispatch, type DispatchTransition } from './model/dispatch.js';
 import { reconcileReviewConflict, type ReviewConflictTransition } from './model/review-conflict.js';
 import { nextAction, nextActionKinds, sameAction } from './model/next-action.js';
+import { recordScenarioRun } from './test-runs.js';
 import type { ObservationJobState } from './model/action-kinds.js';
 import { claimCandidatesParams, claimCandidatesSql } from './model/action-candidates.js';
 import { claimAction, openActions, reconcileActions, renewClaim, settleAction, settleDelivered, type ActionRow } from './model/actions.js';
@@ -528,16 +529,26 @@ export class Engine {
    * observed and that observation saved, so the ordinary delivery path records it merged, with its
    * merge commit, now rather than whenever its own observation comes round — and the stale state
    * that named it unlanded does not recur. A failure is logged and left to that later observation.
+   *
+   * GY-756. The peer is re-read before it is observed, so several observations in one round that
+   * name the same peer do not each observe it from their own stale snapshot: once one has saved, the
+   * rest find it delivered, or already observed at this head against this base tip, and skip it.
+   * A peer that is not merged (its commits reached the branch while its pull request closed
+   * unmerged) has that observation saved all the same, so it is not re-observed on every cycle
+   * until the base branch moves.
    */
   async reconcileLanded(observation: Observation | null, all: Work[], observer = this.submissionObserver) {
     const reconciled: Work[] = [];
     if (!observer) return reconciled;
     for (const entry of observation?.landing?.landed ?? []) {
-      const peer = all.find(item => item.key === entry.key && item.stage !== 'done' && item.submission?.pr === entry.pr);
-      if (!peer) continue;
+      const known = all.find(item => item.key === entry.key);
+      if (!known) continue;
       try {
+        const peer: Work | undefined = (await this.store.pool.query('SELECT document FROM work_items WHERE id=$1', [known.id])).rows[0]?.document;
+        if (!peer || peer.stage === 'done' || peer.submission?.pr !== entry.pr) continue;
+        if (peer.observation && peer.observation.candidate.sha === entry.head && observation!.baseTip && peer.observation.baseTip === observation!.baseTip) continue;
         const seen = await observer(peer, all);
-        if (seen.merged) reconciled.push(await this.observe(peer.id, peer.revision, seen));
+        reconciled.push(await this.observe(peer.id, peer.revision, seen));
       } catch (error) {
         console.error(`[landing] reconciling ${entry.key}'s landed pull request #${entry.pr} failed: ${(error as Error).message}`);
       }
@@ -1226,6 +1237,8 @@ export class Engine {
         if (unexercised) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, actor.id, 'evidence.exercise.refused',
           JSON.stringify({ details: { proof: data.proof, criteria: attachedCriteria(work, all, data.proof), behaviour: data.exercise?.behaviour ?? null, sha: data.sha, reason: unexercised } })]);
         work.evidence.push(evidence);
+        // GY-162: a trusted e2e: record is also a run of its test case, appended to the case's history.
+        await recordScenarioRun(db, work, evidence);
         if (data.proof === deploySmokeProof) work.delivery!.smoke = { evidenceId: evidence.id, result: data.result, sha: data.sha, mergeSha: data.baseSha, producer: actor.id, at: evidence.at, executed: data.executed, skipped: data.skipped, ...(data.url ? { url: data.url } : {}) };
         if (trusted && data.policyRevision !== work.policyRevision) raiseEscalation(work, { trigger: 'evidence-policy-conflict', reason: `Evidence policy v${data.policyRevision} conflicts with current policy v${work.policyRevision}`, at: now.toISOString(), actor: actor.id });
       }
