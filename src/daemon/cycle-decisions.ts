@@ -6,7 +6,7 @@ import { type ContainmentAssessment, type HerdrAgent, type RoleCapacity, approve
 import { type ApprovalWatch, approvalWatchSchema, carriedSession, type DaemonActionKind, latencySampleSchema, message, scopeMeasurementSchema } from './state.js';
 import { decisionKey, scopeAnsweredAt, scopeKey, scopeOutcomeAnswered } from './reconcile.js';
 import { readyToRetry } from './sessions.js';
-import { approvalStep, boundDetail, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, maxApproverCloses, maxRefusalAnswers, maxApproverLaunches, maxDecisionRequests, namePaths, neededDecision, observedFrom, resolveCovers, reworkDecisionReason, refusalNamedIn, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, standingVerdict, withheldDecision } from './decisions.js';
+import { approvalStep, type ApprovalStep, boundDetail, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, maxApproverCloses, maxRefusalAnswers, maxApproverLaunches, maxDecisionRequests, namePaths, neededDecision, observedFrom, resolveCovers, reworkDecisionReason, refusalNamedIn, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, standingVerdict, withheldDecision } from './decisions.js';
 import { type DaemonEffects, failoverKey, record, stoppedStates } from './effects.js';
 import { detectExhaustion } from '../model/capacity.js';
 import { capacityRefusal } from '../fleet.js';
@@ -237,6 +237,38 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     watch.exhaustedAt = stamp;
     await note(`escalation:decision-unjudged:${watch.decision}`, item, 'escalation', 'failed', `${detail}. ${watch.launches} approver session(s) and ${watch.requests} request(s) have not produced a judgement${watch.ended.length ? ` (${watch.ended.join('; ')})` : ''}, so the loop has stopped spending sessions on it: read it with graphyard master decisions ${item.key}, then put it to a fresh approver with graphyard master approver ${item.key} ${watch.decision}, or take the request back and decide what the item needs instead`);
   };
+  /**
+   * Act on a supervision step once its early guards have passed: put down the session that ended,
+   * then make the replacement, record how this one ended, and escalate a decision no session will
+   * judge. Shared by the loop's own watches and the hand watches (GY-779), so the two supervision
+   * paths cannot drift apart in how an approver is closed, relaunched or left standing. Returns
+   * `rerequest` when the decision itself must be asked again — only the loop's own request path
+   * can do that, so it takes its bound and re-request from there. `wait` means the ended session
+   * could not be put down yet, so the step is taken again next cycle.
+   */
+  const actOnStep = async (item: Work, watch: ApprovalWatch, step: ApprovalStep): Promise<'wait' | 'rerequest' | 'done'> => {
+    const base = `approver:${watch.decision}`;
+    // While the ended session cannot be put down, its name or registry slot still refuses a
+    // replacement, so the step is taken again next cycle.
+    if (!await closeApprover(item, watch, step.detail) && watch.closeAttempts < maxApproverCloses) return 'wait';
+    // A launch that waited for a slot or was refused ran no session: it is only made again. A
+    // capacity wait relaunches one at a time (GY-849): while another waiter's relaunch is still
+    // on the launcher, this one waits for a later cycle.
+    if (step.step === 'relaunch' && !watch.agentName) {
+      if (capacityRelaunchWaits(watch)) return 'wait';
+      if (watch.capacity) capacityRelaunchHanded = true;
+      const waited = watch.capacity ? 'waited for an approver slot' : 'had its last approver launch refused';
+      try { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'done', `${item.key}'s ${watch.action} decision ${watch.decision} ${waited}; ${await launch(item, watch, false)}`); }
+      catch (error) { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'failed', `${item.key}'s ${watch.action} decision ${watch.decision} ${waited}; its approver session could not be launched: ${message(error)}`); }
+      return 'done';
+    }
+    recordEnded(watch, step.detail);
+    if (step.step === 'rerequest') return 'rerequest';
+    if (step.step === 'exhausted') { await escalateUnjudged(item, watch, step.detail); return 'done'; }
+    try { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'done', `${step.detail}; ${await launch(item, watch, false)}`); }
+    catch (error) { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'failed', `${step.detail}; a replacement approver session could not be launched: ${message(error)}`); }
+    return 'done';
+  };
   /** Request the decision (or adopt the one already standing) and put it to an approver. */
   const request = async (item: Work, decision: RoutineDecision, key: string, carried: ApprovalWatch | null) => {
     const verdict = decision.action === 'rework' && !carried ? standingVerdict(item) : null;
@@ -455,35 +487,19 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       await note(`escalation:decision-refused:${watch.decision}`, item, 'escalation', 'done', `${step.detail}. The loop does not request it again or launch another approver; answer the refusal: read it with graphyard master decisions ${item.key}, then request what the item needs with a reason that cites ${watch.decision} and gives what the refused request lacked, or act on the refusal instead`);
       return;
     }
-    // Every other step replaces the session, so the one that ended goes first. While it cannot be
-    // closed its name is still taken, and the step is taken again next cycle.
-    if (!await closeApprover(item, watch, step.detail) && watch.closeAttempts < maxApproverCloses) return;
-    // A launch waiting for a slot, or refused outright (GY-551), never ran a session, so there is no
-    // ending to record: it is only made again. A capacity wait relaunches one at a time (GY-849):
-    // while another waiter's relaunch is still on the launcher, this one waits for a later cycle.
-    if (step.step === 'relaunch' && !watch.agentName) {
-      if (capacityRelaunchWaits(watch)) return;
-      if (watch.capacity) capacityRelaunchHanded = true;
-      const waited = watch.capacity ? 'waited for an approver slot' : 'had its last approver launch refused';
-      try { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'done', `${item.key}'s ${watch.action} decision ${watch.decision} ${waited}; ${await launch(item, watch, false)}`); }
-      catch (error) { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'failed', `${item.key}'s ${watch.action} decision ${watch.decision} ${waited}; its approver session could not be launched: ${message(error)}`); }
-      return;
-    }
-    recordEnded(watch, step.detail);
-    if (step.step === 'rerequest') {
-      // The server settled it some other way — failed on a precondition, stale, withdrawn — and
-      // the item still needs the decision, so it is asked again: a bounded number of times, and on
-      // the same widening interval as any refused action. The watch stays until a new request
-      // replaces it, so the bound survives a request that is itself refused.
-      if (watch.requests >= maxDecisionRequests) { if (!watch.exhaustedAt) await escalateUnjudged(item, watch, step.detail); return; }
-      if (state.actions[key]?.state === 'failed' && !readyToRetry(state.actions[key], state.cycle)) return;
-      if (!state.actions[`${base}:ended`]) await note(`${base}:ended`, item, 'decision', 'failed', `${step.detail}; ${item.key} still needs it, so it is requested again`);
-      await request(item, decision, key, watch);
-      return;
-    }
-    if (step.step === 'exhausted') { await escalateUnjudged(item, watch, step.detail); return; }
-    try { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'done', `${step.detail}; ${await launch(item, watch, false)}`); }
-    catch (error) { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'failed', `${step.detail}; a replacement approver session could not be launched: ${message(error)}`); }
+    // Every other step replaces the session, so the one that ended goes first (with the close, the
+    // relaunch — one at a time for a capacity wait, GY-849 — the record and the escalation shared
+    // with the hand watches, GY-779). Only the re-request returns here: it is bound to this
+    // request, so it is taken below.
+    if (await actOnStep(item, watch, step) !== 'rerequest') return;
+    // The server settled it some other way — failed on a precondition, stale, withdrawn — and
+    // the item still needs the decision, so it is asked again: a bounded number of times, and on
+    // the same widening interval as any refused action. The watch stays until a new request
+    // replaces it, so the bound survives a request that is itself refused.
+    if (watch.requests >= maxDecisionRequests) { if (!watch.exhaustedAt) await escalateUnjudged(item, watch, step.detail); return; }
+    if (state.actions[key]?.state === 'failed' && !readyToRetry(state.actions[key], state.cycle)) return;
+    if (!state.actions[`${base}:ended`]) await note(`${base}:ended`, item, 'decision', 'failed', `${step.detail}; ${item.key} still needs it, so it is requested again`);
+    await request(item, decision, key, watch);
   };
 
   const needed = new Set<string>(), unattestable = new Set<string>();
@@ -700,24 +716,11 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
         const step = approvalStep({ ...watch, launchedAt: watch.launchedAt ?? watch.requestedAt }, judged, seen, clock);
         if (step.step === 'wait') continue;
         if (step.step === 'relaunch' && !watch.agentName && approversSpent) continue;
-        const base = `approver:${watch.decision}`;
-        // While the ended session cannot be put down, its name or registry slot still refuses a
-        // replacement, so the step is taken again next cycle.
-        if (!await closeApprover(item, watch, step.detail) && watch.closeAttempts < maxApproverCloses) continue;
-        // A launch that waited for a slot or was refused ran no session: it is only made again.
-        // A capacity wait relaunches one at a time (GY-849), oldest waiting decision first.
-        if (step.step === 'relaunch' && !watch.agentName) {
-          if (capacityRelaunchWaits(watch)) continue;
-          if (watch.capacity) capacityRelaunchHanded = true;
-          const waited = watch.capacity ? 'waited for an approver slot' : 'had its last approver launch refused';
-          try { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'done', `${watch.work}'s ${watch.action} decision ${watch.decision} ${waited}; ${await launch(item, watch, false)}`); }
-          catch (error) { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'failed', `${watch.work}'s ${watch.action} decision ${watch.decision} ${waited}; its approver session could not be launched: ${message(error)}`); }
-          continue;
-        }
-        recordEnded(watch, step.detail);
-        if (step.step === 'exhausted') { await escalateUnjudged(item, watch, step.detail); continue; }
-        try { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'done', `${step.detail}; ${await launch(item, watch, false)}`); }
-        catch (error) { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'failed', `${step.detail}; a replacement approver session could not be launched: ${message(error)}`); }
+        // The close, relaunch, record and escalation steps of the loop's own watches (GY-779): a
+        // `rerequest` step cannot arise here — a decision this watch holds that the control plane
+        // settled otherwise already set `why` above — and a hand watch has no request of its own
+        // to repeat.
+        await actOnStep(item, watch, step);
         continue;
       }
       if (listed && !why) continue;
