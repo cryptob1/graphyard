@@ -10,6 +10,7 @@
 - `GET /api/analytics/flow`, `/api/analytics/attribution`: bounded. Flow days: UTC midnights to today, the first holding earlier time. `window.covered`/`window.kinds`: scan and per-kind reach; `throughput[].covered: false`: unread, not zero. Merged is Deploy; `stepDwell[].sparse` (n<5): marked, unsplit. Reports are cached up to 60 s per window and filters. New flow facts coalesce for 10 s from the start of a report read; the next read after that interval recomputes if facts changed. Concurrent reads share the in-flight computation. Deployment observations invalidate immediately, and a new production-watch pass uses a new cache key. Cold reads and refreshes still pay the bounded database-read cost.
 - Interventions, flow, `/api/shipping-pulse`: 3-connection, 20s-timeout report pool.
 - `GET /api/deployments`: `POST /api/deployments` observations (`producer`/`admin`; `state` `succeeded`, `failed` or `rolled_back`; never moves a gate).
+- `GET /api/tests`, `/api/tests/ID/runs`: case results, paged history.
 - `GET /api/delegation`, `/api/proof-grants`, `/api/delivery`: slices, live proof authority, release state.
 
 Events skip routine `github.observed`/`heartbeat` rows unless `routine=include`; page by `limit` (default 300) and `cursor` (last `seq`); filter by `kind`, `since`, `until`.
