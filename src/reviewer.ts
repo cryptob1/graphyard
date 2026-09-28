@@ -8,6 +8,7 @@ import { defaultChildRun, type ChildRun } from './child-runner.js';
 import { closeFailedLaunch, launchStartMs, withLaunchClose, accountLaunch, acknowledgeLaunch, agentToken, acknowledgementMs, agentLaunchPlan, allocateManagedCheckout, assertOutsideWorktrees, atomicPrivateWrite, autonomousSession, createdHerdrTab, deliverPrompt, herdrJson, loadMasterConfig, markReprompted, neverStarted, onSelectedSession, prepareSessionHarness, privateFile, profileAtLimit, profileConcurrency, registrySessionOf, profileSessions, readSessionScreen, reviewerIdentitySchema, reviewerProfileSchema, closeHerdrPane, selectAccount, sessionActivity, sessionAgentName, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, writeFailure, type HerdrAgent, type PromptDelivery, type StartBounds, type MasterConfig, type RequestDelivery, type ReviewerIdentity, type ReviewerProfile } from './master.js';
 import { clientErrorStatus, nextClientErrorRun, retryStopAttention, retryStopped } from './retry-stop.js';
 import { criteriaRuleSection, fileFollowUpThreads, followUpCreateKey, plannedScope, followUpFindingLimit, followUpFindingMax, listedThreadLimit, readUnresolvedThreads, resolveNamedThreads, threadReadFailureSection, threadSection, unaccountedThreads, type AppendFollowUpFindings, type CreateFollowUpItem, type FollowUpCreateStore, type FollowUpFiling, type FollowUpItem, type LaunchThread, type PendingFollowUpCreate, type ThreadResolution } from './review-threads.js';
+import type { FollowUpEntry } from './model/machine-backlog.js';
 import type { FleetProbe } from './fleet.js';
 import { carriedApproval, type Work } from './model.js';
 import { removeSessionCheckout, type FilesystemProbe, type SessionCheckout } from './install/worktree-root.js';
@@ -1182,6 +1183,15 @@ const keyReuseRefusal = 'Idempotency key reused with different input';
 export const followUpBodyKey = (createKey: string, item: FollowUpItem) =>
   `${createKey.slice(0, 183)}:${createHash('sha256').update(JSON.stringify(item)).digest('hex').slice(0, 16)}`;
 /**
+ * The key a linked resolution's append is sent under (GY-603): the approval's key and the hash of
+ * the whole append — the item and the findings and the reason — as `followUpBodyKey` does for
+ * creates, so a retried resolution of this very append returns its receipt, and another changed
+ * payload after the earlier append was accepted (the ledger or the pending store lost in between)
+ * is a new append instead of the same key refused as reused with the new findings unfiled.
+ */
+export const followUpLinkedKey = (createKey: string, linked: string, findings: FollowUpEntry[], reason: string) =>
+  `${createKey.slice(0, 183)}:${createHash('sha256').update(JSON.stringify([linked, findings, reason])).digest('hex').slice(0, 16)}`;
+/**
  * The follow-up item an approval already filed, found by its parent and the approval's id: it
  * depends on the parent, and its title and description name the parent and the review, as
  * `followUpItem` writes them. Undefined when no such item exists.
@@ -1206,7 +1216,7 @@ async function createResolvingKeyReuse(payload: FollowUpItem, key: string, creat
     if (linked && append && findings) {
       // The item holds the body the key was first sent; the findings this body adds are appended
       // under a key of their own, so a retried resolution repeats rather than duplicates them.
-      try { await append(linked, findings, payload.reason, `${key.slice(0, 193)}:linked`); resolved('linked'); return { key: linked }; }
+      try { await append(linked, findings, payload.reason, followUpLinkedKey(key, linked, findings, payload.reason)); resolved('linked'); return { key: linked }; }
       catch (appendError) {
         // The item is no longer open since it was found: the changed body files its own item, as a
         // reuse with nothing linked does. Any other failure fails the filing, and a later pass
@@ -1378,15 +1388,33 @@ export function stoppedFollowUpAttention(records: ReviewRecord[]) {
  * retry-resume GY-N`, once the cause the attention item names is fixed. Only the stop is cleared:
  * the error run is kept, so the filing's next attempt either files — the cause was fixed — or,
  * still refused with the same 4xx, re-stops at once instead of spending the run again. Each stop
- * is cleared under its approval's filing lock; one the loop holds this pass is left held, and the
- * command names it busy rather than wait. Throws when the item has no stopped filing to resume.
+ * is cleared under its approval's filing lock. A lock the loop holds this pass is waited for a
+ * short bound, since the holder has already read the stopped record and returns without filing, so
+ * once it releases, this command's own write is what the next pass reads. One whose lock is still
+ * held at the bound leaves that approval stopped, and the command says so and names the rerun
+ * rather than directing the caller to wait for a recovery that cannot occur. Throws when the item
+ * has no stopped filing to resume.
  */
-export async function resumeStoppedFollowUps(root: string, repository: string, key: string) {
+/** How long `retry-resume` waits for one approval's filing lock before naming it busy. */
+export const followUpResumeLockWaitMs = 5_000;
+/** How often the wait re-tests the lock. */
+export const followUpResumeLockRetryMs = 250;
+export async function resumeStoppedFollowUps(root: string, repository: string, key: string, options: { lockWaitMs?: number; lockRetryMs?: number; now?: () => number; sleep?: (ms: number) => Promise<void> } = {}) {
   const stopped = (await readReviewLedger(root)).reviews.filter(record => record.key === key && !!record.followUps?.stoppedAt);
   if (!stopped.length) throw new Error(`${key} has no stopped follow-up filing to resume; master status lists the stopped ones under attention`);
+  const now = options.now ?? Date.now, sleep = options.sleep ?? ((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)));
+  const lockWaitMs = options.lockWaitMs ?? followUpResumeLockWaitMs, lockRetryMs = options.lockRetryMs ?? followUpResumeLockRetryMs;
+  const deadline = now() + lockWaitMs;
   const resumed: number[] = [], busy: number[] = [];
   for (const record of stopped) {
-    const release = await tryFollowUpLock(root, followUpCreateKey(repository, record.pr, record.followUps!.reviewId));
+    let release: (() => Promise<void>) | null = null;
+    while (!release) {
+      release = await tryFollowUpLock(root, followUpCreateKey(repository, record.pr, record.followUps!.reviewId));
+      if (release) break;
+      const left = deadline - now();
+      if (left <= 0) break;
+      await sleep(Math.min(lockRetryMs, left));
+    }
     if (!release) { busy.push(record.followUps!.reviewId); continue; }
     try {
       await updateReviewLedger(root, ledger => {
@@ -1395,7 +1423,10 @@ export async function resumeStoppedFollowUps(root: string, repository: string, k
       });
     } finally { await release(); }
   }
-  return { key, resumed, ...(busy.length ? { busy, next: `the loop is filing approval(s) ${busy.join(', ')} this pass; the next pass reads the resumed record` } : {}) };
+  return {
+    key, resumed,
+    ...(busy.length ? { busy, next: `approval(s) ${busy.join(', ')} remain stopped: their filing lock was held the whole wait, so nothing was resumed — run graphyard master retry-resume ${key} again` } : {}),
+  };
 }
 
 export function summarizeReviews(records: ReviewRecord[]) {

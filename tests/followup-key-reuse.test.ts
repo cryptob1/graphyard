@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { loadMasterConfig, setupMaster } from '../src/master.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { followUpCreateKey, followUpItem } from '../src/review-threads.js';
-import { bindReviewer, existingFollowUpItem, followUpBodyKey, followUpExhaustedRetryMs, launchReview, readReviewLedger, reconcileReviews, resumeStoppedFollowUps, saveReviewerProfile, stoppedFollowUpAttention } from '../src/reviewer.js';
+import { bindReviewer, existingFollowUpItem, followUpBodyKey, followUpExhaustedRetryMs, followUpLinkedKey, launchReview, readReviewLedger, reconcileReviews, resumeStoppedFollowUps, saveReviewerProfile, stoppedFollowUpAttention, tryFollowUpLock } from '../src/reviewer.js';
 import { clientErrorStatus, nextClientErrorRun, repeatedClientErrorLimit, retryStopped } from '../src/retry-stop.js';
 import type { Observation, Work } from '../src/model.js';
 
@@ -196,7 +196,13 @@ test('unit:followup-key-reuse-resolved — the linked resolution appends the cha
     assert.equal(appended[0].item, 'GY-300');
     assert.deepEqual(appended[0].findings, [{ path: 'src/c.ts', text: 'src/c.ts:12 — the retry is unbounded' }]);
     assert.match(appended[0].reason, /Follow-ups named by approval 77 of GY-64/);
-    assert.equal(appended[0].key, `${followUpCreateKey('owner/project', 64, 77)}:linked`);
+    const approvalKey77 = followUpCreateKey('owner/project', 64, 77);
+    assert.equal(appended[0].key, followUpLinkedKey(approvalKey77, 'GY-300', appended[0].findings as { path: string | null; text: string }[], appended[0].reason));
+    assert.ok(appended[0].key.startsWith(`${approvalKey77}:`) && appended[0].key.length <= 200);
+    // The key is the whole append's hash: the same append repeats it, and a changed payload — the
+    // ledger or the pending store lost since — keys its own append instead of refusing as reused.
+    assert.equal(followUpLinkedKey(approvalKey77, 'GY-300', appended[0].findings as { path: string | null; text: string }[], appended[0].reason), appended[0].key);
+    assert.notEqual(followUpLinkedKey(approvalKey77, 'GY-300', [{ path: 'src/c.ts', text: 'src/c.ts:13 — a later wording' }], appended[0].reason), appended[0].key);
     assert.deepEqual(sent, [followUpCreateKey('owner/project', 64, 77)], 'one create, under the approval key; the refusal is not retried');
     // Once filed, later passes repeat neither the create nor the append.
     await reconcileReviews(root, config, { run: herdrRun, observe: verdict, work: board, threadsRun: github(), createFollowUpItem: server, appendFollowUps: appendServer, now: () => new Date(Date.now() + 2 * followUpExhaustedRetryMs) });
@@ -262,5 +268,72 @@ test('unit:repeated-4xx-retry-stops — retry-resume clears the stop; a persisti
     assert.equal(filed.failure, undefined);
     assert.equal(filed.stoppedAt, undefined);
     assert.equal(filed.clientError, undefined);
+  } finally { await cleanup(); }
+});
+
+test('unit:repeated-4xx-retry-stops — retry-resume waits for a held filing lock and resumes once it frees (GY-603)', async () => {
+  const { root, cleanup } = await boundMaster();
+  try {
+    await launch(root);
+    const config = await loadMasterConfig(root);
+    const refusal = 'Graphyard refused the follow-up item (422): plannedFiles entry is invalid';
+    let sent = 0;
+    const server = async () => { sent++; throw new Error(refusal); };
+    let clock = Date.parse('2026-09-26T11:00:00Z');
+    const now = () => new Date(clock);
+    const pass = () => reconcileReviews(root, config, { run: herdrRun, observe: verdict, work: [work()], threadsRun: github(), createFollowUpItem: server, now });
+    for (let attempt = 1; attempt <= repeatedClientErrorLimit; attempt++) { await pass(); clock += followUpExhaustedRetryMs + 60_000; }
+    assert.ok(!!(await readReviewLedger(root)).reviews[0].followUps!.stoppedAt);
+    // The loop holds the approval's filing lock this pass, as fileApprovedFollowUps does: the
+    // holder has read the stopped record and returns without filing, so only this command's own
+    // write can resume the record. The holder releases mid-wait, and the stop is cleared.
+    const release = await tryFollowUpLock(root, followUpCreateKey('owner/project', 64, 77));
+    assert.ok(release);
+    let waits = 0;
+    const waited = await resumeStoppedFollowUps(root, 'owner/project', 'GY-64', {
+      lockWaitMs: 5_000, lockRetryMs: 250, now: () => clock,
+      sleep: async ms => { clock += ms; waits++; if (waits === 2) await release(); },
+    });
+    assert.ok(waits >= 2, 'the command waited for the lock rather than naming it busy');
+    assert.deepEqual(waited, { key: 'GY-64', resumed: [77] });
+    assert.equal((await readReviewLedger(root)).reviews[0].followUps!.stoppedAt, undefined);
+    assert.equal(sent, repeatedClientErrorLimit, 'the resumed filing is the next pass\'s to attempt');
+  } finally { await cleanup(); }
+});
+
+test('unit:repeated-4xx-retry-stops — a filing lock held the whole wait leaves the stop set, and the command names the rerun (GY-603)', async () => {
+  const { root, cleanup } = await boundMaster();
+  try {
+    await launch(root);
+    const config = await loadMasterConfig(root);
+    const refusal = 'Graphyard refused the follow-up item (422): plannedFiles entry is invalid';
+    let sent = 0;
+    const server = async () => { sent++; throw new Error(refusal); };
+    let clock = Date.parse('2026-09-26T11:00:00Z');
+    const now = () => new Date(clock);
+    const pass = () => reconcileReviews(root, config, { run: herdrRun, observe: verdict, work: [work()], threadsRun: github(), createFollowUpItem: server, now });
+    const filing = () => readReviewLedger(root).then(ledger => ledger.reviews[0].followUps!);
+    for (let attempt = 1; attempt <= repeatedClientErrorLimit; attempt++) { await pass(); clock += followUpExhaustedRetryMs + 60_000; }
+    assert.ok(!!(await filing()).stoppedAt);
+    // The lock is held for the whole wait: no resume is recorded, and the command reports the
+    // approvals as still stopped and requiring another retry-resume, never a recovery that
+    // waiting for cannot bring.
+    const release = await tryFollowUpLock(root, followUpCreateKey('owner/project', 64, 77));
+    assert.ok(release);
+    const busy = await resumeStoppedFollowUps(root, 'owner/project', 'GY-64', { lockWaitMs: 1_000, lockRetryMs: 250, now: () => clock, sleep: async ms => { clock += ms; } });
+    assert.deepEqual(busy.resumed, []);
+    assert.deepEqual(busy.busy, [77]);
+    assert.match(busy.next!, /77 remain stopped/);
+    assert.match(busy.next!, /graphyard master retry-resume GY-64 again/);
+    // The stop stands: the next pass attempts nothing, exactly as the report implies.
+    assert.equal(sent, repeatedClientErrorLimit);
+    assert.ok(!!(await filing()).stoppedAt);
+    await pass();
+    clock += followUpExhaustedRetryMs + 60_000;
+    assert.equal(sent, repeatedClientErrorLimit, 'the stopped filing is still stopped');
+    // Once the holder releases, the rerun the command named resumes the filing.
+    await release();
+    assert.deepEqual(await resumeStoppedFollowUps(root, 'owner/project', 'GY-64', { lockWaitMs: 0 }), { key: 'GY-64', resumed: [77] });
+    assert.equal((await filing()).stoppedAt, undefined);
   } finally { await cleanup(); }
 });
