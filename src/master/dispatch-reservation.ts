@@ -1,9 +1,10 @@
 // Concern: the per-host dispatch reservation of a profile and an item, and the watch-supervisor probe a failed launch consults (GY-273).
 import { randomUUID } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
-import { link, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { link, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { setTimeout as delay } from 'node:timers/promises';
 import { hostname } from 'node:os';
-import { dirname, resolve } from 'node:path';
+import { basename, dirname, resolve } from 'node:path';
 import type { ChildRun } from '../child-runner.js';
 import type { Work } from '../model.js';
 import { watchAssignment } from '../supervisor.js';
@@ -44,24 +45,90 @@ const staleHolder = (held: { holder: ReservationHolder | null; ageMs: number }, 
   held.ageMs > limitMs || !!held.holder && held.holder.host === hostname() && Number.isSafeInteger(held.holder.pid) && !processAlive(held.holder.pid);
 /** A takeover guard is held only between a re-read and an `rm`: one older than this was abandoned by a crash. */
 const takeoverGuardMs = 60_000;
+/** How long a lock that failed its judgement waits for a create landing while it was set aside to be withdrawn. */
+const putBackAttempts = 20;
+const putBackRetryMs = 25;
+/**
+ * What removals set aside under `file` (GY-682): its lock under `FILE.TOKEN.removing`, its takeover
+ * guard under `FILE.takeover.TOKEN.removing`. Tokens carry no dot, so a longer subject's files never match.
+ */
+async function asidesOf(file: string) {
+  const prefix = `${basename(file)}.`, suffix = '.removing';
+  const names = await readdir(dirname(file)).catch(error => { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [] as string[]; throw error; });
+  return names.filter(name => name.startsWith(prefix) && name.endsWith(suffix)).flatMap(name => {
+    const middle = name.slice(prefix.length, -suffix.length), guard = middle.startsWith('takeover.');
+    const token = guard ? middle.slice('takeover.'.length) : middle;
+    return token && !token.includes('.') ? [{ path: resolve(dirname(file), name), guard }] : [];
+  });
+}
+/** Puts a set-aside lock back at `file` without replacing another lock; true once the lock at `file` is the one set aside. */
+async function putBack(aside: string, file: string) {
+  try { await link(aside, file); return true; }
+  catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') return true;
+    if (code !== 'EEXIST') throw error;
+  }
+  const [at, set] = await Promise.all([stat(file).catch(() => null), stat(aside).catch(() => null)]);
+  return !!at && !!set && at.ino === set.ino && at.dev === set.dev;
+}
 /**
  * Removes the lock at `file` only if the lock actually removed passes `judged` (GY-509). The guard
  * of a takeover counts as abandoned after `takeoverGuardMs` of age alone, so a live dispatcher that
  * stalls between reading a lock and removing it can find its guard cleared and a fresh lock created
  * in the meantime; an `rm` of the path would then delete that fresh lock. The lock is instead moved
- * aside by an atomic rename to a name of this dispatcher's own and judged there: what was moved is
- * exactly what gets judged, however long the dispatcher stalled. A lock that fails the judgement is
- * put back with `link`, which never replaces a lock created at the path in the meantime.
+ * aside by an atomic rename to a name of its own and judged there: what was moved is exactly what
+ * gets judged. A lock that fails the judgement is put back with `link`, which never replaces a lock.
+ *
+ * While a lock is aside its path is free (GY-682). A create landing in that gap sees the live lock
+ * set aside and withdraws itself (`fencingAside`), so the put-back is retried while it does. A lock
+ * that still cannot be put back, or whose judgement failed with an error, is left aside rather than
+ * deleted: there it keeps fencing creates, and `sweepAsides` restores it once it is abandoned.
  */
 export async function removeJudged(file: string, judged: (held: { holder: ReservationHolder | null; ageMs: number }) => boolean, token: string, afterMove?: () => Promise<void>) {
-  const aside = `${file}.${token}.removing`;
+  const aside = `${file}.${token}-${randomUUID()}.removing`;
   try { await rename(file, aside); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
+  let settled = false;
   try {
     await afterMove?.();
     const held = await reservationHolder(aside);
-    if (held && !judged(held)) await link(aside, file).catch(error => { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; });
-  } finally { await rm(aside, { force: true }); }
+    settled = !held || judged(held) || await restore(aside, file);
+  } finally { if (settled) await rm(aside, { force: true }); }
+}
+async function restore(aside: string, file: string) {
+  for (let attempt = 1; ; attempt++) {
+    if (await putBack(aside, file)) return true;
+    if (attempt >= putBackAttempts) return false;
+    await delay(putBackRetryMs);
+  }
+}
+/**
+ * Settles what a removal that crashed left aside under `file` (GY-682), once it has been aside longer
+ * than `takeoverGuardMs` (its ctime is when it was set aside): a guard is removed, a stale lock is
+ * removed, and a live lock is put back at its path — left aside, still fencing, while another stands there.
+ */
+export async function sweepAsides(file: string, now = Date.now()) {
+  for (const aside of await asidesOf(file)) {
+    const info = await stat(aside.path).catch(() => null);
+    if (!info || now - info.ctimeMs <= takeoverGuardMs) continue;
+    if (aside.guard) { await rm(aside.path, { force: true }); continue; }
+    const held = await reservationHolder(aside.path);
+    if (held && (staleHolder(held, dispatchReservationMs) || await putBack(aside.path, file))) await rm(aside.path, { force: true });
+  }
+}
+/**
+ * The live lock of another holder set aside under `file`, if any (GY-682). A lock is created while
+ * such a lock is aside only in the gap before a failed judgement puts it back, so the create is
+ * withdrawn and the reservation stays with the holder of the lock set aside.
+ */
+async function fencingAside(file: string, token: string) {
+  for (const aside of await asidesOf(file)) {
+    if (aside.guard) continue;
+    const held = await reservationHolder(aside.path);
+    if (held && held.holder?.token !== token && !staleHolder(held, dispatchReservationMs)) return held;
+  }
+  return null;
 }
 /**
  * Removes a stale lock, but only the lock that was judged stale (GY-356). Two dispatchers can both
@@ -70,7 +137,8 @@ export async function removeJudged(file: string, judged: (held: { holder: Reserv
  * takeover is therefore serialised by a `.takeover` guard created with O_EXCL, and under it the
  * lock is removed only while it still carries the token that was judged stale, judged on the lock
  * actually moved aside (`removeJudged`). A lock created by a faster takeover carries a new token and
- * is left alone; the slower dispatcher's next create then finds it held.
+ * is left alone; the slower dispatcher's next create then finds it held. A guard abandoned by a crash
+ * is cleared the same way, judged on the guard moved aside, so a guard just created stands (GY-682).
  */
 export async function takeOverStale(file: string, judged: ReservationHolder | null, body: string, token: string) {
   const guard = `${file}.takeover`;
@@ -78,8 +146,7 @@ export async function takeOverStale(file: string, judged: ReservationHolder | nu
   catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
     // Another dispatcher is taking over; a guard abandoned by a crash is cleared for the next attempt.
-    const held = await reservationHolder(guard);
-    if (held && staleHolder(held, takeoverGuardMs)) await rm(guard, { force: true });
+    await removeJudged(guard, held => staleHolder(held, takeoverGuardMs), token);
     return;
   }
   try {
@@ -95,11 +162,18 @@ async function reserveDispatchResource(root: string, resource: 'profile' | 'work
   await mkdir(dirname(file), { recursive: true, mode: 0o700 });
   const token = randomUUID();
   const body = JSON.stringify({ token, pid: process.pid, host: hostname(), at: new Date().toISOString() } satisfies ReservationHolder);
+  const release = async () => { const held = await reservationHolder(file).catch(() => null); if (held?.holder?.token === token) await rm(file, { force: true }); };
   for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      await writeFile(file, body, { flag: 'wx', mode: 0o600 });
-      return async () => { const held = await reservationHolder(file).catch(() => null); if (held?.holder?.token === token) await rm(file, { force: true }); };
-    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+    await sweepAsides(file);
+    let created = false;
+    try { await writeFile(file, body, { flag: 'wx', mode: 0o600 }); created = true; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+    if (created) {
+      const fence = await fencingAside(file, token);
+      if (!fence) return release;
+      await release();
+      throw new DispatchReservedError(resource, subject, refusal(fence.holder));
+    }
     const held = await reservationHolder(file);
     if (!held) continue;
     // A file still being written reads as unparsable for an instant: only its age makes it stale.

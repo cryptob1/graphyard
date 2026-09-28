@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, utimes, writeFile, mkdir } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm, utimes, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir, hostname } from 'node:os';
 import { join } from 'node:path';
-import { currentAgents, dispatchReservationDirectory, dispatchReserved, dispatchedFile, profileLaunchedFile, removeJudged, reserveDispatch, takeOverStale } from '../src/master/dispatch-reservation.js';
+import { currentAgents, dispatchReservationDirectory, dispatchReserved, dispatchedFile, profileLaunchedFile, removeJudged, reserveDispatch, sweepAsides, takeOverStale } from '../src/master/dispatch-reservation.js';
 // @ts-expect-error The standalone executor is a dependency-free entry point script.
 import { controlPlaneEffects } from '../scripts/graphyard-executor.mjs';
 import type { HerdrAgent, WorkerProfile } from '../src/master.js';
@@ -70,16 +70,93 @@ test('unit:stalled-takeover-removes-only-what-it-judged — removal judges the l
     await writeFile(lock, fresh); await utimes(lock, old, old);
     await removeJudged(lock, judgedStale, 'slower');
     assert.equal(await readFile(lock, 'utf8'), fresh, 'a fresh lock is put back');
-    // A takeover creates its lock while this one holds the fresh lock aside: that lock is not replaced.
+    // A takeover creates its lock while this one holds the fresh lock aside, and never withdraws it:
+    // that lock is not replaced, and the fresh lock is left aside rather than deleted (GY-682).
     const newer = JSON.stringify({ token: 'newer', pid: process.pid, host: hostname(), at: new Date().toISOString() });
     await removeJudged(lock, judgedStale, 'slower', async () => { await writeFile(lock, newer, { flag: 'wx' }); });
-    assert.equal(await readFile(lock, 'utf8'), newer, 'a lock created during the stall stands');
+    assert.equal(await readFile(lock, 'utf8'), newer, 'a lock created during the stall is not replaced');
+    const left = (await readdir(root)).filter(name => name.endsWith('.removing'));
+    assert.equal(left.length, 1, 'the lock that could not be put back is left aside');
+    assert.equal(await readFile(join(root, left[0]), 'utf8'), fresh, 'with its holder\'s body');
+    await rm(join(root, left[0])); await rm(lock);
     // The judged lock itself is removed, and a missing lock is nothing to remove.
     await writeFile(lock, stale);
     await removeJudged(lock, judgedStale, 'slower');
     await assert.rejects(readFile(lock, 'utf8'), 'the stale lock is removed');
     await removeJudged(lock, judgedStale, 'slower');
-    await assert.rejects(readFile(`${lock}.slower.removing`, 'utf8'), 'nothing is left aside');
+    assert.deepEqual((await readdir(root)).filter(name => name.endsWith('.removing')), [], 'nothing is left aside');
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+// GY-682: the follow-ups from the approved review of GY-509.
+test('manual:review-followups-triaged — GY-509 follow-ups 1/4/6: fence creates on set-aside locks', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'graphyard-fence-'));
+  try {
+    const directory = dispatchReservationDirectory(root);
+    await mkdir(directory, { recursive: true });
+    const lock = join(directory, 'work-GY-1.lock');
+    const live = JSON.stringify({ token: 'live', pid: process.pid, host: hostname(), at: new Date().toISOString() });
+    await writeFile(lock, live);
+    const asides = async () => (await readdir(directory)).filter(name => name.endsWith('.removing'));
+    // A third dispatcher creates its lock in the gap before the live lock is put back: it sees the
+    // live lock set aside, withdraws its own, and is refused; the live lock is then put back.
+    await removeJudged(lock, held => held.holder?.token === 'stale', 'slower', async () => {
+      await assert.rejects(reserveDispatch(root, item(), profile, new Date().toISOString()), (error: unknown) => dispatchReserved(error) && /process \d+/.test(String(error)), 'the create in the gap is refused, naming the holder set aside');
+    });
+    assert.equal(await readFile(lock, 'utf8'), live, 'the live holder keeps its lock');
+    assert.deepEqual(await asides(), [], 'and nothing is left aside');
+
+    // A creator that never withdraws leaves the live lock aside, where it goes on fencing creates.
+    await removeJudged(lock, held => held.holder?.token === 'stale', 'slower', async () => { await writeFile(lock, JSON.stringify({ token: 'stuck', pid: process.pid, host: hostname(), at: new Date().toISOString() }), { flag: 'wx' }); });
+    assert.equal((await asides()).length, 1);
+    await rm(lock);
+    await assert.rejects(reserveDispatch(root, item(), profile, new Date().toISOString()), dispatchReserved, 'a live lock set aside still holds the reservation');
+    await assert.rejects(readFile(lock, 'utf8'), 'and the refused create is withdrawn');
+    // Once abandoned, the sweep puts the live lock back at its path.
+    await sweepAsides(lock, Date.now() + hour);
+    assert.equal(await readFile(lock, 'utf8'), live, 'an abandoned live lock is restored');
+    assert.deepEqual(await asides(), []);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('manual:review-followups-triaged — GY-509 follow-ups 2/5/3/7: judge abandoned guards and sweep stale asides', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'graphyard-sweep-'));
+  try {
+    const directory = dispatchReservationDirectory(root);
+    await mkdir(directory, { recursive: true });
+    const lock = join(directory, 'work-GY-1.lock');
+    const old = new Date(Date.now() - hour);
+    const stale = JSON.stringify({ token: 'stale', pid: 1, host: 'elsewhere', at: old.toISOString() });
+    // A crash left a stale lock and a guard aside: a fresh aside is left to its removal, an abandoned one swept.
+    await writeFile(`${lock}.crashed.removing`, stale); await utimes(`${lock}.crashed.removing`, old, old);
+    await writeFile(`${lock}.takeover.crashed.removing`, stale);
+    await sweepAsides(lock);
+    assert.equal((await readdir(directory)).filter(name => name.endsWith('.removing')).length, 2, 'a removal in progress is left alone');
+    await sweepAsides(lock, Date.now() + hour);
+    assert.deepEqual((await readdir(directory)).filter(name => name.endsWith('.removing')), [], 'abandoned asides are removed');
+    // Another subject's files are never swept.
+    const other = join(directory, 'work-GY-1.lock.x.lock.crashed.removing');
+    await writeFile(other, stale);
+    await sweepAsides(lock, Date.now() + hour);
+    assert.equal(await readFile(other, 'utf8'), stale);
+    await rm(other);
+
+    // A guard abandoned by a crash is cleared through the judged removal; a fresh guard stands.
+    const guard = `${lock}.takeover`;
+    await writeFile(lock, stale); await utimes(lock, old, old);
+    await writeFile(guard, stale); await utimes(guard, old, old);
+    await takeOverStale(lock, JSON.parse(stale), JSON.stringify({ token: 'slower', pid: process.pid, host: hostname(), at: new Date().toISOString() }), 'slower');
+    await assert.rejects(readFile(guard, 'utf8'), 'the abandoned guard is cleared');
+    const fresh = JSON.stringify({ token: 'third', pid: process.pid, host: hostname(), at: new Date().toISOString() });
+    await writeFile(guard, fresh);
+    await takeOverStale(lock, JSON.parse(stale), JSON.stringify({ token: 'slower', pid: process.pid, host: hostname(), at: new Date().toISOString() }), 'slower');
+    assert.equal(await readFile(guard, 'utf8'), fresh, 'a live guard is put back');
+    assert.deepEqual((await readdir(directory)).filter(name => name.endsWith('.removing')), [], 'and nothing is left aside');
+    // With the guard gone, the stale lock is taken over.
+    await rm(guard);
+    const release = await reserveDispatch(root, item(), profile, new Date().toISOString());
+    assert.notEqual(JSON.parse(await readFile(lock, 'utf8')).token, 'stale');
+    await release();
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
