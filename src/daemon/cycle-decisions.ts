@@ -121,6 +121,10 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     if (watch.session && !listed && !await endApproverSession(item, watch, `approver for ${watch.work} decision ${watch.decision} replaced`))
       throw new Error(`registry session ${watch.session} of the replaced approver could not be ended, so no replacement is launched while it holds the role's slot; ending it is tried again next cycle`);
     Object.assign(watch, { launches: watch.launches + 1, agentName: name, pane: listed?.pane_id ?? null, launchedAt: stamp, account: adopted?.account ?? null, runtime: adopted?.runtime ?? null, session: adopted?.session ?? null });
+    // GY-920: adopting a session that is already judging the decision ends any capacity wait the
+    // watch still carried. The wait described a launch that never happened; kept, it would have
+    // `master status` report "waiting for approver capacity" beside a live approver.
+    if (listed) watch.capacity = null;
     await effects.persist(state);
     if (listed) return `adopted approver session ${name}${adopted?.account ? ` on ${adopted.account}` : ''}, already judging it`;
     inventory = null;
@@ -138,6 +142,17 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   };
   /** The approver launch the launcher runs, and what it did with the watch. */
   const start = async (item: Work, watch: ApprovalWatch) => {
+    // GY-920: the account grab is where oldest-first is won or lost (GY-849). The guarded relaunch
+    // path hands capacity-waiting decisions over one at a time, but a launch whose watch carries no
+    // capacity mark — a brand-new decision's first above all, requested after the older waiter was
+    // handed off — is handed off beside it, and with the launcher running more than one body at once
+    // its approver call could take the very account or slot the older waiter's relaunch was handed
+    // off for. So every approver launch holds here while another decision's capacity-waiting
+    // relaunch is still on the launcher, and makes its call only once that one has settled: first
+    // submitted, first served, whatever the concurrency. The wait is bounded; past it the launch
+    // proceeds as it did before, and the next cycle's guarded relaunch path applies.
+    const standDownBy = Date.now() + 300_000;
+    while (capacityRelaunchInFlight(watch.decision) && Date.now() < standDownBy) await new Promise(resolve => setTimeout(resolve, 50));
     let launched: Awaited<ReturnType<NonNullable<DaemonEffects['approver']>>>;
     try { launched = await effects.approver!(item, watch.decision); }
     catch (error) {
@@ -152,9 +167,12 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
         // A registry session the failed launch could not end stays on the watch, so the next launch ends it first.
         // The launch made no session, so it is taken back like a capacity refusal (GY-551): a
         // registry or server timeout is retried next cycle within the bound, never spends it, and
-        // the escalation past the bound counts only the sessions that ran.
+        // the escalation past the bound counts only the sessions that ran. GY-920: a failure for
+        // any other reason is not a capacity wait — the stale wait is cleared with the rest of the
+        // launch state, so `master status` classifies the watch by this failure and its remedy
+        // instead of reporting a wait for capacity that is over.
         const orphan = (error as { registrySession?: string })?.registrySession;
-        Object.assign(watch, { launches: watch.launches - 1, agentName: null, pane: null, launchedAt: null, account: null, runtime: null, session: orphan ?? null });
+        Object.assign(watch, { launches: watch.launches - 1, agentName: null, pane: null, launchedAt: null, account: null, runtime: null, session: orphan ?? null, capacity: null });
         await effects.persist(state);
         throw error;
       }
