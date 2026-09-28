@@ -503,7 +503,7 @@ export class Engine {
   private async recordEjection(db: PoolClient, work: Work, all: Work[], queuedBefore: number | null, now: Date, extra: Record<string, unknown> = {}) {
     if (queuedBefore === null || work.queue || work.queueEjection?.sequence !== queuedBefore) return;
     await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'queue.ejected',
-      JSON.stringify({ details: { sequence: queuedBefore, reason: work.queueEjection.reason, ...extra, at: now.toISOString() } })]);
+      JSON.stringify({ details: { sequence: queuedBefore, reason: work.queueEjection.reason, conflict: work.queueEjection.conflict ?? null, ...extra, at: now.toISOString() } })]);
     for (const behind of nextQueueEntries(all, work.id, Math.max(mergeBandQueueDepth, this.mergeBatchSize, this.parallelTips))) await wakeJob(db, behind.id);
   }
   // The launch fence is a deployment-independent safety default; only tests shorten it.
@@ -2072,7 +2072,7 @@ export class Engine {
     // standing refusal already answered (GY-94) — is recorded as an ejection, and the entries
     // behind it are woken to predict against the real base.
     const ejected = queuedBefore !== null && !work.queue && work.queueEjection?.sequence === queuedBefore;
-    if (ejected) ledger.push({ kind: 'queue.ejected', details: { sequence: queuedBefore, reason: work.queueEjection!.reason } });
+    if (ejected) ledger.push({ kind: 'queue.ejected', details: { sequence: queuedBefore, reason: work.queueEjection!.reason, conflict: work.queueEjection!.conflict ?? null } });
     // A stuck batch the evaluation dissolved (GY-506) is recorded on the ledger once, when it happened.
     const dissolved = work.queue?.batchDissolved ?? null;
     if (dissolved && JSON.stringify(dissolved) !== JSON.stringify(dissolvedBefore)) ledger.push({ kind: 'queue.batch-dissolved', details: { ...dissolved } });
