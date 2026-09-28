@@ -1,4 +1,4 @@
-<!-- page: Operate Graphyard | 3 | pages and markers. -->
+<!-- page: Operate Graphyard | 3 | pages. -->
 # Reading the dashboard
 
 ## Navigation
@@ -9,22 +9,22 @@ One sidebar: **Work**, **Workers**, **Shipped**, **Tests**, **Insights**, **Sett
 
 Each open item is in one group: **Needs you** (only you decide), **Blocked**, **Moving**, **Up next** or **Backlog**; a tile counts and filters one.
 
-`GET /api/board` serves the groups, not the page. Items carry `group`, `stage`, `owner`, `actor` (`worker`, `reviewer`, `producer`, `approver`, `master`, `executor`, `human-only`, `held`), `command` (or null), `since` and `overdue` (past `overdueAfterMs`). `master status` lists the master's items as `board.owed`.
+`GET /api/board` serves the groups. Items carry `group`, `stage`, `owner`, `actor` (a role), `command` (or null), `since`, `overdue` (`overdueAfterMs`). `master status` lists the master's as `board.owed`.
 
 ## Needs you
 
-`graphyard login` prints a single-use, ten-minute sign-in link for the operator's human session (declared at install); others get **Sign in as the operator**. Requests offer buttons (`park --choice`, plus **Decline**) and notes; **Provide now** seals credentials for `graphyard unseal GY-N`.
+`graphyard login` prints a single-use, ten-minute sign-in link for the operator's human session; others get **Sign in as the operator**. Requests offer choice buttons and notes; **Provide now** seals credentials for `graphyard unseal GY-N`.
 
 ## Workers
 
-**Workers** is its own sidebar entry, registered beside Shipped and Insights in `web/pages/index.tsx`. A row is one [session handle](master-agent-sessions.md#session-handles), from the item, not from Herdr.
+**Workers** is a sidebar entry in `web/pages/index.tsx`; a row is one [session handle](master-agent-sessions.md#session-handles), from the item, not from Herdr.
 
-A running handle last observed over **15 minutes** by default, `sessionStaleThresholdMs` in `web/workers-view.ts`, reads *not seen for <time since that observation>*, never as running, and is not counted among the open sessions; the loop's [session report](master-agent.md#session-liveness-is-reconciled-not-trusted) is what ends a dead handle.
+A handle unobserved over **15 minutes** (`sessionStaleThresholdMs`) reads *not seen for <time since that observation>*, never as running, outside the open-session count; the loop's [session report](master-agent.md#session-liveness-is-reconciled-not-trusted) ends a dead handle.
 
 Running rows offer:
 
-- **Copy local**, on the launching host: `herdr agent attach w1V:pJD`.
-- **Copy remote**: `herdr --help` documents `herdr --machine <label-or-id> <command>`, `herdr --remote <ssh-target>`; interactive attachment is not forwarded by `--machine`, so the form focuses the pane then attaches remotely: `herdr --machine vishrog agent focus w1V:pJD && herdr --remote vishrog`.
+- **Copy local** (launching host): `herdr agent attach w1V:pJD`.
+- **Copy remote**: `herdr --machine <label-or-id> <command>` and `herdr --remote <ssh-target>`; `--machine` does not forward interactive attachment, so it focuses the pane then attaches remotely: `herdr --machine vishrog agent focus w1V:pJD && herdr --remote vishrog`.
 
 ## The status sentence
 
@@ -36,4 +36,4 @@ Below the summary: **What is left**, **Requirements** (✓ or ○ per criterion)
 
 ## Insights
 
-Headline numbers, **Flow** (Now columns show 12 dots, then **+N more**; medians survive a failed replay read), landed per day, merges/hour, median queue wait, time spent, [optimistic merges](github.md#optimistic-merges); **Show details** holds shipping pulse (PR-to-production from `POST /api/production-observations` or `master verify-deployment`) and flow analytics. **Shipped** holds **Interventions**, **Validation** and **Releases**; `GRAPHYARD_INTERVENTION_PATTERNS=1` files repeats as `bug` items. Missing values read `Unavailable`.
+Headline numbers, **Flow** (Now columns show 12 dots, then **+N more**; medians survive a failed replay read), landed per day, merges/hour, median queue wait, time spent, [optimistic merges](github.md#optimistic-merges); **Show details** holds shipping pulse, PR-to-production (`POST /api/production-observations`, `master verify-deployment`), and flow analytics. **Shipped** holds **Interventions**, **Validation** and **Releases**; `GRAPHYARD_INTERVENTION_PATTERNS=1` files repeats as `bug` items; missing values read `Unavailable`.
