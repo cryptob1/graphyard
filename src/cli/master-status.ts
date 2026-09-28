@@ -41,16 +41,16 @@ import { Timings, timedApi, timedStep, withTimings } from '../master/timings.js'
 import { slowReportReader } from '../master/report-cache.js';
 
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
-// The cycle-budget daemon metric (src/daemon/metrics.ts), read from here as it always was.
+// The cycle-budget daemon metric, read from here as it always was.
 export { cycleBudget } from '../daemon/metrics.js';
 // `master scope` lives in its own module, read from here as it always was.
 export { approveScopeRequest } from './master-scope.js';
 
-// Observation throughput and the queue head's lag live beside the observation schedule they read
-// (src/github.ts); the report reads them from here, as do the tests.
+// Observation throughput and the queue head's lag live beside the observation schedule they
+// read; the report reads them from here, as do the tests.
 export { observationThroughputStatus };
 // The attention builders live beside each other in `status-attention.ts`; the report reads them
-// from here, as does everything that was reading them from here before the split.
+// from here, as does everything that read them from here before the split.
 import { mergeStallAttention } from './status-attention.js';
 export { approverLaunchAttention, mergeStallAttention, nameOrphanSupervisors, orphanSupervisorAttention, stalledItemAttention, supervisorReclaimCommand } from './status-attention.js';
 export { humanNeededAttention, needsHumanActions, scopeRequestAttention } from './owed-report.js';
@@ -65,7 +65,7 @@ export { unansweredRequestAttention, unansweredRequestOwner, unobtainableReviewA
  */
 export async function masterStatusReport(root: string, master: MasterConfig, masterApi: (path: string, credential?: string, timeoutMs?: number) => Promise<any>, coordinator: any, cli: { commit: string | null }, dependencies: { supervisorHost?: LoopSupervisorHost; now?: () => number; reportReadBoundMs?: number } = {}) {
   // Every phase of the build is timed, and every server read of a second or more is named with its
-  // route and the phase it was made in: the report carries both under `timings` (GY-377).
+  // route and the phase it was made in: both are carried under `timings` (GY-377).
   const timings = new Timings(dependencies.now);
   const report = await withTimings(timings, () => buildStatusReport(root, master, timedApi(masterApi), coordinator, cli, dependencies));
   return { ...report, timings: timings.report() };
@@ -95,13 +95,13 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const dispatchItems = dispatchFailureAttention(dispatch);
   const containment = await timedStep('containment', () => assessContainment(snapshot.work, { hostId: master.hostId, observedAt: snapshot.now, clockOffset }));
   // Disk is reported from the host, not from the cursor: the loop may be stopped, and the volume
-  // filling is what stops it. The plan is `master reclaim`'s, over the inventory the loop's reclaim
-  // step cached (GY-360): walking a thousand trees per call is what made status take minutes.
+  // filling is what stops it. The plan is `master reclaim`'s, over the inventory the loop cached
+  // (GY-360): walking a thousand trees per call is what made status take minutes.
   const worktrees = worktreesDirectory(root);
   const inventory = await timedStep('worktrees', () => statusWorktreeInventory(root).catch(() => ({ entries: [], at: null, cached: false }))), trees = inventory.entries, reclaimPlan = planWorktreeReclaim(trees, snapshot.work, { now: Date.now(), idleMs: reclaimIdleMs(master) });
   const disk = diskPressure(worktrees, await freeBytes(worktrees), diskThresholdBytes(master), reclaimPlan);
   // The managed worktree root is a volume of its own as often as not: proof and review checkouts
-  // live there, and it is judged against its own minimum and budget, before a write there fails.
+  // live there, and it is judged against its own minimum and budget before a write there fails.
   const managedRoot = await timedStep('managed root', () => managedRootStatus(root, master, [...reviewRecords, ...producerRecords]));
   const diskAttention = [...diskPressureAttention(disk), ...managedRoot.attention];
   const daemonState = await readDaemonState(root, master).catch(error => ({ error: error instanceof Error ? error.message : 'Master daemon state is unreadable' }));
@@ -133,9 +133,9 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   // A waiting sudo prompt is the operator confirming their own GitHub credential on their device.
   const sudo = administration.sudo;
   // A request whose session settled without satisfying its gate: nothing runs for it, nothing
-  // refused, and nothing will launch again until it is named here with the command that answers it.
+  // refused, and nothing relaunches until it is named here with the command that answers it.
   // A review every session settled on a dismissal for is the stronger statement of the same
-  // request (GY-100) and is reported once, as the review that cannot be obtained on that commit.
+  // request (GY-100), reported once as the review that cannot be obtained on that commit.
   const unobtainable = unobtainableReviewAttention(status.work, reviews.completed as SettledReviewSession[]);
   const unanswered = unansweredRequestAttention(status.work);
   // An open item the control plane names no action for. Those waiting on another item or on a
@@ -182,7 +182,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     unavailable: sections.unavailable,
     humanOnly: humanOnly.map(humanOnlyStatusRow),
     // Every open item the control plane names no action for, with the account it names instead
-    // and how long it has held its failing gate; the bound the stalled ones were judged against.
+    // and how long it has held its failing gate; the stalled ones' judging bound.
     actionless: { bound: stallBoundMs, items: actionless },
     liveness,
     backlog,
