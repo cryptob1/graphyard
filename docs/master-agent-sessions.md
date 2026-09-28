@@ -25,7 +25,7 @@ Every launched session (worker, reviewer, producer, approver, headless included)
 
 A profile's `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`), unless the [agent registry](onboarding.md#configure-the-fleet) defines the role. A launch takes the first logged-in account under `run.quotaCeilingPercent`, else **fails over** (`dispatch.accounts`).
 
-On a mid-session limit notice the loop commits worker changes as unpushed `WIP:`, records `capacity.exhausted` (not `lease-loss`), then relaunches on the next account or waits for reset.
+On a mid-session limit notice the loop commits worker changes as unpushed `WIP:`, records `capacity.exhausted` (not `lease-loss`), then relaunches on the next account or awaits the first reset.
 
 ## How a session starts
 
