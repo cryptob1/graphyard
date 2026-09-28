@@ -97,7 +97,18 @@ export function ciConcurrencyAdvisories(checks: string[], workflows: WorkflowFil
 // merge groups must pass `Graphyard / merge`, bound to the control-plane App. Branch protection has
 // no merge-queue setting, so the queue is a repository ruleset on the base branch that Graphyard
 // writes by name and reads back through the branch's active rules.
+// The item's CI checks are deliberately not required on merge groups (GY-303): the App passes a
+// group only when it merges that head onto its bound base (or a commit with the bound base's tree)
+// and lands the head's own tree (`mergeGroupRefusal`), so every check that passed on the head
+// already covers exactly what the group lands.
 export const mergeQueueRulesetName = 'Graphyard merge queue';
+/**
+ * The one way GitHub lands a Graphyard delivery, in the queue and through auto-merge alike (GY-303).
+ * It is not configurable: a merge commit keeps the authorized head in the base branch's history,
+ * which is how landing, reverted deliveries and base ancestry are recognized, and the queue's merge
+ * group is then exactly that head merged onto its bound base (see `mergeGroupRefusal`).
+ */
+export const MERGE_METHOD = 'MERGE';
 /**
  * The repair lane's bypass (GY-406): the control-plane App, and nobody else, may merge a pull
  * request past this ruleset's queue — in pull-request mode only, so it never pushes to the base
@@ -113,7 +124,7 @@ export function mergeQueueRuleset(config: { baseBranch: string; githubAppId: num
     conditions: { ref_name: { include: [`refs/heads/${config.baseBranch}`], exclude: [] } },
     rules: [
       // One entry at a time: each merge group is exactly one authorized head on the base it lands on.
-      { type: 'merge_queue', parameters: { check_response_timeout_minutes: 60, grouping_strategy: 'ALLGREEN', max_entries_to_build: 1, max_entries_to_merge: 1, merge_method: 'MERGE', min_entries_to_merge: 1, min_entries_to_merge_wait_minutes: 0 } },
+      { type: 'merge_queue', parameters: { check_response_timeout_minutes: 60, grouping_strategy: 'ALLGREEN', max_entries_to_build: 1, max_entries_to_merge: 1, merge_method: MERGE_METHOD, min_entries_to_merge: 1, min_entries_to_merge_wait_minutes: 0 } },
       { type: 'required_status_checks', parameters: { strict_required_status_checks_policy: false, required_status_checks: [{ context: CHECK_NAME, integration_id: config.githubAppId }] } },
     ],
   };
