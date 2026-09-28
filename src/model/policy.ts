@@ -3,6 +3,48 @@ import { deploySmokeProof, proofSchema } from './proof.js';
 import { postMergeProofRefusal } from './post-merge-proofs.js';
 import { distinct, reviewProviders, reviewerProfileSchema } from './review.js';
 
+// ---- Risk lanes (GY-883) -------------------------------------------------------------------------
+
+/**
+ * The ceremony an item runs is decided by the risk of what it changes, not by one high-ceremony
+ * path for everything. `low` lands with its required CI checks green and one approving review —
+ * catch-and-revert suits it; `medium` adds its producer-run proofs; `high` keeps the full path,
+ * producer proofs, manual attestations and approver decisions alike.
+ */
+export const lanes = ['low', 'medium', 'high'] as const;
+export type Lane = typeof lanes[number];
+
+/** The shipped high-risk path policy: any changed path under one of these makes the change high. */
+export const highRiskPaths = [/^migrations\/schema/, /^auth\/credentials/, /^deploy\/install/, /^src\/server\/routes/] as const;
+
+/** The shipped low-risk path policy: a change only of tests or of docs is low. */
+export const testOnlyPaths = /(^|\/)(tests?|__tests__)\/|\.test\.[A-Za-z]+$|\.spec\.[A-Za-z]+$/;
+export const docsOnlyPaths = /^docs\/|(^|\/)README\.md$|^AGENTS\.md$|\.mdx?$/;
+
+/**
+ * The lane one change rides in, from the shipped path policy: any high-risk path makes the change
+ * high; a change only of tests or only of docs is low; a change kept inside one module — every
+ * path sharing the same first two segments, such as `src/model/` — is low; everything else is
+ * medium. An unknown change (no paths at all) is medium: the default lane asks for proofs until
+ * the policy can see the change is small.
+ */
+export function determineLane(paths: readonly string[]): Lane {
+  const changed = [...new Set(paths)];
+  if (!changed.length) return 'medium';
+  if (changed.some(path => highRiskPaths.some(pattern => pattern.test(path)))) return 'high';
+  if (changed.every(path => testOnlyPaths.test(path) || docsOnlyPaths.test(path))) return 'low';
+  const segments = changed.map(path => path.split('/').filter(Boolean));
+  const common = segments[0].filter((segment, index) => segments.every(parts => parts[index] === segment)).length;
+  return common >= 2 ? 'low' : 'medium';
+}
+
+/**
+ * The shipped per-lane speed targets: the submit→merge p50 each lane is expected to meet, in
+ * milliseconds, reported beside its lane. They split the pipeline target (GY-54) by lane: the
+ * smaller the change, the faster it is expected to land.
+ */
+export const laneSpeedTargets: Record<Lane, number> = { low: 30 * 60_000, medium: 60 * 60_000, high: 4 * 60 * 60_000 };
+
 // Bootstrap mode: an operator may defer a criterion's proofs for the single change that
 // introduces the harness those proofs depend on. The proof is never dropped. It becomes a
 // standing obligation on the named contract paths, and the next change touching those paths

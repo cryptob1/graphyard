@@ -9,7 +9,8 @@ import { exactApproval, exhaustedReviewerProfiles, reviewProviderOf, reviewerPro
 import { carriedApproval, evidenceBindsCandidate } from './carry.js';
 import { placeInQueue, type MergeQueueSettings } from './queue.js';
 import { regressionRefusals } from '../regression-guard.js';
-import { mechanicalFailure, mechanicalVerdicts, evidenceProves, attestedProof } from './mechanical-proofs.js';
+import { mechanicalFailure, mechanicalProof, mechanicalVerdicts, evidenceProves, attestedProof } from './mechanical-proofs.js';
+import { determineLane, laneSpeedTargets, type Lane } from './policy.js';
 
 // Pure evaluation: neither worker assertions nor UI state can authorize progression.
 declare module './work.js' {
@@ -24,14 +25,45 @@ declare module './work.js' {
 /** The merge gate's refusal while GitHub has not computed a pull request's mergeability (GY-548). */
 export const mergeabilityComputingRefusal = 'GitHub is computing mergeability against the current base; the next observation reads it again';
 
+// ---- Risk lanes (GY-883) -------------------------------------------------------------------------
+
+/**
+ * What each lane's landability asks for beyond the gates every lane keeps (ready, build, review,
+ * test, merge): which proof families are required evidence, and whether a rework round waits for
+ * an approved two-party decision. Low lands on its required CI checks and one approving review —
+ * catch-and-revert suits it; medium adds its producer-run proofs; high keeps today's full path.
+ * A lane only decides which facts the verdict requires of the item, and weakens no criterion
+ * otherwise: a recorded proof failure still returns the head in every lane, and a bootstrap
+ * obligation inherited from an earlier delivery is never waived.
+ */
+export interface LaneRequirements { producerProofs: boolean; manualAttestations: boolean; reworkApprover: boolean }
+export function laneRequirements(lane: Lane): LaneRequirements {
+  return lane === 'low' ? { producerProofs: false, manualAttestations: false, reworkApprover: false }
+    : lane === 'medium' ? { producerProofs: true, manualAttestations: false, reworkApprover: false }
+    : { producerProofs: true, manualAttestations: true, reworkApprover: true };
+}
+
+/** The lane of the change the item carries: the diff its observation holds; unknown stays medium. */
+function itemLane(work: Work): Lane {
+  const observation = work.observation;
+  const observed = observation ? observation.scopeFiles ? observation.scopeFiles.map(file => file.path) : observation.files : [];
+  return determineLane(observed);
+}
+
 /**
  * `mergeQueue` names the settings the queue evaluates by: `batchSize`, the parallel-tip `parallelTips`
  * window (GY-498) and `optimistic` (GY-500). Without it the queue is validated batch by batch (GY-330),
  * as every caller that names no settings expects.
  */
-export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[], mergeQueue?: number | MergeQueueSettings): { stage: Stage; gates: Gate[]; violations: string[]; queue: QueueEntry | null; queueSequence: number; queueEjection: QueueEjection | null; queueHistory: QueueHistoryEntry[] } {
+export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[], mergeQueue?: number | MergeQueueSettings): { stage: Stage; gates: Gate[]; violations: string[]; lane: Lane; speedTarget: number; queue: QueueEntry | null; queueSequence: number; queueEjection: QueueEjection | null; queueHistory: QueueHistoryEntry[] } {
   const gates: Gate[] = [];
   const add = (name: string, reasons: string[]) => gates.push({ name, passed: reasons.length === 0, reasons });
+  // The lane rides the one landability verdict, not beside it (GY-883 AC-3): the evaluation takes
+  // the item's lane, decides which facts it requires, and reports the lane with its speed target.
+  const lane = itemLane(work);
+  const speedTarget = laneSpeedTargets[lane];
+  const required = laneRequirements(lane);
+  const laneRequires = (proof: string) => attestedProof(proof) ? required.manualAttestations : mechanicalProof(proof) ? required.producerProofs : true;
   const dependencies = work.dependencies.filter(id => all.find(w => w.id === id)?.stage !== 'done');
   add('ready', [...(!work.ready ? ['Not released from backlog'] : []), ...dependencies.map(id => `Dependency ${all.find(w => w.id === id)?.key ?? id} is unfinished`), ...(work.blocker ? [work.blocker] : [])]);
   const candidate = work.candidate;
@@ -91,8 +123,10 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[],
   };
   // A bootstrap criterion's proofs are deferred here and required of the next change that
   // touches the same contract; review, CI and every other criterion still gate this one.
+  // The lane decides which of the item's own criterion proofs the verdict requires; the
+  // inherited obligations below are never lane-waived.
   for (const ac of work.criteria.filter(criterion => !criterion.bootstrap)) for (const proof of ac.proofs) {
-    if (unproven(proof)) reasons.push(`${ac.id}: ${demanded(proof)}`);
+    if (laneRequires(proof) && unproven(proof)) reasons.push(`${ac.id}: ${demanded(proof)}`);
   }
   for (const obligation of inheritedObligations(work, all)) {
     if (unproven(obligation.proof)) reasons.push(`Bootstrap obligation inherited from ${obligation.key} ${obligation.criterionId}: ${demanded(obligation.proof)}`);
@@ -134,5 +168,5 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[],
   let stage: Stage = !work.ready ? 'backlog' : !work.submission ? (work.lease && Date.parse(work.lease.expiresAt) > now.getTime() ? 'build' : 'ready') : (first?.name === 'ready' ? 'build' : first?.name as Stage ?? 'merge');
   // Delivery history stays complete; later observations cannot rewrite it.
   if (work.stage === 'done') stage = 'done';
-  return { stage, gates, violations, queue: queueState.queue, queueSequence: queueState.queueSequence, queueEjection: queueState.ejection, queueHistory: queueState.history };
+  return { stage, gates, violations, lane, speedTarget, queue: queueState.queue, queueSequence: queueState.queueSequence, queueEjection: queueState.ejection, queueHistory: queueState.history };
 }
