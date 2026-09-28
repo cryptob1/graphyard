@@ -1,12 +1,13 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { generateKeyPairSync, randomUUID } from 'node:crypto';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
+import { Validation } from '../src/validation.js';
 import { server } from '../src/server.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import { caseResult, flakiness, scenarioOf, type ScenarioRun } from '../src/model/test-cases.js';
@@ -17,11 +18,16 @@ import { caseResult, flakiness, scenarioOf, type ScenarioRun } from '../src/mode
 const operator: Principal = { id: 'operator', role: 'admin' };
 const worker: Principal = { id: 'implementer', role: 'worker' };
 const producer: Principal = { id: 'e2e-producer', role: 'producer', proofs: ['e2e:*'] };
-const principals = [operator, worker, producer];
+const runner: Principal = { id: 'runner', role: 'worker' };
+const collector: Principal = { id: 'collector', role: 'producer', proofs: ['e2e:*'] };
+const builder: Principal = { id: 'builder', role: 'producer' };
+const principals = [operator, worker, producer, runner, collector, builder];
 const tokens = new Map(principals.map(p => [p.id, `${p.id}-${'t'.repeat(32)}`]));
 const head = 'c'.repeat(40), base = 'd'.repeat(40), repository = 'owner/project';
+const attestationPublicKey = generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }).toString();
+const bundleDigest = `sha256:${'1'.repeat(64)}`, imageDigest = `sha256:${'2'.repeat(64)}`;
 
-let database: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
+let database: EmbeddedPostgres, store: Store, engine: Engine, validation: Validation, http: ReturnType<typeof server>, url: string;
 let pullRequest = 300, cases = 0;
 
 before(async () => {
@@ -30,6 +36,7 @@ before(async () => {
   await database.initialise(); await database.start(); await database.createDatabase('test_cases_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/test_cases_test`); await store.init();
   engine = new Engine(store, [15368], 120, repository);
+  validation = new Validation(engine, principals, repository);
   http = server(engine, principals.map(p => ({ ...p, token: tokens.get(p.id)! })), null);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as any).port}`;
@@ -159,4 +166,80 @@ test('unit:test-case-repository — flaky means a pass and a fail on one commit,
   assert.equal(flakiness([at('a', 'fail', 2), at('a', 'pass', 1)]).flaky, true, 'a re-run flip on one commit');
   const old = [...Array.from({ length: 20 }, (_, i) => at(`s${i}`, 'pass', 100 - i)), at('x', 'fail', 50), at('y', 'pass', 49)];
   assert.equal(flakiness(old).flaky, false, 'changes older than the window are not counted');
+});
+
+/** A full validation fixture for one case: environment, runner/collector/builder registrations, bundle, observed item, candidate and request. */
+let fixtures = 0;
+async function validationFixture() {
+  const n = ++fixtures, id = `booking-sms-validation-${n}`;
+  const environment = { id: `staging-${n}`, revision: 1 };
+  const runnerRef = { id: `runner-${n}`, revision: 1 }, collectorRef = { id: `collector-${n}`, revision: 1 }, builderRef = { id: `builder-${n}`, revision: 1 }, bundleRef = { id: `bundle-${n}`, revision: 1 };
+  const scenario = await call('scenarios', operator, { id, title: `Booking ${id} sends an SMS`, purpose: 'A confirmed booking texts the customer', steps: ['Book'], expected: ['An SMS arrives'], environment: environment.id, runner: 'Playwright', testPath: `tests/e2e/${id}.spec.ts` });
+  assert.equal(scenario.status, 200, JSON.stringify(scenario.body));
+  await validation.define(operator, { kind: 'environment', id: environment.id, expectedRevision: 0, repository, url: 'https://staging.example.test', instance: `instance-${n}`, immutable: true, services: ['api'], resources: [`test-account-${n}`] }, randomUUID());
+  for (const [ref, actor, role] of [[runnerRef, runner, 'runner'], [collectorRef, collector, 'collector'], [builderRef, builder, 'builder']] as const)
+    await validation.define(operator, { kind: 'registration', id: ref.id, expectedRevision: 0, principalId: actor.id, role, environment, adapterVersion: 'test-v1', proofs: role === 'collector' ? [`e2e:${id}`] : [], enabled: true,
+      ...(role === 'runner' ? { executionHost: 'unix:///var/run/docker.sock', attestationPublicKey, executionNetwork: 'gy-isolated' } : {}) }, randomUUID());
+  await validation.define(operator, { kind: 'bundle', id: bundleRef.id, expectedRevision: 0, scenario: id, scenarioRevision: scenario.body.revision, scenarioHash: scenario.body.hash, digest: bundleDigest, runnerImageDigest: imageDigest }, randomUUID());
+  let work = await engine.execute(operator, 'create', null, { title: `Ship ${id}`, plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Bookings text the customer', proofs: [`e2e:${id}`] }] }, randomUUID()) as Work;
+  work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
+  work = await engine.execute(worker, 'claim', work.id, {}, randomUUID());
+  work = await engine.execute(worker, 'workspace', work.id, { epoch: work.epoch, host: 'machine-a', path: `/tmp/${work.id}`, branch: `graphyard/${work.key.toLowerCase()}` }, randomUUID());
+  work = await engine.execute(worker, 'submit', work.id, { epoch: work.epoch, pr: ++pullRequest }, randomUUID());
+  const observation: Observation = { clockOffset: { min: 0, max: 0 }, candidate: { sha: head, baseSha: base, pr: work.submission!.pr, branch: work.workspaces.at(-1)!.branch, author: 'implementer' },
+    checks: [{ name: 'test', appId: 15368, result: 'success' }, { name: 'typecheck', appId: 15368, result: 'success' }], reviews: [{ reviewer: 'other', sha: head, state: 'APPROVED' }],
+    protected: true, mergeable: true, merged: false, mergeSha: null, files: [], scopeFiles: [], at: new Date().toISOString() };
+  work = await engine.observe(work.id, work.revision, observation);
+  const build: any = await validation.attestBuild(builder, { registration: builderRef, workId: work.id, expectedWorkRevision: work.revision, sourceSha: head, baseSha: base, buildInputsDigest: imageDigest, artifacts: [{ service: 'api', digest: bundleDigest }], provenanceUrl: 'https://ci.example.test/build/1' }, randomUUID());
+  const candidate = await validation.createCandidate(operator, { workId: work.id, expectedWorkRevision: work.revision, proof: `e2e:${id}`, environment, bundle: bundleRef, buildAttestationId: build.id, requiredArtifacts: ['report'], artifactStorage: 'external' }, randomUUID()) as any;
+  const request = await validation.createRequest(operator, { candidateId: candidate.id, expectedWorkRevision: (await store.list()).find(w => w.id === work.id)!.revision, runner: runnerRef, collector: collectorRef, deadline: new Date(Date.now() + 600_000).toISOString(), maxAttempts: 3 }, randomUUID()) as any;
+  return { n, id, request };
+}
+
+const validationReport = (f: Awaited<ReturnType<typeof validationFixture>>, behavior: 'passed' | 'failed', command: { requestId: string; attemptId: string; epoch: number }) =>
+  ({ ...command, execution: 'completed', behavior, executed: 2, skipped: 0, inventoryComplete: true,
+    target: { instance: `instance-${f.n}`, artifacts: [{ service: 'api', digest: bundleDigest }], measurement: 'provider', coversEntireRun: true, attribution: 'matched' },
+    bundleDigest, runnerImageDigest: imageDigest, artifacts: [{ name: 'report', digest: bundleDigest, url: 'https://private.example.test/report' }], artifactState: 'verified', executionSettled: true,
+    // A trusted pass must exercise its criterion: it holds only beside a stripped run that failed there.
+    ...(behavior === 'passed' ? { exercise: { behaviour: 'the behaviour check in the scenario', result: 'fail', executed: 1 } } : {}) });
+
+/** One validated attempt: dispatch, ack, the collection handoff, and the collector's verified result. */
+async function runAttempt(f: Awaited<ReturnType<typeof validationFixture>>, behavior: 'passed' | 'failed') {
+  const dispatched: any = await validation.dispatch(runner, { registration: { id: `runner-${f.n}`, revision: 1 } }, randomUUID());
+  assert.equal(dispatched.request.id, f.request.id);
+  const command = { requestId: f.request.id, attemptId: dispatched.attempt.id as string, epoch: dispatched.attempt.epoch as number };
+  await validation.runnerCommand(runner, 'ack', command, randomUUID());
+  await validation.collectionAuthority(collector, command);
+  const key = randomUUID(), report = validationReport(f, behavior, command);
+  return { attemptId: command.attemptId, key, report, outcome: await validation.result(collector, report, key) as { accepted: boolean; passed: boolean; reasons?: string[] } };
+}
+
+test('unit:test-case-repository — a completed validation attempt followed by a retry records each attempt as its own run', async () => {
+  const f = await validationFixture();
+  const first = await runAttempt(f, 'passed');
+  assert.equal(first.outcome.accepted, true, JSON.stringify(first.outcome)); assert.equal(first.outcome.passed, true);
+  let entry = await summary(f.id);
+  assert.equal(entry.latest.result, 'pass');
+  assert.equal(entry.latest.run.kind, 'validation'); assert.equal(entry.latest.run.id, f.request.id, 'the request is the run identity');
+  assert.equal(entry.latest.run.attempt, first.attemptId, 'the attempt is part of the run identity');
+  assert.equal(entry.runs, 1); assert.equal(entry.failures, 0);
+  // Within one attempt the publish is idempotent: the receipt replays and nothing new appends.
+  assert.deepEqual(await validation.result(collector, first.report, first.key), first.outcome);
+  assert.equal((await summary(f.id)).runs, 1);
+  // The operator retries the settled request under the same request id; the new attempt's result
+  // is a second run, so a flip is history — never silently dropped by the first attempt's row.
+  await validation.operatorCommand(operator, 'retry', { requestId: f.request.id, epoch: 1, reason: 'Re-run the case after the environment was repaired' }, randomUUID());
+  const second = await runAttempt(f, 'failed');
+  assert.equal(second.outcome.accepted, true, JSON.stringify(second.outcome)); assert.equal(second.outcome.passed, false);
+  const { body } = await history(f.id);
+  assert.deepEqual(body.runs.map((row: ScenarioRun) => [row.result, row.run.attempt]), [['fail', second.attemptId], ['pass', first.attemptId]], 'each attempt is its own run, newest first');
+  for (const row of body.runs as ScenarioRun[]) {
+    assert.equal(row.run.kind, 'validation'); assert.equal(row.run.id, f.request.id);
+    assert.equal(row.sha, head); assert.equal(row.baseSha, base); assert.equal(row.pr, pullRequest);
+    assert.equal(row.producer, collector.id);
+  }
+  entry = await summary(f.id);
+  assert.equal(entry.latest.result, 'fail', 'the newest attempt decides the current result');
+  assert.equal(entry.runs, 2); assert.equal(entry.failures, 1);
+  assert.equal(entry.flaky, true); assert.match(entry.flakyReason!, new RegExp(`passed and failed on commit ${head.slice(0, 8)}`));
 });

@@ -15,7 +15,9 @@ const Pr = ({ pr }: { pr: number | null }) => pr ? <> · <Term term="pull reques
 /** Where a run came from: its commit, pull request, item and its lane's own run identity. */
 export const RunLine = ({ run }: { run: ScenarioRun }) => <>
   <Result result={run.result}/> <Commit sha={run.sha}/><Pr pr={run.pr}/> · {run.workKey}
-  {' · '}{run.run.url ? <a href={run.run.url} target="_blank" rel="noopener noreferrer">{run.run.kind} run {run.run.id.slice(0, 12)}{run.run.attempt ? ` attempt ${run.run.attempt}` : ''} ↗</a> : <>{run.run.kind} run {run.run.id.slice(0, 12)}</>}
+  {' · '}{run.run.url
+    ? <a href={run.run.url} target="_blank" rel="noopener noreferrer">{run.run.kind} run {run.run.id.slice(0, 12)}{run.run.attempt ? ` attempt ${String(run.run.attempt).slice(0, 8)}` : ''} ↗</a>
+    : <>{run.run.kind} run {run.run.id.slice(0, 12)}{run.run.attempt ? ` attempt ${String(run.run.attempt).slice(0, 8)}` : ''}</>}
   {run.scenarioRevision ? ` · v${run.scenarioRevision}` : ''} · {run.executed} executed / {run.skipped} skipped · {run.producer} · {day(run.at)}{run.withdrawn ? <strong className="amber"> · withdrawn</strong> : null}</>;
 
 type Filter = 'all' | 'fail' | 'flaky' | 'never';

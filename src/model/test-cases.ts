@@ -13,10 +13,11 @@ export type CaseResult = 'pass' | 'fail' | 'skipped';
 /** The trusted run a result came from, in its own lane's identity. */
 export interface RunIdentity {
   /** `ci`: a GitHub Actions job read back by the control plane; `github-actions`: a producer's
-   * attested workflow run; `validation`: a validation request attempt; `producer`: a bound
-   * producer session, identified by the evidence record it wrote. */
+   * attested workflow run; `validation`: a validation request, identified per attempt so a
+   * retried request records each attempt's own result; `producer`: a bound producer session,
+   * identified by the evidence record it wrote. */
   kind: 'ci' | 'github-actions' | 'validation' | 'producer';
-  id: string; attempt: number | null; url: string | null;
+  id: string; attempt: number | string | null; url: string | null;
 }
 export interface ScenarioRun {
   seq: number; scenarioId: string; proof: string; result: CaseResult;
@@ -37,7 +38,7 @@ export const caseResult = (evidence: Pick<Evidence, 'result' | 'executed' | 'ski
 export function runIdentity(evidence: Evidence): RunIdentity {
   if (evidence.ciRun) return { kind: 'ci', id: evidence.ciRun.runId, attempt: evidence.ciRun.runAttempt, url: `https://github.com/${evidence.ciRun.repository}/actions/runs/${evidence.ciRun.runId}/job/${evidence.ciRun.jobId}` };
   if (evidence.provenance) return { kind: 'github-actions', id: evidence.provenance.runId, attempt: evidence.provenance.runAttempt, url: evidence.provenance.artifact.url };
-  if (evidence.validation) return { kind: 'validation', id: evidence.validation.requestId, attempt: null, url: null };
+  if (evidence.validation) return { kind: 'validation', id: evidence.validation.requestId, attempt: evidence.validation.attemptId, url: null };
   return { kind: 'producer', id: evidence.id, attempt: null, url: evidence.url ?? null };
 }
 
@@ -50,7 +51,7 @@ export function scenarioRun(work: Pick<Work, 'id' | 'key' | 'candidate'>, eviden
     workId: work.id, workKey: work.key, pr: work.candidate?.sha === evidence.sha ? work.candidate.pr : null,
     run: runIdentity(evidence), evidenceId: evidence.id, producer: evidence.producer, at: evidence.at };
 }
-/** One run is recorded once: a retried publish of the same lane run on the same commit is the same row. */
+/** One run is recorded once: a retried publish of the same lane run — the same attempt, for validation — on the same commit is the same row. */
 export const runKey = (run: Omit<ScenarioRun, 'seq'>) => [run.proof, run.sha, run.baseSha, run.run.kind, run.run.id, run.run.attempt ?? 0].join(':');
 
 /** The window flakiness is judged over, named on the Tests page so the flag can be held to it. */
