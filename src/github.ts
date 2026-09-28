@@ -13,7 +13,9 @@ import type { GitHubCacheStore } from './github-cache.js';
 import { nextAction } from './model/next-action.js';
 import { foldDecisions } from './model/approval.js';
 import { normalMergeState, repairAudit, repairAuditEvent, repairLaneVerdict, type RepairAudit, type RepairLaneVerdict } from './master/repair-lane.js';
-import { currentOptimisticMerge, describeGuard, mainGuard, postMergeVerdict, retestAfterRevert, revertRefusal, verdictCommit, type GuardState, type OptimisticMerge, type OptimisticRevert } from './optimistic-merge.js';
+import { currentOptimisticMerge, describeGuard, mainGuard, mainGuardIntervalMs, postMergeVerdict, publishedOptimisticLane, publishOptimisticLane, retestAfterRevert, revertOverdueThresholdMs, revertRefusal, revertWaitedMs, verdictCommit, type GuardState, type OptimisticMerge, type OptimisticRevert } from './optimistic-merge.js';
+/** The main guard's tick lives with the guard's own logic (src/optimistic-merge.ts); re-exported here for the job loop and its tests. */
+export { mainGuardIntervalMs };
 export { CHECK_NAME };
 import { alreadyMergeableRefusal, approvalOfHead, baseRefreshNeeded, dismissedVerdict, enqueueRequestCurrent, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, owedCheckReruns, pendingRestore, predictQueue, queuePlacement, queueRef, mergeCheckBranch, treeIdenticalPrediction, type GitHubMergeQueueState, type HeadForcePush, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type ObservedApproval, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread } from './merge-queue.js';
 import { blockedFeatures, controlPlanePermissions, describeShortfall, permissionShortfalls, requiredPermissions, type PermissionFeature, type PermissionLevel, type PermissionShortfall } from './github-permissions.js';
@@ -590,9 +592,11 @@ export class GitHub {
   private baseChangeLists = new Map<string, string[] | null>();
   /**
    * Whether the optimistic lane (GY-500) is on, as the published `mergeQueue.optimistic` setting
-   * reads it; null until the job loop loads the settings and means the default (on). With the lane
-   * off nothing reads the files the base changed since a candidate's bound base, so `observe`
-   * spends no compare on them.
+   * reads it once a job on this instance loaded the settings; null means unread here. With the
+   * lane off nothing reads the files the base changed since a candidate's bound base, so `observe`
+   * spends no compare on them. An instance that never loads settings itself — the submission
+   * observer's (engine.ts observeSubmission) — falls back to what the process published
+   * (publishedOptimisticLane, GY-925); until either has read the setting, the compare is paid.
    */
   optimisticLaneEnabled: boolean | null = null;
   /** Blob bytes by sha (GY-863's landing merge-result judgement); a blob's content is immutable, so each is asked once. */
@@ -1157,8 +1161,12 @@ export class GitHub {
     const revertedDelivery = pr.merged && work.stage !== 'done' ? await this.revertedDelivery(work, pr, files, branch, peers, budget) : undefined;
     // What the base changed since the bound base: an optimistic merge (GY-500) needs it disjoint from the head's own files.
     // With the published lane off, nothing reads the comparison, so an install that turned the lane
-    // off pays no compare per (base, tip) pair per open pull request on every base move.
-    const baseChanges = this.optimisticLaneEnabled === false || pr.merged || pr.state !== 'open' ? undefined : await this.baseChangesSince(bound, branch.tip);
+    // off pays no compare per (base, tip) pair per open pull request on every base move. The lane
+    // travels with this instance when the job loop read the setting on it, and — a submission
+    // observation observes through its own instance, which never loads settings — with the process
+    // beside it (GY-925); until either has read the setting, the compare is paid.
+    const laneEnabled = this.optimisticLaneEnabled ?? publishedOptimisticLane();
+    const baseChanges = laneEnabled === false || pr.merged || pr.state !== 'open' ? undefined : await this.baseChangesSince(bound, branch.tip);
     const candidateBase = pr.merged && work.candidate && work.candidate.sha === pr.head.sha ? work.candidate.baseSha : bound;
     // A head contains the base tip by ancestry, or as a published tip whose bound base is the
     // tip's tree-identical predecessor, or as a published tip behind other queue entries, whose
@@ -2174,22 +2182,22 @@ export async function repairLaneStep(engine: Pick<Engine, 'store' | 'enqueueRequ
  * each guard state (`optimistic.guard`, once per state, culprit and probe) and each revert step
  * (`optimistic.revert.*`). A revert it cannot make cleanly is recorded as refused, holds further
  * optimistic merges, and is released once the base branch tip passes the required suite again.
+ * A revert still open past its overdue threshold is named so by the guard's own description —
+ * which master status renders wherever it describes the guard (GY-925) — and its
+ * `optimistic.revert.pending` step records the same threshold (recordRevertPending).
  */
-export const mainGuardIntervalMs = 30_000;
 /**
  * One tick with a revert not landed at once (a required merge queue, for example): recorded as its
  * own `optimistic.revert.pending` step instead of the guard republishing and re-requesting in
  * silence every 30 s (GY-518). The first tick records, and it records again only when the revert
- * turns `overdue` — a revert that has now waited longer than the CI duration observed on the
- * culprit's own merge commit, the brief's attention threshold (floored at two guard ticks so a
- * fast suite never flags within the same tick it was observed in).
+ * turns `overdue` — past the shared threshold (revertOverdueThresholdMs) the guard's own
+ * description also reads, so master status names the stall wherever it describes the guard
+ * (GY-925); the step stays the ledger's durable trace of it.
  */
 async function recordRevertPending(engine: Pick<Engine, 'store'>, guard: Extract<GuardState, { state: 'reverting' }>, now: Date): Promise<void> {
-  const culprit = (await engine.store.list()).find(item => item.id === guard.culprit.id)?.optimisticMerges?.find(entry => entry.mergeSha === guard.culprit.mergeSha);
-  const observedCiMs = culprit?.postMerge?.observedAt ? Math.max(0, Date.parse(culprit.postMerge.observedAt) - Date.parse(guard.culprit.mergedAt)) : null;
-  const waitedMs = Math.max(0, now.getTime() - Date.parse(guard.revert.at));
+  const waitedMs = revertWaitedMs(guard.revert, now), thresholdMs = revertOverdueThresholdMs(guard.culprit);
   const details = { key: guard.culprit.key, mergeSha: guard.culprit.mergeSha, pr: guard.revert.pr, head: guard.revert.head,
-    waitedMs, thresholdMs: Math.max(observedCiMs ?? 0, 2 * mainGuardIntervalMs), overdue: waitedMs > Math.max(observedCiMs ?? 0, 2 * mainGuardIntervalMs), at: now.toISOString() };
+    waitedMs, thresholdMs, overdue: waitedMs > thresholdMs, at: now.toISOString() };
   // Postgres returns jsonb objects with their keys reordered, so the identity is built from values, never serialized objects.
   const last = (await engine.store.pool.query("SELECT payload->'details' AS details FROM events WHERE work_id IS NULL AND kind='optimistic.revert.pending' ORDER BY seq DESC LIMIT 1")).rows[0]?.details;
   if (last && last.key === details.key && last.pr === details.pr && last.head === details.head && last.overdue === details.overdue) return;
@@ -2453,8 +2461,11 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
     batchSizeRead.set(engine, Date.now());
     await Promise.all([engine.loadMergeBatchSize(), engine.loadParallelTips(), engine.loadRerunFailedChecks(), engine.loadOptimisticExclude()]).catch(() => batchSizeRead.delete(engine));
   }
-  // The observation spends its base compare only while the published setting keeps the lane on.
+  // The observation spends its base compare only while the published setting keeps the lane on —
+  // on this instance, and beside it for the submission observer's own instance, which never loads
+  // settings itself (GY-925).
   github.optimisticLaneEnabled = engine.optimisticMerge;
+  publishOptimisticLane(engine.optimisticMerge);
   // The main guard (GY-500) is the installation's, not a job's: it runs here on its own interval,
   // and a failure of it is recorded and retried on the next interval, never failing a job.
   const guardedAt = guardRead.get(engine);

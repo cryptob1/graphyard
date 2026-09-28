@@ -53,7 +53,7 @@ Above one, each entry validates on its own tip: defaults mean four tips at once 
 
 ### Optimistic merges
 
-`mergeQueue.optimistic` (default on, independent of `mergeQueue.rerunFailedChecks`): a green entry disjoint from base changes and shared infrastructure lands head-bound, unqueued; a main guard [reverts](master-agent.md#repair-lane) and reopens culprits (`master status`: `optimisticMerge`). Each repository's shared infrastructure is the master config's `mergeQueue.optimisticExclude` globs — onboarding writes product defaults (manifests and lockfiles, CI config, test helpers, schema and migration directories) — so a change to an excluded path never merges optimistically, nor anything whose base changed one since its run; `optimistic: false` turns the lane off.
+`mergeQueue.optimistic` (default on, independent of `mergeQueue.rerunFailedChecks`): a green entry disjoint from base changes and shared infrastructure lands head-bound, unqueued; a main guard [reverts](master-agent.md#repair-lane) and reopens culprits (`master status`: `optimisticMerge`). Each repository's shared infrastructure is the master config's `mergeQueue.optimisticExclude` globs — onboarding writes product defaults (manifests and lockfiles, CI config, test helpers, schema and migration directories) — so a change to an excluded path never merges optimistically, nor anything whose base changed one since its run; a configured list still identical to a shipped default list reads as the current defaults, so a default glob added later covers the installs onboarded before it (GY-925), while a list the repository tuned away from the defaults stands exactly as configured; `optimistic: false` turns the lane off.
 
 ### Proofs in CI
 
