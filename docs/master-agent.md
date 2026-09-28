@@ -27,8 +27,7 @@ Unless created `"systemDriven": false`, an item refuses hand `dispatch`, `merge`
 
 ### Session liveness is reconciled, not trusted
 
-**Closing finished sessions is not the master's
-manual duty.** A sweep runs on every automatic-dispatch tick (`run.dispatchIntervalSeconds`, default 10, 30 at most). A handle closes at the second consecutive sweep
+**The control plane reconciles session liveness; closing sessions is not the master's manual duty.** A sweep runs on every automatic-dispatch tick (`run.dispatchIntervalSeconds`, default 10, 30 at most). A handle closes at the second consecutive sweep
 that misses it; an unobserved one is left alone for its first 3 minutes. A handle another host launched is left to
 that host's loop. `sessions.unseen` lists stale handles. `dispatch.sessionReconcile` reports each closure:
 
@@ -53,7 +52,7 @@ Each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `linge
 
 With `run.research` set (`model`, `timeoutMinutes` 15, `tokenBudget`), a feature (or `"research": true`) gets one read-only Pi briefing per revision. Product questions: Needs you; build follows the recommendation, a differing answer reworks, failure never blocks.
 
-`Recurring <class> faults` items and `invariant:` faults past `invariantBoundMinutes` get a cycling read-only diagnostician (`run.diagnostician` `model`/`fallbackModel`/`serverLogCommand`, or registry role); approved decisions release its fix or `close` it as duplicate; recurrences after the fix delivers re-file.
+`Recurring <class> faults` items and `invariant:` faults past `invariantBoundMinutes` get a cycling read-only diagnostician (`run.diagnostician`: `model`/`fallbackModel`/`serverLogCommand`/registry role); approved decisions release its fix or `close` it as duplicate; post-delivery recurrences re-file.
 
 ## Machine-filed backlog
 
