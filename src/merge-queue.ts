@@ -325,6 +325,8 @@ export interface QueueHistoryEntry {
   at: string; event: 'enqueued' | 'predicted' | 'ejected' | 'dissolved'; sequence: number; reason?: string; tip?: string;
   /** For a prediction: the entries the tip was published behind, and the item's own reviewed head it was built from. For a speculative-conflict ejection: the entries the conflicting merge was predicted behind (GY-321). */
   predecessors?: string[]; from?: string;
+  /** For an ejection: the ejection's typed conflict record (`QueueEjection.conflict`), so the audit trail tells a conflict from any other ejection without reading `reason` (GY-583). Absent on other events and on entries that predate the field. */
+  conflict?: { base: string | null } | null;
 }
 
 /**
@@ -568,6 +570,13 @@ export function staleMergeability(work: Pick<Work, 'candidate' | 'observation' |
 export function disprovedConflict(work: Pick<Work, 'baseRefresh' | 'policyRevision'>, observation: Pick<Observation, 'candidate' | 'baseTip'>): StaleMergeability | null {
   const stale = work.baseRefresh?.stale;
   return stale && stale.head === observation.candidate.sha && stale.base === observation.baseTip && stale.policyRevision === work.policyRevision ? stale : null;
+}
+/**
+ * The observation with its conflict disproved by `stale` (GY-375): it reads mergeable and not
+ * conflicting, and GitHub's raw reading is kept beside that under `disproved` (GY-390).
+ */
+export function withDisprovedConflict<T extends Pick<Observation, 'mergeable' | 'conflicting' | 'disproved'>>(observation: T, stale: StaleMergeability): T {
+  return { ...observation, mergeable: true, conflicting: false, disproved: { mergeable: observation.mergeable, conflicting: !!observation.conflicting, reading: stale.reading } };
 }
 /**
  * A branch that carried another item's unlanded commits, and what the control plane did about it.
@@ -897,6 +906,24 @@ export function latestCheck(checks: Observation['checks']): Observation['checks'
   }, undefined);
 }
 
+declare module './model/work.js' {
+  interface Gate {
+    /** The server's trusted CI Apps, recorded on the test gate for downstream decisions. */
+    ciAppIds?: number[];
+  }
+}
+
+/**
+ * Select exactly the run the test gate uses, including its configured App trust boundary.
+ * Legacy snapshots without that metadata use the engine's historical GitHub Actions default;
+ * the next gate evaluation records the installation's actual configuration, including [].
+ */
+export function requiredCheck(work: Pick<Work, 'candidate' | 'observation' | 'gates'>, name: string, ciAppIds: readonly number[] = work.gates.find(gate => gate.name === 'test')?.ciAppIds ?? [15368]) {
+  const observation = work.observation, candidate = work.candidate;
+  if (!candidate || !observation || observation.candidate.sha !== candidate.sha || observation.candidate.baseSha !== candidate.baseSha) return undefined;
+  return latestCheck(observation.checks.filter(run => run.name === name && ciAppIds.includes(run.appId)));
+}
+
 /**
  * The violation an observed, unauthorized merge records when a two-party reconciliation of it was
  * refused; the engine writes it as `<prefix><decision id> refused: <reasons>`. Read here because
@@ -991,8 +1018,14 @@ export function ejectionReason(work: Work, ciAppIds: number[], all: Work[] = [],
   const threads = conversationProtectionRefusal(work);
   if (threads) return threads;
   // Evidence binds the tip exactly or carried across a Graphyard-authored tip; either way a
-  // failure or a withdrawal of it is an adverse conclusion about this tip.
-  const proof = work.evidence.find(item => item.trusted && item.result === 'fail' && evidenceBindsCandidate(work, item) && item.policyRevision === work.policyRevision);
+  // failure or a withdrawal of it is an adverse conclusion about this tip. One record is not:
+  // a trusted `manual:` proof whose executed is 0 (GY-868) judged nothing — it is the unexercised
+  // finding the gates read it as (producerManualFailures excludes it), answered by the attestation
+  // the loop requests for it exact or carried (unexercisedFindings reads the carry), so the entry
+  // is held for that attestation rather than ejected for a failure no rework would ever be
+  // requested for (GY-875).
+  const proof = work.evidence.find(item => item.trusted && item.result === 'fail' && evidenceBindsCandidate(work, item) && item.policyRevision === work.policyRevision
+    && !(item.proof.startsWith('manual:') && item.executed === 0));
   if (proof) return `Proof ${proof.proof} failed on speculative tip ${tip}`;
   // A withdrawn proof is an explicit adverse conclusion, not a missing one: the entry leaves the
   // queue instead of holding its position while everything behind it waits.
@@ -1012,6 +1045,16 @@ export function currentRestore(work: Pick<Work, 'candidate' | 'baseRefresh' | 'p
   if (!refresh?.restore || !candidate || refresh.policyRevision !== work.policyRevision) return null;
   // Pending: the contaminated head is still the candidate. Performed: the candidate is what the restore produced.
   return refresh.restore.contaminated === candidate.sha || refresh.head === candidate.sha ? refresh : null;
+}
+/**
+ * GY-638. Whether the restore recorded for exactly the current head found no own reviewed head
+ * under the foreign commits: no restore is left to promise this head, so its gates route it to
+ * rework instead of the resync whose fresh observation would only repeat the same refusal.
+ */
+export function unrepairableRestore(work: { candidate?: Work['candidate']; baseRefresh?: Work['baseRefresh']; policyRevision?: number }): boolean {
+  const refresh = work.baseRefresh, candidate = work.candidate, restore = refresh?.restore;
+  if (!restore || !candidate || refresh!.policyRevision !== work.policyRevision) return false;
+  return restore.outcome === 'unrepairable' && (restore.contaminated === candidate.sha || refresh!.head === candidate.sha);
 }
 /** A repair the coordinator requested for the current head that has not run yet. */
 export function pendingRestore(work: Work): BranchRestore | null {
@@ -1641,7 +1684,7 @@ export interface CheckRerun {
 }
 /** The installation-ledger event recording the rerun count the master published (POST /api/merge-queue). */
 export const rerunFailedChecksEvent = 'merge-queue.rerun-failed-checks';
-/** A rerun GitHub accepted but that no new check run shows after this long no longer holds the failure. */
+/** An owed or accepted rerun with no new check run after this long no longer holds the failure. */
 export const checkRerunVisibilityMs = 15 * 60_000;
 /** Rerun records kept on an item; older ones remain on the ledger. */
 export const checkRerunLimit = 20;
@@ -1660,10 +1703,10 @@ export function holdingCheckRerun(work: Pick<Work, 'checkReruns'>, sha: string, 
  * owed or requested rerun: the loop's decisions and the test gate's next action then wait for the
  * rerun instead of returning the head to its worker, which would cost the bindings the rerun keeps.
  */
-export function checkRerunHeld(work: Pick<Work, 'checkReruns' | 'candidate' | 'observation'>, check: string): boolean {
+export function checkRerunHeld(work: Pick<Work, 'checkReruns' | 'candidate' | 'observation' | 'gates'>, check: string): boolean {
   const observation = work.observation, sha = work.candidate?.sha;
   if (!observation || !sha || observation.candidate.sha !== sha) return false;
-  return !!holdingCheckRerun(work, sha, check, latestCheck((observation.checks ?? []).filter(run => run.name === check)));
+  return !!holdingCheckRerun(work, sha, check, requiredCheck(work, check));
 }
 /** The required check whose newest trusted run failed on the observed candidate and is not held by a rerun. */
 function failedRequiredCheck(work: Work, observation: Observation, ciAppIds: readonly number[] | null): string | undefined {
@@ -1697,8 +1740,8 @@ export function reconcileCheckReruns(work: Work, ciAppIds: readonly number[], li
       if (entry.state === 'owed') { const started = { ...entry, state: 'requested' as const, rerunId: run.id }; transitions.push({ kind: 'check.rerun.requested', rerun: started }); return started; }
       return entry.rerunId === run.id ? entry : { ...entry, rerunId: run.id };
     }
-    if (entry.state === 'requested' && now.getTime() - Date.parse(entry.at) >= checkRerunVisibilityMs) {
-      const expired = { ...entry, state: 'expired' as const, detail: `GitHub accepted the rerun but no new ${entry.check} run appeared within ${checkRerunVisibilityMs / 60_000} minutes`, resolvedAt: at };
+    if (now.getTime() - Date.parse(entry.at) >= checkRerunVisibilityMs) {
+      const expired = { ...entry, state: 'expired' as const, detail: `${entry.state === 'owed' ? 'The rerun remained owed' : 'GitHub accepted the rerun'} but no new ${entry.check} run appeared within ${checkRerunVisibilityMs / 60_000} minutes`, resolvedAt: at };
       transitions.push({ kind: 'check.rerun.expired', rerun: expired }); return expired;
     }
     return entry;
@@ -1727,6 +1770,18 @@ function rerunOutcome(work: Work, sha: string, check: string): string {
   return !last ? '' : last.state === 'failed' ? ', again after one rerun of its failed jobs'
     : last.state === 'refused' ? `; its rerun was refused: ${last.detail ?? 'no reason given'}`
     : last.state === 'expired' ? `; ${last.detail}` : '';
+}
+/** The test gate exposes the rerun even when this candidate has never entered the queue. */
+export function checkRerunStatus(work: Work, check: string): string {
+  const sha = work.candidate?.sha;
+  const last = checkReruns(work).filter(entry => entry.sha === sha && entry.check === check).at(-1);
+  if (!last) return '';
+  const state = last.state === 'owed' ? 'one rerun of its failed jobs is owed'
+    : last.state === 'requested' ? `its failed jobs are rerunning${last.runId ? ` (workflow run ${last.runId})` : ''}`
+    : last.state === 'failed' ? 'failed again after rerunning its failed jobs'
+    : last.state === 'passed' ? 'passed'
+    : `${last.state}: ${last.detail ?? 'no reason given'}`;
+  return `; rerun: ${state}`;
 }
 /** The reruns on the current candidate that still hold a failure, as `<sha>: <what is awaited>` lines. */
 export function pendingCheckReruns(work: Work): string[] {

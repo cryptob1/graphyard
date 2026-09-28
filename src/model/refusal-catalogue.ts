@@ -77,7 +77,7 @@ export const gateRefusalCatalogue: RefusalShape[] = [
     example: 'Every configured reviewer profile is exhausted for this candidate (reviewer-a); add reviewer capacity or select another review provider' },
   { gate: 'review', id: 'provider-reason', match: /.*/, example: 'Pull request is draft; mark it ready to request code review', kinds: ['request-review', 'request-rework', 'resync', 'escalate', 'dispatch'], free: true },
   // test
-  { gate: 'test', id: 'check-not-passed', match: /^Required CI check .+ has not passed on the current candidate$/, kinds: ['resync', 'request-rework'],
+  { gate: 'test', id: 'check-not-passed', match: /^Required CI check .+ has not passed on the current candidate(?:; rerun: [\s\S]*)?$/, kinds: ['resync', 'request-rework'],
     example: 'Required CI check test has not passed on the current candidate' },
   // acceptance
   { gate: 'acceptance', id: 'criterion-unproven', match: /^AC-\d+: .+ needs trusted passing evidence/, kinds: ['dispatch', 'escalate'],
@@ -99,7 +99,7 @@ export const gateRefusalCatalogue: RefusalShape[] = [
   { gate: 'merge', id: 'queue-position', match: /^Merge queue position \d+ of \d+: .+ is ahead$/, example: 'Merge queue position 2 of 3: GY-1 is ahead', kinds: ['merge'] },
   { gate: 'merge', id: 'tip-unpublished', match: /^Speculative tip on predicted base [0-9a-f]+ has not been published and validated for this candidate$/, kinds: ['merge'],
     example: 'Speculative tip on predicted base bbbbbbbbbbbb has not been published and validated for this candidate' },
-  { gate: 'merge', id: 'tip-validating', match: /^Merge queue is validating speculative tip [0-9a-f]+: Required CI check .+ has not passed on the current candidate$/, kinds: ['merge'],
+  { gate: 'merge', id: 'tip-validating', match: /^Merge queue is validating speculative tip [0-9a-f]+: Required CI check .+ has not passed on the current candidate(?:; rerun: [\s\S]*)?$/, kinds: ['merge'],
     example: 'Merge queue is validating speculative tip aaaaaaaaaaaa: Required CI check test has not passed on the current candidate' },
   { gate: 'merge', id: 'tip-awaited', match: /^Waiting for \S+ to publish its speculative tip$/, example: 'Waiting for GY-1 to publish its speculative tip', kinds: ['merge'] },
   { gate: 'merge', id: 'predecessor-wait', match: /^Waiting for \S+(?:, \S+)* to land or leave the merge queue: /, kinds: ['merge'],

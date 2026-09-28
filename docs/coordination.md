@@ -9,7 +9,7 @@ A criterion states an outcome and its proofs:
 {"id":"AC-1","text":"Retrying a confirmed booking produces exactly one SMS request","proofs":["integration:sms-idempotency"]}
 ```
 
-`unit:` and `integration:` proofs are producer-runnable on the exact head ([automatic dispatch](master-agent.md#automatic-dispatch-at-submit)). A `manual:` proof is attested through a two-party decision unless `producerProofs` lists it, making it producer-runnable. `e2e:` proofs use the [validation runner](validation.md).
+`unit:`/`integration:` proofs are producer-runnable on the exact head ([automatic dispatch](master-agent.md#automatic-dispatch-at-submit)). A `manual:` proof is attested through a two-party decision unless `producerProofs` lists it; judged, not title-counted, its trusted pass proves it whatever it executed (`unit:`/`integration:`/`e2e:` need `executed > 0`). `e2e:` proofs use the [validation runner](validation.md).
 
 ## Revise requirements explicitly
 
@@ -29,7 +29,7 @@ The gate is the reviewer's approval of the exact head plus required CI; threads 
 
 ### Keep current with `graphyard sync`
 
-The landing check compares the candidate's changes since its merge base with the commit it would land on (live or predicted base). Each out-of-scope file is judged by the head's three-way merge onto it, not its blob: a change the commit has since extended, or one only the base made, merges to the commit's version, while a head restoring the merge-base version over it is still refused. Out-of-scope deletions and rewrites remain refused. Every observation recomputes this check, so stale refusals clear without a push. The simulated-day soak (`tests/soak.test.ts`) runs this check in the real loop across landing-base moves, and stages a window where GitHub answers compares without a usable merge base; its false refusals hold only there, clearing on the same heads without a worker round.
+The landing check compares the candidate's changes since its merge base with the commit it would land on (live or predicted base). Each out-of-scope file is judged by the head's three-way merge onto it, not its blob: a change the commit has since extended, or one only the base made, merges to the commit's version, while a head restoring the merge-base version over it is still refused. Out-of-scope deletions and rewrites remain refused. Every observation recomputes this check, so stale refusals clear without a push. The simulated-day soak (`tests/soak.test.ts`) runs this check across landing-base moves, and stages a window where GitHub answers compares without a usable merge base; its false refusals hold only there.
 
 Before any push, `graphyard sync GY-N` merges `origin/BASE` (never a rebase), regenerates, commits and prints the same classification. Restore an out-of-scope file with `git checkout BASE_TIP -- PATH`.
 

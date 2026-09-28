@@ -1,11 +1,12 @@
 // Concern: cycle step 4c — request and supervise the routine decisions and their approver sessions.
 import { decisionSituation, uncitedRefusals } from '../model/approval.js';
 import type { Work } from '../model.js';
+import { canonicalJson } from '../onboarding.js';
 import { type ContainmentAssessment, type HerdrAgent, type RoleCapacity, approverProfile, ownLoginAccounts, approverSessionId, approverSessionName, approvedMerge, decisionInput } from '../master.js';
 import { type ApprovalWatch, approvalWatchSchema, carriedSession, type DaemonActionKind, latencySampleSchema, message, scopeMeasurementSchema } from './state.js';
 import { decisionKey, scopeAnsweredAt, scopeKey, scopeOutcomeAnswered } from './reconcile.js';
 import { readyToRetry } from './sessions.js';
-import { approvalStep, boundDetail, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, maxApproverCloses, maxRefusalAnswers, maxApproverLaunches, maxDecisionRequests, namePaths, neededDecision, observedFrom, resolveCovers, reworkDecisionReason, refusalNamedIn, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, standingVerdict, withheldDecision } from './decisions.js';
+import { approvalStep, boundDetail, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, maxApproverCloses, maxRefusalAnswers, maxApproverLaunches, maxDecisionRequests, namePaths, neededDecision, observedFrom, resolveCovers, reworkDecisionReason, refusalNamedIn, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, standingVerdict, withheldDecision } from './decisions.js';
 import { type DaemonEffects, failoverKey, record, stoppedStates } from './effects.js';
 import { detectExhaustion } from '../model/capacity.js';
 import { capacityRefusal } from '../fleet.js';
@@ -298,15 +299,30 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       // The server refuses a request identical to a refused one unless it cites that refusal. The loop
       // reaches this point only on grounds no refused request of its own rested on (a rework binding
       // names its grounds, and a refused binding is never requested again), so it answers the prior
-      // refusals of this action on the item by citing them. A refusal an earlier refused request
-      // already cited is answered through it, so only the uncited ones are named: however many
-      // refusals the item gathers, the citation stays the newest one or few (GY-163). A refusal
-      // stands only against the candidate and base it judged (GY-229): one refused for an earlier
-      // candidate is not this request's to answer, so only this candidate's refusals are cited.
-      // A recover request is situated the same way and answers its refusals alike (GY-265).
+      // refusals of this action on the item by citing them. The first scan judges the exact input the
+      // request carries — the routine input plus its grounds binding (GY-407) — so a refusal the
+      // server would name is cited here, before it costs a refused round-trip and one of the bounded
+      // retries (GY-475); the ledger keeps inputs as jsonb, which does not keep key order, so the
+      // inputs compare in a canonical form. The second keeps answering the refusals recorded before
+      // the binding was kept, which name only the bare attestation no request carries any more, as
+      // they always were answered. A refusal an earlier refused request already cited is answered
+      // through it, so only the uncited ones are named: however many refusals the item gathers, the
+      // citation stays the newest one or few (GY-163). A refusal stands only against the candidate
+      // and base it judged (GY-229): one refused for an earlier candidate is not this request's to
+      // answer, so only this candidate's refusals are cited. A recover request is situated the same
+      // way and answers its refusals alike (GY-265).
       const situated = decision.action === 'rework' || decision.action === 'recover' ? decision.action : null;
       const prefix = decision.action === 'rework' ? `${observedFrom(item)} ` : '';
-      let refused = situated ? uncitedRefusals(history.map(entry => ({ ...entry, reason: entry.reason ?? '' })), situated, decisionInput(situated, item, {}), (a, b) => JSON.stringify(a) === JSON.stringify(b), decisionSituation(situated, item)) : [];
+      let refused: string[] = [];
+      if (situated) {
+        const judged = history.map(entry => ({ ...entry, reason: entry.reason ?? '' }));
+        const same = (a: unknown, b: unknown) => canonicalJson(a) === canonicalJson(b);
+        const situation = decisionSituation(situated, item);
+        refused = [...new Set([
+          ...uncitedRefusals(judged, situated, decisionInput(situated, item, decision.input ?? {}), same, situation),
+          ...uncitedRefusals(judged, situated, decisionInput(situated, item, {}), same, situation),
+        ])];
+      }
       let reason = situated ? reworkDecisionReason(prefix, decision.reason, refused, situated) : fitDecisionReason('', decision.reason, '');
       if (reason === null) {
         // Retrying would be refused every time; the request is not sent, and the master is told once.
@@ -478,14 +494,17 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     const aRank = waitingRank(a), bRank = waitingRank(b);
     return aRank === bRank ? 0 : aRank < bRank ? -1 : 1;
   }) : snapshot.work;
+  // A producer request whose attempts are used up calls for a rework once its escalation has stood
+  // a cycle (GY-496): the proof step raised it on an earlier cycle, with each attempt's outcome.
+  const exhausted = (await cycle.exhaustedProofs()).filter(entry => { const raised = state.actions[exhaustedProofKey(entry)]; return !!raised && raised.cycle < state.cycle; });
   for (const item of workToProcess) await isolate('decision', item, item.key, async () => {
     const assessment = assessments[item.id];
     // A request step 2 refused this cycle is read as it was decided, not as the snapshot saw it.
     const scoped = settled.get(item.id) ?? item;
-    const decision = scopeRoutineDecision(scoped, clock, findingsJudged(scoped)) ?? routineDecision(item, config, clock, assessment);
+    const decision = scopeRoutineDecision(scoped, clock, findingsJudged(scoped)) ?? routineDecision(item, config, clock, assessment, exhausted);
     if (!decision) {
       // Still called for, only not attestable this cycle: its request is not one the item moved past.
-      const called = neededDecision(item, config);
+      const called = neededDecision(item, config, exhausted);
       if (called) unattestable.add(decisionKey(item, called));
       // The item needs the decision and the loop will not attest what it could not verify. Step 3b
       // has already escalated an open item whose fence this host assessed and could not settle.
