@@ -86,7 +86,7 @@ A pass is trusted only when that stripped run failed with a case executed; other
 
 ## Guarded merges
 
-`master merge GY-N|--all` asks [GitHub to merge](github.md#merge-queue) only under a current authorization for the exact head, base and policy. Protocol skew refuses (`… deploy main first`).
+`master merge GY-N|--all` asks [GitHub to merge](github.md#merge-queue) only under a current authorization for the exact head, base and policy.
 
 ### Repair lane
 
