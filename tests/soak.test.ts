@@ -14,7 +14,8 @@ import { processJob } from '../src/github.js';
 import { Refusal, type Principal, type Work } from '../src/model.js';
 import { approverSessionName, decisionInput, masterConfigSchema, mergeExecutor, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { mergeBatchSize, mergeParallelTips, optimisticExcludeGlobs, optimisticMergeEnabled, rerunFailedChecks } from '../src/master/profiles.js';
-import { emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
+import { answeringWidening, emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
+import { plannedFilesMax, type ScopeRequestState } from '../src/model/scope.js';
 import { Launcher } from '../src/daemon/cycle.js';
 import { successorWidening } from '../src/model/successors.js';
 import { systemInvariants, type InvariantCheck } from '../src/model/invariants.js';
@@ -114,6 +115,23 @@ const plan = {
 const file = (n: number) => `src/soak/item-${n}.ts`;
 const files = (n: number) => plan.infrastructure.has(n) ? [file(n), `tests/helpers/soak-item-${n}.ts`] : [file(n)];
 
+/**
+ * GY-630: the scope-widening scenarios a day also carries when `scope` is set, as extra items
+ * released beside the fifteen. Item `wideRule` asks a wide ask its criterion's own directory
+ * implies: the rule approves it directly and folds it into one directory entry. Item `wideFinding`
+ * asks a wide ask only a review finding grounds: the loop widens by posting the folded revision.
+ * Item `unrepresentable` asks the one path no fold can represent under the plannedFiles cap: the
+ * rule refuses it, nothing routes or retries it, and the item stays blocked with the escalation.
+ */
+const scopePlan = {
+  wideRule: 16, wideFinding: 17, unrepresentable: 18,
+  wideRuleDir: 'tests/soak-wide/', wideFindingDir: 'src/soak/extra-17/', unrepresentablePath: 'newtop-18/next.ts',
+  wideRulePlanned: 20, wideRuleAsked: 90, wideFindingAsked: 100, unrepresentablePlanned: plannedFilesMax - 1,
+};
+const padded = (n: number) => String(n).padStart(3, '0');
+/** Item `unrepresentable`'s planned files: plannedFilesMax entries, none in the asked path's directories. */
+const bulk18 = [file(scopePlan.unrepresentable), ...Array.from({ length: scopePlan.unrepresentablePlanned }, (_, index) => `tests/bulk-18/bulk-${padded(index)}.test.ts`)];
+
 let pgServer: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
 before(async () => {
   // An offset no other test file takes: two files sharing a port fail in their `before` hook.
@@ -154,7 +172,7 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
  * and `failTip` names the item whose first speculative tip fails and keeps failing after its rerun.
  */
 let days = 0;
-async function simulateDay(options: { hours: number; regression?: 'approvers-left-open'; handApprovers?: boolean; refuseReworkOf?: number[]; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number } }) {
+async function simulateDay(options: { hours: number; regression?: 'approvers-left-open'; handApprovers?: boolean; scope?: boolean; refuseReworkOf?: number[]; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number } }) {
   const dayStart = clock.now();
   const config: MasterConfig = options.queued
     ? masterConfigSchema.parse({ ...soakConfig, workers: [...workers, ...queueWorkers], mergeQueue: { optimistic: false, parallelTips: options.queued.window } })
@@ -162,7 +180,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   // The spent producer request (GY-496) is a main-day fault, like the blind window and the split:
   // the queue-only, hand-approver and regression days exercise their own faults and would only
   // inherit this one's rework round.
-  const mainDay = !options.queued && !options.handApprovers && !options.regression;
+  const mainDay = !options.queued && !options.handApprovers && !options.regression && !options.scope;
   const github = new SimulatedGitHub({ repository, baseBranch: 'main', appId: 1234, ciAppId: 15368, reviewerApps, ciMs: 5 * minute, reviewMs: 3 * minute, firstPullRequest: 100 * ++days },
     [...Array.from({ length: plan.items }, (_, index) => file(index + 1)), 'README.md']);
   const herdr = new SimulatedHerdr(() => clock.now());
@@ -173,8 +191,18 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   // ---- The fifteen items, created in the backlog and released one every fifteen minutes. ----
   const releaseEveryMs = options.queued?.releaseEveryMs ?? plan.releaseEveryMs;
   const items: Work[] = [];
-  for (let n = 1; n <= plan.items; n++) {
-    let work = await engine.execute(principals.operator, 'create', null, { title: `Soak item ${n}`, plannedFiles: files(n), criteria: [{ id: 'AC-1', text: `Item ${n} behaves`, proofs: [PROOF] }] }, id());
+  for (let n = 1; n <= plan.items + (options.scope ? 3 : 0); n++) {
+    // The scope scenarios carry their own intake: item wideRule plans twenty files under the
+    // directory its criterion names; item unrepresentable plans plannedFilesMax entries outside
+    // every directory of the one path its criterion implies.
+    const scopeIntake = options.scope && n === scopePlan.wideRule ? {
+        plannedFiles: [file(n), ...Array.from({ length: scopePlan.wideRulePlanned }, (_, index) => `${scopePlan.wideRuleDir}base-${padded(index)}.test.ts`)],
+        criteria: [{ id: 'AC-1', text: `Every file under ${scopePlan.wideRuleDir} behaves for item ${n}`, proofs: [PROOF] }] }
+      : options.scope && n === scopePlan.unrepresentable ? {
+        plannedFiles: bulk18,
+        criteria: [{ id: 'AC-1', text: `Item ${n} behaves, and ${scopePlan.unrepresentablePath} moves onto the shared helper too`, proofs: [PROOF] }] }
+      : {};
+    let work = await engine.execute(principals.operator, 'create', null, { title: `Soak item ${n}`, plannedFiles: files(n), criteria: [{ id: 'AC-1', text: `Item ${n} behaves`, proofs: [PROOF] }], ...scopeIntake }, id());
     if (n === plan.exhaustedReviewer) work = await engine.execute(principals.operator, 'reviewpolicy', work.id, { provider: 'agent', expectedPolicyRevision: work.policyRevision, reason: 'Reviewed by the reviewer bots',
       reviewerProfiles: [{ name: 'claude-reviewer', runtime: 'claude', reviewerApp: 'claude-reviewer' }, { name: 'cursor-reviewer', runtime: 'cursor', reviewerApp: 'cursor-reviewer' }] }, id());
     items.push(work);
@@ -200,6 +228,20 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   // the window has to attribute the failure to it and rebuild the tips behind it without it.
   if (options.queued?.failTip) github.flaky.set(items[options.queued.failTip - 1].key, 'rerun-fails');
 
+  // The scope scenarios: what each extra item asks for the moment it is dispatched, and — for the
+  // finding-grounded one — the trusted findings that ground its paths on the base branch.
+  const scopeAsks = new Map<string, string[]>();
+  const findings = new Map<string, Set<string>>();
+  if (options.scope) {
+    scopeAsks.set(items[scopePlan.wideRule - 1].key, Array.from({ length: scopePlan.wideRuleAsked }, (_, index) => `${scopePlan.wideRuleDir}wide-${padded(index)}.test.ts`));
+    const findingPaths = Array.from({ length: scopePlan.wideFindingAsked }, (_, index) => `${scopePlan.wideFindingDir}extra-${padded(index)}.ts`);
+    scopeAsks.set(items[scopePlan.wideFinding - 1].key, findingPaths);
+    findings.set(items[scopePlan.wideFinding - 1].key, new Set(findingPaths));
+    scopeAsks.set(items[scopePlan.unrepresentable - 1].key, [scopePlan.unrepresentablePath]);
+  }
+  // The unrepresentable ask's worker never pushes or submits: its item stays blocked on scope.
+  const hold = new Set(options.scope ? [items[scopePlan.unrepresentable - 1].key] : []);
+
   // ---- Workers: the loop dispatches, the simulated session claims, works, pushes and submits (or dies). ----
   interface Session { work: string; key: string; branch: string; profile: WorkerProfile; epoch: number; attempt: number; pane: string; pushAt: number; diesAt: number | null; state: 'working' | 'submitted' | 'dead'; syncs: number; syncedFor?: string; refusedSince?: number }
   const sessions: Session[] = [], lost: string[] = [];
@@ -216,16 +258,31 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     const attempt = (attempts.get(key) ?? 0) + 1; attempts.set(key, attempt);
     const pane = herdr.open(profile.agentName, 'working', path);
     sessions.push({ work: work.id, key, branch, profile, epoch, attempt, pane, pushAt: clock.now() + plan.workMs, diesAt: plan.deaths.has(n) && attempt === 1 ? clock.now() + plan.deathAfterMs : null, state: 'working', syncs: 0 });
+    // A scope scenario asks the moment it holds the lease, as a worker does, and keeps working
+    // while the control plane decides. An ask carries at most fifty paths, so a wide ask is
+    // filed in batches, which one open request of the attempt merges.
+    const ask = scopeAsks.get(key);
+    for (let at = 0; ask && at < ask.length; at += 50)
+      await engine.execute(principal, 'scope', work.id, { epoch, paths: ask.slice(at, at + 50), reason: `Item ${n}: the ${ask.length === 1 ? 'file' : 'files'} this change touches` }, id());
     return { key, epoch };
   };
   const workersTick = async (now: number) => {
     for (const session of sessions.filter(entry => entry.state === 'working')) {
       if (session.diesAt !== null && now >= session.diesAt) { herdr.kill(session.pane); session.state = 'dead'; continue; }
       const principal = principalOf(session.profile);
-      if (now < session.pushAt) {
+      // The unrepresentable item's worker stays live on its refused ask: the item is blocked on
+      // scope, so it neither pushes nor submits.
+      if (now < session.pushAt || hold.has(session.key)) {
         // A renewal refused is lease loss: the supervisor stops the session, as `watch` does.
         try { await engine.execute(principal, 'heartbeat', session.work, { epoch: session.epoch }, id()); }
         catch (error) { if (!(error instanceof Refusal)) throw error; herdr.kill(session.pane); session.state = 'dead'; lost.push(`${session.key} epoch ${session.epoch}: ${error.message}`); }
+        // The refused ask stands for hours; near the day's end the worker releases the item with
+        // the refusal standing, ending its attempt cleanly instead of lapsing in a later day.
+        if (hold.has(session.key) && now >= dayStart + options.hours * hour - 20 * minute) {
+          await engine.execute(principal, 'release', session.work, { epoch: session.epoch }, id());
+          herdr.status(session.pane, 'done');
+          session.state = 'dead';
+        }
         continue;
       }
       const head = sha('head', session.key, session.epoch);
@@ -358,6 +415,18 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     withdraw: (work, decision, reason) => api(principals.operatorAgent, 'POST', `work/${work.id}/decide`, { action: 'withdraw', decision, reason }),
     baseSuccessions: async since => ({ tip: github.tip, successions: github.successions.filter(entry => github.commits.get(entry.commit)!.at >= Date.parse(since)), files: new Set(github.files) }),
     replan: (work, paths, reason) => api(principals.operatorAgent, 'POST', `work/${work.id}/requirements`, successorWidening(work, paths, reason)),
+    // The scope scenarios run the loop's own deciding and widening effects: the rule decides the
+    // open requests, and the loop widens on the findings it reads, posting the folded revision.
+    ...(options.scope ? {
+      decideScope: (work: Work) => api(principals.operatorAgent, 'POST', `work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch }),
+      reviewFindings: async (work: Work) => {
+        const named = findings.get(work.key);
+        return named ? [{ ground: 'review thread 1', text: `Please also update ${[...named].join(', ')} in this round.` }] : [];
+      },
+      basePaths: async (paths: readonly string[]) => new Set<string>(paths),
+      widenScope: (work: Work, request: ScopeRequestState, paths: string[], reason: string) =>
+        api(principals.operatorAgent, 'POST', `work/${work.id}/requirements`, answeringWidening(work, request, paths, reason)),
+    } : {}),
     controlPlane: async () => ({ build: { commit: production.build } }),
     observeDeployment: async delivered => {
       const serving = delivered.filter(item => github.contains(production.sha, item.delivery!.mergeSha));
@@ -449,6 +518,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   let peakWindow = 0;
   const seenTips = new Set<string>();
   let released = 0, split = false, noticed = false, deploys = 0, cycles = 0, reportedDispatches = 0, restarted = false;
+  const releasedScope = new Set<number>();
   const jobsDue = async () => Number((await store.pool.query('SELECT count(*) AS due FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now())')).rows[0].due);
   for (let elapsed = 0; elapsed <= options.hours * hour;) {
     const now = clock.now();
@@ -456,6 +526,10 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     // the split past its end: the re-plan and its stale-tip flush are the main day's scenario, and
     // a queue of tips built before the split only ejects in a cascade the day cannot recover from.
     while (released < plan.items && elapsed >= released * releaseEveryMs) await engine.execute(principals.operator, 'ready', items[released++].id, {}, id());
+    // The scope scenarios release beside the fifteen: the wide asks early enough to decide well
+    // before their workers push, the unrepresentable one so its refusal stands for hours.
+    for (const [slot, n] of [[30, scopePlan.wideRule], [35, scopePlan.wideFinding], [40, scopePlan.unrepresentable]] as const)
+      if (options.scope && !releasedScope.has(n) && elapsed >= slot * minute) { await engine.execute(principals.operator, 'ready', items[n - 1].id, {}, id()); releasedScope.add(n); }
     const splitAt = options.queued ? options.hours * hour + hour : plan.split.at;
     if (!split && elapsed >= splitAt) {
       split = true;
@@ -868,9 +942,54 @@ test('unit:soak-invariants-hold — after a restart the first request for a refu
   assert.ok(![...herdr.agents.values()].some(agent => /approver/i.test(agent.name ?? '')), 'no approver session is left open at the end of the day');
 });
 
-test('unit:soak-invariants-hold — a loop change that breaks an invariant fails the soak: approver sessions the loop no longer closes are named within the hour', { timeout: 120_000 }, async () => {
+test('unit:soak-invariants-hold — direct wide scope requests: a rule-approved ask folds and answers once, a finding-grounded ask widens once, and an unrepresentable ask is refused with nothing retrying it', { timeout: 300_000 }, async () => {
+  const { items, final, violations, failures, state, escalations } = await simulateDay({ hours: 4, scope: true });
+  assert.deepEqual(violations, [], 'every system invariant holds with the scope scenarios in the day');
+  assert.deepEqual(failures, [], 'no cycle failed');
+
+  // The rule-approved wide ask: folded into one directory entry, applied once, delivered on the
+  // folded scope, and never decided again across the rest of the day.
+  const wide = final.find(item => item.key === items[scopePlan.wideRule - 1].key)!;
+  assert.equal(wide.scopeDecision?.state, 'approved', wide.scopeDecision?.reason);
+  assert.deepEqual(wide.plannedFiles, [file(scopePlan.wideRule), scopePlan.wideRuleDir], 'the wide ask folded into one directory entry');
+  assert.equal(wide.stage, 'done', 'the wide item was delivered on the folded scope');
+  const wideActions = Object.keys(state.actions).filter(key => key.startsWith(`scope:${wide.id}:`));
+  assert.equal(wideActions.length, 1, `one scope action stands for the wide item: ${wideActions.join(', ')}`);
+
+  // The finding-grounded wide ask: the rule refuses it, the loop widens once by posting the folded
+  // revision, and the item delivers on the folded scope.
+  const found = final.find(item => item.key === items[scopePlan.wideFinding - 1].key)!;
+  assert.equal(found.scopeDecision?.state, 'approved', 'the posted widening answered the request');
+  assert.deepEqual(found.plannedFiles, [file(scopePlan.wideFinding), scopePlan.wideFindingDir], 'the finding-grounded ask folded the same way');
+  assert.equal(found.stage, 'done', 'the finding item was delivered on the folded scope');
+  const foundActions = Object.keys(state.actions).filter(key => key.startsWith(`scope:${found.id}:`));
+  assert.equal(foundActions.length, 2, `the refusal and the widening are the only scope actions: ${foundActions.join(', ')}`);
+  assert.equal((await api(principals.operatorAgent, 'GET', `work/${found.id}/decisions`)).decisions.filter((decision: any) => decision.action === 'requirements').length, 0, 'the loop widened on the finding directly, without routing a decision');
+
+  // The unrepresentable ask: refused by the rule, decided once, never applied, never routed, and
+  // never re-decided: the escalation stands and nothing retries it for the rest of the day.
+  const blocked = final.find(item => item.key === items[scopePlan.unrepresentable - 1].key)!;
+  assert.equal(blocked.stage, 'build', 'the item is held in build');
+  assert.match(blocked.scopeDecision!.reason, new RegExp(`no fold represents the ask within the ${plannedFilesMax} entries plannedFiles holds \\(${plannedFilesMax + 1} after folding\\)`));
+  assert.equal(blocked.scopeDecision?.state, 'refused', 'the refusal stands recorded on the item');
+  assert.deepEqual(blocked.plannedFiles, bulk18, 'the oversized ask was never applied');
+  const decided = Object.entries(state.actions).filter(([key]) => key.startsWith(`scope:${blocked.id}:`) && !key.includes(':finding:'));
+  assert.equal(decided.length, 1, `one deciding action stands for the blocked item: ${decided.map(([key]) => key).join(', ')}`);
+  assert.equal(decided[0][1].attempts, 1, 'the rule decided the ask once and never re-decided it');
+  const judging = Object.entries(state.actions).find(([key]) => key.startsWith(`scope:${blocked.id}:`) && key.includes(':finding:'));
+  assert.ok(judging && judging[1].state === 'done' && /no unresolved review finding/.test(judging[1].detail), `the finding rule judged the refusal and left it standing: ${judging?.[1].detail}`);
+  assert.equal((await api(principals.operatorAgent, 'GET', `work/${blocked.id}/decisions`)).decisions.filter((decision: any) => decision.action === 'requirements').length, 0, 'an unrepresentable fold is never routed to a decision the schema would refuse');
+  assert.equal(escalations.filter(detail => detail.includes(blocked.key) && /blocked on scope/.test(detail)).length, 1, 'exactly one escalation stands for the blocked item');
+});
+
+test('unit:soak-invariants-hold — a loop change that breaks an invariant fails the soak: approver sessions the loop no longer closes are named within the hour', { timeout: 600_000 }, async () => {
   // The regression GY-403 was: approvers finished, nobody closed them. Here the loop's close reports
   // success and closes nothing, which no per-item gate of any change would notice.
+  // The day runs beside the shard's other files, so its wall clock is the machine's, not the loop's:
+  // with six day-simulations in the file this is the slowest day per simulated hour (lingering
+  // approver sessions pile up all day), and CI measured it past the old 120s budget while the
+  // simulated hour held, so its budget is sized like the other days' — about twice its measured
+  // run (GY-630).
   const { violations, state } = await simulateDay({ hours: 3, regression: 'approvers-left-open' });
   assert.ok(violations.some(line => /lingering-sessions: VIOLATED — .*approver session graphyard-approver-gy-\d+-/.test(line)), `the soak names the lingering approver: ${violations.slice(0, 3).join('\n')}`);
   assert.ok(violations.every(line => /lingering-sessions/.test(line)), `nothing else is violated: ${violations.filter(line => !/lingering-sessions/.test(line)).slice(0, 3).join('\n')}`);

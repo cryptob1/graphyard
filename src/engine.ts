@@ -18,7 +18,7 @@ import { githubFromEnv, mergeBandQueueDepth } from './github.js';
 import { regressionRefusals } from './regression-guard.js';
 import { ciFamilyAllows, ciProofFamilies, ciRunBindingSchema, ciRunRefusal, isCiProducer, refuseCiProducer, staleCiAttemptRefusal, type CiRunObservation } from './model/ci-proofs.js';
 import { decideScopeRequest, liveScopeWidening, scopeRefusalBlocker, type ScopeDecision } from './model/scope.js';
-import { mergedScopeRequest, plannedFilesCovered } from './model/scope-collapse.js';
+import { mergedScopeRequest, plannedFilesCovered, widenedPlannedFiles } from './model/scope-collapse.js';
 import { configuredDocumentation, documentationObligation, recordDocumentationSubmission, type DocumentationPolicy } from './model/documentation.js';
 import { liveDispatchHandleIds, reconcileAutoDispatch, type DispatchTransition } from './model/dispatch.js';
 import { reconcileReviewConflict, type ReviewConflictTransition } from './model/review-conflict.js';
@@ -238,8 +238,10 @@ function applyScopeDecision(work: Work, request: NonNullable<Work['scopeRequest'
   work.scopeRequest = verdict.state === 'approved' ? null : { ...request, decision };
   if (verdict.state === 'approved') {
     // Non-weakening intent the item already carried: applied to the live attempt, which
-    // keeps its lease and its containment fence exactly as an operator widening would.
-    work.plannedFiles = [...new Set([...(work.plannedFiles ?? []), ...verdict.paths])];
+    // keeps its lease and its containment fence exactly as an operator widening would. A wide
+    // ask is folded into directory entries, as a routed one is, rather than overrun the cap;
+    // an ask no fold represents was refused by the rule above, never applied past the cap.
+    work.plannedFiles = widenedPlannedFiles(work, verdict.paths).plannedFiles;
     work.policyRevision++;
     work.formalReviewResetRequired = true; work.formalReviewBaseline = undefined;
     work.observation = null; work.mergeAuthorization = null; work.reviewRequest = null;
