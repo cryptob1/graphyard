@@ -2,7 +2,7 @@
 import { type Work, type AgentReview, reviewProviderOf, standingEscalations, leaseLossEpoch, RefusedResponse } from '../model.js';
 import { routableScopeRequest, scopeDecisionBinding, scopeDecisionReason } from '../model/scope.js';
 import { baseRefreshConflict, checkRerunHeld, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, restoringAfterEjectionPrefix, speculativeConflict, type ReviewThread, describeThread } from '../merge-queue.js';
-import { mechanicalFailure, mechanicalVerdicts } from '../model/mechanical-proofs.js';
+import { mechanicalFailure, mechanicalProof, mechanicalVerdicts, producerManualFailure, producerManualFailures } from '../model/mechanical-proofs.js';
 import { unexercisedFindings } from '../auto-dispatch.js';
 import { decisionBindingMax } from '../model/approval.js';
 import { guardBroadScope, type MasterConfig, type ContainmentAssessment, containmentPhase, type HerdrAgent } from '../master.js';
@@ -261,18 +261,24 @@ export function failedCheckRework(work: Work): { reason: string; binding: string
  * exercising its criterion (the proof also passed with the change removed) both leave a head no
  * review will ever judge, so the rework is asked for now, whatever threads stand open on it: the
  * rule that waits for a review to judge the threads first would wait for a review that never comes.
+ * GY-868: a manual: proof a producer session may run and recorded as failed with cases executed is
+ * a trusted proof failed like any other — the producer judged the change and found it inadequate —
+ * so it returns the head to its worker too. A manual record with executed = 0 judged nothing and
+ * goes to attestationDecision instead, and a manual proof no producer may run is never the
+ * worker's: both stay out of this rework.
  * The reason quotes each finding and names the open threads, so the worker takes both in one round.
  */
 export function proofRework(work: Work): { reason: string; binding: string } | null {
   const candidate = work.candidate;
   if (!work.submission || work.reworkRequested || !candidate || work.stage === 'done' || work.observation?.merged) return null;
-  const failed = mechanicalVerdicts(work, [work], new Date()).filter(verdict => verdict.outcome === 'failed');
+  const now = new Date();
+  const failed = [...mechanicalVerdicts(work, [work], now).filter(verdict => verdict.outcome === 'failed'), ...producerManualFailures(work, [work], now)];
   // An unexercised `manual:` proof is not the worker's to fix: see attestationDecision.
   const unexercised = unexercisedFindings(work).filter(entry => !entry.proof.startsWith('manual:'));
   if (!failed.length && !unexercised.length) return null;
   const threads = work.observation?.candidate.sha === candidate.sha ? work.observation.conversations?.unresolved ?? [] : [];
   const findings = [
-    ...(failed.length ? [`a trusted proof failed: ${failed.map(verdict => mechanicalFailure(verdict, candidate.sha)).join('; ')}`] : []),
+    ...(failed.length ? [`a trusted proof failed: ${failed.map(verdict => mechanicalProof(verdict.proof) ? mechanicalFailure(verdict, candidate.sha) : producerManualFailure(verdict, candidate.sha)).join('; ')}`] : []),
     ...(unexercised.length ? [`the producer recorded evidence that does not exercise its criterion on ${candidate.sha.slice(0, 12)} — ${unexercised.map(entry => `${entry.proof}: "${entry.finding.length > 400 ? `${entry.finding.slice(0, 399)}…` : entry.finding}"`).join('; ')}`] : []),
   ];
   const named = threads.slice(0, 5).map(thread => { const text = describeThread(thread); return text.length > 120 ? `${text.slice(0, 119)}…` : text; });
@@ -289,6 +295,9 @@ export function proofRework(work: Work): { reason: string; binding: string } | n
  * remedy, which the GY-393 approver refused. The change was never at fault, only the record, so the
  * loop asks for the attestation again, carrying the exercise record (`attestationExercise`) its
  * approver confirms by running the proof against the candidate base.
+ * GY-868: a trusted manual record with executed = 0 is an unexercised finding too — no case ran, so
+ * the criterion was never judged — and is answered here as well, never through rework or an
+ * operator escalation.
  */
 export function attestationDecision(work: Work): RoutineDecision | null {
   const candidate = work.candidate;
@@ -309,7 +318,8 @@ export function attestationDecision(work: Work): RoutineDecision | null {
  * speculative merge conflicts. An ejection whose base the control plane has not yet tried to
  * bring the head onto waits for that attempt first: a clean refresh republishes the head and it
  * re-enters the queue with no round at all, and a conflicting one is named by `baseRefreshConflict`.
- * The binding names the head and the base tip, so a base that moves on is a fresh ground.
+ * The binding names the head and the base tip, so a base that moves on is a fresh ground; for a
+ * queue ejection that tip is the base the conflicting merge was attempted onto, as recorded.
  * An ejection whose speculative base held predecessors is no conflict with the base (GY-321): merging
  * the base resolves nothing, so no round is asked; the entry waits for those predecessors
  * and re-enters with the same head (model/queue.ts, `predecessorWait`).
@@ -322,8 +332,13 @@ export function syncConflict(work: Work): { reason: string; binding: string } | 
   if (observation.conflicting && !work.queue)
     return { reason: `GitHub reports that candidate ${candidate.sha.slice(0, 12)} conflicts with base branch tip ${tip.slice(0, 12)}`, binding: `${candidate.sha}:sync:${tip}` };
   const ejection = work.queueEjection;
-  if (ejection && !work.queue && ejection.sha === candidate.sha && ejection.policyRevision === work.policyRevision && speculativeConflict(ejection) && !ejection.predecessors?.length && !pendingBaseRefresh(work))
-    return { reason: `the merge queue ejected candidate ${candidate.sha.slice(0, 12)}: ${ejection.reason} (base branch tip ${tip.slice(0, 12)})`, binding: `${candidate.sha}:queue-conflict:${ejection.sequence}:${tip}` };
+  if (ejection && !work.queue && ejection.sha === candidate.sha && ejection.policyRevision === work.policyRevision && speculativeConflict(ejection) && !ejection.predecessors?.length && !pendingBaseRefresh(work)) {
+    // The base the speculative merge was actually attempted onto, as the ejection recorded it
+    // (GY-252); the observed tip only for a record that named none (GY-583).
+    const base = ejection.conflict?.base ?? tip;
+    const moved = base === tip ? '' : `; the base branch tip is now ${tip.slice(0, 12)}`;
+    return { reason: `the merge queue ejected candidate ${candidate.sha.slice(0, 12)}: ${ejection.reason} (base branch tip ${base.slice(0, 12)}${moved})`, binding: `${candidate.sha}:queue-conflict:${ejection.sequence}:${base}` };
+  }
   return null;
 }
 /** The resolve decision a standing control-plane lease-loss calls for (see `supersededLeaseLoss`), or null. */

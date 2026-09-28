@@ -2,7 +2,7 @@ import type { Evidence, Observation, ScopeFile, Work } from './model.js';
 import { evidenceBindsCandidate, type ApprovalIdentity, type CarriedApproval, type CarriedProof, type QueueCarry, type RequiredApproval, type TipMerge } from './model/carry.js';
 import { reviewProviderOf } from './model/review.js';
 import { pathScopesOverlap } from './model/scope.js';
-import { queuedRegressions } from './regression-guard.js';
+import { queuedRegressions, staleTipRegressions } from './regression-guard.js';
 import { missingAncestryReason, missingBaseAncestry } from './merge-base-ancestry.js';
 
 // Graphyard publishes speculative tips outside refs/heads and refs/tags: the namespace is
@@ -325,6 +325,8 @@ export interface QueueHistoryEntry {
   at: string; event: 'enqueued' | 'predicted' | 'ejected' | 'dissolved'; sequence: number; reason?: string; tip?: string;
   /** For a prediction: the entries the tip was published behind, and the item's own reviewed head it was built from. For a speculative-conflict ejection: the entries the conflicting merge was predicted behind (GY-321). */
   predecessors?: string[]; from?: string;
+  /** For an ejection: the ejection's typed conflict record (`QueueEjection.conflict`), so the audit trail tells a conflict from any other ejection without reading `reason` (GY-583). Absent on other events and on entries that predate the field. */
+  conflict?: { base: string | null } | null;
 }
 
 /**
@@ -689,10 +691,14 @@ export function currentBaseRefreshCarry(work: Pick<Work, 'candidate' | 'baseRefr
  * actually land on — the live base-branch tip, or the predicted base of a tip published behind
  * entries that have not landed yet:
  *
- * - `files`: the head's changes since its merge base with the landing commit, compared with
- *   that commit. Files only the base changed are inherited by a three-way merge, not reverted.
- *   Recomputed on every observation, including unchanged heads previously refused. Present when
- *   the landing tree differs from the bound base, or a predicted base needs its own diff.
+ * - `files`: the head's changes since its merge base with the landing commit, each outside the
+ *   planned scope judged by the three-way merge result of the head onto that commit (GY-863):
+ *   a branch carrying an earlier version of a change the commit has since extended merges to
+ *   exactly what the commit holds, so it is not a revert; a head that restores the merge-base
+ *   version over the commit's still is. Files only the base changed are inherited by a
+ *   three-way merge, not reverted. Recomputed on every observation, including unchanged heads
+ *   previously refused. Present when the landing tree differs from the bound base, or a
+ *   predicted base needs its own diff.
  * - `carried`: other items' unlanded candidates whose commits this head has in its history — a
  *   speculative tip pushed onto its branch leaves them there — while its tree holds their files as
  *   the landing commit does. Merging such a head makes the provider record the other pull request
@@ -935,14 +941,21 @@ export function ejectionReason(work: Work, ciAppIds: number[], all: Work[] = [],
   if (!candidate || !observation || observation.candidate.sha !== candidate.sha || observation.candidate.baseSha !== candidate.baseSha) return null;
   const tip = candidate.sha.slice(0, 12);
   if (observation.prState === 'closed') return 'Pull request was closed without merging';
+  // A tip still built behind an entry that left without landing (GY-568) is not reverting anything
+  // of its own: when its tree shows a refused conclusion — the unlanded work of the entries it was
+  // built behind — it leaves the queue so the control plane restores it, and the reason says so.
+  // A tip whose tree shows nothing refused is not ejected: the queue rebuilds it from the item's
+  // own reviewed head instead. The gate reads the tree before the carried-items excusal (GY-871):
+  // the carried work is what the restore is for, never this entry's revert.
+  const unexcused = staleTipRegressions(work, observation, all);
+  const stale = unexcused.length ? staleSpeculativeTip(work, all) : null;
+  if (stale) return `Speculative tip ${tip} was built behind ${stale.departed.join(', ')}, which left the merge queue without landing; landing it on ${unexcused[0].base.slice(0, 12)} would carry their unlanded work (${unexcused.map(entry => entry.text).join('; ')}), so the branch is restored to its own reviewed head`;
   // The base this entry would land on holds work its head would delete, revert or rewrite: an
   // observed adverse conclusion about the tip, which only a new head can answer. It names every
-  // file and the item that owns it; a file the observation could not compare ejects nothing.
+  // file and the item that owns it; a file the observation could not compare ejects nothing, and
+  // a file carried from another item's commits on this head is excused exactly as the build gate
+  // excuses it (GY-871), so nothing that passed build is ejected over the same files.
   const regressions = queuedRegressions(work, observation, all);
-  // A tip still built behind an entry that left without landing (GY-568) is not reverting anything
-  // of its own: it leaves the queue so the control plane restores it, and the reason says so.
-  const stale = regressions.length ? staleSpeculativeTip(work, all) : null;
-  if (stale) return `Speculative tip ${tip} was built behind ${stale.departed.join(', ')}, which left the merge queue without landing; landing it on ${regressions[0].base.slice(0, 12)} would carry their unlanded work (${regressions.map(entry => entry.text).join('; ')}), so the branch is restored to its own reviewed head`;
   if (regressions.length) return `Landing speculative tip ${tip} on ${regressions[0].base.slice(0, 12)} would revert work outside its planned files: ${regressions.map(entry => entry.text).join('; ')}`;
   // Observations retain every run, including superseded ones; only the newest trusted run
   // for a required check decides, exactly as the test gate does, so a successful retry

@@ -346,7 +346,7 @@ export const promptDigest = (text: string) => createHash('sha256').update(text).
  * becomes claimable only once its partial work is on the record. Nothing is preserved for an
  * attempt that submitted — its work is on the pull request — or one the quota path already kept.
  */
-export async function preserveInterruptedAttempt(state: DaemonState, effects: DaemonEffects, item: Work, epoch: number, profile: WorkerProfile | undefined, observed: string, now: () => number, performed: DaemonAction[]) {
+export async function preserveInterruptedAttempt(state: DaemonState, effects: DaemonEffects, item: Work, epoch: number, profile: WorkerProfile | undefined, observed: string, now: () => number, performed: DaemonAction[], options: { endsBlocker?: true } = {}) {
   if (!effects.reportCapacity) return null;
   const key = preserveKey(item, epoch), previous = state.actions[key];
   if (previous?.state === 'done' || (previous && !readyToRetry(previous, state.cycle))) return previous;
@@ -355,7 +355,7 @@ export async function preserveInterruptedAttempt(state: DaemonState, effects: Da
   await record(state, key, { kind: 'preserve', work: item.key, principal, epoch, state: 'started', detail: `Keeping what attempt ${epoch} of ${item.key} left in its worktree: ${observed}`, attempts, cycle: state.cycle }, now(), effects.persist);
   try {
     const partialWork = await effects.preserveWork?.(item, epoch, 'interrupted before it could submit') ?? { state: 'not-applicable' as const, detail: 'this loop has no access to the attempt worktree' };
-    await effects.reportCapacity(item, { event: 'exhausted', cause: 'interrupted', role: 'worker', epoch, profile: profile?.name ?? principal ?? 'unknown', account: null, runtime: profile?.kind ?? null, reason: observed.slice(0, 500), resetsAt: null, partialWork });
+    await effects.reportCapacity(item, { event: 'exhausted', cause: 'interrupted', role: 'worker', epoch, profile: profile?.name ?? principal ?? 'unknown', account: null, runtime: profile?.kind ?? null, reason: observed.slice(0, 500), resetsAt: null, partialWork, ...options });
     const where = partialWork.commit ? ` at ${partialWork.commit.slice(0, 12)}${partialWork.branch ? ` on ${partialWork.branch}` : ''}${partialWork.path ? ` (${partialWork.path})` : ''}` : '';
     return performed[performed.push(await record(state, key, { kind: 'preserve', work: item.key, principal, epoch, state: 'done', detail: `${item.key} attempt ${epoch} ${observed}. Partial work ${partialWork.state}${where}${partialWork.detail ? `: ${partialWork.detail}` : ''}; the attempt ended on the record and the next attempt's request names the commit`, attempts, cycle: state.cycle }, now(), effects.persist)) - 1];
   } catch (error) {
