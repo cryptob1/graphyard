@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { Closure } from './closure.js';
+import { isDelivered } from './closure.js';
 import type { Work } from './work.js';
 
 // ---------------------------------------------------------------------------
@@ -208,4 +209,16 @@ export function triageClosure(judgement: TriageJudgement): { kind: 'superseded' 
   if (judgement.outcome === 'release') return null;
   if (judgement.outcome === 'merge') return { kind: 'duplicate', ref: judgement.into, reason: `Merged into ${judgement.into} by triage: ${judgement.reason}`.slice(0, 2000) };
   return judgement.ref ? { kind: 'superseded', ref: judgement.ref, reason: `Already fixed by ${judgement.ref}: ${judgement.reason}`.slice(0, 2000) } : { kind: 'obsolete', ref: null, reason: `Not worth doing: ${judgement.reason}`.slice(0, 2000) };
+}
+
+// ---- Pending follow-ups (GY-845) ---------------------------------------------------------------
+
+/** Whether a parent item has been delivered and can have its follow-ups materialized. */
+export function parentIsShipped(parent: Pick<Work, 'stage' | 'closure'>) {
+  return isDelivered(parent);
+}
+
+/** The pending findings a follow-up item has from approvals of an unshipped parent (GY-845). */
+export function pendingFollowUpFindings(work: Pick<Work, 'pendingFollowUps'>) {
+  return work.pendingFollowUps?.findings ?? [];
 }

@@ -178,6 +178,8 @@ export interface Work extends Create {
   researchBrief?: ResearchRecord | null;
   /** Set when the item was closed without delivery (model/closure.ts); a closed item is `done` but never delivered. */
   closure?: Closure | null; triage?: TriageRecord | null; // triage is a machine-filed item's judgement (GY-402, model/machine-backlog.ts)
+  /** Pending follow-up findings from approvals of an unshipped parent: recorded here until the parent ships, then materialized as a follow-up item (GY-845). */
+  pendingFollowUps?: { findings: Array<{ path: string | null; text: string; ref?: string }>; addedAt: string } | null;
   /** Sessions of this item that ran out of provider quota, and any role with no account left (model/capacity.ts). */
   capacity?: CapacityState | null;
   queue?: QueueEntry | null; queueSequence?: number; queueEjection?: QueueEjection | null; queueHistory?: QueueHistoryEntry[];
