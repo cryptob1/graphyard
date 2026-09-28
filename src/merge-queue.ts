@@ -581,6 +581,12 @@ export interface BranchRestore {
    * records that predate the field and on every other outcome.
    */
   failure?: string | null;
+  /**
+   * The stable category of `failure` (GY-854): what a repeat is judged by, never the diagnostic
+   * string, whose commits move with the base tip and the produced head between attempts. Absent
+   * on records that predate the field and on every other outcome.
+   */
+  failureKind?: RestoreFailureKind | null;
   /** How many times the restore has run for this contaminated head; absent on records that predate the count. */
   attempts?: number;
   /**
@@ -590,6 +596,8 @@ export interface BranchRestore {
    */
   escalated?: string | null;
 }
+/** What kind of refusal or shortfall a restore's `failure` records, stable across attempts. */
+export type RestoreFailureKind = 'branch reset refused' | 'merge refused' | 'read-back failed' | 'read-back mismatch' | 'conflict';
 
 /**
  * The base a candidate stays bound to while Graphyard has not yet brought it onto a moved branch

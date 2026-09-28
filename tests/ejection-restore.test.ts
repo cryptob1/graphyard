@@ -147,6 +147,7 @@ test('unit:ejection-restore-current-tip — an ejection restore merges the revie
   assert.deepEqual([failed.restore!.outcome, failed.head, failed.base], ['unpublished', null, moved]);
   assert.equal(failed.restore!.attempts, 1);
   assert.equal(failed.restore!.escalated ?? null, null, 'a first failure is not yet a repeat');
+  assert.equal(failed.restore!.failureKind, 'read-back mismatch');
   assert.ok(failed.restore!.failure!.includes(`wrote the restored commit ${sha40('ee').slice(0, 12)}`), failed.restore!.failure ?? '');
   assert.ok(failed.restore!.failure!.includes(`shows the branch at ${contaminated.slice(0, 12)}`), failed.restore!.failure ?? '');
   assert.deepEqual([(await events(work, 'branch.restored')).length, (await events(work, 'branch.restore-unpublished')).length], [0, 1]);
@@ -183,6 +184,7 @@ test('unit:ejection-restore-no-silent-repeat — a restore that produces the sam
   work = await reload(work);
   const firstFailure = work.baseRefresh!.restore!;
   assert.deepEqual([firstFailure.outcome, firstFailure.attempts], ['unpublished', 1]);
+  assert.equal(firstFailure.failureKind, 'merge refused');
   assert.ok(firstFailure.failure!.includes('was merged into it: GitHub POST /merges failed (403)'), firstFailure.failure ?? '');
   assert.equal(firstFailure.escalated ?? null, null);
 
@@ -191,14 +193,22 @@ test('unit:ejection-restore-no-silent-repeat — a restore that produces the sam
   assert.ok(retry, 'the failed restore is retried once');
   assert.equal(retry!.previous?.outcome, 'unpublished');
   assert.equal(retry!.previous?.attempts, 1);
+  assert.equal(retry!.previous?.failureKind, 'merge refused');
 
-  // Attempt 2: the same refusal again — the record escalates instead of inviting a third attempt.
+  // Attempt 2: the same refusal again, with the base tip moved since — the refusal's text quotes
+  // the tip, so the two texts differ; the result is the same (branch protection refused the merge,
+  // the candidate never changed), and that is what the record escalates on, never the text.
+  const movedAgain = sha40('b4');
+  const protectionAgain = provider(work, { tip: movedAgain, readback: () => contaminated, merge: 'refused' });
   await onlyJob(work);
-  await processJob(engine, adapter(observation, protection.github).github);
+  await processJob(engine, adapter(observation, protectionAgain.github).github);
   work = await reload(work);
   const escalated = work.baseRefresh!.restore!;
   assert.deepEqual([escalated.outcome, escalated.attempts], ['unpublished', 2]);
-  assert.equal(escalated.failure, firstFailure.failure, 'the same result twice');
+  assert.equal(escalated.failureKind, 'merge refused', 'the stable kind of both failures');
+  assert.notEqual(escalated.failure, firstFailure.failure, 'the refusal texts differ, each quoting the tip of its own attempt');
+  assert.ok(firstFailure.failure!.includes(moved.slice(0, 12)), firstFailure.failure ?? '');
+  assert.ok(escalated.failure!.includes(movedAgain.slice(0, 12)), escalated.failure ?? '');
   assert.match(escalated.escalated!, /same result twice without the candidate changing/);
   assert.ok(escalated.escalated!.includes('stops repeating'), escalated.escalated ?? '');
   assert.equal(ejectedTipRestore(work, await store.list()), null, 'no third attempt is offered');
@@ -208,18 +218,18 @@ test('unit:ejection-restore-no-silent-repeat — a restore that produces the sam
   const reasons = gate(work, 'build').reasons.join(' ');
   assert.match(reasons, new RegExp(`^${restoringAfterEjectionPrefix}`));
   assert.match(reasons, /stopped repeating/);
-  assert.ok(reasons.includes(firstFailure.failure!.slice(0, 60)), reasons);
+  assert.ok(reasons.includes(escalated.failure!), reasons);
   assert.equal(neededDecision(work, { autoMerge: true }), null, 'the escalation is the master\'s to answer, not a worker round');
 
   // master status names it, with the next command, and the branch report carries the same facts.
   const status = buildMasterStatus(await store.workSnapshot(), [], []);
   const row = status.work.find(entry => entry.key === work.key)!;
   assert.match(row.attention!, /stopped repeating/);
-  assert.ok(row.attention!.includes(firstFailure.failure!), row.attention ?? '');
+  assert.ok(row.attention!.includes(escalated.failure!), row.attention ?? '');
   assert.match(row.attentionOwner!.next, /graphyard master repair/);
   assert.ok(status.attentionItems.some(item => item.subject === work.key && /stopped repeating/.test(item.text)), 'the escalation is on the attention list');
   const line = branchReport(status.work).contaminated.find(entry => entry.key === work.key)!;
   assert.match(line.line, /not on the branch/);
   assert.match(line.line, /escalated: it stops repeating/);
-  assert.ok(line.line.includes(firstFailure.failure!), line.line);
+  assert.ok(line.line.includes(escalated.failure!), line.line);
 });
