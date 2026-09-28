@@ -395,7 +395,13 @@ export async function collect(api, options, analytics) {
   const snapshot = await api('work-snapshot');
   const population = recentDelivered(snapshot.work, options.items);
 
-  const rework = await readReworkEvents(api, population.since, { pages: reworkPages, limit: pageLimit });
+  // The sibling reworkRoundsWithOwnCauses (src/flow-analytics.ts) guards its ledger walk the same
+  // way: an empty population has nothing to classify, so the whole-ledger rework read — up to
+  // reworkPages × pageLimit rows scanned from the ledger start, and the reader credential it is
+  // the only step to demand — is skipped and the rework summary stands empty.
+  const rework = population.items.length
+    ? await readReworkEvents(api, population.since, { pages: reworkPages, limit: pageLimit })
+    : { rounds: [], complete: true, pages: 0 };
   const entries = attributeDeliveryRounds(population.items, rework.rounds, classify);
   const rounds = entries.flatMap(entry => entry.rounds);
   const byCause = Object.fromEntries(deliveryReworkCauses.map(cause => [cause, 0]));
