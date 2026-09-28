@@ -10,7 +10,7 @@ import type { NextAction } from './next-action.js';
 import type { ActionQueue } from './actions.js';
 import type { AgentRequest } from './agent-requests.js';
 import type { SessionHandle } from './sessions.js';
-import { namedPaths, pathScope, pathScopeContains, type ScopeDecision, type ScopeRequestState } from './scope.js';
+import { namedPaths, pathScope, pathScopeContains, plannedFilesMax, type ScopeDecision, type ScopeRequestState } from './scope.js';
 import type { CapacityState } from './capacity.js';
 import type { HumanRequest } from './human-request.js';
 import type { ResearchRecord } from '../research.js';
@@ -38,7 +38,7 @@ export const createSchema = z.object({
   dependencies: z.array(z.string().uuid()).max(50).default([]),
   criteria: z.array(criterionSchema).min(1).max(50),
   policy: policySchema.default({ checks: ['test', 'typecheck'], review: true }),
-  plannedFiles: z.array(z.string().min(1).max(500)).max(100).default([]),
+  plannedFiles: z.array(z.string().min(1).max(500)).max(plannedFilesMax).default([]),
   exclusiveResources: resourcesSchema.optional(),
   slice: z.enum(sliceIds).optional(),
   // Manual proofs a launched producer session may run on the item's behalf. Unit and
@@ -112,10 +112,9 @@ export interface Observation {
   candidate: Candidate; checks: { name: string; result: string; appId: number; id?: number; attempt?: number }[];
   reviews: { reviewer: string; sha: string; state: string; id?: number; submittedAt?: string }[];
   merged: boolean; mergeSha: string | null; mergedAt?: string | null; mergeable: boolean;
-  // GitHub computed a merge conflict with the base (`pr.mergeable === false`), as distinct from
-  // `mergeable` being false while GitHub is still computing it. A conflicting head is the one a
-  // behind-base candidate is withheld and sent back for (GY-191).
-  conflicting?: boolean;
+  // GitHub computed a merge conflict with the base (`pr.mergeable === false`), not merely still computing it;
+  // a conflicting head is withheld and sent back (GY-191). `disproved` keeps GitHub's raw reading a test merge disproved (GY-390).
+  conflicting?: boolean; disproved?: { mergeable: boolean; conflicting: boolean; reading: string };
   // The real base-branch head and its tree, read from refs/heads/<base> (never from the pull
   // request's cached base) and recorded separately from the candidate's bound base so a
   // speculative binding never hides where the managed branch actually points.
