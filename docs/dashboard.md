@@ -3,13 +3,13 @@
 
 ## Navigation
 
-One sidebar: **Work**, **Workers**, **Shipped**, **Tests** (planned), **Insights**, **Settings**.
+One sidebar: **Work**, **Workers**, **Shipped**, **Tests**, **Insights**, **Settings**.
 
 ## Work: one classification
 
 Each open item is in one group: **Needs you** (only you may decide), **Blocked**, **Moving**, **Up next** or **Backlog**; a tile counts and filters one.
 
-`GET /api/board` serves these groups, not the page. Items carry `group`, `stage`, `owner`, `actor` (`worker`, `reviewer`, `producer`, `approver`, `master`, `executor`, `human-only`, `held`), `command` (or null), `since` and `overdue` (past `overdueAfterMs`). `master status` lists the master's items as `board.owed`.
+`GET /api/board` serves the groups, not the page. Items carry `group`, `stage`, `owner`, `actor` (`worker`, `reviewer`, `producer`, `approver`, `master`, `executor`, `human-only`, `held`), `command` (or null), `since` and `overdue` (past `overdueAfterMs`). `master status` lists the master's items as `board.owed`.
 
 ## Workers
 
@@ -20,7 +20,7 @@ A running handle last observed over **15 minutes** by default, `sessionStaleThre
 Running rows offer:
 
 - **Copy local**, on the launching host: `herdr agent attach w1V:pJD`.
-- **Copy remote**: `herdr --help` documents `herdr --machine <label-or-id> <command>` and `herdr --remote <ssh-target>`, and interactive attachment is not forwarded by `--machine`, so the form focuses the pane then attaches remotely: `herdr --machine vishrog agent focus w1V:pJD && herdr --remote vishrog`.
+- **Copy remote**: `herdr --help` documents `herdr --machine <label-or-id> <command>`, `herdr --remote <ssh-target>`; interactive attachment is not forwarded by `--machine`, so the form focuses the pane then attaches remotely: `herdr --machine vishrog agent focus w1V:pJD && herdr --remote vishrog`.
 
 ## The status sentence
 
@@ -28,7 +28,7 @@ Rows show **Build, Validate, Test, Review, Prove, Merge, Deploy**. A merged item
 
 ## An item page
 
-Below the summary: **What is left**, **Requirements** (✓ or ○ per criterion), **Pull request** and **Activity**. **Technical details** holds gates, sessions, evidence and overlaps.
+Below the summary: **What is left**, **Requirements** (✓ or ○ per criterion), **Pull request**, **Test cases** and **Activity**. **Technical details** holds gates, sessions, evidence, overlaps.
 
 ## Insights
 
