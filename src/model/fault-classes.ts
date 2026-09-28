@@ -61,12 +61,12 @@ export const faultCatalogue = {
   'configuration': ['app-permissions', 'held-jobs', 'delegation-limits', 'unrunnable-remedy', 'fleet', 'setup', 'executor', 'generated-files', 'installation', 'sandbox-blocker', 'action:config'],
   'containment': ['containment-settleable', 'containment-grace', 'containment', 'action:settle'],
   'merge': ['base-conflict', 'merged-unauthorized', 'merged-reverted', 'contaminated', 'merge-refused', 'action:merge'],
-  'proof': ['proof-gap', 'timing-failure', 'escalation:evidence-policy-conflict', 'action:proof'],
+  'proof': ['proof-gap', 'timing-failure', 'proof-unexercised', 'escalation:evidence-policy-conflict', 'action:proof'],
   'capacity': ['reviewer-exhausted', 'role-capacity', 'concurrency-starved', 'action:failover', 'action:capacity'],
   'resources': ['disk-pressure', 'resource-bound', 'ledger-refusal', 'action:reclaim'],
   'loop': ['loop-liveness', 'loop-cost', 'loop-failures', 'loop-silence', 'delivery-budget', 'loop-cursor', 'dispatch-failures', 'action:fault', 'action:diagnosis'],
   'human-decision': ['human-request', 'sudo', 'action:human'],
-  'stalled-gate': ['gate', 'blocker', 'stalled-item', 'stalled-action', 'actorless'],
+  'stalled-gate': ['gate', 'blocker', 'stalled-item', 'stalled-action', 'retry-stopped', 'actorless'],
   'unclassified': ['unclassified'],
 } as const satisfies Record<FaultClass, readonly string[]>;
 export type FaultKind = typeof faultCatalogue[FaultClass][number];
@@ -101,6 +101,12 @@ const signatures: [FaultKind, (subject: string, text: string) => boolean][] = [
   ['decision-unanswered', (_, text) => /^Decision \S+ \(\S+\) is unanswered/.test(text)],
   ['approver-launch', (_, text) => /is awaiting an approver for/.test(text)],
   ['stalled-action', (_, text) => /\S+ action is stalled\b/.test(text)],
+  // GY-889: a loop retry stopped on one unchanged 4xx (retry-stop.ts) was an unclassified line until
+  // the catalogue recognised it; the builders also set the kind, so a rewording cannot reopen the class.
+  ['retry-stopped', (_, text) => /^The loop stopped retrying\b/.test(text)],
+  // GY-889: a head awaiting rework because its proofs were recorded as not exercising their criterion
+  // (unanswered-requests.ts) read as unclassified the same way.
+  ['proof-unexercised', (_, text) => /is awaiting rework for a non-exercising proof/.test(text)],
   ['stalled-item', (_, text) => /has held its \S+ gate for .+ with no action named/.test(text)],
   ['actorless', (_, text) => /no rework request and no named wait/.test(text)], ['unanswered-request', (_, text) => /has stood unanswered for/.test(text)],
   ['stuck-request', (_, text) => /^\S+ request \S+ on \S+ \(session \S+\) is pending/.test(text)],

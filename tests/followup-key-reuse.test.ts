@@ -158,6 +158,8 @@ test('unit:repeated-4xx-retry-stops — a loop retry failing with the same 4xx o
     assert.match(attention[0].text, /stopped retrying follow-up filing for approval 77 \(PR #64\) for GY-64/);
     assert.ok(attention[0].text.includes(refusal), attention[0].text);
     assert.equal(attention[0].role, 'master');
+    // GY-889: the stopped retry is a catalogued stalled-gate fault, never an unclassified line.
+    assert.deepEqual([attention[0].kind, attention[0].faultClass], ['retry-stopped', 'stalled-gate']);
   } finally { await cleanup(); }
 });
 

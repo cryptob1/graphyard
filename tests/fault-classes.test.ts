@@ -13,6 +13,8 @@ import { escalationTriggers, type Work } from '../src/model.js';
 import { agentOwner, controlPlaneAttention, installationSources, masterConfigSchema, workAttentionCauses, type AttentionItem, type MasterConfig } from '../src/master.js';
 import { cycleFailureAttentionAfter, cycleFaults, daemonActionFaultKind, daemonActionKinds, daemonEffects, daemonSummary, emptyDaemonState, endFailingRuns, fileRecurringFaultClasses, herdrFaultKinds, loopAttention, loopLiveness, noteConfigReload, noteCycleFailure, noteWatchdog, onceAnnotations, faultObservationIntervalMs, pruneDaemonState, reconcilePendingActions, retainedActions, runCycle, storeAction, timingFaultAttention, type DaemonEffects } from '../src/master-daemon.js';
 import { attributeAttention, derivedAttention, faulted } from '../src/master-status.js';
+import { retryStopAttention } from '../src/retry-stop.js';
+import { unansweredRequestAttention } from '../src/cli/unanswered-requests.js';
 import type { ResourceReading } from '../src/master-resources.js';
 import { predictQueue } from '../src/merge-queue.js';
 import { describeHumanRequest } from '../src/model/human-request.js';
@@ -65,7 +67,7 @@ test('unit:fault-classes — every existing attention kind maps to exactly one c
     ['failed loop actions', daemonActionKinds.map(daemonActionFaultKind)],
     ['loop attention', ['loop-liveness', 'loop-cost', 'loop-failures', 'loop-silence', 'delivery-budget', 'loop-cursor', 'dispatch-failures']],
     ['master status builders', ['disk-pressure', 'resource-bound', 'ledger-refusal', 'scope-request', 'consent-hold', 'review-conflict', 'unobtainable-review', 'decision-refused', 'decision-stale', 'decision-unanswered',
-      'approver-launch', 'stalled-action', 'stalled-item', 'unanswered-request', 'stuck-request', 'overlong-session', 'context-overflow', 'timing-failure', 'agent-request', 'owed-decision', 'generated-files',
+      'approver-launch', 'stalled-action', 'retry-stopped', 'stalled-item', 'unanswered-request', 'stuck-request', 'overlong-session', 'context-overflow', 'timing-failure', 'proof-unexercised', 'agent-request', 'owed-decision', 'generated-files',
       'github-budget', 'intervention-pattern', 'throughput', 'executor', 'setup', 'installation', 'sudo', 'unrunnable-remedy', 'role-capacity', 'concurrency-starved', 'fleet', 'actorless']],
     ['work item record', ['containment', 'human-request', 'scope-request', 'proof-gap', 'role-capacity', 'scope-violation', 'blocker', 'sandbox-blocker']],
   ];
@@ -105,6 +107,34 @@ test('unit:fault-classes — attention items, escalations and pipeline faults ca
     { subject: 'GY-131', text: "GY-131's request-review action is stalled, not retrying: 3 attempts in a row failed for one unchanged reason — reviewer busy" },
   ]);
   assert.deepEqual(stalledLines.map(entry => [entry.kind, entry.faultClass]), Array(4).fill(['stalled-action', 'stalled-gate']), 'a stalled action is classified in its current wording and its pre-GY-185 one');
+  // GY-889: three attention lines no catalogue entry recognised read as unclassified — a loop retry
+  // stopped on one unchanged 4xx (GY-537) and two heads awaiting rework for a non-exercising proof
+  // (GY-853, GY-888). Reproduced here from their builders with the recorded inputs: the builders now
+  // set the kind themselves, the catalogue recognises the wording of a line that arrives without one,
+  // and three such lines in the window no longer reach the unclassified threshold at all.
+  const [stopped] = [retryStopAttention({ step: 'follow-up filing for approval 5327884989 (PR #372)', item: 'GY-537', error: 'the follow-ups could not be appended to GY-808: Graphyard refused the follow-ups for GY-808 (409): Idempotency key reused with different input', count: 10, at: '2026-09-27T12:21:03.883Z' })];
+  assert.match(stopped.text, /^The loop stopped retrying follow-up filing for approval 5327884989 \(PR #372\) for GY-537: 10 consecutive attempts failed/);
+  const unexercisedDetail = (proof: string, sha: string, behaviour: string) => `${proof} was recorded as not exercising AC-1 on ${sha}: the mutation removing "${behaviour}" survived — ${proof} does not exercise AC-1: no case ran against the tree with "${behaviour.slice(0, 40)}…"`;
+  const nonExercising = unansweredRequestAttention([
+    { key: 'GY-853', dispatch: { review: null, producers: [{ requestId: 'r-853', sinceMs: 60_000, group: 'unit', session: { state: 'completed', resolution: 'evidence does not exercise its criterion' }, unexercised: [unexercisedDetail('unit:worker-submits-sandbox-failures-to-ci', '1d49f9919749', 'Workers submit when their own criteria pass; the full test suite is CI\'s gate. The submission policy rule is exported from src/master/harness.ts and included in the worker prompt in src/master/dispatch.ts.')] }] } },
+    { key: 'GY-888', dispatch: { review: null, producers: [{ requestId: 'r-888', sinceMs: 60_000, group: 'unit', session: { state: 'completed', resolution: 'evidence does not exercise its criterion' }, unexercised: [unexercisedDetail('unit:coordinator-write-blocked-for-shell', '70826ae41197', 'assertion that write operations to read-only mounted coordinator checkout fail with Permission denied or Read-only error')] }] } },
+  ]);
+  assert.match(nonExercising[0].text, /^GY-853 is awaiting rework for a non-exercising proof: unit:worker-submits-sandbox-failures-to-ci was recorded as not exercising AC-1 on 1d49f9919749:/);
+  assert.match(nonExercising[1].text, /^GY-888 is awaiting rework for a non-exercising proof: unit:coordinator-write-blocked-for-shell was recorded as not exercising AC-1 on 70826ae41197:/);
+  const classifiedLines = classifyAttention([stopped, ...nonExercising]);
+  assert.deepEqual(classifiedLines.map(entry => [entry.kind, entry.faultClass]),
+    [['retry-stopped', 'stalled-gate'], ['proof-unexercised', 'proof'], ['proof-unexercised', 'proof']], 'each recorded instance is catalogued, where the base read unclassified');
+  // Even a line that reaches classification without its builder's kind is recognised by its wording.
+  const bare = classifiedLines.map(({ kind: _kind, faultClass: _class, ...line }) => line);
+  assert.deepEqual(classifyAttention(bare).map(entry => [entry.kind, entry.faultClass]),
+    [['retry-stopped', 'stalled-gate'], ['proof-unexercised', 'proof'], ['proof-unexercised', 'proof']], 'the wording is catalogued too');
+  // So the class the loop counts for these lines is never unclassified again: a window holding the
+  // three recorded instances holds one stalled-gate instance and two proof instances, and files nothing.
+  const record = { instances: [] as FaultInstance[], open: {} as Record<string, string>, failing: {} as Record<string, string> };
+  const observed = classifyAttention([stopped, ...nonExercising]).map(({ kind, faultClass, subject, text }) => ({ kind, faultClass, subject, text }));
+  trackFaults(record, observed, iso(0));
+  assert.deepEqual([...new Set(record.instances.map(entry => entry.faultClass))].sort(), ['proof', 'stalled-gate'], 'no instance is unclassified');
+  assert.deepEqual(recurringClasses(record.instances, [], policy, clock).filter(entry => entry.faultClass === 'unclassified'), [], 'the unclassified class never reaches its threshold on these lines again');
   // Escalations on an item, one class per trigger.
   const escalated = item('GY-7', { escalations: escalationTriggers.map(trigger => ({ trigger, reason: `${trigger} raised`, actor: 'graphyard', at: iso(0) })) } as Partial<Work>);
   assert.deepEqual(workFaults(escalated, clock).map(entry => entry.faultClass), ['session-liveness', 'proof', 'review-convergence', 'scope']);

@@ -15,6 +15,7 @@ import { nextAction } from '../src/model/next-action.js';
 import { neededDecision } from '../src/daemon/decisions.js';
 import { describeDispatch } from '../src/master/status.js';
 import { unansweredRequestAttention } from '../src/cli/unanswered-requests.js';
+import { classifyAttention } from '../src/model/fault-classes.js';
 
 // GY-135: a proof that passes against an unchanged tree proves nothing. A pass is trusted only
 // beside the producer's run of the same proof failing against a tree with its criterion's
@@ -203,8 +204,14 @@ test('unit:nonexercising-proof-named master status names the item as awaiting re
   assert.match(item.text, /^GY-421 is awaiting rework for a non-exercising proof: /);
   for (const named of [UNIT, 'AC-3', MUTATION]) assert.ok(item.text.includes(named), `the attention names ${named}: ${item.text}`);
   assert.doesNotMatch(item.text, /stood unanswered|Producer request for/);
+  // GY-889: the line is a proof fault the catalogue names, not an unclassified wait.
+  assert.deepEqual([item.kind, item.faultClass], ['proof-unexercised', 'proof']);
   // A producer session that settled with no finding is still the unanswered request it was.
   const plain = describeDispatch(work, { pending: [], completed: [] }, { producers: { pending: [], completed: [session] }, failures: [] }, clock.getTime());
   const bare = { ...plain!, producers: plain!.producers.map(({ unexercised: _unexercised, ...entry }: any) => entry) };
-  assert.match(unansweredRequestAttention([{ key: work.key, dispatch: bare as any }])[0].text, /^Producer request for unit proofs for GY-421 has stood unanswered/);
+  const unanswered = unansweredRequestAttention([{ key: work.key, dispatch: bare as any }])[0];
+  assert.match(unanswered.text, /^Producer request for unit proofs for GY-421 has stood unanswered/);
+  // The plain unanswered line keeps its wording classification: a quiet session, not a proof defect.
+  const [unansweredClassified] = classifyAttention([unanswered]);
+  assert.deepEqual([unansweredClassified.kind, unansweredClassified.faultClass], ['unanswered-request', 'session-liveness']);
 });
