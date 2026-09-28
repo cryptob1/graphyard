@@ -46,7 +46,11 @@ export async function masterSessionStep(cycle: Cycle) {
   let rotated = false;
   if (master.agentName && master.startedAt && !launching) {
     const age = clock - Date.parse(master.startedAt);
-    if (handle && handle.pane_id === master.pane) {
+    // A runtime that has left its pane (Herdr lists the pane with no agent in it: status unknown)
+    // is the exit closeStep reads for workers (cycle-sessions.ts): the pane remains, the session
+    // does not — a liveness miss, never a live reading that resets the exit count.
+    const exitedInPane = !!handle && handle.pane_id === master.pane && !handle.agent && handle.agent_status === 'unknown';
+    if (handle && handle.pane_id === master.pane && !exitedInPane) {
       master.misses = 0;
       await isolate('failover', null, 'master-session', async () => {
         // A stopped session's own output is read for the provider's limit notice — the failover
@@ -62,10 +66,12 @@ export async function masterSessionStep(cycle: Cycle) {
         // A guarded merge in flight defers the rotation one cycle: the merge is not cut short.
         if (age > budgetMs && !mergeInFlight()) rotated = await rotateMasterSession(cycle, 'budget', `${master.agentName} ran ${Math.round(age / 60_000)} minutes, past its ${Math.round(budgetMs / 60_000)}-minute session budget`);
       });
-    } else if (!handle && age > launchAppearanceMs) {
+    } else if ((exitedInPane || !handle) && age > launchAppearanceMs) {
       master.misses += 1;
       if (master.misses >= 2) await isolate('failover', null, 'master-session', async () => {
-        rotated = await rotateMasterSession(cycle, 'exited', `${master.agentName} is gone from Herdr on two consecutive readings (first miss at ${new Date(clock - age).toISOString()})`);
+        rotated = await rotateMasterSession(cycle, 'exited', exitedInPane
+          ? `${master.agentName}'s runtime has left pane ${master.pane} (status unknown) on two consecutive readings (first miss at ${new Date(clock - age).toISOString()})`
+          : `${master.agentName} is gone from Herdr on two consecutive readings (first miss at ${new Date(clock - age).toISOString()})`);
       });
     }
   }
@@ -125,11 +131,13 @@ export async function masterSessionStep(cycle: Cycle) {
   }
 
   // Wakes (AC-2): one bundled wake per cycle, naming every changed subject key; the heartbeat is
-  // the fallback. Skipped while the pane is working (delivered next cycle) and while a launch or
-  // rotation is in flight — a vanished session is woken by its replacement's handover instead.
+  // the fallback. Skipped while the pane is working (delivered next cycle), while a launch or
+  // rotation is in flight, and for a runtime that has left its pane — a vanished session is woken
+  // by its replacement's handover instead, and a paste into a dead pane would only sit there.
   const agent = live.agentName ? herdr.agents.find(candidate => candidate.name === live.agentName && candidate.pane_id === live.pane) : undefined;
-  for (const key of Object.keys(live.subjects)) if (!agent) delete live.subjects[key];
-  if (agent && effects.promptSession && !launching) {
+  const runtimeGone = !!agent && !agent.agent && agent.agent_status === 'unknown';
+  for (const key of Object.keys(live.subjects)) if (!agent || runtimeGone) delete live.subjects[key];
+  if (agent && !runtimeGone && effects.promptSession && !launching) {
     const subjects = actionableSubjects(config, snapshot.work, clock, { approvals: state.approvals });
     const causes = subjects.filter(subject => live.subjects[subject.key] !== promptDigest(subject.detail)).map(subject => subject.key);
     const reference = live.lastWake?.at ?? live.startedAt;
@@ -151,17 +159,18 @@ export async function masterSessionStep(cycle: Cycle) {
 
 /**
  * End the live master session for `cause`: its registry session is given back, an exhausted
- * account is held until it resets, its pane is closed (a session that already exited has none),
- * and the record is cleared so the launch half of this step relaunches from the durable handover.
- * The subject digests are kept: the replacement inherits the same standing subjects, which the
- * handover names, so a rotation never reads as a wake.
+ * account is held until it resets, its pane is closed — an exit in place leaves the pane behind,
+ * and a pane Herdr no longer lists was already gone — so the configured name frees for the
+ * relaunch, and the record is cleared so the launch half of this step relaunches from the durable
+ * handover. The subject digests are kept: the replacement inherits the same standing subjects,
+ * which the handover names, so a rotation never reads as a wake.
  */
 async function rotateMasterSession(cycle: Cycle, cause: MasterRotationCause, detail: string, resetsAt: string | null = null): Promise<boolean> {
   const { state, effects, now, clock, performed } = cycle;
   const master = state.master;
   if (master.session && effects.endRegistrySession) await effects.endRegistrySession(master.session, `master session ${master.agentName} ended (${cause}): ${detail.slice(0, 300)}`).catch(() => {});
   if (cause === 'exhausted' && master.account) await effects.holdAccount?.(master.account, { at: new Date(clock).toISOString(), resetsAt, reason: detail.slice(0, 500), role: masterProfile, profile: masterProfile, work: null }).catch(() => {});
-  if (master.pane && cause !== 'exited') {
+  if (master.pane) {
     try { await effects.closeSession(master.pane); }
     catch (error) { if (!paneAlreadyGone(error)) throw error; }
   }

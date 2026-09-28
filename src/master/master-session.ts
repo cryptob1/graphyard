@@ -83,7 +83,9 @@ export async function launchMasterSession(root: string, config: MasterConfig, he
   if (!selected) throw masterRoleUnconfigured(`No agent registry role decides the master session`);
   const kind = selected.account.kind;
   let plan: ReturnType<typeof accountLaunch>;
-  try { plan = accountLaunch({ kind, approvals: 'auto', agentArgs: [], environment: {} }, selected.account); }
+  // The same reach the human launch grants (startMaster): Codex's sandbox is widened to the private
+  // state the master's own commands write beside its credential, and nothing beyond it.
+  try { plan = accountLaunch({ kind, approvals: 'auto', agentArgs: [], environment: {} }, selected.account, { writable: [dirname(config.credentialFile)] }); }
   catch (error) { await selected.release(`master session launch failed: ${failureText(error).slice(0, 300)}`); throw error; }
   let pane: string | undefined, tabId: string | undefined, delivery: RequestDelivery | undefined;
   const abandon = async (error: unknown, note: string) => {

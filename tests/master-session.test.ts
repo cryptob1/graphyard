@@ -131,7 +131,7 @@ test('unit:master-session-supervised-and-rotated — the loop launches its maste
   harness.outputs[cfg.masterAgentName!] = 'Error: usage limit has been reached. Your limit resets at 4pm';
   await cycle(340_000);
   assert.equal(state.master.lastEnd?.cause, 'exhausted');
-  assert.deepEqual(harness.closed, ['pane-2'], 'the spent session pane is closed');
+  assert.deepEqual(harness.closed, ['pane-1', 'pane-2'], 'the spent session pane is closed (the exited pane was closed with it)');
   assert.deepEqual(harness.held.map(([account]) => account), ['claude-a'], 'the account it spent is held');
   assert.equal(harness.held[0][1].role, 'master');
   assert.equal(harness.held[0][1].profile, 'master');
@@ -153,7 +153,7 @@ test('unit:master-session-supervised-and-rotated — the loop launches its maste
   await cycle(340_000 + 32 * 60_000);
   assert.equal(state.master.lastEnd?.cause, 'budget');
   assert.match(state.master.lastEnd!.detail, /past its 30-minute session budget/);
-  assert.deepEqual(harness.closed, ['pane-2', 'pane-3']);
+  assert.deepEqual(harness.closed, ['pane-1', 'pane-2', 'pane-3']);
   assert.equal(harness.launches.length, 4, 'the role relaunches after the deferred rotation');
   assert.equal(state.master.rotations, 4);
   assert.equal(state.master.pane, 'pane-4');
@@ -168,6 +168,21 @@ test('unit:master-session-supervised-and-rotated — the loop launches its maste
   assert.equal(state.master.adopted, true);
   assert.equal(state.master.pane, 'pane-human');
   assert.ok(adopted.actions.some(action => action.kind === 'session' && /Adopted master session/.test(action.detail)));
+
+  // Exit in place: the adopted session's runtime has left its pane — Herdr still lists the pane,
+  // with no agent in it and status unknown. That reads as a miss, never as a live pane: one miss
+  // waits, the second rotates, the pane it left is closed so the name frees, and the role
+  // relaunches from the durable handover.
+  harness.agents = [{ name: cfg.masterAgentName, pane_id: 'pane-human', agent: null, agent_status: 'unknown' }];
+  await cycle(340_000 + 33 * 60_000 + 130_000);
+  assert.equal(harness.launches.length, 4, 'the first reading of a runtime-less pane launches nothing');
+  await cycle(340_000 + 33 * 60_000 + 260_000);
+  assert.equal(state.master.lastEnd?.cause, 'exited');
+  assert.match(state.master.lastEnd!.detail, /runtime has left pane pane-human/);
+  assert.ok(harness.closed.includes('pane-human'), 'the pane the runtime left is closed so the relaunch can take the name');
+  assert.equal(harness.launches.length, 5, 'the role relaunches from the durable handover');
+  assert.equal(state.master.rotations, 5);
+  assert.equal(state.master.pane, 'pane-5');
 });
 
 test('unit:master-wake-on-event — a material event produces exactly one wake naming its cause, an unchanged cycle none, a changed state one more, and the heartbeat is only the silence fallback', async () => {
