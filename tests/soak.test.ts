@@ -750,7 +750,11 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   // the deploys, the split, both merge states, auto-merge, and the failover.
   // One item broke main after its optimistic merge and was reverted and reopened, so it merged twice.
   assert.equal(github.merges.length, plan.items + 1, 'fifteen items merged, one of them twice');
-  const gaps = github.merges.slice(1).map((entry, index) => entry.at - github.merges[index].at).sort((a, b) => a - b);
+  // The attested item's delivery carries the one extra round GY-521 is about — the attest request
+  // its new head overtook, withdrawn and asked afresh — so the cadence reads the merges beside it,
+  // whose pace this assertion guards.
+  const pace = github.merges.filter(entry => entry.key !== items[plan.attested - 1].key);
+  const gaps = pace.slice(1).map((entry, index) => entry.at - pace[index].at).sort((a, b) => a - b);
   assert.ok(Math.abs(gaps[Math.floor(gaps.length / 2)] - 15 * minute) <= 5 * minute, `a merge about every fifteen minutes: ${github.merges.map(entry => `${entry.key} +${Math.round((entry.at - dayStart) / minute)} min`).join(', ')}`);
   assert.ok(github.merges.some(entry => entry.key === items[plan.clean - 1].key && entry.state === 'CLEAN' && entry.mode === 'immediate'), `a CLEAN pull request merged at once: ${JSON.stringify(github.merges)}`);
   assert.ok(github.merges.some(entry => entry.key === items[plan.unstable - 1].key && entry.state === 'UNSTABLE' && entry.mode === 'immediate'), 'an UNSTABLE pull request merged at once');
