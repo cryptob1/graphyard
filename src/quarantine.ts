@@ -214,18 +214,36 @@ export function heldDetail(verification: Pick<ContainmentVerification, 'held'>, 
 }
 /** How systemd reports a scope whose supervisor and every process it held have ended. */
 export const endedScopeStates = ['not-found', 'inactive', 'failed', 'dead'];
-const interactiveShells = ['bash', 'sh', 'zsh', 'fish', 'dash', 'ksh'];
 /** Long options that only make a shell interactive or skip its startup files; none takes a value. */
-const interactiveLongFlags = ['--login', '--interactive', '--noprofile', '--norc'];
+const interactiveLongFlagsShared = ['--login', '--interactive', '--noprofile', '--norc'];
+/**
+ * The interactive shells and the long flags each accepts (GY-449): the shared list from every
+ * shell, each shell's own extras only from it. A single shared list refused the excusal of a
+ * pane shell started with a benign flag of its own shell (fish `--private`, bash `--noediting`)
+ * and held it for an operator. Every entry only makes its shell interactive, skip startup files
+ * or line-editing, or restrict it; none takes a value, runs a command, script, stdin script or
+ * chosen startup file (`--rcfile x`, `--init-file=x`, fish's `--debug-level=…`) of its own, and
+ * a flag of one shell is refused from every other.
+ */
+const interactiveLongFlags = new Map<string, readonly string[]>([
+  ['bash', [...interactiveLongFlagsShared, '--noediting', '--restricted', '--verbose']],
+  ['sh', interactiveLongFlagsShared],
+  ['zsh', [...interactiveLongFlagsShared, '--no-rcs', '--no-globalrcs', '--restricted', '--verbose']],
+  ['fish', [...interactiveLongFlagsShared, '--private', '--no-config']],
+  ['dash', interactiveLongFlagsShared],
+  ['ksh', interactiveLongFlagsShared],
+]);
 /**
  * An interactive shell by its command line: a shell binary (a login shell's `-bash` too) given
- * only allowlisted flags — short `-i`/`-l` in any cluster, or a long flag above — so it runs no
- * command, script, stdin script or chosen startup file (`--rcfile x`, `--init-file=x`) of its own.
+ * only allowlisted flags — short `-i`/`-l` in any cluster, or a long flag its own shell accepts —
+ * so it runs no command, script, stdin script or chosen startup file (`--rcfile x`,
+ * `--init-file=x`) of its own.
  */
 export function isInteractiveShell(command: string) {
   const [binary, ...args] = command.trim().split(/\s+/);
   const name = (binary ?? '').split('/').pop()!.replace(/^-/, '');
-  return interactiveShells.includes(name) && args.every(arg => /^-[il]+$/.test(arg) || interactiveLongFlags.includes(arg));
+  const allowlist = interactiveLongFlags.get(name);
+  return allowlist !== undefined && args.every(arg => /^-[il]+$/.test(arg) || allowlist.includes(arg));
 }
 /** The Herdr pane of the quarantined epoch's implementation session, as the session ledger recorded it. */
 export function recordedPane(work: Pick<Work, 'containmentQuarantine' | 'sessions'>) {
