@@ -21,7 +21,7 @@ A criterion states an outcome and its proofs:
 
 ## Review gate: verdicts, not threads
 
-The gate is the reviewer's approval of the exact head plus required CI; threads are inputs: an approval names each listed one resolved, follow-up (filed as backlog) or overridden, or is withdrawn; the loop resolves those named. A filing refused as a reused idempotency key links that key's item (same parent and approval), or files under an approval-and-body-hash key. Retries stop after 10 consecutive identical 4xx failures, raising one attention item naming step, error and item. After two rework rounds a bot's thread is advisory. Required conversation resolution is drift: `master protection --apply`.
+The gate is the reviewer's approval of the exact head plus required CI; threads inform it: an approval names each thread resolved, follow-up (filed as backlog) or overridden, or is withdrawn; the loop resolves those named. A filing refused as a reused idempotency key links that key's item (same parent and approval), or files under an approval-and-body-hash key. Retries stop after 10 consecutive identical 4xx failures, raising one attention item naming step, error and item. After two rework rounds a bot's thread is advisory. Required conversation resolution is drift: `master protection --apply`.
 
 ## Refuse candidates that revert shipped code outside their scope
 
@@ -29,7 +29,7 @@ The gate is the reviewer's approval of the exact head plus required CI; threads 
 
 ### Keep current with `graphyard sync`
 
-The landing check compares the candidate's changes since its merge base with the commit it would land on (live or predicted base). Each out-of-scope file is judged by the head's three-way merge onto it, not its blob: a change the commit has since extended, or one only the base made, merges to the commit's version, while a head restoring the merge-base version over it is still refused. Out-of-scope deletions and rewrites remain refused. Every observation recomputes this check, so stale refusals clear without a push. The simulated-day soak (`tests/soak.test.ts`) runs this check across landing-base moves, and stages a window where GitHub answers compares without a usable merge base; its false refusals hold only there.
+The landing check compares the candidate's changes since its merge base with the commit it would land on (live or predicted). Each out-of-scope file is judged by the head's three-way merge onto it, not its blob: a change the commit has since extended, or one only the base made, merges to the commit's version; a head restoring the merge-base version over it is still refused. Every observation recomputes it, so stale refusals clear without a push. The simulated-day soak (`tests/soak.test.ts`) runs it across landing-base moves, and stages a compare window without a usable merge base; its false refusals hold only there.
 
 Before any push, `graphyard sync GY-N` merges `origin/BASE` (never a rebase), regenerates, commits and prints the same classification. Restore an out-of-scope file with `git checkout BASE_TIP -- PATH`.
 
@@ -43,4 +43,4 @@ The [routine target](master-agent-reference.md#pipeline-speed) comes from `sync`
 
 ## Explain stalls
 
-`graphyard diagnose GY-N` explains the refusing gate and what else holds it; conflicting `base-behind`/`base-conflict` get rework, or [docs-sync](development.md#documentation-that-rarely-conflicts) if docs-only. Three unobserved observation jobs in a row are `observation-starved`, raised as master attention and `/api/status` `starvedJobs`.
+`graphyard diagnose GY-N` explains the refusing gate and what else holds it; `base-behind`/`base-conflict` get rework or, docs-only, [docs-sync](development.md#documentation-that-rarely-conflicts). Three unobserved observation jobs in a row are `observation-starved`, raised as master attention and `/api/status` `starvedJobs`.

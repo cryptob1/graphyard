@@ -31,7 +31,7 @@ npm ci && npm run build && npm test
 
 ### Documentation that rarely conflicts
 
-Write self-contained paragraphs; reword shared sentences only when wrong. A confirmed docs-only conflict is docs-synced, not reworked: the base merges in keeping both sides in budget, the approval kept while the non-docs diff is unchanged. Status and Insights rank daily hotspots; five on one path is raised.
+Write self-contained paragraphs; reword shared sentences only when wrong. A docs-only conflict is docs-synced, not reworked: base merges in, both sides kept in budget, approval kept while the diff outside docs/ stands unchanged; five a day on one path raises one.
 
 ## Trusted contracts
 

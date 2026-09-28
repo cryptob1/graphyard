@@ -100,12 +100,12 @@ const plan = {
   // GY-842: review panes of a previous day, standing agentless with their worktrees deleted.
   leftovers: 8,
   rework: new Set([3, 7, 11]), deaths: new Set([5, 9]), deathAfterMs: 8 * minute,
-  deploys: [2 * hour + 30 * minute, 5 * hour], dirtyCheckout: { from: 4 * hour + 50 * minute, to: 6 * hour }, split: { at: 45 * minute, item: 12 }, clean: 2, unstable: 4, slowRecompute: 8, exhaustedReviewer: 6,
-  // GY-566: main rewrites the docs page item two documented itself in just as its reviewer approves
+  deploys: [2 * hour + 30 * minute, 5 * hour], dirtyCheckout: { from: 4 * hour + 50 * minute, to: 6 * hour }, split: { at: 45 * minute, item: 12 },   clean: 2, unstable: 4, slowRecompute: 8, exhaustedReviewer: 6,
+  // GY-566: main rewrites the docs page item six documented itself in just as its reviewer approves
   // it; the loop routes the docs-only conflict to a docs-sync session, which resolves it in four
-  // minutes. Item two hosts it because its checks are clean from the start, so no other fault
-  // competes with the one conflict the day must hold, and the regression day reuses it.
-  docsConflict: { item: 2, page: 'docs/master-agent.md', syncMs: 4 * minute },
+  // minutes. Item six hosts it because its approval lands past the day's first merges, so the base
+  // move does not churn the early cadence, and the regression day reuses it.
+  docsConflict: { item: 6, page: 'docs/master-agent.md', syncMs: 4 * minute },
   /** GY-500: the item whose first head breaks main after its optimistic merge, and the items that change shared infrastructure and so queue. */
   breaksMain: 10, infrastructure: new Set([13, 14]),
   // GY-516: a flake on a speculative tip whose one rerun passes, and one whose rerun fails again.
@@ -750,9 +750,9 @@ async function simulateDay(options: { hours: number; regression?: ('approvers-le
     // The world moves: GitHub, then the sessions. A deploy restarts the control plane once the
     // sessions have renewed: for the rest of that minute nothing reaches it, the loop included.
     github.tick(now);
-    // The docs-conflict scenario is a main-day and regression-day fault; the queue-only day keeps
-    // its own, so a docs ejection cannot churn the window this day watches.
-    if (!options.queued) docsTick();
+    // The docs-conflict scenario is a main-day and regression-day fault: the other days' own
+    // rework accounting and windows would only absorb a base move this day must hold.
+    if (!options.queued && !options.scope && !options.handApprovers && !options.capacityWait && !options.refuseReworkOf?.length) docsTick();
     await workersTick(now);
     docsSyncTick(now);
     await producersTick(now);
