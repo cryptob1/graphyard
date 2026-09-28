@@ -54,10 +54,12 @@ const fixtureWork: Work[] = [
     createdAt: '2026-09-26T05:00:00.000Z',
     pipeline: { attempts: [], submittedAt: null, resubmittedAt: null, reworkRounds: 0, interventions: { blocked: 0, requirements: 0 } },
   }),
-  // GY-905: delivered but its events are pruned — nothing to fold, named as unmeasured.
+  // GY-905: delivered with attempt records but its events are pruned — nothing to fold, named as
+  // unmeasured. (An item with neither attempts nor events is named unmeasured-execution first:
+  // pipeline-speed's own awaiting-backfill-before-events-pruned precedence.)
   deliveredItem(E, 'GY-905', {
     createdAt: '2026-09-26T07:00:00.000Z', delivery: { pr: 404, mergeSha: sha40('GY-905'), mergedAt: '2026-09-26T08:30:00.000Z', mergedAtRepository: '2026-09-26T08:30:00.000Z' },
-    pipeline: { attempts: [], submittedAt: '2026-09-26T08:00:00.000Z', resubmittedAt: '2026-09-26T08:00:00.000Z', reworkRounds: 0, interventions: { blocked: 0, requirements: 0 } },
+    pipeline: { attempts: [attempt(1, '2026-09-26T08:05:00.000Z', '2026-09-26T08:25:00.000Z')], submittedAt: '2026-09-26T08:00:00.000Z', resubmittedAt: '2026-09-26T08:00:00.000Z', reworkRounds: 0, interventions: { blocked: 0, requirements: 0 } },
   }),
 ];
 
@@ -105,16 +107,22 @@ const eventsA = [
   fullRow(A, 'submit', '2026-09-26T06:00:00.000Z', snapshot(A, 'GY-901', { at: '2026-09-26T06:00:00.000Z', submission: { epoch: 1, pr: 400 }, candidate: { pr: 400, sha: sha40('a1'), baseSha: sha40('base') }, gates: fullGates('test', ['Required check test has not finished']) })),
   fullRow(A, 'rework', '2026-09-26T06:30:00.000Z', snapshot(A, 'GY-901', { at: '2026-09-26T06:30:00.000Z', reworkRequested: true, gates: fullGates('build', ['Worker has not submitted implementation for this attempt']) })),
   fullRow(A, 'claim', '2026-09-26T07:00:00.000Z', snapshot(A, 'GY-901', { at: '2026-09-26T07:00:00.000Z', candidate: { pr: 400, sha: sha40('a2'), baseSha: sha40('base') }, gates: fullGates('test', ['Required check test is running for the new head']) })),
-  fullRow(A, 'reconciled', '2026-09-26T07:30:00.000Z', snapshot(A, 'GY-901', { at: '2026-09-26T07:30:00.000Z', gates: fullGates('review', ['Independent approval of the current commit is required']) })),
+  // The GitHub observation rows: the reconciliation pass records the review, queue and merge-gate
+  // transitions on `github.observed` rows — the routine kinds the server excludes unless the read
+  // names routine=include (src/events-history.ts `eventSelection`).
+  fullRow(A, 'github.observed', '2026-09-26T07:30:00.000Z', snapshot(A, 'GY-901', { at: '2026-09-26T07:30:00.000Z', gates: fullGates('review', ['Independent approval of the current commit is required']) })),
   fullRow(A, 'rework', '2026-09-26T08:00:00.000Z', snapshot(A, 'GY-901', { at: '2026-09-26T08:00:00.000Z', reworkRequested: true, gates: fullGates('build', ['Worker has not submitted implementation for this attempt']) })),
   fullRow(A, 'submit', '2026-09-26T08:30:00.000Z', snapshot(A, 'GY-901', { at: '2026-09-26T08:30:00.000Z', candidate: { pr: 400, sha: sha40('a3'), baseSha: sha40('base') }, gates: fullGates('acceptance', ['required proof outstanding']) })),
-  fullRow(A, 'reconciled', '2026-09-26T09:00:00.000Z', snapshot(A, 'GY-901', { at: '2026-09-26T09:00:00.000Z', queue: { sequence: 1 }, gates: fullGates('merge', ['Merge queue position 1 of 1: the entry is queued']) })),
-  fullRow(A, 'reconciled', '2026-09-26T09:30:00.000Z', snapshot(A, 'GY-901', { at: '2026-09-26T09:30:00.000Z', gates: fullGates('merge', ['GitHub observation missing or older than two minutes']) })),
-  fullRow(A, 'reconciled', '2026-09-26T09:45:00.000Z', snapshot(A, 'GY-901', { at: '2026-09-26T09:45:00.000Z', gates: fullGates('merge', ['the merge is held for the approver: decision d9 for GY-901 awaits its independent approval']) })),
+  // A routine heartbeat whose snapshot repeats the standing gates, candidate and submission:
+  // included in the read, yet no new gate fact — routine volume must not disturb the fold.
+  fullRow(A, 'heartbeat', '2026-09-26T08:45:00.000Z', snapshot(A, 'GY-901', { at: '2026-09-26T08:45:00.000Z', submission: { epoch: 1, pr: 400 }, candidate: { pr: 400, sha: sha40('a3'), baseSha: sha40('base') }, gates: fullGates('acceptance', ['required proof outstanding']) })),
+  fullRow(A, 'github.observed', '2026-09-26T09:00:00.000Z', snapshot(A, 'GY-901', { at: '2026-09-26T09:00:00.000Z', queue: { sequence: 1 }, gates: fullGates('merge', ['Merge queue position 1 of 1: the entry is queued']) })),
+  fullRow(A, 'github.observed', '2026-09-26T09:30:00.000Z', snapshot(A, 'GY-901', { at: '2026-09-26T09:30:00.000Z', gates: fullGates('merge', ['GitHub observation missing or older than two minutes']) })),
+  fullRow(A, 'github.observed', '2026-09-26T09:45:00.000Z', snapshot(A, 'GY-901', { at: '2026-09-26T09:45:00.000Z', gates: fullGates('merge', ['the merge is held for the approver: decision d9 for GY-901 awaits its independent approval']) })),
 ];
 const eventsB = [
   fullRow(B, 'submit', '2026-09-26T07:00:00.000Z', snapshot(B, 'GY-902', { at: '2026-09-26T07:00:00.000Z', submission: { epoch: 1, pr: 401 }, candidate: { pr: 401, sha: sha40('b1'), baseSha: sha40('base') }, gates: fullGates('test', ['Required check test has not finished']) })),
-  fullRow(B, 'reconciled', '2026-09-26T07:30:00.000Z', snapshot(B, 'GY-902', { at: '2026-09-26T07:30:00.000Z', gates: fullGates('review', ['Independent approval of the current commit is required']) })),
+  fullRow(B, 'github.observed', '2026-09-26T07:30:00.000Z', snapshot(B, 'GY-902', { at: '2026-09-26T07:30:00.000Z', gates: fullGates('review', ['Independent approval of the current commit is required']) })),
   { seq: String(seq++), work_id: B, actor: 'graphyard', kind: 'decision.requested', created_at: '2026-09-26T07:30:00.000Z', payload: { id: 'dz1', action: 'rework', reason: ownReviewReason } },
   { seq: String(seq++), work_id: B, actor: 'graphyard-approver-1', kind: 'decision.approved', created_at: '2026-09-26T07:50:00.000Z', payload: { id: 'dz1', reason: 'the verdict is real' } },
   fullRow(B, 'rework', '2026-09-26T08:00:00.000Z', snapshot(B, 'GY-902', { at: '2026-09-26T08:00:00.000Z', reworkRequested: true, gates: fullGates('build', ['Worker has not submitted implementation for this attempt']) })),
@@ -129,6 +137,12 @@ const fullEventsByWork: Record<string, any[]> = { [A]: eventsA, [B]: eventsB, [C
 
 // The fake control plane answers the exact read contract the script uses: a whole-ledger
 // kind=rework read with `details` payloads and cursor paging, and per-item reads with full payloads.
+// The per-item branch mirrors the server (src/events-history.ts `eventSelection`): the routine rows
+// (`github.observed`, `heartbeat`) are filtered out unless the read names routine=include, and the
+// since lower bound is half-open. If the script forgets routine=include, the observation rows
+// disappear exactly as they do against the live API and the asserted split stops adding up — so
+// this fixture pins the request instead of hiding the bug the reviewer found.
+const routineRow = (row: any) => row.kind === 'github.observed' || row.kind === 'heartbeat';
 const fakeApi = async (path: string) => {
   if (path === 'work-snapshot') return { work: fixtureWork, now: '2026-09-26T12:00:00.000Z' };
   if (path.startsWith('events?')) {
@@ -148,7 +162,11 @@ const fakeApi = async (path: string) => {
     assert.equal(query.get('view'), 'page');
     assert.equal(query.get('order'), 'asc');
     assert.equal(query.get('since'), fixtureWork.find(item => item.id === work)?.pipeline?.submittedAt, 'the per-item read opens at the item\'s first submission: the window the split measures');
-    const rows = fullEventsByWork[work] ?? [];
+    const includeRoutine = query.get('routine') === 'include';
+    const since = Date.parse(query.get('since') ?? '');
+    const rows = (fullEventsByWork[work] ?? [])
+      .filter(row => includeRoutine || !routineRow(row))
+      .filter(row => Number.isFinite(Date.parse(row.created_at)) ? Date.parse(row.created_at) >= since : true);
     return { events: rows, page: { hasMore: false, nextCursor: null }, filters: { work } };  }
   throw new Error(`unexpected api path ${path}`);
 };
@@ -238,11 +256,15 @@ test('unit:wait-causes-classified — each delivery\'s waiting time splits by ca
   assert.equal(waitB.executionMs, 60 * minute);
   assert.equal(waitB.executionMs + waitB.totalWaitMs, waitB.windowMs);
 
-  // GY-903: measured split with no attempt records — execution is named unmeasured, not guessed.
+  // GY-903: a submitted, delivered window with no attempt records — its execution is unknown, so
+  // the window is not convertible into a waiting split: named unmeasured-execution, contributing
+  // nothing, never turned into fabricated waiting time.
   const waitC = deliveryWaitingTimeByCase(fixtureWork[2], eventsC, helpers);
-  assert.equal(waitC.measured, true);
-  assert.equal(waitC.unmeasuredExecution, true);
-  assert.deepEqual(waitC.byCause, { 'no-worker-slot': 20 * minute, ci: 10 * minute, review: 0, proof: 0, 'approver-decision': 0, 'merge-queue': 0, observation: 0, 'gate-disagreement': 0 });
+  assert.equal(waitC.measured, false);
+  assert.equal(waitC.coverage, 'unmeasured-execution');
+  assert.equal(waitC.windowMs, 30 * minute);
+  assert.deepEqual(waitC.byCause, { 'no-worker-slot': 0, ci: 0, review: 0, proof: 0, 'approver-decision': 0, 'merge-queue': 0, observation: 0, 'gate-disagreement': 0 });
+  assert.equal(waitC.totalWaitMs, 0);
   assert.equal(waitC.executionMs, 0);
 
   // Unmeasured items are named by coverage, never silently dropped from the population.
@@ -252,25 +274,28 @@ test('unit:wait-causes-classified — each delivery\'s waiting time splits by ca
 
   // The aggregate: totals, shares of the waiting hours, per-delivery percentiles per cause —
   // built in the population's own order (GY-903, GY-905, GY-902, GY-901, GY-904 by accepted merge).
+  // Only GY-902 and GY-901 are measured: the unmeasured-execution delivery adds no fabricated
+  // waiting minute to any bucket.
   waitA.key = 'GY-901'; waitB.key = 'GY-902'; waitC.key = 'GY-903';
   const waitD = deliveryWaitingTimeByCase(fixtureWork[3], [], helpers); waitD.key = 'GY-904';
   const waitE = deliveryWaitingTimeByCase(fixtureWork[4], [], helpers); waitE.key = 'GY-905';
   const waits = [waitC, waitE, waitB, waitA, waitD];
   const summary = summarizeWaiting(waits, nearestRankPercentiles);
   assert.deepEqual(summary.byCause, {
-    'no-worker-slot': 60 * minute, ci: 40 * minute, review: 40 * minute, proof: 30 * minute,
+    'no-worker-slot': 40 * minute, ci: 30 * minute, review: 40 * minute, proof: 30 * minute,
     'approver-decision': 35 * minute, 'merge-queue': 30 * minute, observation: 15 * minute, 'gate-disagreement': 20 * minute,
   });
-  assert.equal(summary.totalWaitMs, 270 * minute);
+  assert.equal(summary.totalWaitMs, 240 * minute);
   assert.equal(summary.executionMs, 120 * minute);
   assert.equal(summary.executionMs + summary.totalWaitMs, summary.windowMs);
-  assert.equal(summary.executionShare, Number((120 / 390).toFixed(4)), 'execution share of the open time (120 min execution of 390 min window)');
-  assert.equal(summary.waitP50Ms, 60 * minute, 'per-delivery waiting: GY-903 30 min, GY-902 60 min, GY-901 180 min');
+  assert.equal(summary.executionShare, Number((120 / 360).toFixed(4)), 'execution share of the open time (120 min execution of the 360 min measured windows)');
+  assert.equal(summary.waitP50Ms, 60 * minute, 'per-delivery waiting among measured items: GY-902 60 min, GY-901 180 min');
   assert.equal(summary.waitP90Ms, 180 * minute);
   assert.equal(summary.largest[0].cause, 'no-worker-slot');
-  assert.equal(summary.largest[0].ms, 60 * minute);
+  assert.equal(summary.largest[0].ms, 40 * minute);
   assert.equal(Math.abs(waitCauses.reduce((total: number, cause: string) => total + (summary.shares[cause] ?? 0), 0) - 1) < 0.001, true, 'the printed shares cover every waiting minute');
-  assert.deepEqual(summary.unmeasured, [{ key: 'GY-905', coverage: 'events-pruned' }, { key: 'GY-904', coverage: 'no-submission' }]);
+  assert.deepEqual(summary.unmeasured, [
+    { key: 'GY-903', coverage: 'unmeasured-execution' }, { key: 'GY-905', coverage: 'events-pruned' }, { key: 'GY-904', coverage: 'no-submission' }]);
   assert.deepEqual(summary.unmeasuredExecution, ['GY-903']);
 
   // The whole report over the fake control plane: the paged reads, the fold, both splits, and the
@@ -288,9 +313,9 @@ test('unit:wait-causes-classified — each delivery\'s waiting time splits by ca
   assert.deepEqual(report.waiting.unmeasured, summary.unmeasured);
   assert.deepEqual(report.preRelease, { totalMs: 6 * 60 * minute, measured: 4, unmeasured: 1 }, 'pre-release time (created to first submission) is reported from the documents, outside the seven-way split');
   // The pipeline-speed headline is the shared module's own: only items with attempt records are
-  // measured (GY-903 and GY-905 hold no attempts, so they await backfill there).
-  assert.equal(report.pipelineSpeed.measured, 2);
-  assert.equal(report.pipelineSpeed.unmeasured, 3);
+  // measured there (GY-903 holds no attempts, so it awaits backfill in that report).
+  assert.equal(report.pipelineSpeed.measured, 3);
+  assert.equal(report.pipelineSpeed.unmeasured, 2);
   assert.equal(report.pipelineSpeed.submitToMerge.p50Ms, 120 * minute);
   assert.equal(report.pipelineSpeed.submitToMerge.p90Ms, 240 * minute);
 
@@ -301,9 +326,9 @@ test('unit:wait-causes-classified — each delivery\'s waiting time splits by ca
   assert.match(text, /own-change-review: 2 rounds/);
   assert.match(text, /stale-observation: 1 round/);
   assert.match(text, /base-breakage: 0 rounds/, 'a zero cause is printed, so shares are comparable across runs');
-  assert.match(text, /Waiting time: 4\.5 h of waiting against 2 h of execution across 3 measured deliveries/);
-  assert.match(text, /no-worker-slot: 1 h \(p50/);
+  assert.match(text, /Waiting time: 4 h of waiting against 2 h of execution across 2 measured deliveries/);
+  assert.match(text, /no-worker-slot: 0\.7 h \(p50/);
   assert.match(text, /gate-disagreement: 0\.3 h/);
-  assert.match(text, /Unmeasured: GY-905 \(events-pruned\), GY-904 \(no-submission\)/);
-  assert.match(text, /Pipeline speed: submit→merge p50 120 min p90 4 h over 2 measured deliveries \(3 unmeasured\)/);
+  assert.match(text, /Unmeasured: GY-903 \(unmeasured-execution\), GY-905 \(events-pruned\), GY-904 \(no-submission\)/);
+  assert.match(text, /Pipeline speed: submit→merge p50 120 min p90 4 h over 3 measured deliveries \(2 unmeasured\)/);
 });

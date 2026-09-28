@@ -15,14 +15,16 @@
 // the review/CI split live here, layered in front of the shared classifier.
 //
 // AC-2's window is each item's first submission → accepted merge (mergedAtRepository ?? mergedAt,
-// the pipeline-speed convention). The ledger rows of each item are read in full payload and folded
-// through deriveFacts per item — `gates.changed` is a projected fact, not a raw ledger kind — and
-// the interval between consecutive facts is attributed to exactly one cause: a slice a pipeline
-// attempt (claimedAt → endedAt) covers is execution, never waiting; a slice an open approver
-// decision (decision.requested → decided) covers is approver-decision; the rest follows the step
-// the gate fact places the item at. Clock-inverted intervals clamp to zero, open intervals close
-// at the merge, and no interval opens from a fact observed at or after the merge. Items with no
-// recorded submission, pruned events or an exhausted read are named, never dropped.
+// the pipeline-speed convention). The ledger rows of each item are read in full payload — with the
+// routine rows included (`routine=include`: the `github.observed` rows are where CI checks, reviews,
+// queue state and merge gates are recorded) — and folded through deriveFacts per item —
+// `gates.changed` is a projected fact, not a raw ledger kind — and the interval between consecutive
+// facts is attributed to exactly one cause: a slice a pipeline attempt (claimedAt → endedAt) covers
+// is execution, never waiting; a slice an open approver decision (decision.requested → decided)
+// covers is approver-decision; the rest follows the step the gate fact places the item at.
+// Clock-inverted intervals clamp to zero, open intervals close at the merge, and no interval opens
+// from a fact observed at or after the merge. Items with no recorded submission, no attempt records
+// (unknown execution), pruned events or an exhausted read are named, never dropped.
 //
 //   GRAPHYARD_URL=… GRAPHYARD_TOKEN=… node scripts/delivery-causes.mjs [--items 100] [--record DIR] [--json]
 //
@@ -148,13 +150,18 @@ export async function readReworkEvents(api, since, bounds = {}) {
   return { rounds, complete, pages };
 }
 
-/** Bounded paged read of one item's history from a given instant on, with the work snapshots the fold needs. The waiting window opens at the item's first submission, so the read starts there: pre-submission history (backlog, blocks, earlier epochs' rework) is not part of the split. The walk is capped at a deterministic row budget (`pages` × `limit`): light pages keep every request well inside the client timeout, and an item whose window holds more rows than the cap yields a split over the part read — a floor the report discloses. */
+/** Bounded paged read of one item's history from a given instant on, with the work snapshots the fold needs. The waiting window opens at the item's first submission, so the read starts there: pre-submission history (backlog, blocks, earlier epochs' rework) is not part of the split, and the routine rows the server would summarise away are requested (`routine=include`) because the `github.observed` rows carry the CI, review, queue and gate transitions. The walk is capped at a deterministic row budget (`pages` × `limit`): light pages keep every request well inside the client timeout, and an item whose window holds more rows than the cap yields a split over the part read — a floor the report discloses. */
 export async function readDeliveryEvents(api, workId, bounds = {}) {
   const limit = bounds.limit ?? 100, pageBound = bounds.pages ?? 24;
   const events = [];
   let cursor = null, complete = false, pages = 0;
   while (cursor !== null || pages === 0) {
-    const params = new URLSearchParams({ work: workId, order: 'asc', payload: 'full', view: 'page', limit: String(limit) });
+    // routine=include: the ledger's routine rows (`github.observed`, `heartbeat`) are excluded by
+    // default (src/events-history.ts `eventSelection`), and the `github.observed` rows are where
+    // the reconciliation pass records CI checks, reviews, queue state and merge gates — without
+    // them the fold would leave an item parked at an older gate fact until some later non-routine
+    // row, corrupting the waiting split.
+    const params = new URLSearchParams({ work: workId, order: 'asc', payload: 'full', view: 'page', routine: 'include', limit: String(limit) });
     if (bounds.since) params.set('since', bounds.since);
     if (cursor) params.set('cursor', cursor);
     const history = await api(`events?${params}`);
@@ -188,17 +195,23 @@ const observationWaitMarkers = [/\bobservation\b[^.\n]{0,40}\b(missing|older tha
  * merge-ready → merge-queue, recorded refusal text → gate-disagreement, escalation/hold/decision →
  * approver-decision, observation-freshness → observation). Gate facts observed at or after the
  * merge never open an interval, negative intervals clamp to zero, and everything still open closes
- * at the merge. An item with no recorded submission, no delivery, or no readable gate facts is
- * named by `coverage` and contributes nothing, never silently.
+ * at the merge. An item with no recorded submission, no delivery, no attempt records (its execution
+ * is unknown), or no readable gate facts is named by `coverage` and contributes nothing, never
+ * silently.
  */
 export function deliveryWaitingTimeByCase(item, events, helpers) {
   const zero = () => Object.fromEntries(waitCauses.map(cause => [cause, 0]));
-  const result = { measured: false, coverage: 'unmeasured', windowMs: 0, executionMs: 0, totalWaitMs: 0, byCause: zero(), unmeasuredExecution: false, slices: [] };
+  const result = { measured: false, coverage: 'unmeasured', windowMs: 0, executionMs: 0, totalWaitMs: 0, byCause: zero(), slices: [] };
   const submittedMs = time(item.pipeline?.submittedAt);
   const mergedMs = time(mergedAtOf(item));
   if (submittedMs === null) { result.coverage = 'no-submission'; return result; }
   if (mergedMs === null) { result.coverage = 'undelivered'; return result; }
   result.windowMs = Math.max(0, mergedMs - submittedMs);
+  // A backfilled item can carry no attempt records at all: its execution is unknown, so no part of
+  // its window is convertible into a waiting split. The report names it (unmeasured-execution,
+  // pipeline-speed's awaiting-backfill discipline and precedence) rather than turning unknown
+  // worker execution into waiting time.
+  if (!(item.pipeline?.attempts ?? []).length) { result.coverage = 'unmeasured-execution'; return result; }
 
   // Fold the raw ledger rows into flow facts (state resets per item), and pair each approver
   // decision's request with the row that settled it — an unmatched request still counts as
@@ -225,9 +238,6 @@ export function deliveryWaitingTimeByCase(item, events, helpers) {
     .map(pair => ({ start: Math.max(pair.start, submittedMs), end: Math.min(pair.end, mergedMs) }))
     .filter(pair => pair.end > pair.start)
     .sort((a, b) => a.start - b.start);
-  // A backfilled item can carry no attempt records at all: its execution is unknown, which the
-  // report names (unmeasuredExecution) rather than converting the build step into waiting.
-  result.unmeasuredExecution = !(item.pipeline?.attempts ?? []).length;
 
   const decisionIntervals = [...decisions.values()]
     .map(pair => pair.requestedAt === null ? null : { start: Math.max(pair.requestedAt, submittedMs), end: Math.min(pair.resolvedAt ?? mergedMs, mergedMs) })
@@ -310,7 +320,7 @@ export function summarizeWaiting(results, percentiles) {
     byCause, shares: Object.fromEntries(waitCauses.map(cause => [cause, share(byCause[cause])])), largest,
     unmeasured: results.filter(entry => !entry.measured).map(entry => ({ key: entry.key, coverage: entry.coverage })),
     readFailed: results.filter(entry => entry.coverage === 'read-failed').map(entry => entry.key),
-    unmeasuredExecution: measured.filter(entry => entry.unmeasuredExecution).map(entry => entry.key),
+    unmeasuredExecution: results.filter(entry => !entry.measured && entry.coverage === 'unmeasured-execution').map(entry => entry.key),
     incompleteReads: results.filter(entry => entry.measured && entry.complete === false).map(entry => entry.key),
   };
 }
@@ -398,7 +408,7 @@ export async function collect(api, options, analytics) {
   const ownCounts = measuredEntries.map(entry => entry.rounds.filter(round => round.cause === 'own-change-review' || round.cause === 'own-change-ci').length);
 
   const helpers = { deriveFacts, gateFactStep, mergeReadyGate, queueSequencingReason };
-  const skipResult = (item, coverage) => ({ measured: false, coverage, key: item.key, complete: true, windowMs: 0, executionMs: 0, totalWaitMs: 0, byCause: Object.fromEntries(waitCauses.map(cause => [cause, 0])), unmeasuredExecution: false, slices: [] });
+  const skipResult = (item, coverage) => ({ measured: false, coverage, key: item.key, complete: true, windowMs: 0, executionMs: 0, totalWaitMs: 0, byCause: Object.fromEntries(waitCauses.map(cause => [cause, 0])), slices: [] });
   // Six bounded per-item walks in flight, each starting at the item's first submission — the
   // window the split measures — each capped at a deterministic row budget whose exhaustion turns
   // the item's split into a disclosed floor, with one retry because a failed page is usually
