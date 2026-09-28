@@ -19,8 +19,8 @@ A running handle last observed over **15 minutes** by default, `sessionStaleThre
 
 Running rows offer:
 
-- **Copy local**, on the launching host: `herdr agent attach w1V:pJD`.
-- **Copy remote**: `herdr --help` documents `herdr --machine <label-or-id> <command>` and `herdr --remote <ssh-target>`, and interactive attachment is not forwarded by `--machine`, so the form focuses the pane then attaches remotely: `herdr --machine vishrog agent focus w1V:pJD && herdr --remote vishrog`.
+- **Copy local** (launching host): `herdr agent attach w1V:pJD`.
+- **Copy remote**: `herdr --help` documents `--machine <label-or-id> <command>` and `--remote <ssh-target>`; interactive attachment is not forwarded by `--machine`, so the form focuses the pane then attaches remotely: `herdr --machine vishrog agent focus w1V:pJD && herdr --remote vishrog`.
 
 ## The status sentence
 
@@ -28,7 +28,7 @@ Rows show **Build, Validate, Test, Review, Prove, Merge, Deploy**. A merged item
 
 ## An item page
 
-Below the summary: **What is left**, **Requirements** (✓ or ○ per criterion), **Pull request** and **Activity**. **Technical details** holds gates, sessions, evidence and overlaps.
+Below the summary: **What is left**, **Requirements** (✓ or ○ per criterion), **Pull request** and **Activity**. **Technical details** holds gates, sessions, evidence and overlaps (`Shares files with GY-166, GY-167 (tests/)`).
 
 ## Insights
 

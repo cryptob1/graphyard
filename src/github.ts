@@ -588,6 +588,13 @@ export class GitHub {
   private histories = new Map<string, Set<string> | null>();
   /** Files changed between two pinned commits (GY-500); immutable, so each pair is compared once. */
   private baseChangeLists = new Map<string, string[] | null>();
+  /**
+   * Whether the optimistic lane (GY-500) is on, as the published `mergeQueue.optimistic` setting
+   * reads it; null until the job loop loads the settings and means the default (on). With the lane
+   * off nothing reads the files the base changed since a candidate's bound base, so `observe`
+   * spends no compare on them.
+   */
+  optimisticLaneEnabled: boolean | null = null;
   /** Blob bytes by sha (GY-863's landing merge-result judgement); a blob's content is immutable, so each is asked once. */
   private blobContents = new Map<string, Buffer>();
   /** The persisted cold layer under the four maps above (src/github-cache.ts), when attached. */
@@ -1149,7 +1156,9 @@ export class GitHub {
     const landing = pr.merged || pr.state !== 'open' ? undefined : await this.landingCheck(work, pr.head.sha, files, bound, speculative, branch, peers, budget);
     const revertedDelivery = pr.merged && work.stage !== 'done' ? await this.revertedDelivery(work, pr, files, branch, peers, budget) : undefined;
     // What the base changed since the bound base: an optimistic merge (GY-500) needs it disjoint from the head's own files.
-    const baseChanges = pr.merged || pr.state !== 'open' ? undefined : await this.baseChangesSince(bound, branch.tip);
+    // With the published lane off, nothing reads the comparison, so an install that turned the lane
+    // off pays no compare per (base, tip) pair per open pull request on every base move.
+    const baseChanges = this.optimisticLaneEnabled === false || pr.merged || pr.state !== 'open' ? undefined : await this.baseChangesSince(bound, branch.tip);
     const candidateBase = pr.merged && work.candidate && work.candidate.sha === pr.head.sha ? work.candidate.baseSha : bound;
     // A head contains the base tip by ancestry, or as a published tip whose bound base is the
     // tip's tree-identical predecessor, or as a published tip behind other queue entries, whose
@@ -1851,7 +1860,11 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     const existing = (await this.pages(`/commits/${revert.head}/check-runs?check_name=${encodeURIComponent(CHECK_NAME)}&filter=latest`, 'check_runs')).find(c => c.app.id === this.config.appId);
     const body = { name: CHECK_NAME, head_sha: revert.head, status: 'completed', conclusion: 'success', external_id: work.id,
       output: { title: 'Main guard: optimistic-merge revert', summary: `Revert of ${work.key}'s optimistic merge at ${revert.head}: ${revert.failing.join(', ') || 'required checks failed'} on main` } };
-    await this.request(existing ? `/check-runs/${existing.id}` : '/check-runs', existing ? 'PATCH' : 'POST', body);
+    // A verdict already standing is not republished on every guard tick; the merge request below is.
+    if (!(existing?.status === body.status && existing.conclusion === body.conclusion && existing.external_id === body.external_id
+      && existing.output?.title === body.output.title && existing.output?.summary === body.output.summary)) {
+      await this.request(existing ? `/check-runs/${existing.id}` : '/check-runs', existing ? 'PATCH' : 'POST', body);
+    }
     await this.graphql(headBoundMergeMutation, { id: state.pullRequestId, head: revert.head, method: autoMergeMethod() });
     const merged = await this.request(`/pulls/${revert.pr}`);
     return merged?.merged && typeof merged.merge_commit_sha === 'string' ? merged.merge_commit_sha : null;
@@ -2153,14 +2166,38 @@ export async function repairLaneStep(engine: Pick<Engine, 'store' | 'enqueueRequ
  * optimistic merges, and is released once the base branch tip passes the required suite again.
  */
 export const mainGuardIntervalMs = 30_000;
+/**
+ * One tick with a revert not landed at once (a required merge queue, for example): recorded as its
+ * own `optimistic.revert.pending` step instead of the guard republishing and re-requesting in
+ * silence every 30 s (GY-518). The first tick records, and it records again only when the revert
+ * turns `overdue` — a revert that has now waited longer than the CI duration observed on the
+ * culprit's own merge commit, the brief's attention threshold (floored at two guard ticks so a
+ * fast suite never flags within the same tick it was observed in).
+ */
+async function recordRevertPending(engine: Pick<Engine, 'store'>, guard: Extract<GuardState, { state: 'reverting' }>, now: Date): Promise<void> {
+  const culprit = (await engine.store.list()).find(item => item.id === guard.culprit.id)?.optimisticMerges?.find(entry => entry.mergeSha === guard.culprit.mergeSha);
+  const observedCiMs = culprit?.postMerge?.observedAt ? Math.max(0, Date.parse(culprit.postMerge.observedAt) - Date.parse(guard.culprit.mergedAt)) : null;
+  const waitedMs = Math.max(0, now.getTime() - Date.parse(guard.revert.at));
+  const details = { key: guard.culprit.key, mergeSha: guard.culprit.mergeSha, pr: guard.revert.pr, head: guard.revert.head,
+    waitedMs, thresholdMs: Math.max(observedCiMs ?? 0, 2 * mainGuardIntervalMs), overdue: waitedMs > Math.max(observedCiMs ?? 0, 2 * mainGuardIntervalMs), at: now.toISOString() };
+  // Postgres returns jsonb objects with their keys reordered, so the identity is built from values, never serialized objects.
+  const last = (await engine.store.pool.query("SELECT payload->'details' AS details FROM events WHERE work_id IS NULL AND kind='optimistic.revert.pending' ORDER BY seq DESC LIMIT 1")).rows[0]?.details;
+  if (last && last.key === details.key && last.pr === details.pr && last.head === details.head && last.overdue === details.overdue) return;
+  await engine.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', ['graphyard', 'optimistic.revert.pending', JSON.stringify({ details })]);
+}
 export async function guardMain(engine: Pick<Engine, 'store' | 'ciAppIds' | 'recordPostMerge' | 'recordOptimisticRevert'>, github: Pick<GitHub, 'commitChecks' | 'openRevert' | 'mergeRevert' | 'baseBranch' | 'permissionShortfall'>, now = new Date()): Promise<GuardState> {
   const required = (work: Work) => work.policy.checks;
-  for (const work of await engine.store.list()) {
+  const items = await engine.store.list();
+  let wrotePostMerge = false;
+  for (const work of items) {
     const merge = currentOptimisticMerge(work);
     if (!merge || (merge.postMerge && merge.postMerge.verdict !== 'pending')) continue;
     await engine.recordPostMerge(work.id, merge.mergeSha, postMergeVerdict(await github.commitChecks(verdictCommit(merge)), required(work), engine.ciAppIds));
+    wrotePostMerge = true;
   }
-  let all = await engine.store.list();
+  // Nothing recorded: the reading above is still exactly what the guard judges, so the pass
+  // reuses it instead of listing every work item twice per tick.
+  let all = wrotePostMerge ? await engine.store.list() : items;
   let guard = mainGuard(all);
   const recorded = (await engine.store.pool.query("SELECT payload->'details' AS details FROM events WHERE work_id IS NULL AND kind='optimistic.guard' ORDER BY seq DESC LIMIT 1")).rows[0]?.details;
   const summary = { state: guard.state, detail: describeGuard(guard), window: guard.window.map(merge => ({ key: merge.key, mergeSha: merge.mergeSha, verdict: merge.verdict })),
@@ -2189,7 +2226,7 @@ export async function guardMain(engine: Pick<Engine, 'store' | 'ciAppIds' | 'rec
       await engine.recordOptimisticRevert(work.id, held.culprit.mergeSha, { ...revert, state: 'merged', mergeSha: merged });
       // The merges that landed after the culprit failed on commits that held it: each is re-tested on the revert.
       for (const merge of retestAfterRevert(held)) await engine.recordPostMerge(merge.id, merge.mergeSha, { verdict: 'pending' }, merged);
-    }
+    } else await recordRevertPending(engine, held, now);
   } else if (held.state === 'refused') {
     // Main is released once its tip passes again, however it was fixed.
     const tip = (await github.baseBranch()).tip;
@@ -2405,6 +2442,8 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
     batchSizeRead.set(engine, Date.now());
     await Promise.all([engine.loadMergeBatchSize(), engine.loadParallelTips(), engine.loadRerunFailedChecks(), engine.loadOptimisticExclude()]).catch(() => batchSizeRead.delete(engine));
   }
+  // The observation spends its base compare only while the published setting keeps the lane on.
+  github.optimisticLaneEnabled = engine.optimisticMerge;
   // The main guard (GY-500) is the installation's, not a job's: it runs here on its own interval,
   // and a failure of it is recorded and retried on the next interval, never failing a job.
   const guardedAt = guardRead.get(engine);
