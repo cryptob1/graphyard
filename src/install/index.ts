@@ -304,7 +304,12 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
     title: host ? `Generate one credential per principal on the host under ${host.layout.tokensDirectory} (mode 0600); this machine keeps fingerprints only` : `Generate one credential per principal under ${session.directory} (mode 0600) and never write it to the repository`,
     values: session.principals.map(principal => {
       const token = session.tokens.get(principal.id);
-      const role = `${principal.role}${principal.proofs?.length ? ` limited to ${principal.proofs.join(', ')}` : ''}`;
+      // The declared kind rides beside the role: the operator row reads "(human)", the agents
+      // "(ai)", and a principal the running deployment left undeclared is named as such so the
+      // plan shows the repair an apply performs.
+      const undeclaredDeployed = record?.principals.some(deployed => deployed.id === principal.id
+        && deployed.role === 'admin' && deployed.sessionKind !== 'human');
+      const role = `${principal.role}${principal.proofs?.length ? ` limited to ${principal.proofs.join(', ')}` : ''}${principal.sessionKind ? ` (${principal.sessionKind})` : ''}${undeclaredDeployed ? '; deployed without a sessionKind, this apply declares it human' : ''}`;
       return { name: principal.id, value: REDACTED, secret: true, note: token ? role : `${role}; ${PENDING}`, ...(token ? { fingerprint: fingerprint(token) } : {}) };
     }),
   });
@@ -356,6 +361,18 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
   if (record && record.provider !== context.provider && !host?.migrate) drift.push({ action: 'local.credentials', field: 'provider', expected: context.provider, observed: record.provider });
   if (record && record.repository.toLowerCase() !== session.inputs.repository.toLowerCase()) drift.push({ action: 'local.credentials', field: 'repository', expected: session.inputs.repository, observed: record.repository });
   if (record && (record.domain ?? null) !== (context.domain ?? null)) drift.push({ action: 'provider.url', field: 'domain', expected: context.domain ?? 'provider-assigned', observed: record.domain ?? 'provider-assigned' });
+  // An install deployed before principals declared a session kind keeps its operator undeclared,
+  // and the server treats an undeclared session as never human (delegation.ts `sessionKind`):
+  // its human-only requests park with nobody able to answer them. The roster this plan writes
+  // declares the operator human, so --apply repairs the deployment; the plan names the drift
+  // instead of silently rewriting the operator's identity.
+  for (const deployed of record?.principals ?? []) {
+    if (deployed.role !== 'admin') continue;
+    const planned = session.principals.find(principal => principal.id === deployed.id);
+    if (!planned || planned.sessionKind !== 'human' || deployed.sessionKind === 'human') continue;
+    drift.push({ action: 'local.credentials', field: 'sessionKind', expected: `${planned.id} declared sessionKind human`,
+      observed: `${deployed.id} declares ${deployed.sessionKind ? `sessionKind ${deployed.sessionKind}` : 'no sessionKind'}; human-only requests have no one who can answer them` });
+  }
 
   const plan: InstallPlan = {
     version: 1, repository: session.inputs.repository, provider: context.provider, installId: session.installId,
@@ -445,7 +462,7 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
   if (migratedFrom) for (const principal of session.principals) {
     if (migratedFrom.principals.some(old => old.fingerprint === fingerprint(session.tokens.get(principal.id)!))) throw new Error(`The host reuses a credential of the old installation (${principal.id}); the old loop would keep its leases`);
   }
-  record = { ...record, url, domain: context.domain, provider: context.provider, selfContained: !!context.host, migratedFrom, baseBranch: session.inputs.baseBranch, reviewPolicy: session.reviewPolicy, principals: session.principals.map(principal => ({ id: principal.id, role: principal.role, ...(principal.proofs?.length ? { proofs: principal.proofs } : {}), fingerprint: fingerprint(session.tokens.get(principal.id)!) })), updatedAt: new Date(deps.now()).toISOString() };
+  record = { ...record, url, domain: context.domain, provider: context.provider, selfContained: !!context.host, migratedFrom, baseBranch: session.inputs.baseBranch, reviewPolicy: session.reviewPolicy, principals: session.principals.map(principal => ({ id: principal.id, role: principal.role, ...(principal.sessionKind ? { sessionKind: principal.sessionKind } : {}), ...(principal.proofs?.length ? { proofs: principal.proofs } : {}), fingerprint: fingerprint(session.tokens.get(principal.id)!) })), updatedAt: new Date(deps.now()).toISOString() };
   await writeInstallRecord(session.directory, record, vault);
 
   // GitHub: the App manifest flow needs the live HTTPS origin, so it runs after the URL exists.

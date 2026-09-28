@@ -151,12 +151,12 @@ test('unit:plain-status-copy — every stage and every gate reason reads as one 
   assert.equal(plainReason('Internal epoch lease candidate mismatch', 'merge').text, 'Waiting to merge');
 });
 
-test('integration:dashboard-navigation — one sidebar (Work, Workers, Shipped, Tests planned, Insights, Settings); every other page sits under one entry; admin-only and unconfigured pages hidden', async () => {
+test('integration:dashboard-navigation — one sidebar (Work, Workers, Shipped, Tests, Insights, Settings); every other page sits under one entry; admin-only and unconfigured pages hidden', async () => {
   const labels = (d: Dashboard) => primaryEntries(d).map(entry => entry!.label);
-  // GY-161 replaced GY-67's four entries with the approved design's six; Tests is planned (GY-162) and opens nothing.
+  // GY-161 replaced GY-67's four entries with the approved design's six; Tests opens the test-case results (GY-162).
   assert.deepEqual(sections.map(section => section.label), ['Work', 'Workers', 'Shipped', 'Tests', 'Insights', 'Settings']);
-  for (const role of ['admin', 'reader', 'worker', 'coordinator', 'operator-agent']) assert.ok(labels(dashboard({}, role)).length <= 5, role);
-  assert.deepEqual(labels(dashboard()), ['Work', 'Workers', 'Shipped', 'Insights', 'Settings']);
+  for (const role of ['admin', 'reader', 'worker', 'coordinator', 'operator-agent']) assert.ok(labels(dashboard({}, role)).length <= 6, role);
+  assert.deepEqual(labels(dashboard()), ['Work', 'Workers', 'Shipped', 'Tests', 'Insights', 'Settings']);
   const sectionOf = Object.fromEntries(views.map(view => [view.label, view.section]));
   assert.equal(sectionOf.Insights, 'insights');
   for (const page of ['Delivered', 'Interventions', 'Validation', 'Releases']) assert.equal(sectionOf[page], 'shipped', page);
@@ -164,8 +164,8 @@ test('integration:dashboard-navigation — one sidebar (Work, Workers, Shipped, 
 
   // The sidebar renders exactly the primary entries; the pages of a section are sub-page links above the content.
   const sidebar = markup(createElement(Sidebar, { entries: views.map(view => primaryEntry(dashboard(), view)), dashboard: dashboard() }));
-  assert.equal(sidebar.match(/class="nav( active)?"/g)?.length, 5);
-  assert.equal(sidebar.match(/class="nav planned"/g)?.length, 1);
+  assert.equal(sidebar.match(/class="nav( active)?"/g)?.length, 6);
+  assert.equal(sidebar.match(/class="nav planned"/g), null, 'Tests has shipped (GY-162): no entry is a placeholder');
   const tabs = (d: Dashboard, view: string) => [...markup(createElement(TopBar, { ...d, view })).matchAll(/class="tab(?: active)?"[^>]*>(?:<abbr[^>]*>)?([^<]+)</g)].map(match => match[1]);
   assert.deepEqual(tabs(dashboard(), 'insights'), [], 'Insights is one page with no tabs (GY-168)');
   assert.deepEqual(tabs(dashboard(), 'shipped'), ['Delivered', 'Interventions', 'Validation', 'Releases']);

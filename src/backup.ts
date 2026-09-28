@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type pg from 'pg';
 import { advisoryLocks, ledgerOrder, ledgerSeeded, ledgerSequences, ledgerTables } from './store.js';
 import { releaseInfo, schemaVersion } from './release.js';
+import { retryDeadlocks } from './store/migration-locks.js';
 
 /**
  * A logical, versioned backup of the whole coordination ledger, taken from one consistent
@@ -88,6 +89,9 @@ export function verifyBackup(input: unknown): Backup {
   return backup;
 }
 
+/** How many times a restore runs when live traffic deadlocks it (40P01) before the deadlock is reported. */
+const restoreDeadlockAttempts = 5;
+
 /**
  * Restore a verified backup into an empty, migrated database, in one transaction.
  *
@@ -105,7 +109,8 @@ export function verifyBackup(input: unknown): Backup {
 export async function restoreBackup(pool: pg.Pool, input: unknown) {
   const backup = verifyBackup(input);
   const db = await pool.connect();
-  try {
+  const restored: Record<string, number> = {};
+  const restore = async () => {
     await db.query('BEGIN');
     // The backup lock, exclusive: one restore at a time and no backup of a half-restored ledger. Never
     // the coordination lock (GY-203): the target must be empty, so a replica already running against
@@ -116,6 +121,10 @@ export async function restoreBackup(pool: pg.Pool, input: unknown) {
     await db.query('SELECT pg_advisory_xact_lock($1)', [advisoryLocks.backup]);
     const current = Number((await db.query('SELECT COALESCE(MAX(version),0) AS version FROM graphyard_schema')).rows[0].version);
     if (current !== schemaVersion) throw new Error(`Restore requires a database migrated to schema generation ${schemaVersion} (found ${current}); run \`graphyard db migrate\` with the release that took the backup or a newer one, then restore`);
+    // Postgres takes those locks one table at a time, so a writer holding a later table that then asks for
+    // one already locked here deadlocks with the restore, and Postgres may abort the restore (GY-443). That
+    // is transient, as it is for a migration: the restore rolls back and runs again, waits for the writer
+    // this time, and then either restores or refuses the ledger that writer left non-empty.
     await db.query(`LOCK TABLE ${ledgerTables.join(', ')} IN EXCLUSIVE MODE`);
     for (const name of ledgerTables) {
       if (name === 'graphyard_schema' || ledgerSeeded.includes(name)) continue;
@@ -124,7 +133,6 @@ export async function restoreBackup(pool: pg.Pool, input: unknown) {
         ? 'A release that started against this database has already seeded proof authority from its environment; restore into a database migrated with `graphyard db migrate` instead, so the backup\'s grants and their history are the only authority'
         : 'Restoring over live state resurrects expired ownership and discards later evidence'}`);
     }
-    const restored: Record<string, number> = {};
     for (const table of backup.tables) {
       if (table.name === 'graphyard_schema') continue;
       if (ledgerSeeded.includes(table.name)) await db.query(`DELETE FROM ${table.name}`);
@@ -139,6 +147,10 @@ export async function restoreBackup(pool: pg.Pool, input: unknown) {
       await db.query(`SELECT setval($1, $2, $3)`, [sequence.name, Math.max(sequence.value, 1), sequence.called]);
     }
     await db.query('COMMIT');
+  };
+  try {
+    let attempts = 0;
+    await retryDeadlocks(restore, () => ++attempts < restoreDeadlockAttempts, () => db.query('ROLLBACK'));
     const missing = ledgerTables.filter(name => name !== 'graphyard_schema' && !backup.tables.some(t => t.name === name));
     return { restored, takenAt: backup.takenAt, fromVersion: backup.graphyardVersion, fromSchema: backup.schemaVersion, toSchema: schemaVersion, tablesLeftEmpty: missing };
   } catch (error) { await db.query('ROLLBACK').catch(() => {}); throw error; }

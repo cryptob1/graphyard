@@ -1,6 +1,7 @@
 // Concern: cycle step 2 — decide open scope requests and measure the decision budget.
 import type { Work } from '../model.js';
-import { type ScopeRequestState, pathScope, pathScopeContains, pinningTestGround, redecidableScopeRefusal, routableScopeRequest, testFile, unplannedPaths } from '../model/scope.js';
+import { type ScopeRequestState, pathScope, pathScopeContains, pinningTestGround, plannedFilesMax, redecidableScopeRefusal, routableScopeRequest, testFile, unplannedPaths } from '../model/scope.js';
+import { widenedPlannedFiles } from '../model/scope-collapse.js';
 import { barrelSuccessorGround, criterionSymbolGround, criterionSymbols, criterionTestGround, phraseCallees } from '../model/criterion-scope.js';
 import { type Successor, successorGround, successorsOf } from '../model/successors.js';
 import { findingScope, type ReviewFinding } from '../review-scope.js';
@@ -114,6 +115,15 @@ export async function scopeStep(cycle: Cycle) {
       }
       const granted = scoped.grounds!.map(entry => entry.path), rest = 'refusal' in scoped ? scoped.refusal : null;
       const grounds = scoped.grounds!.map(entry => `${entry.path} (${entry.ground})`).join('; ');
+      // No fold may represent the grounded paths under the cap: the widening is refused before it
+      // is posted, and the request keeps its refusal as it stands for the approver (GY-630).
+      const wide = widenedPlannedFiles(item, granted);
+      if (!wide.representable) {
+        const detail = boundDetail(`Not widened ${item.key}: the ${granted.length} grounded paths fold to ${wide.plannedFiles.length} planned entries, past the ${plannedFilesMax} plannedFiles holds, so no requirements revision can carry them`);
+        const entry = await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done', detail, attempts, cycle: state.cycle }, now(), effects.persist);
+        if (judged && previous.detail !== detail) performed.push(entry);
+        return null;
+      }
       const reason = guardBroadScope({ ...item, plannedFiles: [...new Set([...(item.plannedFiles ?? []), ...granted])] },
         `Additive scope ${item.key}'s own change calls for — a review finding names it, it succeeds a planned file the base branch split, renamed or re-exports, a test pins text a planned file holds or a criterion changes, or it defines or calls a symbol a criterion names: ${grounds}. ${request.requestedBy} asked because ${request.reason}`.slice(0, 1900), { allow: false, command: 'the loop', existing: item.plannedFiles });
       const widened = await effects.widenScope(item, request, granted, reason) as Work | undefined;
@@ -173,8 +183,10 @@ export async function scopeStep(cycle: Cycle) {
       }
       if (decision.state === 'refused' && !routed) {
         const escalationKey = `escalation:scope:${item.id}:${request.at}`;
+        // A partial widening just granted some paths: the escalation names only the ones still refused.
+        const remaining = unplannedPaths((settled.get(item.id) ?? decided).plannedFiles, request.paths);
         performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done',
-          detail: `${item.key} is blocked on scope: ${request.requestedBy} asked for ${request.paths.length ? namePaths(request.paths) : 'a requirements change'} because ${boundDetail(request.reason, 400)}, and the loop refused it because ${boundDetail(decision.reason, 500)}. Decide it with graphyard master scope ${item.key} REASON, or graphyard master requirements ${item.key} FILE REASON for anything that is not purely additive`,
+          detail: `${item.key} is blocked on scope: ${request.requestedBy} asked for ${remaining.length ? namePaths(remaining) : 'a requirements change'} because ${boundDetail(request.reason, 400)}, and the loop refused it because ${boundDetail(decision.reason, 500)}. Decide it with graphyard master scope ${item.key} REASON, or graphyard master requirements ${item.key} FILE REASON for anything that is not purely additive`,
           attempts: 1, cycle: state.cycle }, now(), effects.persist));
       }
     } catch (error) {

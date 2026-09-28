@@ -10,12 +10,13 @@ import type { NextAction } from './next-action.js';
 import type { ActionQueue } from './actions.js';
 import type { AgentRequest } from './agent-requests.js';
 import type { SessionHandle } from './sessions.js';
-import { namedPaths, pathScope, pathScopeContains, type ScopeDecision, type ScopeRequestState } from './scope.js';
+import { namedPaths, pathScope, pathScopeContains, plannedFilesMax, type ScopeDecision, type ScopeRequestState } from './scope.js';
 import type { CapacityState } from './capacity.js';
 import type { HumanRequest } from './human-request.js';
 import type { ResearchRecord } from '../research.js';
 import type { RepairAudit } from '../master/repair-lane.js';
 import type { Closure } from './closure.js';
+import type { TriageRecord } from './machine-backlog.js';
 import { proofSchema } from './proof.js';
 import { closedQuestionsSchema } from './closed-question.js';
 import { workOriginSchema } from './interventions.js';
@@ -37,7 +38,7 @@ export const createSchema = z.object({
   dependencies: z.array(z.string().uuid()).max(50).default([]),
   criteria: z.array(criterionSchema).min(1).max(50),
   policy: policySchema.default({ checks: ['test', 'typecheck'], review: true }),
-  plannedFiles: z.array(z.string().min(1).max(500)).max(100).default([]),
+  plannedFiles: z.array(z.string().min(1).max(500)).max(plannedFilesMax).default([]),
   exclusiveResources: resourcesSchema.optional(),
   slice: z.enum(sliceIds).optional(),
   // Manual proofs a launched producer session may run on the item's behalf. Unit and
@@ -111,10 +112,9 @@ export interface Observation {
   candidate: Candidate; checks: { name: string; result: string; appId: number; id?: number; attempt?: number }[];
   reviews: { reviewer: string; sha: string; state: string; id?: number; submittedAt?: string }[];
   merged: boolean; mergeSha: string | null; mergedAt?: string | null; mergeable: boolean;
-  // GitHub computed a merge conflict with the base (`pr.mergeable === false`), as distinct from
-  // `mergeable` being false while GitHub is still computing it. A conflicting head is the one a
-  // behind-base candidate is withheld and sent back for (GY-191).
-  conflicting?: boolean;
+  // GitHub computed a merge conflict with the base (`pr.mergeable === false`), not merely still computing it;
+  // a conflicting head is withheld and sent back (GY-191). `disproved` keeps GitHub's raw reading a test merge disproved (GY-390).
+  conflicting?: boolean; disproved?: { mergeable: boolean; conflicting: boolean; reading: string };
   // The real base-branch head and its tree, read from refs/heads/<base> (never from the pull
   // request's cached base) and recorded separately from the candidate's bound base so a
   // speculative binding never hides where the managed branch actually points.
@@ -172,12 +172,11 @@ export interface Work extends Create {
    * ended that attempt's lease and parked the item; the answer clears it, and answered requests
    * are kept in `humanRequests` (see model/human-request.ts).
    */
-  humanRequest?: HumanRequest | null;
-  humanRequests?: HumanRequest[];
+  humanRequest?: HumanRequest | null; humanRequests?: HumanRequest[];
   /** What the research step found before build, and the product questions it asked (src/research.ts). */
   researchBrief?: ResearchRecord | null;
   /** Set when the item was closed without delivery (model/closure.ts); a closed item is `done` but never delivered. */
-  closure?: Closure | null;
+  closure?: Closure | null; triage?: TriageRecord | null; // triage is a machine-filed item's judgement (GY-402, model/machine-backlog.ts)
   /** Sessions of this item that ran out of provider quota, and any role with no account left (model/capacity.ts). */
   capacity?: CapacityState | null;
   queue?: QueueEntry | null; queueSequence?: number; queueEjection?: QueueEjection | null; queueHistory?: QueueHistoryEntry[];
