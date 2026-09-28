@@ -232,9 +232,9 @@ export const nowColumnLimit = 12;
 /** Initial density before the lane is measured (also used by server rendering). */
 export const nowPerRow = 2;
 const nowRowHeight = 28;
-/** Reserve a 24px target plus spacing, or enough room for a labelled pill. */
+/** Reserve a 24px target plus spacing, or enough room for a labelled pill, within the narrower column eight steps give. */
 export const nowRowCapacity = (width: number, compact: boolean) =>
-  Math.max(1, Math.min(nowColumnLimit, Math.floor(width / stepIds.length / (compact ? 28 : 88))));
+  Math.max(1, Math.min(nowColumnLimit, Math.floor(width / stepIds.length / (compact ? 26 : 77))));
 /** Where the `index`th dot of a step column stands: its wrapped row, and its slot in that row. */
 const nowSlot = (step: StepId, index: number, nowPerRow: number) => `${(stepIds.indexOf(step) + (index % nowPerRow + 0.5) / nowPerRow) / stepIds.length * 100}%`;
 const nowTop = (row: number) => `${10 + row * nowRowHeight}px`;

@@ -50,7 +50,7 @@ export { approveScopeRequest } from './master-scope.js';
 // (src/github.ts); the report reads them from here, as do the tests.
 export { observationThroughputStatus };
 // The attention builders live beside each other in `status-attention.ts`; the report reads them
-// from here, as does everything that was reading them from here before the split.
+// from here, as do the tests.
 import { mergeStallAttention } from './status-attention.js';
 export { approverLaunchAttention, mergeStallAttention, nameOrphanSupervisors, orphanSupervisorAttention, stalledItemAttention, supervisorReclaimCommand } from './status-attention.js';
 export { humanNeededAttention, needsHumanActions, scopeRequestAttention } from './owed-report.js';

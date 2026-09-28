@@ -20,13 +20,13 @@ A running handle last observed over **15 minutes** by default, `sessionStaleThre
 Running rows offer:
 
 - **Copy local**, on the launching host: `herdr agent attach w1V:pJD`.
-- **Copy remote**: `herdr --help` documents `herdr --machine <label-or-id> <command>`, `herdr --remote <ssh-target>`; interactive attachment is not forwarded by `--machine`, so the form focuses the pane then attaches remotely: `herdr --machine vishrog agent focus w1V:pJD && herdr --remote vishrog`.
+- **Copy remote**: `herdr --help` documents `herdr --machine <label-or-id> <command>` and `herdr --remote <ssh-target>`; interactive attachment is not forwarded by `--machine`: `herdr --machine vishrog agent focus w1V:pJD && herdr --remote vishrog`.
 
-[Research runs](master-agent.md#research-before-build) are **Researches** rows.
+[Research runs](master-agent.md#research-and-diagnosis) are **Researches** rows.
 
 ## The status sentence
 
-Rows show **Research, Build, Validate, Test, Review, Prove, Merge, Deploy** (`src/model/pr-steps.ts`). Research: **current** while live, **done** with a brief, else **skipped** (failed, bug, `"research": false`, built briefless, no `run.research`). Merged items read *Merged*, then *Live* once production serves it (counted this week). Moving and Blocked rows past thirty minutes turn overdue.
+Rows show **Research, Build, Validate, Test, Review, Prove, Merge, Deploy**. Research: **current** while live, **done** with a brief, else **skipped** (failed, bug, `research: false`, built briefless, unconfigured). Merged items read *Merged*, then *Live* once production serves it (counted this week). Moving and Blocked rows past thirty minutes turn overdue.
 
 ## An item page
 

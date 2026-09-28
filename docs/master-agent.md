@@ -46,11 +46,11 @@ another session's handle finished to free a slot.
 
 ### System invariants
 
-Per cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `lingering-sessions` (30 min), `refresh-churn` (3 per own head), `merge-stall` (10 min), `cycle-p90` (30 s), `untriaged-backlog` (24 h), `deploy-lease-loss` (0). Thresholds: `invariants` in `.graphyard/master.json`; `tests/soak.test.ts` enforces.
+Each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `lingering-sessions` (30 min), `refresh-churn` (3 per own head), `merge-stall` (10 min), `cycle-p90` (30 s), `untriaged-backlog` (24 h), `deploy-lease-loss` (0). Faults per class; thresholds: `invariants` in `.graphyard/master.json`; `tests/soak.test.ts` enforces.
 
 ## Research and diagnosis
 
-With `run.research` set (`model`, `timeoutMinutes` 15, `tokenBudget`), a feature (or `"research": true`) gets one read-only Pi briefing per revision. Product questions: Needs you; build follows the recommendation, a differing answer reworks, failure never blocks. `master status` `research`: `live`, `waiting`, `failed`. The loop posts `research.configured` to `POST /api/research-settings` on each change; `/api/status`, `/api/board` serve it.
+With `run.research` set (`model`, `timeoutMinutes` 15, `tokenBudget`), a feature (or `"research": true`) gets one read-only Pi briefing per revision. Product questions: Needs you; build follows the recommendation, a differing answer reworks, failure never blocks. `master status` `research`: `live`, `waiting`, `failed`; the loop posts `research.configured` to `POST /api/research-settings` on each change.
 
 `Recurring <class> faults` items, `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`: `model`/`fallbackModel`/`serverLogCommand`/registry role); approved decisions release its fix or close-as-duplicate; post-delivery recurrences re-file.
 
