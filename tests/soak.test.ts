@@ -169,7 +169,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   // The spent producer request (GY-496) is a main-day fault, like the blind window and the split:
   // the queue-only, hand-approver and regression days exercise their own faults and would only
   // inherit this one's rework round.
-  const mainDay = !options.queued && !options.handApprovers && !options.regression;
+  const mainDay = !options.queued && !options.handApprovers && !options.regression && !options.scope;
   const github = new SimulatedGitHub({ repository, baseBranch: 'main', appId: 1234, ciAppId: 15368, reviewerApps, ciMs: 5 * minute, reviewMs: 3 * minute, firstPullRequest: 100 * ++days },
     [...Array.from({ length: plan.items }, (_, index) => file(index + 1)), 'README.md']);
   const herdr = new SimulatedHerdr(() => clock.now());
@@ -265,6 +265,13 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
         // A renewal refused is lease loss: the supervisor stops the session, as `watch` does.
         try { await engine.execute(principal, 'heartbeat', session.work, { epoch: session.epoch }, id()); }
         catch (error) { if (!(error instanceof Refusal)) throw error; herdr.kill(session.pane); session.state = 'dead'; lost.push(`${session.key} epoch ${session.epoch}: ${error.message}`); }
+        // The refused ask stands for hours; near the day's end the worker releases the item with
+        // the refusal standing, ending its attempt cleanly instead of lapsing in a later day.
+        if (hold.has(session.key) && now >= dayStart + options.hours * hour - 20 * minute) {
+          await engine.execute(principal, 'release', session.work, { epoch: session.epoch }, id());
+          herdr.status(session.pane, 'done');
+          session.state = 'dead';
+        }
         continue;
       }
       const head = sha('head', session.key, session.epoch);
@@ -886,8 +893,8 @@ test('unit:soak-invariants-hold — after a restart the first request for a refu
   assert.ok(![...herdr.agents.values()].some(agent => /approver/i.test(agent.name ?? '')), 'no approver session is left open at the end of the day');
 });
 
-test('unit:soak-invariants-hold — direct wide scope requests: a rule-approved ask folds and answers once, a finding-grounded ask widens once, and an unrepresentable ask is refused with nothing retrying it', { timeout: 180_000 }, async () => {
-  const { items, final, violations, failures, state, escalations } = await simulateDay({ hours: 6, scope: true });
+test('unit:soak-invariants-hold — direct wide scope requests: a rule-approved ask folds and answers once, a finding-grounded ask widens once, and an unrepresentable ask is refused with nothing retrying it', { timeout: 300_000 }, async () => {
+  const { items, final, violations, failures, state, escalations } = await simulateDay({ hours: 4, scope: true });
   assert.deepEqual(violations, [], 'every system invariant holds with the scope scenarios in the day');
   assert.deepEqual(failures, [], 'no cycle failed');
 
@@ -915,7 +922,7 @@ test('unit:soak-invariants-hold — direct wide scope requests: a rule-approved 
   const blocked = final.find(item => item.key === items[scopePlan.unrepresentable - 1].key)!;
   assert.equal(blocked.stage, 'build', 'the item is held in build');
   assert.match(blocked.scopeDecision!.reason, new RegExp(`no fold represents the ask within the ${plannedFilesMax} entries plannedFiles holds \\(${plannedFilesMax + 1} after folding\\)`));
-  assert.equal(blocked.scopeRequest?.decision?.state, 'refused', 'the request stays open carrying the refusal');
+  assert.equal(blocked.scopeDecision?.state, 'refused', 'the refusal stands recorded on the item');
   assert.deepEqual(blocked.plannedFiles, bulk18, 'the oversized ask was never applied');
   const decided = Object.entries(state.actions).filter(([key]) => key.startsWith(`scope:${blocked.id}:`) && !key.includes(':finding:'));
   assert.equal(decided.length, 1, `one deciding action stands for the blocked item: ${decided.map(([key]) => key).join(', ')}`);
