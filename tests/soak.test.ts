@@ -933,9 +933,14 @@ test('unit:soak-invariants-hold — direct wide scope requests: a rule-approved 
   assert.equal(escalations.filter(detail => detail.includes(blocked.key) && /blocked on scope/.test(detail)).length, 1, 'exactly one escalation stands for the blocked item');
 });
 
-test('unit:soak-invariants-hold — a loop change that breaks an invariant fails the soak: approver sessions the loop no longer closes are named within the hour', { timeout: 120_000 }, async () => {
+test('unit:soak-invariants-hold — a loop change that breaks an invariant fails the soak: approver sessions the loop no longer closes are named within the hour', { timeout: 600_000 }, async () => {
   // The regression GY-403 was: approvers finished, nobody closed them. Here the loop's close reports
   // success and closes nothing, which no per-item gate of any change would notice.
+  // The day runs beside the shard's other files, so its wall clock is the machine's, not the loop's:
+  // with six day-simulations in the file this is the slowest day per simulated hour (lingering
+  // approver sessions pile up all day), and CI measured it past the old 120s budget while the
+  // simulated hour held, so its budget is sized like the other days' — about twice its measured
+  // run (GY-630).
   const { violations, state } = await simulateDay({ hours: 3, regression: 'approvers-left-open' });
   assert.ok(violations.some(line => /lingering-sessions: VIOLATED — .*approver session graphyard-approver-gy-\d+-/.test(line)), `the soak names the lingering approver: ${violations.slice(0, 3).join('\n')}`);
   assert.ok(violations.every(line => /lingering-sessions/.test(line)), `nothing else is violated: ${violations.filter(line => !/lingering-sessions/.test(line)).slice(0, 3).join('\n')}`);
