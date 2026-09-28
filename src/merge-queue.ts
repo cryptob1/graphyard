@@ -1,5 +1,6 @@
 import type { Evidence, Observation, ScopeFile, Work } from './model.js';
 import { evidenceBindsCandidate, type ApprovalIdentity, type CarriedApproval, type CarriedProof, type QueueCarry, type RequiredApproval, type TipMerge } from './model/carry.js';
+import { currentEvidence } from './model/evidence.js';
 import { reviewProviderOf } from './model/review.js';
 import { pathScopesOverlap } from './model/scope.js';
 import { queuedRegressions, staleTipRegressions } from './regression-guard.js';
@@ -1023,17 +1024,25 @@ export function ejectionReason(work: Work, ciAppIds: number[], all: Work[] = [],
   // finding the gates read it as (producerManualFailures excludes it), answered by the attestation
   // the loop requests for it exact or carried (unexercisedFindings reads the carry), so the entry
   // is held for that attestation rather than ejected for a failure no rework would ever be
-  // requested for (GY-875). GY-910: that attestation is requested only for a proof a criterion of
-  // this item names (attestationDecision, attestationExercise). A proof inherited from a bootstrap
-  // obligation is named by no local criterion, and for it nothing can request that attestation —
-  // proofRework excludes every unexercised manual finding and the proof group's failed state
-  // refuses a producer relaunch — so holding the entry for it would keep this entry and every
-  // entry behind it queued forever. The hold exempts only an attestable proof; any other
-  // executed = 0 record is the adverse conclusion it reads as and ejects, so the order moves and
-  // the control plane restores the branch.
+  // requested for (GY-875). GY-917: the hold no longer narrows to a proof a criterion of this item
+  // names. GY-910's narrowing answered an attestation path that could not see an inherited proof —
+  // attestationDecision returned null without a local criterion and the attest precondition
+  // refused one — so an inherited record ejected into a strand nothing could answer: the proof
+  // group's failed state refused a producer relaunch, proofRework excluded the finding, and the
+  // ejection record barred the same candidate from re-entering. The attestation path now routes
+  // the inherited criterion (attestationDecision names the obligation, the attest precondition
+  // accepts a proof requiredProofs demands, and the exercise record covers it), so every
+  // unexecuted `manual:` record holds its entry for an attestation the loop can actually request,
+  // and none ejects a candidate into a remedy-free strand. And superseded evidence decides
+  // nothing: the newest trusted record for the proof — exactly what currentEvidence selects, as
+  // the acceptance and producer paths read it — is the applicable one, so a trusted pass appended
+  // for the same candidate answers the earlier failure and the already-proven entry is neither
+  // ejected nor held (the rule the required-check read above already applies to CI runs). A proof
+  // whose current record cannot be selected at all is judged as before: supersession never
+  // excuses the failure it cannot see past.
   const proof = work.evidence.find(item => item.trusted && item.result === 'fail' && evidenceBindsCandidate(work, item) && item.policyRevision === work.policyRevision
-    && !(item.proof.startsWith('manual:') && item.executed === 0
-      && work.criteria.some(criterion => criterion.proofs.includes(item.proof))));
+    && !(currentEvidence(work, item.proof)?.id && currentEvidence(work, item.proof)!.id !== item.id)
+    && !(item.proof.startsWith('manual:') && item.executed === 0));
   if (proof) return `Proof ${proof.proof} failed on speculative tip ${tip}`;
   // A withdrawn proof is an explicit adverse conclusion, not a missing one: the entry leaves the
   // queue instead of holding its position while everything behind it waits.

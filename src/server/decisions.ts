@@ -61,7 +61,12 @@ export async function requestDecision(services: Services, caller: Principal, id:
     const replay = await receipt(db, actor, key, fingerprint); if (replay) return replay;
     const work = await findWork(db, id); demand(work, 'Work item not found', 404);
     for (const capability of requiredDecisionCapabilities(data.action, input, work!)) assertDecisionAuthority(actor, capability, work!, services.repository);
-    const precondition = decisionPrecondition(data.action, input, work!); demand(!precondition, precondition!, 409);
+    // The ledger rides with an attest request: a proof inherited from a bootstrap obligation is
+    // required by no criterion of this item, yet the queue holds its entry for its attestation
+    // (GY-917), so the precondition judges it against the obligations the ledger shows.
+    const precondition = decisionPrecondition(data.action, input, work!,
+      data.action === 'attest' ? (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(row => row.document) : []);
+    demand(!precondition, precondition!, 409);
     // The repair lane's decision names the fault it repairs (GY-406): a merge-path location. The
     // name is not matched against a ledger record (GY-428, declined): a merge left pending records no
     // refusal event, and a refusal names GitHub's reason, never the broken file. What the ledger must
@@ -149,7 +154,8 @@ export async function approveDecision(services: Services, caller: Principal, id:
       const resuming = decision!.state === 'approved' && decision!.approvedBy === actor.id;
       demand(decision!.state === 'requested' || resuming, `Decision ${decision!.id} is already ${decision!.state}${decision!.approvedBy ? ` (approved by ${decision!.approvedBy})` : ''}`, 409);
       await requesterAuthority(services, db, decision!, work!);
-      let precondition = resuming ? null : decisionPrecondition(decision!.action, decision!.input, work!);
+      let precondition = resuming ? null : decisionPrecondition(decision!.action, decision!.input, work!,
+        decision!.action === 'attest' ? (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(row => row.document) : []);
       // A resolve decision is pinned to what its resolver's judgement rests on — the policy
       // revision, the candidate head and base, the lease epoch, and the exact standing
       // escalation set with the moment each was raised — not to the item's whole revision: a

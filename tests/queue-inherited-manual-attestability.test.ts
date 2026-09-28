@@ -5,15 +5,19 @@ import { requiredProofs } from '../src/model/bootstrap.js';
 import { attestationDecision } from '../src/daemon/decisions.js';
 import type { Evidence, Observation, Work } from '../src/model.js';
 
-// GY-910, the P1 follow-up from the review of GY-875 (PR #461): the GY-875 hold exempts every
-// trusted `manual:` record with executed = 0 from ejection, but the attestation it is held for is
-// requested only for a proof a criterion of the item itself names (attestationDecision,
-// attestationExercise). A producer-runnable `manual:` proof inherited from a bootstrap obligation
-// is named by no local criterion, so for it attestationDecision returns null, proofRework excludes
-// every unexercised manual finding, and the proof group's failed state refuses a producer relaunch:
-// the held entry and every entry behind it were queued forever. The hold now exempts only a proof
-// the item can attest locally; any other executed = 0 record is the adverse conclusion it reads as
-// and ejects, so the order moves.
+// GY-917, the P1 and P2 follow-ups from the review of GY-910 (PR #482). GY-910 held a trusted
+// `manual:` record with executed = 0 out of the merge queue's ejections only when a criterion of
+// the item itself named the proof: for a proof inherited from a bootstrap obligation nothing
+// requested the attestation (attestationDecision returned null without a local criterion, and the
+// attest precondition refused one), so the entry was ejected into a strand nothing could answer —
+// the proof group's failed state refused a producer relaunch, proofRework excluded the finding and
+// the ejection record barred the same candidate from re-entering. The attestation path now routes
+// the inherited criterion (attestationDecision names the obligation, the attest precondition
+// accepts a proof the ledger requires, the exercise record covers it), so the hold no longer
+// narrows: every unexecuted `manual:` record holds its entry for an attestation the loop can
+// request. And superseded evidence decides nothing: a trusted pass appended for the same candidate
+// is the record currentEvidence selects — the one the acceptance and producer paths already read —
+// so the earlier failure no longer ejects or holds the already-proven entry.
 
 const head = 'a'.repeat(40), base = 'b'.repeat(40), at = '2026-09-28T00:00:00.000Z';
 const ciAppIds = [15368];
@@ -66,32 +70,57 @@ function deferringItem(): Work {
 const bound = (work: Work): Work => { work.observation = observation(work); return work; };
 const inheritedCriteria = (work: Work, all: Work[]) => requiredProofs(work, all).includes(MANUAL);
 
-test('unit:queue-ejects-unattestable-inherited-manual — an inherited manual record no criterion names ejects; the same record on a locally named proof is still held', () => {
+test('unit:queue-holds-inherited-manual-for-attestation — an inherited manual record with executed = 0 holds for the attestation the loop now requests', () => {
   const all = [deferringItem(), inheritingItem({}, [{ id: 'AC-1', text: 'The queue tests pass', proofs: [UNIT] }])];
   const work = bound(all[1]);
   // The scenario is the reviewer's, not a synthetic one: the proof reaches the item only through
   // the bootstrap obligation its planned files touch.
   assert.ok(inheritedCriteria(work, all), 'the manual proof is inherited from the bootstrap obligation');
-  // Nothing can answer the record at the item: the attestation path names no criterion for it,
-  // which is exactly why the queue must not hold the entry for that attestation.
-  assert.equal(attestationDecision(work), null, 'no attestation can be requested for a proof no local criterion names');
-  assert.match(ejectionReason(work, ciAppIds, all)!, new RegExp(`Proof ${MANUAL} failed on speculative tip`), 'an unattestable inherited record ejects the entry');
+  // GY-917: the attestation is requested for the inherited proof, naming its obligation — the
+  // answerability the queue's hold rests on.
+  assert.equal(attestationDecision(work)?.input?.proof, MANUAL, 'the attestation of the inherited record is requested');
+  assert.match(attestationDecision(work)!.reason, /inherited obligation/, 'the reason names the inherited obligation the local criteria do not');
+  // The entry is held for that attestation, not ejected into the strand GY-910's narrowing made.
+  assert.equal(ejectionReason(work, ciAppIds, all), null, 'an inherited executed = 0 record holds the entry');
+  assert.equal(ejectionReason(work, ciAppIds), null, 'the hold reads the item alone, as the attestation request does');
 
-  // GY-875 keeps its ground where the hold can be answered: the same executed = 0 record on a
-  // proof the item names itself holds the entry for the attestation the loop requests.
+  // GY-875 keeps its ground where it always worked: the same executed = 0 record on a proof the
+  // item names itself holds the entry for the attestation the loop requests, naming the criterion.
   const local = bound(inheritingItem({}, [{ id: 'AC-1', text: 'The follow-ups are triaged', proofs: [MANUAL] }, { id: 'AC-2', text: 'The queue tests pass', proofs: [UNIT] }]));
   assert.equal(ejectionReason(local, ciAppIds, [local]), null, 'an attestable record still holds the entry');
   assert.equal(attestationDecision(local)?.input?.proof, MANUAL, 'the hold is answered by the attestation of that record');
+  assert.match(attestationDecision(local)!.reason, /AC-1/, 'the reason names the local criterion');
 });
 
-test('unit:queue-ejects-inherited-carried-manual — a carried inherited manual record ejects too, and a judged failure ejects as before', () => {
+test('unit:queue-ejects-inherited-judged-manual — a judged inherited failure ejects as before', () => {
   const all = [deferringItem(), inheritingItem({}, [{ id: 'AC-1', text: 'The queue tests pass', proofs: [UNIT] }])];
   // A record the producer judged with cases executed is a failure of the change (GY-868) whether
   // or not any criterion names it, and ejects exactly as before.
   const judged = bound(inheritingItem({ executed: 3 }, [{ id: 'AC-1', text: 'The queue tests pass', proofs: [UNIT] }]));
   assert.match(ejectionReason(judged, ciAppIds, [judged])!, new RegExp(`Proof ${MANUAL} failed on speculative tip`));
-  // The inherited case ejects with or without the deferring item in view: the predicate reads the
-  // item's own criteria, so the hold and the attestation path cannot diverge again.
-  const work = bound(all[1]);
-  assert.match(ejectionReason(work, ciAppIds)!, new RegExp(`Proof ${MANUAL} failed on speculative tip`), 'the ejection does not depend on the ledger slice');
+  assert.match(ejectionReason(judged, ciAppIds)!, new RegExp(`Proof ${MANUAL} failed on speculative tip`), 'the ejection does not depend on the ledger slice');
+});
+
+test('unit:queue-ignores-superseded-manual-failure — a trusted pass appended for the same candidate answers the earlier failure', () => {
+  // GY-917 P2: currentEvidence takes the last applicable record, so the acceptance and producer
+  // paths already read the pass; the ejection check must too, or it ejects a proven candidate on
+  // the record it replaced — ejected, held, either way the strand the finding names.
+  const superseded = bound(inheritingItem({ id: 'e1' }, [{ id: 'AC-1', text: 'The follow-ups are triaged', proofs: [MANUAL] }], {
+    evidence: [
+      { id: 'e1', proof: MANUAL, sha: head, baseSha: base, policyRevision: 1, result: 'fail' as const, executed: 0, skipped: 0, producer: 'trusted-producer', trusted: true, at },
+      { id: 'e2', proof: MANUAL, sha: head, baseSha: base, policyRevision: 1, result: 'pass' as const, executed: 0, skipped: 0, producer: 'attester', trusted: true, at: '2026-09-28T01:00:00.000Z' },
+    ],
+  })) as Work;
+  assert.equal(ejectionReason(superseded, ciAppIds, [superseded]), null, 'the superseded failure neither ejects nor holds the proven entry');
+  // The same answer holds for a judged failure the attestation later overturned.
+  const judgedSuperseded = bound(inheritingItem({ id: 'e1', executed: 3 }, [{ id: 'AC-1', text: 'The queue tests pass', proofs: [UNIT] }], {
+    evidence: [
+      { id: 'e1', proof: MANUAL, sha: head, baseSha: base, policyRevision: 1, result: 'fail' as const, executed: 3, skipped: 0, producer: 'trusted-producer', trusted: true, at },
+      { id: 'e2', proof: MANUAL, sha: head, baseSha: base, policyRevision: 1, result: 'pass' as const, executed: 2, skipped: 0, producer: 'attester', trusted: true, at: '2026-09-28T01:00:00.000Z' },
+    ],
+  })) as Work;
+  assert.equal(ejectionReason(judgedSuperseded, ciAppIds, [judgedSuperseded]), null, 'a newer trusted pass decides, exactly as the test gate reads the newest run');
+  // A failure with nothing after it is still adverse: supersession never excuses what it cannot see.
+  const current = bound(inheritingItem({ executed: 3 }, [{ id: 'AC-1', text: 'The queue tests pass', proofs: [UNIT] }]));
+  assert.match(ejectionReason(current, ciAppIds, [current])!, new RegExp(`Proof ${MANUAL} failed on speculative tip`));
 });
