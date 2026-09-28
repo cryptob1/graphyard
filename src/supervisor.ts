@@ -485,9 +485,9 @@ export async function supervise(command: string, args: string[], epoch: number, 
             const renewal = await renewWithRetry(() => stopping, orphaned, () => { if (!stopping) armDeadline(); });
             if (typeof renewal === 'object') await surrenderOrphaned(renewal.orphaned);
             else if (renewal === 'renewed') { if (!stopping) armDeadline(); }
-            else if (renewal === 'refused') { console.error('Graphyard lease cannot be renewed. Stopping worker.'); stop(1); }
+            else if (renewal === 'refused') { await surrenderOrphaned('the attempt ended and its lease was refused by Graphyard'); return; }
           }
-          catch { console.error('Graphyard lease cannot be renewed. Stopping worker.'); stop(1); }
+          catch (error) { await surrenderOrphaned('a lease renewal error must end the attempt: ' + (error instanceof Error ? error.message : String(error)).slice(0, 1500)); return; }
           finally { pending = false; }
         }, options.intervalMs ?? 25_000);
         armDeadline();
