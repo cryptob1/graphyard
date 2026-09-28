@@ -65,7 +65,7 @@ A failed snapshot read retries once after 0.5–1.5 s; a failed cycle waits min(
 
 ## Recovery
 
-A dead supervisor fences its item; `containment` lists each surviving process's pid, cmdline, cwd. With `settleable: true` run `master settle-containment GY-N REASON`; otherwise stop the recorded scope unit (`containment.scope`) and request `rework`.
+A dead supervisor fences its item; `containment` lists each surviving process's pid, cmdline and cwd. With `settleable: true` run `master settle-containment GY-N REASON`; otherwise stop the recorded scope unit (`containment.scope`) and request `rework`.
 
 An unexplained lapsed lease raises `lease-loss` (`blocked-awaiting-operator`/`stopped-by-attestation` are history); any admin settles an explained one with `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"` ([settling](delegation.md#who-may-settle-what)). 
 
