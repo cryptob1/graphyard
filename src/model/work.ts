@@ -88,6 +88,8 @@ export interface AssignmentIdentity { owner: string; epoch: number; displayName?
 export interface Lease { owner: string; epoch: number; expiresAt: string }
 export interface ContainmentScope { unit: string; pid: number }
 export interface Workspace { host: string; path: string; branch: string; epoch: number; owner: string }
+/** State of an earlier attempt's worktree that was held by the item's branch when a new attempt allocated it. */
+export interface PreservedAttempt { epoch: number; branch: string; refs: string; diff: string; at: string }
 // createdAt is the provider's pull-request creation time; older observations predate it.
 export interface Candidate { sha: string; baseSha: string; pr: number; branch: string; author: string; createdAt?: string }
 /**
@@ -148,7 +150,7 @@ export interface Work extends Create {
   implementers?: string[];
   id: string; key: string; stage: Stage; revision: number; policyRevision: number;
   createdAt: string; updatedAt: string; stageEnteredAt: string; ready: boolean;
-  epoch: number; lease: Lease | null; lastAssignment?: AssignmentIdentity; workspaces: Workspace[]; candidate: Candidate | null;
+  epoch: number; lease: Lease | null; lastAssignment?: AssignmentIdentity; workspaces: Workspace[]; preservedAttempts?: PreservedAttempt[]; candidate: Candidate | null;
   // `scope` is the exact systemd scope unit the supervisor launched the session in and that
   // supervisor's pid, so settlement can attribute a live scope to this assignment or another.
   containmentQuarantine?: { owner: string; epoch: number; at: string; settlementHash: string; launchAcknowledgedAt?: string; launchExpiresAt?: string; leaseExpiresAt?: string; scope?: ContainmentScope } | null;

@@ -146,6 +146,35 @@ export async function installUnderLease(worktree: string, renew: () => Promise<u
   return result;
 }
 
+/** Capture a stale worktree's state before releasing its branch. */
+async function preserveStaleWorktree(priorPath: string, branch: string, mutate: (action: string, data: any) => Promise<void>) {
+  const quietly = (...gitArgs: string[]) => spawnSync('git', gitArgs, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  // Capture refs: both branches and tags in the stale worktree
+  const refs = String(quietly('-C', priorPath, 'show-ref', '--').stdout || '').trim();
+  // Capture uncommitted diff: both staged and unstaged changes
+  const diff = String(quietly('-C', priorPath, 'diff', 'HEAD').stdout || '').trim();
+  const stagedDiff = String(quietly('-C', priorPath, 'diff', '--cached', 'HEAD').stdout || '').trim();
+  const allDiff = [diff, stagedDiff].filter(Boolean).join('\n');
+  return { refs: refs || '(no refs)', diff: allDiff || '(no uncommitted changes)', at: new Date().toISOString() };
+}
+
+/** End an in-progress operation (rebase, merge, cherry-pick) on a worktree. */
+function abortInProgressOperation(priorPath: string) {
+  const quietly = (...gitArgs: string[]) => spawnSync('git', gitArgs, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  const isRebasing = quietly('-C', priorPath, 'rev-parse', '-q', '--verify', 'REBASE_HEAD').status === 0;
+  const isMerging = quietly('-C', priorPath, 'rev-parse', '-q', '--verify', 'MERGE_HEAD').status === 0;
+  const isCherryPicking = quietly('-C', priorPath, 'rev-parse', '-q', '--verify', 'CHERRY_PICK_HEAD').status === 0;
+  if (isRebasing) {
+    try { execFileSync('git', ['-C', priorPath, 'rebase', '--abort'], { stdio: ['ignore', 'ignore', 'pipe'] }); } catch { /* ignore */ }
+  }
+  if (isMerging) {
+    try { execFileSync('git', ['-C', priorPath, 'merge', '--abort'], { stdio: ['ignore', 'ignore', 'pipe'] }); } catch { /* ignore */ }
+  }
+  if (isCherryPicking) {
+    try { execFileSync('git', ['-C', priorPath, 'cherry-pick', '--abort'], { stdio: ['ignore', 'ignore', 'pipe'] }); } catch { /* ignore */ }
+  }
+}
+
 /** Local worktrees and the supervised worker launch. */
 export const workspaceCommands = defineCommands([
   {
@@ -231,11 +260,19 @@ export const workspaceCommands = defineCommands([
       await mkdir(resolve(root, '.graphyard/worktrees'), { recursive: true });
       const exists = spawnSync('git', ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`]).status === 0;
       try {
-        if (work.submission && exists) {
+        if (exists) {
           const records = execFileSync('git', ['worktree', 'list', '--porcelain', '-z'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] }).split('\0\0');
           for (const record of records) {
-            const fields = record.split('\0'); const priorPath = fields.find(field => field.startsWith('worktree '))?.slice(9);
-            if (priorPath && fields.includes(`branch refs/heads/${branch}`)) execFileSync('git', ['-C', priorPath, 'checkout', '--detach', '--quiet'], { stdio: ['ignore', 'ignore', 'inherit'] });
+            const fields = record.split('\0');
+            const priorPath = fields.find(field => field.startsWith('worktree '))?.slice(9);
+            if (priorPath && fields.includes(`branch refs/heads/${branch}`)) {
+              // Found a worktree holding the branch; preserve its state, abort operations, detach HEAD
+              const preserved = await preserveStaleWorktree(priorPath, branch, mutate);
+              abortInProgressOperation(priorPath);
+              try { execFileSync('git', ['-C', priorPath, 'checkout', '--detach', '--quiet'], { stdio: ['ignore', 'ignore', 'inherit'] }); } catch { /* ignore */ }
+              // Record the preserved attempt
+              await mutate('preserve-attempt', { epoch: work.epoch, branch, ...preserved });
+            }
           }
         }
         execFileSync('git', exists ? ['worktree', 'add', path, branch] : ['worktree', 'add', '-b', branch, path, startPoint], { stdio: ['ignore', 'ignore', 'inherit'] });
