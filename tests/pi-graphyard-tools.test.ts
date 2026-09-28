@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, symlink } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import graphyard, { guardCommand, mktempDirectories, mktempOptions, systemPromptSection, type ExtensionApi, type ToolDefinition } from '../integrations/pi/index.js';
 import { autonomyContract } from '../src/autonomy.js';
 import { decidePayloadSchema, evidencePayloadSchema } from '../src/runner/payloads.js';
@@ -183,6 +183,16 @@ test('unit:pi-destructive-guard the tool-call guard refuses rm on a statically u
         assert.deepEqual(mktempDirectories(command, `${listed}\n`), [], command);
       for (const command of [`mktemp -d -p ${dirname(listed)}`, `mktemp -dp ${dirname(listed)} x.XXXXXX`, `mktemp -d --tmpdir=${dirname(listed)}`, 'mktemp -d --suffix .dir', 'mktemp -d --suffix=.dir -- x.XXXXXX'])
         assert.deepEqual(mktempDirectories(command, `${listed}\n`), [listed], command);
+      // A --tmpdir template may carry slashes: mktemp creates only its final component, so the line
+      // counts when it is under the named parent at any depth (GY-564 review).
+      const nested = await mkdtemp(join(dirname(listed), 'existing-'));
+      const created = join(nested, 'run.abc123');
+      try {
+        await mkdir(created, { recursive: true });
+        for (const command of [`mktemp -d -p ${dirname(listed)} ${basename(nested)}/run.XXXXXX`, `mktemp -d --tmpdir=${dirname(listed)} ${basename(nested)}/run.XXXXXX`])
+          assert.deepEqual(mktempDirectories(command, `${created}\n`), [created], command);
+        assert.deepEqual(mktempDirectories(`mktemp -d -p ${join(nested, 'deeper')} x.XXXXXX`, `${created}\n`), [], 'still under the named parent');
+      } finally { await rm(nested, { recursive: true, force: true }); }
       assert.deepEqual(mktempOptions(['-dqt', 'x.XXXXXX']), { directory: true, dryRun: false, parent: null });
       assert.deepEqual(mktempOptions(['-p/var/tmp', '-d']), { directory: true, dryRun: false, parent: '/var/tmp' });
       assert.equal(mktempOptions(['--tmpdir-ish']), null);

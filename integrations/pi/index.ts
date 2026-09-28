@@ -358,7 +358,8 @@ export function mktempOptions(words: string[]): { directory: boolean; dryRun: bo
  * invocation counts, and only its single line of output (GY-391): a line a second command printed
  * beside it (`mktemp -d && ls -d /tmp/*`) is not a directory the session created. The line is kept
  * only when it is a real directory under the temporary root and, when `-p`/`--tmpdir` names a
- * parent, directly inside that parent (GY-564).
+ * parent, under that parent — a `--tmpdir` template may carry slashes and mktemp creates only its
+ * final component, so an existing parent can hold it at any depth (GY-564).
  */
 export function mktempDirectories(command: string, output: string, root = tmpdir()): string[] {
   const segments = shellWords(command);
@@ -371,7 +372,7 @@ export function mktempDirectories(command: string, output: string, root = tmpdir
   if (lines.length !== 1) return [];
   const [line] = lines, base = resolve(root);
   if (!isAbsolute(line) || !inside(resolve(line), base) || resolve(line).split(sep).includes('..')) return [];
-  if (options.parent && (!isAbsolute(options.parent) || dirname(resolve(line)) !== resolve(options.parent))) return [];
+  if (options.parent && (!isAbsolute(options.parent) || !inside(resolve(line), resolve(options.parent)))) return [];
   try { return statSync(line).isDirectory() ? [line] : []; } catch { return []; }
 }
 

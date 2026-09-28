@@ -13,7 +13,7 @@ import { launchProducer, readProducerLedger, reclaimCheckouts, reconcileProducer
 import { narrowRoleRuntime, piRuntimeSchema } from '../src/runner/payloads.js';
 import { clearRuns, liveRun, registerRun } from '../src/runner/registry.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
-import { attestConfirmation, piApproverWithAttestation } from '../src/master/autonomy.js';
+import { approverClone, attestConfirmation, piApproverWithAttestation } from '../src/master/autonomy.js';
 import type { FilesystemProbe } from '../src/install/worktree-root.js';
 
 // GY-169 AC-3, proof integration:pi-narrow-roles. The master config selects the runtime of each
@@ -127,7 +127,10 @@ test('integration:pi-narrow-roles the master config selects each narrow role\'s 
 test('integration:pi-narrow-roles with pi selected the approver runs headless and its verdict is applied as the approver identity on the approve route, and the server still judges it', async () => {
   const { root, managed, scenario, posted, fetcher, answer, cleanup } = await installation({ approver: 'pi' });
   try {
-    const item = work('GY-88', 'unit', ['unit:pi-graphyard-tools']);
+    // GY-564: the approver's clone detaches at the candidate head or refuses the launch, so the
+    // candidate here is the fixture repository's own head — a head the clone can actually supply.
+    const head = execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+    const item = work('GY-88', 'unit', ['unit:pi-graphyard-tools'], { candidate: { sha: head, baseSha: B, pr: 169, branch: 'graphyard/gy-88-1', author: 'implementer' } });
     const reason = 'the requested rework is grounded in the reviewer finding';
     await writeFile(scenario, JSON.stringify({ calls: [
       { tool: 'bash', input: { command: 'node bin/graphyard.mjs master decisions GY-88' } },
@@ -284,4 +287,31 @@ test('integration:pi-narrow-roles the headless approver\'s prompt names only its
   const prompt = piApproverWithAttestation(config, work, 'd1', '/managed/approval/checkout');
   assert.ok(prompt.includes('Read the code in /managed/approval/checkout, a clone of the repository made for this run alone'), 'the approver reads its own clone');
   assert.ok(prompt.includes(attestConfirmation(B)) && prompt.indexOf(attestConfirmation(B)) < prompt.indexOf('graphyard_decide'), 'and is told to confirm an exercise record before it decides');
+});
+
+test('integration:pi-narrow-roles the approver clone detaches at the candidate head and refuses a head the repository cannot supply (GY-564)', async () => {
+  const scratch = await realpath(await mkdtemp(join(tmpdir(), 'graphyard-approver-clone-')));
+  try {
+    const origin = join(scratch, 'repository');
+    await mkdir(origin);
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: origin, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    git('init', '-q', '-b', 'main');
+    await writeFile(join(origin, 'README.md'), 'approver clone\n');
+    git('add', 'README.md');
+    git('-c', 'user.name=Graphyard', '-c', 'user.email=graphyard@example.test', 'commit', '-q', '-m', 'initial');
+    const head = git('rev-parse', 'HEAD').trim();
+    const atCandidate = join(scratch, 'clone-of-head');
+    await approverClone(origin, atCandidate, head);
+    assert.equal(execFileSync('git', ['-C', atCandidate, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), head, 'detached at the candidate head');
+    assert.deepEqual(execFileSync('git', ['-C', atCandidate, 'remote'], { encoding: 'utf8' }).trim(), '', 'the clone keeps no remote');
+    // Without a candidate the clone takes the repository's current head.
+    const atCurrent = join(scratch, 'clone-of-current');
+    await approverClone(origin, atCurrent);
+    assert.equal(execFileSync('git', ['-C', atCurrent, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), head, 'the repository\'s current head when no candidate is bound');
+    // A candidate outside the operator's objects is fetched, and a fetch that still cannot supply
+    // it refuses the launch: an approver silently detached at HEAD would judge an unrelated tree.
+    const missing = 'e'.repeat(40);
+    await assert.rejects(approverClone(origin, join(scratch, 'clone-of-missing'), missing), /--detach/, `the missing candidate ${missing} refuses the launch`);
+    assert.equal(existsSync(join(scratch, 'clone-of-missing', 'README.md')), false, 'the refused clone never shows the operator\'s head');
+  } finally { await rm(scratch, { recursive: true, force: true }); }
 });

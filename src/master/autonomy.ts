@@ -315,23 +315,15 @@ async function abandonLaunch(error: unknown, pane: string | undefined, tabId: st
  */
 export const approverSessionId = (decision: string) => `approver:${decision}`;
 /**
- * The approver's own copy of the repository (GY-564): a clone that borrows the operator's objects
- * but has its own refs, index and working tree, checked out detached at the candidate head (or the
- * repository's current head when the decision carries no candidate), with no remote. Nothing the
- * approver runs there — checkout, reset, clean, a redirection, a push — can reach the operator's
- * checkout, and its prompt never names that checkout, so read-only is enforced rather than asked.
- *
- * The candidate head may sit outside the operator's objects (produced on another host, not yet
- * fetched), so the bound SHA is fetched from the operator's repository while the clone still holds
- * the remote. A head that is still missing refuses the launch: an approver detached at whatever
- * HEAD happens to name would confirm an exercise record against an unrelated tree (GY-564 review).
+ * The approver's own copy of the repository (GY-564): a clone with its own refs, index and working
+ * tree, detached at the candidate head (or the current head when none is bound), with no remote.
+ * The bound SHA is fetched while the remote exists; one the repository cannot supply refuses the launch rather than silently detach at HEAD, where the approver would judge an unrelated tree.
  */
 export async function approverClone(root: string, target: string, sha?: string, run: ChildRun = defaultChildRun) {
   await run('git', ['clone', '--quiet', '--shared', '--no-checkout', root, target], { cwd: root });
-  if (sha) { try { await run('git', ['-C', target, 'fetch', '--quiet', 'origin', sha], { cwd: target }); } catch { /* the operator's repository does not have it either */ } }
+  if (sha) try { await run('git', ['-C', target, 'fetch', '--quiet', 'origin', sha], { cwd: target }); } catch { /* not in the operator's repository */ }
   await run('git', ['-C', target, 'remote', 'remove', 'origin'], { cwd: target });
   await run('git', ['-C', target, 'checkout', '--quiet', '--detach', sha ?? 'HEAD'], { cwd: target });
-  return target;
 }
 /**
  * A headless approver's run (GY-169), in a directory of its own under the managed worktree root
@@ -343,9 +335,9 @@ async function startHeadlessApprover(root: string, config: MasterConfig, work: W
   const checkout = await allocateManagedCheckout(root, config, 'approval', work.key, work.candidate?.sha ?? '0'.repeat(40), randomUUID(), headless.filesystem);
   let started: ReturnType<typeof startNarrowRun>;
   try {
-    const clone = await approverClone(root, checkout.worktree, work.candidate?.sha);
+    await approverClone(root, checkout.worktree, work.candidate?.sha);
     started = startNarrowRun({ runner, name, role: 'approver', work: work.key, subject: decision, checkout: checkout.directory,
-      prompt: attest ? piApproverWithAttestation(config, work, decision, clone) : piApproverPrompt(config, work.key, decision, config.approver!.id, clone),
+      prompt: attest ? piApproverWithAttestation(config, work, decision, checkout.worktree) : piApproverPrompt(config, work.key, decision, config.approver!.id, checkout.worktree),
       options: approverRunOptions(checkout.directory, decision, { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: config.approver!.credentialFile, GRAPHYARD_HOST_ID: config.hostId }, piRuntimeSchema.parse(config.run.pi ?? {}).approverTimeoutMinutes * 60_000),
       apply: async result => result.ok ? [await applyDecision(config.url, token, work, result.payload, headless.fetcher)] : [] });
   } catch (error) { await settleCheckout(root, checkout.directory); throw error; }
