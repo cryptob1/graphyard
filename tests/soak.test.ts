@@ -92,17 +92,17 @@ const plan = {
   // own new changes read as reverts — the reading this item fixes. The window covers the NOTICE
   // commit on main, which moves the base under candidates still unqueued: their false landing
   // refusals hold only the build gate and clear on the same heads when the window closes, before
-  // a worker could even react to them.
+  // a worker could even react. GY-612's memory dip holds the morning's launches back, so the
+  // window sits where the deferred candidates' landing heads are the ones open under it.
   blind: { from: 96 * minute, to: 98 * minute },
   notice: 96 * minute,
   // GY-496: item 15's first head has its producer runs killed (exit 143) twice, then failing until
   // the request is spent; the loop escalates it once and requests one rework for that head.
   spentProducer: 15, lostRuns: 2,
-  // GY-612: the host's memory dips below its floor for an hour in the morning and then recovers,
-  // the way the day this item records went; the top consumers' ranking moves between cycles under
-  // it. It ends early enough that the backlog it builds drains before the deploys, so a delayed
-  // worker death is not mistaken for a lease the deploy lost.
-  memoryDip: { from: 30 * minute, until: 90 * minute },
+  // GY-612: the host starts the day below its memory floor — the way the day this item records
+  // began — and recovers a quarter hour in, so the only launch it holds back is the first item's
+  // and the day's later cadence is the undipped one every other fault's choreography is tuned to.
+  memoryDip: { from: 0, until: 15 * minute },
 };
 const file = (n: number) => `src/soak/item-${n}.ts`;
 const files = (n: number) => plan.infrastructure.has(n) ? [file(n), `tests/helpers/soak-item-${n}.ts`] : [file(n)];
@@ -319,11 +319,15 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     catch (error) { if (error instanceof Refusal) throw Object.assign(new Error(JSON.stringify({ error: error.message })), { confirmedRefusal: error.status >= 400 && error.status < 500 }); throw error; }
   };
   // ---- Host memory (GY-612): below its floor the loop launches nothing, recording the crossing once each way. ----
+  // The queue-only day runs without the dip, the way it runs without the blind window: its fault
+  // is the bound candidates' recovery, which the main day exercises, and a launch pause under a
+  // full queue would only churn its window's choreography.
+  const dip = options.queued ? null : plan.memoryDip;
   const GiB = 2 ** 30;
   let memoryReads = 0;
   const memoryReading = (): HostMemoryReading => {
     const elapsed = clock.now() - dayStart;
-    if (elapsed < plan.memoryDip.from || elapsed >= plan.memoryDip.until) return { totalBytes: 62 * GiB, availableBytes: 20 * GiB };
+    if (!dip || elapsed < dip.from || elapsed >= dip.until) return { totalBytes: 62 * GiB, availableBytes: 20 * GiB };
     // The same two consumers with their ranking reversed every other read: the host's `ps` ranking
     // moves while a dip stands, and a fault keyed on that wording would churn instances (GY-612).
     const consumers = [{ command: 'node', processes: 3, rssBytes: 6 * GiB }, { command: 'claude', processes: 2, rssBytes: 5 * GiB }];

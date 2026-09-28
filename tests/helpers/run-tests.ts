@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseShard, readDurations, shardFiles } from '../../scripts/ci-tests.mjs';
 import { isolatedTestEnvironment, reserveTestPorts, testPortEnvironment, type ReserveOptions } from '../../src/cli/test-isolation.js';
+import { hostMemoryVariable } from '../../src/master-resources.js';
 import { heldVariable, sessionVerificationSlot } from '../../src/master/verification-slots.js';
 
 // The suite's own runner (GY-174): `npm test` and `npm run test:browser` start here, so a clean run
@@ -107,9 +108,12 @@ export async function runTests(options: RunOptions = {}): Promise<RunResult> {
   try {
     // The suite's managed checkouts live inside the tree it runs from (ignored by .graphyard/): a worker's
     // sandbox can write nowhere else, and the default ~/.local/share/graphyard failed every checkout there (GY-498).
+    // A run of the suite reads no host memory (GY-612): the deferral the loop launches under is
+    // exercised by tests that stub a reading, and a host the suite itself loaded low must not flip
+    // the behaviour of tests that stub none.
     const dataHome = resolve(cwd, '.graphyard/test-data');
     mkdirSync(dataHome, { recursive: true });
-    const set = { ...(options.browser ? { GRAPHYARD_BROWSER_PORT: String(reservation.base) } : testPortEnvironment(reservation.base)), GRAPHYARD_DATA_HOME: dataHome };
+    const set = { ...(options.browser ? { GRAPHYARD_BROWSER_PORT: String(reservation.base) } : { ...testPortEnvironment(reservation.base), [hostMemoryVariable]: 'unreadable' }), GRAPHYARD_DATA_HOME: dataHome };
     const environment = isolatedTestEnvironment(options.environment ?? process.env, set);
     const [command, commandArgs] = options.browser || !selection
       ? [process.execPath, [fileURLToPath(import.meta.resolve('@playwright/test/cli')), 'test', ...args]]

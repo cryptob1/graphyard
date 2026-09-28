@@ -729,8 +729,12 @@ export function memoryConsumers(listing: string, limit = 5): MemoryConsumer[] {
   return [...byCommand.values()].sort((a, b) => b.rssBytes - a.rssBytes).slice(0, limit);
 }
 
+/** The variable the suite's runner sets on the runs it starts (tests/helpers/run-tests.ts, value `unreadable`): a run so marked reads nothing, so a busy host's real memory cannot flip launch behaviour inside tests that stub no reading of their own. Production never sets it. */
+export const hostMemoryVariable = 'GRAPHYARD_HOST_MEMORY';
+
 /** This host's memory from /proc/meminfo, with its top consumers when it is below the floor; null where it cannot be read. */
 export async function readHostMemory(): Promise<HostMemoryReading | null> {
+  if (process.env[hostMemoryVariable] === 'unreadable') return null;
   let meminfo: string;
   try { meminfo = await readFile('/proc/meminfo', 'utf8'); } catch { return null; }
   const field = (name: string) => { const match = new RegExp(`^${name}:\\s+(\\d+) kB`, 'm').exec(meminfo); return match ? Number(match[1]) * 1024 : null; };
