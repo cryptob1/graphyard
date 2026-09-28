@@ -1002,7 +1002,7 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   // The injected class, end to end: three instances in the window, one item, one primary run,
   // every instance linked to it, and no fix item filed for a covering diagnosis.
   const heldJobs = state.faults.instances.filter(entry => entry.kind === 'held-jobs');
-  assert.equal(heldJobs.length, plan.heldJob.at.length, `one instance per held-job window: ${JSON.stringify(heldJobs.map(entry => entry.at))}`);
+  assert.equal(heldJobs.length, basePlan.heldJob.at.length, `one instance per held-job window: ${JSON.stringify(heldJobs.map(entry => entry.at))}`);
   const configuration = filedFaultItems.filter(item => item.origin!.faultClass!.class === 'configuration');
   assert.equal(configuration.length, 1, 'the held-job class filed exactly one recurring item');
   const configurationKey = configuration[0].key, configurationDiagnosis = state.diagnoses[configurationKey];
@@ -1049,7 +1049,7 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.doesNotMatch(sweepStatus?.detail ?? '', /the oldest is pane/, 'no oldest pane outlives the drained day');
   assert.ok(!state.actions['sweep:panes:attention'], 'the day never stood past the agentless attention bound');
   // GY-544: every scope decision made between two cycles earned exactly one re-prompt for its attempt, and nothing else re-prompted it.
-  assert.equal(decided.length, plan.scoped.size, 'scope requests were asked and decided between cycles');
+  assert.equal(decided.length, basePlan.scoped.size, 'scope requests were asked and decided between cycles');
   for (const attempt of decided) {
     const [key, epoch] = attempt.split(':');
     const told = prompts.filter(prompt => prompt.key === key && prompt.epoch === Number(epoch) && /its scope request was applied/.test(prompt.text));
@@ -1057,9 +1057,9 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   }
   assert.equal(prompts.length, decided.length, `no prompt beyond one per scope decision: ${JSON.stringify(prompts.map(prompt => prompt.text.slice(0, 200)))}`);
   // Herdr's misreads closed no live session; the pane whose runtime exited was closed as exited; no sighting outlived its handle.
-  assert.equal(misreads.length, plan.misread.size, 'two live panes were misread for a cycle');
+  assert.equal(misreads.length, basePlan.misread.size, 'two live panes were misread for a cycle');
   assert.deepEqual(exitedLive, [], 'no implementation handle was closed as exited while its agent was live');
-  for (const n of plan.exits) assert.ok(exitedClosed.some(entry => entry.startsWith(`${items[n - 1].key} `)), `${items[n - 1].key}: the handle of the worker whose runtime exited was closed as exited: ${exitedClosed.join(', ')}`);
+  for (const n of basePlan.exits) assert.ok(exitedClosed.some(entry => entry.startsWith(`${items[n - 1].key} `)), `${items[n - 1].key}: the handle of the worker whose runtime exited was closed as exited: ${exitedClosed.join(', ')}`);
   assert.ok(exitedRowsSeen > 0, 'the loop recorded exited-session sightings during the day');
   assert.deepEqual(Object.keys(state.actions).filter(key => key.startsWith('exited:implementation:')), [], 'no exited-session sighting outlives the day');
   assert.deepEqual(final.flatMap(item => (item.sessions ?? []).filter(handle => handle.kind === 'implementation' && handle.state === 'running').map(handle => `${item.key} ${handle.id}`)), [], 'every implementation handle is closed once its item is delivered');
