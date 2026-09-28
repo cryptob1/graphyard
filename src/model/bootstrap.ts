@@ -1,6 +1,7 @@
 import type { Work } from './work.js';
 import type { BootstrapMode } from './policy.js';
 import { evidenceBindsCandidate } from './carry.js';
+import { evidenceProves } from './mechanical-proofs.js';
 import { pathScopesOverlap } from './scope.js';
 export { pathScope, pathScopeContains, pathScopesOverlap } from './scope.js';
 
@@ -9,11 +10,12 @@ export interface BootstrapObligation extends BootstrapMode { key: string; workId
 /**
  * A deferred proof is discharged only by a delivered change that actually ran it: trusted
  * passing evidence bound to that change's merged candidate and policy. Nothing an operator
- * or worker asserts can retire an obligation.
+ * or worker asserts can retire an obligation. GY-895: a manual: proof is judged, never counted
+ * from titles, so its trusted pass discharges whatever it executed.
  */
 export function deliveredProof(work: Work, proof: string) {
   return work.stage === 'done' && !!work.candidate && work.evidence.some(evidence => evidence.proof === proof && evidence.trusted
-    && evidence.result === 'pass' && evidence.executed > 0 && evidence.skipped === 0
+    && evidenceProves(proof, evidence)
     && evidenceBindsCandidate(work, evidence) && evidence.policyRevision === work.policyRevision);
 }
 

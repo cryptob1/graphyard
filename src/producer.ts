@@ -9,6 +9,7 @@ import { closeFailedLaunch, launchStartMs, withLaunchClose, accountLaunch, ackno
 import type { FleetProbe, selectFleetSession } from './fleet.js';
 import { implementerIdentities, type Work } from './model.js';
 import type { DispatchRequest } from './model/dispatch.js';
+import { evidenceProves } from './model/mechanical-proofs.js';
 import { reclaimSessionCheckouts, removeSessionCheckout, sessionCheckout, worktreeRoot, type CheckoutReclaimReport, type FilesystemProbe, type SessionCheckout } from './install/worktree-root.js';
 import { assertSessionLedgerRoom, boundSessionLedger, readReviewLedger, releaseClosedRequests, unrecordedPaneStopped, type SessionLedgerSpec } from './reviewer.js';
 import { closedQuestionFor } from './model/closed-question.js';
@@ -433,7 +434,14 @@ async function updateProducerRecord(root: string, id: string, change: (record: P
 export function proofOutcome(work: Work | undefined, record: Pick<ProducerRecord, 'sha' | 'baseSha' | 'policyRevision'>, proof: string): ProducerOutcome {
   const bound = (work?.evidence ?? []).filter(entry => entry.proof === proof && entry.sha === record.sha && entry.baseSha === record.baseSha && entry.policyRevision === record.policyRevision && !entry.revocation);
   const trusted = bound.filter(entry => entry.trusted).at(-1);
-  if (trusted) return trusted.result === 'pass' && trusted.executed > 0 && trusted.skipped === 0 ? 'pass' : 'fail';
+  // GY-895: a manual: proof is judged, never counted from titles, so its trusted pass proves it
+  // whatever it executed. One recorded with executed = 0 judged nothing (GY-868): the finding the
+  // attestation answers, which the session reports as `unexercised` rather than as a failure.
+  if (trusted) {
+    if (evidenceProves(proof, trusted)) return 'pass';
+    if (trusted.proof.startsWith('manual:') && trusted.executed === 0) return 'unexercised';
+    return 'fail';
+  }
   if (bound.at(-1)?.unexercised) return 'unexercised';
   return bound.length ? 'untrusted' : 'missing';
 }
