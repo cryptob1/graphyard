@@ -49,6 +49,10 @@ another session's handle finished to free a slot.
 
 Each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `lingering-sessions` (30 min), `refresh-churn` (3 per own head), `merge-stall` (10 min), `cycle-p90` (30 s), `untriaged-backlog` (24 h), `deploy-lease-loss` (0). Faults per class; thresholds: `invariants` in `.graphyard/master.json`; `tests/soak.test.ts` enforces.
 
+### The pipeline doctor
+
+Every `run.doctor.intervalMinutes` the loop launches the **doctor**: sanctioned commands only (`scope`, `requirements`, `unblock`, `decide`+`approver`, `settle-containment`, `close`, `create`, `release`); a run posts a per-item event and summary, unactionable findings escalate or file deduplicated faults; each cycle it settles a submitted attempt's lapsed fence, clears a covered blocker, relaunches an approver unanswered. Off: `run.doctor.enabled=false`.
+
 ## Research before build
 
 With `run.research` set (`model`, `timeoutMinutes` 15, `tokenBudget`), a feature (or `"research": true`) gets one read-only Pi briefing per revision. Product questions: Needs you; build follows the recommendation, a differing answer reworks, failure never blocks.
