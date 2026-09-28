@@ -1,8 +1,13 @@
 // Concern: worker, reviewer and producer profiles, the master config schema, and profile session naming.
 import { createHash } from 'node:crypto';
-import { isAbsolute } from 'node:path';
+import { dirname, isAbsolute, resolve, sep } from 'node:path';
 import { z } from 'zod';
-import { defaultMergeBatchSize, maxMergeBatchSize } from '../merge-queue.js';
+import { defaultChildRun } from '../child-runner.js';
+import { pathScopeContains } from '../model/scope.js';
+import { temporaryDirectories, underTestRunner } from '../supervisor.js';
+import { defaultMergeBatchSize, defaultParallelTips, maxMergeBatchSize, maxParallelTips, mergeQueueInsights } from '../merge-queue.js';
+import { defaultOptimisticMerge, defaultOptimisticExclude } from '../optimistic-merge.js';
+import type { Work } from '../model/work.js';
 import { diagnosticianSettingsSchema, narrowRoleRuntimeSchema, piRuntimeSchema } from '../runner/payloads.js';
 import { researchSettingsSchema } from '../research.js';
 import { sessionNameField, sessionNameLimit, assertSessionName, sessionNameDigestLength, SessionNameRefusedError } from '../session-name.js';
@@ -58,6 +63,42 @@ export const workerProfileSchema = z.object({
   if (profile.credentialFile && !isAbsolute(profile.credentialFile)) context.addIssue({ code: 'custom', message: 'credentialFile must be absolute', path: ['credentialFile'] });
 });
 export type WorkerProfile = z.infer<typeof workerProfileSchema>;
+
+/**
+ * Why a worker profile may not launch as configured, or null (GY-857). Every worker is launched
+ * with writes confined to its assigned worktree — Claude Code through harness rules that deny
+ * the coordinator checkout's own files, Codex through its workspace-write sandbox and the Git
+ * directories granted beside it, opencode through `external_directory: "deny"` — so a profile
+ * that turns its runtime's confinement off is refused when the launcher installs the worker's
+ * harness, naming the setting. It is judged at launch and not at parse (GY-184's precedent): an
+ * existing master.json keeps loading and says why the profile cannot start.
+ */
+export function workerConfinementRefusal(profile: { kind?: string; agentArgs?: readonly string[]; environment?: Record<string, string> }): string | null {
+  const args = profile.agentArgs ?? [];
+  const bypass = args.find(arg => ['--dangerously-skip-permissions', '--dangerously-bypass-approvals-and-sandbox', '--yolo'].includes(arg));
+  if (bypass) return `A worker profile cannot launch with ${bypass}: it turns the runtime's approval and write confinement off, and every worker is launched with writes confined to its assigned worktree. Remove it from the profile; the runtime's own recipe keeps the session unattended without it.`;
+  if (profile.kind === 'codex') {
+    for (let index = 0; index < args.length; index++) {
+      const [flag, inline] = args[index].split(/=(.*)/s);
+      if (flag !== '--sandbox' && flag !== '-s') continue;
+      const value = inline ?? args[index + 1] ?? '';
+      if (value !== 'workspace-write') return `A codex worker profile cannot set ${flag} ${value}: only the workspace-write sandbox confines the session's writes to its assigned worktree and the Git directories granted beside it. Remove the flag or set it to workspace-write.`;
+    }
+  }
+  if (profile.kind === 'opencode' && !openCodeExternalDenied(profile.environment?.OPENCODE_PERMISSION)) {
+    return `An opencode worker profile must set OPENCODE_PERMISSION to a JSON permission document whose "external_directory" is "deny": Graphyard's allow-all default would let the session edit paths outside its assigned worktree. Set the profile variable to {"edit":"allow","bash":"allow","webfetch":"allow","external_directory":"deny"}.`;
+  }
+  return null;
+}
+/** Whether an OPENCODE_PERMISSION document denies every external directory: absent, unparseable, `allow`, or an `ask` leaf all count as not denied. */
+function openCodeExternalDenied(raw: string | undefined): boolean {
+  if (raw === undefined) return false;
+  let document: unknown;
+  try { document = JSON.parse(raw); } catch { return false; }
+  const external = (document && typeof document === 'object' && !Array.isArray(document) ? (document as Record<string, unknown>).external_directory : undefined);
+  const denied = (node: unknown): boolean => node === 'deny' || (!!node && typeof node === 'object' && !Array.isArray(node) && Object.values(node).every(denied));
+  return denied(external);
+}
 
 // A reviewer session holds no Graphyard identity: it reads a candidate and posts one GitHub
 // verdict with a short-lived reviewer-App token, so it needs no principal and no credential file.
@@ -255,6 +296,13 @@ export const masterBrowserSchema = z.object({
 export type MasterBrowser = z.infer<typeof masterBrowserSchema>;
 
 export const agentIdentitySchema = z.object({ id: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$/), credentialFile: z.string().min(1).max(1000) }).strict();
+/**
+ * GY-516: the product default for `mergeQueue.rerunFailedChecks`, so every installation reruns a
+ * failed required check once on the same sha before the failure ejects the entry; 0 disables it.
+ */
+export const defaultRerunFailedChecks = 1;
+/** The most reruns per sha and check master config and the control plane accept. */
+export const maxRerunFailedChecks = 3;
 export const masterConfigSchema = z.object({
   version: z.literal(1),
   url: z.string(),
@@ -275,9 +323,26 @@ export const masterConfigSchema = z.object({
   // The agent environments profiles may launch on, discovered or created by master environments.
   environments: z.array(agentEnvironmentSchema).max(50).optional(),
   run: masterRunSchema.prefault({}),
-  // The merge queue (GY-330): how many consecutive entries one combined tip validates (default 4;
-  // 1 validates every entry on its own tip). The loop publishes it to the control plane every change.
-  mergeQueue: z.object({ batchSize: z.number().int().min(1).max(maxMergeBatchSize).optional() }).strict().optional(),
+  // The merge queue. `parallelTips` (GY-498) is how many queue positions are validated at once:
+  // speculative tips for the first that many positions all published and CI'd concurrently, each
+  // entry on its own tip, an entry whose tip and every tip ahead of it passed merging as soon as it
+  // heads the queue (default 4). Since every entry has its own tip, `batchSize` (GY-330) no longer
+  // batches validation; it only widens the observation band and the delivery/ejection wake depth.
+  // `optimistic` (GY-500, default on): an entry whose files are disjoint from everything merged since
+  // its base, touching no shared infrastructure, merges at once past the queue, and main is guarded
+  // after the merge with automatic revert. false sends every entry through the queue.
+  // The loop publishes all of these to the control plane on every change.
+  // `optimisticExclude` (GY-503): the repository's own shared-infrastructure globs, master init
+  // written with the product defaults; a change to an excluded path never merges optimistically.
+  mergeQueue: z.object({
+    batchSize: z.number().int().min(1).max(maxMergeBatchSize).optional(),
+    optimistic: z.boolean().optional(),
+    parallelTips: z.number().int().min(1).max(maxParallelTips).optional(),
+    rerunFailedChecks: z.number().int().min(0).max(maxRerunFailedChecks).optional(),
+    optimisticExclude: z.array(z.string().trim().min(1).max(200)
+      .refine(glob => !glob.startsWith('/') && !/[\s\u0000-\u001f]/.test(glob) && !glob.split('/').some(segment => segment === '.' || segment === '..'),
+        'Exclude globs are repository-relative, without . or .. segments, whitespace or control characters')).max(100).optional(),
+  }).strict().optional(),
   // The operator's own authenticated browser profile, used only by master browser flows.
   browser: masterBrowserSchema.optional(),
   // The master's own operator-agent identity, and the separate approver identity whose session
@@ -293,8 +358,126 @@ export type MasterConfig = z.infer<typeof masterConfigSchema>;
 export function mergeBatchSize(config: Pick<MasterConfig, 'mergeQueue'> | null | undefined): number {
   return config?.mergeQueue?.batchSize ?? defaultMergeBatchSize;
 }
+/** Whether optimistic merge is on under this master config: `mergeQueue.optimistic`, on by default (GY-500). */
+export function optimisticMergeEnabled(config: Pick<MasterConfig, 'mergeQueue'> | null | undefined): boolean {
+  return config?.mergeQueue?.optimistic ?? defaultOptimisticMerge;
+}
+
+/** The parallel-tip window under this master config: `mergeQueue.parallelTips`, or the default of 4 (GY-498). */
+export function mergeParallelTips(config: Pick<MasterConfig, 'mergeQueue'> | null | undefined): number {
+  return config?.mergeQueue?.parallelTips ?? defaultParallelTips;
+}
+
+/**
+ * The merge queue as the control plane runs it (GY-330, GY-498): the batch size and parallel-tip
+ * window the server reports it evaluates by (`/api/status` mergeQueue), else this master's own
+ * configuration before the server reports one; the in-flight tips; throughput Insights.
+ */
+export function mergeQueueWindow(master: MasterConfig, coordinator?: any) {
+  const running = coordinator?.mergeQueue;
+  return { batchSize: Number.isSafeInteger(running?.batchSize) ? running.batchSize as number : mergeBatchSize(master),
+    parallelTips: Number.isSafeInteger(running?.parallelTips) ? running.parallelTips as number : mergeParallelTips(master) };
+}
+export function mergeQueueStatus(master: MasterConfig, snapshot: { work: Work[]; now: string }, coordinator?: any) {
+  const window = mergeQueueWindow(master, coordinator);
+  return { ...window, configured: { batchSize: mergeBatchSize(master), parallelTips: mergeParallelTips(master) },
+    ...mergeQueueInsights(snapshot.work, Date.parse(snapshot.now), window.parallelTips, Array.isArray(coordinator?.ciAppIds) ? coordinator.ciAppIds : null) };
+}
+
+/** Reruns of a failed required check per sha under this master config: `mergeQueue.rerunFailedChecks`, or the product default of 1. */
+export function rerunFailedChecks(config: Pick<MasterConfig, 'mergeQueue'> | null | undefined): number {
+  return config?.mergeQueue?.rerunFailedChecks ?? defaultRerunFailedChecks;
+}
+
+/** The repository's shared-infrastructure globs under this master config: `mergeQueue.optimisticExclude`, or the product defaults (GY-503). */
+export function optimisticExcludeGlobs(config: Pick<MasterConfig, 'mergeQueue'> | null | undefined): string[] {
+  return config?.mergeQueue?.optimisticExclude ?? [...defaultOptimisticExclude];
+}
 
 export function assertMasterBinding(config: MasterConfig, status: any) {
   if (status.actor?.role !== 'coordinator') throw new Error('Master commands require the configured coordinator identity');
   if (typeof status.repository !== 'string' || status.repository.toLowerCase() !== config.repository.toLowerCase() || status.baseBranch !== config.baseBranch || status.githubAppId !== config.githubAppId) throw new Error('The Graphyard repository, managed base branch, or GitHub App changed; rerun master init before continuing');
 }
+
+// ---- The coordinator checkout guard (GY-857) -----------------------------------------------------
+//
+// Worker confinement is one half of the containment; this is the other: nothing that runs
+// Graphyard's own code — the master loop, an executor — may start, self-upgrade or restart from
+// a coordinator checkout holding uncommitted work, because that is how unreviewed half-finished
+// files reach the live loop (workers wrote them there by absolute path, and a restart loaded
+// them). The checkout a process runs from is derived from the configured CLI launcher exactly as
+// repository-setup links the plugin: `<root>/bin/graphyard.mjs`. `dirty` here means tracked
+// files that differ from HEAD, or untracked files under the source paths — a scratch or ignored
+// file is nobody's code.
+
+/** The coordinator checkout the CLI launcher at `cliPath` runs from: `<root>/bin/graphyard.mjs`. */
+export const coordinatorCheckoutRoot = (cliPath: string) => dirname(dirname(cliPath));
+/** The checkout areas whose files the loop and the executors load; untracked files under them are uncommitted source, not scratch. */
+export const coordinatorSourcePrefixes = ['src/', 'scripts/', 'bin/', 'tests/', 'docs/'];
+export const coordinatorSourceFiles = ['package.json', 'package-lock.json', 'tsconfig.json'];
+export const isCoordinatorSourcePath = (path: string) => coordinatorSourceFiles.includes(path) || coordinatorSourcePrefixes.some(prefix => path.startsWith(prefix));
+
+/** How a coordinator checkout stands: its commit, and the paths that make it dirty. */
+export interface CoordinatorCheckout { root: string; commit: string | null; /** Tracked files that differ from HEAD. */ modified: string[]; /** Untracked, not ignored files under the source paths. */ untracked: string[] }
+export type CheckoutRun = (command: string, args: string[]) => Promise<string> | string;
+/** The commit and porcelain status a checkout read produced; both verbatim (`-z`), never trimmed. */
+export function parseCoordinatorCheckout(root: string, commitRead: string, status: string): CoordinatorCheckout {
+  const commit = commitRead.trim() || null;
+  const modified: string[] = [], untracked: string[] = [];
+  // -z: entries verbatim and NUL-separated; a rename or copy carries its old path in a second field.
+  const entries = status.split('\0');
+  for (let index = 0; index < entries.length; index++) {
+    const entry = entries[index];
+    if (entry.length < 4) continue;
+    const xy = entry.slice(0, 2), path = entry.slice(3);
+    if (xy === '!!') continue;
+    if (xy === '??') { if (isCoordinatorSourcePath(path)) untracked.push(path); continue; }
+    if (xy.includes('R') || xy.includes('C')) index++;
+    modified.push(path);
+  }
+  return { root, commit, modified, untracked };
+}
+const checkoutGitRun: CheckoutRun = (command, args) => defaultChildRun(command, args).then(output => String(output));
+/** Reads how the checkout at `root` stands, through the asynchronous runner. An unreadable checkout (no git, no commit) is never dirty: it cannot be read as code either. */
+export async function readCoordinatorCheckout(root: string, run: CheckoutRun = checkoutGitRun): Promise<CoordinatorCheckout> {
+  const git = async (args: string[]) => String(await run('git', ['-C', root, ...args]));
+  let commitRead: string;
+  try { commitRead = await git(['rev-parse', 'HEAD']); }
+  catch { return { root, commit: null, modified: [], untracked: [] }; }
+  try { return parseCoordinatorCheckout(root, commitRead, await git(['status', '--porcelain', '-z', '--untracked-files=normal'])); }
+  catch { return { root, commit: commitRead.trim() || null, modified: [], untracked: [] }; }
+}
+/** Every path that makes the checkout dirty: what a refusal names and what a lease match is judged on. */
+export const dirtyCheckoutPaths = (checkout: CoordinatorCheckout) => checkout.commit ? [...checkout.modified, ...checkout.untracked] : [];
+/**
+ * Whether the guard judges this checkout at all. In production every checkout is judged; under
+ * the test runner only one under the temporary directories is, so the suite — which runs from
+ * the real checkout — tests the refusal with fixtures, and the real checkout's own scratch never
+ * refuses a test's loop or executor.
+ */
+export function checkoutGuardApplies(root: string): boolean {
+  if (!underTestRunner()) return true;
+  const directory = resolve(root);
+  return temporaryDirectories().some(temporary => directory === temporary || directory.startsWith(`${temporary}${sep}`));
+}
+/** The dirty paths, for the work snapshot's live leases whose planned files match them. */
+export interface DirtyCheckoutLease { key: string; epoch: number; owner: string; paths: string[] }
+export function dirtyCheckoutLeases(work: { key: string; lease?: { epoch: number; owner: string; expiresAt: string } | null; plannedFiles?: readonly string[] }[], paths: readonly string[], now: number = Date.now()): DirtyCheckoutLease[] {
+  return work.flatMap(item => {
+    if (!item.lease || Date.parse(item.lease.expiresAt) <= now) return [];
+    const matched = paths.filter(path => (item.plannedFiles ?? []).some(planned => pathScopeContains(planned, path)));
+    return matched.length ? [{ key: item.key, epoch: item.lease.epoch, owner: item.lease.owner, paths: matched }] : [];
+  });
+}
+/** Why `subject` refuses the checkout, or null when it is clean (or has no readable commit). */
+export function coordinatorCheckoutRefusal(checkout: CoordinatorCheckout, subject: string): string | null {
+  const dirty = dirtyCheckoutPaths(checkout);
+  if (!checkout.commit || !dirty.length) return null;
+  const named = dirty.slice(0, 8).join(', ');
+  const paths = `dirty path(s): ${named}${dirty.length > 8 ? `; and ${dirty.length - 8} more` : ''}`;
+  return `${subject} refuses to start, self-upgrade or restart from the coordinator checkout at ${checkout.root}: it holds uncommitted work at ${checkout.commit.slice(0, 12)} — ${checkout.modified.length} modified and ${checkout.untracked.length} untracked source ${paths}. It keeps running the last clean code; clean or stash these paths, then restart ${subject}`;
+}
+/** The refusal as `master status` raises it: the escalation also names which live leases' planned files the dirty paths match. */
+export const dirtyCheckoutEscalation = (refusal: string, leases: DirtyCheckoutLease[]) => leases.length
+  ? `${refusal}. The paths match the planned files of ${leases.length === 1 ? 'one live lease' : `${leases.length} live leases`}: ${leases.map(lease => `${lease.key} epoch ${lease.epoch} (${lease.owner}): ${lease.paths.join(', ')}`).join('; ')}`
+  : refusal;
