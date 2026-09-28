@@ -529,16 +529,26 @@ export class Engine {
    * observed and that observation saved, so the ordinary delivery path records it merged, with its
    * merge commit, now rather than whenever its own observation comes round — and the stale state
    * that named it unlanded does not recur. A failure is logged and left to that later observation.
+   *
+   * GY-756. The peer is re-read before it is observed, so several observations in one round that
+   * name the same peer do not each observe it from their own stale snapshot: once one has saved, the
+   * rest find it delivered, or already observed at this head against this base tip, and skip it.
+   * A peer that is not merged (its commits reached the branch while its pull request closed
+   * unmerged) has that observation saved all the same, so it is not re-observed on every cycle
+   * until the base branch moves.
    */
   async reconcileLanded(observation: Observation | null, all: Work[], observer = this.submissionObserver) {
     const reconciled: Work[] = [];
     if (!observer) return reconciled;
     for (const entry of observation?.landing?.landed ?? []) {
-      const peer = all.find(item => item.key === entry.key && item.stage !== 'done' && item.submission?.pr === entry.pr);
-      if (!peer) continue;
+      const known = all.find(item => item.key === entry.key);
+      if (!known) continue;
       try {
+        const peer: Work | undefined = (await this.store.pool.query('SELECT document FROM work_items WHERE id=$1', [known.id])).rows[0]?.document;
+        if (!peer || peer.stage === 'done' || peer.submission?.pr !== entry.pr) continue;
+        if (peer.observation && peer.observation.candidate.sha === entry.head && observation!.baseTip && peer.observation.baseTip === observation!.baseTip) continue;
         const seen = await observer(peer, all);
-        if (seen.merged) reconciled.push(await this.observe(peer.id, peer.revision, seen));
+        reconciled.push(await this.observe(peer.id, peer.revision, seen));
       } catch (error) {
         console.error(`[landing] reconciling ${entry.key}'s landed pull request #${entry.pr} failed: ${(error as Error).message}`);
       }
