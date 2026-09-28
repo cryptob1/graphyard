@@ -7,7 +7,7 @@ import { controlPlaneHandlers } from '../src/executor.js';
  * loop's merge step does since GY-246, so it never reads like an accepted merge.
  */
 
-test('unit:executor-merge-row-names-unaccounted-outcome — the executor merge row names an outcome that is neither pending nor merged, and records pending and merged outcomes verbatim (GY-442)', async () => {
+test('manual:review-followups-triaged — the executor merge row names an outcome that is neither pending nor merged, and records pending and merged outcomes verbatim (GY-442)', async () => {
   const work = { id: 'work-1', key: 'GY-1' } as any;
   const config = { herdrWorkspace: null } as any;
   const row = async (outcome: unknown) => {
