@@ -5,6 +5,7 @@ import { dismissedReviewIds } from '../src/github.js';
 import { openReviewConflict, reconcileReviewConflict } from '../src/model/review-conflict.js';
 import { trackFaults, type FaultRecord } from '../src/model/fault-classes.js';
 import { mergeBaseDismissal, mergeBaseDismissalAttention } from '../src/merge-base-ancestry.js';
+import { figureless, wording } from '../src/model/fault-wording.js';
 
 // GY-486: three review-convergence faults in 24 hours, each counted where no second review event
 // happened. The test is named for the proof it produces: manual:fault-class-review-convergence.
@@ -95,16 +96,36 @@ test('manual:fault-class-review-convergence — GY-288: one standing merge-base 
   assert.match(first.text, /base branch tip 0e2108cf789d/);
   assert.match(second.text, /base branch tip ab8fdf6cf47e/);
   assert.notEqual(first.text, second.text);
+  // trackFaults keys a standing fault by its kind, subject and normalised wording. The base
+  // normaliser (figureless) kept a hash's letters, so the advance changed the key; the candidate's
+  // drops the hash.
+  for (const [run, normalise] of [['base', figureless], ['candidate', wording]] as const) {
+    if (run === 'base') assert.notEqual(normalise(first.text), normalise(second.text), 'the base keys the advance as another fault');
+    else assert.equal(normalise(first.text), normalise(second.text), 'the candidate keys it as the same fault');
+  }
+  // A lone standing line of its kind keeps its instance when reworded under either normaliser
+  // (GY-368), so the key only decides the count once a second fault of the kind stands on the
+  // subject — here a dismissal for a changed verdict beside the merge-base one.
+  const beside = (entry: typeof first) => ({ ...entry, text: entry.text.replace('for a merge-base change', 'for a changed verdict') });
   const record: FaultRecord = { instances: [], open: {}, failing: {} };
-  assert.equal(trackFaults(record, [first], '2026-09-26T05:05:55.157Z').length, 1);
-  assert.equal(trackFaults(record, [second], '2026-09-26T05:11:49.761Z').length, 0, 'the advance opens no second instance');
-  assert.equal(record.instances.length, 1);
-  assert.equal(record.instances[0].lastSeenAt, '2026-09-26T05:11:49.761Z');
+  assert.equal(trackFaults(record, [first, beside(first)], '2026-09-26T05:05:55.157Z').length, 2);
+  assert.equal(trackFaults(record, [second, beside(second)], '2026-09-26T05:11:49.761Z').length, 0, 'the advance opens no second instance');
+  assert.equal(record.instances.length, 2);
+  assert.deepEqual(record.instances.map(entry => entry.lastSeenAt), ['2026-09-26T05:11:49.761Z', '2026-09-26T05:11:49.761Z']);
   assert.match(record.instances[0].text, /ab8fdf6cf47e/, 'the standing instance carries the latest wording');
   // A dismissal that ended and happens again is a new instance, as before.
   trackFaults(record, [], '2026-09-26T05:20:00.000Z');
   assert.equal(trackFaults(record, [second], '2026-09-26T05:30:00.000Z').length, 1);
-  // Only commit hashes are dropped: a different fault on the subject is still its own instance.
-  const other = { ...second, text: second.text.replace('for a merge-base change', 'for a changed verdict') };
-  assert.equal(trackFaults(record, [second, other], '2026-09-26T05:31:00.000Z').length, 1);
+  // Only moving figures are dropped: a different fault on the subject is still its own instance.
+  assert.equal(trackFaults(record, [second, beside(second)], '2026-09-26T05:31:00.000Z').length, 1);
+});
+
+test('fault wording drops hex-shaped tokens with a digit, commit hashes or not, and keeps words', () => {
+  assert.equal(wording('base branch tip 0e2108cf789d advanced'), wording('base branch tip ab8fdf6cf47e advanced'));
+  assert.equal(wording(`head ${sha40('1f1bc8b91d78')} dismissed`), 'head # dismissed');
+  // Any 7–40-character hex-shaped token with a digit is dropped, as documented — not only a hash.
+  assert.equal(wording('lease beef1234 lapsed'), 'lease # lapsed');
+  // A word with no digit, or one too short to be a hash, keeps its letters.
+  assert.equal(wording('facade deadbeef stood'), 'facade deadbeef stood');
+  assert.equal(wording('run abc123 failed'), 'run abc # failed');
 });
