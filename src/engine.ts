@@ -236,8 +236,9 @@ function applyScopeDecision(work: Work, request: NonNullable<Work['scopeRequest'
   if (verdict.state === 'approved') {
     // Non-weakening intent the item already carried: applied to the live attempt, which
     // keeps its lease and its containment fence exactly as an operator widening would. A wide
-    // ask is folded into directory entries, as a routed one is, rather than overrun the cap.
-    work.plannedFiles = widenedPlannedFiles(work, verdict.paths);
+    // ask is folded into directory entries, as a routed one is, rather than overrun the cap;
+    // an ask no fold represents was refused by the rule above, never applied past the cap.
+    work.plannedFiles = widenedPlannedFiles(work, verdict.paths).plannedFiles;
     work.policyRevision++;
     work.formalReviewResetRequired = true; work.formalReviewBaseline = undefined;
     work.observation = null; work.mergeAuthorization = null; work.reviewRequest = null;

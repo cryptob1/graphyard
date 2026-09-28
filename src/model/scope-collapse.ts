@@ -1,6 +1,5 @@
 // Concern: folding a wide plannedFiles widening into directory entries, and merging an attempt's pending scope asks (GY-549).
 import { type ScopeCriterion, type ScopeRequestState, namedPaths, pathScope, pathScopeContains, plannedFilesMax, unplannedPaths } from './scope.js';
-
 // ---------------------------------------------------------------------------
 // Collapsing a wide widening into directory entries (GY-549).
 //
@@ -59,15 +58,22 @@ export function collapsePlannedFiles(plannedFiles: readonly string[], paths: rea
   return { plannedFiles: entries, collapsed };
 }
 
+/** The plannedFiles a widening applies as, and whether any fold represents it under the cap (GY-630). */
+export interface Widening { plannedFiles: string[]; collapsed: CollapsedScope[]; representable: boolean }
+
 /**
  * The plannedFiles an approved widening by `paths` applies (GY-630). The rule and a review finding
  * approve directly, never through the approver, so their paths are unioned as asked while that
  * fits; a union over `plannedFilesMax` is folded exactly as a routed ask is, so a wide ask a
  * criterion's directory implies is applied as directory entries instead of stalling at the cap.
+ * `representable` is false when even the fold leaves more entries than the cap holds: no revision
+ * can carry the ask, so every caller refuses it rather than apply or post what the schemas reject.
  */
-export function widenedPlannedFiles(item: { criteria?: readonly ScopeCriterion[]; plannedFiles?: readonly string[] }, paths: readonly string[]) {
+export function widenedPlannedFiles(item: { criteria?: readonly ScopeCriterion[]; plannedFiles?: readonly string[] }, paths: readonly string[]): Widening {
   const union = [...new Set([...(item.plannedFiles ?? []), ...paths])];
-  return union.length <= plannedFilesMax ? union : collapsePlannedFiles(item.plannedFiles ?? [], paths, collapseArea(item)).plannedFiles;
+  if (union.length <= plannedFilesMax) return { plannedFiles: union, collapsed: [], representable: true };
+  const folded = collapsePlannedFiles(item.plannedFiles ?? [], paths, collapseArea(item));
+  return { ...folded, representable: folded.plannedFiles.length <= plannedFilesMax };
 }
 
 /**
@@ -101,4 +107,20 @@ export function mergedScopeRequest(pending: ScopeRequestState | null | undefined
   if (!carried.length) return ask;
   const reason = pending.reason === ask.reason || pending.reason.includes(ask.reason) ? pending.reason : `${pending.reason} | ${ask.reason}`;
   return { ...ask, paths: [...new Set([...carried, ...ask.paths])], reason: reason.length <= 2000 ? reason : `${reason.slice(0, 1999)}…` };
+}
+
+/**
+ * The additive widening a refused request asks the approver for, a wide ask folded into directory
+ * entries (GY-549), or null. A fold that still cannot represent the ask under the cap is never
+ * routed: the revision it would propose is refused by the schema on every attempt, so the refusal
+ * stays standing for the operator instead of a doomed decision (GY-630).
+ */
+export function routableScopeRequest(item: { plannedFiles?: readonly string[]; criteria?: readonly ScopeCriterion[]; scopeRequest?: ScopeRequestState | null; lease?: { epoch: number; expiresAt: string } | null }, now: number) {
+  const request = item.scopeRequest;
+  if (!request || request.decision?.state !== 'refused' || request.remove?.length || request.criteria?.length) return null;
+  // A request whose attempt no longer holds the lease is moot: a fresh attempt asks afresh.
+  if (!item.lease || item.lease.epoch !== request.epoch || Date.parse(item.lease.expiresAt) <= now) return null;
+  const paths = unplannedPaths(item.plannedFiles, request.paths);
+  const folded = paths.length ? collapsePlannedFiles(item.plannedFiles ?? [], paths, collapseArea(item)) : null;
+  return folded && folded.plannedFiles.length <= plannedFilesMax ? { request, paths, ...folded } : null;
 }

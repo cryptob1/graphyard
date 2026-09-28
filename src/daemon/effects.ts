@@ -602,8 +602,12 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
         asOperatorAgent('POST', `work/${work.id}/requirements`, successorWidening(work, paths, reason)) : undefined;
     },
     get widenScope() {
-      return current().operatorAgent ? async (work: Work, request: ScopeRequestState, paths: string[], reason: string) =>
-        asOperatorAgent('POST', `work/${work.id}/requirements`, answeringWidening(work, request, paths, reason)) : undefined;
+      return current().operatorAgent ? async (work: Work, request: ScopeRequestState, paths: string[], reason: string) => {
+        // An unrepresentable widening is refused before it is posted (GY-630): answeringWidening
+        // returns null rather than a revision the schema would reject on every retry.
+        const revision = answeringWidening(work, request, paths, reason);
+        return revision ? asOperatorAgent('POST', `work/${work.id}/requirements`, revision) : undefined;
+      } : undefined;
     },
     requestProof: async work => {
       const config = current();

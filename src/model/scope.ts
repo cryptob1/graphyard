@@ -174,6 +174,11 @@ export function decideScopeRequest(
   const matched = paths.map(path => ({ path, by: scopeImplication(path, implied) }));
   const outside = matched.filter(entry => !entry.by).map(entry => entry.path);
   if (outside.length) return refused(`${outside.join(', ')} ${outside.length === 1 ? 'is' : 'are'} outside what this item's own criteria and the repository's documentation rule imply; an operator decides scope the item does not already carry`);
+  // An implied ask no fold can represent under the plannedFiles cap is refused, never applied or
+  // routed: the schemas hold the same bound, and no narrower fold exists to grant instead (GY-630).
+  const folded = collapsePlannedFiles(item.plannedFiles ?? [], paths, collapseArea(item)).plannedFiles;
+  if (folded.length > plannedFilesMax)
+    return refused(`no fold represents the ask within the ${plannedFilesMax} entries plannedFiles holds (${folded.length} after folding); an operator decides scope the item cannot carry file by file`);
   return { state: 'approved', reason: `additive scope the item already implies — ${matched.map(entry => `${entry.path} (${entry.by!.why})`).join('; ')}`, paths };
 }
 
@@ -243,15 +248,8 @@ export function redecidableScopeRefusal(item: { plannedFiles?: readonly string[]
 // as it judges rework, recovery, resolution and merge. The requester is never the approver.
 // ---------------------------------------------------------------------------
 
-/** The additive widening a refused request asks the approver for, a wide ask folded into directory entries (GY-549), or null. */
-export function routableScopeRequest(item: { plannedFiles?: readonly string[]; criteria?: readonly ScopeCriterion[]; scopeRequest?: ScopeRequestState | null; lease?: { epoch: number; expiresAt: string } | null }, now: number) {
-  const request = item.scopeRequest;
-  if (!request || request.decision?.state !== 'refused' || request.remove?.length || request.criteria?.length) return null;
-  // A request whose attempt no longer holds the lease is moot: a fresh attempt asks afresh.
-  if (!item.lease || item.lease.epoch !== request.epoch || Date.parse(item.lease.expiresAt) <= now) return null;
-  const paths = unplannedPaths(item.plannedFiles, request.paths);
-  return paths.length ? { request, paths, ...collapsePlannedFiles(item.plannedFiles ?? [], paths, collapseArea(item)) } : null;
-}
+/** The additive widening a refused request asks the approver for (GY-549): defined beside the fold it proposes, in model/scope-collapse.ts. */
+export { routableScopeRequest } from './scope-collapse.js';
 
 /** The requested paths the item's plannedFiles do not yet cover — what is still being asked for. */
 export const unplannedPaths = (plannedFiles: readonly string[] | undefined, paths: readonly string[]) =>
