@@ -10,6 +10,7 @@ import { assignment } from '../../src/model/assignment';
 import { CandidatePr, CandidateSha, shortShas } from '../candidate';
 import EvidenceArtifacts from '../components/evidence-artifacts';
 import PostDeployment from '../components/post-deployment';
+import TestCases from '../components/test-cases';
 import StatusAge from '../components/status-age';
 import Term, { Explained } from '../components/term';
 import { age } from '../../src/model/format';
@@ -42,7 +43,8 @@ const oneLine = (text: string) => { const first = text.split(/(?<=[.;:])\s/)[0];
  * section answers one question, in this order: What is left (one plain line per unmet
  * requirement, grouped by step, naming who clears it; gate reasons only through `plainReason`),
  * Requirements (one line per criterion with its met or pending mark, the full text on expand),
- * Pull request (link, commit, changed files, checks, review) and Activity (the latest events, the
+ * Pull request (link, commit, changed files, checks, review), Test cases (the e2e cases linked to
+ * the pull request, with their result on its head, GY-162) and Activity (the latest events, the
  * full history on expand). Everything technical — gate internals, sessions and their attach
  * commands, review provider, next action and executors, agent requests, evidence — is in one
  * collapsed "Technical details" section, in the control plane's own vocabulary, and policy
@@ -145,6 +147,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
         <div><dt>Review</dt><dd>{!item.policy.review ? 'not required' : review}</dd></div>
       </dl> : <p className="muted">No pull request yet.</p>}
     </section>
+    <TestCases item={item} api={api}/>
     <section className="panel activity" aria-label="Activity"><h2>Activity</h2>
       {events.length ? <ul className="activity-list">{events.slice(0, 3).map(event => <li key={event.seq}>{activityLabel(event.kind)} <small>· {formatAge(event.created_at, now)} ago</small></li>)}</ul> : <p className="muted">Nothing recorded yet.</p>}
       <details className="full-history"><summary>{historyLabel(events.length)}</summary><History key={item.id} events={events}/></details>

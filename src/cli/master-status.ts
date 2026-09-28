@@ -124,8 +124,9 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     snapshot.work, master.workers, runtime, Date.parse(snapshot.now)));
   // A check failed on the clock says so, against its budget; a routed scope request, its approver.
   const status = routedScopeStatus(await timedStep('timing failures', () => qualifyTimingFailures(sessions, snapshot.work, master.repository, ghCheckAnnotations(master.repository))), snapshot.work, cycling?.approvals);
-  // Rework rounds by cause (GY-643), out-of-item causes removed; a failed read marks the section.
-  try { status.speed.reworkRounds = await reworkRoundsWithOwnCauses(status.speed.reworkRounds, masterApi, snapshot); }
+  // Rework rounds by cause (GY-643), out-of-item causes removed, cached beside the worktree
+  // inventory (GY-725); a failed read marks the section.
+  try { status.speed.reworkRounds = await reworkRoundsWithOwnCauses(status.speed.reworkRounds, masterApi, snapshot, 100, { root }); }
   catch (error) { sections.mark('rework causes', 'GET /api/events?kind=rework', error); }
   // A waiting sudo prompt is the operator confirming their own GitHub credential on their device.
   const sudo = administration.sudo;
