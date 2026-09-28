@@ -5,6 +5,7 @@ import { githubBudgetAttention, type BudgetStatus } from '../src/cli/github-budg
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { storeAction } from '../src/daemon/state.js';
+import type { FaultInstance } from '../src/model/fault-classes.js';
 import type { Work } from '../src/model.js';
 
 // GY-537. The observation class ("a read of GitHub or of a check that is paused, stale or silent")
@@ -98,4 +99,39 @@ test('manual:fault-class-observation — a pause, a budget below the reserve and
   const failed = storeAction(state, 'refresh:work-GY-9:x:y:1', { kind: 'refresh', work: 'GY-9', principal: null, state: 'failed', detail: 'GitHub answered 502 reading the base branch', attempts: 1, epoch: null, cycle: 1, at: iso(0) });
   assert.equal(failed.faultClass, 'observation');
   assert.ok(observation(state).some(entry => entry.kind === 'action:refresh' && entry.subject === 'GY-9'));
+});
+
+test('manual:fault-class-observation — an upgrade retires the spurious instances an older build counted, so three of them file nothing', async () => {
+  // The cursor an installation upgrades with: the two conflict refreshes and the above-reserve
+  // projection as the previous build recorded them — observation instances, unlinked, inside the
+  // window, at the threshold. Beside them, a real below-reserve fault and a refresh that failed
+  // for a real reason, which the retirement must leave standing.
+  const at = iso(-hour), earlier = iso(-2 * hour);
+  const conflictText = (key: string, sha: string) =>
+    `${key} [trigger: conflict confirmed]: ${sha} cannot be brought onto base branch tip ${base.slice(0, 12)} by Graphyard; it returns to the worker with the conflict named: Candidate ${sha.slice(0, 12)} cannot be brought onto base branch tip ${base.slice(0, 12)} without resolving a conflict`;
+  const instance = (id: string, kind: FaultInstance['kind'], subject: string, text: string, seen: string): FaultInstance =>
+    ({ id, kind, faultClass: 'observation', subject, text, at: seen, lastSeenAt: seen, linkedTo: null });
+  const spurious = [
+    instance(`action:refresh|GY-303|${at}`, 'action:refresh', 'GY-303', conflictText('GY-303', '892a53a6789f'.padEnd(40, '0')), at),
+    instance(`action:refresh|GY-404|${at}`, 'action:refresh', 'GY-404', conflictText('GY-404', '11cdbc378234'.padEnd(40, '0')), at),
+    instance(`github-budget|github|${at}`, 'github-budget', 'github',
+      'GitHub budget: 3082 of 5000 requests remain and the spend rate is 80.2/min over the last ten minutes; at that rate the budget is exhausted at 2026-09-26T08:24:18.946Z, before it resets at 2026-09-26T08:28:43.000Z', at),
+  ];
+  const genuine = [
+    instance(`github-budget|github|${earlier}`, 'github-budget', 'github',
+      'GitHub budget: 400 of 5000 requests remain and the spend rate is 80.2/min over the last ten minutes; at that rate the budget is exhausted at 2026-09-26T07:54:18.946Z, before it resets at 2026-09-26T08:28:43.000Z; it is already below the 500-request merge-path reserve, so only merge-gate candidates and webhook wakes are observed', earlier),
+    instance(`action:refresh|GY-9|${earlier}`, 'action:refresh', 'GY-9', 'GitHub answered 502 reading the base branch', earlier),
+  ];
+  const state = emptyDaemonState(config());
+  state.faults.instances = [...spurious, ...genuine];
+  state.faults.failing['refresh:work-GY-303:8'.padEnd(60, '8')] = spurious[0].id;
+  state.faults.failing['refresh:work-GY-404:1'.padEnd(60, '1')] = spurious[1].id;
+  const filed: unknown[] = [];
+  await runCycle(config(), state, effects([], () => budget(), filed), () => clock);
+
+  // The threshold was met — three unlinked instances in the window — yet the first cycle after the
+  // upgrade files nothing: the designed outcomes retired, with the failing runs that named them…
+  assert.deepEqual(filed, [], 'three spurious instances file nothing');
+  assert.deepEqual(observation(state).map(entry => entry.id).sort(), genuine.map(entry => entry.id).sort(), 'the designed outcomes retired; the genuine faults stayed');
+  assert.deepEqual(Object.keys(state.faults.failing).filter(key => key.startsWith('refresh:')), [], 'a retired run keeps no failing entry');
 });

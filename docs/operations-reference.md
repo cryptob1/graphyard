@@ -3,7 +3,7 @@
 
 ## Master coordination loop
 
-Restart `graphyard master run` freely; it never dispatches twice. `master status` (cached interventions) → `daemon` gives health and `cycleTime` (30-minute p50/p95); `journalctl --user -u graphyard-master`, the log. `daemon.metrics.timings` time steps and calls over 1s; cycles over 60 s raise `loop` attention naming three slowest. Launches run beside cycles (`run.launchConcurrency`, default 3). Failed requests log route and SQL.
+Restart `graphyard master run` freely; it never dispatches twice. `master status` → `daemon` gives health and `cycleTime`; `journalctl --user -u graphyard-master` is the log. `daemon.metrics.timings` times steps and calls over 1s; a cycle over 60 s raises `loop` attention naming the three slowest. Launches run beside cycles (`run.launchConcurrency`, default 3). Failed requests log route and SQL.
 
 ### Perpetual master loop
 
@@ -19,11 +19,11 @@ On the worker `graphyard master settle-containment GY-N "reason"` verifies nothi
 
 ## Submitted implementation needs rework
 
-Stop the worker, then `graphyard rework GY-N --previous-worker-stopped "reason"`; the next worker resubmits. `scripts/rework-causes.mjs` classifies the last 100 deliveries' rework rounds by ledger reason; `master status` reports the split (`speed.reworkRounds.ownChange`): median excluding causes outside the item's own change.
+Stop the worker, then `graphyard rework GY-N --previous-worker-stopped "reason"`; the next worker resubmits. `scripts/rework-causes.mjs` classifies the last 100 deliveries' rework rounds by ledger reason; `master status` reports the median (`speed.reworkRounds.ownChange`) excluding causes outside the item's own change.
 
 ## Flaky CI check
 
-A required check failing on a tip or head reruns once per sha (*rerun failed jobs*, Actions:write), holding position, approval, proofs, with no rework meanwhile; a second failure or refusal ejects (`check.rerun.*`). `mergeQueue.rerunFailedChecks`: default 1, 0 disables, published like `batchSize`.
+A required check failing on a tip or head reruns once per sha (*rerun failed jobs*, Actions:write), holding position, approval and proofs, no rework meanwhile; a second failure or refusal ejects (`check.rerun.*`). `mergeQueue.rerunFailedChecks`: default 1, 0 disables, published like `batchSize`.
 
 ## Accepted evidence turns out to be wrong
 
@@ -46,7 +46,7 @@ A projected exhaustion above the reserve is shown as `github-budget-projection` 
 | `steady` | unchanged since last observed: 5 minutes, stretched by the fleet bound |
 | `idle` | next action dispatch or escalation: 5 minutes, stretched when unchanged |
 
-Unchanged non-merge candidates spend **at most 40%** (`steadyStateShare`) of the limit.
+Unchanged non-merge candidates spend **at most 40%** (`steadyStateShare`).
 
 ### The merge-path reserve
 
@@ -64,7 +64,7 @@ A rate-limit `403`/`429` pauses requests; gates read stale until it lifts: nothi
 
 ### Reading the budget
 
-`graphyard status` (or `GET /api/status`) → `githubBudget`; `master status` raises `github` attention.
+`graphyard status` → `githubBudget`; `master status` raises `github` attention.
 
 ### Webhook liveness
 
@@ -98,10 +98,9 @@ Rotate `GRAPHYARD_PRINCIPALS` and redeploy. Operator agents hold only listed cap
 
 ```sh
 graphyard grants grant ci "integration:*,unit:*" "CI proofs"
-graphyard grants revoke ci "integration:claim-safety" "Runner decommissioned"
 ```
 
-Only an `admin` grants, only to `producer` principals. Patterns: exact name, `kind:*`, prefix (`manual:gy-43/*`).
+Only an `admin` grants, only to `producer` principals. Patterns: exact name, `kind:*`, prefix (`manual:gy-43/*`); `grants revoke` takes them away.
 
 ## Setup proposals and drift
 
@@ -109,7 +108,7 @@ Only an `admin` grants, only to `producer` principals. Patterns: exact name, `ki
 
 ## Scale limits
 
-`GRAPHYARD_RECONCILE_BATCH_MS` (default 250) sizes reconcile batches; `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (default 4, ≤ half pool) share one pace per token: budget above reserve, minus others' spend, paced to reset. Claims: head `max(2,batchSize,parallelTips)` band, in-flight merges, never-observed submissions, jobs due over five minutes, review/rework waits, running sessions (earlier if tight), `available_at`; tight, idle items await webhooks. `observationThroughput` reports budget, pace, head lag, oldest unobserved submission; `master status` raises `github` past two minutes. Heartbeat, claim, `complete` and `blocked` own the lease pool; `leaseHealth` (`GET /api/status`) reports heartbeat p50/p95 and failures (raised past 5 s).
+`GRAPHYARD_RECONCILE_BATCH_MS` (default 250) sizes reconcile batches; `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (default 4, ≤ half pool) share one pace per token: budget above reserve, minus others' spend, paced to reset. Claims: head `max(2,batchSize,parallelTips)` band, in-flight merges, never-observed submissions, jobs due over five minutes, review/rework waits, running sessions (earlier if tight), `available_at`; tight, idle items await webhooks. `observationThroughput` reports budget, pace, head lag, oldest unobserved submission. Heartbeat, claim, `complete` and `blocked` own the lease pool; `leaseHealth` (`GET /api/status`) reports heartbeat p50/p95 and failures.
 
 ### Concurrent reconciliation
 

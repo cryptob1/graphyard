@@ -2,7 +2,7 @@
 // structural item filed per recurring class.
 import { createHash } from 'node:crypto';
 import type { Work } from '../model.js';
-import { classified, classifyAttention, faultClasses, faultClassItem, faultClassPolicyFromEnv, recurringClasses, statusFaults, trackFaults, workFaults, type FaultClassPolicy, type FaultKind, type FaultObservation } from '../model/fault-classes.js';
+import { classified, classifyAttention, faultClasses, faultClassItem, faultClassPolicyFromEnv, recurringClasses, statusFaults, trackFaults, workFaults, type FaultClassPolicy, type FaultInstance, type FaultKind, type FaultObservation } from '../model/fault-classes.js';
 import { buildMasterStatus, diskThresholdBytes, type AttentionItem, type ContainmentAssessment, type ControlPlaneStatus, type HerdrAgent, type MasterConfig } from '../master.js';
 import { worktreeRootMinFreeBytes } from '../install/worktree-root.js';
 import { qualifyTimingFailures, type CheckAnnotations } from '../cli/timing-failures.js';
@@ -131,6 +131,26 @@ export function endFailingRuns(state: Pick<DaemonState, 'actions' | 'faults'>, p
   }
 }
 /**
+ * Retires the instances an older build counted for what this design handles itself (GY-537): a
+ * confirmed-conflict refresh row's run — the conflict is the refresh doing what it is for, so the
+ * `action:refresh` fault its wording carried is not — and a budget projected to exhaust while above
+ * the reserve, whose stored `github-budget` line names the projected reset and no below-reserve
+ * clause (a pause, or a budget below the reserve, says so and stays a fault). Without this an
+ * upgrade keeps each for the rest of the recurrence window and the class files, or keeps standing,
+ * the very item the change exists to close. Runs every cycle, before the class is judged, and is
+ * idempotent: neither outcome is noted again (a conflict records with no fault kind; a projection
+ * above the reserve is shown uncounted).
+ */
+export function retireDesignedOutcomes(state: Pick<DaemonState, 'faults'>) {
+  const designed = (instance: FaultInstance) =>
+    (instance.kind === 'action:refresh' && /cannot be brought onto base branch tip .*it returns to the worker with the conflict named/.test(instance.text)) ||
+    (instance.kind === 'github-budget' && /^GitHub budget: .+ requests remain and the spend rate is /.test(instance.text) && !/; it is already below the \d+-request merge-path reserve/.test(instance.text));
+  const retired = new Set(state.faults.instances.filter(designed).map(entry => entry.id));
+  if (!retired.size) return;
+  state.faults.instances = state.faults.instances.filter(entry => !retired.has(entry.id));
+  for (const refs of [state.faults.open, state.faults.failing]) for (const key of Object.keys(refs)) if (retired.has(refs[key])) delete refs[key];
+}
+/**
  * One structural item per recurring class (AC-2). A class whose unaccounted instances in the window
  * reach the threshold, with no open item naming it, gets one backlog item filed as the master's
  * operator-agent identity, listing the instances; while that item is open, every later instance is
@@ -186,6 +206,9 @@ export const faultObservationIntervalMs = 60_000;
  */
 export async function faultStep(cycle: Cycle, assessments: Record<string, ContainmentAssessment>) {
   const { config, state, effects, now, snapshot, clock, performed, agents, credentials } = cycle;
+  // An upgrade keeps its record: instances an older build counted for what this design handles itself
+  // retire first, so the class is never judged on them again (GY-537).
+  retireDesignedOutcomes(state);
   // The cadence is the loop's own time, as the reads it spaces out are: the snapshot's clock need not move between cycles.
   const policy = effects.faultClassPolicy ?? faultClassPolicyFromEnv(process.env), last = state.faults.observedAt ? Date.parse(state.faults.observedAt) : Number.NaN, local = now();
   if (local >= last && local - last < faultObservationIntervalMs) { // a local clock that went back observes again
