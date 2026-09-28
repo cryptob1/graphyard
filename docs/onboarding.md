@@ -72,7 +72,7 @@ node "$GRAPHYARD_CLI" master registry account set claude-b --runtime claude --mo
 node "$GRAPHYARD_CLI" master registry account quota opencode-a exhausted --resets-at 2026-09-22T00:00:00Z --reason "Plan exhausted"
 ```
 
-`--key-file zai.key --key-variable ZAI_API_KEY`: a 0600 home key file, exported per run. New or changed Pi accounts are smoke-tested; failure bars the account; two unjudged runs bench it from that role an hour.
+`--key-file zai.key --key-variable ZAI_API_KEY`: a 0600 key file, exported per run. New or changed Pi accounts are smoke-tested; failure bars the account; two unjudged runs bench it from that role an hour.
 
 ### Add a role
 
@@ -112,7 +112,7 @@ Onboarding also writes `mergeQueue.optimisticExclude` into `.graphyard/master.js
 
 ### The pipeline doctor (on by default)
 
-A **doctor** (headless Pi, or the `doctor` role) runs every 10 minutes (`run.doctor.intervalMinutes`) through [sanctioned commands](master-agent.md#the-pipeline-doctor); off: `run.doctor.enabled=false`.
+A **doctor** runs every 10 minutes (`run.doctor.intervalMinutes`) through [sanctioned commands](master-agent.md#the-pipeline-doctor); off: `run.doctor.enabled=false`.
 
 ## 4. Prove the first PR
 

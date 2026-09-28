@@ -7,7 +7,10 @@ import { isClosed } from '../model/closure.js';
 import { openFaultClassItem } from '../model/fault-classes.js';
 import { scopeRefusalBlocker, unplannedPaths } from '../model/scope.js';
 import { approverSessionName, guardBroadScope } from '../master/autonomy.js';
-import { containmentPhase } from '../master.js';
+import { containmentPhase, type MasterConfig } from '../master.js';
+import { selectFleetSession } from '../fleet.js';
+import { registryHeadlessLaunch, registryRunner } from '../runner/roles.js';
+import { piRunner } from '../runner/pi.js';
 import { doctorActionSchema, doctorFindingsSchema, doctorFiledSchema, doctorRunRecordSchema, type DoctorAction, type DoctorFinding, type DoctorFiled, type DoctorPendingFile, type DoctorRunRecord } from './state.js';
 import { doctorSettingsSchema, type DoctorSettings } from '../master/profiles.js';
 import { z } from 'zod';
@@ -62,6 +65,40 @@ export function doctorSettings(run: { doctor?: unknown; pi?: { command?: string 
   const parsed = doctorSettingsSchema.parse(run?.doctor ?? {});
   return { ...parsed, command: parsed.command ?? run?.pi?.command ?? 'pi' };
 }
+
+/** One call as the master's operator-agent identity, as `daemonEffects` wires it. */
+export type OperatorAgentPost = (method: 'GET' | 'POST', path: string, body?: unknown, key?: string) => Promise<unknown>;
+
+/**
+ * The doctor's effects under the live configuration (GY-711). Its primary run takes the registry's
+ * doctor role when an operator defines one, else Pi on `run.doctor.model`; the fallback run is Pi
+ * on the stronger `fallbackModel`. Every run launches restricted to the doctor's own tool set —
+ * bash and its report tool — so no other tool ever starts. The session holds the control plane URL
+ * and the operator-agent credential by path — never the token itself — and its shipped command
+ * allowlist (integrations/pi) holds it to the sanctioned master commands.
+ */
+export const doctorEffects = (config: MasterConfig, root: string, post: OperatorAgentPost): DoctorEffects => {
+  const settings = doctorSettings(config.run);
+  return {
+    settings, cwd: root,
+    env: { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: config.operatorAgent!.credentialFile, GRAPHYARD_HOST_ID: config.hostId, GRAPHYARD_DOCTOR_CLI: config.cliPath },
+    runner: async attempt => {
+      if (attempt === 'primary') {
+        const fleet = await selectFleetSession(config, doctorRole, { name: doctorRole, principal: config.operatorAgent!.id }, {});
+        if (fleet) {
+          const launch = registryHeadlessLaunch(fleet.account);
+          // The doctor's command allowlist is the Pi extension's: a registry doctor role on any other runtime would run unguarded, so it is not used.
+          if (launch.command === 'pi') return { runner: registryRunner(fleet.account, [...doctorSessionArgs]), runtime: launch.command, model: launch.model, release: fleet.release };
+          await fleet.release(`the registry doctor role names runtime ${launch.command}; the doctor runs only on Pi, where its command allowlist applies`);
+        }
+      }
+      const model = attempt === 'primary' ? settings.model : settings.fallbackModel;
+      return { runner: piRunner({ command: settings.command, model, args: [...doctorSessionArgs] }), runtime: 'pi', model };
+    },
+    file: (input, key) => post('POST', 'work', input, key) as Promise<Work>,
+    recordRun: run => post('POST', 'doctor', run),
+  };
+};
 
 /** The fault bounds of the doctor's checks, in minutes, as the shipped template states them. */
 export const doctorBounds = {

@@ -40,7 +40,7 @@ import { readRelease, restartExecutors } from '../executor-fleet.js';
 import { serverCallName, timedCall, timedFetch, timedRun } from '../master/timings.js';
 import type { RunRecord, Runner } from '../runner/types.js';
 import type { ResearchEvent } from '../research.js';
-import { doctorRole, doctorSessionArgs, doctorSettings, type DoctorEffects } from './doctor.js';
+import { doctorEffects, doctorSettings, type DoctorEffects } from './doctor.js';
 import { diagnosticianRole, type DiagnosticianEffects } from './diagnosis.js';
 import { diagnosticianSettings } from '../runner/payloads.js';
 
@@ -304,17 +304,9 @@ export interface DaemonEffects {
    */
   fileFaultClass?: (input: ReturnType<typeof faultClassItem>, key: string) => Promise<Work>;
   /**
-  /**
-   * The pipeline doctor (GY-711): its settings, the runners of its primary and fallback runs, and
-   * filing and run recording as the master's operator-agent identity. Absent while
-   * `run.doctor.enabled` is false or the operator-agent identity is missing: the loop then runs
-   * only the deterministic remedies, and stuck work waits for the master, as before.
-   */
+  /** The pipeline doctor (GY-711, src/daemon/doctor.ts): absent while `run.doctor.enabled` is false or the operator-agent identity is missing, the loop then running only the deterministic remedies. */
   doctor?: DoctorEffects;
-  /**
-   * Clears an item's blocker as the master's operator-agent identity, bound to the revision the
-   * loop read (GY-711 remedy 2): only for a scope refusal plannedFiles already covers.
-   */
+  /** Clears an item's blocker as the operator-agent identity, bound to the revision the loop read (GY-711 remedy 2): only for a scope refusal plannedFiles already covers. */
   unblock?: (work: Work, reason: string) => Promise<Work>;
   /**
    * The diagnostician (GY-439): its settings, the runners of its primary and fallback runs, the
@@ -568,37 +560,6 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     };
   };
   let publishedEnvironment: string | null = null, publishedMergeQueue: string | null = null;
-  /**
-   * The doctor's effects under the live configuration (GY-711). Its primary run takes the
-   * registry's doctor role when an operator defines one, else Pi on `run.doctor.model`; the
-   * fallback run is Pi on the stronger `fallbackModel`. Every run launches restricted to the
-   * doctor's own tool set — bash and its report tool — so no other tool ever starts. The session
-   * holds the control plane URL and the operator-agent credential by path — never the token
-   * itself — and its shipped command allowlist (integrations/pi) holds it to the sanctioned
-   * master commands.
-   */
-  const doctor = (config: MasterConfig): DoctorEffects => {
-    const settings = doctorSettings(config.run);
-    return {
-      settings, cwd: root,
-      env: { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: config.operatorAgent!.credentialFile, GRAPHYARD_HOST_ID: config.hostId, GRAPHYARD_DOCTOR_CLI: config.cliPath },
-      runner: async attempt => {
-        if (attempt === 'primary') {
-          const fleet = await selectFleetSession(config, doctorRole, { name: doctorRole, principal: config.operatorAgent!.id }, {});
-          if (fleet) {
-            const launch = registryHeadlessLaunch(fleet.account);
-            // The doctor's command allowlist is the Pi extension's: a registry doctor role on any other runtime would run unguarded, so it is not used.
-            if (launch.command === 'pi') return { runner: registryRunner(fleet.account, [...doctorSessionArgs]), runtime: launch.command, model: launch.model, release: fleet.release };
-            await fleet.release(`the registry doctor role names runtime ${launch.command}; the doctor runs only on Pi, where its command allowlist applies`);
-          }
-        }
-        const model = attempt === 'primary' ? settings.model : settings.fallbackModel;
-        return { runner: piRunner({ command: settings.command, model, args: [...doctorSessionArgs] }), runtime: 'pi', model };
-      },
-      file: (input, key) => asOperatorAgent('POST', 'work', input, key) as Promise<Work>,
-      recordRun: run => asOperatorAgent('POST', 'doctor', run),
-    };
-  };
   const persistLoop = (state: DaemonState) => writeDaemonState(current(), state);
   return {
     agents: () => listHerdrAgents(run).catch(() => []),
@@ -789,7 +750,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     get fileFaultClass() { return current().operatorAgent ? (input: ReturnType<typeof faultClassItem>, key: string) => asOperatorAgent('POST', 'work', input, key) as Promise<Work> : undefined; },
     // The doctor acts only through the operator-agent identity, and only its sanctioned commands (GY-711).
     get unblock() { return current().operatorAgent ? (work: Work, reason: string) => asOperatorAgent('POST', `work/${work.id}/unblock`, { reason, expectedRevision: work.revision }) as Promise<Work> : undefined; },
-    get doctor() { const config = current(); return config.operatorAgent && doctorSettings(config.run).enabled ? doctor(config) : undefined; },
+    get doctor() { const config = current(); return config.operatorAgent && doctorSettings(config.run).enabled ? doctorEffects(config, root, asOperatorAgent) : undefined; },
     containment: (work, observed) => assessContainment(work, { hostId: current().hostId, observedAt: observed.now, clockOffset: observed.clockOffset, probe: async target => annotatePaneShell(await probeSupervisorAbsence(target, { run }),
       work.find(item => item.key === target.key && item.containmentQuarantine?.epoch === target.epoch), pane => herdrJson(['pane', 'process-info', '--pane', pane], run), undefined, () => herdrJson(['pane', 'list'], run),
       () => herdrJson(['status', 'server', '--json'], run)) }),
