@@ -14,7 +14,7 @@ import { collectScanInput } from '../src/onboarding.js';
 import { proposeDocumentation, readDocumentationConfig, writeDocumentationConfig } from '../src/repository-setup.js';
 import { documentationGlobMatches } from '../src/model/documentation-glob.js';
 import { decideScopeRequest, documentationScopes } from '../src/model/scope.js';
-import { configuredDocumentation, defaultDocumentationPolicy, documentationAssignment, documentationCheck, documentationCriterionTitle, documentationDrift, documentationObligation, repositoryConfigFile, type DocumentationPolicy } from '../src/model/documentation.js';
+import { configuredDocumentation, defaultDocumentationPolicy, documentationAssignment, documentationCheck, documentationCriterionTitle, documentationDoctorView, documentationDrift, documentationObligation, repositoryConfigFile, type DocumentationPolicy } from '../src/model/documentation.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 
 // GY-215: every ticket keeps its project's documentation current. Documentation is a
@@ -156,10 +156,27 @@ test('unit:docs-policy-drift — doctor reports a committed graphyard.json the c
   assert.equal(documentationDrift(null, siteRepository), null, 'a checkout that commits no policy has nothing to drift from');
   assert.equal(documentationDrift(siteRepository, { ...siteRepository }), null);
   assert.equal(documentationDrift({ paths: ['README.md', 'docs/'], changelog: null }, { paths: ['docs/', 'README.md'], changelog: null }), null, 'path order is not drift');
+  assert.equal(documentationDrift({ paths: ['docs/', 'docs/', 'README.md'], changelog: null }, { paths: ['README.md', 'docs/'], changelog: null }), null, 'a repeated path is not drift');
+  assert.ok(documentationDrift({ paths: ['docs/', 'docs/'], changelog: null }, { paths: ['docs/', 'README.md'], changelog: null }), 'a repeated path cannot stand in for a missing one (GY-470)');
   const drift = documentationDrift(siteRepository, defaultDocumentationPolicy)!;
   assert.deepEqual(drift.committed, siteRepository); assert.deepEqual(drift.deployed, defaultDocumentationPolicy);
   assert.ok(drift.attention.includes(documentationAssignment(siteRepository).line), drift.attention);
   assert.ok(documentationDrift({ ...siteRepository, changelog: null }, siteRepository), 'a changelog difference is drift');
+});
+
+test('unit:docs-doctor-unknown — doctor reports a control plane that predates the check as unknown even when the checkout commits no graphyard.json (GY-470)', () => {
+  // The reviewed fault: an older control plane with no committed graphyard.json printed
+  // committed: null, deployed: null, drift: null, unknown: null, which reads as agreement.
+  const old = documentationDoctorView(null, { actor: { role: 'worker' } });
+  assert.equal(old.committed, null); assert.equal(old.drift, null); assert.equal(old.deployed, null);
+  assert.match(old.unknown!, /predates GY-293/);
+  assert.match(documentationDoctorView(siteRepository, { actor: { role: 'worker' } }).unknown!, /predates GY-293/, 'the committed policy does not make the unknown one comparable');
+  assert.match(documentationDoctorView({ error: 'graphyard.json is not JSON' }, { actor: { role: 'worker' } }).unknown!, /predates GY-293/, 'an unreadable local policy does not make the unknown server policy known');
+  const current = documentationDoctorView(null, { documentation: siteRepository });
+  assert.equal(current.unknown, null, 'a control plane that reports its policy is not unknown');
+  assert.equal(current.drift, null);
+  assert.match(documentationDoctorView(siteRepository, { documentation: defaultDocumentationPolicy }).drift!, /GRAPHYARD_DOCUMENTATION=/, 'the drift attention still names the assignment');
+  assert.equal(documentationDoctorView(null, null).unknown, null, 'an unreachable control plane is reported through the connection failure instead');
 });
 
 test('unit:reviewer-checks-docs — the reviewer prompt carries the documentation check with the repository\'s paths, and a CLI change with no docs diff and no statement is flagged', () => {

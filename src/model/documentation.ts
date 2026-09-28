@@ -75,11 +75,38 @@ export function configuredDocumentation(env: NodeJS.ProcessEnv = typeof process 
  */
 export function documentationDrift(committed: DocumentationPolicy | null, deployed: DocumentationPolicy) {
   if (!committed) return null;
-  const same = (a: readonly string[], b: readonly string[]) => a.length === b.length && a.every(path => b.includes(path));
+  // Compared as sets: order and repeats are not drift, but a path present on one side only is.
+  const same = (a: readonly string[], b: readonly string[]) => { const left = new Set(a), right = new Set(b); return left.size === right.size && [...left].every(path => right.has(path)); };
   if (same(committed.paths, deployed.paths) && committed.changelog === deployed.changelog) return null;
   const assignment = documentationAssignment(committed);
   return { committed, deployed, variable: assignment.variable,
     attention: `${repositoryConfigFile} declares documentation ${JSON.stringify(committed)} but the control plane serves ${JSON.stringify(deployed)}: set ${assignment.line} on the deployment` };
+}
+
+/** What doctor reports about this checkout's documentation policy beside the control plane's. */
+export interface DocumentationDoctorView {
+  committed: DocumentationPolicy | null;
+  deployed: DocumentationPolicy | null;
+  /** The drift attention line with the assignment that fixes it, when the two policies differ. */
+  drift: string | null;
+  /** Why the deployed policy cannot be compared: the reachable control plane predates the check. */
+  unknown: string | null;
+  /** The committed `graphyard.json` exists but does not parse. */
+  error?: string;
+}
+
+/**
+ * Doctor's documentation view (GY-293, GY-470): the committed `graphyard.json` policy beside the
+ * one the control plane serves. A reachable control plane that reports no policy predates GY-293,
+ * so drift is unknown rather than absent whatever the checkout commits — a null that reads as
+ * agreement would hide the gap. An unreachable control plane is `null` here and reported through
+ * the connection failure instead.
+ */
+export function documentationDoctorView(committed: DocumentationPolicy | { error: string } | null, live: { documentation?: DocumentationPolicy | null; [key: string]: unknown } | null): DocumentationDoctorView {
+  const unknown = live && !live.documentation ? `The control plane does not report its documentation policy (it predates GY-293); redeploy it to compare against ${repositoryConfigFile}` : null;
+  const deployed = live?.documentation ?? null;
+  if (committed && 'error' in committed) return { committed: null, deployed, drift: null, unknown, error: committed.error };
+  return { committed, deployed, drift: deployed ? documentationDrift(committed, deployed)?.attention ?? null : null, unknown };
 }
 
 /** The standard criterion's short name, as the control plane stamps it on every feature and bug. */

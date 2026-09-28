@@ -12,7 +12,7 @@ import { ciProducerProvisioningSteps, readRoster, registerCiProducer } from '../
 import { completionProfiles, readinessChecklist, summarizeDefinitions, type CompletionProfile } from '../readiness.js';
 import { defineCommands } from './registry.js';
 import { readSecretFromStdin } from './context.js';
-import { documentationDrift } from '../model/documentation.js';
+import { documentationDoctorView } from '../model/documentation.js';
 
 
 const interactiveGithubSetup = (root: string) => async (repository: string, deployment: string) => {
@@ -174,8 +174,9 @@ export const installCommands = defineCommands([
       // The committed documentation policy against the deployed one (GY-293): the control plane
       // reads only GRAPHYARD_DOCUMENTATION, so an unredeployed graphyard.json edit is drift.
       const committedDocumentation = await readDocumentationConfig(root).catch((error: any) => ({ error: error.message as string }));
-      const documentation = committedDocumentation && 'error' in committedDocumentation ? { committed: null, deployed: live?.documentation ?? null, drift: null, error: committedDocumentation.error }
-        : { committed: committedDocumentation, deployed: live?.documentation ?? null, drift: live?.documentation ? documentationDrift(committedDocumentation, live.documentation)?.attention ?? null : null };
+      // A reachable control plane that does not report its policy predates GY-293: drift is then
+      // unknown, not absent, whatever this checkout commits (GY-470).
+      const documentation = documentationDoctorView(committedDocumentation, live);
       // Capacity drift and production lag are the two installation facts a deploy can break
       // silently; the server reports both and doctor repeats them beside the App preflight.
       const delegationLimits = live?.delegationLimits ?? null, production = live?.production ?? null;
