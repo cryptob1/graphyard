@@ -556,16 +556,14 @@ export type RefreshTrigger = 'conflict confirmed' | 'failed check behind base' |
 /** Check results that report a failure, as opposed to a run still to answer. */
 export const failedCheckResults = ['failure', 'timed_out', 'action_required', 'cancelled'];
 /**
- * The latest run of the named check on the observed head, ordered as the test gate orders them
- * (`latestCheck`, by immutable check-run ID): a re-run supersedes the run it repeats, and a newly
- * triggered workflow run supersedes an older one whatever its attempt number.
+ * The first check the policy requires whose newest trusted run on the observed current head
+ * reported a failure — the failure a `failed check behind base` refresh answers (GY-534). The
+ * run that decides is the one the test gate reads (`requiredCheck`: newest by immutable
+ * check-run ID, within the configured CI Apps), so a same-named check another App reported
+ * cannot set a branch rewrite in motion.
  */
-export function latestCheckRun(work: Pick<Work, 'observation'>, name: string) {
-  return latestCheck((work.observation?.checks ?? []).filter(check => check.name === name)) ?? null;
-}
-/** The first check the policy requires whose latest run on the observed head reported a failure, or null. */
-export function failedRequiredCheck(work: Pick<Work, 'observation' | 'policy'>): string | null {
-  return work.policy.checks.find(name => { const latest = latestCheckRun(work, name); return !!latest && failedCheckResults.includes(latest.result); }) ?? null;
+export function failedCheckForRefresh(work: Pick<Work, 'candidate' | 'observation' | 'gates' | 'policy'>): string | null {
+  return work.policy.checks.find(name => { const latest = requiredCheck(work, name); return !!latest && failedCheckResults.includes(latest.result); }) ?? null;
 }
 /**
  * A GitHub `mergeable: false` the control plane's own test merge showed to be clean (GY-375).
@@ -681,8 +679,13 @@ export function baseRefreshNeeded(work: Work): { head: string; boundBase: string
   // for a failed check again, so a genuinely broken head reaches rework after one extra CI round
   // however often the base moves. A stale-mergeability reading for the pair wrote nothing, so it
   // does not count as the attempt.
-  const check = failedRequiredCheck(work);
+  const check = failedCheckForRefresh(work);
   if (check) {
+    // A head the queue ejected is the queue's to answer, not the refresh's: the ejection names the
+    // check, and the queue's re-entry, restore or rework recovers the item. Between an ejection and
+    // that recovery the entry stands unqueued on its failed tip, and refreshing it here would set
+    // eject, refresh, re-enter, fail, eject spinning past the churn bound (GY-375).
+    if ((work.queueHistory ?? []).some(entry => entry.event === 'ejected' && entry.tip === candidate.sha)) return null;
     const produced = refresh?.head === candidate.sha && refresh.trigger === 'failed check behind base' && !refresh.stale;
     if (produced || recorded && !refresh!.stale) return null;
   } else if (observation.conflicting !== true || recorded) return null;
