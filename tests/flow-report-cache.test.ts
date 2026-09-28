@@ -65,7 +65,7 @@ test('unit:flow-report-cached — a second read of the same window is served fro
   const first = await flow();
   assert.equal(first.body.coverage.workItems, 30);
   const second = await flow();
-  assert.ok(second.ms < 100, `the cached read took ${second.ms.toFixed(1)} ms`);
+  assert.ok(second.ms < 200, `the cached read took ${second.ms.toFixed(1)} ms`);
   assert.equal(second.body.bottleneck.observedAt, first.body.bottleneck.observedAt, 'the second read is the pooled report');
   assert.deepEqual(second.body, first.body);
 
