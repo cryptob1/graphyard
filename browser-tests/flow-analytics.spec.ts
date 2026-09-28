@@ -4,6 +4,7 @@ import { computeAttribution, type AttributionDataset } from '../src/attribution'
 import type { Work } from '../src/model';
 import { stepIds } from '../src/model/pr-steps';
 import { formatDuration } from '../src/model/duration';
+import { nowRowCapacity } from '../web/pages/insights-flow.js';
 import { NOW, boardApi, boardWork } from './ui-board';
 
 // Browser-only fixtures. The report is computed by the real aggregation from synthetic
@@ -337,10 +338,11 @@ for (const viewport of [{ name: 'desktop', width: 1440, height: 1000 }, { name: 
     // The step header carries the column's full count at either width.
     const count = stepHead(page, step!).locator('> span').getByText(`${total} now`);
     await expect(count).toBeVisible();
-    // Density follows measured column width while reserving room for touch targets.
+    // Density follows the lane's own `nowRowCapacity`: measured column width, compact reserve at
+    // 1250 px and below, the same reading the page renders with.
     const rows = await lane.locator(`.now-dot[data-step="${step}"]`).evaluateAll(dots => new Set(dots.map(dot => (dot as HTMLElement).dataset.row)).size);
     const laneWidth = await lane.evaluate(node => node.clientWidth);
-    const capacity = Math.max(1, Math.min(12, Math.floor(laneWidth / 7 / (viewport.width <= 1250 ? 28 : 88))));
+    const capacity = nowRowCapacity(laneWidth, viewport.width <= 1250);
     expect(rows).toBe(Math.ceil(12 / capacity));
     if (viewport.name === 'compact desktop') expect(capacity).toBeGreaterThan(2);
     const more = lane.locator(`.now-more[data-step="${step}"]`);

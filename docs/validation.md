@@ -5,13 +5,13 @@ An `e2e:` proof passes only from a pinned candidate, bundle and separate [collec
 
 ## Test cases
 
-Define a test case (`admin`) in **Settings → Test cases** or `graphyard scenario scenario.json`: `id`, `title`, `purpose`, `setup`, `steps`, `expected`, `environment`, `runner`, `testPath`. Revisions are immutable; a criterion naming `e2e:ID` pins the latest at creation; a newer one needs a follow-up item.
+Define a test case (`admin`) in **Settings → Test cases** or `graphyard scenario scenario.json`: `id`, `title`, `purpose`, `setup`, `steps`, `expected`, `environment`, `runner`, `testPath`. Revisions are immutable; a criterion naming `e2e:ID` pins the latest at creation; a newer one needs a follow-up.
 
-Trusted `e2e:ID` results append runs to **Tests**, one per attempt, bound to commit and run; workers cannot.
+Trusted `e2e:ID` results append one run per attempt to **Tests**, bound to commit and run; workers cannot.
 
 ## Identities
 
-- Operator (`admin`): defines environments and bundles, registers identities, selects, requests, cancels, recovers candidates.
+- Operator (`admin`): defines environments and bundles, registers identities, selects, requests, cancels, recovers.
 - Runner (`worker` + registration): polls `dispatch`, acknowledges, heartbeats.
 - Builder and collector (`producer` + registration): attest source → artifacts; verify, publish; a collector that attested the build is refused.
 
@@ -23,7 +23,7 @@ Define the environment, runner registration (local `unix://` Docker socket, atte
 
 ## Requests and results
 
-A request names candidate, runner, collector, `deadline`, `maxAttempts`, binding the observed target; another manifest supersedes it. The runner `ack`s within 30 seconds, heartbeats every 20; `collection-authority` ends the runner's authority.
+A request names candidate, runner, collector, `deadline`, `maxAttempts`, binding the observed target; another manifest supersedes it. The runner `ack`s within 30 seconds, heartbeats every 20; `collection-authority` ends its authority.
 
 Only a measured whole-run `matched` target with verified artifacts, settled execution passes. `cancel`, `settle` (with stop evidence), `retry` recover requests; `graphyard validation capacity` [diagnoses](recovery.md#runner-capacity-and-request-diagnostics) stuck ones.
 
