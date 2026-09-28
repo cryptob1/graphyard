@@ -331,9 +331,9 @@ export function conversationPayload(current: any, desired: ReviewProtection) {
   };
 }
 
-export async function applyProtection(config: { repository: string; baseBranch: string; githubAppId: number }, work: Work[], run: ProtectionRun = protectionRun) {
+export async function applyProtection(config: { repository: string; baseBranch: string; githubAppId: number }, work: Work[], run: ProtectionRun = protectionRun, workflows: WorkflowFile[] = readWorkflows()) {
   const current = readProtection(config, run);
-  const plan = protectionPlan(current, config, work);
+  const plan = protectionPlan(current, config, work, undefined, workflows);
   if (plan.blockers.length) throw new Error(plan.refusal!);
   if (!plan.changes.length) return { ...plan, applied: false, result: 'branch protection already matches every open review policy' };
   let queueRefused = false;
@@ -359,7 +359,7 @@ export async function applyProtection(config: { repository: string; baseBranch: 
       JSON.stringify({ required_approving_review_count: plan.desired.requiredApprovals, require_last_push_approval: plan.desired.requireLastPushApproval, dismiss_stale_reviews: plan.desired.dismissStaleReviews }));
   }
   const reread = readProtection(config, run);
-  const verified = protectionPlan(reread, config, work);
+  const verified = protectionPlan(reread, config, work, undefined, workflows);
   if (!verified.consistent) throw new Error(`GitHub did not report the reconciled protection; branch protection remains inconsistent with the open review policies: ${[...verified.changes, ...verified.blockers].join('; ')}`);
   return { ...verified, applied: true, result: `branch protection now matches the ${plan.mode} review policy of every open item${verified.mergeQueue ? `, and ${plan.branch} merges through GitHub's merge queue requiring ${CHECK_NAME}; the queue's only bypass actor is App ${config.githubAppId} in pull-request mode, for the audited repair lane` : verified.autoMerge ? `, and ${plan.branch} merges through auto-merge requiring ${CHECK_NAME} (the repository cannot have a merge queue)` : ''}` };
 }

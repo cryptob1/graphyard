@@ -4,7 +4,7 @@ import { parseArgs } from 'node:util';
 import { listHerdrAgents, masterHarness, masterSettingsFromArgs, producerCommand, registeredReview, saveMasterSettings, saveWorkerProfile, startMaster, workerProfileSchema } from '../../master.js';
 import { readReviewLedger, reviewCommand as launchReview } from '../../reviewer.js';
 import { readDispatchCursor } from '../../auto-dispatch.js';
-import { applyProtection, protectionPlan, readProtection } from '../../protection.js';
+import { applyProtection, protectionPlan, readProtection, readWorkflows } from '../../protection.js';
 import { writeHarnessPermissions } from '../../harness.js';
 import { browserFlows, runBrowserFlow, type BrowserFlow } from '../../master-browser.js';
 import { reviewerCommand } from '../master-reviewer.js';
@@ -40,8 +40,11 @@ export async function fleetCommand(session: MasterSession): Promise<unknown> {
   if (id === 'protection') {
     const { values } = parseArgs({ args, options: { apply: { type: 'boolean' } }, allowPositionals: false });
     const snapshot = await masterApi('work-snapshot');
-    if (values.apply) return print(await applyProtection(master, snapshot.work));
-    return print({ ...protectionPlan(readProtection(master), master, snapshot.work), apply: false, next: 'Rerun with --apply to reconcile branch protection with these policies' });
+    // The workflows are the managed checkout's: read them from the root the CLI discovered, never
+    // the process working directory, so the plan carries its CI advisories from any subdirectory.
+    const workflows = readWorkflows(root);
+    if (values.apply) return print(await applyProtection(master, snapshot.work, undefined, workflows));
+    return print({ ...protectionPlan(readProtection(master), master, snapshot.work, undefined, workflows), apply: false, next: 'Rerun with --apply to reconcile branch protection with these policies' });
   }
   if (id === 'browser') {
     const { values, positionals } = parseArgs({ args, options: { 'dry-run': { type: 'boolean' } }, allowPositionals: true });

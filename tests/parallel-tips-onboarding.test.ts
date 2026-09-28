@@ -1,13 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { defaultParallelTips } from '../src/merge-queue.js';
 import { onboardingParallelTips } from '../src/master/profiles.js';
 import { onboardingMergeQueue } from '../src/repository-setup.js';
-import { parallelTipsAdvisories, protectionPlan, type WorkflowFile } from '../src/protection.js';
+import { parallelTipsAdvisories, protectionPlan, readWorkflows, type WorkflowFile } from '../src/protection.js';
 import { loadMasterConfig, setupMaster } from '../src/master.js';
 import type { Work } from '../src/model.js';
 
@@ -79,4 +79,33 @@ test('unit:parallel-tips-onboarded — master protection plans the advisory for 
   assert.match(onboarded.advisories[0], /at least 8 concurrent runner slots/, 'the advisory recommends parallelTips × jobs per run');
   const unwritten = protectionPlan(protection, { repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }, work, undefined, [workflowWithConcurrency]);
   assert.deepEqual(unwritten.advisories, [], 'no parallel-tips advisory where the installation wrote none');
+});
+
+test('unit:parallel-tips-onboarded — the advisory reads the checkout from the repository root, not the working directory', async () => {
+  // `graphyard master protection` runs from wherever the operator stands: the workflows must come
+  // from the discovered repository root, or a subdirectory invocation silently loses the advisory.
+  const root = await mkdtemp(join(tmpdir(), 'graphyard-parallel-tips-root-'));
+  const home = process.cwd();
+  await mkdir(join(root, 'nested'), { recursive: true });
+  process.chdir(join(root, 'nested'));
+  try {
+    await mkdir(join(root, '.github', 'workflows'), { recursive: true });
+    await writeFile(join(root, '.github', 'workflows', 'ci.yml'), workflowWithConcurrency.text);
+    assert.deepEqual(readWorkflows(), [], 'from a subdirectory the working-directory default finds no workflows');
+    const found = readWorkflows(root);
+    assert.deepEqual(found.map(file => file.path), ['.github/workflows/ci.yml'], 'the repository root yields the checkout\u2019s workflows');
+    const advisories = parallelTipsAdvisories(defaultParallelTips, found);
+    assert.equal(advisories.length, 1, `the advisory survives a subdirectory invocation: ${advisories.join('; ')}`);
+    assert.match(advisories[0], /concurrent runner slots/);
+  } finally {
+    process.chdir(home);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('unit:parallel-tips-onboarded — master protection feeds both plan and apply the workflows read from the CLI root', async () => {
+  const fleet = await readFile(new URL('../src/cli/master/fleet.ts', import.meta.url), 'utf8');
+  assert.match(fleet, /const workflows = readWorkflows\(root\)/, 'the command reads the workflows from the discovered repository root');
+  assert.match(fleet, /protectionPlan\(readProtection\(master\), master, snapshot\.work, undefined, workflows\)/, 'the plan carries those workflows, not a working-directory default');
+  assert.match(fleet, /applyProtection\(master, snapshot\.work, undefined, workflows\)/, 'the apply path carries the same workflows');
 });
