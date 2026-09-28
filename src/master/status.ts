@@ -5,13 +5,14 @@ import { standingCapacity, describeCapacity, quotaRoles } from '../model/capacit
 import { parkedOnHuman, humanDecisionLabel, answerCommand, openHumanRequests } from '../model/human-request.js';
 import { type Work, carriedBindings, describeGround, reviewProviderOf, reviewerProfileFor, exhaustedReviewerProfiles, implementerIdentities, describeQueueBinding, deploySmokeRequired, isClosed, closedHistory, deliveryState, postDeployMs, productionLatencyMs, rollbackGuidance, type QueueBindingReport } from '../model.js';
 import { containmentAttestation, containmentGraceMs } from '../quarantine.js';
-import { defaultMergeBatchSize, describeMergeBatches, type MergeBatchView, predictQueue, describeGitHubQueue, pendingBaseRefresh, baseRefreshConflict, currentBaseRefreshCarry, branchContamination, currentRestore, restoredApproval, unpublishableEntry, refusedReconciliation, type QueuePlacement } from '../merge-queue.js';
+import { defaultMergeBatchSize, describeMergeBatches, describeTipWindow, windowBatchView, type MergeBatchView, type TipView, predictQueue, describeGitHubQueue, pendingBaseRefresh, baseRefreshConflict, currentBaseRefreshCarry, branchContamination, currentRestore, restoredApproval, unpublishableEntry, refusedReconciliation, type QueuePlacement } from '../merge-queue.js';
 import { MERGE_PROTOCOL } from '../protocol-version.js';
 import { mergeBaseDismissal, mergeBaseDismissalAttention } from '../merge-base-ancestry.js';
 import { pipelineSpeed, pipelineSpeedSummary } from '../pipeline-speed.js';
 import { profileSessions, type WorkerProfile } from './profiles.js';
 import { sessionActivity } from './launch.js';
 import { sessionView } from '../model/session-state.js';
+import { mechanicalProof, unexercisedDetail, unexercisedFindings } from '../model/mechanical-proofs.js';
 import type { HerdrAgent } from './herdr.js';
 import { type ContainmentAssessment, containmentHold, containmentPhase } from './containment.js';
 import { agentOwner, type AttentionItem, controlPlaneAttention, type ControlPlaneStatus, fleetStatus, workAttentionOwner, type WorkAttentionCause } from './attention.js';
@@ -44,7 +45,7 @@ export function mergeProtocolSkew(status: { build?: { commit?: string | null; pr
   return `server runs ${serverCommit}, CLI expects ${cliCommit}: deploy main first (server merge protocol ${serverProtocol}, CLI merge protocol ${cliProtocol}${serverProtocol < cliProtocol ? '; the deployment has not served the commit the CLI runs' : '; update the CLI checkout to the deployed commit'})`;
 }
 /** Sessions the local ledgers hold and the launches the dispatcher refused, as `master status` joins them onto each candidate's requests. */
-export interface SessionRetryReport { requestId: string; attempts: number; started: number; neverStarted: number; limit: number; unstartedLimit: number; nextAt: string | null; exhausted: boolean; last: { state: string; resolution: string | null } | null }
+export interface SessionRetryReport { requestId: string; attempts: number; started: number; neverStarted: number; lost?: number; limit: number; unstartedLimit: number; nextAt: string | null; exhausted: boolean; last: { state: string; resolution: string | null } | null }
 export interface DispatchSessions { producers: { pending: any[]; completed: any[] }; failures: { requestId: string; kind: string; attempts: number; reason: string; at: string; nextAt: string }[]; retries?: SessionRetryReport[] }
 const noSessions: DispatchSessions = { producers: { pending: [], completed: [] }, failures: [] };
 /**
@@ -69,7 +70,13 @@ export function describeDispatch(work: Work, reviews: { pending: any[]; complete
   // the attempts so far and when the next one is due are reported beside the request.
   const retry = (requestId: string) => sessions.retries?.find(entry => entry.requestId === requestId) ?? null;
   const describe = (request: NonNullable<typeof state.review>, records: any[]) => ({ requestId: request.id, sha: request.sha, baseSha: request.baseSha, policyRevision: request.policyRevision, requestedAt: request.requestedAt, sinceMs: since(request.requestedAt), reason: request.reason,
-    ...(request.group ? { group: request.group, proofs: request.proofs } : {}), session: session(records, request.id), failure: failure(request.id), retry: retry(request.id) });
+    ...(request.group ? { group: request.group, proofs: request.proofs } : {}), session: session(records, request.id), failure: failure(request.id), retry: retry(request.id),
+    // A proof the producer found does not exercise its criterion returns the head to its worker (GY-817).
+    ...(request.group ? unexercisedOf(request) : {}) });
+  const unexercisedOf = (request: NonNullable<typeof state.review>) => {
+    const findings = unexercisedFindings(work, request.sha, request.proofs).filter(entry => mechanicalProof(entry.proof));
+    return findings.length ? { unexercised: findings.map(entry => unexercisedDetail(entry, request.sha)) } : {};
+  };
   const reviewRecords = [...reviews.completed, ...reviews.pending], producerRecords = [...sessions.producers.completed, ...sessions.producers.pending];
   return { review: state.review ? describe(state.review, reviewRecords) : null, producers: state.producers.map(request => describe(request, producerRecords)),
     recent: state.history.slice(-5).map(request => ({ kind: request.kind, ...(request.group ? { group: request.group } : {}), sha: request.sha, state: request.state, resolution: request.resolution ?? null, resolvedAt: request.resolvedAt ?? null })) };
@@ -117,7 +124,7 @@ export function concurrencyAttention(reports: RoleConcurrencyReport[]): Attentio
     text: `${report.role} capacity is saturated: ${report.running} session${report.running === 1 ? '' : 's'} running against a limit of ${report.limit} (${report.profiles.map(entry => `${entry.profile} ${entry.running}/${entry.limit}`).join(', ')}), ${report.waiting} request${report.waiting === 1 ? '' : 's'} waiting for a slot, the longest (${report.longest!.work}${report.longest!.group ? ` ${report.longest!.group} proofs` : ''}) for ${Math.round(report.longestWaitMs! / 60_000)} minutes`,
     ...agentOwner('master', `Raise concurrency on a ${report.role} profile in .graphyard/master.json, or add a ${report.role} profile on another account (master ${report.role} add); master run adopts the change on its next tick and starts more sessions without a restart. See docs/onboarding.md#size-review-and-proof-capacity`) }));
 }
-export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profiles: WorkerProfile[], agents: HerdrAgent[], credentialHealth: Record<string, { available: boolean; reason: string | null }> = {}, containment: Record<string, ContainmentAssessment> = {}, reviews: { pending: any[]; completed: any[] } = { pending: [], completed: [] }, baseBranch = 'main', controlPlane?: ControlPlaneStatus, sessions: DispatchSessions = noSessions, candidateConflicts: { report: Record<string, ConflictReport>; available: boolean; reason: string | null } = { report: {}, available: false, reason: 'Candidate conflicts were not probed' }, roles?: RoleProfiles, cliPath = 'graphyard', mergeQueue: { batchSize: number } = { batchSize: defaultMergeBatchSize }) {
+export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profiles: WorkerProfile[], agents: HerdrAgent[], credentialHealth: Record<string, { available: boolean; reason: string | null }> = {}, containment: Record<string, ContainmentAssessment> = {}, reviews: { pending: any[]; completed: any[] } = { pending: [], completed: [] }, baseBranch = 'main', controlPlane?: ControlPlaneStatus, sessions: DispatchSessions = noSessions, candidateConflicts: { report: Record<string, ConflictReport>; available: boolean; reason: string | null } = { report: {}, available: false, reason: 'Candidate conflicts were not probed' }, roles?: RoleProfiles, cliPath = 'graphyard', mergeQueue: { batchSize: number; parallelTips?: number } = { batchSize: defaultMergeBatchSize }) {
   const now = Date.parse(snapshot.now);
   const scheduling = dispatchSchedule(snapshot.work, now);
   const installation = controlPlaneAttention(controlPlane), registry = fleetStatus(controlPlane?.fleet);
@@ -132,10 +139,17 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
   const placements = predictQueue(snapshot.work, now);
   // The queue in batches (GY-330): each entry's batch, its members, and the combined tip under test.
   const reportedCiApps = (controlPlane as { ciAppIds?: unknown } | undefined)?.ciAppIds;
-  const batches = describeMergeBatches(snapshot.work, placements, mergeQueue.batchSize, Array.isArray(reportedCiApps) ? reportedCiApps.filter((id): id is number => typeof id === 'number') : null);
+  const ciApps = Array.isArray(reportedCiApps) ? reportedCiApps.filter((id): id is number => typeof id === 'number') : null;
+  // Under a parallel-tip window (GY-498) each entry's merge step reads the window — the tips it
+  // merges behind, their entries and CI state — exactly as the control plane validates it.
+  const windows = mergeQueue.parallelTips ? describeTipWindow(snapshot.work, placements, mergeQueue.parallelTips, ciApps) : null;
+  const batches: Map<string, MergeBatchView> = windows
+    ? new Map([...windows].map(([key, view]) => [key, windowBatchView(key, view, mergeQueue.parallelTips!)]))
+    : describeMergeBatches(snapshot.work, placements, mergeQueue.batchSize, ciApps);
+  const tipsOf = (key: string): { tips: TipView[] } | Record<string, never> => windows?.get(key)?.tips.length ? { tips: windows.get(key)!.tips } : {};
   // Each queued item's batch (GY-330) and its place in GitHub's own merge queue, as the control plane
   // last read it (GY-258): GitHub performs the merge, so this is where a queued item waits once every gate passes.
-  const githubQueueRow = (work: Work) => ({ batch: batches.get(work.key) ?? null, ...(work.observation?.githubQueue ? { github: { ...work.observation.githubQueue, summary: describeGitHubQueue(work) } } : {}) });
+  const githubQueueRow = (work: Work) => ({ batch: batches.get(work.key) ?? null, ...tipsOf(work.key), ...(work.observation?.githubQueue ? { github: { ...work.observation.githubQueue, summary: describeGitHubQueue(work) } } : {}) });
   const queueRows = placements.map(placement => { const work = snapshot.work.find(item => item.id === placement.id)!; return { ...queueRow(placement, describeQueueBinding(work, snapshot.work, new Date(now), placement)), ...githubQueueRow(work) }; });
   // The cause each row's attention was raised for, which is the fault kind its attention item carries.
   const causes = new Map<string, WorkAttentionCause>();
