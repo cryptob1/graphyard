@@ -50,6 +50,23 @@ const criteriaOf = (verdict: MechanicalVerdict) => verdict.criteria.length ? ver
  */
 export const mechanicalFailure = (verdict: MechanicalVerdict, sha: string) =>
   `${criteriaOf(verdict)}: ${verdict.proof} failed on ${short(sha)} (trusted evidence from ${verdict.producer}); the head returns to its worker before review`;
+/**
+ * GY-868: the trusted `manual:` proofs a producer session may run that failed with cases executed
+ * on the head. Such a record is a judgement about the change, so it is the worker's to fix exactly
+ * like a mechanical one — proofRework sends the head back, and no operator escalation stands. A
+ * record with executed = 0 judged nothing and is an unexercised finding instead (see
+ * `unexercisedFindings`); a manual proof no producer may run is the operator-witnessed escalation
+ * cycle-delivery records. Neither appears here.
+ */
+export function producerManualFailures(work: Work, all: Work[], now: Date): MechanicalVerdict[] {
+  const named = (proof: string) => work.criteria.filter(criterion => !criterion.bootstrap && criterion.proofs.includes(proof)).map(criterion => criterion.id);
+  return automatableOutcomes(work, all, now).filter(entry => !mechanicalProof(entry.proof) && entry.outcome === 'failed'
+    && (currentEvidence(work, entry.proof, now)?.executed ?? 0) > 0)
+    .map(entry => ({ criteria: named(entry.proof), proof: entry.proof, outcome: entry.outcome, ...(entry.producer ? { producer: entry.producer } : {}) }));
+}
+/** One producer-run manual failure as the rework names it: judged with cases executed, so the worker fixes the change. */
+export const producerManualFailure = (verdict: MechanicalVerdict, sha: string) =>
+  `${criteriaOf(verdict)}: ${verdict.proof} failed on ${short(sha)} (trusted evidence from ${verdict.producer}); the producer judged the change and found it inadequate, so the head returns to its worker`;
 
 /** Why no reviewer may be asked about this head yet, or null once every mechanical proof has passed on it. */
 export function mechanicalHold(work: Work, all: Work[], now: Date): { needed: false; reason: string; state: ReviewState } | null {
@@ -123,15 +140,24 @@ export function producerGroupDecisions(work: Work, all: Work[], now: Date, outco
  * never launched again for the head and the loop requests the rework instead (GY-193 AC-3). Each
  * finding carries the criteria the run was held to and the behaviour whose removal — the mutation —
  * left the proof passing, so the planner's rework names all three (GY-817).
+ *
+ * GY-868: a trusted `manual:` record whose executed is 0 is a finding of the same kind, whatever
+ * its result reads: executed counts the cases and checks the producer ran to judge the criterion,
+ * so executed = 0 records a judgement never made, not a failure of the change. The loop answers it
+ * through attestationDecision (GY-523) — never through rework or an operator escalation.
  */
 export interface UnexercisedFinding { proof: string; finding: string; criteria: string[]; behaviour: string | null }
+/** What a `manual:` record with no case executed is: a judgement never made (GY-868). */
+export const unexecutedManualFinding = (proof: string) => `the record carries executed = 0: no test case or check ran, so the criterion was never judged and there is no failure of the change to fix`;
 export function unexercisedFindings(work: Work, sha: string | undefined = work.candidate?.sha, proofs?: readonly string[]): UnexercisedFinding[] {
   if (!sha) return [];
   const findings = new Map<string, UnexercisedFinding>();
   for (const entry of work.evidence ?? []) {
-    if (!entry.unexercised || entry.sha !== sha || entry.policyRevision !== work.policyRevision || (proofs && !proofs.includes(entry.proof))) continue;
+    if (entry.sha !== sha || entry.policyRevision !== work.policyRevision || (proofs && !proofs.includes(entry.proof))) continue;
     const criteria = entry.exercise?.criterion ? [entry.exercise.criterion] : work.criteria.filter(criterion => criterion.proofs.includes(entry.proof)).map(criterion => criterion.id);
-    findings.set(entry.proof, { proof: entry.proof, finding: entry.unexercised, criteria, behaviour: entry.exercise?.behaviour ?? null });
+    if (entry.unexercised) findings.set(entry.proof, { proof: entry.proof, finding: entry.unexercised, criteria, behaviour: entry.exercise?.behaviour ?? null });
+    else if (entry.trusted && !entry.revocation && entry.proof.startsWith('manual:') && entry.executed === 0)
+      findings.set(entry.proof, { proof: entry.proof, finding: `${entry.proof} ${unexecutedManualFinding(entry.proof)}`, criteria, behaviour: entry.exercise?.behaviour ?? null });
   }
   // A trusted pass recorded since answers the finding: the proof is proven on this head after all.
   return [...findings.values()].filter(({ proof }) => !(sha === work.candidate?.sha && currentEvidence(work, proof)?.result === 'pass'));
