@@ -16,6 +16,9 @@ import { approverSessionName, decisionInput, masterConfigSchema, mergeExecutor, 
 import { mergeBatchSize, mergeParallelTips, optimisticExcludeGlobs, optimisticMergeEnabled, rerunFailedChecks } from '../src/master/profiles.js';
 import { answeringWidening, emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { plannedFilesMax, type ScopeRequestState } from '../src/model/scope.js';
+import { diagnosticianSettings, diagnosisSettled } from '../src/runner/payloads.js';
+import type { RunOptions, RunResult, Runner } from '../src/runner/types.js';
+import type { DiagnosticianEffects } from '../src/daemon/diagnosis.js';
 import { Launcher } from '../src/daemon/cycle.js';
 import { successorWidening } from '../src/model/successors.js';
 import { systemInvariants, type InvariantCheck } from '../src/model/invariants.js';
@@ -39,7 +42,12 @@ import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } f
  * rerun once (GY-516), one passing on the rerun and one failing again, one head whose producer
  * runs are killed, then fail until the request is spent (GY-496), and the loop's
  * between-cycles self-upgrade (GY-437) against a simulated coordinator checkout that stands dirty
- * across the second deploy for a while. One day's approver refuses the rework decision two items
+ * across the second deploy for a while. The plane also reports a held integration job in three
+ * separate windows, so the `held-jobs` fault class recurs past its threshold and the loop files one
+ * recurring-fault item for it (GY-173): the diagnostician (GY-439) is wired as a fake, so the real
+ * loop diagnoses the recurring item within the cycle that files it and closes it, on the approved
+ * two-party decision, as a duplicate of an open item — once, never again per cycle, with the
+ * approver session closed once the decision settles. One day's approver refuses the rework decision two items
  * call for, and a mid-day restart loses the loop's cursor while they still call for it, so their
  * next requests must cite those binding-carrying refusals at once (GY-475). Every one of the
  * fifteen must be delivered. The loop
@@ -54,6 +62,10 @@ import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } f
  * tips ahead pass while the suffix rebuilds without it, and the window reconfigured mid-day and
  * republished. A change to the loop that breaks an invariant fails here, in CI, before it merges;
  * a new behaviour that repeats per cycle, head or item belongs in this world.
+ * The loop records every worker's session handle and may prompt a session (GY-544): three workers
+ * ask for scope that is decided before the loop's next cycle sees the request, two panes are
+ * misread by Herdr as holding no agent for one cycle, and one worker's runtime exits and leaves
+ * its pane on a bare shell.
  */
 const repository = 'owner/project';
 const PROOF = 'unit:soak-behaves';
@@ -111,9 +123,56 @@ const basePlan = {
   // it at once — and is itself rebuilt onto the moved base, so the failed rerun never costs that
   // item its rework round (the rerun-fails path itself is exercised by tests/tip-flake-rerun.test.ts).
   outOfQueue: { item: 15, afterMs: minute },
+  // The control plane's held integration job, standing in three separate windows: three instances
+  // of the `held-jobs` fault class inside the recurrence window, so the loop files the class's one
+  // recurring item and the diagnostician diagnoses it (GY-439).
+  heldJob: { at: [40, 80, 120].map(offset => offset * minute), forMs: 2 * minute },
+  // GY-544: scope asked and answered between two cycles, and a live pane Herdr misreads for one cycle.
+  // The scope overlay cannot ride item ten: an applied scope decision binds the approval baseline to
+  // the attempt's first pull request (the requirement-review reset), and item ten's optimistic revert
+  // reopens it onto a new pull request no approval can ever satisfy — items one and thirteen keep
+  // their pull request across their rounds, so the overlay rides those.
+  scoped: new Set([1, 4, 13]), scopeAfterMs: 6 * minute, misread: new Set([1, 10]), misreadAfterMs: 4 * minute,
+  // A runtime that exits and leaves its pane open on a bare shell. Item eight's first attempt is
+  // free to exit, its second carrying the slow-recompute head; item ten's first attempt is the one
+  // that must break main, so the exit could not ride it.
+  exits: new Set([8]), exitAfterMs: 12 * minute,
 };
 const file = (n: number) => `src/soak/item-${n}.ts`;
 const files = (n: number) => basePlan.infrastructure.has(n) ? [file(n), `tests/helpers/soak-item-${n}.ts`] : [file(n)];
+const fixture = (n: number) => `src/soak/item-${n}-fixture.ts`;
+
+/**
+ * The diagnostician's answer, derived the way a read-only session would from the evidence the
+ * prompt carries: the cause is the held integration job standing for the class, and the answer is
+ * the newest open item listed as covering the cause. The payload goes through the options' own
+ * validation, exactly as a real run's tool call does.
+ */
+function diagnosisRunner(seen: { subject: string }[]): Runner {
+  return {
+    name: 'soak-diagnostician',
+    start<T>(prompt: string, options: RunOptions<T>) {
+      const given = JSON.parse(prompt.slice(prompt.indexOf('{'))) as { subject: string; faultClass: string; instances: { at: string }[]; openItems: string[] };
+      seen.push({ subject: given.subject });
+      const open = given.openItems.map(line => /^GY-(\d+)/.exec(line)?.[1]).filter((key): key is string => !!key && `GY-${key}` !== given.subject);
+      const payload = {
+        subject: given.subject,
+        cause: 'The integration job queue held the same sync job on a permission shortfall that clears on its own; the loop already tracks the class, so the newest open item covers the cause',
+        evidence: {
+          logLines: [`${given.instances.at(-1)?.at ?? 'unknown'} held-jobs on installation: 1 integration job(s) held on a permission shortfall`],
+          commands: ['graphyard master status — the held-jobs line stood in three separate windows and was absent between them'],
+        },
+        faultClass: given.faultClass,
+        covering: open.length ? `GY-${Math.max(...open.map(Number))}` : null,
+        fix: null,
+      };
+      let result: RunResult<T>;
+      try { const parsed = options.validate(payload); result = { ok: true, tool: options.tool, payload: parsed, payloads: [parsed] }; }
+      catch (error) { result = { ok: false, failure: { reason: 'invalid-payload', detail: String(error) }, payloads: [] }; }
+      return { id: `soak-diagnosis-${seen.length}`, events: [], onEvent: () => () => {}, cancel() {}, result: async () => result };
+    },
+  };
+}
 
 /**
  * GY-630: the scope-widening scenarios a day also carries when `scope` is set, as extra items
@@ -165,7 +224,9 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
 
 /**
  * One simulated day of the loop against this world. `regression` injects a fault into the loop's own
- * effects, standing for a change that breaks an invariant, so the soak shows it would fail. `queued`
+ * effects, standing for a change that breaks an invariant, so the soak shows it would fail.
+ * `capacityWait` refuses every approver launch with `capacityExhausted` between `from` and `to`,
+ * and records what waited, what was refused and what launched once the window closed (GY-849). `queued`
  * runs the day with the optimistic lane off, so every item goes through the merge queue under the
  * parallel-tip window (GY-498): `window` is the configured `mergeQueue.parallelTips`, `reconfigure`
  * rewrites master config mid-day the way an operator's edit does (the next cycle republishes it),
@@ -177,7 +238,7 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
  * re-post cannot use it.
  */
 let days = 0;
-async function simulateDay(options: { hours: number; regression?: 'approvers-left-open'; handApprovers?: boolean; scope?: boolean; refuseReworkOf?: number[]; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; plan?: Partial<typeof basePlan> }) {
+async function simulateDay(options: { hours: number; regression?: 'approvers-left-open'; handApprovers?: boolean; capacityWait?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; plan?: Partial<typeof basePlan> }) {
   const dayStart = clock.now();
   // A day may restage the shared scenario: the day-scoped view of the plan is what every fault
   // below arms from, while each test's own assertions still read the shared base plan.
@@ -211,7 +272,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
         plannedFiles: bulk18,
         criteria: [{ id: 'AC-1', text: `Item ${n} behaves, and ${scopePlan.unrepresentablePath} moves onto the shared helper too`, proofs: [PROOF] }] }
       : {};
-    let work = await engine.execute(principals.operator, 'create', null, { title: `Soak item ${n}`, plannedFiles: files(n), criteria: [{ id: 'AC-1', text: `Item ${n} behaves`, proofs: [PROOF] }], ...scopeIntake }, id());
+    let work = await engine.execute(principals.operator, 'create', null, { title: `Soak item ${n}`, plannedFiles: files(n), criteria: [{ id: 'AC-1', text: plan.scoped.has(n) ? `Item ${n} behaves, with its fixture ${fixture(n)}` : `Item ${n} behaves`, proofs: [PROOF] }], ...scopeIntake }, id());
     if (n === plan.exhaustedReviewer) work = await engine.execute(principals.operator, 'reviewpolicy', work.id, { provider: 'agent', expectedPolicyRevision: work.policyRevision, reason: 'Reviewed by the reviewer bots',
       reviewerProfiles: [{ name: 'claude-reviewer', runtime: 'claude', reviewerApp: 'claude-reviewer' }, { name: 'cursor-reviewer', runtime: 'cursor', reviewerApp: 'cursor-reviewer' }] }, id());
     items.push(work);
@@ -257,7 +318,8 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   const hold = new Set(options.scope ? [items[scopePlan.unrepresentable - 1].key] : []);
 
   // ---- Workers: the loop dispatches, the simulated session claims, works, pushes and submits (or dies). ----
-  interface Session { work: string; key: string; branch: string; profile: WorkerProfile; epoch: number; attempt: number; pane: string; pushAt: number; diesAt: number | null; state: 'working' | 'submitted' | 'dead'; syncs: number; syncedFor?: string; refusedSince?: number }
+  interface Session { work: string; key: string; branch: string; profile: WorkerProfile; epoch: number; attempt: number; pane: string; pushAt: number; diesAt: number | null; exitsAt: number | null; state: 'working' | 'submitted' | 'dead' | 'exited'; syncs: number; syncedFor?: string; refusedSince?: number;
+    scopeAt: number | null; misreadAt: number | null; misread: boolean }
   const sessions: Session[] = [], lost: string[] = [];
   const attempts = new Map<string, number>();
   const principalOf = (profile: WorkerProfile): Principal => ({ id: profile.principal, role: 'worker' });
@@ -271,19 +333,45 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     await engine.execute(principal, 'workspace', work.id, { epoch, host: 'soak-host', path, branch }, id());
     const attempt = (attempts.get(key) ?? 0) + 1; attempts.set(key, attempt);
     const pane = herdr.open(profile.agentName, 'working', path);
-    sessions.push({ work: work.id, key, branch, profile, epoch, attempt, pane, pushAt: clock.now() + plan.workMs, diesAt: plan.deaths.has(n) && attempt === 1 ? clock.now() + plan.deathAfterMs : null, state: 'working', syncs: 0 });
+    sessions.push({ work: work.id, key, branch, profile, epoch, attempt, pane, pushAt: clock.now() + plan.workMs, diesAt: !options.capacityWait && plan.deaths.has(n) && attempt === 1 ? clock.now() + plan.deathAfterMs : null,
+      exitsAt: plan.exits.has(n) && attempt === 1 ? clock.now() + plan.exitAfterMs : null, state: 'working', syncs: 0,
+      scopeAt: plan.scoped.has(n) && attempt === 1 ? clock.now() + plan.scopeAfterMs : null, misreadAt: plan.misread.has(n) && attempt === 1 ? clock.now() + plan.misreadAfterMs : null, misread: false });
     // A scope scenario asks the moment it holds the lease, as a worker does, and keeps working
     // while the control plane decides. An ask carries at most fifty paths, so a wide ask is
     // filed in batches, which one open request of the attempt merges.
     const ask = scopeAsks.get(key);
     for (let at = 0; ask && at < ask.length; at += 50)
       await engine.execute(principal, 'scope', work.id, { epoch, paths: ask.slice(at, at + 50), reason: `Item ${n}: the ${ask.length === 1 ? 'file' : 'files'} this change touches` }, id());
-    return { key, epoch };
+    // The pane is the session's own coordinate: the loop records it on the implementation handle.
+    return { key, epoch, pane, agentName: profile.agentName };
   };
   const workersTick = async (now: number) => {
     for (const session of sessions.filter(entry => entry.state === 'working')) {
       if (session.diesAt !== null && now >= session.diesAt) { herdr.kill(session.pane); session.state = 'dead'; continue; }
+      // The runtime exits and leaves a bare shell in its pane; its supervisor keeps the lease a few
+      // minutes more, then releases it, so the item goes to a new attempt without a lease loss.
+      if (session.exitsAt !== null && now >= session.exitsAt) {
+        const listed = herdr.agents.get(session.pane);
+        if (listed?.agent) { listed.agent = null; listed.agent_status = 'unknown'; }
+        const principal = principalOf(session.profile);
+        if (now < session.exitsAt + 4 * minute) await engine.execute(principal, 'heartbeat', session.work, { epoch: session.epoch }, id());
+        else { await engine.execute(principal, 'release', session.work, { epoch: session.epoch }, id()); session.state = 'exited'; }
+        continue;
+      }
       const principal = principalOf(session.profile);
+      // Herdr misreads the live agent for exactly one cycle: its pane shows no agent, then shows it again.
+      const listed = herdr.agents.get(session.pane);
+      if (session.misread && listed) { listed.agent = 'claude'; session.misread = false; }
+      else if (session.misreadAt !== null && now >= session.misreadAt && listed) { listed.agent = null; session.misread = true; session.misreadAt = null; misreads.push(session.pane); }
+      // The worker asks for scope its criteria name and goes idle waiting; the control plane decides
+      // it before the loop's next cycle, so the loop never sees the request open.
+      if (session.scopeAt !== null && now >= session.scopeAt) {
+        session.scopeAt = null;
+        await engine.execute(principal, 'scope', session.work, { epoch: session.epoch, paths: [fixture(numberOf(session))], reason: 'The fixture my criterion names' }, id());
+        herdr.status(session.pane, 'idle');
+        await engine.execute(principals.coordinator, 'autoscope', session.work, { epoch: session.epoch }, id());
+        decided.push(`${session.key}:${session.epoch}`);
+      }
       // The unrepresentable item's worker stays live on its refused ask: the item is blocked on
       // scope, so it neither pushes nor submits.
       if (now < session.pushAt || hold.has(session.key)) {
@@ -330,8 +418,28 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     }
   };
 
+  // ---- The session record and the prompts the loop gives sessions (GY-544). ----
+  const decided: string[] = [], misreads: string[] = [], prompts: { key: string; epoch: number; pane: string; text: string }[] = [], exitedLive: string[] = [], exitedClosed: string[] = [];
+  const panes = new Map<string, string>();
+  const recordSession: DaemonEffects['recordSession'] = async (work, handle) => {
+    if (handle.pane) panes.set(`${work.id}:${handle.id}`, handle.pane);
+    if (handle.kind === 'implementation' && handle.state === 'finished' && /the agent has exited/.test(handle.outcome ?? '')) {
+      const pane = panes.get(`${work.id}:${handle.id}`), listed = pane ? herdr.agents.get(pane) : undefined;
+      exitedClosed.push(`${work.key} ${handle.id}`);
+      if (listed?.agent) exitedLive.push(`${work.key} ${handle.id} in pane ${pane}, whose agent is live: ${handle.outcome}`);
+    }
+    return api(principals.coordinator, 'POST', `work/${work.id}/session`, handle);
+  };
+  const promptSession: DaemonEffects['promptSession'] = async (agent, text) => {
+    const session = sessions.find(entry => entry.pane === agent.pane_id);
+    prompts.push({ key: session?.key ?? '?', epoch: session?.epoch ?? 0, pane: agent.pane_id!, text });
+    // The prompted session resumes.
+    herdr.status(agent.pane_id!, 'working');
+  };
+
   // ---- Approvers and producers: sessions the loop launches, each acting on the minute after. ----
   const pending: (() => Promise<void>)[] = [];
+  const approverPanes: string[] = [];
   // GY-475: the scenario's refusals and every request the loop sent, so the day can be judged on
   // what its first request after the loss of the loop's own cursor already cited.
   const refused: { key: string; decision: string }[] = [];
@@ -340,8 +448,18 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   // sessions all end without judging: the first vanishes or stops, each relaunch the loop makes
   // stops `done`, and one relaunch is refused by a registry timeout.
   const hand = new Map<string, { key: string; launches: number; refused: number }>();
+  // GY-849: approver launches the capacity window refused, the launches that succeeded once it
+  // closed, and the watches still waiting when it did, each with its request's age.
+  const capacityRefused: { decision: string; key: string; elapsed: number }[] = [];
+  const capacityLaunched: { decision: string; key: string; elapsed: number }[] = [];
+  let capacityWaiters: { decision: string; key: string; requestedAt: string }[] | null = null;
   const approver: DaemonEffects['approver'] = async (work, decision) => {
+    if (options.capacityWait && clock.now() - dayStart >= options.capacityWait.from && clock.now() - dayStart < options.capacityWait.to) {
+      capacityRefused.push({ decision, key: work.key, elapsed: clock.now() - dayStart });
+      throw Object.assign(new Error('No healthy agent account for the approver: every approver account is spent until its quota resets'), { capacityExhausted: true });
+    }
     const unjudged = hand.get(decision);
+    if (!unjudged) capacityLaunched.push({ decision, key: work.key, elapsed: clock.now() - dayStart });
     if (unjudged) {
       unjudged.launches += 1;
       if (unjudged.key === items[plan.items - 1].key && unjudged.launches === 1) { unjudged.refused += 1; throw new Error('the agent registry for the approver role is unreachable: timeout'); }
@@ -350,6 +468,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       return { agentName, pane };
     }
     const agentName = approverSessionName(work, decision), pane = herdr.open(agentName);
+    approverPanes.push(pane);
     pending.push(async () => {
       const refuseDue = !!options.refuseReworkOf?.includes(numberOf(work)) && !refused.some(entry => entry.key === work.key)
         && (await api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(work.id)}/decisions`)).decisions.some((entry: { id: string; action: string }) => entry.id === decision && entry.action === 'rework');
@@ -417,11 +536,25 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   const executor = { principal: principals.coordinator.id, instance: `soak-${randomUUID()}` };
   const merge: DaemonEffects['merge'] = work => mergeExecutor(config, snapshot, transport, executor, randomUUID(), github.gh(repository))(work);
   const refuseMerge: DaemonEffects['refuseMerge'] = (work, reason, since) => api(principals.coordinator, 'POST', `work/${work.id}/mergerefused`, { sha: work.candidate!.sha, baseSha: work.candidate!.baseSha, policyRevision: work.policyRevision, reason: reason.slice(0, 2000), since });
+  // The diagnostician (GY-439), faked: its run answers from the evidence the prompt carries, and
+  // its filing and deciding ride the same routes the production wiring uses, as the master's
+  // operator-agent identity.
+  const settings = diagnosticianSettings({ diagnostician: { invariantBoundMinutes: 30 } });
+  const diagnosed: { subject: string }[] = [];
+  const diagnostician: DiagnosticianEffects = {
+    settings, cwd: '/tmp/soak/checkout',
+    runner: async attempt => ({ runner: diagnosisRunner(diagnosed), runtime: `soak-${attempt}`, model: attempt === 'primary' ? settings.model : settings.fallbackModel }),
+    context: async () => ({ journal: [`${new Date(clock.now()).toISOString()} graphyard-master: 1 integration job(s) held on a permission shortfall`], serverLog: [`${new Date(clock.now()).toISOString()} POST /api/status 200`], pullRequests: [] }),
+    file: (input, key) => engine.execute(principals.operatorAgent, 'create', null, input, key),
+    decide: (work, action, reason, input = {}) => api(principals.operatorAgent, 'POST', `work/${work.id}/decide`, { action, input: decisionInput(action, work, input), reason }),
+  };
+  // The control plane's status read the faults are classified from; `heldJobs` is the flap below.
+  let heldJobs = false;
   const effects: DaemonEffects = {
     agents: () => herdr.list(),
     herdr: () => ({ agents: herdr.list(), available: true }),
     panes: async () => ({ panes: herdr.paneList(), available: true }),
-    recordSession: (work, handle) => api(principals.coordinator, 'POST', `work/${work.id}/session`, handle),
+    recordSession,
     credentials: async profiles => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])),
     snapshot, dispatch, requestProof, approver, merge, refuseMerge,
     closeSession: pane => { if (options.regression === 'approvers-left-open' && /approver/.test(herdr.agents.get(pane)?.name ?? '')) return; herdr.close(pane); },
@@ -432,6 +565,9 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     },
     decisions: work => api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(work.id)}/decisions`),
     withdraw: (work, decision, reason) => api(principals.operatorAgent, 'POST', `work/${work.id}/decide`, { action: 'withdraw', decision, reason }),
+    faultClassPolicy: { threshold: 3, windowHours: 24 },
+    fileFaultClass: (input, key) => engine.execute(principals.operatorAgent, 'create', null, input, key),
+    diagnostician,
     baseSuccessions: async since => ({ tip: github.tip, successions: github.successions.filter(entry => github.commits.get(entry.commit)!.at >= Date.parse(since)), files: new Set(github.files) }),
     replan: (work, paths, reason) => api(principals.operatorAgent, 'POST', `work/${work.id}/requirements`, successorWidening(work, paths, reason)),
     // The scope scenarios run the loop's own deciding and widening effects: the rule decides the
@@ -446,12 +582,13 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       widenScope: (work: Work, request: ScopeRequestState, paths: string[], reason: string) =>
         api(principals.operatorAgent, 'POST', `work/${work.id}/requirements`, answeringWidening(work, request, paths, reason)),
     } : {}),
-    controlPlane: async () => ({ build: { commit: production.build } }),
+    controlPlane: async () => ({ build: { commit: production.build }, ...(heldJobs ? { heldJobs: 1 } : {}) }),
     observeDeployment: async delivered => {
       const serving = delivered.filter(item => github.contains(production.sha, item.delivery!.mergeSha));
       return { source: 'endpoint', sha: production.sha, at: new Date(clock.now()).toISOString(), reason: null, deployed: serving.map(item => item.key), pending: delivered.filter(item => !serving.includes(item)).map(item => item.key) };
     },
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    promptSession,
     exhaustedProofs: async () => [...abandoned.values()],
   };
   // The loop publishes the master's merge-queue settings each cycle they change (GY-330, GY-498,
@@ -536,7 +673,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   const chainedTips = new Set<string>();
   let peakWindow = 0;
   const seenTips = new Set<string>();
-  let released = 0, split = false, noticed = false, deploys = 0, cycles = 0, reportedDispatches = 0, restarted = false;
+  let released = 0, split = false, noticed = false, deploys = 0, cycles = 0, reportedDispatches = 0, restarted = false, exitedRowsSeen = 0;
   // GY-831: when each staged fault armed, and what the lost carry named, so the test can assert the
   // recovery against the exact candidate and review the faults were staged on.
   const stale: { stuckArmedAt: number | null; stuckHead: string | null; stuckReported: boolean; lostAt: number | null; carried: { reviewer: string; reviewId: number; originalSha: string } | null } =
@@ -593,6 +730,8 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     }
     const deploying = deploys < plan.deploys.length && elapsed >= plan.deploys[deploys];
     if (deploying) { production.build = sha('build', ++deploys); production.sha = github.tip; production.deploys.push({ at: now, build: production.build, sha: production.sha }); }
+    // The plane reports its held integration job only inside the flap windows (GY-439's recurring fault).
+    heldJobs = plan.heldJob.at.some(at => elapsed >= at && elapsed < at + plan.heldJob.forMs);
     // The world moves: GitHub, then the sessions. A deploy restarts the control plane once the
     // sessions have renewed: for the rest of that minute nothing reaches it, the loop included.
     github.tick(now);
@@ -675,6 +814,9 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
         }
         peakWindow = Math.max(peakWindow, tipped.length);
       }
+      // GY-849: what still waited for capacity when the window closed, each with its request's age.
+      if (options.capacityWait && !capacityWaiters && elapsed >= options.capacityWait.to)
+        capacityWaiters = Object.values(state.approvals).filter(watch => watch.capacity).map(watch => ({ decision: watch.decision, key: watch.work, requestedAt: watch.requestedAt }));
       try {
         const result = await runCycle(config, state, effects, clock.now, launcher); cycles++;
         reportedDispatches += result.actions.filter(action => action.kind === 'dispatch' && action.state === 'done').length;
@@ -687,6 +829,11 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       // The interval between cycles is when a hand-off launch settles; the day's clock waits for
       // them so the world never acts on a half-finished launch.
       await launcher.idle();
+      // GY-544: the loop's exited-session sightings stay bounded by the implementation handles still running here.
+      const exitedRows = Object.keys(state.actions).filter(key => key.startsWith('exited:implementation:'));
+      const running = (await store.list()).flatMap(item => (item.sessions ?? []).filter(handle => handle.kind === 'implementation' && handle.state === 'running' && handle.host === config.hostId)).length;
+      exitedRowsSeen += exitedRows.length;
+      if (exitedRows.length > running) violations.push(`${new Date(now).toISOString()} (+${Math.round(elapsed / minute)} min) ${exitedRows.length} exited-session sighting(s) for ${running} running implementation handle(s)`);
       // Between cycles, as runDaemon runs it: the self-upgrade against the simulated checkout.
       checkout.dirty = elapsed >= plan.dirtyCheckout.from && elapsed < plan.dirtyCheckout.to;
       const upgraded = await selfUpgrade(state);
@@ -707,12 +854,13 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   const final = (await store.list()).filter(item => items.some(entry => entry.id === item.id));
   if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
   return { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, herdr, hand, escalations, spent, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, landingRefusals, foreignPane,
-    mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted, stale };
+    mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted, stale, approverPanes, herdrClosed: herdr.closed, diagnosisModel: settings.model, capacityRefused, capacityLaunched, capacityWaiters,
+    decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen };
 }
 
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 180_000 }, async () => {
   const began = performance.now();
-  const { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, state, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, herdr, landingRefusals, foreignPane, mergeQueuePosts } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
+  const { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, state, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, herdr, landingRefusals, foreignPane, mergeQueuePosts, approverPanes, herdrClosed, diagnosisModel, decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
   const undelivered = final.filter(item => item.stage !== 'done' || !item.delivery);
   assert.deepEqual(undelivered.map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
@@ -828,6 +976,42 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
     assert.ok(landed && github.contains(landed.sha, entry.sha), `${entry.key} landed the exact head its false refusal named (${entry.sha.slice(0, 12)})`);
   }
   assert.ok(sessions.every(session => session.syncs === 0), 'no worker was woken to sync what was never wrong');
+  // The diagnostician (GY-439) rode the same day. The three held-job windows recur past the
+  // threshold, so the loop files the class's one recurring item and diagnoses it within the cycle
+  // that files it, and the day's own churn (the dead workers' leases, the delivery budget) recurs
+  // into further classes beside it. Every filed item is diagnosed once, never relaunched per
+  // cycle, and closed as a duplicate of the open item its diagnosis named, on the approved
+  // two-party decision, with its approver session closed once the decision settled.
+  const filedFaultItems = (await store.list()).filter(item => item.origin?.faultClass);
+  assert.ok(filedFaultItems.length >= 1, `the day filed recurring-fault items: ${filedFaultItems.map(item => `${item.key} (${item.origin!.faultClass!.class})`).join(', ')}`);
+  assert.deepEqual(Object.keys(state.diagnoses).sort(), filedFaultItems.map(item => item.key).sort(), 'one diagnosis per filed item, none relaunched per cycle');
+  const byKey = new Map(filedFaultItems.map(item => [item.key, item]));
+  for (const [subject, diagnosis] of Object.entries(state.diagnoses)) {
+    const item = byKey.get(subject)!;
+    assert.ok(diagnosisSettled(diagnosis), `${subject}'s diagnosis settled: ${diagnosis.state} ${diagnosis.detail}`);
+    assert.equal(diagnosis.kind, 'recurring');
+    assert.equal(diagnosis.faultClass, item.origin!.faultClass!.class);
+    assert.equal(item.stage, 'done', `${subject} was closed on its diagnosis`);
+    assert.deepEqual([item.closure?.kind, item.closure?.ref], ['duplicate', diagnosis.answeredBy], `${subject} was closed as the duplicate of the item its diagnosis answered it with`);
+    if (diagnosis.state === 'answered') {
+      assert.ok(diagnosis.diagnosis!.covering, `${subject}'s diagnosis named an open item as covering the cause`);
+      assert.equal(diagnosis.answeredBy, diagnosis.diagnosis!.covering);
+      assert.ok(diagnosis.decision && diagnosis.decision.action === 'close' && diagnosis.decision.approver, `${subject}'s closure rode an approved two-party decision with an independent approver`);
+    }
+  }
+  // The injected class, end to end: three instances in the window, one item, one primary run,
+  // every instance linked to it, and no fix item filed for a covering diagnosis.
+  const heldJobs = state.faults.instances.filter(entry => entry.kind === 'held-jobs');
+  assert.equal(heldJobs.length, plan.heldJob.at.length, `one instance per held-job window: ${JSON.stringify(heldJobs.map(entry => entry.at))}`);
+  const configuration = filedFaultItems.filter(item => item.origin!.faultClass!.class === 'configuration');
+  assert.equal(configuration.length, 1, 'the held-job class filed exactly one recurring item');
+  const configurationKey = configuration[0].key, configurationDiagnosis = state.diagnoses[configurationKey];
+  assert.ok(heldJobs.every(entry => entry.linkedTo === configurationKey), 'every held-job instance links to the recurring item, so none files again');
+  assert.equal(configurationDiagnosis.state, 'answered', `the held-job diagnosis was answered: ${configurationDiagnosis.detail}`);
+  assert.deepEqual(configurationDiagnosis.runs.map(entry => [entry.model, entry.result]), [[diagnosisModel, 'diagnosed']], 'one primary run diagnosed it, no fallback needed');
+  assert.ok(!(await store.list()).some(item => /Filed by the master loop from the diagnostician's diagnosis/.test(item.description ?? '')), 'the covering diagnoses filed no fix item');
+  assert.ok(approverPanes.length > 0, 'the day launched approver sessions for its decisions');
+  assert.deepEqual(approverPanes.filter(pane => !herdrClosed.includes(pane)), [], `every approver session the day launched was closed once its decision settled: ${JSON.stringify(herdrClosed)}`);
   assert.ok(cycles > 24 * 6, `the loop cycled through the day (${cycles} cycles)`);
   // GY-437: the between-cycles self-upgrade ran after every cycle of the day. Each deploy aligned
   // the checkout once, and restarted the fleet and the loop once (every merge touches src/); the
@@ -864,6 +1048,21 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.match(sweepStatus?.detail ?? '', /0 standing agentless; the backlog has drained/, `the drain is what stands on the record (${sweepStatus?.detail?.slice(0, 200)})`);
   assert.doesNotMatch(sweepStatus?.detail ?? '', /the oldest is pane/, 'no oldest pane outlives the drained day');
   assert.ok(!state.actions['sweep:panes:attention'], 'the day never stood past the agentless attention bound');
+  // GY-544: every scope decision made between two cycles earned exactly one re-prompt for its attempt, and nothing else re-prompted it.
+  assert.equal(decided.length, plan.scoped.size, 'scope requests were asked and decided between cycles');
+  for (const attempt of decided) {
+    const [key, epoch] = attempt.split(':');
+    const told = prompts.filter(prompt => prompt.key === key && prompt.epoch === Number(epoch) && /its scope request was applied/.test(prompt.text));
+    assert.equal(told.length, 1, `${attempt}: one re-prompt for its scope decision: ${JSON.stringify(prompts)}`);
+  }
+  assert.equal(prompts.length, decided.length, `no prompt beyond one per scope decision: ${JSON.stringify(prompts.map(prompt => prompt.text.slice(0, 200)))}`);
+  // Herdr's misreads closed no live session; the pane whose runtime exited was closed as exited; no sighting outlived its handle.
+  assert.equal(misreads.length, plan.misread.size, 'two live panes were misread for a cycle');
+  assert.deepEqual(exitedLive, [], 'no implementation handle was closed as exited while its agent was live');
+  for (const n of plan.exits) assert.ok(exitedClosed.some(entry => entry.startsWith(`${items[n - 1].key} `)), `${items[n - 1].key}: the handle of the worker whose runtime exited was closed as exited: ${exitedClosed.join(', ')}`);
+  assert.ok(exitedRowsSeen > 0, 'the loop recorded exited-session sightings during the day');
+  assert.deepEqual(Object.keys(state.actions).filter(key => key.startsWith('exited:implementation:')), [], 'no exited-session sighting outlives the day');
+  assert.deepEqual(final.flatMap(item => (item.sessions ?? []).filter(handle => handle.kind === 'implementation' && handle.state === 'running').map(handle => `${item.key} ${handle.id}`)), [], 'every implementation handle is closed once its item is delivered');
   const seconds = (performance.now() - began) / 1000;
   assert.ok(seconds < 120, `the day runs well inside the three minutes the CI test job allows it (${seconds.toFixed(1)} s)`);
 });
@@ -1043,6 +1242,42 @@ test('unit:soak-invariants-hold — a guarded merge that refuses a queue head is
     `only the staged items were refused: ${JSON.stringify(others)}`);
   const seconds = (performance.now() - began) / 1000;
   assert.ok(seconds < 200, `the day runs inside its budget (${seconds.toFixed(1)} s)`);
+});
+
+test('unit:soak-invariants-hold — approver launches refused for capacity wait uncounted and relaunch oldest-first within two cycles of capacity freeing, with no hand action and every invariant holding', { timeout: 180_000 }, async () => {
+  // GY-849: between minute 50 and minute 130 no approver account is eligible, which spans the
+  // rework rounds of items three and seven (requested about minutes 58 and 118), so both decisions
+  // sit waiting when the window closes. The loop must relaunch them — uncounted against the launch
+  // bound, one at a time on the launcher, the older request taking the freed capacity first, each
+  // within a couple of cycles of the window closing — with no hand action, and both items delivered.
+  const began = performance.now();
+  const window = { from: 50 * minute, to: 130 * minute };
+  const { items, final, violations, failures, escalations, capacityRefused, capacityLaunched, capacityWaiters } =
+    await simulateDay({ hours: 6, capacityWait: window });
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
+  assert.deepEqual(violations, [], 'every system invariant holds across the capacity waits and the ordered relaunches');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  // Both rework decisions were refused inside the window and both still waited when it closed.
+  assert.ok(capacityWaiters && capacityWaiters.length === 2, `both rework decisions waited at window close: ${JSON.stringify(capacityWaiters)}`);
+  const waiters = [...(capacityWaiters ?? [])].sort((a, b) => Date.parse(a.requestedAt) - Date.parse(b.requestedAt));
+  assert.ok(waiters.every(entry => [...capacityRefused].some(refusal => refusal.decision === entry.decision && refusal.elapsed >= window.from && refusal.elapsed < window.to)),
+    `each waiting decision was refused for capacity inside the window: ${JSON.stringify(capacityRefused.slice(0, 4))}…`);
+  assert.ok(waiters.every(entry => entry.key === items[2].key || entry.key === items[6].key), `the waiters are the rework rounds of items three and seven: ${JSON.stringify(waiters)}`);
+  // Once capacity freed, the oldest waiting decision launched first, then the next: one at a time,
+  // each in its own cycle, so a newer decision never races an older one for the freed capacity.
+  const recovered = capacityLaunched.filter(entry => waiters.some(waiter => waiter.decision === entry.decision)).sort((a, b) => a.elapsed - b.elapsed);
+  assert.deepEqual(recovered.map(entry => entry.decision), waiters.map(entry => entry.decision),
+    `capacity freed took the waiting decisions in age order: ${JSON.stringify({ launched: recovered, waited: waiters })}`);
+  assert.ok(recovered.length >= 2 && recovered[0].elapsed < recovered[1].elapsed,
+    `the relaunches went one at a time, never two in one cycle: ${JSON.stringify(recovered)}`);
+  for (const entry of recovered)
+    assert.ok(entry.elapsed >= window.to && entry.elapsed <= window.to + 2 * minute, `${entry.decision} launched within two cycles of capacity freeing (+${Math.round((entry.elapsed - window.to) / minute)} min)`);
+  // Neither decision was left unanswered: neither escalated as unjudged, and both rework rounds ran.
+  for (const waiter of waiters)
+    assert.ok(!escalations.some(detail => detail.includes(waiter.decision) && /approver session\(s\)/.test(detail)), `${waiter.key}: the capacity wait never escalated as unjudged`);
+  for (const n of [3, 7]) assert.equal(final.find(item => item.key === items[n - 1].key)!.pipeline?.reworkRounds ?? 0, 1, `item ${n}'s rework round ran after its capacity wait`);
+  const seconds = (performance.now() - began) / 1000;
+  assert.ok(seconds < 150, `the capacity-wait day runs inside its budget (${seconds.toFixed(1)} s)`);
 });
 
 // GY-475's citation day runs before the regression day: the days share one control plane, and

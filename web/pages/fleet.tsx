@@ -61,6 +61,10 @@ export function ConnectCard({ connect, onCancel, onAnswer, onRetry, onRemove }: 
 }
 
 /** One account as the registry sees it: what it runs, which roles it serves, what it is doing, and why it cannot launch when it cannot. */
+// Whether a form carries a secret-shaped value in its launch data. The audit reason is prose, not launch data,
+// so it may name a token prefix without being refused (GY-397).
+export const pastesCredential = (form: FormData) => [...form.entries()].some(([name, value]) => name !== 'reason' && typeof value === 'string' && value.split(/[\s,]+/).some(looksLikeSecret));
+
 export function AccountCard({ account, connect, onChangeRoles }: { account: FleetAccountView; connect?: ConnectView; onChangeRoles?: (account: string) => void }) {
   return <div className="criterion" data-account={account.name}>
     <strong className={account.eligible ? undefined : 'amber'}>{account.name} · {account.runtime} · {account.model}{account.modelId ? ` (${account.modelId})` : ''}{ connect?.provider ? ` · ${connect.provider}` : '' } · {account.eligible ? 'eligible' : 'ineligible'}</strong>
@@ -177,8 +181,7 @@ export default function FleetPage({ api, status }: Pick<Dashboard, 'api' | 'stat
     event.preventDefault();
     const target = event.currentTarget, form = new FormData(target);
     // The registry holds references, never secrets: a pasted credential is refused before it leaves the browser.
-    // The audit reason is prose, not launch data, so it may name a token prefix without being refused (GY-397).
-    if ([...form.entries()].some(([name, value]) => name !== 'reason' && typeof value === 'string' && value.split(/[\s,]+/).some(looksLikeSecret))) { setFormError('That looks like a credential. The registry stores where a login lives (host and home), never the secret itself; connect the account at the top of this page instead.'); return; }
+    if (pastesCredential(form)) { setFormError('That looks like a credential. The registry stores where a login lives (host and home), never the secret itself; connect the account at the top of this page instead.'); return; }
     setBusy(true); setFormError('');
     try { await api(path(form), body(form)); target.reset(); await load(); }
     catch (error) { setFormError((error as Error).message); }
@@ -217,7 +220,7 @@ export default function FleetPage({ api, status }: Pick<Dashboard, 'api' | 'stat
   const cancel = async (id: string) => { try { await api(`agent-registry/connect/${id}/cancel`, { reason: 'Cancelled from Settings › Agents' }); await load(); } catch (error) { setFormError((error as Error).message); } };
   /** Take a failed connect's card off this page for this browser; the ledger record is untouched. */
   const remove = (id: string) => setRemoved(current => { const next = [...new Set([...current, id])]; try { localStorage.setItem('graphyard.removedConnects', JSON.stringify(next)); } catch { /* a private window keeps it for the session */ } return next; });
-  /** Retry reconnects the same provider on the same host: an api key is sealed again (it was never stored), a subscription login starts afresh. */
+  /** Retry reconnects the same provider on the same host: an api key is sealed again (it was never stored), a subscription login starts afresh. Admins only, like answering the login code: retrying re-enters the credential; coordinators keep inspect, cancel and remove. */
   const retry = (failed: ConnectView) => setWizard({ ...closedWizard, open: true, provider: failed.provider, host: failed.host });
   /** The card's 'change': open Advanced and name the account in the role editor's order. */
   const changeRoles = (account: string) => {
@@ -233,7 +236,7 @@ export default function FleetPage({ api, status }: Pick<Dashboard, 'api' | 'stat
     {fleet && canEdit && <section><div className="section-title"><h2>Connect an account</h2>{!wizard.open && <button className="connect-button" data-connect-account onClick={() => setWizard({ ...closedWizard, open: true, host: hosts[0]?.host ?? null })}>Connect an account</button>}</div>
       {wizard.open && <ConnectWizard providers={providers} hosts={hosts} wizard={wizard} setWizard={setWizard} onConnect={id => void connect(id, wizard.host ?? hosts[0]?.host ?? '', wizard.key)} onClose={() => setWizard(closedWizard)}/>}
     </section>}
-    {fleet && <FleetOverview fleet={fleet} connects={connects.filter(connect => !removed.includes(connect.id))} onChangeRoles={canEdit ? changeRoles : undefined} onCancelConnect={canEdit ? id => void cancel(id) : undefined} onAnswerConnect={status?.actor?.role === 'admin' ? answer : undefined} onRetryConnect={canEdit ? retry : undefined} onRemoveConnect={canEdit ? remove : undefined}/>}
+    {fleet && <FleetOverview fleet={fleet} connects={connects.filter(connect => !removed.includes(connect.id))} onChangeRoles={canEdit ? changeRoles : undefined} onCancelConnect={canEdit ? id => void cancel(id) : undefined} onAnswerConnect={status?.actor?.role === 'admin' ? answer : undefined} onRetryConnect={status?.actor?.role === 'admin' ? retry : undefined} onRemoveConnect={canEdit ? remove : undefined}/>}
     {fleet && canEdit && <section><details className="advanced more-details" ref={advanced}><summary>Advanced: runtimes, models, roles and policies</summary>
       <p className="muted">Everything below names where a login lives — never the credential. Connect accounts at the top of the page; use this only to shape the fleet itself. Every change is recorded with its reason.</p>
       {formError && <p role="alert" className="amber">{formError}</p>}
