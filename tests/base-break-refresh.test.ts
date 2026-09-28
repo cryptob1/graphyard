@@ -9,7 +9,7 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { CHECK_NAME, GitHub, processJob } from '../src/github.js';
-import type { BaseRefresh } from '../src/merge-queue.js';
+import { checkRerunHeld, type BaseRefresh } from '../src/merge-queue.js';
 import { Refusal, type Observation, type Principal, type Work } from '../src/model.js';
 import { actionAccount } from '../src/model/next-action.js';
 import { buildMasterStatus, masterConfigSchema, type MasterConfig } from '../src/master.js';
@@ -177,6 +177,26 @@ test('unit:base-break-refresh — a candidate whose only failing test also fails
   const snapshot = (await store.workSnapshot()).work;
   await runCycle(loopConfig(), emptyDaemonState(loopConfig()), loopEffects(() => snapshot, decided));
   assert.deepEqual(decided, [], 'the loop requests no rework decision');
+
+  // The owed rerun (GY-516) was this hold's blind spot once already: while the rerun is owed the
+  // failed check stands the rework down on its own, and removing the base-break guard from
+  // failedCheckRework survived the suite hidden behind it. Once the rerun's own run has failed
+  // again nothing is owed, and the hold alone must keep the worker out of a round the base
+  // breakage answers — so the rework is asserted here with the rerun spent, not held.
+  const rerunSeen = (item: Work): Observation => ({ ...seen(item), checks: [
+    { name: 'test', result: 'failure', appId: 15368, id: 511 }, { name: 'typecheck', result: 'success', appId: 15368 }],
+    at: new Date().toISOString() });
+  work = await engine.observe(work.id, work.revision, rerunSeen(work));
+  assert.equal(checkRerunHeld(work, 'test'), false, 'the rerun was spent: its own run failed again, so none is owed');
+  assert.deepEqual(baseBreakHold(work), found, 'the breakage still holds the candidate');
+  assert.equal(failedCheckRework(work), null, 'the spent rerun asks for no rework while the breakage holds');
+  const spentAccount = actionAccount(work, [work], new Date());
+  assert.equal(spentAccount.action, null, `no request-rework action is named: ${JSON.stringify(spentAccount.action)}`);
+  assert.match(spentAccount.wait?.detail ?? '', /held only by a base-branch breakage/);
+  const spentDecided: { action: string; reason: string }[] = [];
+  const spentSnapshot = (await store.workSnapshot()).work;
+  await runCycle(loopConfig(), emptyDaemonState(loopConfig()), loopEffects(() => spentSnapshot, spentDecided));
+  assert.deepEqual(spentDecided, [], 'the loop requests no rework decision with the rerun spent either');
 
   // The observation job brings it onto the fixed tip, the same refresh the merge queue makes.
   await store.pool.query("UPDATE jobs SET available_at=now()+interval '1 hour'");

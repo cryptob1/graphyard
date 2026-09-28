@@ -252,6 +252,9 @@ export function failedCheckRework(work: Work): { reason: string; binding: string
   if (observation.candidate.sha !== candidate.sha || observation.merged || observation.prState === 'closed') return null;
   // Failed only on tests the base branch broke and its tip fixed (GY-793): the observation job
   // refreshes the candidate onto that tip, and no worker is sent back for what it did not break.
+  // Guarded after the GY-516 rerun is spent too: once the rerun has failed again nothing else
+  // stands this rework down, so the hold is the only thing keeping the worker out of a round
+  // the base breakage answers.
   if (baseBreakHold(work)) return null;
   const failed = work.policy.checks.filter(name => {
     const latest = requiredCheck(work, name);
