@@ -1,4 +1,4 @@
-import { baseRefreshNeeded, failedCheckResults, latestCheckRun, queueSequencingReason, refreshInFlight } from '../merge-queue.js';
+import { baseRefreshNeeded, checkRerunHeld, failedCheckResults, queueSequencingReason, refreshInFlight, requiredCheck } from '../merge-queue.js';
 import { reviewNeed } from './dispatch.js';
 import { standingEscalations } from './escalation.js';
 import { leadHoldRefusal } from './delegation.js';
@@ -54,7 +54,7 @@ export const refusalRules: { gate: string | null; match: RegExp; kind: NextActio
   { gate: 'review', match: /^Outstanding change requests/, kind: 'request-rework' },
   { gate: 'review', match: /.*/, kind: 'request-review' },
   // test: a check that failed needs a new head; one that has not answered yet needs a fresh read.
-  { gate: 'test', match: /^Required CI check .+ has not passed on the current candidate$/, kind: 'resync' },
+  { gate: 'test', match: /^Required CI check .+ has not passed on the current candidate(?:; rerun: [\s\S]*)?$/, kind: 'resync' },
   // acceptance
   { gate: 'acceptance', match: /is no longer independent:/, kind: 'escalate' },
   { gate: 'acceptance', match: /needs trusted passing evidence/, kind: 'dispatch' },
@@ -130,10 +130,12 @@ export function reviewStandstill(work: Work, all: Work[] = [work], now = new Dat
  * review refusal standing over a head no review can be asked for (`reviewStandstill`).
  */
 export function refusalAction(work: Work, gate: string, refusal: string, all: Work[] = [work], now = new Date()): NextActionKind {
-  if (gate === 'test' && /^Required CI check (.+) has not passed on the current candidate$/.test(refusal)) {
-    const name = refusal.match(/^Required CI check (.+) has not passed on the current candidate$/)![1];
-    const latest = latestCheckRun(work, name);
+  if (gate === 'test' && /^Required CI check (.+?) has not passed on the current candidate(?:; rerun: [\s\S]*)?$/.test(refusal)) {
+    const name = refusal.match(/^Required CI check (.+?) has not passed on the current candidate(?:; rerun: [\s\S]*)?$/)![1];
+    const latest = requiredCheck(work, name);
     if (!latest || !failedCheckResults.includes(latest.result)) return 'resync';
+    // A failure held by its one owed or running rerun (GY-516) is answered by the rerun's reading.
+    if (checkRerunHeld(work, name)) return 'resync';
     // A failed check on a head behind the base tip is answered by the control plane's own base
     // refresh (GY-534), which the fresh reading runs: the failure may be one main already fixed,
     // and a rework decision owed for it is refused on exactly those grounds. A refresh that already
