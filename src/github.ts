@@ -8,11 +8,12 @@ import { readFile } from 'node:fs/promises';
 import type { Engine } from './engine.js';
 import { behindBaseHold, mechanicalHold } from './model/dispatch.js';
 import { CHECK_NAME, carriedApproval, demand, nativeReviewRequired, parseReviewerApps, reviewerProfileFor, reviewProviderOf, type Observation, type ReviewerApp, type ReviewerProfile, type ScopeFile, type TipMerge, type Work, type ReviewRequest } from './model.js';
-import { inPlannedScope, type LandedCandidate } from './regression-guard.js';
+import { inPlannedScope, threeWayMerge, type LandedCandidate } from './regression-guard.js';
 import type { GitHubCacheStore } from './github-cache.js';
 import { nextAction } from './model/next-action.js';
 import { foldDecisions } from './model/approval.js';
 import { normalMergeState, repairAudit, repairAuditEvent, repairLaneVerdict, type RepairAudit, type RepairLaneVerdict } from './master/repair-lane.js';
+import { currentOptimisticMerge, describeGuard, mainGuard, postMergeVerdict, retestAfterRevert, revertRefusal, verdictCommit, type GuardState, type OptimisticMerge, type OptimisticRevert } from './optimistic-merge.js';
 export { CHECK_NAME };
 import { alreadyMergeableRefusal, approvalOfHead, baseRefreshNeeded, dismissedVerdict, enqueueRequestCurrent, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, owedCheckReruns, pendingRestore, predictQueue, queuePlacement, queueRef, mergeCheckBranch, treeIdenticalPrediction, type GitHubMergeQueueState, type HeadForcePush, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type ObservedApproval, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread } from './merge-queue.js';
 import { MERGE_METHOD } from './protection.js';
@@ -258,6 +259,10 @@ export function queuedAhead(work: Pick<Work, 'id' | 'queue'>, all: readonly Pick
  * cadence follows it rather than inventing a second reading of the same state.
  */
 export function observationBand(work: Work, all: Work[], now: Date, next = nextAction(work, all, now)): { band: Exclude<CadenceBand, 'steady'>; reason: string; fresh?: true } {
+  // The recorded window is derived by gate evaluation, including tips still awaiting CI.
+  // Every in-flight tip needs verdict reads even before its test gate passes.
+  if (work.queue?.tips?.length && work.stage !== 'done')
+    return { band: 'merge', reason: `${work.key} is validating a tip in the parallel window; its verdict can advance the queue` };
   const open = !!work.candidate && !!work.observation && !work.observation.merged && work.observation.prState === 'open';
   if (next?.kind === 'merge' || open && work.gates.every(gate => gate.name === 'merge' || gate.passed)) {
     // Only the entries that can merge next need the merge band's 20-second freshness. On
@@ -596,6 +601,10 @@ export class GitHub {
   }
   private blobs = new Map<string, string | null>();
   private histories = new Map<string, Set<string> | null>();
+  /** Files changed between two pinned commits (GY-500); immutable, so each pair is compared once. */
+  private baseChangeLists = new Map<string, string[] | null>();
+  /** Blob bytes by sha (GY-863's landing merge-result judgement); a blob's content is immutable, so each is asked once. */
+  private blobContents = new Map<string, Buffer>();
   /** The persisted cold layer under the four maps above (src/github-cache.ts), when attached. */
   private persisted: GitHubCacheStore | null = null;
   private warming: Promise<void> | null = null;
@@ -1154,6 +1163,8 @@ export class GitHub {
     const budget = { remaining: scopeLookupBudget };
     const landing = pr.merged || pr.state !== 'open' ? undefined : await this.landingCheck(work, pr.head.sha, files, bound, speculative, branch, peers, budget);
     const revertedDelivery = pr.merged && work.stage !== 'done' ? await this.revertedDelivery(work, pr, files, branch, peers, budget) : undefined;
+    // What the base changed since the bound base: an optimistic merge (GY-500) needs it disjoint from the head's own files.
+    const baseChanges = pr.merged || pr.state !== 'open' ? undefined : await this.baseChangesSince(bound, branch.tip);
     const candidateBase = pr.merged && work.candidate && work.candidate.sha === pr.head.sha ? work.candidate.baseSha : bound;
     // A head contains the base tip by ancestry, or as a published tip whose bound base is the
     // tip's tree-identical predecessor, or as a published tip behind other queue entries, whose
@@ -1190,97 +1201,25 @@ export class GitHub {
       ...(pr.mergeable === null && pr.state === 'open' && !pr.merged ? { mergeabilityUnknown: true } : {}),
       protected: protection.protected, conversations, files: files.map(f => f.filename), at: startedAt,
       baseTip: branch.tip, baseTree: branch.tree, baseTipContained, baseTipAncestor: contained, scopeFiles,
-      ...(landing ? { landing } : {}), ...(revertedDelivery ? { revertedDelivery } : {}),
+      ...(landing ? { landing } : {}), ...(revertedDelivery ? { revertedDelivery } : {}), ...(baseChanges !== undefined ? { baseChanges } : {}),
       ...(dismissals.forcePushes.length ? { headForcePushes: dismissals.forcePushes } : {}),
     };
   }
   /**
    * The commit the candidate would land on, and what landing there would revert (see
-   * merge-queue.ts LandingCheck). A tip published behind entries that have not landed lands on
-   * its predicted base, which is its bound base; everything else lands on the live branch head.
-   * A base that differs from the bound one only by commit, not by tree, needs no second
-   * comparison. The answer about carried candidates is reused while the head, the landing commit
-   * and every open candidate it was decided against are unchanged.
+   * merge-queue.ts LandingCheck). The judgement is the shared `landingCheck` below, over this
+   * adapter's answers, so the soak world (tests/helpers/soak-world.ts) exercises the identical
+   * code the production observer runs.
    */
   private async landingCheck(work: Work, head: string, files: any[], bound: string, speculative: string | null, branch: { tip: string; tree: string }, peers: Work[] | undefined, budget: { remaining: number }): Promise<LandingCheck> {
-    const speculation = work.queue?.speculation;
-    const predicted = !!speculative && speculative !== branch.tip && speculation!.baseTree !== branch.tree && speculation!.predecessors.length > 0 && await this.contains(branch.tip, speculative);
-    const base = predicted ? speculative! : branch.tip;
-    const sameTree = base === bound || !!speculative && speculation!.baseTree === branch.tree;
-    // The pull request's own diff is taken against the live branch, which does not hold the
-    // entries ahead yet: a file one of them adds and this head drops appears in it nowhere. What
-    // landing on a predicted base does is that base compared with the head that contains it.
-    const landed = predicted ? await this.landingDiff(base, head) : sameTree ? null : files;
-    const landing: LandingCheck = { base, ...(landed ? { files: await this.compareScope(work.plannedFiles ?? [], landed, base, budget) } : {}) };
-    if (!peers) return landing;
-    const open = peers.filter(peer => peer.id !== work.id && peer.stage !== 'done' && !!peer.submission && !!peer.candidate && peer.candidate.sha !== head
-      && !!peer.observation && !peer.observation.merged && peer.observation.prState !== 'closed' && peer.observation.candidate.sha === peer.candidate.sha);
-    // A peer is in this head's history by its current head, or by the reviewed head under a tip
-    // of its own: the tip a queue republishes changes, the reviewed head under it does not.
-    landing.examined = open.map(peer => `${peer.key}@${ownHeads(peer).join('+')}`).sort();
-    const previous = work.observation && work.observation.candidate.sha === head ? work.observation.landing : undefined;
-    // An answer recorded before landed peers were asked about (GY-744) may name one unlanded: it is asked again.
-    if (previous?.carried && previous.foreign && previous.landed && previous.base === base && JSON.stringify(previous.examined) === JSON.stringify(landing.examined) && !previous.carried.some(entry => entry.unverified)) return { ...landing, carried: previous.carried, foreign: previous.foreign, landed: previous.landed };
-    const carried: CarriedCandidate[] = [];
-    const foreign: ForeignCandidate[] = [];
-    const onBase: LandedCandidate[] = [];
-    // The entries ahead are in a predicted base by construction, so their files standing in this
-    // head as they stand there is the ordinary state of a queued tip and says nothing: two entries
-    // ahead that both change one file leave it merged in the tip behind them. What such a tip would
-    // really take from them is a change to the base it lands on, which `files` compares above —
-    // every drop of theirs is a removal or a modification in `base...head`. So they are judged
-    // there, and `carried` judges the candidates the landing commit does not hold.
-    const ahead = new Set(predicted ? speculation!.predecessors : []);
-    // One compare per peer, asked a few at a time: asked in turn they held an observation past the
-    // merge window's 25 seconds, so a candidate with many open peers could never be authorized in time.
-    // One compare lists what the head adds over the base; a peer head is in the head's history when it
-    // is on that list, or else only when the base itself holds it — a question every candidate on the
-    // same base shares. Asked per peer against each head, this was ~N² compares per observation round.
-    const added = await this.historySince(base, head);
-    const containment = await boundedMap(open, peerContainmentConcurrency, async peer => {
-      if (ahead.has(peer.key)) return false;
-      for (const sha of ownHeads(peer)) {
-        if (!added) { if (await this.contains(sha, head)) return true; continue; }
-        if (added.has(sha)) return true;
-        if (await this.contains(sha, base) && await this.contains(sha, head)) return true;
-      }
-      return false;
-    });
-    for (const [index, peer] of open.entries()) {
-      if (!containment[index]) continue;
-      // The owning item's record says unlanded; git decides (GY-744).
-      const merged = await this.landedOn(peer, branch.tip);
-      if (merged) { onBase.push(merged); continue; }
-      foreign.push({ key: peer.key, pr: peer.candidate!.pr, head: peer.candidate!.sha });
-      const entry: CarriedCandidate = { key: peer.key, pr: peer.candidate!.pr, head: peer.candidate!.sha, dropped: [] };
-      for (const file of peer.observation!.scopeFiles ?? []) {
-        // A file this item planned is its own to change, whoever else touched it.
-        if (inPlannedScope(work.plannedFiles ?? [], file.path)) continue;
-        if ((budget.remaining -= 2) < 0) { entry.unverified = true; break; }
-        const held = await this.blobAt(file.path, head);
-        if (file.status !== 'removed' && held === file.sha) continue;
-        // Neither the owner's version nor anything new: exactly what the landing commit holds, so
-        // the owner's change is in this head's history and absent from its tree.
-        if (held !== await this.blobAt(file.path, base) || file.status === 'removed' && held === null) continue;
-        entry.dropped.push({ path: file.path, detail: held === null ? 'the file is absent from this head and from the commit it would land on' : 'the file is held exactly as the commit it would land on holds it' });
-      }
-      if (entry.dropped.length || entry.unverified) carried.push(entry);
-    }
-    return { ...landing, carried, foreign, landed: onBase };
-  }
-  /**
-   * GY-744. Whether a peer's pull request is already on the base branch tip, whatever its item
-   * records: one of its own heads is an ancestor of the tip, or GitHub reports it merged with a
-   * merge commit the tip holds (a squash or rebase merge leaves the head itself off the branch).
-   */
-  private async landedOn(peer: Work, tip: string): Promise<LandedCandidate | null> {
-    const pr = peer.candidate!.pr, head = peer.candidate!.sha;
-    let ancestor = false;
-    for (const sha of ownHeads(peer)) if (await this.contains(sha, tip)) { ancestor = true; break; }
-    const pull = await this.request(`/pulls/${pr}`);
-    const mergeSha = pull?.merged && typeof pull.merge_commit_sha === 'string' ? pull.merge_commit_sha as string : null;
-    if (!ancestor && !(mergeSha && await this.contains(mergeSha, tip))) return null;
-    return { key: peer.key, pr, head, mergeSha };
+    return landingCheck({
+      compare: (from, to, query = '') => this.request(`/compare/${from}...${to}${query}`),
+      pull: pr => this.request(`/pulls/${pr}`),
+      blobAt: (path, ref) => this.blobAt(path, ref),
+      blobContent: sha => this.blobContent(sha),
+      contains: (base, tip) => this.contains(base, tip),
+      historySince: (base, tip) => this.historySince(base, tip),
+    }, work, head, files, bound, speculative, branch, peers, budget);
   }
   /** True when the commit took the path from the content the pull request delivered: one of its parents still holds that exact blob. */
   private async revertsDelivered(commit: string, path: string, files: any[]): Promise<boolean> {
@@ -1288,13 +1227,6 @@ export class GitHub {
     const detail = await this.request(`/commits/${commit}`);
     for (const parent of Array.isArray(detail?.parents) ? detail.parents : []) if (typeof parent?.sha === 'string' && await this.blobAt(path, parent.sha) === delivered) return true;
     return false;
-  }
-  /** The provider's file records for `base...head`; a list at the cap ends with a record nothing was compared for, which the guard refuses. */
-  private async landingDiff(base: string, head: string): Promise<any[]> {
-    const comparison = await this.request(`/compare/${base}...${head}`);
-    demand(Array.isArray(comparison?.files), `GitHub did not list the files changed between ${base.slice(0, 12)} and ${head.slice(0, 12)}`, 502);
-    return comparison.files.length < compareFileCap ? comparison.files
-      : [...comparison.files, { filename: `(the comparison lists ${compareFileCap} files or more; the rest were not compared)`, status: 'unchanged', additions: 0, deletions: 0, uncompared: true }];
   }
   /**
    * Whether the base branch holds what a merged pull request shipped (GY-97). A file is missing
@@ -1340,26 +1272,11 @@ export class GitHub {
    * file outside the planned scope compared with the commit the candidate is bound to (the base
    * branch tip, or the predicted base of a published speculative tip), so those paths are looked
    * up there by blob identity. Paths beyond the lookup budget stay uncompared, which the guard
-   * refuses rather than passes.
+   * refuses rather than passes. The judgement is shared (`compareScopeOf`), so the soak world
+   * runs the identical code.
    */
   private async compareScope(plannedFiles: string[], files: any[], base: string, budget = { remaining: scopeLookupBudget }): Promise<ScopeFile[]> {
-    // Lookups are granted from the budget in file order, exactly as when they ran one at a time,
-    // then asked a few at a time: in turn they held a final merge verification past its window.
-    const wanted: { entry: ScopeFile; field: 'baseSha' | 'previousBaseSha'; path: string }[] = [];
-    const compared: ScopeFile[] = [];
-    for (const file of files) {
-      const status: ScopeFile['status'] = ['added', 'modified', 'removed', 'renamed', 'copied', 'changed', 'unchanged'].includes(file.status) ? file.status : 'modified';
-      const previousPath = typeof file.previous_filename === 'string' && file.previous_filename !== file.filename ? file.previous_filename : undefined;
-      const entry: ScopeFile = { path: file.filename, status, ...(previousPath ? { previousPath } : {}),
-        sha: status !== 'removed' && typeof file.sha === 'string' && /^[a-f0-9]{40}$/.test(file.sha) ? file.sha : null,
-        additions: Number.isSafeInteger(file.additions) ? file.additions : 0, deletions: Number.isSafeInteger(file.deletions) ? file.deletions : 0, binary: typeof file.patch !== 'string' };
-      if (!file.uncompared && !inPlannedScope(plannedFiles, entry.path) && budget.remaining-- > 0) wanted.push({ entry, field: 'baseSha', path: entry.path });
-      if (previousPath && status === 'renamed' && !inPlannedScope(plannedFiles, previousPath) && budget.remaining-- > 0) wanted.push({ entry, field: 'previousBaseSha', path: previousPath });
-      compared.push(entry);
-    }
-    const found = await boundedMap(wanted, peerContainmentConcurrency, want => this.blobAt(want.path, base));
-    wanted.forEach((want, index) => { want.entry[want.field] = found[index]; });
-    return compared;
+    return compareScopeOf(this, plannedFiles, files, base, budget);
   }
   /** Blob identity of a path at a ref, or null when the ref holds no file there. */
   async blobAt(path: string, ref: string): Promise<string | null> {
@@ -1378,6 +1295,17 @@ export class GitHub {
     if (Array.isArray(entry) || entry?.type === 'dir') return null;
     demand(typeof entry?.sha === 'string' && /^[a-f0-9]{40}$/.test(entry.sha), `GitHub did not return a readable blob for ${path} at ${ref}`, 502);
     return entry.sha;
+  }
+  /** The bytes of a blob by sha (GY-863): the landing check merges the three versions of a contested path. A blob's content never changes, so it is asked of GitHub once. */
+  async blobContent(sha: string): Promise<Buffer | null> {
+    const known = this.blobContents.get(sha);
+    if (known) return known;
+    const entry = await this.request(`/git/blobs/${sha}`);
+    demand(entry && typeof entry === 'object' && typeof entry.content === 'string', `GitHub did not return the content of blob ${sha.slice(0, 12)}`, 502);
+    const content = entry.encoding === 'base64' ? Buffer.from(entry.content, 'base64') : Buffer.from(entry.content, 'utf8');
+    this.blobContents.set(sha, content);
+    if (this.blobContents.size > ancestryEntries) this.blobContents.delete(this.blobContents.keys().next().value!);
+    return content;
   }
   async verify(work: Work, peers?: Work[]): Promise<Observation> {
     const first = await this.observe(work, peers);
@@ -1774,8 +1702,13 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
   /**
    * Whether `head` merges cleanly onto `base`, without writing to any branch a person or a check
    * reads (GY-375): the merge is tried on a scratch branch created at `head` for this one check and
-   * deleted afterwards. Returns the conflict, or null when the merge is clean. GitHub has no
-   * read-only merge check; `[skip ci]` keeps the scratch merge commit from starting a workflow.
+   * deleted afterwards. Returns the conflict, or null when the merge is clean.
+   *
+   * GitHub has no read-only merge check. The compare API reports ancestry, never a conflict, and
+   * the merges API merges only into a branch, so the scratch ref must live under refs/heads.
+   * `[skip ci]` keeps the scratch merge commit from starting a workflow; the branch creation itself
+   * is a push that `on: push` workflows and branch rulesets see. A ruleset refusal fails the job
+   * with GitHub's refusal, and a failed delete is logged, not hidden (GY-390).
    */
   async testMerge(key: string, head: string, base: string): Promise<string | null> {
     const branch = mergeCheckBranch(key);
@@ -1787,8 +1720,9 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
       if (!(error instanceof SpeculativeConflict)) throw error;
       return error.message;
     } finally {
-      // A scratch branch left behind by a failed delete is overwritten by the next check.
-      await this.request(`/git/refs/heads/${branch}`, 'DELETE').catch(() => {});
+      // A scratch branch left behind by a failed delete is overwritten by the next check, but it
+      // is visible in the repository until then, so the failure is named.
+      await this.request(`/git/refs/heads/${branch}`, 'DELETE').catch(error => console.error(`Graphyard could not delete merge-check branch ${branch}: ${error instanceof Error ? error.message : String(error)}`));
     }
   }
   /**
@@ -1862,6 +1796,88 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     await this.graphql(headBoundMergeMutation, { id: state.pullRequestId, head: audit.head, method: MERGE_METHOD });
   }
   /**
+   * The files the base branch changed from `base` to `tip` (see changedFiles), or null when they
+   * cannot be listed completely. Two pinned commits never change, so each pair is compared once.
+   */
+  async baseChangesSince(base: string, tip: string): Promise<string[] | null> {
+    const key = `${base}...${tip}`;
+    if (this.baseChangeLists.has(key)) return this.baseChangeLists.get(key)!;
+    const files = await this.changedFiles(base, tip).then(paths => paths ? [...paths].sort() : null, () => null);
+    this.baseChangeLists.set(key, files);
+    if (this.baseChangeLists.size > historyEntries) this.baseChangeLists.delete(this.baseChangeLists.keys().next().value!);
+    return files;
+  }
+  /** Every check run on a commit, as the gates read a candidate's: what the main guard judges a merge commit by (GY-500). */
+  async commitChecks(sha: string): Promise<{ name: string; result: string; appId: number; id?: number }[]> {
+    return (await this.pages(`/commits/${sha}/check-runs?filter=all`, 'check_runs')).filter(check => check.name !== CHECK_NAME)
+      .map(check => ({ name: check.name, result: check.status === 'completed' ? check.conclusion : check.status, appId: check.app?.id, ...(Number.isSafeInteger(check.id) ? { id: check.id } : {}) }));
+  }
+  /**
+   * Opens the revert of an optimistic merge that broke main (GY-500): one commit on the base
+   * branch tip restoring each of the merge's files to its first parent's version (or removing a
+   * file the merge added), on a `graphyard-revert/` branch, as a pull request. Refused — nothing
+   * written — when a later merge changed one of those files again, since the revert would undo it.
+   */
+  async openRevert(work: Work, merge: OptimisticMerge, reason: string): Promise<{ pr: number; head: string } | { refusal: string }> {
+    const branch = await this.baseBranch();
+    const refusal = revertRefusal(merge, await this.changedFiles(merge.mergeSha, branch.tip).catch(() => null));
+    if (refusal) return { refusal };
+    const parent = (await this.request(`/commits/${merge.mergeSha}`))?.parents?.[0]?.sha;
+    demand(typeof parent === 'string' && /^[a-f0-9]{40}$/.test(parent), `GitHub did not return the first parent of ${merge.mergeSha}`, 502);
+    // Each file's entry in the parent's tree, walked down from its root tree by the entries' own shas.
+    const trees = new Map<string, Map<string, { mode: string; sha: string; type: string }>>();
+    const read = async (sha: string) => {
+      if (!trees.has(sha)) trees.set(sha, new Map(((await this.request(`/git/trees/${sha}`))?.tree ?? []).map((entry: any) => [entry.path, { mode: entry.mode, sha: entry.sha, type: entry.type }])));
+      return trees.get(sha)!;
+    };
+    const root = await this.commitTree(parent);
+    const entryAt = async (path: string) => {
+      let tree = root;
+      const segments = path.split('/');
+      for (const segment of segments.slice(0, -1)) {
+        const entry = (await read(tree)).get(segment);
+        if (entry?.type !== 'tree') return null;
+        tree = entry.sha;
+      }
+      return (await read(tree)).get(segments.at(-1)!) ?? null;
+    };
+    const tree = [];
+    for (const path of merge.lane.files) {
+      const entry = await entryAt(path);
+      tree.push(entry && entry.type === 'blob' ? { path, mode: entry.mode, type: 'blob', sha: entry.sha } : { path, mode: '100644', type: 'blob', sha: null });
+    }
+    const created = await this.request('/git/trees', 'POST', { base_tree: branch.tree, tree });
+    const title = `Revert optimistic merge of ${work.key} (${merge.mergeSha.slice(0, 12)})`;
+    const commit = await this.request('/git/commits', 'POST', { message: `${title}\n\n${reason}`, tree: created.sha, parents: [branch.tip] });
+    demand(typeof commit?.sha === 'string' && /^[a-f0-9]{40}$/.test(commit.sha), 'GitHub returned an invalid revert commit', 502);
+    const ref = `graphyard-revert/${work.key.toLowerCase()}-${merge.mergeSha.slice(0, 12)}`;
+    await this.publishRef(`refs/heads/${ref}`, commit.sha);
+    const existing = (await this.request(`/pulls?state=open&head=${encodeURIComponent(`${this.config.repository.split('/')[0]}:${ref}`)}`)) as any[];
+    const pull = existing?.[0] ?? await this.request('/pulls', 'POST', { title, head: ref, base: this.config.base, body: `${reason}\n\nOpened by Graphyard's main guard (GY-500); it merges through the repair lane's bypass, bound to this head.` });
+    demand(Number.isSafeInteger(pull?.number), 'GitHub did not open the revert pull request', 502);
+    return { pr: pull.number, head: commit.sha };
+  }
+  /**
+   * Lands a revert the main guard opened, exactly at `head`, with the repair lane's bypass (GY-406):
+   * the App publishes its `Graphyard / merge` verdict naming the revert and merges head-bound, so
+   * main is restored within one CI duration instead of after another queue round. Returns the
+   * merge commit once GitHub reports the pull request merged, else null.
+   */
+  async mergeRevert(work: Work, revert: Pick<OptimisticRevert, 'pr' | 'head' | 'failing'>): Promise<string | null> {
+    const pull = await this.request(`/pulls/${revert.pr}`);
+    if (pull?.merged) return typeof pull.merge_commit_sha === 'string' ? pull.merge_commit_sha : null;
+    const state = await this.mergeQueueState(revert.pr!);
+    requireCurrent(state.head === revert.head, `Revert pull request #${revert.pr} head moved from ${revert.head!.slice(0, 12)} to ${state.head.slice(0, 12)}; the guard merges only the head it built`);
+    if (state.mode !== 'none') await this.dequeuePullRequest(state);
+    const existing = (await this.pages(`/commits/${revert.head}/check-runs?check_name=${encodeURIComponent(CHECK_NAME)}&filter=latest`, 'check_runs')).find(c => c.app.id === this.config.appId);
+    const body = { name: CHECK_NAME, head_sha: revert.head, status: 'completed', conclusion: 'success', external_id: work.id,
+      output: { title: 'Main guard: optimistic-merge revert', summary: `Revert of ${work.key}'s optimistic merge at ${revert.head}: ${revert.failing.join(', ') || 'required checks failed'} on main` } };
+    await this.request(existing ? `/check-runs/${existing.id}` : '/check-runs', existing ? 'PATCH' : 'POST', body);
+    await this.graphql(headBoundMergeMutation, { id: state.pullRequestId, head: revert.head, method: MERGE_METHOD });
+    const merged = await this.request(`/pulls/${revert.pr}`);
+    return merged?.merged && typeof merged.merge_commit_sha === 'string' ? merged.merge_commit_sha : null;
+  }
+  /**
    * GitHub's merge queue requires every required check on the merge group commit it builds, not only
    * on the pull request head. The authorized head's verdict is carried to that commit, and only
    * while the head stays authorized: a withdrawn head is dequeued, which discards the group. It is
@@ -1899,6 +1915,200 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
       && existing.output?.title === body.output.title && existing.output?.summary === body.output.summary) return;
     await this.request(existing ? `/check-runs/${existing.id}` : '/check-runs', existing ? 'PATCH' : 'POST', body);
   }
+}
+
+/**
+ * The GitHub answers the landing check reads: compare listings, a pull request record, blob
+ * identity, ancestry, and the commits one side holds over another. The production adapter
+ * answers them from the REST API; the soak world (tests/helpers/soak-world.ts) answers them
+ * from its simulated repository, so both run the identical landing judgement.
+ */
+export interface LandingGitHub {
+  /** GitHub's `GET /compare/from...to` answer; `query` is the `?…` search string or empty. */
+  compare(from: string, to: string, query?: string): Promise<any>;
+  /** GitHub's `GET /pulls/:number` answer, or null when there is no such pull request. */
+  pull(pr: number): Promise<any>;
+  /** Blob identity of a path at a commit, or null when that commit holds no file there. */
+  blobAt(path: string, ref: string): Promise<string | null>;
+  /**
+   * The bytes of a blob by sha (GY-863), or null when they cannot be had. Optional: the merge-result
+   * judgement of the landing check needs the three versions' contents, and a provider view that
+   * cannot produce them keeps the conservative blob-identity comparison.
+   */
+  blobContent?(sha: string): Promise<Buffer | null>;
+  /** Whether `head` contains `base` by ancestry. */
+  contains(base: string, head: string): Promise<boolean>;
+  /** The commits `head` holds that `base` does not, or null when GitHub's list is truncated. */
+  historySince(base: string, head: string): Promise<Set<string> | null>;
+}
+/**
+ * The commit the candidate would land on, and what landing there would revert (see
+ * merge-queue.ts LandingCheck). A tip published behind entries that have not landed lands on
+ * its predicted base, which is its bound base; everything else lands on the live branch head.
+ * A base that differs from the bound one only by commit, not by tree, needs no second
+ * comparison. The answer about carried candidates is reused while the head, the landing commit
+ * and every open candidate it was decided against are unchanged.
+ */
+export async function landingCheck(github: LandingGitHub, work: Work, head: string, files: any[], bound: string, speculative: string | null, branch: { tip: string; tree: string }, peers: Work[] | undefined, budget: { remaining: number }): Promise<LandingCheck> {
+  const speculation = work.queue?.speculation;
+  const predicted = !!speculative && speculative !== branch.tip && speculation!.baseTree !== branch.tree && speculation!.predecessors.length > 0 && await github.contains(branch.tip, speculative);
+  const base = predicted ? speculative! : branch.tip;
+  const sameTree = base === bound || !!speculative && speculation!.baseTree === branch.tree;
+  // Use the landing base's merge base with the head, not the two endpoint trees (or a PR
+  // file list computed against another base). A path only the base changed is inherited by
+  // a three-way merge; it is not this candidate restoring its older copy of that path.
+  // Recompute even for an unchanged head: an old observation may contain a false refusal.
+  const landed = predicted || !sameTree ? await landingDiff(github, base, head, predicted ? undefined : files) : null;
+  const landing: LandingCheck = { base, ...(landed ? { files: await compareScopeOf(github, work.plannedFiles ?? [], landed.files, base, budget) } : {}) };
+  if (landed) await decideLandingMerges(github, work.plannedFiles ?? [], landing.files!, landed.mergeBase, budget);
+  if (!peers) return landing;
+  const open = peers.filter(peer => peer.id !== work.id && peer.stage !== 'done' && !!peer.submission && !!peer.candidate && peer.candidate.sha !== head
+    && !!peer.observation && !peer.observation.merged && peer.observation.prState !== 'closed' && peer.observation.candidate.sha === peer.candidate.sha);
+  // A peer is in this head's history by its current head, or by the reviewed head under a tip
+  // of its own: the tip a queue republishes changes, the reviewed head under it does not.
+  landing.examined = open.map(peer => `${peer.key}@${ownHeads(peer).join('+')}`).sort();
+  const previous = work.observation && work.observation.candidate.sha === head ? work.observation.landing : undefined;
+  // An answer recorded before landed peers were asked about (GY-744) may name one unlanded: it is asked again.
+  if (previous?.carried && previous.foreign && previous.landed && previous.base === base && JSON.stringify(previous.examined) === JSON.stringify(landing.examined) && !previous.carried.some(entry => entry.unverified)) return { ...landing, carried: previous.carried, foreign: previous.foreign, landed: previous.landed };
+  const carried: CarriedCandidate[] = [];
+  const foreign: ForeignCandidate[] = [];
+  const onBase: LandedCandidate[] = [];
+  // The entries ahead are in a predicted base by construction, so their files standing in this
+  // head as they stand there is the ordinary state of a queued tip and says nothing: two entries
+  // ahead that both change one file leave it merged in the tip behind them. What such a tip would
+  // really take from them is a change to the base it lands on, which `files` compares above —
+  // every drop of theirs is a removal or a modification in `base...head`. So they are judged
+  // there, and `carried` judges the candidates the landing commit does not hold.
+  const ahead = new Set(predicted ? speculation!.predecessors : []);
+  // One compare per peer, asked a few at a time: asked in turn they held an observation past the
+  // merge window's 25 seconds, so a candidate with many open peers could never be authorized in time.
+  // One compare lists what the head adds over the base; a peer head is in the head's history when it
+  // is on that list, or else only when the base itself holds it — a question every candidate on the
+  // same base shares. Asked per peer against each head, this was ~N² compares per observation round.
+  const added = await github.historySince(base, head);
+  const containment = await boundedMap(open, peerContainmentConcurrency, async peer => {
+    if (ahead.has(peer.key)) return false;
+    for (const sha of ownHeads(peer)) {
+      if (!added) { if (await github.contains(sha, head)) return true; continue; }
+      if (added.has(sha)) return true;
+      if (await github.contains(sha, base) && await github.contains(sha, head)) return true;
+    }
+    return false;
+  });
+  for (const [index, peer] of open.entries()) {
+    if (!containment[index]) continue;
+    // The owning item's record says unlanded; git decides (GY-744).
+    const merged = await landedOn(github, peer, branch.tip);
+    if (merged) { onBase.push(merged); continue; }
+    foreign.push({ key: peer.key, pr: peer.candidate!.pr, head: peer.candidate!.sha });
+    const entry: CarriedCandidate = { key: peer.key, pr: peer.candidate!.pr, head: peer.candidate!.sha, dropped: [] };
+    for (const file of peer.observation!.scopeFiles ?? []) {
+      // A file this item planned is its own to change, whoever else touched it.
+      if (inPlannedScope(work.plannedFiles ?? [], file.path)) continue;
+      if ((budget.remaining -= 2) < 0) { entry.unverified = true; break; }
+      const held = await github.blobAt(file.path, head);
+      if (file.status !== 'removed' && held === file.sha) continue;
+      // Neither the owner's version nor anything new: exactly what the landing commit holds, so
+      // the owner's change is in this head's history and absent from its tree.
+      if (held !== await github.blobAt(file.path, base) || file.status === 'removed' && held === null) continue;
+      entry.dropped.push({ path: file.path, detail: held === null ? 'the file is absent from this head and from the commit it would land on' : 'the file is held exactly as the commit it would land on holds it' });
+    }
+    if (entry.dropped.length || entry.unverified) carried.push(entry);
+  }
+  return { ...landing, carried, foreign, landed: onBase };
+}
+/**
+ * GY-744. Whether a peer's pull request is already on the base branch tip, whatever its item
+ * records: one of its own heads is an ancestor of the tip, or GitHub reports it merged with a
+ * merge commit the tip holds (a squash or rebase merge leaves the head itself off the branch).
+ * The merge commit counts only for a pull request merged at a head its item recorded (GY-756): one
+ * force-pushed past the recorded head and merged ships content Graphyard never saw, so the recorded
+ * head is not landed by it and its files stay under the guard.
+ */
+async function landedOn(github: LandingGitHub, peer: Work, tip: string): Promise<LandedCandidate | null> {
+  const pr = peer.candidate!.pr, head = peer.candidate!.sha;
+  const heads = ownHeads(peer);
+  let ancestor = false;
+  for (const sha of heads) if (await github.contains(sha, tip)) { ancestor = true; break; }
+  const pull = await github.pull(pr);
+  const mergeSha = pull?.merged && typeof pull.merge_commit_sha === 'string' && heads.includes(pull.head?.sha) ? pull.merge_commit_sha as string : null;
+  if (!ancestor && !(mergeSha && await github.contains(mergeSha, tip))) return null;
+  return { key: peer.key, pr, head, mergeSha };
+}
+/**
+ * Only changes the head makes since its merge base with the landing commit can affect the
+ * landing tree. Explicitly compare from that ancestor: an endpoint diff also lists the base's
+ * own new changes in reverse. A missing merge-base answer retains the conservative comparison;
+ * it never licenses dropping a file. A capped list remains unverified, even after filtering.
+ */
+async function landingDiff(github: Pick<LandingGitHub, 'compare'>, base: string, head: string, fallback?: any[]): Promise<{ mergeBase: string | null; files: any[] }> {
+  let comparison = await github.compare(base, head);
+  const ancestor = comparison?.merge_base_commit?.sha;
+  const mergeBase = typeof ancestor === 'string' && /^[a-f0-9]{40}$/.test(ancestor) && ancestor !== base ? ancestor : null;
+  if (mergeBase) comparison = await github.compare(mergeBase, head);
+  demand(Array.isArray(comparison?.files), `GitHub did not list the files changed between ${base.slice(0, 12)} and ${head.slice(0, 12)}`, 502);
+  // Without ancestry metadata, retain all changes the previous live-base check knew about.
+  if (!mergeBase && fallback) comparison = { files: [...new Map([...comparison.files, ...fallback].map(file => [file.filename, file])).values()] };
+  return { mergeBase, files: comparison.files.length < compareFileCap ? comparison.files
+    : [...comparison.files, { filename: `(the comparison lists ${compareFileCap} files or more; the rest were not compared)`, status: 'unchanged', additions: 0, deletions: 0, uncompared: true }] };
+}
+/**
+ * GY-863. The landing guard judges each examined file by the three-way merge result of the head
+ * onto the landing commit, not by the head's blob: a branch carrying an earlier version of a
+ * change the commit has since extended merges to exactly what the commit holds, and is not the
+ * candidate reverting it. Blob identity settles every file the merge base and the commit hold
+ * identically, or the head holds as the commit does; the rest are merged line by line
+ * (`threeWayMerge`) from the three blobs' contents, and a clean merge that reproduces the
+ * commit's own version is recorded as `mergeSha` for the guard to match against `baseSha`. A
+ * conflict, a difference, and anything the budget, the size caps or GitHub leave unanswered all
+ * stand as the conservative blob-identity refusal: the judgement only ever clears a file that
+ * provably lands as the commit already holds it.
+ */
+const mergeContentCap = 512 * 1024;
+async function decideLandingMerges(github: LandingGitHub, plannedFiles: string[], files: ScopeFile[], mergeBase: string | null, budget: { remaining: number }): Promise<void> {
+  if (!mergeBase || !github.blobContent) return;
+  for (const file of files) {
+    if (inPlannedScope(plannedFiles, file.path) || file.baseSha === undefined || file.baseSha === null || file.sha === null || file.baseSha === file.sha) continue;
+    if (budget.remaining < 1) return;
+    const ancestor = await github.blobAt(file.path, mergeBase);
+    budget.remaining -= 1;
+    if (ancestor === null || ancestor === file.baseSha || ancestor === file.sha) continue;
+    if (budget.remaining < 3) return;
+    budget.remaining -= 3;
+    const [baseContent, headContent, landingContent] = await Promise.all([github.blobContent(ancestor), github.blobContent(file.sha), github.blobContent(file.baseSha)]);
+    if (!baseContent || !headContent || !landingContent) continue;
+    if (baseContent.length > mergeContentCap || headContent.length > mergeContentCap || landingContent.length > mergeContentCap) continue;
+    // A NUL byte is git's own binary marker, and a byte-level merge of binary files is not judged here.
+    if (baseContent.includes(0) || headContent.includes(0) || landingContent.includes(0)) continue;
+    const merged = threeWayMerge(baseContent, landingContent, headContent);
+    if (merged.clean && merged.content !== null && merged.content.equals(landingContent)) file.mergeSha = file.baseSha;
+  }
+}
+/**
+ * The provider's PR diff is taken against the merge base. The regression guard needs every
+ * file outside the planned scope compared with the commit the candidate is bound to (the base
+ * branch tip, or the predicted base of a published speculative tip), so those paths are looked
+ * up there by blob identity. Paths beyond the lookup budget stay uncompared, which the guard
+ * refuses rather than passes.
+ */
+async function compareScopeOf(github: Pick<LandingGitHub, 'blobAt'>, plannedFiles: string[], files: any[], base: string, budget = { remaining: scopeLookupBudget }): Promise<ScopeFile[]> {
+  // Lookups are granted from the budget in file order, exactly as when they ran one at a time,
+  // then asked a few at a time: in turn they held a final merge verification past its window.
+  const wanted: { entry: ScopeFile; field: 'baseSha' | 'previousBaseSha'; path: string }[] = [];
+  const compared: ScopeFile[] = [];
+  for (const file of files) {
+    const status: ScopeFile['status'] = ['added', 'modified', 'removed', 'renamed', 'copied', 'changed', 'unchanged'].includes(file.status) ? file.status : 'modified';
+    const previousPath = typeof file.previous_filename === 'string' && file.previous_filename !== file.filename ? file.previous_filename : undefined;
+    const entry: ScopeFile = { path: file.filename, status, ...(previousPath ? { previousPath } : {}),
+      sha: status !== 'removed' && typeof file.sha === 'string' && /^[a-f0-9]{40}$/.test(file.sha) ? file.sha : null,
+      additions: Number.isSafeInteger(file.additions) ? file.additions : 0, deletions: Number.isSafeInteger(file.deletions) ? file.deletions : 0, binary: typeof file.patch !== 'string' };
+    if (!file.uncompared && !inPlannedScope(plannedFiles, entry.path) && budget.remaining-- > 0) wanted.push({ entry, field: 'baseSha', path: entry.path });
+    if (previousPath && status === 'renamed' && !inPlannedScope(plannedFiles, previousPath) && budget.remaining-- > 0) wanted.push({ entry, field: 'previousBaseSha', path: previousPath });
+    compared.push(entry);
+  }
+  const found = await boundedMap(wanted, peerContainmentConcurrency, want => github.blobAt(want.path, base));
+  wanted.forEach((want, index) => { want.entry[want.field] = found[index]; });
+  return compared;
 }
 /** Whether GitHub attributes a commit to the control-plane App's bot account: by the linked author, or by the App's noreply address. */
 function appAuthored(commit: any, login: string): boolean {
@@ -1970,6 +2180,63 @@ export async function repairLaneStep(engine: Pick<Engine, 'store' | 'enqueueRequ
   catch (error) { await record('repair.failed', { ...audit, error: error instanceof Error ? error.message : String(error) }); throw error; }
   return verdict;
 }
+/**
+ * The main guard (GY-500), run by the job loop every `mainGuardIntervalMs`. After an optimistic
+ * merge the required suite runs on the merge commit (CI's run on each push to the base branch);
+ * the guard reads its verdict on every optimistic merge commit that has not concluded, and when
+ * one failed it traces the culprit among the optimistic merges since the last green commit
+ * (mainGuard, bisecting when there are several) and reverts it at once: it opens a revert pull
+ * request and lands it head-bound through the repair lane's bypass, which reopens the culprit
+ * item for a rework round. Every step is on the ledger: each verdict (`optimistic.post-merge`),
+ * each guard state (`optimistic.guard`, once per state, culprit and probe) and each revert step
+ * (`optimistic.revert.*`). A revert it cannot make cleanly is recorded as refused, holds further
+ * optimistic merges, and is released once the base branch tip passes the required suite again.
+ */
+export const mainGuardIntervalMs = 30_000;
+export async function guardMain(engine: Pick<Engine, 'store' | 'ciAppIds' | 'recordPostMerge' | 'recordOptimisticRevert'>, github: Pick<GitHub, 'commitChecks' | 'openRevert' | 'mergeRevert' | 'baseBranch' | 'permissionShortfall'>, now = new Date()): Promise<GuardState> {
+  const required = (work: Work) => work.policy.checks;
+  for (const work of await engine.store.list()) {
+    const merge = currentOptimisticMerge(work);
+    if (!merge || (merge.postMerge && merge.postMerge.verdict !== 'pending')) continue;
+    await engine.recordPostMerge(work.id, merge.mergeSha, postMergeVerdict(await github.commitChecks(verdictCommit(merge)), required(work), engine.ciAppIds));
+  }
+  let all = await engine.store.list();
+  let guard = mainGuard(all);
+  const recorded = (await engine.store.pool.query("SELECT payload->'details' AS details FROM events WHERE work_id IS NULL AND kind='optimistic.guard' ORDER BY seq DESC LIMIT 1")).rows[0]?.details;
+  const summary = { state: guard.state, detail: describeGuard(guard), window: guard.window.map(merge => ({ key: merge.key, mergeSha: merge.mergeSha, verdict: merge.verdict })),
+    ...('culprit' in guard ? { culprit: guard.culprit.key, mergeSha: guard.culprit.mergeSha } : {}), ...('probe' in guard ? { probe: guard.probe.mergeSha } : {}), ...('probes' in guard ? { probes: guard.probes } : {}) };
+  // Postgres returns jsonb objects with their keys reordered, so the identity is built from values, never serialized objects.
+  const identity = (value: any) => JSON.stringify([value?.state ?? null, value?.culprit ?? null, value?.probe ?? null,
+    (Array.isArray(value?.window) ? value.window : []).map((merge: any) => [merge?.key, merge?.mergeSha, merge?.verdict])]);
+  if (identity(recorded) !== identity(summary) && !(guard.state === 'green' && !recorded)) await engine.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', ['graphyard', 'optimistic.guard', JSON.stringify({ details: { ...summary, at: now.toISOString() } })]);
+  // Writing a revert needs Contents: write; without it the guard keeps reading and waits for the permission.
+  if (github.permissionShortfall?.('merge-queue')) return guard;
+  if (guard.state === 'culprit') {
+    const found = guard, work = all.find(item => item.id === found.culprit.id)!, merge = currentOptimisticMerge(work)!;
+    const base = { at: now.toISOString(), failing: found.culprit.failing, probes: found.probes, kept: found.kept.map(entry => entry.key), resolvedBy: null };
+    const opened = await github.openRevert(work, merge, `${describeGuard(found)}. The main guard reverts it so main is green again; ${work.key} is reopened for a rework round.`);
+    await engine.recordOptimisticRevert(work.id, merge.mergeSha, 'refusal' in opened
+      ? { ...base, state: 'refused', pr: null, head: null, mergeSha: null, refusal: opened.refusal }
+      : { ...base, state: 'opened', pr: opened.pr, head: opened.head, mergeSha: null, refusal: null });
+    all = await engine.store.list(); guard = mainGuard(all);
+  }
+  const held = guard;
+  if (held.state === 'reverting') {
+    const work = all.find(item => item.id === held.culprit.id)!, revert = held.revert;
+    const merged = await github.mergeRevert(work, revert);
+    if (merged) {
+      await engine.recordOptimisticRevert(work.id, held.culprit.mergeSha, { ...revert, state: 'merged', mergeSha: merged });
+      // The merges that landed after the culprit failed on commits that held it: each is re-tested on the revert.
+      for (const merge of retestAfterRevert(held)) await engine.recordPostMerge(merge.id, merge.mergeSha, { verdict: 'pending' }, merged);
+    }
+  } else if (held.state === 'refused') {
+    // Main is released once its tip passes again, however it was fixed.
+    const tip = (await github.baseBranch()).tip;
+    const verdict = postMergeVerdict(await github.commitChecks(tip), required(all.find(item => item.id === held.culprit.id)!), engine.ciAppIds);
+    if (verdict.verdict === 'pass') await engine.recordOptimisticRevert(held.culprit.id, held.culprit.mergeSha, { ...held.revert, resolvedBy: { sha: tip, at: now.toISOString() } });
+  } else return held;
+  return mainGuard(await engine.store.list());
+}
 export async function githubFromEnv() {
   if (!process.env.GITHUB_APP_ID || !process.env.GITHUB_REPOSITORY) return null;
   const privateKey = process.env.GITHUB_PRIVATE_KEY ?? await readFile(process.env.GITHUB_PRIVATE_KEY_FILE!, 'utf8');
@@ -1983,7 +2250,7 @@ export async function githubFromEnv() {
 async function advanceQueue(engine: Engine, github: GitHub, work: Work, job: { work_id: string; token: string }, guard: (snapshot: Work, success: boolean) => () => Promise<void>, hold: (feature: PermissionFeature) => string | null) {
   const all = await engine.store.list();
   const placement = queuePlacement(work, all.map(item => item.id === work.id ? work : item), Date.now());
-  if (!placement || placement.current || !placement.publishable) return { work, published: false, held: null };
+  if (!placement || placement.current || !placement.publishable || engine.parallelTips > 0 && placement.position >= engine.parallelTips) return { work, published: false, held: null };
   // Publishing a tip writes a merge commit and a ref; without Contents: write the call can
   // only 403. The entry keeps its place and waits for the permission instead of retrying.
   const held = hold('merge-queue');
@@ -1997,12 +2264,13 @@ async function advanceQueue(engine: Engine, github: GitHub, work: Work, job: { w
   }
 }
 /**
- * Brings one in-flight candidate onto the base branch tip it no longer contains. The queue owns
- * its own entries, so this is every other submitted candidate: the merge, the record of what it
- * produced, and the binding carry are all the control plane's, and no worker is asked for a round.
+ * Answers one in-flight candidate that GitHub reports conflicting with the base branch tip. The
+ * queue owns its own entries, so this is every other submitted candidate. Since GY-375 nothing is
+ * written to the candidate's branch: a test merge on a scratch branch either disproves GitHub's
+ * reading, which is recorded, or confirms the conflict, which goes back to the worker.
  */
 async function refreshBase(engine: Engine, github: GitHub, work: Work, job: { work_id: string; token: string }, guard: (snapshot: Work, success: boolean) => () => Promise<void>, hold: (feature: PermissionFeature) => string | null) {
-  // The refresh writes a merge commit onto the candidate's branch; without Contents: write the
+  // The refresh's test merge creates and writes a scratch branch; without Contents: write the
   // call can only 403. The candidate keeps its held base and waits for the permission instead.
   const held = hold('merge-queue');
   if (held) return { work, published: false, held };
@@ -2060,6 +2328,7 @@ export const permissionRefusalLimit = 3;
 /** How often the job loop re-reads the merge-queue settings the master published (GY-330, GY-516). */
 export const mergeBatchSizeRefreshMs = 30_000;
 const batchSizeRead = new WeakMap<Engine, number>();
+const guardRead = new WeakMap<Engine, number>(), guardFailure = new WeakMap<Engine, string>();
 /**
  * How far the claim priority reaches into the merge queue (GY-492): the head and the next
  * `max(2, batch size) - 1` entries. The head needs a fresh observation to merge at all; the
@@ -2168,12 +2437,25 @@ export function observationThroughputStatus(coordinator: { githubBudget?: ({ thr
  * budget (its non-304 requests), which is what the worker returns its paced slot with (GY-567).
  */
 export async function processJob(engine: Engine, github: GitHub, spent?: (charged: number) => void): Promise<boolean> {
-  // The batch size and the rerun count (GY-516) are the master's configuration, published to the
-  // installation ledger; a restarted server reads them back here before the next evaluation it runs.
+  // The batch size, the rerun count (GY-516) and the optimistic exclude globs (GY-503) are the
+  // master's configuration, published to the installation ledger; a restarted server reads them
+  // back here before the next evaluation it runs.
   const readAt = batchSizeRead.get(engine);
   if (readAt === undefined || Date.now() - readAt >= mergeBatchSizeRefreshMs) {
     batchSizeRead.set(engine, Date.now());
-    await Promise.all([engine.loadMergeBatchSize(), engine.loadRerunFailedChecks()]).catch(() => batchSizeRead.delete(engine));
+    await Promise.all([engine.loadMergeBatchSize(), engine.loadParallelTips(), engine.loadRerunFailedChecks(), engine.loadOptimisticExclude()]).catch(() => batchSizeRead.delete(engine));
+  }
+  // The main guard (GY-500) is the installation's, not a job's: it runs here on its own interval,
+  // and a failure of it is recorded and retried on the next interval, never failing a job.
+  const guardedAt = guardRead.get(engine);
+  if (typeof github.commitChecks === 'function' && (guardedAt === undefined || Date.now() - guardedAt >= mainGuardIntervalMs)) {
+    guardRead.set(engine, Date.now());
+    await guardMain(engine, github).catch(async error => {
+      const message = error instanceof Error ? error.message : String(error);
+      if (guardFailure.get(engine) === message) return;
+      guardFailure.set(engine, message);
+      await engine.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', ['graphyard', 'optimistic.guard.failed', JSON.stringify({ details: { error: message, at: new Date().toISOString() } })]).catch(() => {});
+    });
   }
   // The fleet is read before the claim, so the claim order can name it (GY-492): with a backlog
   // due, the merge-queue head's job is claimed first however recently it became due, instead of
@@ -2183,7 +2465,9 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
   // priority being advisory and the publication guard rechecking ownership; re-read after the
   // claim only if claim order ever gains a correctness role.
   const all = await engine.store.list();
-  const job = await engine.store.takeJob(observationClaimOrder(all, engine.mergeBatchSize, Date.now(), budgetTight(github.budget?.())), observationHeadCount(all, engine.mergeBatchSize));
+  // The band spans the parallel-tip window too (GY-498): every entry validated at once is claimed first.
+  const band = Math.max(engine.mergeBatchSize, engine.parallelTips);
+  const job = await engine.store.takeJob(observationClaimOrder(all, band, Date.now(), budgetTight(github.budget?.())), observationHeadCount(all, band));
   if (!job) return false;
   const startedAt = Date.now();
   let work: Work | undefined;
@@ -2244,6 +2528,8 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
       // observation recorded the rerun as owed, holding the entry's position; GitHub is asked here,
       // outside any transaction, and its answer recorded. A refusal lets the failure stand at once.
       for (const owed of owedCheckReruns(work, engine.ciAppIds)) {
+        const rerunHold = hold('check-rerun');
+        if (rerunHold) { held ??= rerunHold; break; }
         let outcome: { state: 'requested' | 'refused'; runId?: number; detail?: string };
         if (typeof github.rerunFailedJobs !== 'function') outcome = { state: 'refused', detail: 'This GitHub adapter cannot rerun failed jobs' };
         else try { outcome = { state: 'requested', runId: (await github.rerunFailedJobs(owed.failedRunId)).runId }; }
