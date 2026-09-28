@@ -3,7 +3,7 @@
 
 ## Master coordination loop
 
-Restart `graphyard master run` freely; it never dispatches twice. `master status` (cached interventions) → `daemon` gives health and `cycleTime` (30-minute p50/p95); `journalctl --user -u graphyard-master`, the log. `daemon.metrics.timings` time steps and calls over 1s; cycles over 60 s raise `loop` attention naming three slowest. Launches run beside cycles (`run.launchConcurrency`, default 3). Failed requests log route and SQL.
+Restart `graphyard master run` freely; it never dispatches twice. `master status` → `daemon` gives health and `cycleTime` (30-minute p50/p95); `journalctl --user -u graphyard-master`, the log. `daemon.metrics.timings` time steps and calls over 1s; cycles over 60 s raise `loop` attention. Launches run beside cycles (`run.launchConcurrency`, default 3).
 
 ### Perpetual master loop
 
@@ -15,7 +15,7 @@ A lease expires 120 seconds after the last heartbeat, or one further lease perio
 
 ## Supervisor died leaving a containment quarantine
 
-On the worker `graphyard master settle-containment GY-N "reason"` verifies nothing survives; only the loop excuses an idle pane shell (childless, parent `herdr server`). If refused, confirm the stop, then `rework` or `recover-containment` once delivered ([recipes](operations.md#recovery-recipes)).
+On the worker `graphyard master settle-containment GY-N "reason"` verifies nothing survives; only the loop excuses an idle pane shell. If refused, confirm the stop, then `rework` or `recover-containment` once delivered ([recipes](operations.md#recovery-recipes)).
 
 ## Submitted implementation needs rework
 
@@ -39,10 +39,10 @@ A required check failing on a tip or head reruns once per sha (*rerun failed job
 
 | Band | Cadence |
 | --- | --- |
-| `merge` | within two of the queue head, gates passing: 20 seconds |
+| `merge` | within two of the queue head: 20 seconds |
 | `active` | awaiting a check, review, base refresh or rework: 1 minute |
-| `steady` | unchanged since last observed: 5 minutes, stretched by the fleet bound |
-| `idle` | next action dispatch or escalation: 5 minutes, stretched when unchanged |
+| `steady` | unchanged since last observed: 5 minutes, fleet-stretched |
+| `idle` | next action dispatch or escalation: 5 minutes |
 
 Unchanged non-merge candidates spend **at most 40%** (`steadyStateShare`).
 
@@ -74,9 +74,9 @@ Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROF
 
 ### Host memory
 
-Heavy verification runs a session starts (`npm test`, `npm run test:browser`, `npm run typecheck`, `tsc --noEmit`, `npx tsc`) take a host slot first: a lock directory, `.verification-slots` under the managed worktree root. Default slots: max(2, floor(total memory GB / 8)); set `GRAPHYARD_VERIFICATION_SLOTS` in the loop's environment on that host. A run finding every slot held prints that it waits, naming the directory and holders. Launches create the directory under an existing root and grant it to Codex's sandbox (`--add-dir`, probed for workers); it outlives the checkouts. A session's own `PATH` keeps the wrappers first. Runs outside sessions (CI, your shell) are unbounded.
+Heavy verification runs a session starts (`npm test`, `test:browser`, `npm run typecheck`, `tsc --noEmit`) take a host slot first from `.verification-slots`, a lock directory under the managed worktree root. Default slots: max(2, floor(total memory GB / 8)); `GRAPHYARD_VERIFICATION_SLOTS` sets that host's bound. A run finding every slot held prints that it waits, and on what. Launches create it under an existing root and put the wrappers first on the session's `PATH`. Runs outside sessions (CI, your shell) are unbounded.
 
-Below max(10% of total, 4 GB) available, the loop, dispatcher and executors launch no worker, reviewer or producer on that host, recording `Launches deferred` (`escalation:dispatch:memory`) and one `memory` attention item (class `resources`) naming the top consumers; launches resume, recorded, once memory recovers. Running sessions are untouched. The dip stands as one `memory-pressure` fault instance however the consumers' ranking moves between cycles: the fault's text is fixed, and the attention item keeps the moving detail.
+Below max(10% of total, 4 GB) available, the loop, dispatcher and executors launch no worker, reviewer or producer on that host, recording `Launches deferred` (`escalation:dispatch:memory`) and one `memory` attention item (class `resources`) naming the top consumers; launches resume, recorded, once memory recovers, running sessions untouched. One `memory-pressure` fault instance stands for the whole dip: the fault's text is fixed; the attention item keeps the moving consumer ranking.
 
 ## Bootstrap mode for a self-proving change
 
@@ -92,7 +92,7 @@ A merge production never served is a `delivery.deployment-incident` ([observatio
 
 ## Merge bypass
 
-An ungated merge is a permanent violation: repair access, open a follow-up item, never backfill evidence. An admin opens a direct-merge window with `graphyard operator direct-merges on --since ISO REASON`.
+An ungated merge is a permanent violation: repair access, open a follow-up item, never backfill evidence; an admin opens a direct-merge window with `graphyard operator direct-merges on --since ISO REASON`.
 
 ## Credentials
 
@@ -119,3 +119,4 @@ graphyard grants revoke ci "integration:claim-safety" "Runner decommissioned"
 ### Concurrent reconciliation
 
 A stale observation snapshot retries after two seconds.
+

@@ -743,7 +743,7 @@ test('integration:loop-liveness — an absent or stalled loop is the top attenti
     assert.equal(report.attentionItems[0].subject, 'loop', `the top attention item: ${JSON.stringify(report.attentionItems[0])}`);
     assert.match(report.attentionItems[0].text, /No master loop holds this repository/);
     assert.match(report.attentionItems[0].next, /graphyard master restart/);
-    assert.equal(report.counts.attention, 1, 'and it is counted, so a quiet installation is not reported as all clear');
+    assert.equal(report.counts.attention, 1, `counted: ${JSON.stringify(report.attentionItems.map(item => [item.subject, item.text.slice(0, 130)]))}`);
     assert.equal((report.daemon as { liveness: { state: string } }).liveness.state, 'absent');
   } finally { await rm(directory, { recursive: true, force: true }); await rm(root, { recursive: true, force: true }); }
 

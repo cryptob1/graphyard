@@ -98,8 +98,8 @@ const plan = {
   // refusals hold only the build gate and clear on the same heads when the window closes, before
   // a worker could even react. GY-612's memory dip holds the morning's launches back, so the
   // window sits where the deferred candidates' landing heads are the ones open under it.
-  blind: { from: 96 * minute, to: 98 * minute },
-  notice: 96 * minute,
+  blind: { from: 150 * minute, to: 152 * minute },
+  notice: 150 * minute,
   // GY-496: item 1's first head has its producer runs killed (exit 143) twice, then failing until
   // the request is spent; the loop escalates it once and requests one rework for that head. The
   // fault-free first item hosts it because GY-756's out-of-queue merge needs the last released
