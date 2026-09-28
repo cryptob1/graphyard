@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 /** Whether `path` is a directory; mirrors the launcher's own check for re-exposed paths. */
@@ -101,17 +101,27 @@ test('unit:coordinator-write-blocked-for-shell — every runtime kind launches c
     const confinement = await coordinatorConfinement({ kind: 'claude', args: [], coordinatorRoot: root, sessionDirectory: worktree });
     assert.equal(confinement?.mechanism, 'read-only-mount');
     // The host's process-launch channels are hidden where they exist, so no command inside the
-    // namespace can ask a host manager to start the write outside it.
+    // namespace can ask a host manager to start the write outside it. Each channel is masked at
+    // its canonical real path: bubblewrap (up to 0.11) cannot build a mount point whose path
+    // traverses an absolute symlink — /var/run → /run on Debian-family hosts resolves against
+    // bubblewrap's own staging root, where the target does not exist — and one mask at the real
+    // directory covers every symlink alias of it.
     const launchTargets = hostProcessLaunchTargets();
     for (const directory of launchTargets.directories.filter(path => isDirectory(path))) {
-      const maskIdx = confinement.wrapper.indexOf(directory);
+      const maskIdx = confinement.wrapper.indexOf(realpathSync(directory));
       assert.ok(maskIdx > 0 && confinement.wrapper[maskIdx - 1] === '--tmpfs', `the namespace hides the process-launch directory ${directory}`);
     }
     for (const socket of launchTargets.busSockets.filter(path => existsSync(path) && !isDirectory(path))) {
-      const socketIdx = confinement.wrapper.indexOf(socket);
+      const socketIdx = confinement.wrapper.indexOf(realpathSync(socket));
       assert.ok(socketIdx > 0 && confinement.wrapper[socketIdx - 2] === '--ro-bind' && confinement.wrapper[socketIdx - 1] === '/dev/null', `the namespace replaces the bus socket ${socket} with an unconnectable device`);
     }
     assert.ok(processLaunchMaskWords({ directories: ['/run/user/4242/systemd', '/run/dbus', '/run/dbus'], busSockets: ['/run/user/4242/bus', '/run/user/4242/nested'] }, [root]).length > 0, 'the mask words are built for channels that exist');
+    if (isDirectory('/run/dbus')) {
+      const candidates = ['/run/dbus', '/var/run/dbus'];
+      const canonicalDirectories = [...new Set(candidates.filter(isDirectory).map(path => realpathSync(path)))];
+      assert.deepEqual(processLaunchMaskWords({ directories: candidates }, [root]), canonicalDirectories.flatMap(path => ['--tmpfs', path]),
+        'aliased launch-channel directories collapse into one mask named by the canonical real path');
+    }
     assert.ok(processLaunchMaskWords({ directories: [root, base] }, [root]).length === 0, 'a candidate that would hide a protected path is dropped');
     assert.ok(processLaunchMaskWords({ directories: [worktree] }, [worktree]).length === 0, 'the session\'s own directory is never hidden either');
     const probe = [

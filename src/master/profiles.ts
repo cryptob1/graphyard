@@ -603,15 +603,21 @@ export const sessionGitAdminDirectory = (sessionDirectory: string, root: string)
  * manager (`systemd-run --user`) — or the system one over `/run/dbus` (`systemd-run --system`) — to
  * start a helper outside this mount namespace and write the underlying, writable coordinator
  * checkout, which a fresh `/proc` alone does not close (GY-888, review finding). Candidates that
- * would hide a protected path are dropped.
+ * would hide a protected path are dropped. Each candidate is named by its canonical real path
+ * before deduplication: bubblewrap (up to 0.11) builds a mount point only where every path
+ * component resolves inside the namespace, and a destination reached through an absolute symlink —
+ * `/var/run` → `/run` on Debian-family hosts — resolves against its own staging root, where the
+ * target does not exist, so the launch dies with "Can't mkdir". The canonical path also aliases
+ * that pair to one mask, and hiding the real directory hides every symlink to it.
  */
 export const processLaunchMaskWords = (
   targets: { directories?: readonly string[]; busSockets?: readonly string[] },
   protect: readonly string[],
 ): readonly string[] => {
   const hides = (path: string) => !protect.some(p => p === path || withinCheckout(p, path));
-  const directories = [...new Set((targets.directories ?? []).filter(path => isAbsolute(path) && isDirectoryPath(path) && hides(path)))];
-  const sockets = [...new Set((targets.busSockets ?? []).filter(path => isAbsolute(path) && existsSync(path) && !isDirectoryPath(path) && hides(path)))];
+  const canonical = (path: string) => { try { return realpathSync(path); } catch { return path; } };
+  const directories = [...new Set((targets.directories ?? []).filter(path => isAbsolute(path) && isDirectoryPath(path) && hides(path)).map(canonical))];
+  const sockets = [...new Set((targets.busSockets ?? []).filter(path => isAbsolute(path) && existsSync(path) && !isDirectoryPath(path) && hides(path)).map(canonical))];
   return [...directories.flatMap(path => ['--tmpfs', path]), ...sockets.flatMap(path => ['--ro-bind', '/dev/null', path])];
 };
 /**
