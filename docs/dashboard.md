@@ -7,7 +7,7 @@ One sidebar: **Work**, **Workers**, **Shipped**, **Tests**, **Insights**, **Sett
 
 ## Work: one classification
 
-Each open item is in one group: **Needs you** (only you decide), **Blocked**, **Moving**, **Up next** or **Backlog**; tiles count and filter one.
+Each open item is in one group: **Needs you** (only you may decide), **Blocked**, **Moving**, **Up next** or **Backlog**; a tile counts and filters one group.
 
 `GET /api/board` serves the groups: `group`, `stage`, `owner`, `actor` (a role), `command`, `since`, `overdue`. `master status` lists the master's as `board.owed`.
 
@@ -32,7 +32,7 @@ Rows show **Build, Validate, Test, Review, Prove, Merge, Deploy**; a merged item
 
 ## An item page
 
-Below the summary: **What is left**, **Requirements** (✓ or ○ each), **Pull request**, **Test cases**, **Activity**. **Technical details**: gates, sessions, evidence.
+Below the summary: **What is left**, **Requirements** (✓ or ○ per criterion), **Pull request**, **Test cases** and **Activity**. **Technical details** holds gates, sessions, evidence and overlaps (`Shares files with GY-166, GY-167 (tests/)`).
 
 ## Insights
 
