@@ -5,6 +5,7 @@ import { readFile, mkdir, lstat } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { z } from 'zod';
 import { type ChildRun, type ChildRunOptions, defaultChildRun } from '../child-runner.js';
+import { baseTree, releaseSpecGate } from '../cli/planned-files-intent.js';
 import { distinctSessionName, sessionNameLimit, sessionName, nameForLaunch } from '../session-name.js';
 import { localDirectory } from '../onboarding.js';
 import { broadScopeRefusals } from '../coordination.js';
@@ -679,6 +680,10 @@ export async function runAutonomyCommand(root: string, config: MasterConfig, id:
   }
   if (id === 'release' || id === 'unblock') {
     const work = await item(args[0]);
+    // The release gate (GY-881): before the item is made ready, its spec is graded against the
+    // base branch it will be worked on, and a failing one is refused naming each unresolved
+    // reference — the master rewrites it with master requirements instead of dispatching it.
+    if (id === 'release') await releaseSpecGate(root, config.baseBranch, work);
     return call(await operator(), `work/${work.id}/${id === 'release' ? 'ready' : 'unblock'}`, { expectedRevision: work.revision, reason: reason(args.slice(1)) });
   }
   if (id === 'repair') {

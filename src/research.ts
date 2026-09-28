@@ -3,6 +3,7 @@ import type pg from 'pg';
 import { z } from 'zod';
 import { demand, operatorScopeIncludes, type Principal, type Work } from './model.js';
 import { humanOnlyRefusal, parkRule } from './model/human-request.js';
+import { specRulesPrompt } from './model/spec-check.js';
 import { defaultPiModel, piRunner } from './runner/pi.js';
 import type { Run, RunResult, Runner } from './runner/types.js';
 import { save } from './store.js';
@@ -208,6 +209,7 @@ export function researchPrompt(config: { repository: string }, work: Pick<Work, 
     + `Its acceptance criteria: ${work.criteria.map(criterion => `${criterion.id}: ${clip(criterion.text, 1500)}`).join(' ')} `
     + (work.plannedFiles?.length ? `Its planned files: ${work.plannedFiles.join(', ')}. ` : '')
     + 'Read this checkout (it is the base branch) and, where it helps, the outside world, and find: the existing code and conventions to reuse, as paths with what each offers; relevant external patterns and prior art, each with its source (a URL, a library, a standard, or a path); the risks and edge cases; and the approach you recommend. '
+    + `Hold the item's spec to the rules it is written by, and check each against this checkout: ${specRulesPrompt} Verify that every file, route and exported symbol a criterion names resolves into the planned files (or is a file a criterion describes creating) by searching for it, and name any that does not in the brief's risks, so the requirements are rewritten before the item is created. `
     + 'List as product questions only questions about the product experience whose answer is the operator\'s to choose (goals and priorities), each with why it matters and a concrete recommended answer: the build proceeds on your recommendation until the operator answers, so recommend what you would ship. Settle every engineering question yourself in the approach. '
     + `This session is read-only and nobody reads it: do not edit, commit, push, claim work, run the build or tests, or ask anyone anything. Keep within about ${settings.tokenBudget} tokens and ${settings.timeoutMinutes} minutes. `
     + `Then call the ${researchTool} tool exactly once with existingCode, patterns, risks, approach and questions, and stop.`;

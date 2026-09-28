@@ -7,6 +7,7 @@
 // failure was swallowed, and the reviewer approved without judging or resolving any thread.
 import type { ChildRun } from './child-runner.js';
 import type { FollowUpEntry } from './model/machine-backlog.js';
+import { specRulesPrompt } from './model/spec-check.js';
 
 /** An unresolved review thread as the reviewer's launch prompt names it: an input to the verdict, not a merge blocker. */
 export interface LaunchThread { id: string; author: string; path: string; line: number | null; outdated: boolean; excerpt: string; createdAt?: string; url?: string }
@@ -75,7 +76,7 @@ export function criteriaRuleSection(key: string, sha: string, criteria: { id: st
     + 'Classify each finding, and each open review thread, as BLOCKING or FOLLOW-UP. BLOCKING: the head fails a stated acceptance criterion, or a correctness or security defect in the changed code breaks one of the item\'s own criteria. '
     + 'FOLLOW-UP: everything else — edge cases beyond the criteria, style, naming, hypotheticals, further hardening, and bot suggestions. '
     + 'APPROVE when every criterion is met and no finding or thread is BLOCKING; list the FOLLOW-UP ones in the body instead of requesting changes for them. '
-    + 'Write each FOLLOW-UP finding of your own that has no review thread on a line of its own, before the closing lines, exactly of the form "Follow-up finding: PATH:LINE — what is wrong and why"; Graphyard files those in the same backlog item as the Follow-up threads. '
+    + 'Write each FOLLOW-UP finding of your own that has no review thread on a line of its own, before the closing lines, exactly of the form "Follow-up finding: PATH:LINE — what is wrong and why"; Graphyard files those in the same backlog item as the Follow-up threads. Name in each finding the file that holds it: locate that file by searching for the symbols and routes the finding names, never by guessing a path. '
     + 'REQUEST_CHANGES cites only BLOCKING findings, and names for each the acceptance criterion it blocks; never request changes for a FOLLOW-UP. Never weaken a criterion to let the change pass. '
     + 'End the review body with three lines, exactly of the forms "Resolved threads: ID1 ID2", "Follow-up threads: ID3 ID4" and "Overridden threads: ID5 ID6": the first names the review thread IDs you verified fixed, or no longer applicable, at this head; the second names the unresolved threads you judged FOLLOW-UP; the third names the threads whose finding you judged wrong, with the reason for each earlier in the body. Write "none" after a line\'s colon when it names nothing. '
     + 'Once Graphyard observes your approval of this head it resolves the Resolved threads, and files the Follow-up threads and findings as one backlog item and resolves each thread with a reply naming that item. ';
@@ -363,7 +364,7 @@ export function followUpItem(input: { key: string; workId: string; pr: number; s
   // retry, so the item plans the first ones and its description names the rest for a scope request.
   const unplanned = scopes.slice(plannedFilesMax);
   const overflow = unplanned.length ? clipEnd(`Planned files name ${plannedFilesMax} of the ${scopes.length} top-level paths these follow-ups touch (the work schema's bound); request scope for the rest: ${unplanned.join(', ')}`, Math.floor(descriptionMax / 4)) : '';
-  const head = overflow ? `${intro}\n${overflow}` : intro;
+  const head = [intro, `Write this item to the rules every task is held to: ${specRulesPrompt}`, overflow].filter(Boolean).join('\n');
   const render = [...threads.map((thread, index) => (budget: number) => describeFollowUp(thread, index, budget)),
     ...findings.map((finding, index) => (budget: number) => clipEnd(`${threads.length + index + 1}. Finding with no thread: ${finding.text}`, budget))];
   // Water-fill the description, shortest entry first: an entry within an even share keeps its whole
