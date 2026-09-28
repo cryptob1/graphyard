@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -76,6 +76,11 @@ test('unit:rework-round-causes-classified — the classifier reads a fixture led
   assert.equal(classifyReworkReason('GY-x: reruns passed; no flake and no defect the text names.').cause, 'other');
   assert.equal(classifyReworkReason('GY-x: graphyard-reviewer[bot] requested changes on a. The verdict stands against the current head.').cause, 'own-change');
   assert.equal(classifyReworkReason('GY-x: required CI check test failed on candidate a, cause not established by the text.').cause, 'other', 'an unattributed round is counted as other, never guessed into a named cause');
+  // Rule order (GY-725): a conflict reason whose approval also went stale is the conflict, and a
+  // hang the text ties to the item's own change is own-change — first match wins in that order.
+  assert.equal(classifyReworkReason('GY-x: GitHub reports that candidate a conflicts with base branch tip b, so its approval went stale. Only a sync can resolve it.').cause, 'conflict', 'the conflict is named before the lost approval its stale approval also names');
+  assert.equal(classifyReworkReason('GY-x: the reviewer requested changes: the new fixture hangs on CI.').cause, 'own-change', 'a hang attributed to the change is own-change, not a CI flake');
+  assert.equal(classifyReworkReason('GY-x: the check does not fail but hangs on the runner until it times out.').cause, 'ci-flake', 'a positive hang beside a negated word is still a hang');
 
   // The report: rounds only at or after the item's first submission, classified and shared.
   const classify = (reason: string) => classifyReworkReason(reason);
@@ -91,6 +96,16 @@ test('unit:rework-round-causes-classified — the classifier reads a fixture led
   const linked = findFixItem(openItems, 'docs-budget');
   assert.deepEqual(linked, { key: 'GY-880', title: 'Fix docs budget churn: pages re-trimmed every round' }, 'the oldest open item whose title names the cause');
   assert.equal(findFixItem(openItems, 'conflict'), null, 'the delivered GY-860 is closed and never matches; conflict has no open item here');
+  // Fix-item keywords (GY-725): the title `filingPayload` generates for a cause is always found
+  // again, so a filed fix item is linked rather than duplicated; a title that merely mentions the
+  // cause's word ("proof", "conflict") or any cause-specific "… rework rounds" title never stands
+  // in for another cause's fix item.
+  const filedTitle = (cause: string, label: string) => filingPayload(cause, label, 3, 0.2).title;
+  const conflictFiled = { key: 'GY-890', title: filedTitle('conflict', 'Conflict with the base') };
+  assert.deepEqual(findFixItem([...openItems, conflictFiled], 'conflict'), conflictFiled, 'the item the script itself filed for the cause is linked, not re-filed');
+  assert.deepEqual(findFixItem([{ key: 'GY-891', title: filedTitle('other', 'Other') }, { key: 'GY-892', title: filedTitle('conflict', 'Conflict with the base') }], 'other')?.key, 'GY-891', 'the other-cause filing is found without matching every "… rework rounds" title');
+  assert.equal(findFixItem([{ key: 'GY-893', title: 'Proof producer retries: backoff tuning' }, { key: 'GY-894', title: 'Conflict resolution wizard for the merge UI' }], 'lost-approval-or-proof'), null, 'a title that merely mentions a proof is not the lost-approval fix item');
+  assert.equal(findFixItem([{ key: 'GY-895', title: 'Reduce the other rework rounds the ledger text never attributes' }], 'other')?.key, 'GY-895', 'a genuinely related open item still stands in for a filing');
   const filing = filingPayload('conflict', 'Conflict with the base', 3, 0.2);
   assert.match(filing.title, /[Cc]onflict with the base/);
   assert.equal(filing.criteria[0].proofs[0], 'manual:rework-cause-fix');
@@ -106,7 +121,7 @@ test('unit:rework-round-causes-classified — the classifier reads a fixture led
   assert.throws(() => parseArguments(['--unknown']), /Unknown argument/);
 });
 
-test('unit:rework-rounds-split-by-cause — the split excludes causes outside the item\'s own change from the median, and master status reports it beside the raw figure', async () => {
+test('unit:rework-rounds-split-by-cause — the split excludes causes outside the item\'s own change from the median, master status reports it beside the raw figure, and docs/ states the measured figures', async () => {
   // The split itself: raw counts keep every round; the own-change counts drop base breakage,
   // conflict, docs budget, lost approval or proof, and CI flakes.
   const round = (cause: string): ReworkRound => ({ workId: A, key: 'GY-901', seq: '1', at: submittedAt, cause: cause as ReworkRound['cause'], marker: null });
@@ -129,7 +144,9 @@ test('unit:rework-rounds-split-by-cause — the split excludes causes outside th
   assert.equal(recent.since, '2026-09-26T08:00:00.000Z', 'the window opens at the earliest first submission in the population, not at the first merge');
 
   // Master status wiring: the report carries the split under speed.reworkRounds.ownChange,
-  // read from the same ledger rows, with the raw figure untouched beside it.
+  // read from the same ledger rows, with the raw figure untouched beside it. The ledger walk runs
+  // once per population: the split is cached beside the worktree inventory, so a second call is
+  // one file read (GY-725).
   const directory = await mkdtemp(join(tmpdir(), 'graphyard-rework-causes-'));
   const root = await mkdtemp(join(tmpdir(), 'graphyard-rework-causes-repo-'));
   execFileSync('git', ['init', '-q', root]);
@@ -139,9 +156,11 @@ test('unit:rework-rounds-split-by-cause — the split excludes causes outside th
     repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [] });
   await writeDaemonState(master, emptyDaemonState(master));
   const now = '2026-09-26T12:00:00.000Z';
+  let eventsReads = 0;
   const masterApi = async (path: string) => {
     if (path === 'work-snapshot') return { work: fixtureWork, now };
     if (path.startsWith('events?')) {
+      eventsReads++;
       const query = new URLSearchParams(path.slice('events?'.length));
       assert.equal(query.get('kind'), 'rework');
       assert.equal(query.get('payload'), 'details');
@@ -150,11 +169,11 @@ test('unit:rework-rounds-split-by-cause — the split excludes causes outside th
     if (path === 'board') throw new Error('not served under test');
     return {};
   };
+  const supervisorHost = { platform: 'linux' as const, temporaryDirectories: [] as string[], run: (command: string, args: string[]) => command === 'loginctl' ? '\n' : args[1] === 'is-enabled' ? 'enabled\n' : args[1] === 'is-active' ? 'active\n' : '' };
   try {
-    const report = await masterStatusReport(root, master, masterApi, { actor: { id: 'coordinator-1' } }, { commit: null },
-      { supervisorHost: { platform: 'linux', temporaryDirectories: [], run: (command: string, args: string[]) => command === 'loginctl' ? '\n' : args[1] === 'is-enabled' ? 'enabled\n' : args[1] === 'is-active' ? 'active\n' : '' } });
+    const report = await masterStatusReport(root, master, masterApi, { actor: { id: 'coordinator-1' } }, { commit: null }, { supervisorHost });
     const ownChange = report.speed.reworkRounds as typeof report.speed.reworkRounds & {
-      ownChange: { items: number; measured: number; unmeasured: number; rounds: number; median: number; rawMedian: number; eventsComplete: boolean; statement: string | null;
+      ownChange: { items: number; measured: number; unmeasured: number; rounds: number; median: number; rawMedian: number; eventsComplete: boolean; statement: string | null; cached: boolean; at: string;
         byCause: Record<string, number>; shares: Record<string, number | null>; largest: { cause: string; count: number; share: number | null }[]; window: { since: string | null; until: string } };
     };
     assert.ok(ownChange.ownChange, 'master status reports the classified rounds');
@@ -164,13 +183,25 @@ test('unit:rework-rounds-split-by-cause — the split excludes causes outside th
     assert.equal(split.eventsComplete, true);
     assert.equal(split.statement, null);
     assert.equal(split.unmeasured, 1, 'GY-904 has no recorded submission and is named, not dropped');
+    assert.equal(split.cached, false, 'the first report computes the split and names it freshly computed');
     assert.ok(report.speed.reworkRounds.median !== undefined, 'the raw rework rounds stand beside the split');
+    const fresh = await masterStatusReport(root, master, masterApi, { actor: { id: 'coordinator-1' } }, { commit: null }, { supervisorHost });
+    const again = (fresh.speed.reworkRounds as typeof ownChange).ownChange;
+    assert.equal(again.cached, true, 'a second report over the same population is served from the split cache');
+    assert.deepEqual([again.rounds, again.median, again.rawMedian], [split.rounds, split.median, split.rawMedian], 'the cached split carries the same figures');
+    assert.equal(eventsReads, 1, 'the rework ledger was walked once, not once per report');
     // The rendered report names the split the docs state.
     const text = render({ population: { items: 100, delivered: 4, measured: 3, unmeasured: 1 }, window: split.window, statement: null,
       rounds: 5, ownChange: 2, outsideItem: 3, causes: split.byCause, shares: split.shares,
       largest: split.largest.filter(entry => entry.count > 0).slice(0, 3), reworkRounds: { rawMedian: 2, rawP90: 2, median: 0, p90: 2 }, fix: [] });
     assert.match(text, /own-change median 0/);
     assert.match(text, /outside it/);
+    // The docs page the PR description points at states the measured figures (GY-725, finding 17):
+    // the test reads docs/, it does not only render the script output.
+    const operations = await readFile(fileURLToPath(new URL('../docs/operations-reference.md', import.meta.url)), 'utf8');
+    assert.match(operations, /55% own-change/, 'docs/ states the measured own-change share');
+    assert.match(operations, /33% conflicts/, 'docs/ states the measured conflict share');
+    assert.match(operations, /raw median 2/, 'docs/ states the raw median beside the own-change figure');
   } finally {
     await rm(directory, { recursive: true, force: true });
     await rm(root, { recursive: true, force: true });
