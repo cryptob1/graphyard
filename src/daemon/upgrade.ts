@@ -11,8 +11,10 @@
 // commit the base branch does not contain is never touched: the refusal is on the cursor, and
 // `master status` names it until it clears. While such a refusal stands and the checkout has not
 // moved, the fetch of origin backs off — the local reads alone re-establish the refusal — and a
-// diff that changes the package manifest or lockfile is refused too, because the loop runs no
-// dependency install.
+// restart a moved checkout still owes retries without a fetch, and a diff that changes the
+// package manifest or lockfile is refused too, because the loop runs no dependency install: that
+// refusal records the restart it owes, fetches nothing while the release is unchanged, and
+// finishes it once the checkout stands on the tip installed.
 import { readFileSync } from 'node:fs';
 import type { ChildRun } from '../child-runner.js';
 import { shortCommit, type ExecutorRestartResult } from '../executor-fleet.js';
@@ -29,6 +31,9 @@ const loadedPrefixes = ['src/', 'scripts/', 'bin/'], loadedFiles = ['package.jso
 export function upgradeTouchesCode(paths: readonly string[]): boolean {
   return paths.some(path => loadedFiles.includes(path) || loadedPrefixes.some(prefix => path.startsWith(prefix)));
 }
+
+/** How long a standing refusal over the package manifest or lockfile goes without a fresh fetch of origin: the local reads alone re-establish it (GY-490). */
+export const upgradeFetchBackoffMs = 10 * 60_000;
 
 /** The supervisor unit the loop itself runs under, when systemd supervises it: read from the process's own cgroup, like an executor's. */
 export const loopUnitPattern = /^graphyard-master(?:[@.-][A-Za-z0-9@._:-]*)?\.service$/;
@@ -97,6 +102,11 @@ export interface SelfUpgradeDeps {
 export async function performSelfUpgrade(config: MasterConfig, state: DaemonState, deps: SelfUpgradeDeps): Promise<SelfUpgradeOutcome> {
   const now = deps.now ?? Date.now, at = () => new Date(now()).toISOString();
   const git = (...args: string[]) => deps.run('git', ['-C', deps.root, ...args]);
+  /** Whether git places `ancestor` inside `descendant`: yes, no, or unknown when git cannot answer. */
+  const isAncestor = async (ancestor: string, descendant: string): Promise<boolean | null> => {
+    try { await git('merge-base', '--is-ancestor', ancestor, descendant); return true; }
+    catch (error: any) { return error?.status === 1 ? false : null; }
+  };
   const persist = async () => { if (deps.persist) await deps.persist(state); };
   const key = `upgrade:${state.deployment?.sha ?? 'none'}`;
   const note = async (detail: string, failure: boolean) => {
@@ -179,10 +189,25 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
 
   // 3. The fetch backs off while a refusal stands and the checkout has not moved since it was
   //    recorded: the local reads alone re-establish the refusal, so a checkout left dirty for
-  //    hours stops paying a network fetch every cycle. The moment the checkout clears, the fetch
-  //    resumes below.
-  if (state.upgrade.refused?.commit === checkout.commit && localRefusal)
-    return refused(localRefusal, checkout.commit);
+  //    hours stops paying a network fetch every cycle. A refusal over the package manifest or
+  //    lockfile backs off on a clock instead — only a fetch can tell whether a new tip still
+  //    changes the manifest — and repeats itself without rewriting the refusal or the cursor
+  //    until the backoff ends. The moment the checkout clears, the fetch resumes below.
+  const standing = state.upgrade.refused?.commit === checkout.commit ? state.upgrade.refused : null;
+  if (standing && (localRefusal
+    || (/package(-lock)?\.json/.test(standing.reason) && now() - Date.parse(standing.at) < upgradeFetchBackoffMs)))
+    return localRefusal
+      ? await refused(localRefusal, checkout.commit)
+      : { outcome: 'refused', reason: standing.reason, commit: checkout.commit };
+
+  // 3b. A restart one alignment still owes retries without a fetch when the checkout stands
+  //    where that move left it and holds the verified release: the local reads alone decide the
+  //    retry, so a fleet restart that keeps being refused stops paying a fetch every cycle
+  //    (GY-490). A release the checkout does not hold falls through to the full alignment
+  //    below, which moves the checkout to the newer tip and carries the restart with it.
+  if (state.upgrade.pending?.to === checkout.commit && state.deployment?.sha
+    && await isAncestor(state.deployment.sha, checkout.commit) === true)
+    return finish(state.upgrade.pending);
 
   // 4. The base tip, from a fresh fetch.
   let to: string;
@@ -208,12 +233,8 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
   //    checkout — is refused like a dirty one, so nothing off the branch is ever moved away from.
   if (localRefusal) return refused(localRefusal, checkout.commit);
   const from = checkout.commit;
-  try { await git('merge-base', '--is-ancestor', from, `refs/remotes/origin/${config.baseBranch}`); }
-  catch (error: any) {
-    // An ancestry git cannot place is unknown, never off-branch — the release-lag report skips it
-    // the same way; a definitive no refuses the move.
-    if (error?.status === 1) return refused(`HEAD holds ${shortCommit(from)}, which ${config.baseBranch} does not contain; it is upgraded only as a clean detached checkout of ${config.baseBranch}, so a commit off the branch is never left behind`, from);
-  }
+  if (await isAncestor(from, `refs/remotes/origin/${config.baseBranch}`) === false)
+    return refused(`HEAD holds ${shortCommit(from)}, which ${config.baseBranch} does not contain; it is upgraded only as a clean detached checkout of ${config.baseBranch}, so a commit off the branch is never left behind`, from);
 
   // 7. What the move would change, then the move itself.
   //    A restart still owed for an earlier move stays owed: a docs-only move on top of a src/ one
@@ -225,10 +246,14 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
   // A diff that changes the package manifest or lockfile would restart the fleet and the loop on
   // dependencies nobody installed — the lockfile is not even loaded code. The loop runs no
   // install, so it refuses the move and lets the attention name the install, before anything is
-  // cleared: the owed restart below stays owed while the move is refused.
+  // cleared: the refusal records the restart it owes, so once the checkout stands on the tip with
+  // the dependencies installed, the alignment finishes that restart instead of calling the
+  // release aligned while the fleet and the loop still run the old loaded code.
   const manifests = changed.filter(path => path === 'package.json' || path === 'package-lock.json');
-  if (manifests.length)
+  if (manifests.length) {
+    state.upgrade.pending = { from, to, code: true };
     return refused(`the diff to ${shortCommit(to)} changes ${manifests.join(' and ')} and the loop runs no dependency install; it leaves the checkout at ${shortCommit(from)} until the checkout stands on ${config.baseBranch} with the new dependencies installed`, from);
+  }
   const owed = state.upgrade.pending?.code === true;
   if (state.upgrade.pending) { state.upgrade.pending = null; await persist(); }
   const code = owed || upgradeTouchesCode(changed);

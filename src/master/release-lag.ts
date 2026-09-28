@@ -5,13 +5,15 @@
 // used to be invisible: every component went on running the release it had loaded. This module
 // says, per component, what it loaded against the base tip, and names any component that stays
 // more than one delivery behind for over ten minutes — one delivery behind is the ordinary gap
-// between a merge and its verified deployment, and is never named. The ancestry scan is bounded:
-// what a release holds is a prefix of the merge-ordered deliveries, so each component scans from
-// the newest back and stops at the first delivery its release contains, however long the delivered
-// history is.
+// between a merge and its verified deployment, and is never named. A delivery whose merge changed
+// no code the loop or the executors load holds nothing back — the upgrade moves the checkout for
+// it and restarts nothing — so it is never counted. The ancestry scan is bounded: what a release
+// holds is a prefix of the merge-ordered deliveries, so each component scans from the newest back
+// and stops at the first delivery its release contains, however long the delivered history is.
 import { agentOwner, type AttentionItem } from './attention.js';
 import { shortCommit } from '../executor-fleet.js';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
+import { upgradeTouchesCode } from '../daemon/upgrade.js';
 
 /** How long a component may stay more than one delivery behind before it is named (GY-437). */
 export const releaseLagGraceMs = 10 * 60_000;
@@ -33,11 +35,17 @@ export async function readBaseTip(root: string, baseBranch: string, run: ChildRu
   try { return (await run('git', ['-C', root, 'rev-parse', `refs/remotes/origin/${baseBranch}^{commit}`])).trim() || null; } catch { return null; }
 }
 
+/** Whether git places `ancestor` inside `descendant`: yes, no, or unknown when git cannot answer. */
+async function isAncestor(root: string, run: ChildRun, ancestor: string, descendant: string): Promise<boolean | null> {
+  try { await run('git', ['-C', root, 'merge-base', '--is-ancestor', ancestor, descendant]); return true; }
+  catch (error: any) { return error?.status === 1 ? false : null; }
+}
+
 export interface ReleaseLagRow {
   component: string; label: string;
   release: { commit: string | null; dirty: boolean | null };
   baseTip: string | null;
-  /** Delivered items the loaded release does not contain, oldest first; ancestry git cannot place is never counted. */
+  /** Delivered items the loaded release does not contain whose merge changed loaded code, oldest first; ancestry git cannot place is never counted. */
   behind: { key: string; mergedAt: string }[];
   /** When being more than one delivery behind began: the second-oldest missing delivery's merge, or the component's start, whichever is later. */
   since: string | null;
@@ -52,25 +60,42 @@ export interface ReleaseLagReport { baseTip: string | null; components: ReleaseL
  * Per component, the release it loaded against the base tip. A delivery counts as behind when
  * git answers and answers no — a commit this checkout does not hold, or a component with no
  * readable release, reads as unknown and is never counted, so attention is raised only on what
- * is known. The scan runs from the newest delivery back: deliveries are ordered by merge, so
- * what a release holds is a prefix of them, and the first delivery git places inside the release
- * ends the scan — a component k deliveries behind costs k + 1 ancestry reads, however long the
- * delivered history is (GY-490).
+ * is known — and when its merge changed code the loop or the executors load: a docs-only merge
+ * moves the checkout and restarts nothing, so it holds no component back (GY-490). The scan runs
+ * from the newest delivery back: deliveries are ordered by merge, so what a release holds is a
+ * prefix of them, and the first delivery git places inside the release ends the scan — a
+ * component k deliveries behind costs k + 1 ancestry reads and k diffs, however long the
+ * delivered history is. Provider timestamps can tie and the snapshot holds no order within a
+ * tie, so an equal-timestamp group is placed whole before the scan may stop: a contained
+ * delivery never ends the scan ahead of a tied delivery merged after it (GY-490).
  */
 export async function releaseLag(baseTip: string | null, deliveries: readonly LagDelivery[], components: readonly LagComponent[],
   deps: { root: string; run?: ChildRun; now: number; graceMs?: number }): Promise<ReleaseLagReport> {
   const run = deps.run ?? defaultChildRun;
   const graceMs = deps.graceMs ?? releaseLagGraceMs;
   const newestFirst = [...deliveries].sort((a, b) => Date.parse(a.mergedAt) - Date.parse(b.mergedAt)).reverse();
+  /** Whether the delivery's merge changed code the loop or the executors load; a merge git cannot diff reads as code, never as docs-only. */
+  const touchesCode = async (mergeSha: string): Promise<boolean> => {
+    try {
+      const paths = (await run('git', ['-C', deps.root, 'diff', '--name-only', `${mergeSha}^..${mergeSha}`])).split('\n').map(path => path.trim()).filter(Boolean);
+      return upgradeTouchesCode(paths);
+    } catch { return true; }
+  };
   const rows = components.map(async (component): Promise<ReleaseLagRow> => {
     const commit = component.release.commit;
     const behind: LagDelivery[] = [];
-    if (commit) for (const delivery of newestFirst) {
-      const mergeSha = delivery.mergeSha.toLowerCase();
-      if (mergeSha === commit) break;
-      try { await run('git', ['-C', deps.root, 'merge-base', '--is-ancestor', mergeSha, commit]); break; }
-      catch (error: any) { if (error?.status !== 1) continue; }
-      behind.push(delivery);
+    if (commit) for (let start = 0; start < newestFirst.length;) {
+      let end = start;
+      while (end < newestFirst.length && Date.parse(newestFirst[end].mergedAt) === Date.parse(newestFirst[start].mergedAt)) end++;
+      let contained = false;
+      for (const delivery of newestFirst.slice(start, end)) {
+        const mergeSha = delivery.mergeSha.toLowerCase();
+        const placed = mergeSha === commit ? true : await isAncestor(deps.root, run, mergeSha, commit);
+        if (placed === true) { contained = true; continue; }
+        if (placed === false && await touchesCode(mergeSha)) behind.push(delivery);
+      }
+      if (contained) break;
+      start = end;
     }
     behind.reverse();
     // The count of missing deliveries reaches two when the second-oldest of them merged — later

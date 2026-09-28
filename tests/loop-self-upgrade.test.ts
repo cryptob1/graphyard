@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -63,19 +63,48 @@ class FakeGit {
   nextTip: string | null = null;
   checkoutTo: string | null = null;
   fetches = 0;
-  constructor(head: string, originTip: string) { this.head = head; this.originTip = originTip; }
+  /** The linear history the fake repository models, oldest first: merge-base answers from it, and a checkout or fetch extends it. */
+  lineage: string[];
+  /** Ancestor/descendant pairs merge-base must answer no for: modelled commits off the checkout's line. */
+  divergent: [string, string][] = [];
+  constructor(head: string, originTip: string) {
+    this.head = head; this.originTip = originTip;
+    this.lineage = head === originTip ? [head] : [head, originTip];
+  }
   run = async (command: string, args: string[]): Promise<string> => {
     assert.equal(command, 'git', `the upgrade runs git alone, asked for ${command}`);
     const rest = args.slice(2), op = rest[0], operands = rest.slice(1);
-    if (op === 'rev-parse') return `${operands[0] === 'HEAD' ? this.head : this.originTip}\n`;
+    // git resolves ref names against the checkout's refs; the fake holds two: HEAD and the base tip.
+    const resolve = (ref: string) => ref === 'HEAD' ? this.head : ref.startsWith('refs/') ? this.originTip : ref;
+    const place = (ancestor: string, descendant: string): boolean | null => {
+      if (this.divergent.some(([a, d]) => a === ancestor && d === descendant)) return false;
+      if (ancestor === descendant) return true;
+      if (!this.lineage.includes(ancestor) || !this.lineage.includes(descendant)) return null;
+      return this.lineage.indexOf(ancestor) <= this.lineage.lastIndexOf(descendant);
+    };
+    if (op === 'rev-parse') return `${resolve(operands[0])}\n`;
     if (op === 'symbolic-ref') {
       if (!this.branch) throw Object.assign(new Error('fatal: not a symbolic ref (use git branch --reason)'), { status: 1 });
       return this.branch;
     }
     if (op === 'status') return this.dirty;
-    if (op === 'fetch') { this.fetches += 1; if (this.nextTip) this.originTip = this.nextTip; return ''; }
+    if (op === 'merge-base') {
+      assert.equal(operands[0], '--is-ancestor', `the upgrade asks merge-base only as --is-ancestor: git ${rest.join(' ')}`);
+      const placed = place(resolve(operands[1]), resolve(operands[2]));
+      if (placed === true) return '';
+      throw Object.assign(new Error(placed === false ? 'is not an ancestor' : 'unknown commit'), { status: placed === false ? 1 : 128 });
+    }
+    if (op === 'fetch') {
+      this.fetches += 1;
+      if (this.nextTip) { this.originTip = this.nextTip; if (!this.lineage.includes(this.originTip)) this.lineage.push(this.originTip); }
+      return '';
+    }
     if (op === 'diff') return `${this.diffPaths.join('\n')}\n`;
-    if (op === 'checkout') { this.checkoutTo = operands[2]; this.head = operands[2]; this.branch = null; return ''; }
+    if (op === 'checkout') {
+      this.checkoutTo = operands[2]; this.head = operands[2]; this.branch = null;
+      if (!this.lineage.includes(operands[2])) this.lineage.push(operands[2]);
+      return '';
+    }
     throw new Error(`fake git cannot answer: git ${rest.join(' ')}`);
   };
 }
@@ -214,7 +243,7 @@ test('unit:loop-self-upgrade — between cycles the loop checks out the verified
     assert.equal(settled.calls.self, 1, 'then re-executes the loop');
     assert.deepEqual(busy.upgrade.pending, null);
     assert.equal(busy.upgrade.alignedRelease, busyTip);
-    assert.equal(fake.fetches, 6, 'each pass fetches the base branch it aligns with');
+    assert.equal(fake.fetches, 5, 'the retry fetched nothing: the checkout stands where the pending move left it, so the local reads alone re-decide it (GY-490)');
 
     // A restart still owed when a newer, docs-only tip arrives stays owed: the fleet still runs the
     // code the earlier src/ move replaced, so the docs-only move restarts it.
@@ -253,6 +282,43 @@ test('unit:loop-self-upgrade — between cycles the loop checks out the verified
     assert.match(unsupervised.outcome === 'failed' ? unsupervised.reason : '', /could not re-execute itself through its supervisor/);
     assert.equal(selfThrew, 1);
     assert.match([...Object.values(alone.actions)].at(-1)!.detail, /keeps running [0-9a-f]{12} until its supervisor restarts it/);
+
+    // A diff that changes the package manifest is refused — the loop runs no dependency install —
+    // and the refusal records the restart it owes: once the checkout stands on the tip with the
+    // dependencies installed, the alignment finishes that restart instead of calling the release
+    // aligned while the fleet and the loop still run the old loaded code (GY-490). While the
+    // refusal stands, the fetch backs off: the local reads alone re-establish it.
+    const manifestTip = hex('1');
+    fake.nextTip = manifestTip;
+    fake.diffPaths = ['package.json'];
+    const manifest = emptyDaemonState(master);
+    manifest.deployment = verified(manifestTip);
+    manifest.release = { commit: aloneTip, dirty: false };
+    const manifestDeps = recording(fake, checkout);
+    const refusedManifest = await performSelfUpgrade(master, manifest, manifestDeps.deps());
+    assert.equal(refusedManifest.outcome, 'refused');
+    assert.match(refusedManifest.outcome === 'refused' ? refusedManifest.reason : '', /changes package\.json and the loop runs no dependency install/);
+    assert.deepEqual(manifest.upgrade.pending, { from: aloneTip, to: manifestTip, code: true }, 'the refused move stays owed on the cursor, as a code restart');
+    assert.equal(fake.checkoutTo, aloneTip, 'the checkout was not moved');
+    assert.deepEqual(manifestDeps.calls.executors, [], 'nothing was restarted');
+    const fetchesAtRefusal = fake.fetches;
+    const reAsked = recording(fake, checkout);
+    const reRefused = await performSelfUpgrade(master, manifest, reAsked.deps());
+    assert.equal(reRefused.outcome, 'refused');
+    assert.equal(fake.fetches, fetchesAtRefusal, 'a standing manifest refusal fetches nothing while the checkout stands still');
+    // The operator recovers: the checkout moves to the tip and installs there. The next pass
+    // finishes the owed restart — still without a fetch — and the alignment completes.
+    fake.head = manifestTip;
+    const manifestDone = recording(fake, checkout);
+    const recovered = await performSelfUpgrade(master, manifest, manifestDone.deps());
+    assert.equal(recovered.outcome, 'upgraded');
+    assert.equal(fake.fetches, fetchesAtRefusal, 'the recovery pass re-decided without a fetch');
+    assert.deepEqual(manifestDone.calls.executors, [manifestTip], 'the owed restart ran: the fleet onto the installed code');
+    assert.equal(manifestDone.calls.self, 1, 'and the loop re-executed itself');
+    assert.deepEqual(manifest.upgrade.pending, null);
+    assert.equal(manifest.upgrade.alignedRelease, manifestTip);
+    assert.equal(manifest.upgrade.refused, null);
+    fake.diffPaths = [];
 
     // The wiring: runDaemon performs the upgrade between the cycle and its wait, never mid-cycle —
     // through the shipped performSelfUpgrade here. The process before it loaded the first commit
@@ -313,43 +379,57 @@ const delivered = (key: string, mergeSha: string, mergedAt: string) => ({
 
 test('unit:release-lag-visible — master status reports the release the loop and each executor loaded against the base tip, and names any component more than one delivery behind for over ten minutes', async () => {
   const { directory, master, dispose } = await fixture();
-  // The coordinator checkout is a real repository, so the shipped ancestry read answers: `base`
-  // is what the loop and one executor still run, and two deliveries were merged after it.
+  // The coordinator checkout is a real repository, so the shipped ancestry and diff reads answer:
+  // `base` is what the loop and one executor still run, two code deliveries and one docs-only
+  // delivery were merged after it, and only the code ones hold a component back (GY-490).
   const root = await repository();
   try {
     const base = git(root, 'rev-parse', 'HEAD');
-    git(root, 'commit', '-q', '--allow-empty', '-m', 'delivery one');
+    await mkdir(join(root, 'src'), { recursive: true });
+    await writeFile(join(root, 'src/one.ts'), 'one\n');
+    git(root, 'add', 'src/one.ts');
+    git(root, 'commit', '-q', '-m', 'delivery one');
     const deliveryOne = git(root, 'rev-parse', 'HEAD');
-    git(root, 'commit', '-q', '--allow-empty', '-m', 'delivery two');
+    await writeFile(join(root, 'src/two.ts'), 'two\n');
+    git(root, 'add', 'src/two.ts');
+    git(root, 'commit', '-q', '-m', 'delivery two');
     const deliveryTwo = git(root, 'rev-parse', 'HEAD');
+    await writeFile(join(root, 'README.md'), 'second\n');
+    git(root, 'add', 'README.md');
+    git(root, 'commit', '-q', '-m', 'delivery three, docs-only');
+    const deliveryDocs = git(root, 'rev-parse', 'HEAD');
     git(root, 'update-ref', 'refs/remotes/origin/main', deliveryTwo);
 
     const now = Date.now();
     const ago = (ms: number) => new Date(now - ms).toISOString();
     // The loop loaded `base` two hours ago; deliveries it misses merged an hour ago and twenty
-    // minutes ago — more than one behind, for over the grace window.
+    // minutes ago — more than one behind, for over the grace window. The docs-only delivery that
+    // merged after them holds nothing back and is never counted.
     const state = emptyDaemonState(master);
     state.release = { commit: base, dirty: false };
     state.lock = { id: 'lock', pid: process.pid, host: master.hostId, startedAt: ago(2 * hour), heartbeatAt: new Date(now).toISOString() };
     state.upgrade.refused = { at: ago(5 * minute), reason: 'tracked files differ from the commit it holds; it is upgraded only clean', commit: base };
     await writeFile(join(directory, 'coordinator.daemon.json'), JSON.stringify(state));
     // One executor is current; one runs the same stale release as the loop; one misses exactly
-    // one delivery, which is the ordinary merge-to-verification gap and is never named.
+    // one delivery, which is the ordinary merge-to-verification gap and is never named; one sits
+    // on the docs-only delivery, which changes no loaded code and is never named either.
     await writeExecutorRegistration(master, registration(master, 'exec-current', deliveryTwo, ago(30 * minute)));
     await writeExecutorRegistration(master, registration(master, 'exec-stale', base, ago(3 * hour)));
     await writeExecutorRegistration(master, registration(master, 'exec-mid', deliveryOne, ago(3 * hour)));
+    await writeExecutorRegistration(master, registration(master, 'exec-docs', deliveryDocs, ago(30 * minute)));
 
-    const masterApi = async (path: string) => path === 'work-snapshot' ? { work: [delivered('GY-1', deliveryOne, new Date(now - hour).toISOString()), delivered('GY-2', deliveryTwo, new Date(now - 20 * minute).toISOString())], now: new Date(now).toISOString() } : { decisions: [] };
+    const masterApi = async (path: string) => path === 'work-snapshot' ? { work: [delivered('GY-1', deliveryOne, new Date(now - hour).toISOString()), delivered('GY-2', deliveryTwo, new Date(now - 20 * minute).toISOString()), delivered('GY-3', deliveryDocs, new Date(now - 10 * minute).toISOString())], now: new Date(now).toISOString() } : { decisions: [] };
     const report = await masterStatusReport(root, master, masterApi, { actor: { id: 'coordinator-1' } }, { commit: base });
 
     // The report: what each component loaded, against the base tip, with what each is missing.
     assert.equal(report.releaseLag.baseTip, deliveryTwo);
     const rows = Object.fromEntries(report.releaseLag.components.map(row => [row.component, row]));
-    assert.deepEqual({ loop: rows['loop'].release.commit, current: rows['exec-current'].release.commit, stale: rows['exec-stale'].release.commit, mid: rows['exec-mid'].release.commit },
-      { loop: base, current: deliveryTwo, stale: base, mid: deliveryOne });
-    assert.deepEqual(rows['loop'].behind.map(entry => entry.key), ['GY-1', 'GY-2'], 'the loop misses both deliveries');
+    assert.deepEqual({ loop: rows['loop'].release.commit, current: rows['exec-current'].release.commit, stale: rows['exec-stale'].release.commit, mid: rows['exec-mid'].release.commit, docs: rows['exec-docs'].release.commit },
+      { loop: base, current: deliveryTwo, stale: base, mid: deliveryOne, docs: deliveryDocs });
+    assert.deepEqual(rows['loop'].behind.map(entry => entry.key), ['GY-1', 'GY-2'], 'the loop misses both code deliveries, and the docs-only one is not counted');
     assert.deepEqual(rows['exec-current'].behind, [], 'a current executor misses none');
     assert.deepEqual(rows['exec-mid'].behind.map(entry => entry.key), ['GY-2'], 'one delivery behind is the ordinary gap');
+    assert.deepEqual(rows['exec-docs'].behind, [], 'a docs-only delivery holds nothing back');
 
     // The attention: the loop and the stale executor are named; the mid one and the current one are not.
     const lagItems = report.attentionItems.filter(item => /more than one delivery behind/.test(item.text));
@@ -383,6 +463,15 @@ test('unit:release-lag-visible — master status reports the release the loop an
     assert.deepEqual(young.components[0].behind.map(entry => entry.key), ['GY-1', 'GY-2']);
     assert.equal(young.components[0].late, false, 'began nine minutes ago: not yet named');
     assert.equal(young.attention.length, 0);
+    // Equal merge timestamps carry no order: the tied group is placed whole, so a contained
+    // delivery never ends the scan ahead of a tied delivery merged after it (GY-490).
+    const tied = new Date(now).toISOString();
+    const tie = await releaseLag(deliveryOne, [
+      { key: 'GY-2', mergeSha: deliveryTwo, mergedAt: tied },
+      { key: 'GY-1', mergeSha: deliveryOne, mergedAt: tied },
+    ], [{ name: 'loop', label: 'The master loop', release: { commit: deliveryOne, dirty: false }, startedAt: null, restart: 'systemctl --user restart graphyard-master' }],
+      { root, run: real, now, graceMs: releaseLagGraceMs });
+    assert.deepEqual(tie.components[0].behind.map(entry => entry.key), ['GY-2'], 'a delivery tied with the contained one is still counted');
     const empty = await mkdtemp(join(tmpdir(), 'graphyard-loop-upgrade-empty-'));
     try {
       assert.equal(await readBaseTip(empty, 'main', real), null, 'a checkout that never fetched reads the tip as unknown');

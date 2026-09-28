@@ -63,6 +63,16 @@ const plan = {
   items: 15, releaseEveryMs: 15 * minute, workMs: 20 * minute,
   rework: new Set([3, 7, 11]), deaths: new Set([5, 9]), deathAfterMs: 8 * minute,
   deploys: [2 * hour + 30 * minute, 5 * hour], dirtyCheckout: { from: 4 * hour + 50 * minute, to: 6 * hour }, split: { at: 45 * minute, item: 12 }, clean: 2, unstable: 4, slowRecompute: 8, exhaustedReviewer: 6,
+  // GY-490: the upgrade's repeated-behaviour invariants, exercised on the same day. The fleet
+  // restart the first deploy alignment owes is refused for half an hour and must retry without a
+  // fetch; across the second deploy the checkout is dirty (as before), then on a branch, then of
+  // a cleanliness git cannot read — each refused without a further fetch — and the first tip the
+  // cleared checkout could move to changes package.json (item 13's delivery), which the loop
+  // refuses until the operator puts the checkout back on the tip with the dependencies installed.
+  execRefusal: { from: 2 * hour + 30 * minute, to: 3 * hour },
+  offBranch: { from: 6 * hour, to: 6 * hour + 20 * minute },
+  unknownClean: { from: 6 * hour + 20 * minute, to: 6 * hour + 40 * minute },
+  manifestItem: 13, manifestRecoveryAt: 7 * hour,
 };
 const file = (n: number) => `src/soak/item-${n}.ts`;
 
@@ -105,7 +115,7 @@ let days = 0;
 async function simulateDay(options: { hours: number; regression?: 'approvers-left-open'; handApprovers?: boolean }) {
   const dayStart = clock.now();
   const github = new SimulatedGitHub({ repository, baseBranch: 'main', appId: 1234, ciAppId: 15368, reviewerApps, ciMs: 5 * minute, reviewMs: 3 * minute, firstPullRequest: 100 * ++days },
-    [...Array.from({ length: plan.items }, (_, index) => file(index + 1)), 'README.md']);
+    [...Array.from({ length: plan.items }, (_, index) => file(index + 1)), 'README.md', 'package.json']);
   const herdr = new SimulatedHerdr();
   const adapter = github.adapter();
   const moveClock = async (ms: number) => { clock.advance(ms); await store.pool.query('UPDATE simulated_clock SET offset_ms=$1', [clock.offsetMs]); };
@@ -151,7 +161,8 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
         catch (error) { if (!(error instanceof Refusal)) throw error; herdr.kill(session.pane); session.state = 'dead'; lost.push(`${session.key} epoch ${session.epoch}: ${error.message}`); }
         continue;
       }
-      const pr = github.push(session.key, session.branch, principal.id, sha('head', session.key, session.epoch), [file(numberOf(session))]);
+      const pr = github.push(session.key, session.branch, principal.id, sha('head', session.key, session.epoch),
+        numberOf(session) === plan.manifestItem ? [file(numberOf(session)), 'package.json'] : [file(numberOf(session))]);
       await engine.execute(principal, 'submit', session.work, { epoch: session.epoch, pr: pr.number, documentation: 'A simulated item: it changes no documented behaviour' }, id());
       session.state = 'submitted';
       herdr.status(session.pane, 'done');
@@ -220,8 +231,14 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   // ---- The coordinator checkout the loop runs from, and its supervisor (GY-437). ----
   // A detached checkout of the base branch, at the tip the day starts on; git answers from the
   // simulated GitHub, and a restart of the fleet or of the loop itself is recorded, not performed.
-  const checkout = { head: github.tip, origin: github.tip, dirty: false };
-  const upgrades = { fetches: 0, checkouts: [] as { at: number; from: string; to: string }[], executors: [] as string[], self: 0, outcomes: [] as SelfUpgradeOutcome['outcome'][] };
+  // The GY-490 windows move it onto a branch, make its cleanliness unreadable, and refuse the
+  // fleet restart, so the guards and the backoffs repeat for real.
+  const checkout = { head: github.tip, origin: github.tip, dirty: false, branch: null as string | null, statusWorks: true };
+  const upgrades = {
+    fetches: 0, checkouts: [] as { at: number; from: string; to: string }[], executors: [] as string[], self: 0,
+    outcomes: [] as SelfUpgradeOutcome['outcome'][], outcomesDetail: [] as { outcome: SelfUpgradeOutcome['outcome']; reason: string | null; fetches: number }[],
+    execRefusals: [] as string[], recoveries: [] as number[],
+  };
   /** The paths the base branch changed between two commits: every merged pull request's files, and what any other commit added or removed. */
   const changedPaths = (from: string, to: string) => {
     const paths = new Set<string>(), seen = new Set<string>(), queue = [to];
@@ -243,17 +260,33 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   const coordinatorGit = async (command: string, args: string[]): Promise<string> => {
     assert.equal(command, 'git');
     const [op, ...operands] = args.slice(2);
+    // git resolves ref names against the checkout's refs; the simulation holds two: HEAD and the fetched base tip.
+    const resolve = (ref: string) => ref === 'HEAD' ? checkout.head : ref.startsWith('refs/') ? checkout.origin : ref;
     if (op === 'fetch') { upgrades.fetches++; checkout.origin = github.tip; return ''; }
-    if (op === 'rev-parse') return `${operands[0] === 'HEAD' ? checkout.head : checkout.origin}\n`;
-    if (op === 'symbolic-ref') throw Object.assign(new Error('fatal: ref HEAD is not a symbolic ref'), { status: 1 });
-    if (op === 'status') return checkout.dirty ? ' M src/master.ts\n' : '';
+    if (op === 'rev-parse') return `${resolve(operands[0])}\n`;
+    if (op === 'symbolic-ref') { if (checkout.branch) return checkout.branch; throw Object.assign(new Error('fatal: ref HEAD is not a symbolic ref'), { status: 1 }); }
+    if (op === 'status') { if (!checkout.statusWorks) throw new Error('fatal: unable to read the working tree'); return checkout.dirty ? ' M src/master.ts\n' : ''; }
+    if (op === 'merge-base') {
+      assert.equal(operands[0], '--is-ancestor', `the upgrade asks merge-base only as --is-ancestor: git ${args.slice(2).join(' ')}`);
+      const [ancestor, descendant] = [resolve(operands[1]), resolve(operands[2])];
+      if (github.contains(descendant, ancestor)) return '';
+      throw Object.assign(new Error(`is not an ancestor of ${descendant.slice(0, 12)}`), { status: 1 });
+    }
     if (op === 'diff') { const [from, to] = operands[1].split('..'); return `${changedPaths(from, to).join('\n')}\n`; }
     if (op === 'checkout') { assert.ok(!checkout.dirty, 'a dirty checkout is never touched'); upgrades.checkouts.push({ at: clock.now(), from: checkout.head, to: operands[2] }); checkout.head = operands[2]; return ''; }
     throw new Error(`the simulated coordinator checkout cannot answer git ${args.slice(2).join(' ')}`);
   };
   const selfUpgrade = (state: DaemonState) => performSelfUpgrade(config, state, {
     root: '/soak/coordinator', run: coordinatorGit, now: clock.now, persist: async () => {},
-    restartExecutors: async to => { upgrades.executors.push(to); return { result: 'restarted', reason: null, coordinator: { commit: to }, held: [], restarted: [], unsupervised: [], forgotten: [] }; },
+    // `elapsed` is the day clock the loop body steps: the simulated time since the day began.
+    restartExecutors: async to => {
+      const elapsed = clock.now() - dayStart;
+      if (elapsed >= plan.execRefusal.from && elapsed < plan.execRefusal.to) {
+        upgrades.execRefusals.push(to);
+        return { result: 'refused' as const, reason: 'Restart refused while an executor on soak-host holds a claimed action: exec-1 holds merge for GY-7', coordinator: { commit: to }, held: [], restarted: [], unsupervised: [], forgotten: [] };
+      }
+      upgrades.executors.push(to); return { result: 'restarted', reason: null, coordinator: { commit: to }, held: [], restarted: [], unsupervised: [], forgotten: [] };
+    },
     // The supervisor re-executes the loop: the next process loads the release the checkout holds, as runDaemon records it.
     restartSelf: async () => { upgrades.self++; state.release = { commit: checkout.head, dirty: checkout.dirty }; },
   });
@@ -261,13 +294,13 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   // ---- The day. ----
   const state = emptyDaemonState(config);
   /** The cursor's upgrade actions and the refusal's attempts, sampled every cycle the checkout stood refused. */
-  const refusalSamples: { keys: number; attempts: number }[] = [];
+  const refusalSamples: { keys: number; attempts: number; fetches: number; reason: string; pending: boolean }[] = [];
   // Session launches run beside the cycle (GY-616): the loop carries one launcher across its
   // cycles, the way `runDaemon` does, and a launch settles in the interval after the cycle that
   // handed it over — here, before the simulated clock moves on.
   const launcher = new Launcher();
   const violations: string[] = [], observed = new Set<string>(), failures: string[] = [], escalations: string[] = [], spent = new Set<string>();
-  let released = 0, split = false, deploys = 0, cycles = 0, reportedDispatches = 0;
+  let released = 0, split = false, deploys = 0, cycles = 0, reportedDispatches = 0, recovered = false;
   const jobsDue = async () => Number((await store.pool.query('SELECT count(*) AS due FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now())')).rows[0].due);
   for (let elapsed = 0; elapsed <= options.hours * hour;) {
     const now = clock.now();
@@ -312,10 +345,25 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       await launcher.idle();
       // Between cycles, as runDaemon runs it: the self-upgrade against the simulated checkout.
       checkout.dirty = elapsed >= plan.dirtyCheckout.from && elapsed < plan.dirtyCheckout.to;
+      checkout.branch = elapsed >= plan.offBranch.from && elapsed < plan.offBranch.to ? 'refs/heads/main' : null;
+      checkout.statusWorks = !(elapsed >= plan.unknownClean.from && elapsed < plan.unknownClean.to);
+      // The operator's recovery for a manifest refusal, once it is owed: fetch, put the checkout
+      // on the base tip, install the dependencies. The loop then finishes the restart it recorded.
+      if (!recovered && elapsed >= plan.manifestRecoveryAt && state.upgrade.refused && /package(-lock)?\.json/.test(state.upgrade.refused.reason)) {
+        recovered = true;
+        upgrades.recoveries.push(clock.now());
+        checkout.origin = github.tip; checkout.head = github.tip;
+      }
       const upgraded = await selfUpgrade(state);
       upgrades.outcomes.push(upgraded.outcome);
-      if (upgraded.outcome === 'failed') failures.push(`${new Date(now).toISOString()}: self-upgrade failed: ${upgraded.reason}`);
-      if (upgraded.outcome === 'refused') refusalSamples.push({ keys: Object.keys(state.actions).filter(key => key.startsWith('upgrade:')).length, attempts: state.actions['upgrade:refused']?.attempts ?? 0 });
+      upgrades.outcomesDetail.push({ outcome: upgraded.outcome, reason: 'reason' in upgraded ? upgraded.reason : null, fetches: upgrades.fetches });
+      if (process.env.SOAK_TRACE && upgraded.outcome !== 'skipped') console.error(`+${Math.round(elapsed / minute)} min upgrade ${upgraded.outcome}: ${'reason' in upgraded ? upgraded.reason : (upgraded as { to?: string }).to ?? ''}`);
+      if (upgraded.outcome === 'failed') {
+        // A refused fleet restart is the GY-490 scenario: expected inside its window (the
+        // refusals are recorded as they happen), a failure anywhere else.
+        if (!/executors were not restarted/.test(upgraded.reason)) failures.push(`${new Date(now).toISOString()}: self-upgrade failed: ${upgraded.reason}`);
+      }
+      if (upgraded.outcome === 'refused') refusalSamples.push({ keys: Object.keys(state.actions).filter(key => key.startsWith('upgrade:')).length, attempts: state.actions['upgrade:refused']?.attempts ?? 0, fetches: upgrades.fetches, reason: state.upgrade.refused?.reason ?? '', pending: !!state.upgrade.pending });
       for (const check of state.invariants.report as InvariantCheck[]) {
         if (check.observed) observed.add(check.invariant);
         if (!check.holds) violations.push(`${new Date(now).toISOString()} (+${Math.round(elapsed / minute)} min) ${check.line}`);
@@ -357,19 +405,41 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   const reviewed = final.find(item => item.key === items[plan.exhaustedReviewer - 1].key)!;
   assert.ok(reviewed.reviewFailovers?.some(failover => failover.profile === 'claude-reviewer' && failover.exhaustion === 'usage-limit' && failover.nextProfile === 'cursor-reviewer'), `the exhausted reviewer bot failed over to the next profile: ${JSON.stringify(reviewed.reviewFailovers)}`);
   assert.ok(cycles > 24 * 6, `the loop cycled through the day (${cycles} cycles)`);
-  // GY-437: the between-cycles self-upgrade ran after every cycle of the day. Each deploy aligned
-  // the checkout once, and restarted the fleet and the loop once (every merge touches src/); the
-  // dirty checkout across the second deploy was refused, untouched, without growing the cursor,
-  // and aligned once it was clean again.
+  // GY-437 + GY-490: the between-cycles self-upgrade ran after every cycle of the day. The first
+  // deploy moved the checkout and owed the fleet and the loop their restart: the refused window
+  // held that restart up, retried every cycle without a fetch, and finished once the window
+  // closed. Across the second deploy the checkout stood dirty, then on a branch, then of a
+  // cleanliness git could not read: refused each time, untouched, without a further fetch or a
+  // growing cursor. The first tip the cleared checkout could move to changes package.json: the
+  // move was refused with the restart it owes recorded on the cursor, until the operator put the
+  // checkout back on the tip installed — the loop then finished the owed restart and stood
+  // aligned with the last deployed release.
   const summary = `${upgrades.checkouts.map(entry => `+${Math.round((entry.at - dayStart) / minute)} min ${entry.from.slice(0, 7)}..${entry.to.slice(0, 7)}`).join(', ')}`;
   assert.equal(upgrades.outcomes.length, cycles, 'the self-upgrade ran between every cycle');
-  assert.equal(upgrades.checkouts.length, production.deploys.length, `one alignment per deploy: ${summary}`);
-  assert.equal(upgrades.executors.length, production.deploys.length, 'one fleet restart per deploy');
-  assert.equal(upgrades.self, production.deploys.length, 'one re-execution of the loop per deploy');
-  assert.deepEqual(upgrades.executors, upgrades.checkouts.map(entry => entry.to), 'the fleet restarts against the tip the checkout moved to');
-  assert.ok(upgrades.checkouts[1].at >= dayStart + plan.dirtyCheckout.to, `the second deploy aligned only once the checkout was clean: ${summary}`);
-  assert.ok(refusalSamples.length >= 3, `the dirty checkout stood refused across the second deploy (${refusalSamples.length} cycles)`);
-  assert.deepEqual(new Set(refusalSamples.map(sample => JSON.stringify(sample))).size, 1, `a standing refusal does not grow the cursor's actions: ${JSON.stringify(refusalSamples.slice(0, 3))}`);
+  assert.equal(upgrades.checkouts.length, 1, `the loop itself moved the checkout once: the second deploy's move was manifest-refused and the operator recovered it: ${summary}`);
+  assert.ok(upgrades.checkouts[0].at >= dayStart + plan.deploys[0] && upgrades.checkouts[0].at < dayStart + plan.dirtyCheckout.from, `the one move aligned the first deploy, before the checkout went dirty: ${summary}`);
+  assert.ok(upgrades.execRefusals.length >= 5, `the fleet restart was refused across the window (${upgrades.execRefusals.length} refusals, ${upgrades.executors.length + upgrades.execRefusals.length} attempts)`);
+  assert.ok(upgrades.execRefusals.every(to => to === upgrades.checkouts[0].to), 'every refused restart was still pointed at the tip the checkout moved to');
+  const retryFetches = new Set(upgrades.outcomesDetail.filter(entry => entry.outcome === 'failed' && /executors were not restarted/.test(entry.reason!)).map(entry => entry.fetches));
+  assert.deepEqual([...retryFetches], [1], 'every refused-restart retry re-decided without a fetch: one fetch bought the whole window');
+  assert.equal(upgrades.executors.length, 2, `one fleet restart for the first deploy's alignment and one for the recovery: ${upgrades.executors.join(', ')}`);
+  assert.equal(upgrades.executors[0], upgrades.checkouts[0].to, 'the fleet restart followed the checkout move');
+  assert.equal(upgrades.executors[1], checkout.head, 'the recovery restart ran against the tip the checkout was recovered to');
+  assert.equal(upgrades.self, 2, 'one re-execution per finished restart: the deploy alignment and the recovery');
+  // The day's whole fetch bill: one per alignment attempt that got past the guards — the first
+  // deploy, the second deploy's dirty entry, the manifest entry after the checkout cleared — and
+  // at most the manifest backoff's refetches before the recovery. No refusal episode, retry or
+  // suppressed pass fetches on its own.
+  assert.ok(upgrades.fetches <= 5, `the day fetched origin ${upgrades.fetches} times: ${JSON.stringify(upgrades.outcomesDetail.map(entry => `${entry.outcome}@${entry.fetches}`))}`);
+  assert.ok(refusalSamples.length >= 3, `the checkout stood refused across the second deploy (${refusalSamples.length} cycles)`);
+  assert.ok(refusalSamples.some(sample => /tracked files differ/.test(sample.reason)), 'a dirty checkout was refused');
+  assert.ok(refusalSamples.some(sample => /instead of standing detached/.test(sample.reason)), 'a checkout on a branch was refused');
+  assert.ok(refusalSamples.some(sample => /could not be read/.test(sample.reason)), 'a checkout of unknown cleanliness was refused');
+  const manifestSamples = refusalSamples.filter(sample => /package\.json/.test(sample.reason));
+  assert.ok(manifestSamples.length >= 1 && manifestSamples.every(sample => sample.pending), 'the manifest refusal recorded the restart it owes');
+  assert.ok(refusalSamples.filter(sample => sample.attempts <= 3).every(sample => sample.fetches === 2), `the dirty, branch and unknown-cleanliness refusals fetched once and never again: ${JSON.stringify(refusalSamples.map(sample => ({ attempts: sample.attempts, fetches: sample.fetches })))}`);
+  assert.ok(refusalSamples.every(sample => sample.keys <= plan.deploys.length + 1), `a standing refusal does not grow the cursor's actions: ${JSON.stringify(refusalSamples.map(sample => ({ keys: sample.keys, attempts: sample.attempts })))}`);
+  assert.equal(upgrades.recoveries.length, 1, 'the operator recovered the manifest refusal once');
   assert.equal(state.upgrade.refused, null, 'the refusal cleared with the alignment');
   assert.equal(state.upgrade.alignedRelease, production.deploys[1].sha, 'the loop stands aligned with the last deployed release');
   assert.equal(state.release?.commit, checkout.head, 'the re-executed loop reports the release the checkout holds');
