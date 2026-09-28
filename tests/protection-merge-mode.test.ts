@@ -21,10 +21,15 @@ const queueRules = [{ type: 'merge_queue', parameters: {} }, { type: 'required_s
 
 /** A fake `gh` for the master's protection: one repository, its branch rules, and every write it receives. */
 function github(owner: 'User' | 'Organization', options: { allowAutoMerge?: boolean; refuseQueue?: boolean } = {}) {
-  const state = { allowAutoMerge: options.allowAutoMerge ?? false, rules: [] as unknown[], writes: [] as string[][] };
+  const state = { allowAutoMerge: options.allowAutoMerge ?? false, queueRefused: false, rules: [] as unknown[], writes: [] as string[][] };
   const run = (_command: string, args: string[], input?: string) => {
     const path = args.find(arg => arg.startsWith('repos/'))!;
     if (args.includes('PATCH') && path === `repos/${config.repository}`) { state.writes.push(args); state.allowAutoMerge = args.includes('allow_auto_merge=true'); return '{}'; }
+    if (path.startsWith(`repos/${config.repository}/actions/variables`)) {
+      if (args.includes('POST') || args.includes('PATCH')) { state.writes.push(args); state.queueRefused = true; return '{}'; }
+      if (state.queueRefused) return '{}';
+      throw Object.assign(new Error(`Command failed: gh ${args.join(' ')}`), { stderr: 'gh: Not Found (HTTP 404)' });
+    }
     if (path.startsWith(`repos/${config.repository}/rulesets`) && (args.includes('POST') || args.includes('PUT'))) {
       state.writes.push(args);
       if (options.refuseQueue) throw Object.assign(new Error(`Command failed: gh ${args.join(' ')}`), { stderr: 'gh: Validation Failed (HTTP 422)' });
@@ -87,13 +92,17 @@ test('unit:protection-auto-merge-mode — a user-owned repository plans auto-mer
 
 /** A fake install-time `gh`: branch protection, rules, and the repository document. */
 function installGh(owner: 'User' | 'Organization', options: { protectedBranch?: boolean } = {}) {
-  const state = { allowAutoMerge: false, protectedBranch: options.protectedBranch ?? true, calls: [] as string[][] };
+  const state = { allowAutoMerge: false, queueRefused: false, protectedBranch: options.protectedBranch ?? true, calls: [] as string[][] };
   const gh: GitHubCli = async (args) => {
     state.calls.push(args);
     const path = args.find(arg => arg.startsWith('repos/'))!;
     const ok = (value: unknown) => ({ stdout: JSON.stringify(value), stderr: '', code: 0 });
     if (args.includes('PATCH') && path === 'repos/owner/project') { state.allowAutoMerge = args.includes('allow_auto_merge=true'); return ok({}); }
     if (args.includes('PUT') && path.endsWith('/protection')) { state.protectedBranch = true; return ok({}); }
+    if (path.startsWith('repos/owner/project/actions/variables')) {
+      if (args.includes('POST') || args.includes('PATCH')) { state.queueRefused = true; return ok({}); }
+      return state.queueRefused ? ok({}) : { stdout: '', stderr: 'gh: Not Found (HTTP 404)', code: 1 };
+    }
     if (path.startsWith('repos/owner/project/rulesets')) return args.includes('POST') ? { stdout: '', stderr: 'HTTP 422', code: 1 } : ok([]);
     if (path.startsWith('repos/owner/project/rules/branches/')) return ok([]);
     // GitHub answers 404 for the protection of a branch that has none, the state of a fresh repository.

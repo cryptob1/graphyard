@@ -1,6 +1,6 @@
 import { createSign } from 'node:crypto';
 import type { Transport } from './transport.js';
-import { enableAutoMergeArgs, mergeMode, mergeQueueRuleset, mergeQueueRulesetName, mergeQueueState, queueRulesetRefused, repositoryMergeSettings, type RepositoryMergeSettings } from '../protection.js';
+import { enableAutoMergeArgs, mergeMode, mergeQueueRuleset, mergeQueueRulesetName, mergeQueueState, notFound, queueRefusalVariable, queueRulesetRefused, readQueueRefusalArgs, recordQueueRefusalArgs, repositoryMergeSettings, type RepositoryMergeSettings } from '../protection.js';
 
 export const CHECK_NAME = 'Graphyard / merge';
 export const VERIFICATION_CHECK = 'Graphyard / install verification';
@@ -121,7 +121,8 @@ export async function readProtection(gh: GitHubCli, repository: string, branch: 
  * How GitHub merges on the branch, read whether or not it is protected yet: its merge queue
  * (GY-258) lives in the branch's rules, and a repository without one merges through auto-merge
  * instead (GY-310) — a user-owned repository, or an organization-owned one whose queue ruleset
- * GitHub refused with 422, recorded persistently by the fallback's allow_auto_merge (GY-350).
+ * GitHub refused with 422, recorded persistently by the fallback's refusal marker and
+ * allow_auto_merge (GY-350, GY-459).
  * Answers what `mergeQueueSatisfied` and `installMergeMode` read.
  */
 export async function readMergeFacts(gh: GitHubCli, repository: string, branch: string) {
@@ -129,8 +130,19 @@ export async function readMergeFacts(gh: GitHubCli, repository: string, branch: 
 }
 async function attachMergeFacts<T extends object>(gh: GitHubCli, repository: string, branch: string, target: T) {
   Object.defineProperty(target, installBranchRules, { value: await ghJson(gh, ['api', `repos/${repository}/rules/branches/${branch}`], null), enumerable: false });
-  Object.defineProperty(target, installRepositoryMerge, { value: repositoryMergeSettings(await ghJson(gh, ['api', `repos/${repository}`], null)), enumerable: false });
+  Object.defineProperty(target, installRepositoryMerge, { value: repositoryMergeSettings(await ghJson(gh, ['api', `repos/${repository}`], null), await readQueueRefusal(gh, repository)), enumerable: false });
   return target;
+}
+/** Whether the repository carries Graphyard's queue-refusal marker (GY-459): null when GitHub did not say either way. */
+async function readQueueRefusal(gh: GitHubCli, repository: string): Promise<boolean | null> {
+  const result = await gh(readQueueRefusalArgs(repository), { allowFailure: true });
+  return result.code === 0 ? true : notFound(`${result.stderr}\n${result.stdout}`) ? false : null;
+}
+/** Record GitHub's refusal of the queue ruleset in the repository, so no re-run retries it (GY-459). */
+async function recordQueueRefusal(gh: GitHubCli, repository: string) {
+  if ((await gh(recordQueueRefusalArgs(repository), { allowFailure: true })).code === 0) return;
+  const result = await gh(recordQueueRefusalArgs(repository, true), { allowFailure: true });
+  if (result.code !== 0) throw new Error(`GitHub refused the merge queue on ${repository}, but the refusal could not be recorded as the ${queueRefusalVariable} repository variable; confirm the account administers it`);
 }
 const installBranchRules = Symbol.for('graphyard.install.branchRules');
 const installRepositoryMerge = Symbol.for('graphyard.install.repositoryMerge');
@@ -252,7 +264,10 @@ export async function applyProtection(gh: GitHubCli, inputs: ProtectionInputs) {
   const merge = current ?? await readMergeFacts(gh, inputs.repository, inputs.branch);
   if (mergeQueueSatisfied(merge, inputs.graphyardAppId) === false) {
     if (installMergeMode(merge) === 'auto-merge') await enableAutoMerge(gh, inputs.repository);
-    else if (inputs.graphyardAppId && !await applyMergeQueue(gh, inputs.repository, inputs.branch, inputs.graphyardAppId)) await enableAutoMerge(gh, inputs.repository);
+    else if (inputs.graphyardAppId && !await applyMergeQueue(gh, inputs.repository, inputs.branch, inputs.graphyardAppId)) {
+      await recordQueueRefusal(gh, inputs.repository);
+      await enableAutoMerge(gh, inputs.repository);
+    }
   }
   return payload;
 }

@@ -14,7 +14,7 @@ The control-plane App holds (`src/github-permissions.ts`):
 | Issues | Read | receive `issue_comment` webhooks carrying review results (comment webhooks) |
 | Metadata | Read | read the managed repository (repository access) |
 | Pull requests | Read and write | read pull requests and reviews (pull request observation); post review request comments (review dispatch) |
-A reviewer App is never granted Contents: write, Checks, or Administration; worker identities are not Apps at all. It holds:
+A reviewer App is never granted Contents: write, Checks, or Administration; worker identities are not Apps. It holds:
 
 | Permission | Access | Needed to |
 | --- | --- | --- |
@@ -31,7 +31,7 @@ Grants are rechecked every five minutes and on 403s; a shortfall (`appPermission
 
 ## Require the check
 
-On the base branch require `Graphyard / merge` from this App, `strict` **off**, admin-enforced, no force pushes or deletion, workers without bypass ([repair lane](master-agent.md#repair-lane)); `master browser protection` reconciles it.
+On the base branch require `Graphyard / merge` from this App, `strict` **off**, admin-enforced, no force pushes or deletion, workers without bypass ([repair lane](master-agent.md#repair-lane)); `master browser protection` reconciles it. A refused queue is recorded as the repository variable `GRAPHYARD_MERGE_QUEUE_REFUSED`; an organization's own auto-merge still gets one queue attempt.
 
 The gate requires `GITHUB_CI_APP_IDS` CI checks, current-head approval, trusted passing evidence, a mergeable non-draft PR and the queue head or the [optimistic lane](#optimistic-merges). Unknown mergeability is re-read 3 times in 10 s, then refused.
 
@@ -39,7 +39,7 @@ The gate requires `GITHUB_CI_APP_IDS` CI checks, current-head approval, trusted 
 
 A failed required check reruns once on the unchanged head before rework or ejection. Gate and rework decisions take the newest check-run ID from configured CI Apps, ignoring other Apps' same-named checks. Master status shows pending reruns and outcomes outside the queue. An owed or accepted rerun expires after 15 minutes without a new run; a running check finishes. The App needs Actions: write — preflight diagnoses a missing grant and rerun requests hold until accepted.
 
-Once gated, the candidate's speculative tip, pushed onto the candidate branch and `refs/graphyard/queue/KEY`, binds every check, review and proof. A failed check, requested changes, a revoked proof, a conflict or rework ejects it to the back. One conflicting only with entries ahead of it re-enters unchanged once one lands or leaves. The App passes the check for an authorized head and merge group and asks GitHub to merge (queue, auto-merge or direct); protection decides; withdrawal dequeues. Without a queue, `CLEAN`, `UNSTABLE` and `HAS_HOOKS` PRs merge at once, head-bound.
+Once gated, the candidate's speculative tip binds every check, review and proof. A failed check, requested changes, a revoked proof, a conflict or rework ejects it to the back. One conflicting only with entries ahead re-enters unchanged once one lands or leaves. The App passes the check for an authorized head and merge group and asks GitHub to merge (queue, auto-merge or direct); protection decides; withdrawal dequeues. Without a queue, `CLEAN`, `UNSTABLE` and `HAS_HOOKS` PRs merge at once, head-bound.
 
 ### Bindings and carry
 
@@ -47,13 +47,13 @@ Reviews and proofs bind one head, base and policy revision. The queue tip merges
 
 ### Parallel tips
 
-`mergeQueue.parallelTips` (master config, default 4, published via `POST /api/merge-queue`) stacked tips test at once; entries merge in order once every tip through theirs passes. Each publication wakes successors, re-reading in-flight verdicts. After any configured failed-check rerun, a failing tip ejects its entry once those ahead pass; later tips rebuild. `master status` and Merge step list them.
+`mergeQueue.parallelTips` (master config, default 4, via `POST /api/merge-queue`) stacked tips test at once; entries merge in order once every tip through theirs passes. Each publication wakes successors, re-reading in-flight verdicts. After any configured failed-check rerun, a failing tip ejects its entry once those ahead pass; later tips rebuild. `master status` and Merge step list them.
 
-Above one, each entry validates on its own tip: defaults mean four tips at once — one CI duration covers four positions, costing concurrent CI and a discarded suffix on failure; `parallelTips: 1` restores batching; `batchSize` still widens observation and wake depth.
+Above one, each entry validates on its own tip: defaults mean four tips at once, costing concurrent CI and a discarded suffix on failure; `parallelTips: 1` restores batching; `batchSize` still widens observation and wake depth.
 
 ### Optimistic merges
 
-`mergeQueue.optimistic` (default on, independent of `mergeQueue.rerunFailedChecks`): a green entry disjoint from base changes and shared infrastructure lands head-bound, unqueued; a main guard [reverts](master-agent.md#repair-lane) and reopens culprits (`master status`: `optimisticMerge`). Each repository's shared infrastructure is the master config's `mergeQueue.optimisticExclude` globs — onboarding writes product defaults (manifests and lockfiles, CI config, test helpers, schema and migration directories) — so a change to an excluded path never merges optimistically, nor anything whose base changed one since its run; `optimistic: false` turns the lane off.
+`mergeQueue.optimistic` (default on, independent of `mergeQueue.rerunFailedChecks`): a green entry disjoint from base changes and shared infrastructure lands head-bound, unqueued; a main guard [reverts](master-agent.md#repair-lane) and reopens culprits (`master status`: `optimisticMerge`). Each repository's shared infrastructure is the master config's `mergeQueue.optimisticExclude` globs — onboarding writes product defaults (manifests, lockfiles, CI config, test helpers, schema and migration directories) — so a change to an excluded path never merges optimistically, nor anything whose base changed one since its run; `optimistic: false` turns the lane off.
 
 ### Proofs in CI
 
