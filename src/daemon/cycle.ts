@@ -161,11 +161,24 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
     try { await body(sink); }
     catch (error) {
       const failed = `isolated:${kind}:${item?.id ?? key}`;
+      const why = `The ${kind} launch for ${item?.key ?? key} threw, so only that launch failed: ${message(error)}`;
       try {
         sink.push(await record(state, failed, { kind, work: item?.key ?? null, principal: null, state: 'failed', epoch: item?.epoch ?? null,
-          detail: `The ${kind} launch for ${item?.key ?? key} threw, so only that launch failed: ${message(error)}`,
+          detail: why,
           attempts: (state.actions[failed]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
       } catch { /* a cursor that cannot be written is the next cycle's failure */ }
+      // The launch's own `started` entry is what holds the cycle off the same work until it settles,
+      // and a body that threw after recording it, before settling it itself, left it started until a
+      // restart reconciled it (GY-714). It is settled failed here for the same throw, so the cursor
+      // is truthful now and the gates that read the key see a failure they can retry.
+      const started = state.actions[key];
+      if (started?.state === 'started') {
+        try {
+          sink.push(await record(state, key, { kind: started.kind, work: started.work, principal: started.principal, epoch: started.epoch, state: 'failed',
+            detail: `${why} Its own started entry is settled failed for that throw, so no restart is needed to reconcile it`,
+            attempts: started.attempts, cycle: state.cycle }, now(), effects.persist));
+        } catch { /* a cursor that cannot be written is the next cycle's failure */ }
+      }
     }
   });
   const cycle: Cycle = { config, state, effects, now, snapshot, clock, clockOffset, performed, isolate, agents, credentials, open, owns, heldBy, timings, launcher, launch, detached: !settle, exhaustedProofs };
