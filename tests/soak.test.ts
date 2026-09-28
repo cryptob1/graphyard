@@ -102,7 +102,7 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
  * effects, standing for a change that breaks an invariant, so the soak shows it would fail.
  */
 let days = 0;
-async function simulateDay(options: { hours: number; regression?: 'approvers-left-open'; handApprovers?: boolean }) {
+async function simulateDay(options: { hours: number; regression?: 'approvers-left-open'; handApprovers?: boolean; refuseReworkOf?: number[] }) {
   const dayStart = clock.now();
   const github = new SimulatedGitHub({ repository, baseBranch: 'main', appId: 1234, ciAppId: 15368, reviewerApps, ciMs: 5 * minute, reviewMs: 3 * minute, firstPullRequest: 100 * ++days },
     [...Array.from({ length: plan.items }, (_, index) => file(index + 1)), 'README.md']);
@@ -160,6 +160,10 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
 
   // ---- Approvers and producers: sessions the loop launches, each acting on the minute after. ----
   const pending: (() => Promise<void>)[] = [];
+  // GY-475: the scenario's refusals and every request the loop sent, so the day can be judged on
+  // what its first request after the loss of the loop's own cursor already cited.
+  const refused: { key: string; decision: string }[] = [];
+  const decideCalls: { key: string; action: string; reason: string; input: unknown }[] = [];
   // GY-551: decisions a master requested and put to an approver by hand (`master approver`), whose
   // sessions all end without judging: the first vanishes or stops, each relaunch the loop makes
   // stops `done`, and one relaunch is refused by a registry timeout.
@@ -174,7 +178,17 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       return { agentName, pane };
     }
     const agentName = approverSessionName(work, decision), pane = herdr.open(agentName);
-    pending.push(async () => { await api(principals.approver, 'POST', `work/${work.id}/approve`, { decision, reason: `Approved: the loop's routine ${decision} decision for ${work.key} rests on what it verified` }); herdr.status(pane, 'done'); });
+    pending.push(async () => {
+      const refuseDue = !!options.refuseReworkOf?.includes(numberOf(work)) && !refused.some(entry => entry.key === work.key)
+        && (await api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(work.id)}/decisions`)).decisions.some((entry: { id: string; action: string }) => entry.id === decision && entry.action === 'rework');
+      if (refuseDue) {
+        await api(principals.approver, 'POST', `work/${work.id}/approve`, { action: 'refuse', decision, reason: `Refused: ${work.key}'s rework rests on grounds this approver does not accept` });
+        refused.push({ key: work.key, decision });
+      } else {
+        await api(principals.approver, 'POST', `work/${work.id}/approve`, { decision, reason: `Approved: the loop's routine ${decision} decision for ${work.key} rests on what it verified` });
+      }
+      herdr.status(pane, 'done');
+    });
     return { agentName, pane };
   };
   const requestProof: DaemonEffects['requestProof'] = work => {
@@ -204,7 +218,11 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     credentials: async profiles => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])),
     snapshot, dispatch, requestProof, approver, merge,
     closeSession: pane => { if (options.regression === 'approvers-left-open' && /approver/.test(herdr.agents.get(pane)?.name ?? '')) return; herdr.close(pane); },
-    decide: (work, action, reason, input = {}) => api(principals.operatorAgent, 'POST', `work/${work.id}/decide`, { action, input: decisionInput(action, work, input), reason }),
+    decide: (work, action, reason, input = {}) => {
+      const bound = decisionInput(action, work, input);
+      decideCalls.push({ key: work.key, action, reason, input: bound });
+      return api(principals.operatorAgent, 'POST', `work/${work.id}/decide`, { action, input: bound, reason });
+    },
     decisions: work => api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(work.id)}/decisions`),
     withdraw: (work, decision, reason) => api(principals.operatorAgent, 'POST', `work/${work.id}/decide`, { action: 'withdraw', decision, reason }),
     baseSuccessions: async since => ({ tip: github.tip, successions: github.successions.filter(entry => github.commits.get(entry.commit)!.at >= Date.parse(since)), files: new Set(github.files) }),
@@ -259,7 +277,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   });
 
   // ---- The day. ----
-  const state = emptyDaemonState(config);
+  let state = emptyDaemonState(config);
   /** The cursor's upgrade actions and the refusal's attempts, sampled every cycle the checkout stood refused. */
   const refusalSamples: { keys: number; attempts: number }[] = [];
   // Session launches run beside the cycle (GY-616): the loop carries one launcher across its
@@ -267,7 +285,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   // handed it over — here, before the simulated clock moves on.
   const launcher = new Launcher();
   const violations: string[] = [], observed = new Set<string>(), failures: string[] = [], escalations: string[] = [], spent = new Set<string>();
-  let released = 0, split = false, deploys = 0, cycles = 0, reportedDispatches = 0;
+  let released = 0, split = false, deploys = 0, cycles = 0, reportedDispatches = 0, restarted = false;
   const jobsDue = async () => Number((await store.pool.query('SELECT count(*) AS due FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now())')).rows[0].due);
   for (let elapsed = 0; elapsed <= options.hours * hour;) {
     const now = clock.now();
@@ -288,6 +306,18 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       const pane = herdr.open(approverSessionName(current, decision.id));
       // Each ends a minute after the loop first lists it.
       pending.push(async () => { pending.push(async () => { if (ending === 'vanishes') herdr.kill(pane); else herdr.status(pane, 'done'); }); });
+    }
+    // GY-475: once the loop has settled the scenario's refused rework decisions (each approver
+    // session closed, its refusal escalated and never re-requested), the daemon restarts: the
+    // fresh cursor holds no watch, and the items still call for the same decisions — same head,
+    // base and grounds binding. The fresh loop's first request for each must already cite its
+    // refusal: the ledger keeps the refused inputs as jsonb, whose key order is not the loop's,
+    // so the scan matches only in canonical form, and an uncited request would cost a refused
+    // round-trip and one of the three bounded refusal answers.
+    if (options.refuseReworkOf?.length && !restarted && refused.length === options.refuseReworkOf.length
+      && refused.every(entry => state.actions[`escalation:decision-refused:${entry.decision}`]?.state === 'done')) {
+      state = emptyDaemonState(config);
+      restarted = true;
     }
     const deploying = deploys < plan.deploys.length && elapsed >= plan.deploys[deploys];
     if (deploying) { production.build = sha('build', ++deploys); production.sha = github.tip; production.deploys.push({ at: now, build: production.build, sha: production.sha }); }
@@ -327,7 +357,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   }
 
   const final = (await store.list()).filter(item => items.some(entry => entry.id === item.id));
-  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, herdr, hand, escalations, spent, upgrades, refusalSamples, checkout };
+  return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, herdr, hand, escalations, spent, upgrades, refusalSamples, checkout, refused, decideCalls, restarted };
 }
 
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 180_000 }, async () => {
@@ -406,4 +436,44 @@ test('unit:soak-invariants-hold — a loop change that breaks an invariant fails
   assert.ok(violations.every(line => /lingering-sessions/.test(line)), `nothing else is violated: ${violations.filter(line => !/lingering-sessions/.test(line)).slice(0, 3).join('\n')}`);
   // The violation is a fault of its class on the loop's record, which files one item when it recurs.
   assert.equal(state.faults.instances.filter(instance => instance.kind === 'invariant:lingering-sessions' && instance.faultClass === 'session-liveness').length, 1);
+});
+
+test('unit:soak-invariants-hold — after a restart the first request for a refused rework decision already cites the refusal the binding names, and no request is refused', { timeout: 900_000 }, async () => {
+  // GY-475: the approver refuses the rework decision items 3 and 7 call for; the loop settles the
+  // watch, escalates the refusal and never re-requests it. A restart then loses the cursor while
+  // both items still call for the same decision — same head, base and grounds binding. The ledger
+  // keeps the refused inputs as jsonb, whose key order is not the loop's, so the fresh loop's
+  // up-front scan matches them only in canonical form: each item's next request already cites its
+  // refusal and is accepted on the first attempt, where a scan blind to the binding would send an
+  // uncited request, take the 409 the server answers it with, and spend one of the three bounded
+  // refusal answers per item.
+  const { final, violations, observed, failures, lost, escalations, herdr, refused, decideCalls, restarted, state } = await simulateDay({ hours: 6, refuseReworkOf: [3, 7] });
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}`), [], 'all fifteen items are delivered');
+  assert.deepEqual(violations, [], 'every system invariant holds across the refusals, the restart and the cited re-requests');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.deepEqual(lost, [], 'no worker lost its lease');
+  assert.deepEqual([...observed].sort(), [...systemInvariants].sort(), 'every invariant was observed, not merely left unread');
+  assert.ok(restarted, 'the day included the scenario restart');
+  assert.equal(refused.length, 2, 'both scenario refusals were judged');
+  assert.equal(final.reduce((total, item) => total + (item.pipeline?.reworkRounds ?? 0), 0), plan.rework.size, 'the refusals added no rework rounds');
+  for (const { key, decision } of refused) {
+    const item = final.find(entry => entry.key === key)!;
+    const history = (await api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(item.id)}/decisions`)).decisions as { id: string; action: string; state: string; input: any }[];
+    const reworks = history.filter(entry => entry.action === 'rework');
+    assert.equal(reworks.length, 2, `${key}: bounded requests — exactly the refused and the cited rework decisions`);
+    assert.equal(reworks[0].id, decision, `${key}: the refused rework decision was the first`);
+    assert.equal(reworks[0].state, 'refused');
+    assert.equal(reworks[1].state, 'applied', `${key}: the cited re-request was applied and carried the round`);
+    const calls = decideCalls.filter(call => call.key === key && call.action === 'rework');
+    assert.equal(calls.length, 2, `${key}: each request was sent once — the re-request took no refused round-trip`);
+    assert.ok(!calls[0].reason.includes(decision), `${key}: the refused request could cite nothing`);
+    assert.ok(calls[1].reason.includes(decision), `${key}: the first request after the restart cites the refusal in its reason`);
+    // The ledger kept the refused input as jsonb, whose key order is not the one the request
+    // builds, so the fresh scan only matched it in canonical form — which this proves ran.
+    assert.notEqual(JSON.stringify(reworks[0].input), JSON.stringify(calls[1].input), `${key}: jsonb kept the refused input in another key order than the request builds`);
+    assert.deepEqual(calls[1].input, reworks[0].input, `${key}: the cited request carries the refused request's exact input`);
+    assert.ok(escalations.some(detail => detail.includes(decision) && /does not request it again/.test(detail)), `${key}: the refusal was escalated, not re-requested, while it stood`);
+    assert.ok(!Object.values(state.approvals).some(watch => watch.work === key), `${key}: no watch is left open on the item`);
+  }
+  assert.ok(![...herdr.agents.values()].some(agent => /approver/i.test(agent.name ?? '')), 'no approver session is left open at the end of the day');
 });
