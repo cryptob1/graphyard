@@ -506,9 +506,14 @@ test('unit:registry-visibility — master status and the dashboard show each acc
 // ---------------------------------------------------------------------------
 // AC-5 — setup discovers the host and proposes a registry (the onboarding review is manual:registry-onboarding-review)
 // ---------------------------------------------------------------------------
-test('integration:registry-setup-proposal — setup discovers the logged-in CLIs and their accounts, proposes a registry, and a new installation reaches a working fleet with no hand-written profile; the onboarding guide adds a runtime, an account and a role in that order', async () => {
+test('integration:registry-setup-proposal — setup discovers the logged-in CLIs and their accounts, proposes a registry, and a new installation reaches a working fleet with no hand-written profile; the onboarding guide adds a runtime, an account and a role in that order', async t => {
   await reset();
   const directory = await temporaryDirectory('environments', scratch), home = await temporaryDirectory('home', scratch);
+  // opencode keeps its login under XDG_DATA_HOME, which a host may set outside `home`; pin it to
+  // the isolated home so discovery sees only the logins this test created.
+  const hostDataHome = process.env.XDG_DATA_HOME;
+  t.after(() => { if (hostDataHome === undefined) delete process.env.XDG_DATA_HOME; else process.env.XDG_DATA_HOME = hostDataHome; });
+  process.env.XDG_DATA_HOME = join(home, '.local/share');
   const isolated = await login(directory, 'claude-b', 'claude'); await login(directory, 'claude-c', null); const codexHome = await login(directory, 'codex-a', 'codex');
   await login(home, '.claude', 'claude');
   const logins = await discoverHostLogins({ directory, home, executables: name => name === 'muse' });

@@ -290,7 +290,7 @@ test('integration:pi-narrow-roles the headless approver\'s prompt names only its
 });
 
 test('integration:pi-narrow-roles the approver clone detaches at the candidate head and refuses a head the repository cannot supply (GY-564)', async () => {
-  const scratch = await realpath(await mkdtemp(join(tmpdir(), 'graphyard-approver-clone-')));
+  const scratch = await realpath(await temporaryDirectory('approver-clone'));
   try {
     const origin = join(scratch, 'repository');
     await mkdir(origin);

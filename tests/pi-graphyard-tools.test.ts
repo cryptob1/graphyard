@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, symlink } from 'node:fs/promises';
+import { mkdir, readFile, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import graphyard, { guardCommand, mktempDirectories, mktempOptions, systemPromptSection, type ExtensionApi, type ToolDefinition } from '../integrations/pi/index.js';
@@ -186,7 +186,7 @@ test('unit:pi-destructive-guard the tool-call guard refuses rm on a statically u
         assert.deepEqual(mktempDirectories(command, `${listed}\n`), [listed], command);
       // A --tmpdir template may carry slashes: mktemp creates only its final component, so the line
       // counts when it is under the named parent at any depth (GY-564 review).
-      const nested = await mkdtemp(join(dirname(listed), 'existing-'));
+      const nested = await temporaryDirectory('existing', dirname(listed));
       const created = join(nested, 'run.abc123');
       try {
         await mkdir(created, { recursive: true });
