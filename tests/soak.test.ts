@@ -128,7 +128,11 @@ const plan = {
   // recurring item and the diagnostician diagnoses it (GY-439).
   heldJob: { at: [40, 80, 120].map(offset => offset * minute), forMs: 2 * minute },
   // GY-544: scope asked and answered between two cycles, and a live pane Herdr misreads for one cycle.
-  scoped: new Set([1, 10, 13]), scopeAfterMs: 6 * minute, misread: new Set([1, 10]), misreadAfterMs: 4 * minute,
+  // The scope overlay cannot ride item ten: an applied scope decision binds the approval baseline to
+  // the attempt's first pull request (the requirement-review reset), and item ten's optimistic revert
+  // reopens it onto a new pull request no approval can ever satisfy — items one and thirteen keep
+  // their pull request across their rounds, so the overlay rides those.
+  scoped: new Set([1, 4, 13]), scopeAfterMs: 6 * minute, misread: new Set([1, 10]), misreadAfterMs: 4 * minute,
   // A runtime that exits and leaves its pane open on a bare shell. Item eight's first attempt is
   // free to exit, its second carrying the slow-recompute head; item ten's first attempt is the one
   // that must break main, so the exit could not ride it.
@@ -989,7 +993,7 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.doesNotMatch(sweepStatus?.detail ?? '', /the oldest is pane/, 'no oldest pane outlives the drained day');
   assert.ok(!state.actions['sweep:panes:attention'], 'the day never stood past the agentless attention bound');
   // GY-544: every scope decision made between two cycles earned exactly one re-prompt for its attempt, and nothing else re-prompted it.
-  assert.equal(decided.length, plan.scoped.size, 'three scope requests were asked and decided between cycles');
+  assert.equal(decided.length, plan.scoped.size, 'scope requests were asked and decided between cycles');
   for (const attempt of decided) {
     const [key, epoch] = attempt.split(':');
     const told = prompts.filter(prompt => prompt.key === key && prompt.epoch === Number(epoch) && /its scope request was applied/.test(prompt.text));
