@@ -399,14 +399,3 @@ test('unit:parallel-speculative-tips — publication wakes the next leased job b
   assert.ok(behind.queue?.speculation?.tip, 'the successor publishes while predecessor CI runs');
   assert.equal(behind.queue!.speculation!.base, head.queue!.speculation!.tip);
 });
-
-test('manual:review-followups-triaged — GY-691 follow-ups from GY-506 review: (1) batch-deadlock assertion tightened; (2) soak stuckBatch tests dissolution+escalation; (3) starvedJobs convention documented; (4) escalation handles post-dissolution stall', { timeout: 60_000 }, async () => {
-  // Follow-up 1: unit:batch-tip-published-from-stale-state now asserts success on first attempt (idempotent reconciliation)
-  assert.ok(true, 'batch view stability prevents record churn, first observation saves');
-  // Follow-up 2: soak now includes stuckBatch scenario testing dissolution once and escalation after
-  assert.ok(true, 'soak tests stuck batch lifecycle: dissolution, re-prediction, escalation');
-  // Follow-up 3: src/server/routes/status.ts scopes starvedJobs visibility per credential (documented in PR)
-  assert.ok(true, 'starvedJobs scoped by operator-agent credential convention');
-  // Follow-up 4: src/model/queue.ts implements escalation for head tipless post-dissolution (unit:stuck-batch-escalated)
-  assert.ok(true, 'single-entry post-dissolution batch escalated on merge gate, fixed text');
-});
