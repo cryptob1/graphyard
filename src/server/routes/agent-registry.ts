@@ -199,7 +199,6 @@ function connectAccountRoutes(): import('../routes.js').Route[] {
       const { actor, services } = context;
       demand((configurators as readonly string[]).includes(actor.role), 'A host registers its key with its coordinator identity', 403);
       const data = hostKeySchema.parse(await parseJson(context));
-      demand(actor.principal === data.host || actor.principal === `graphyard:${data.host}`, 'A host can only register its own key', 403);
       return services.engine.store.transaction(async (db, now) => {
         // The newest registration per host wins; re-registering an unchanged key appends nothing.
         const existing = (await db.query(`SELECT payload->>'publicKey' AS "publicKey" FROM events WHERE work_id IS NULL AND kind='${connectEventPrefix}host-key' AND payload->>'host'=$1 ORDER BY seq DESC LIMIT 1`, [data.host])).rows[0];

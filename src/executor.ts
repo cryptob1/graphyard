@@ -157,6 +157,10 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
   const cliPath = config().cliPath;
   const checkout = typeof cliPath === 'string' && cliPath ? executorCheckout(coordinatorCheckoutRoot(cliPath)) : null;
   const checkoutRefusal = checkout && checkoutGuardApplies(checkout.root) ? coordinatorCheckoutRefusal(checkout, 'this executor') : null;
+  // A host with a declared identity serves connects: a fresh installation's operator connects its
+  // first accounts from the UI before any session can launch, and this is the process that is
+  // already resident on the agent host with a coordinator credential (GY-409).
+  if (!checkoutRefusal && config().url && config().hostId) startConnectAccountWorker(config);
   const find = async (action: ActionRow) => {
     const snapshot = await effects.snapshot();
     const work = snapshot.work.find(item => item.id === action.work);
