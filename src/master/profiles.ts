@@ -250,6 +250,12 @@ export const masterRunSchema = z.object({
   // re-prompts it once, and how long after that re-prompt a still-quiet session is recorded as
   // never started (see acknowledgeLaunch); default 90.
   acknowledgementSeconds: z.number().int().min(30).max(900).optional(),
+  // The loop-launched master session (GY-898): how long one master session may run before the
+  // loop rotates it (default 240 minutes; the 12h coordination maximum stays as the surfaced-only
+  // safety bound, and a rotation defers while a guarded merge is in flight), and how long the
+  // heartbeat fallback waits before it wakes a master that has had no material event (default 30).
+  masterSessionMinutes: z.number().int().min(30).max(720).optional(),
+  masterHeartbeatMinutes: z.number().int().min(5).max(240).optional(),
   // How long a launched runtime has to come up in its pane before the launch fails and closes it
   // (GY-413); default 60. A loaded host echoes the launch command slowly, which is a slow start.
   launchStartSeconds: z.number().int().min(10).max(600).optional(),

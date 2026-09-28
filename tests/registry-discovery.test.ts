@@ -109,7 +109,8 @@ test('unit:registry-discovers-agent-environments — propose discovers every ~/.
     const full = ['claude-a', 'claude-b', 'claude-c', 'codex', 'cursor-a', 'opencode-a', 'opencode-b'];
     assert.deepEqual(roles.worker, full); assert.deepEqual(roles.reviewer, full);
     assert.deepEqual(roles.approver, [...full, 'pi-a', 'pi-b']); assert.deepEqual(roles.producer, [...full, 'pi-a', 'pi-b']);
-    assert.deepEqual(proposal.roles.map((role: any) => role.name), [...fleetRoles]);
+    // The master role is never proposed (GY-898): the operator names its accounts themselves.
+    assert.deepEqual(proposal.roles.map((role: any) => role.name), fleetRoles.filter(name => name !== 'master'));
 
     // Nothing a credential home holds beyond what the readiness probe decides reaches the proposal.
     const shown = JSON.stringify(preview);
@@ -122,7 +123,7 @@ test('unit:registry-discovers-agent-environments — propose discovers every ~/.
     assert.deepEqual(written.map(entry => entry.path), ['agent-registry/apply']);
     assert.equal(applied.revision, 1);
     assert.deepEqual(registry.accounts.map(account => account.name), proposal.accounts.map((account: any) => account.name));
-    assert.deepEqual(registry.roles.map(role => role.name), [...fleetRoles]);
+    assert.deepEqual(registry.roles.map(role => role.name), fleetRoles.filter(name => name !== 'master'), 'the applied proposal proposes no master role (GY-898)');
     assert.equal(registry.lastMutation?.kind, 'apply');
     const stored = JSON.stringify(registry);
     for (const value of secrets) assert.ok(!stored.includes(value), 'the stored revision never carries a credential');

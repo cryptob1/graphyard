@@ -206,7 +206,11 @@ test('integration:agent-registry-model — the control plane stores runtimes wit
   await registryCommand({ hostId: HOST }, ['role', 'set', 'reviewer', '--concurrency', '2', '--reason', 'One more reviewer at a time'], cli);
   assert.deepEqual((await ok('agent-registry/document', coordinator) as Registry).roles.find(role => role.name === 'reviewer'), { name: 'reviewer', accounts: ['codex-a', 'claude-a'], concurrency: 2 }, 'the CLI changed the limit and kept the order');
   for (const name of ['producer', 'approver', 'escalation-handler']) await ok('agent-registry/roles', operator, { role: { name, accounts: ['claude-a'], concurrency: 1 }, reason: `Configure ${name}` });
-  assert.equal((await call('agent-registry/roles', operator, { role: { name: 'janitor', accounts: ['claude-a'], concurrency: 1 }, reason: 'r' })).status, 400, 'the roles are the five the control plane launches');
+  // The master role (GY-898) is a capacity role like any other, but never more than one live session:
+  // whatever the mutation asks, the stored concurrency is 1 (two masters break single-coordinator).
+  await ok('agent-registry/roles', operator, { role: { name: 'master', accounts: ['claude-a'], concurrency: 4 }, reason: 'Configure the loop-launched master session' });
+  assert.equal((await ok('agent-registry/document', coordinator) as Registry).roles.find(role => role.name === 'master')!.concurrency, 1, 'the master role is pinned to one live session');
+  assert.equal((await call('agent-registry/roles', operator, { role: { name: 'janitor', accounts: ['claude-a'], concurrency: 1 }, reason: 'r' })).status, 400, 'an unknown role is refused');
   assert.equal((await call('agent-registry/roles', operator, { role: { name: 'worker', accounts: ['claude-a', 'claude-a'], concurrency: 1 }, reason: 'r' })).status, 400);
 
   // Observed quota state and reset time: marked by an operator here, observed by an executor's probe in the selection test.
@@ -218,7 +222,7 @@ test('integration:agent-registry-model — the control plane stores runtimes wit
   assert.deepEqual(fleetRoles.filter(name => view.roles.some(role => role.role === name)), [...fleetRoles]);
   const claude = view.accounts.find(account => account.name === 'claude-a')!;
   assert.deepEqual([claude.runtime, claude.model, claude.modelId, claude.cost, claude.capability?.tier, claude.host, claude.home, claude.maxSessions], ['claude', 'opus', 'claude-opus-5', { inputPerMTok: 15, outputPerMTok: 75 }, 'frontier', HOST, claudeHome, 2]);
-  assert.deepEqual(claude.roles.map(entry => `${entry.role}:${entry.preference}/${entry.of}`), ['worker:1/3', 'reviewer:2/2', 'producer:1/1', 'approver:1/1', 'escalation-handler:1/1']);
+  assert.deepEqual(claude.roles.map(entry => `${entry.role}:${entry.preference}/${entry.of}`), ['worker:1/3', 'reviewer:2/2', 'producer:1/1', 'approver:1/1', 'escalation-handler:1/1', 'master:1/1']);
   const aider = view.accounts.find(account => account.name === 'aider-a')!;
   assert.deepEqual([aider.quota, aider.resetsAt, aider.quotaSource, aider.eligible], ['exhausted', resetsAt, 'operator', false]); assert.match(aider.ineligible!, /aider-a quota is exhausted until/);
   assert.equal(view.runtimes.find(runtime => runtime.name === 'aider')!.launch.homeVariable, 'AIDER_HOME');
@@ -516,7 +520,8 @@ test('integration:registry-setup-proposal — setup discovers the logged-in CLIs
   assert.equal(preview.applied, false); assert.match(preview.next, /--apply/);
   assert.deepEqual(preview.proposal.runtimes.map((runtime: any) => runtime.name), ['claude', 'codex', 'muse']);
   assert.deepEqual(preview.proposal.accounts.map((account: any) => [account.name, account.runtime, account.model, account.credential.home]), [['claude-b', 'claude', 'claude-default', isolated], ['codex-a', 'codex', 'codex-default', codexHome], ['claude', 'claude', 'claude-default', join(home, '.claude')], ['muse', 'muse', 'muse-default', null]]);
-  assert.deepEqual(preview.proposal.roles.map((role: any) => role.name), [...fleetRoles]); assert.ok(preview.proposal.roles.every((role: any) => role.accounts.join() === 'claude-b,codex-a,claude,muse' && role.concurrency >= 1));
+  // The master role is never proposed (GY-898): the operator names its accounts themselves.
+  assert.deepEqual(preview.proposal.roles.map((role: any) => role.name), fleetRoles.filter(name => name !== 'master')); assert.ok(preview.proposal.roles.every((role: any) => role.accounts.join() === 'claude-b,codex-a,claude,muse' && role.concurrency >= 1));
   assert.equal((await ok('agent-registry', auditor) as FleetView).configured, false, 'a proposal stores nothing');
 
   const applied = await registryCommand({ hostId: HOST }, ['propose', '--directory', directory, '--apply'], cli, { home, executables: name => name === 'muse' }) as any;

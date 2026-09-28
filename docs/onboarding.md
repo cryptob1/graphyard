@@ -7,7 +7,7 @@ Follow [install](install.md): `node "$GRAPHYARD_CLI" install --provider railway 
 
 ## 2. Add machines
 
-Each concurrent session needs a worker identity and host ID; raise `install --workers` or connect:
+Each concurrent session needs a worker identity and host ID; raise `install --workers`.
 
 ```sh
 node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST --herdr --host-id UNIQUE_MACHINE_NAME --token-stdin
@@ -21,13 +21,13 @@ Commit `AGENTS.md`, `.gitignore`, `graphyard.json`; never `.graphyard/`. Without
 
 ### What the generated instructions authorize
 
-The managed `AGENTS.md` section states that **every session Graphyard launches receives its instruction as the session's own first request, on the runtime's command line, never as pasted text**; the only later paste (the loop's single re-prompt, or the reviewer's reminder) comes from the same launcher and is acted on without confirmation.
+The managed `AGENTS.md` section states that **every session Graphyard launches receives its instruction as the session's own first request, on the runtime's command line, never as pasted text**; the only later paste (the loop's single re-prompt, the reviewer's reminder, or its event wake) comes from the same launcher and is acted on without confirmation.
 
-Agents treat bracketed paste as untrusted data (prompt injection), so sessions start without anybody sending `go`; Claude Code also gets `--append-system-prompt-file`. The role files under `.graphyard/harness/` hold permissions, not instructions.
+Agents treat bracketed paste as untrusted data (prompt injection), so sessions start without anybody sending `go`; Claude Code also gets `--append-system-prompt-file`; the role files under `.graphyard/harness/` hold permissions, not instructions.
 
 ### Connect an account
 
-Settings › **Agents** › **Connect an account**: pick a provider; paste a key (sealed to the host's public key in the browser — the server relays ciphertext only) or start a login. The host writes the provider's auth file (0600) and smoke-tests provider and model; the card shows the result. A subscription login shows its URL and code — finish it in your browser; for Claude, **Paste the code** its page shows (**Cancel** stops it). **Retry** on a failed card is admins-only: it re-enters the credential. The host's executor must run: strong accounts join worker and reviewer, cheap ones approver and producer; research joins when the host makes the account's wrapper its research command; **change** edits roles. The shell steps below remain for scripted setups.
+Settings › **Agents** › **Connect an account**: pick a provider; paste a key (sealed to the host's public key; the server relays ciphertext only) or start a login. The host writes the auth file (0600) and smoke-tests provider and model. A subscription login shows its URL and code — finish it in your browser; for Claude, **Paste the code** (**Cancel** stops it). **Retry** on a failed card is admins-only. Strong accounts join worker and reviewer, cheap ones approver and producer; research joins when the host makes the account's wrapper its research command; **change** edits roles.
 
 ### Agent environments
 
@@ -39,7 +39,7 @@ CLAUDE_CONFIG_DIR=~/.coding_agents/claude-a claude                       # /logi
 node "$GRAPHYARD_CLI" master environments --apply                        # report quota, write profiles
 ```
 
-Profiles default to [`"approvals": "auto"`](master-agent-sessions.md#approval-modes) (trade-off: unattended sessions); `"prompt"` is refused at launch.
+Profiles default to [`"approvals": "auto"`](master-agent-sessions.md#approval-modes); `"prompt"` is refused.
 
 ### Configure the fleet
 
@@ -52,7 +52,7 @@ node "$GRAPHYARD_CLI" master registry propose --apply
 
 ### Add a runtime
 
-Advanced, or the CLI (dash-led values join their flag with `=`):
+Advanced, or the CLI (dash-led values join their flag):
 
 ```sh
 node "$GRAPHYARD_CLI" master registry runtime set aider --kind aider --arg=--yes-always \
@@ -62,7 +62,7 @@ node "$GRAPHYARD_CLI" master registry runtime set aider --kind aider --arg=--yes
 
 ### Add an account
 
-Connect it in the UI, or record one login each:
+Or record one login each:
 
 ```sh
 node "$GRAPHYARD_CLI" master registry model set opus --provider Anthropic --id claude-opus-5 \
@@ -72,11 +72,11 @@ node "$GRAPHYARD_CLI" master registry account set claude-b --runtime claude --mo
 node "$GRAPHYARD_CLI" master registry account quota opencode-a exhausted --resets-at 2026-09-22T00:00:00Z --reason "Plan exhausted"
 ```
 
-`--key-file zai.key --key-variable ZAI_API_KEY`: a 0600 home key file, exported per run. New or changed Pi accounts are smoke-tested; failure bars the account; two unjudged runs bench it from that role an hour.
+`--key-file zai.key --key-variable ZAI_API_KEY`: a 0600 home key file, exported per run. New or changed Pi accounts are smoke-tested; failure bars the account; two unjudged runs bench it from the role an hour.
 
 ### Add a role
 
-Preferred account first; applies next launch:
+Preferred account first;
 
 ```sh
 node "$GRAPHYARD_CLI" master registry role set worker claude-b,claude-c,codex-a --concurrency 4 --reason "Codex overflow"
@@ -91,7 +91,7 @@ Each candidate needs one review and one producer session per proof group; `"conc
 "reviewers":[{"name":"claude-reviewer","agentName":"review-claude","kind":"claude","accounts":["claude-a","claude-b"],"concurrency":3}]
 ```
 
-Adding workers? For worker count `W` and `G` proof groups: `⌈W / 2⌉` review slots and `G × ⌈W / 2⌉` producer slots over ≥ 2 producer principals. Watch `longestWaitMs`.
+Adding workers? For worker count `W` and `G` proof groups: `⌈W / 2⌉` review and `G × ⌈W / 2⌉` producer slots over ≥ 2 producer principals. Watch `longestWaitMs`.
 
 ## 3. Start the master
 
@@ -102,9 +102,9 @@ node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST   # now installs th
 node "$GRAPHYARD_CLI" master start codex     # or: master start claude
 ```
 
-Run it as an OS identity whose GitHub credentials workers cannot read. `--browser-profile` is the Chrome profile signed in to GitHub as admin (`master browser`); *Confirm access* in GitHub Mobile stays human-only. Add the reviewer with `master reviewer setup` and `master reviewer add PROFILE` ([Claude](../examples/master/claude-reviewer.json) template); its manifest flow is the only App confirmation.
+Run it as an OS identity whose GitHub credentials workers cannot read. `--browser-profile` is the Chrome profile signed in to GitHub as admin (`master browser`); *Confirm access* in GitHub Mobile stays human-only. Add the reviewer with `master reviewer setup` and `master reviewer add PROFILE` ([template](../examples/master/claude-reviewer.json)); its manifest flow is the only App confirmation.
 
-Onboarding also writes `mergeQueue.optimisticExclude` into `.graphyard/master.json`: the [shared-infrastructure](github.md#optimistic-merges) globs — manifests and lockfiles, CI config, test helpers, schema and migration directories — never merged optimistically over. Tune the list there; re-runs keep it; `mergeQueue.optimistic: false` turns the lane off.
+Onboarding also writes the [shared-infrastructure](github.md#optimistic-merges) `mergeQueue.optimisticExclude` globs — manifests and lockfiles, CI config, test helpers, schema and migration directories — never merged optimistically over. Tune the list there; re-runs keep it; `mergeQueue.optimistic: false` turns the lane off.
 
 ### The loop must be supervised
 
