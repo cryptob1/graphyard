@@ -1988,13 +1988,17 @@ export async function landingCheck(github: LandingGitHub, work: Work, head: stri
  * GY-744. Whether a peer's pull request is already on the base branch tip, whatever its item
  * records: one of its own heads is an ancestor of the tip, or GitHub reports it merged with a
  * merge commit the tip holds (a squash or rebase merge leaves the head itself off the branch).
+ * The merge commit counts only for a pull request merged at a head its item recorded (GY-756): one
+ * force-pushed past the recorded head and merged ships content Graphyard never saw, so the recorded
+ * head is not landed by it and its files stay under the guard.
  */
 async function landedOn(github: LandingGitHub, peer: Work, tip: string): Promise<LandedCandidate | null> {
   const pr = peer.candidate!.pr, head = peer.candidate!.sha;
+  const heads = ownHeads(peer);
   let ancestor = false;
-  for (const sha of ownHeads(peer)) if (await github.contains(sha, tip)) { ancestor = true; break; }
+  for (const sha of heads) if (await github.contains(sha, tip)) { ancestor = true; break; }
   const pull = await github.pull(pr);
-  const mergeSha = pull?.merged && typeof pull.merge_commit_sha === 'string' ? pull.merge_commit_sha as string : null;
+  const mergeSha = pull?.merged && typeof pull.merge_commit_sha === 'string' && heads.includes(pull.head?.sha) ? pull.merge_commit_sha as string : null;
   if (!ancestor && !(mergeSha && await github.contains(mergeSha, tip))) return null;
   return { key: peer.key, pr, head, mergeSha };
 }

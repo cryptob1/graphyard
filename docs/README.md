@@ -26,7 +26,7 @@ Start with the numbered path; the other pages are references to open when a task
 ## Build integrations
 
 - [Agent protocol and HTTP API](protocol.md) — the HTTP API, one topic per page.
-- [E2E validation](validation.md) — test cases, runner protocol.
+- [E2E validation](validation.md) — test cases, runners.
 - [Playwright runner and collector](runner-setup.md) — host setup.
 - [Releases and observed delivery](delivery.md) — the release API.
 - [Runner capacity, artifacts and rollback](recovery.md) — diagnostics, storage, rollback.

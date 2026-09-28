@@ -217,7 +217,7 @@ export default function FleetPage({ api, status }: Pick<Dashboard, 'api' | 'stat
   const cancel = async (id: string) => { try { await api(`agent-registry/connect/${id}/cancel`, { reason: 'Cancelled from Settings › Agents' }); await load(); } catch (error) { setFormError((error as Error).message); } };
   /** Take a failed connect's card off this page for this browser; the ledger record is untouched. */
   const remove = (id: string) => setRemoved(current => { const next = [...new Set([...current, id])]; try { localStorage.setItem('graphyard.removedConnects', JSON.stringify(next)); } catch { /* a private window keeps it for the session */ } return next; });
-  /** Retry reconnects the same provider on the same host: an api key is sealed again (it was never stored), a subscription login starts afresh. */
+  /** Retry reconnects the same provider on the same host: an api key is sealed again (it was never stored), a subscription login starts afresh. Admins only, like answering the login code: retrying re-enters the credential; coordinators keep inspect, cancel and remove. */
   const retry = (failed: ConnectView) => setWizard({ ...closedWizard, open: true, provider: failed.provider, host: failed.host });
   /** The card's 'change': open Advanced and name the account in the role editor's order. */
   const changeRoles = (account: string) => {
@@ -233,7 +233,7 @@ export default function FleetPage({ api, status }: Pick<Dashboard, 'api' | 'stat
     {fleet && canEdit && <section><div className="section-title"><h2>Connect an account</h2>{!wizard.open && <button className="connect-button" data-connect-account onClick={() => setWizard({ ...closedWizard, open: true, host: hosts[0]?.host ?? null })}>Connect an account</button>}</div>
       {wizard.open && <ConnectWizard providers={providers} hosts={hosts} wizard={wizard} setWizard={setWizard} onConnect={id => void connect(id, wizard.host ?? hosts[0]?.host ?? '', wizard.key)} onClose={() => setWizard(closedWizard)}/>}
     </section>}
-    {fleet && <FleetOverview fleet={fleet} connects={connects.filter(connect => !removed.includes(connect.id))} onChangeRoles={canEdit ? changeRoles : undefined} onCancelConnect={canEdit ? id => void cancel(id) : undefined} onAnswerConnect={status?.actor?.role === 'admin' ? answer : undefined} onRetryConnect={canEdit ? retry : undefined} onRemoveConnect={canEdit ? remove : undefined}/>}
+    {fleet && <FleetOverview fleet={fleet} connects={connects.filter(connect => !removed.includes(connect.id))} onChangeRoles={canEdit ? changeRoles : undefined} onCancelConnect={canEdit ? id => void cancel(id) : undefined} onAnswerConnect={status?.actor?.role === 'admin' ? answer : undefined} onRetryConnect={status?.actor?.role === 'admin' ? retry : undefined} onRemoveConnect={canEdit ? remove : undefined}/>}
     {fleet && canEdit && <section><details className="advanced more-details" ref={advanced}><summary>Advanced: runtimes, models, roles and policies</summary>
       <p className="muted">Everything below names where a login lives — never the credential. Connect accounts at the top of the page; use this only to shape the fleet itself. Every change is recorded with its reason.</p>
       {formError && <p role="alert" className="amber">{formError}</p>}
