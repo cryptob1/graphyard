@@ -5,11 +5,14 @@ import type { DaemonAction } from './state.js';
 import { detectExhaustion, type CapacityRole } from '../model/capacity.js';
 import { classifyRuntimePrompt, continueAfterDecline, type EscalationSession, escalationProfile, type HerdrAgent, ownLoginAccounts, profileAccount, type RuntimePrompt } from '../master.js';
 import { standingEscalations } from '../model/escalation.js';
+import { roleSessionMaximumMs } from '../model/sessions.js';
 import { capacityRecheckMs } from '../auto-dispatch.js';
 import { message, orphanObservationSchema } from './state.js';
 import { closeKey } from './reconcile.js';
 import { boundDetail } from './decisions.js';
 import { clearProfileFailure, orphanedSupervisors, readyToRetry } from './sessions.js';
+import { clearedBefore, clearedBlockerKey, failedAttemptCount, overlongKey, overlongReason, reblockedKey, reblockedMarker, reblockedReason } from './reblocked-attempts.js';
+import { paneAlreadyGone } from '../request-settlement.js';
 import { blockedPromptAnswers, blockedPromptFailMs, blockedPromptSettleMs, failoverKey, handlerSettleMs, launchAppearanceMs, launcherRetry, promptDigest, type LaunchedSession, preserveInterruptedAttempt, record, stoppedStates } from './effects.js';
 import type { Cycle } from './cycle.js';
 
@@ -181,14 +184,30 @@ export async function closeStep(cycle: Cycle) {
       const key = failoverKey('escalation-handler', item, `${session.trigger}:${session.waiting ? `${session.waiting.since}:relaunch` : session.launchedAt}`), previous = state.actions[key];
       if (session.waiting && !standingEscalations(item).some(entry => entry.trigger === session.trigger)) { await dropWait(session.waiting, `the ${session.trigger} escalation on ${item.key} no longer stands`); return; }
       if (session.waiting) {
-        if (Date.parse(session.waiting.retryAt) > clock || !effects.relaunchEscalation || !readyToRetry(previous, state.cycle)) return;
-        try {
-          const launched = await effects.relaunchEscalation(session);
-          performed.push(await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'done', detail: `escalation handler for ${item.key} (${session.trigger}) waited since ${session.waiting.since} (${session.waiting.reason}); relaunched as ${launched.agentName} on ${launched.account ?? 'its runtime\'s own account'}`, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
-        } catch (error) {
-          if ((error as { capacityExhausted?: boolean })?.capacityExhausted) { await effects.endEscalation?.(session, session.waiting.reason, { ...session.waiting, retryAt: launcherRetry(error) ?? new Date(clock + capacityRecheckMs).toISOString() }).catch(() => {}); return; }
-          performed.push(await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'failed', detail: `escalation handler for ${item.key} (${session.trigger}) could not be launched again: ${message(error)}`, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
-        }
+        const waiting = session.waiting;
+        if (Date.parse(waiting.retryAt) > clock || !effects.relaunchEscalation || !readyToRetry(previous, state.cycle)) return;
+        const attempts = (previous?.attempts ?? 0) + 1;
+        await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'started', detail: `escalation handler for ${item.key} (${session.trigger}) waited since ${waiting.since} (${waiting.reason}); launching it again`, attempts, cycle: state.cycle }, now(), effects.persist);
+        // The relaunch is a session launch: the launcher runs it beside the cycle (GY-616), and the
+        // failover is settled when it lands — done with the handler it became, or waiting again on
+        // the reset the launcher chose when no account is left for the role.
+        cycle.launch('failover', item, key, [], async sink => {
+          let detail: string, settle: 'done' | 'waiting' = 'done';
+          try {
+            const launched = await effects.relaunchEscalation!(session);
+            detail = `escalation handler for ${item.key} (${session.trigger}) waited since ${waiting.since} (${waiting.reason}); relaunched as ${launched.agentName} on ${launched.account ?? 'its runtime\'s own account'}`;
+          } catch (error) {
+            if (!(error as { capacityExhausted?: boolean })?.capacityExhausted) {
+              sink.push(await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'failed', detail: `escalation handler for ${item.key} (${session.trigger}) could not be launched again: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist));
+              return;
+            }
+            const retryAt = launcherRetry(error) ?? new Date(clock + capacityRecheckMs).toISOString();
+            await effects.endEscalation?.(session, waiting.reason, { ...waiting, retryAt }).catch(() => {});
+            settle = 'waiting';
+            detail = `escalation handler for ${item.key} (${session.trigger}) waits for capacity: no other account is left for the role (${message(error)}), so it is launched again from its waiting record at ${retryAt}`;
+          }
+          sink.push(await record(state, key, { kind: 'failover', work: item.key, principal: null, state: settle, detail, attempts, cycle: state.cycle }, now(), effects.persist));
+        });
         return;
       }
       const agent = stopped(session.agentName);
@@ -206,22 +225,30 @@ export async function closeStep(cycle: Cycle) {
         await effects.reportCapacity!(item, { event: 'exhausted', role: 'escalation-handler', requestId: session.trigger.slice(0, 64), profile: escalationProfile, account: session.account, runtime: session.runtime, reason: signal.reason, resetsAt: signal.resetsAt,
           partialWork: { state: 'not-applicable', detail: 'an escalation handler edits nothing: it requests a decision and leaves no work to keep' } });
         const ended = `provider quota exhausted on ${session.account ?? 'its runtime\'s own account'} mid-session (${signal.reason}; ${resets})`;
-        let next: string;
-        try {
-          if (!effects.relaunchEscalation) throw new Error('this loop cannot launch an escalation handler');
-          // The handler is ended but its record stays, due now: a relaunch that fails for any reason
-          // is retried by later cycles from it, and a successful one replaces it.
-          await effects.endEscalation?.(session, ended, { since: new Date(clock).toISOString(), retryAt: new Date(clock).toISOString(), reason: `${ended}; to be launched again`.slice(0, 500) });
-          const launched = await effects.relaunchEscalation(session);
-          next = `relaunched as ${launched.agentName} on ${launched.account ?? 'its runtime\'s own account'}`;
-        } catch (error) {
-          if (!(error as { capacityExhausted?: boolean })?.capacityExhausted) throw error;
-          // The launcher already chose the wait: the earliest reset among every account it skipped.
-          const retryAt = launcherRetry(error) ?? signal.resetsAt ?? hold?.until ?? new Date(clock + capacityRecheckMs).toISOString();
-          await effects.endEscalation?.({ ...session, pane: null, session: null }, ended, { since: new Date(clock).toISOString(), retryAt, reason: message(error).slice(0, 500) });
-          next = `no other account is left for the role (${message(error)}), so it is launched again at ${retryAt}`;
-        }
-        performed.push(await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'done', detail: `escalation handler ${session.agentName} for ${item.key} (${session.trigger}) ${ended}; ${next}`, attempts, cycle: state.cycle }, now(), effects.persist));
+        await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'started', detail: `escalation handler ${session.agentName} for ${item.key} (${session.trigger}) ${ended}; launching it again`, attempts, cycle: state.cycle }, now(), effects.persist);
+        // The relaunch is a session launch: the launcher runs it beside the cycle (GY-616), and the
+        // failover is recorded done, with what became of the handler, when it lands.
+        cycle.launch('failover', item, key, [], async sink => {
+          let next: string;
+          try {
+            if (!effects.relaunchEscalation) throw new Error('this loop cannot launch an escalation handler');
+            // The handler is ended but its record stays, due now: a relaunch that fails for any reason
+            // is retried by later cycles from it, and a successful one replaces it.
+            await effects.endEscalation?.(session, ended, { since: new Date(clock).toISOString(), retryAt: new Date(clock).toISOString(), reason: `${ended}; to be launched again`.slice(0, 500) });
+            const launched = await effects.relaunchEscalation(session);
+            next = `relaunched as ${launched.agentName} on ${launched.account ?? 'its runtime\'s own account'}`;
+          } catch (error) {
+            if (!(error as { capacityExhausted?: boolean })?.capacityExhausted) {
+              sink.push(await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'failed', detail: `escalation handler ${session.agentName} for ${item.key} exhausted its account (${signal.reason}) but could not be failed over: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist));
+              return;
+            }
+            // The launcher already chose the wait: the earliest reset among every account it skipped.
+            const retryAt = launcherRetry(error) ?? signal.resetsAt ?? hold?.until ?? new Date(clock + capacityRecheckMs).toISOString();
+            await effects.endEscalation?.({ ...session, pane: null, session: null }, ended, { since: new Date(clock).toISOString(), retryAt, reason: message(error).slice(0, 500) });
+            next = `no other account is left for the role (${message(error)}), so it is launched again at ${retryAt}`;
+          }
+          sink.push(await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'done', detail: `escalation handler ${session.agentName} for ${item.key} (${session.trigger}) ${ended}; ${next}`, attempts, cycle: state.cycle }, now(), effects.persist));
+        });
       } catch (error) {
         performed.push(await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'failed', detail: `escalation handler ${session.agentName} for ${item.key} exhausted its account (${signal.reason}) but could not be failed over: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist));
       }
@@ -297,8 +324,11 @@ export async function closeStep(cycle: Cycle) {
     // The session's own handle on the item — the one its launcher registered — carries the prompt
     // and the loop's answer, as a worker's does (GY-223). One the launcher never registered has
     // only the loop's ledger entry: the loop does not mint a handle under an id it would have to guess.
-    const registered = item.sessions?.find(entry => entry.state === 'running' && (entry.kind === 'review' || entry.kind === 'proof')
-      && (entry.agentName === session.agentName || (!!session.pane && entry.pane === session.pane)));
+    // The handle's id is the launch's request id, so that binding is exact and is tried first (GY-472);
+    // the agent name or pane is the fallback for a launch that carries no request id.
+    const running = item.sessions?.filter(entry => entry.state === 'running' && (entry.kind === 'review' || entry.kind === 'proof')) ?? [];
+    const registered = session.requestId ? running.find(entry => entry.id === session.requestId)
+      : running.find(entry => entry.agentName === session.agentName || (!!session.pane && entry.pane === session.pane));
     const handle = async (outcome: string, finished: boolean) => {
       if (!registered) return;
       await effects.recordSession?.(item, { id: registered.id, kind: registered.kind, runtime: registered.runtime, host: registered.host, subject: registered.subject,
@@ -306,6 +336,10 @@ export async function closeStep(cycle: Cycle) {
     };
     await unblock(`${session.role} session ${session.agentName}`, `${session.role}:${session.record}`, agent, item, null, null, null, handle, async reason => {
       // The handle ends before any relaunch: a relaunch reopens the same handle for its new session.
+      // The handle update follows the close, as endWorkerAttempt orders it: if the close throws the
+      // pane is still open, so the handle stays running while the ledger records the failed close,
+      // and a retry writes it once the close succeeds (GY-472); writing it finished first would
+      // describe a session the loop never ended.
       if (!effects.endSession) { await effects.closeSession(agent.pane_id!); await handle(`closed as failed: ${reason}`, true); return 'its pane was closed and its request launches again on the next dispatch tick'; }
       await effects.endSession(session, `closed as failed: ${reason}`.slice(0, 500));
       await handle(`closed as failed: ${reason}`, true);
@@ -407,18 +441,19 @@ function workerHandle(cycle: Cycle, item: Work, profile: WorkerProfile, epoch: n
  * (which ends the lease, so the dispatch step claims the item again next cycle and the next
  * attempt's request names that commit), its supervisor is stopped and its pane closed.
  */
-async function endWorkerAttempt(cycle: Cycle, item: Work, profile: WorkerProfile, epoch: number, pane: string, reason: string, observed: string) {
+async function endWorkerAttempt(cycle: Cycle, item: Work, profile: WorkerProfile, epoch: number, pane: string | null, reason: string, observed: string, options: { endsBlocker?: true } = {}) {
   const { state, effects, now, performed } = cycle;
-  const preserved = await preserveInterruptedAttempt(state, effects, item, epoch, profile, observed, now, performed);
+  const preserved = await preserveInterruptedAttempt(state, effects, item, epoch, profile, observed, now, performed, options);
   if (preserved && preserved.state !== 'done') throw new Error(`its attempt could not be ended on the record: ${preserved.detail}`);
   const scope = item.containmentQuarantine?.epoch === epoch && item.containmentQuarantine.owner === profile.principal ? item.containmentQuarantine.scope : undefined;
   let stop = 'its supervisor stops on the ended lease';
   try {
     if (scope && effects.stopSupervisor) { await effects.stopSupervisor({ id: item.id, key: item.key, epoch, owner: profile.principal, profile: profile.name, agentName: profile.agentName, scope, leaseExpiresAt: item.lease!.expiresAt }, 'SIGTERM'); stop = `its supervisor (pid ${scope.pid}) was stopped through ${scope.unit}`; }
   } catch (error) { stop = `its supervisor could not be signalled (${message(error)}) and stops on the ended lease`; }
-  await effects.closeSession(pane);
-  await workerHandle(cycle, item, profile, epoch, pane, `closed as failed: ${reason}`, true);
-  return `the attempt ended on the record, ${stop}, pane ${pane} was closed, and ${item.key} is dispatched again`;
+  // A session already gone from Herdr has no pane left to close (GY-867 ends such attempts too).
+  if (pane) await effects.closeSession(pane);
+  await workerHandle(cycle, item, profile, epoch, pane ?? 'none', `closed as failed: ${reason}`, true);
+  return `the attempt ended on the record, ${stop}, ${pane ? `pane ${pane} was closed` : 'no pane was left to close'}, and ${item.key} is dispatched again`;
 }
 
 /** How long a worker holding a live lease may show no activity before it is re-prompted, and again after that before its item goes to a new attempt (GY-524). */
@@ -463,7 +498,7 @@ function scopeChange(item: Work) {
  * handed to a new one that keeps its branch.
  */
 async function resumeStep(cycle: Cycle, failedOver: Set<string>) {
-  const { config, state, effects, now, performed, isolate, agents, heldBy } = cycle;
+  const { config, state, effects, now, clock, performed, isolate, agents, heldBy } = cycle;
   const live = new Set<string>();
   for (const profile of config.workers.filter(worker => worker.mode === 'launch')) await isolate('session', heldBy(profile), profile.name, async () => {
     const item = heldBy(profile);
@@ -481,14 +516,71 @@ async function resumeStep(cycle: Cycle, failedOver: Set<string>) {
     const scopeDetail = request ? `${item.key} epoch ${epoch} waits on its scope request of ${request.at} for ${request.paths.join(', ')}, and ${profile.agentName} is re-prompted once it is answered` : null;
     if (blockerDetail && state.actions[keys.blocker]?.detail !== boundDetail(blockerDetail)) await entry(keys.blocker, 'waiting', blockerDetail);
     if (scopeDetail && state.actions[keys.scope]?.detail !== boundDetail(scopeDetail)) await entry(keys.scope, 'waiting', scopeDetail);
+    // GY-867: blocked again on an epoch whose blocker was already cleared once. Re-prompting the
+    // same session again would only repeat the cycle, so the attempt ends and the item goes on.
+    const cleared = item.blocker && !request ? clearedBefore(state, item, epoch) : null;
+    if (cleared) {
+      const key = reblockedKey(item, epoch), previous = state.actions[key];
+      if (previous?.state === 'done' || (previous && !readyToRetry(previous, state.cycle))) return;
+      const reason = reblockedReason(item, epoch, cleared, item.blocker!), attempts = (previous?.attempts ?? 0) + 1;
+      await entry(key, 'started', `${profile.agentName} on ${item.key} ${reason}; ending the attempt`, attempts);
+      try {
+        const next = await endWorkerAttempt(cycle, item, profile, epoch, pane, reason, reason, { endsBlocker: true });
+        performed.push(await entry(key, 'done', `${profile.agentName} on ${item.key} ${reason}; ${next}, keeping the attempt's branch and ending the blocker it recorded`, attempts));
+        await drop(keys.blocker, keys.idle);
+      } catch (error) {
+        performed.push(await entry(key, 'failed', `${profile.agentName} on ${item.key} ${reason}, but its attempt could not be ended: ${message(error)}`, attempts));
+      }
+      return;
+    }
+
+    // GY-885: an attempt that runs past its role's time box is ended and retried fresh with backoff.
+    const sessionHandle = item.sessions?.find(h => h.kind === 'implementation' && h.state === 'running' && h.epoch === epoch);
+    if (sessionHandle) {
+      const startedAt = Date.parse(sessionHandle.startedAt);
+      if (Number.isFinite(startedAt)) {
+        const ageMs = Math.max(0, clock - startedAt);
+        const maximumMs = roleSessionMaximumMs['implementation'];
+        if (ageMs > maximumMs) {
+          const key = overlongKey(item, epoch), previous = state.actions[key];
+          if (!previous || previous.state === 'failed' || readyToRetry(previous, state.cycle)) {
+            const failedCount = failedAttemptCount(item);
+            const reason = overlongReason(item, epoch, ageMs, maximumMs, failedCount);
+            const attempts = (previous?.attempts ?? 0) + 1;
+            await entry(key, 'started', `${profile.agentName} on ${item.key} ${reason}; ending the attempt`, attempts);
+            try {
+              // The reason itself is what the capacity record keeps: it carries the overlong marker
+              // the retry ladder reads back, and names the runtime and run the item's history shows.
+              const next = await endWorkerAttempt(cycle, item, profile, epoch, pane, reason, reason);
+              performed.push(await entry(key, 'done', `${profile.agentName} on ${item.key} ${reason}; ${next}`, attempts));
+              await drop(keys.blocker, keys.idle);
+            } catch (error) {
+              performed.push(await entry(key, 'failed', `${profile.agentName} on ${item.key} ${reason}, but its attempt could not be ended: ${message(error)}`, attempts));
+            }
+            return;
+          }
+        }
+      }
+    }
+
     if (item.blocker || request) { await drop(keys.idle); return; }
 
-    // 1e. Nothing is open any more: what the attempt waited on was resolved.
+    // 1e. Nothing is open any more: what the attempt waited on was resolved. A scope request asked
+    //     and answered between two cycles was never marked, but its decision stays on the item with
+    //     the attempt's epoch (GY-544), so a recent one nobody was told of since counts as waited on.
+    //     A blocker cleared between two cycles leaves no such record on the item, so it is left
+    //     to the idle-with-lease re-prompt below.
     const waited = [state.actions[keys.blocker], state.actions[keys.scope]].filter((action): action is DaemonAction => action?.state === 'waiting');
-    if (waited.length) {
+    const decision = item.scopeDecision, decidedAt = decision?.epoch === epoch ? Date.parse(decision.at) : NaN;
+    const unmarked = !state.actions[keys.scope] && Number.isFinite(decidedAt) && now() - decidedAt <= idleLeaseMs
+      && !Object.entries(state.actions).some(([key, action]) => key.startsWith(`resume:prompt:${item.id}:${epoch}:`) && action.state !== 'failed' && Date.parse(action.at) >= decidedAt);
+    if (waited.length || unmarked) {
       const blocker = state.actions[keys.blocker]?.detail.split(blockerMarker)[1];
-      const changed = [state.actions[keys.blocker] ? `its blocker${blocker ? ` ("${blocker.slice(0, 300)}")` : ''} was cleared` : null, state.actions[keys.scope] ? scopeChange(item) : null].filter(Boolean).join(', and ');
-      const promptKey = `resume:prompt:${item.id}:${epoch}:${waited[0].at}`, previous = state.actions[promptKey];
+      // Remembered for the epoch: a second block after this clearance ends the attempt (GY-867).
+      if (state.actions[keys.blocker]?.state === 'waiting' && !state.actions[clearedBlockerKey(item, epoch)])
+        await entry(clearedBlockerKey(item, epoch), 'done', blocker ? `"${blocker.slice(0, 300)}"` : 'its earlier blocker');
+      const changed = [state.actions[keys.blocker] ? `its blocker${blocker ? ` ("${blocker.slice(0, 300)}")` : ''} was cleared` : null, state.actions[keys.scope] || unmarked ? scopeChange(item) : null].filter(Boolean).join(', and ');
+      const promptKey = `resume:prompt:${item.id}:${epoch}:${waited[0]?.at ?? decision!.at}`, previous = state.actions[promptKey];
       if (previous && previous.state !== 'failed') { await drop(keys.blocker, keys.scope); return; }
       // No session to tell (1d settles a dead one), or one on a runtime prompt (1b answers that first).
       if (!agent || !pane || status === 'blocked') return;
@@ -551,20 +643,39 @@ async function resumeStep(cycle: Cycle, failedOver: Set<string>) {
  * left build, the stage it was launched for, or Herdr detects no agent in its pane — the runtime is
  * no longer the pane's foreground process. The pane is matched on its own coordinate, never on the
  * profile's agent name, which the profile's next session reuses in another pane. The handle is
- * closed with the reason, so no reader counts it running.
+ * closed with the reason, so no reader counts it running, and its pane is closed in the same step —
+ * the runtime already left, so the pane is a bare shell holding a pty — and the close is recorded
+ * with the end (GY-842). A pane that is already gone is recorded as such, not as a failure.
+ *
+ * Herdr's foreground detection misreads a live agent at times, and a pane can drop out of one
+ * listing (GY-544), so an exited runtime is acted on as step 1 acts on one: only when Herdr read
+ * the handle's workspace at all, and only once the same sight stands on a later cycle and
+ * launchAppearanceMs after it was first seen.
  */
 async function closeExitedWorkerSessions(cycle: Cycle, runtime: { agents: HerdrAgent[]; available: boolean } | null) {
   const { config, state, effects, snapshot, clock, now, performed, isolate } = cycle;
   if (!effects.recordSession) return;
+  const sighted = new Set<string>();
   for (const item of snapshot.work) for (const handle of item.sessions ?? []) {
     if (handle.kind !== 'implementation' || handle.state !== 'running' || handle.host !== config.hostId) continue;
     const leased = !!item.lease && item.lease.owner === handle.principal && Date.parse(item.lease.expiresAt) > clock;
+    const seenKey = `exited:implementation:${item.id}:${handle.id}:${handle.startedAt}`;
     let reason: string | null = null;
     if (item.stage !== 'build' && !leased) reason = `${item.key} has left build, the stage this implementation session was launched for, and is now in ${item.stage}`;
     else if (runtime?.available && handle.pane && !(clock - Date.parse(handle.startedAt) < launchAppearanceMs)) {
       const listed = runtime.agents.find(agent => agent.pane_id === handle.pane);
-      if (!listed || listed.agent === null || listed.agent === '')
-        reason = `the ${handle.runtime} runtime is no longer the foreground process of pane ${handle.pane}: Herdr ${listed ? 'detects no agent in it' : 'lists no agent in it'}, so the agent has exited`;
+      // A pane absent from a listing that holds nothing of its workspace says nothing about the pane.
+      const workspace = handle.workspace ?? (handle.pane.includes(':') ? handle.pane.split(':')[0] : null);
+      const read = !!listed || !workspace || runtime.agents.some(agent => agent.pane_id?.startsWith(`${workspace}:`));
+      const exited = read && (!listed || listed.agent === null || listed.agent === '')
+        ? `the ${handle.runtime} runtime is no longer the foreground process of pane ${handle.pane}: Herdr ${listed ? 'detects no agent in it' : 'lists no agent in it'}, so the agent has exited` : null;
+      const seen = state.actions[seenKey];
+      if (exited) {
+        sighted.add(seenKey);
+        if (!seen) { await record(state, seenKey, { kind: 'close', work: item.key, principal: handle.principal, state: 'waiting', detail: `${exited}; implementation session ${handle.id} is closed if that still stands on a later cycle, ${launchAppearanceMs / 1000}s from now`, attempts: 1, cycle: state.cycle }, now(), effects.persist); continue; }
+        if (seen.cycle === state.cycle || now() - Date.parse(seen.at) < launchAppearanceMs) continue;
+        reason = `${exited} (first seen at ${seen.at})`;
+      }
     }
     if (!reason) continue;
     const key = `close:implementation:${item.id}:${handle.id}:${handle.startedAt}`, previous = state.actions[key];
@@ -573,11 +684,24 @@ async function closeExitedWorkerSessions(cycle: Cycle, runtime: { agents: HerdrA
     await isolate('close', item, handle.id, async () => {
       const entry = (outcome: 'done' | 'failed', detail: string) => record(state, key, { kind: 'close', work: item.key, principal: handle.principal, state: outcome, detail, attempts, cycle: state.cycle }, now(), effects.persist);
       try {
-        await effects.recordSession!(item, { id: handle.id, kind: 'implementation', runtime: handle.runtime, host: handle.host, subject: handle.subject, state: 'finished', outcome: `closed by the loop: ${found}`.slice(0, 500) });
-        performed.push(await entry('done', `Closed implementation session ${handle.id} of ${item.key}${handle.pane ? ` (pane ${handle.pane})` : ''}: ${found}`));
+        // The pane goes first, so the record never says finished beside a pane still standing. A
+        // close that fails leaves the handle running: the step is retried whole on a later cycle.
+        let closed = '';
+        if (handle.pane) {
+          try { await effects.closeSession(handle.pane); closed = `; pane ${handle.pane} closed`; }
+          catch (error) { if (!paneAlreadyGone(error)) throw error; closed = `; pane ${handle.pane} was already gone`; }
+        }
+        await effects.recordSession!(item, { id: handle.id, kind: 'implementation', runtime: handle.runtime, host: handle.host, subject: handle.subject, state: 'finished', outcome: `closed by the loop: ${found}${closed}`.slice(0, 500) });
+        performed.push(await entry('done', `Closed implementation session ${handle.id} of ${item.key}${handle.pane ? ` (pane ${handle.pane})` : ''}: ${found}${closed}`));
+        // Its sighting goes with it, in this cycle's sweep.
+        sighted.delete(seenKey);
       } catch (error) {
         performed.push(await entry('failed', `Could not close implementation session ${handle.id} of ${item.key}: ${message(error)}`));
       }
     });
   }
+  // A sighting that did not stand this cycle — the agent reappeared, or its handle was closed — starts over.
+  const lapsed = Object.keys(state.actions).filter(key => key.startsWith('exited:implementation:') && state.actions[key].state === 'waiting' && !sighted.has(key));
+  for (const key of lapsed) delete state.actions[key];
+  if (lapsed.length) await effects.persist(state);
 }

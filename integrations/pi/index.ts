@@ -11,7 +11,7 @@ import { autonomyContract } from '../../src/autonomy';
  * never run blindly. Nothing here asks a person anything: there is no UI call anywhere in this
  * file, and a refused call returns its reason to the agent so it retries safely.
  *
- * `GRAPHYARD_PI_ROLE` (approver | producer | research | triage) selects the role's tool; unset, the approver's
+ * `GRAPHYARD_PI_ROLE` (approver | producer | research | diagnostician | triage) selects the role's tool; unset, the approver's
  * and the producer's are registered.
  * The tools submit nothing to the control plane themselves: the runner hands the validated payload
  * to the loop, which applies it through the same routes a terminal session uses, and the gates
@@ -70,6 +70,29 @@ export const researchParameters: JsonSchema = {
     approach: text(6000, 'The approach you recommend the worker take'),
     questions: { type: 'array', maxItems: 10, description: 'Product-experience questions only the operator may answer; the build proceeds on each recommendation until answered',
       items: { type: 'object', additionalProperties: false, required: ['question', 'why', 'recommendation'], properties: { question: text(1000, 'The question'), why: text(1000, 'Why the answer matters'), recommendation: text(1000, 'The answer you recommend') } } },
+  },
+};
+
+/** The diagnostician's diagnosis (GY-439, src/runner/payloads.ts diagnosisPayloadSchema): the cause, its evidence, its class, and exactly one answer. */
+const faultClassNames = ['session-liveness', 'review-convergence', 'decision', 'scope', 'overlap-hold', 'observation', 'deployment', 'configuration',
+  'containment', 'merge', 'proof', 'capacity', 'resources', 'loop', 'human-decision', 'stalled-gate', 'unclassified'] as const;
+export const diagnoseParameters: JsonSchema = {
+  type: 'object', additionalProperties: false, required: ['subject', 'cause', 'evidence', 'faultClass'],
+  properties: {
+    subject: text(400, 'The work item key or invariant instance you were asked to diagnose, exactly as given'),
+    cause: text(4000, 'The root cause the instances share, stated so a worker can remove it'),
+    evidence: { type: 'object', additionalProperties: false, required: ['logLines', 'commands'], description: 'What the cause rests on: at least one log line or command',
+      properties: { logLines: { type: 'array', maxItems: 50, items: text(1000, 'A log line, quoted exactly') }, commands: { type: 'array', maxItems: 50, items: text(1000, 'A command you ran and what it showed') } } },
+    faultClass: { type: 'string', enum: faultClassNames, description: 'The fault class the cause belongs to' },
+    covering: { type: 'string', pattern: '^GY-\\d+$', description: 'An existing open item that already covers this cause; omit when you give fix' },
+    fix: { type: 'object', additionalProperties: false, required: ['title', 'description', 'priority', 'criteria', 'plannedFiles'], description: 'The root-cause item to file; omit when you give covering',
+      properties: {
+        title: text(200, 'The fix item title'), description: text(20000, 'The cause, the evidence and what to change'),
+        type: { type: 'string', enum: ['feature', 'bug', 'chore'] }, priority: { type: 'integer', minimum: 0, description: 'The priority to release it at, 0 (highest) to 4' },
+        criteria: { type: 'array', minItems: 1, maxItems: 20, items: { type: 'object', additionalProperties: false, required: ['id', 'text', 'proofs'],
+          properties: { id: { type: 'string', pattern: '^[A-Z]+-\\d+$', description: 'AC-1, AC-2, ...' }, text: text(4000, 'A testable criterion'), proofs: { type: 'array', minItems: 1, maxItems: 10, items: text(200, 'A proof such as unit:name') } } } },
+        plannedFiles: { type: 'array', minItems: 1, maxItems: 100, items: text(500, 'A file or directory the fix changes; name files, not the repository root') },
+      } },
   },
 };
 
@@ -135,7 +158,8 @@ export function graphyardTools(role: string | undefined = process.env.GRAPHYARD_
   };
   const decide = tool('graphyard_decide', 'Graphyard decide', 'Record your verdict on the Graphyard decision you were asked to judge: approve true or false, with your reason. Call it exactly once; it is your answer.', decideParameters, params => `decision ${params.decision}`, true);
   const evidence = tool('graphyard_submit_evidence', 'Graphyard evidence', 'Submit one proof\'s result on the exact head, base and policy revision you were given, with the exercise run against the tree with the criterion\'s behaviour removed. Call it once per proof, pass or fail.', evidenceParameters, params => `proof ${params.proof}`, false);
-  // The research session's brief (GY-259) is registered for its own role only.
+  // The research session's brief (GY-259) and the diagnostician's diagnosis (GY-439) are registered for their own roles only.
+  if (role === 'diagnostician') return [tool('graphyard_diagnose', 'Graphyard diagnose', 'Record your diagnosis of the recurring fault or invariant violation you were asked to diagnose: its cause, the log lines and commands it rests on, its fault class, and either the existing open item that covers it or the fix item to file. Call it exactly once; it is your result.', diagnoseParameters, params => `diagnosis ${params.subject}`, true)];
   if (role === 'research') return [tool('graphyard_research_brief', 'Graphyard research brief', 'Record the research brief for the item you were asked to research: existing code to reuse, patterns and prior art with sources, risks, the approach you recommend, and the operator\'s product questions with your recommended answers. Call it exactly once; it is your result.', researchParameters, () => 'the brief', true)];
   // The triage session's judgement of a machine-filed backlog item (GY-402), likewise for its own role only.
   if (role === 'triage') return [tool('graphyard_triage_decision', 'Graphyard triage decision', 'Record your judgement of the machine-filed backlog item you were asked to triage: release it with a priority, close it with a reason (naming the delivered item that already fixed it, if any), or merge it into another open item. Call it exactly once; it is your result.', triageParameters, () => 'the judgement', true)];
@@ -294,21 +318,61 @@ export function guardCommand(command: string, context: GuardContext): GuardVerdi
 }
 
 /**
+ * GNU mktemp's options, parsed as mktemp parses them (GY-564): whether it creates a directory,
+ * whether it creates anything at all, and the directory a `-p`/`--tmpdir` names. An option it does
+ * not take, or more than one template, is `null` — a line nobody can say mktemp made.
+ */
+export function mktempOptions(words: string[]): { directory: boolean; dryRun: boolean; parent: string | null } | null {
+  let directory = false, dryRun = false, parent: string | null = null, templates = 0, options = true;
+  for (let index = 0; index < words.length; index++) {
+    const word = words[index];
+    if (options && word === '--') { options = false; continue; }
+    if (options && word.startsWith('--')) {
+      const [name, value] = word.includes('=') ? [word.slice(0, word.indexOf('=')), word.slice(word.indexOf('=') + 1)] : [word, null];
+      if (name === '--directory') directory = true;
+      else if (name === '--dry-run') dryRun = true;
+      else if (name === '--quiet') { /* no effect on what is created */ }
+      else if (name === '--tmpdir') parent = value;
+      else if (name === '--suffix') { if (value === null) index++; }
+      else return null;
+      continue;
+    }
+    if (options && word.startsWith('-') && word.length > 1) {
+      for (let at = 1; at < word.length; at++) {
+        const flag = word[at];
+        if (flag === 'd') directory = true;
+        else if (flag === 'u') dryRun = true;
+        else if (flag === 'q' || flag === 't') { /* quiet; template under the temporary root */ }
+        else if (flag === 'p') { parent = word.slice(at + 1) || words[++index] || null; if (parent === null) return null; break; }
+        else return null;
+      }
+      continue;
+    }
+    if (++templates > 1) return null;
+  }
+  return { directory, dryRun, parent };
+}
+
+/**
  * The directory a `mktemp -d` call printed. Only a command that is nothing but that one mktemp
  * invocation counts, and only its single line of output (GY-391): a line a second command printed
  * beside it (`mktemp -d && ls -d /tmp/*`) is not a directory the session created. The line is kept
- * only when it is a real directory under the temporary root.
+ * only when it is a real directory under the temporary root and, when `-p`/`--tmpdir` names a
+ * parent, under that parent — a `--tmpdir` template may carry slashes and mktemp creates only its
+ * final component, so an existing parent can hold it at any depth (GY-564).
  */
 export function mktempDirectories(command: string, output: string, root = tmpdir()): string[] {
   const segments = shellWords(command);
   if (segments.length !== 1) return [];
   const [program, ...words] = segments[0];
-  if (program.dynamic || program.value.split('/').pop() !== 'mktemp' || words.some(word => word.dynamic)) return [];
-  if (!words.some(word => word.value === '--directory' || /^-[A-Za-z]*d[A-Za-z]*$/.test(word.value))) return [];
+  if (program.dynamic || program.value.split('/').pop() !== 'mktemp' || words.some(word => word.dynamic || word.glob)) return [];
+  const options = mktempOptions(words.map(word => word.value));
+  if (!options?.directory || options.dryRun) return [];
   const lines = output.split('\n').map(line => line.trim()).filter(Boolean);
   if (lines.length !== 1) return [];
   const [line] = lines, base = resolve(root);
   if (!isAbsolute(line) || !inside(resolve(line), base) || resolve(line).split(sep).includes('..')) return [];
+  if (options.parent && (!isAbsolute(options.parent) || !inside(resolve(line), resolve(options.parent)))) return [];
   try { return statSync(line).isDirectory() ? [line] : []; } catch { return []; }
 }
 

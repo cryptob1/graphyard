@@ -96,6 +96,15 @@ test('unit:fault-classes — attention items, escalations and pipeline faults ca
   ]);
   assert.deepEqual(worded.map(entry => entry.faultClass), ['scope', 'review-convergence', 'observation', 'stalled-gate', 'stalled-gate', 'unclassified']);
   assert.equal(worded[4].kind, 'actorless');
+  // GY-729: GY-185 reworded the stalled-action line and the signature still named the old wording, so
+  // every stalled action since read as unclassified. These are the three recorded instances verbatim.
+  const stalledLines = classifyAttention([
+    { subject: 'GY-646', text: "GY-646's request-review action is stalled, retried only on a widening backoff: 3 attempts in a row failed for one unchanged reason — GY-646 GitHub observation is missing or older than two minutes — and it has been open 12m over 4 attempt(s); next attempt at 2026-09-26T16:04:33.888Z. Nothing changes by attempting it again while that condition stands" },
+    { subject: 'GY-446', text: "GY-446's resync action is stalled, retried only on a widening backoff: 4 attempts in a row failed for one unchanged reason — The operation was aborted due to timeout — and it has been open 29m over 4 attempt(s). Nothing changes by attempting it again while that condition stands" },
+    { subject: 'GY-551', text: "GY-551's resync action is stalled, retried only on a widening backoff: 4 attempts in a row failed for one unchanged reason — The operation was aborted due to timeout — and it has been open 29m over 4 attempt(s); next attempt at 2026-09-26T16:58:11.374Z. Nothing changes by attempting it again while that condition stands" },
+    { subject: 'GY-131', text: "GY-131's request-review action is stalled, not retrying: 3 attempts in a row failed for one unchanged reason — reviewer busy" },
+  ]);
+  assert.deepEqual(stalledLines.map(entry => [entry.kind, entry.faultClass]), Array(4).fill(['stalled-action', 'stalled-gate']), 'a stalled action is classified in its current wording and its pre-GY-185 one');
   // Escalations on an item, one class per trigger.
   const escalated = item('GY-7', { escalations: escalationTriggers.map(trigger => ({ trigger, reason: `${trigger} raised`, actor: 'graphyard', at: iso(0) })) } as Partial<Work>);
   assert.deepEqual(workFaults(escalated, clock).map(entry => entry.faultClass), ['session-liveness', 'proof', 'review-convergence', 'scope']);
