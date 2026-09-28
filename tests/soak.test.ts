@@ -1,9 +1,10 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
+import { lstat, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import EmbeddedPostgres from 'embedded-postgres';
 import pg from 'pg';
@@ -11,6 +12,8 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { processJob } from '../src/github.js';
+import { runChild } from '../src/child-runner.js';
+import { reclaimIdleMs, reclaimWorktrees, removeReclaimableWorktrees, worktreeReclaimAuditFile, worktreesDirectory, writeWorktreeInventoryCache, type WorktreeRemoval, type WorktreeRemovalReport } from '../src/master.js';
 import { Refusal, type Principal, type Work } from '../src/model.js';
 import { approverSessionName, decisionInput, masterConfigSchema, mergeExecutor, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { mergeBatchSize, mergeParallelTips, optimisticExcludeGlobs, optimisticMergeEnabled, rerunFailedChecks } from '../src/master/profiles.js';
@@ -52,7 +55,11 @@ import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } f
  * GY-498, GY-500, GY-516), and a second, queue-only day runs the parallel-tip window (GY-498) over
  * every item: several tips validated at once, a failing tip ejecting only its own entry once the
  * tips ahead pass while the suffix rebuilds without it, and the window reconfigured mid-day and
- * republished. A change to the loop that breaks an invariant fails here, in CI, before it merges;
+ * republished. Every attempt works in a real Git worktree under a real repository, so the loop's
+ * reclaim step runs its real removal pass all day: finished trees go within the per-pass bound, a
+ * delivered directory Git forgets is judged as an orphan whatever hold its registered days left
+ * standing (GY-552), and an orphan that holds work keeps it. A change to the loop that breaks an
+ * invariant fails here, in CI, before it merges;
  * a new behaviour that repeats per cycle, head or item belongs in this world.
  */
 const repository = 'owner/project';
@@ -73,10 +80,6 @@ const credentials = everyone.map(principal => ({ ...principal, token: `${princip
 const token = (principal: Principal) => credentials.find(entry => entry.id === principal.id)!.token;
 const reviewerApps = [{ id: 'claude-reviewer', runtime: 'claude', appId: 55_001, botUserId: 55_002 }, { id: 'cursor-reviewer', runtime: 'cursor', appId: 66_001, botUserId: 66_002 }];
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
-const soakConfig: MasterConfig = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: launcher, repository, baseBranch: 'main', githubAppId: 1234,
-  hostId: 'soak-host', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers,
-  operatorAgent: { id: principals.operatorAgent.id, credentialFile: '/outside/operator.token' }, approver: { id: principals.approver.id, credentialFile: '/outside/approver.token' },
-  run: { proofWorkflow: 'acceptance.yml', intervalSeconds: 60 } });
 
 /** The day, in simulated time from the start. */
 const start = Date.parse('2031-06-02T08:00:00Z');
@@ -111,9 +114,22 @@ const plan = {
   // it at once — and is itself rebuilt onto the moved base, so the failed rerun never costs that
   // item its rework round (the rerun-fails path itself is exercised by tests/tip-flake-rerun.test.ts).
   outOfQueue: { item: 15, afterMs: minute },
+  // GY-552: the held-to-unregistered transition. Item 12's delivered directory is cleaned to its
+  // dependency trees and the stale `.git` pointer before Git forgets it, so the orphan is
+  // removable; item 13's keeps its work, so the pass must keep the directory and report it. Both
+  // are single-attempt items no leftover review session stands on, so nothing else holds their
+  // trees. At most `removalLimit` finished trees go per pass, so the drain paces across passes.
+  orphans: { empty: 12, holding: 13 }, removalLimit: 3,
 };
 const file = (n: number) => `src/soak/item-${n}.ts`;
 const files = (n: number) => plan.infrastructure.has(n) ? [file(n), `tests/helpers/soak-item-${n}.ts`] : [file(n)];
+
+const soakConfig: MasterConfig = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: launcher, repository, baseBranch: 'main', githubAppId: 1234,
+  hostId: 'soak-host', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers,
+  operatorAgent: { id: principals.operatorAgent.id, credentialFile: '/outside/operator.token' }, approver: { id: principals.approver.id, credentialFile: '/outside/approver.token' },
+  // The disk threshold stays below any real volume, so the reclaim step keeps to its own interval
+  // rather than running on every cycle, and the per-pass removal bound is the plan's own (GY-552).
+  run: { proofWorkflow: 'acceptance.yml', intervalSeconds: 60, diskThresholdGb: 0.1, worktreeRemovalLimit: plan.removalLimit } });
 
 /**
  * GY-630: the scope-widening scenarios a day also carries when `scope` is set, as extra items
@@ -242,6 +258,38 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   // The unrepresentable ask's worker never pushes or submits: its item stays blocked on scope.
   const hold = new Set(options.scope ? [items[scopePlan.unrepresentable - 1].key] : []);
 
+  // ---- The worktree world (GY-552): a real repository whose assignment worktrees the loop reclaims. ----
+  // Every attempt works in a real Git worktree under a real repository, the way the launcher makes
+  // one, so the cycle's reclaim step runs its real removal pass against real trees: finished
+  // worktrees go at most the plan's bound per pass, a directory Git has forgotten is judged as an
+  // orphan whatever hold its registered days left standing, and an orphan that holds work keeps it.
+  const wtRoot = await mkdtemp(join(tmpdir(), 'graphyard-soak-worktrees-'));
+  execFileSync('git', ['init', '-q', '-b', 'main', wtRoot]);
+  for (const [key, value] of [['user.email', 'soak@example.com'], ['user.name', 'Soak Test'], ['commit.gpgsign', 'false']]) execFileSync('git', ['config', key, value], { cwd: wtRoot });
+  await writeFile(join(wtRoot, '.gitignore'), 'node_modules/\n');
+  await writeFile(join(wtRoot, 'source.ts'), 'export const value = 1;\n');
+  execFileSync('git', ['add', '-A'], { cwd: wtRoot });
+  execFileSync('git', ['commit', '-qm', 'base'], { cwd: wtRoot });
+  await mkdir(join(wtRoot, 'node_modules', 'pg'), { recursive: true });
+  await writeFile(join(wtRoot, 'node_modules', 'pg', 'index.js'), 'module.exports = "shared";\n');
+  const worktreePaths = new Map<string, Set<string>>(), worktreeBranches = new Map<string, string>();
+  /** An assignment worktree exactly as the launcher creates one: its own branch on the first attempt, a detached fresh checkout on a later one (the branch stays with the open pull request). */
+  const addWorktree = async (key: string, epoch: number, branch: string, n: number, first: boolean) => {
+    const path = join(worktreesDirectory(wtRoot), `${key}-${epoch}`);
+    execFileSync('git', ['worktree', 'add', '-q', ...(first ? ['-b', branch] : ['--detach']), path, 'main'], { cwd: wtRoot });
+    await symlink(join(wtRoot, 'node_modules'), join(path, 'node_modules'));
+    if (n === plan.orphans.empty || n === plan.orphans.holding) await writeFile(join(path, 'notes.txt'), `scratch for ${key}\n`);
+    if (first) worktreeBranches.set(path, branch);
+    (worktreePaths.get(key) ?? worktreePaths.set(key, new Set()).get(key)!).add(path);
+    return path;
+  };
+  /** Git forgets a worktree's registry entry the way a stray prune does: the directory stays behind. The empty orphan is first cleaned to its dependency trees and the stale `.git` pointer. */
+  const forgetWorktree = async (path: string, holding: boolean) => {
+    if (!holding) for (const name of await readdir(path)) if (name !== 'node_modules' && name !== '.git') await rm(join(path, name), { recursive: true, force: true });
+    await rm(join(wtRoot, '.git', 'worktrees', basename(path)), { recursive: true, force: true });
+    execFileSync('git', ['worktree', 'prune'], { cwd: wtRoot });
+  };
+
   // ---- Workers: the loop dispatches, the simulated session claims, works, pushes and submits (or dies). ----
   interface Session { work: string; key: string; branch: string; profile: WorkerProfile; epoch: number; attempt: number; pane: string; pushAt: number; diesAt: number | null; state: 'working' | 'submitted' | 'dead'; syncs: number; syncedFor?: string; refusedSince?: number }
   const sessions: Session[] = [], lost: string[] = [];
@@ -253,9 +301,9 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     const epoch = claimed.epoch, key = work.key, n = numberOf(work);
     // A rework attempt pushes to the pull request already linked, from a fresh workspace.
     const branch = work.candidate?.branch ?? `graphyard/${key.toLowerCase()}-${epoch}`;
-    const path = `/tmp/soak/${key}-${epoch}`;
-    await engine.execute(principal, 'workspace', work.id, { epoch, host: 'soak-host', path, branch }, id());
     const attempt = (attempts.get(key) ?? 0) + 1; attempts.set(key, attempt);
+    const path = await addWorktree(key, epoch, branch, n, attempt === 1);
+    await engine.execute(principal, 'workspace', work.id, { epoch, host: 'soak-host', path, branch }, id());
     const pane = herdr.open(profile.agentName, 'working', path);
     sessions.push({ work: work.id, key, branch, profile, epoch, attempt, pane, pushAt: clock.now() + plan.workMs, diesAt: plan.deaths.has(n) && attempt === 1 ? clock.now() + plan.deathAfterMs : null, state: 'working', syncs: 0 });
     // A scope scenario asks the moment it holds the lease, as a worker does, and keeps working
@@ -398,6 +446,11 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   // One executor instance for the loop's process, and a fresh request per merge the loop asks for, as `master run` wires it.
   const executor = { principal: principals.coordinator.id, instance: `soak-${randomUUID()}` };
   const merge: DaemonEffects['merge'] = work => mergeExecutor(config, snapshot, transport, executor, randomUUID(), github.gh(repository))(work);
+  // GY-552: what the day's reclaim passes did, pass by pass, so the test can watch the drain pace
+  // across passes and the holds stand and clear. `held` is cumulative per pass, `holdsSeen` counts
+  // the passes each tree was held on, and `unregistered` the directories Git has forgotten.
+  const passes: { at: number; removed: WorktreeRemoval[]; kept: WorktreeRemovalReport['kept']; held: string[]; backlog: number; errors: string[] }[] = [];
+  const holdsSeen = new Map<string, number>(), unregistered = new Set<string>();
   const effects: DaemonEffects = {
     agents: () => herdr.list(),
     herdr: () => ({ agents: herdr.list(), available: true }),
@@ -434,6 +487,19 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     },
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
     exhaustedProofs: async () => [...abandoned.values()],
+    // The reclaim step (GY-552), exactly as the loop wires it: the removal pass over the real
+    // repository, then the dependency reclaim on what remains, then the inventory cache with the
+    // holds it recorded, so a hold stands across passes the way it does in production.
+    reclaim: async work => {
+      const idleMs = reclaimIdleMs(config);
+      const trees = await removeReclaimableWorktrees(wtRoot, work, { idleMs, run: runChild, baseBranch: 'main', limit: plan.removalLimit });
+      const report = await reclaimWorktrees(wtRoot, work, { idleMs, entries: trees.entries });
+      const taken = new Set(report.applied ? report.removed : []);
+      await writeWorktreeInventoryCache(wtRoot, { at: trees.at, entries: trees.entries.map(entry => ({ ...entry, dependencies: entry.dependencies.filter(dependency => !taken.has(dependency.path)) })), held: trees.held });
+      for (const entry of trees.held) holdsSeen.set(entry.path, (holdsSeen.get(entry.path) ?? 0) + 1);
+      passes.push({ at: clock.now(), removed: trees.removed, kept: trees.kept, held: trees.held.map(entry => entry.path), backlog: trees.backlog, errors: trees.errors });
+      return { ...report, trees };
+    },
   };
   // The loop publishes the master's merge-queue settings each cycle they change (GY-330, GY-498,
   // GY-500, GY-516), exactly as daemonEffects wires it; the day records what was published, when.
@@ -631,6 +697,20 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       // The interval between cycles is when a hand-off launch settles; the day's clock waits for
       // them so the world never acts on a half-finished launch.
       await launcher.idle();
+      // GY-552: once a delivered item's directory has been held on two passes while Git still
+      // registered it, Git forgets the registry entry and the directory stays behind. The hold
+      // from its registered days must not shield what it has become: item 12's orphan, cleaned to
+      // its dependency trees and the stale `.git` pointer, is removable; item 13's keeps its work,
+      // so the pass must keep the directory and report what it holds.
+      if (unregistered.size < 2 && holdsSeen.size) {
+        const all = await store.list();
+        for (const [n, holding] of [[plan.orphans.empty, false], [plan.orphans.holding, true]] as const) {
+          const key = items[n - 1].key, path = [...worktreePaths.get(key) ?? []].at(-1);
+          if (!path || unregistered.has(key) || (holdsSeen.get(path) ?? 0) < 2 || all.find(entry => entry.key === key)?.stage !== 'done') continue;
+          unregistered.add(key);
+          await forgetWorktree(path, holding);
+        }
+      }
       // Between cycles, as runDaemon runs it: the self-upgrade against the simulated checkout.
       checkout.dirty = elapsed >= plan.dirtyCheckout.from && elapsed < plan.dirtyCheckout.to;
       const upgraded = await selfUpgrade(state);
@@ -650,13 +730,27 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   engine.reconcileLanded = reconcileLanded; engine.directMergeEnvironment = null;
   const final = (await store.list()).filter(item => items.some(entry => entry.id === item.id));
   if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
+  // ---- What the day's reclamation left behind, gathered before the worktree world is cleaned up. ----
+  const audit = (await readFile(worktreeReclaimAuditFile(wtRoot), 'utf8').catch(() => '')).trim().split('\n').filter(Boolean)
+    .map(line => JSON.parse(line) as { at: string; action: string; path: string; key: string | null; reason: string; head: string | null });
+  const exists = (path: string) => lstat(path).then(() => true, () => false);
+  const emptyKey = items[plan.orphans.empty - 1].key, holdingKey = items[plan.orphans.holding - 1].key;
+  const solePath = (key: string) => [...worktreePaths.get(key)!].at(-1)!;
+  const reclaimEvidence = {
+    passes, unregistered: [...unregistered], holds: [...holdsSeen.entries()], paths: Object.fromEntries([...worktreePaths].map(([key, paths]) => [key, [...paths]])), branches: worktreeBranches, audit,
+    emptyOrphan: { key: emptyKey, path: solePath(emptyKey), gone: !(await exists(solePath(emptyKey))) },
+    holdingOrphan: { key: holdingKey, path: solePath(holdingKey), kept: await exists(solePath(holdingKey)),
+      note: await readFile(join(solePath(holdingKey), 'notes.txt'), 'utf8').catch(() => null) },
+    sharedInstall: await readFile(join(wtRoot, 'node_modules', 'pg', 'index.js'), 'utf8').catch(() => null),
+  };
+  await rm(wtRoot, { recursive: true, force: true });
   return { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, herdr, hand, escalations, spent, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, landingRefusals, foreignPane,
-    mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted };
+    mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted, reclaim: reclaimEvidence };
 }
 
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 180_000 }, async () => {
   const began = performance.now();
-  const { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, state, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, herdr, landingRefusals, foreignPane, mergeQueuePosts } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
+  const { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, state, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, herdr, landingRefusals, foreignPane, mergeQueuePosts, reclaim } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
   const undelivered = final.filter(item => item.stage !== 'done' || !item.delivery);
   assert.deepEqual(undelivered.map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
@@ -808,6 +902,45 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.match(sweepStatus?.detail ?? '', /0 standing agentless; the backlog has drained/, `the drain is what stands on the record (${sweepStatus?.detail?.slice(0, 200)})`);
   assert.doesNotMatch(sweepStatus?.detail ?? '', /the oldest is pane/, 'no oldest pane outlives the drained day');
   assert.ok(!state.actions['sweep:panes:attention'], 'the day never stood past the agentless attention bound');
+  // GY-552: the held-to-unregistered transition, run by the real loop's reclaim step against the
+  // real worktrees every attempt worked in. Item 12's delivered tree was held on two passes while
+  // Git still registered it; once Git forgot the directory the orphan went on a later pass even
+  // though its refs and its activity never moved. Item 13's orphan, which holds work, was kept
+  // with what it holds intact. The drain paced across later passes within the per-pass bound, and
+  // the audit carries exactly one entry per removal.
+  const emptyPath = reclaim.emptyOrphan.path, holdingPath = reclaim.holdingOrphan.path;
+  const heldOn = reclaim.passes.filter(pass => pass.held.includes(emptyPath)).length;
+  assert.ok(heldOn >= 2, `the delivered tree was held while Git still registered it (${heldOn} pass(es))`);
+  assert.ok(reclaim.passes.some(pass => pass.held.includes(holdingPath)), 'the holding delivered tree was held too');
+  const removalPasses = reclaim.passes.filter(pass => pass.removed.length);
+  assert.ok(removalPasses.length >= 3, `the removals drained across later passes (${removalPasses.length} pass(es) removed trees)`);
+  assert.ok(reclaim.passes.every(pass => pass.removed.length <= plan.removalLimit), `no pass removed more than its bound of ${plan.removalLimit}`);
+  const removedPaths = reclaim.passes.flatMap(pass => pass.removed.map(entry => entry.path));
+  const createdPaths = Object.values(reclaim.paths).flat();
+  assert.ok(removedPaths.length >= 5, `multiple finished trees went across the day (${removedPaths.length} of ${createdPaths.length})`);
+  assert.equal(new Set(removedPaths).size, removedPaths.length, 'no tree was removed twice');
+  assert.ok(removedPaths.every(path => createdPaths.includes(path)), 'nothing that was never an assignment worktree was removed');
+  assert.ok(!removedPaths.includes(holdingPath), 'the orphan that holds work was never removed');
+  assert.ok(createdPaths.filter(path => path !== holdingPath && !removedPaths.includes(path)).every(path => {
+    const key = Object.keys(reclaim.paths).find(name => reclaim.paths[name].includes(path))!;
+    return Number(key.replace('GY-', '')) <= plan.leftovers;
+  }), `every tree still standing but the holding orphan belongs to an item a leftover review session keeps: ${createdPaths.filter(path => path !== holdingPath && !removedPaths.includes(path)).join(', ')}`);
+  assert.deepEqual(reclaim.audit.map(entry => entry.path).sort(), [...new Set(removedPaths)].sort(), 'the audit carries exactly one entry per removal');
+  assert.equal(new Set(reclaim.audit.map(entry => `${entry.action} ${entry.path}`)).size, reclaim.audit.length, 'no duplicate audit records');
+  const orphanEntry = reclaim.audit.find(entry => entry.path === emptyPath)!;
+  assert.equal(orphanEntry.action, 'orphan-remove');
+  assert.equal(orphanEntry.head, null);
+  assert.match(orphanEntry.reason, /is delivered; the directory was no longer a registered Git worktree and held nothing but dependency trees/);
+  assert.ok(reclaim.audit.filter(entry => entry.action === 'worktree-remove').every(entry => entry.head !== null && /^[0-9a-f]{40}$/.test(entry.head)), 'a registered removal carries the head it removed');
+  assert.equal(reclaim.emptyOrphan.gone, true, 'the otherwise-empty orphan went once Git no longer registered it');
+  assert.ok(reclaim.branches.get(emptyPath), "the orphan's branch survives its directory");
+  assert.equal(reclaim.holdingOrphan.kept, true, 'the orphan that holds work was kept');
+  assert.equal(reclaim.holdingOrphan.note, `scratch for ${reclaim.holdingOrphan.key}\n`, 'the work the holding orphan holds was preserved');
+  const holdingKept = reclaim.passes.flatMap(pass => pass.kept).filter(entry => entry.path === holdingPath);
+  assert.ok(holdingKept.some(entry => /Not a registered Git worktree, and it holds \d+ path\(s\) that are not dependency trees/.test(entry.reason)), `the kept orphan was reported with what it holds: ${holdingKept.at(-1)?.reason ?? 'never reported'}`);
+  assert.equal(reclaim.sharedInstall, 'module.exports = "shared";\n', 'the shared install behind the orphan\'s link survived it');
+  assert.deepEqual([...reclaim.unregistered].sort(), [reclaim.emptyOrphan.key, reclaim.holdingOrphan.key].sort(), 'exactly the two scenario directories were unregistered');
+  assert.deepEqual(reclaim.passes.flatMap(pass => pass.errors), [], 'no reclaim pass errored');
   const seconds = (performance.now() - began) / 1000;
   assert.ok(seconds < 120, `the day runs well inside the three minutes the CI test job allows it (${seconds.toFixed(1)} s)`);
 });
@@ -879,7 +1012,7 @@ test('unit:soak-invariants-hold — the parallel-tip window validates several qu
   assert.ok(seconds < 150, `the queue-only day runs inside its budget (${seconds.toFixed(1)} s)`);
 });
 
-test('unit:soak-invariants-hold — hand-launched approvers that vanish or stop without judging are relaunched within the bound, a refused relaunch is retried, and the spent watches keep every invariant holding', { timeout: 120_000 }, async () => {
+test('unit:soak-invariants-hold — hand-launched approvers that vanish or stop without judging are relaunched within the bound, a refused relaunch is retried, and the spent watches keep every invariant holding', { timeout: 180_000 }, async () => {
   // GY-551: for every decision a master put to an approver by hand the loop now launches up to two
   // more sessions itself and keeps the spent watch past the bound, so both repeat per item here.
   const { final, violations, failures, state, herdr, hand, escalations, spent } = await simulateDay({ hours: 6, handApprovers: true });
