@@ -303,9 +303,14 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
       // The step throws when it does not record the merge request, so reaching here means GitHub
       // now holds the authorized head (GY-258). What it returns is its own account — requested and
       // not yet observed, or already merged — and the row records that verbatim rather than a word
-      // of the executor's own: only the observation says merged.
-      const result = await effects.merge(work) as { result?: string } | undefined;
-      return `${work.key}: ${result?.result ?? 'the guarded merge returned without a result of its own'}`;
+      // of the executor's own: only the observation says merged. An outcome that is neither pending
+      // nor merged is named as such, the way the loop names it (GY-246), so the row never reads it
+      // the same as an accepted merge (GY-442).
+      const result = await effects.merge(work) as { result?: string; pending?: boolean; merged?: boolean } | undefined;
+      const unaccounted = result?.merged !== true && result?.pending !== true;
+      const unaccountedNote = 'the merge reported neither a pending request nor a merge GitHub performed';
+      if (!result?.result) return `${work.key}: ${unaccounted ? unaccountedNote : 'the guarded merge returned without a result of its own'}`;
+      return `${work.key}: ${result.result}${unaccounted ? `; ${unaccountedNote}` : ''}`;
     },
     'verify-deployment': async action => {
       const { work } = await find(action);
