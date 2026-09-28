@@ -144,8 +144,8 @@ export function scopeRoutineDecision(work: Work, now: number, judged: boolean): 
  * Recovery releases a delivered item whose supervisor is still quarantined. A merge decision is
  * needed only where automatic merging is off, and then for the exact candidate that is mergeable.
  */
-export function routineDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>, now: number, assessment?: ContainmentAssessment | null): RoutineDecision | null {
-  const needed = neededDecision(work, config);
+export function routineDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>, now: number, assessment?: ContainmentAssessment | null, exhausted: readonly ExhaustedProof[] = []): RoutineDecision | null {
+  const needed = neededDecision(work, config, exhausted);
   if (!needed) return null;
   // None attests anything about a worker: a merge is of a mergeable candidate, a triage closure of an unreleased backlog item,
   // and an attestation's approver judges the proof.
@@ -166,8 +166,11 @@ export function routineDecision(work: Work, config: Pick<MasterConfig, 'autoMerg
 export function awaitingEjectionRestore(work: Pick<Work, 'gates'>): boolean {
   return (work.gates ?? []).some(gate => gate.name === 'build' && gate.reasons.some(reason => reason.startsWith(restoringAfterEjectionPrefix)));
 }
-/** What the item calls for, before asking whether the loop may attest that its worker is stopped. */
-export function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>): RoutineDecision | null {
+/**
+ * What the item calls for, before asking whether the loop may attest that its worker is stopped.
+ * `exhausted` is the producer requests the loop escalated as spent on an earlier cycle (GY-496).
+ */
+export function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>, exhausted: readonly ExhaustedProof[] = []): RoutineDecision | null {
   if (work.stage === 'done') {
     return work.containmentQuarantine
       ? { action: 'recover', reason: `${work.key} is delivered and still fenced by its epoch ${work.containmentQuarantine.epoch} containment quarantine; recovery releases it without touching the delivery.`, binding: String(work.containmentQuarantine.epoch) } : null;
@@ -205,6 +208,8 @@ export function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge
   if (proofs) return { action: 'rework', ...proofs };
   const ci = failedCheckRework(work);
   if (ci) return { action: 'rework', ...ci };
+  const spent = exhaustedProofRework(work, exhausted);
+  if (spent) return { action: 'rework', ...spent };
   // The operator answered a product question the head was built on provisionally, and the answer
   // differs from that recommendation (GY-259): the head no longer builds what was asked.
   const research = researchRework(work);
@@ -254,6 +259,32 @@ export function failedCheckRework(work: Work): { reason: string; binding: string
   if (!failed.length) return null;
   return { reason: `${work.key}: required CI check${failed.length === 1 ? '' : 's'} ${failed.join(', ')} failed on candidate ${candidate.sha.slice(0, 12)}. No gate passes a head whose required checks failed, so the item returns to a worker to fix what CI found.`,
     binding: `${candidate.sha}:ci:${failed.join(',')}` };
+}
+/**
+ * GY-496. A producer request the loop stopped attempting: every automatic session it launched for
+ * the head's proof group ended without trusted evidence (auto-dispatch.ts `abandon`). Before this,
+ * nothing followed: GY-421 waited over seventy minutes in review with its proofs missing, no
+ * producer would be launched for the head again, and the master had to ask for a rework by hand.
+ */
+export interface ExhaustedProof { requestId: string; work: string; sha: string; group: string | null; proofs: string[]; attempts: string[]; reason: string }
+/** The escalation that raises an exhausted request; the rework is requested only on a later cycle. */
+export const exhaustedProofKey = (entry: Pick<ExhaustedProof, 'work' | 'requestId'>) => `escalation:proof-exhausted:${entry.work}:${entry.requestId}`;
+const groupName = (entry: ExhaustedProof) => `the ${entry.group ?? 'producer'} proof group${entry.proofs.length ? ` (${entry.proofs.join(', ')})` : ''}`;
+const quoteAttempts = (entry: ExhaustedProof, limit = 1600) => { const text = entry.attempts.map(attempt => `"${attempt}"`).join('; '); return text.length > limit ? `${text.slice(0, limit - 1)}…` : text || 'no attempt recorded'; };
+/** The attention the loop raises the cycle it first sees the request spent: group, every attempt's outcome, and the next step's owner. */
+export function exhaustedProofEscalation(entry: ExhaustedProof) {
+  return boundDetail(`${entry.work}: producer attempts for ${groupName(entry)} on ${entry.sha.slice(0, 12)} are used up (${entry.reason}); no producer is launched for this head again. Attempts: ${quoteAttempts(entry)}. Next step, owned by the master loop: on its next cycle it requests a rework decision for ${entry.work} quoting these attempts, and the independent approver judges it; the master fixes a launcher fault (a producer profile or its credential) if the attempts name one`);
+}
+/** The rework an item whose proof requests are spent calls for, once the escalation has stood a cycle, or null. */
+export function exhaustedProofRework(work: Work, exhausted: readonly ExhaustedProof[]): { reason: string; binding: string } | null {
+  const candidate = work.candidate;
+  if (!work.submission || work.reworkRequested || !candidate || work.stage === 'done' || work.observation?.merged) return null;
+  const spent = exhausted.filter(entry => entry.work === work.key && entry.sha === candidate.sha);
+  if (!spent.length) return null;
+  const each = Math.max(200, Math.floor(1600 / spent.length));
+  return { reason: `${work.key}: the producer attempts for ${spent.map(entry => `${groupName(entry)} on ${candidate.sha.slice(0, 12)} ended without trusted evidence — ${quoteAttempts(entry, each)}`).join('. And ')}. No producer is launched for this head again, so it cannot pass its proofs; the item returns to a worker to fix what the attempts name and push a fresh head the producers are requested for.`,
+    // Keyed on the head alone: a second group spent on the same head asks for no second rework.
+    binding: `${candidate.sha}:proof-exhausted` };
 }
 /**
  * GY-193. The rework a head's own proofs call for, or null. A trusted proof that failed on the head
@@ -318,7 +349,8 @@ export function attestationDecision(work: Work): RoutineDecision | null {
  * speculative merge conflicts. An ejection whose base the control plane has not yet tried to
  * bring the head onto waits for that attempt first: a clean refresh republishes the head and it
  * re-enters the queue with no round at all, and a conflicting one is named by `baseRefreshConflict`.
- * The binding names the head and the base tip, so a base that moves on is a fresh ground.
+ * The binding names the head and the base tip, so a base that moves on is a fresh ground; for a
+ * queue ejection that tip is the base the conflicting merge was attempted onto, as recorded.
  * An ejection whose speculative base held predecessors is no conflict with the base (GY-321): merging
  * the base resolves nothing, so no round is asked; the entry waits for those predecessors
  * and re-enters with the same head (model/queue.ts, `predecessorWait`).
@@ -331,8 +363,13 @@ export function syncConflict(work: Work): { reason: string; binding: string } | 
   if (observation.conflicting && !work.queue)
     return { reason: `GitHub reports that candidate ${candidate.sha.slice(0, 12)} conflicts with base branch tip ${tip.slice(0, 12)}`, binding: `${candidate.sha}:sync:${tip}` };
   const ejection = work.queueEjection;
-  if (ejection && !work.queue && ejection.sha === candidate.sha && ejection.policyRevision === work.policyRevision && speculativeConflict(ejection) && !ejection.predecessors?.length && !pendingBaseRefresh(work))
-    return { reason: `the merge queue ejected candidate ${candidate.sha.slice(0, 12)}: ${ejection.reason} (base branch tip ${tip.slice(0, 12)})`, binding: `${candidate.sha}:queue-conflict:${ejection.sequence}:${tip}` };
+  if (ejection && !work.queue && ejection.sha === candidate.sha && ejection.policyRevision === work.policyRevision && speculativeConflict(ejection) && !ejection.predecessors?.length && !pendingBaseRefresh(work)) {
+    // The base the speculative merge was actually attempted onto, as the ejection recorded it
+    // (GY-252); the observed tip only for a record that named none (GY-583).
+    const base = ejection.conflict?.base ?? tip;
+    const moved = base === tip ? '' : `; the base branch tip is now ${tip.slice(0, 12)}`;
+    return { reason: `the merge queue ejected candidate ${candidate.sha.slice(0, 12)}: ${ejection.reason} (base branch tip ${base.slice(0, 12)}${moved})`, binding: `${candidate.sha}:queue-conflict:${ejection.sequence}:${base}` };
+  }
   return null;
 }
 /** The resolve decision a standing control-plane lease-loss calls for (see `supersededLeaseLoss`), or null. */
