@@ -458,7 +458,10 @@ export const connectProviders: readonly ConnectProvider[] = [
   {
     id: 'anthropic-api', label: 'Anthropic API', kind: 'api-key', runtime: 'claude', model: 'claude-default', tier: 'strong',
     authFile: 'settings.json',
-    authDocument: (existing, key) => ({ ...existing, env: { ...((existing.env ?? {}) as Record<string, unknown>), ANTHROPIC_API_KEY: key } }),
+    authDocument: (existing, key) => {
+      const updated = { ...existing, env: { ...((existing.env ?? {}) as Record<string, unknown>), ANTHROPIC_API_KEY: key } };
+      return updated;
+    },
     smoke: { command: 'claude', args: ['-p', smokePrompt], envVariable: 'CLAUDE_CONFIG_DIR' },
     help: 'An Anthropic API key Claude Code bills to your API account.',
   },
@@ -534,7 +537,7 @@ export function parseLoginOutput(text: string): { url: string | null; code: stri
  * and the first code it returns is written to the login once. The child is bounded: past the
  * window it is stopped and the failure is what the card shows.
  */
-export async function relaySubscriptionLogin(provider: ConnectProvider, home: string, options: { login?: { command: string; args: string[] }; pollMs?: number; loginTimeoutMs?: number; onPrinted?: (printed: { url: string | null; code: string | null }) => unknown; answer?: () => Promise<string | null> } = {}): Promise<{ url: string | null; code: string | null; loggedIn: boolean; error: string | null }> {
+export async function relaySubscriptionLogin(provider: ConnectProvider, home: string, options: { login?: { command: string; args: string[] }; pollMs?: number; loginTimeoutMs?: number; onPrinted?: (printed: { url: string | null; code: string | null }) => unknown; answer?: () => Promise<string | null>; isCancelled?: () => Promise<boolean> } = {}): Promise<{ url: string | null; code: string | null; loggedIn: boolean; error: string | null }> {
   const login = options.login ?? { command: provider.login!.command, args: provider.login!.args };
   const pollMs = options.pollMs ?? 2_000, timeoutMs = options.loginTimeoutMs ?? 10 * 60_000;
   const file = resolve(home, provider.loginFile ?? '');
@@ -555,13 +558,13 @@ export async function relaySubscriptionLogin(provider: ConnectProvider, home: st
     const printed = () => { found ??= parseLoginOutput(text); return found; };
     // The login blocks until the operator signs in, and the operator needs the URL to do that: hand
     // it on the moment it is printed (with the code, once both are out or the output settles).
-    let told = false, settle: ReturnType<typeof setTimeout> | undefined;
+    let announced = false, settle: ReturnType<typeof setTimeout> | undefined, lastAnnounced: { url: string | null; code: string | null } | null = null;
     const tell = () => {
-      if (told || settled) return;
+      if (settled) return;
       const now = parseLoginOutput(text);
       if (!now.url && !now.code) return;
       clearTimeout(settle);
-      const announce = () => { if (told || settled) return; told = true; found = parseLoginOutput(text); void Promise.resolve(options.onPrinted?.(found)).catch(() => {}); };
+      const announce = () => { if (settled) return; found = parseLoginOutput(text); if (!announced || found.url !== lastAnnounced?.url || found.code !== lastAnnounced?.code) { announced = true; lastAnnounced = found; void Promise.resolve(options.onPrinted?.(found)).catch(() => {}); } };
       if (now.url && now.code) announce(); else settle = setTimeout(announce, 500);
     };
     const read = (chunk: Buffer) => { text += chunk.toString(); tell(); };
@@ -572,11 +575,11 @@ export async function relaySubscriptionLogin(provider: ConnectProvider, home: st
     let answered = !pasteCode || !options.answer, asking = false;
     child.stdin?.on('error', () => { /* the login exited before reading the code; its exit reports why */ });
     const ask = () => {
-      if (answered || asking || !told || settled) return;
+      if (answered || asking || !announced || settled) return;
       asking = true;
       void options.answer!().then(code => { if (code && !answered && !settled) { answered = true; child.stdin?.end(`${code.trim()}\n`); } }, () => {}).finally(() => { asking = false; });
     };
-    const polling = setInterval(() => { if (settled) return; ask(); void seen().then(there => { if (there) finish({ ...(printed() ?? { url: null, code: null }), loggedIn: true, error: null }); }); }, pollMs);
+    const polling = setInterval(() => { if (settled) return; ask(); void seen().then(there => { if (there) finish({ ...(printed() ?? { url: null, code: null }), loggedIn: true, error: null }); }); void (options.isCancelled?.() ?? Promise.resolve(false)).then(cancelled => { if (cancelled) finish({ ...(printed() ?? { url: null, code: null }), loggedIn: false, error: 'The connect was cancelled' }); }, () => { /* a failed cancellation poll leaves the login running, as the answer poll does */ }); }, pollMs);
     limit.unref?.(); polling.unref?.();
     child.on('error', error => finish({ ...(printed() ?? { url: null, code: null }), loggedIn: false, error: `${login.command} failed: ${error instanceof Error ? error.message : 'unknown reason'}` }));
     child.on('close', status => { void seen().then(there => {
