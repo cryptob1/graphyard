@@ -7,7 +7,7 @@ import { appManifest, reviewerAppManifest } from '../src/github-setup.js';
 // unit:app-permissions-declaration
 test('the control-plane declaration carries the merge queue\'s Contents: write and nothing beyond what a feature names', () => {
   const required = requiredPermissions(controlPlanePermissions);
-  assert.deepEqual(required, { administration: 'read', checks: 'write', contents: 'write', issues: 'read', metadata: 'read', pull_requests: 'write' });
+  assert.deepEqual(required, { actions: 'write', administration: 'read', checks: 'write', contents: 'write', issues: 'read', metadata: 'read', pull_requests: 'write' });
   const queue = controlPlanePermissions.filter(requirement => requirement.feature === 'merge-queue');
   assert.deepEqual(queue.map(requirement => [requirement.permission, requirement.level]), [['contents', 'write']], 'the queue is the only reason for Contents: write');
   for (const requirement of controlPlanePermissions) assert.ok(requirement.reason.length > 10, `${requirement.permission} ${requirement.level} states why it is needed`);
@@ -20,7 +20,7 @@ test('the reviewer declaration never gains Contents: write, Checks, or Administr
 });
 
 test('shortfalls compare granted levels with the declaration, name the blocked features, and point at the installation page', () => {
-  const legacy = { administration: 'read', checks: 'write', contents: 'read', issues: 'read', metadata: 'read', pull_requests: 'write' };
+  const legacy = { actions: 'write', administration: 'read', checks: 'write', contents: 'read', issues: 'read', metadata: 'read', pull_requests: 'write' };
   const missing = permissionShortfalls(legacy, controlPlanePermissions);
   assert.deepEqual(missing.map(shortfall => ({ permission: shortfall.permission, required: shortfall.required, granted: shortfall.granted, features: shortfall.features })),
     [{ permission: 'contents', required: 'write', granted: 'read', features: ['merge-queue'] }]);
@@ -32,7 +32,7 @@ test('shortfalls compare granted levels with the declaration, name the blocked f
   const bare = permissionShortfalls({ metadata: 'read' }, controlPlanePermissions);
   const contents = bare.find(shortfall => shortfall.permission === 'contents')!;
   assert.equal(contents.granted, null); assert.equal(contents.required, 'write'); assert.deepEqual(contents.features, ['observation', 'merge-queue']);
-  assert.deepEqual(blockedFeatures(bare).sort(), ['check', 'comment-events', 'merge-queue', 'observation', 'review-dispatch']);
+  assert.deepEqual(blockedFeatures(bare).sort(), ['check', 'check-rerun', 'comment-events', 'merge-queue', 'observation', 'review-dispatch']);
   // Write satisfies read; admin satisfies write; unknown or missing values satisfy nothing.
   assert.deepEqual(permissionShortfalls({ ...legacy, contents: 'admin' }, controlPlanePermissions), []);
   assert.equal(permissionShortfalls({ ...legacy, contents: 'write', checks: 'yes' }, controlPlanePermissions)[0].permission, 'checks');
@@ -44,9 +44,11 @@ test('the App manifests request exactly the declared sets, so the queue\'s Conte
   const control = appManifest('owner/repo', 'https://example.com', 'http://127.0.0.1:4311');
   assert.deepEqual(control.default_permissions, requiredPermissions(controlPlanePermissions));
   assert.equal(control.default_permissions.contents, 'write');
+  assert.equal(control.default_permissions.actions, 'write');
   const reviewer = reviewerAppManifest('claude', 'owner/repo', 'https://example.com', 'http://127.0.0.1:4311');
   assert.deepEqual(reviewer.default_permissions, requiredPermissions(reviewerPermissions));
   assert.equal(reviewer.default_permissions.contents, 'read');
+  assert.equal('actions' in reviewer.default_permissions, false);
   assert.equal('checks' in reviewer.default_permissions, false); assert.equal('administration' in reviewer.default_permissions, false);
 });
 
@@ -60,4 +62,15 @@ test('the setup guide carries the permission tables generated from the declarati
   const install = await readFile(new URL('../docs/install.md', import.meta.url), 'utf8');
   assert.match(install, /github-setup --update-permissions/);
   assert.match(install, /## Upgrading an existing installation/);
+});
+
+
+test('Actions write is diagnosed before attempting failed-job reruns', () => {
+  for (const actions of [undefined, 'read']) {
+    const missing = permissionShortfalls({ ...requiredPermissions(controlPlanePermissions), actions }, controlPlanePermissions);
+    assert.equal(missing.length, 1);
+    assert.equal(missing[0].permission, 'actions');
+    assert.deepEqual(blockedFeatures(missing), ['check-rerun']);
+    assert.match(describeShortfall(missing[0], 'control', 'https://github.com/settings/installations/42'), /lacks Actions: write.*rerun failed workflow jobs/);
+  }
 });
