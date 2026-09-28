@@ -10,7 +10,7 @@ import type { NextAction } from './next-action.js';
 import type { ActionQueue } from './actions.js';
 import type { AgentRequest } from './agent-requests.js';
 import type { SessionHandle } from './sessions.js';
-import { namedPaths, pathScope, pathScopeContains, type ScopeDecision, type ScopeRequestState } from './scope.js';
+import { namedPaths, pathScope, pathScopeContains, plannedFilesMax, type ScopeDecision, type ScopeRequestState } from './scope.js';
 import type { CapacityState } from './capacity.js';
 import type { HumanRequest } from './human-request.js';
 import type { ResearchRecord } from '../research.js';
@@ -38,7 +38,7 @@ export const createSchema = z.object({
   dependencies: z.array(z.string().uuid()).max(50).default([]),
   criteria: z.array(criterionSchema).min(1).max(50),
   policy: policySchema.default({ checks: ['test', 'typecheck'], review: true }),
-  plannedFiles: z.array(z.string().min(1).max(500)).max(100).default([]),
+  plannedFiles: z.array(z.string().min(1).max(500)).max(plannedFilesMax).default([]),
   exclusiveResources: resourcesSchema.optional(),
   slice: z.enum(sliceIds).optional(),
   // Manual proofs a launched producer session may run on the item's behalf. Unit and

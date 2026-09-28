@@ -1,4 +1,4 @@
-import { baseRefreshConflict, conversationProtectionRefusal, failedCheckResults, requiredCheckPassed, requiredCheckRun, requiredChecksOf, restoringAfterEjection, tipValidation } from '../merge-queue.js';
+import { baseRefreshConflict, checkRerunStatus, conversationProtectionRefusal, failedCheckResults, requiredCheckPassed, requiredCheckRun, requiredChecksOf, restoringAfterEjection, tipValidation } from '../merge-queue.js';
 import type { QueueEjection, QueueEntry, QueueHistoryEntry } from '../merge-queue.js';
 import type { Gate, Stage, Work } from './work.js';
 import { escalationRefusals } from './escalation.js';
@@ -73,11 +73,14 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[],
   ] : []);
   // The policy's checks and every other check the base branch's protection requires (GY-430):
   // GitHub refuses the merge while any of them has not passed, so none is left for it to find.
-  add('test', requiredChecksOf(work).flatMap(check => {
+  const checkReasons = requiredChecksOf(work).flatMap(check => {
     const run = current ? requiredCheckRun(check, obs!.checks, ciAppIds) : undefined;
     if (requiredCheckPassed(check, run)) return [];
-    return [!check.policy && run && failedCheckResults.includes(run.result) ? `Required check ${check.name} failed on the current candidate` : `Required CI check ${check.name} has not passed on the current candidate`];
-  }));
+    return [!check.policy && run && failedCheckResults.includes(run.result)
+      ? `Required check ${check.name} failed on the current candidate`
+      : `Required CI check ${check.name} has not passed on the current candidate${current ? checkRerunStatus(work, check.name) : ''}`];
+  });
+  gates.push({ name: 'test', ciAppIds: [...ciAppIds], reasons: checkReasons, passed: checkReasons.length === 0 });
   const reasons: string[] = [];
   const unproven = (proof: string) => {
     const evidence = currentEvidence(work, proof, now);
