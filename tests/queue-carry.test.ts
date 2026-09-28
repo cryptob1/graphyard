@@ -488,7 +488,7 @@ test('unit:repeated-merge-refusal-acted — a guarded merge refused for the same
     await mergeStep({ config: master, state, effects, now: () => clock, performed, open, isolate: async (_kind: unknown, _item: unknown, _name: unknown, body: () => Promise<unknown>) => body() } as unknown as Cycle);
     return performed;
   };
-  const repeated = () => Object.entries(state.actions).filter(([key]) => key.endsWith(':repeated')).map(([, action]) => action);
+  const repeated = () => Object.entries(state.actions).filter(([key]) => key.includes(':repeated')).map(([, action]) => action);
   const start = clock;
   // A changed reason restarts the count.
   await cycle(); clock += 61_000; reason = 'the pull request changed on GitHub before merge'; const restart = clock;
@@ -511,5 +511,71 @@ test('unit:repeated-merge-refusal-acted — a guarded merge refused for the same
   // Acted on once per candidate and reason.
   for (let pass = 0; pass < 3; pass++) { await cycle(); clock += 61_000; }
   assert.equal(reported.length, 1);
+});
+
+test('unit:repeated-merge-refusal-acted — a rereview that a fresh approval answers re-arms the same refusal, and the loop then takes the rework action', async () => {
+  await clearQueue();
+  const main = sha40('71'), headA = sha40('72'), headB = sha40('73'), tipB = sha40('74'), mergedA = sha40('75');
+  let first = await submitted('Re-arm first'), item = await submitted('Re-arm carried');
+  first = await validated(first, { sha: headA, baseSha: main }); item = await validated(item, { sha: headB, baseSha: main });
+  await onlyJob(first);
+  await processJob(engine, adapter(work => tip(work, { sha: headA, baseSha: main }), (work, placement) => published(work, placement, headA, null)).github);
+  await onlyJob(item);
+  await processJob(engine, adapter(work => tip(work, { sha: headB, baseSha: main }), (work, placement) => published(work, placement, tipB, { from: headB, parents: [headB, headA], author: 'graphyard[bot]', authoredByApp: true, conflicts: false, baseChanges: ['src/head.ts'] })).github);
+  const dismissed = [{ id: 42, reviewer: 'graphyard-reviewer[bot]', sha: headB, state: 'DISMISSED' }];
+  item = await engine.observe(item.id, (await reload(item)).revision, tip(item, { sha: tipB, baseSha: headA }, { baseTip: main, reviews: dismissed }));
+  first = await mergeHead(first, { sha: headA, baseSha: main }, mergedA);
+  item = await engine.observe(item.id, (await reload(item)).revision, tip(item, { sha: tipB, baseSha: headA }, { baseTip: mergedA, baseTree: treeOf(headA), reviews: dismissed }));
+  assert.ok(item.gates.every(entry => entry.passed), item.gates.flatMap(entry => entry.reasons).join('; '));
+  assert.equal(carriedApproval(item)?.reviewId, 41, 'the candidate stands on a carried approval');
+
+  // The loop's view: every gate passes, so the guarded merge is retried on its short pause, and
+  // refuses with one unchanged reason.
+  const view = (work: Work) => ({ ...work, stage: 'merge', gates: work.gates.map(entry => ({ ...entry, passed: true, reasons: [] })), violations: [] }) as Work;
+  let clock = Date.parse('2031-04-01T09:00:00Z');
+  const master = { url: 'https://graphyard.example', repository: 'owner/project', autoMerge: true } as MasterConfig;
+  const state = emptyDaemonState(master);
+  const reported: { reason: string; since: string }[] = [];
+  const reason = `${item.key} merge refused: the pull request changed on GitHub before merge`;
+  const effects = {
+    snapshot: async () => ({ work: [view(await reload(item))], now: new Date(clock).toISOString() }),
+    persist: async () => {},
+    merge: async () => { throw new Error(reason); },
+    refuseMerge: async (work: Work, text: string, since: string) => { reported.push({ reason: text, since }); return engine.execute(coordinator, 'mergerefused', work.id, { sha: work.candidate!.sha, baseSha: work.candidate!.baseSha, policyRevision: work.policyRevision, reason: text, since }, randomUUID()); },
+  };
+  const cycle = async () => {
+    state.cycle++;
+    const open = [view(await reload(item))], performed: Cycle['performed'] = [];
+    await mergeStep({ config: master, state, effects, now: () => clock, performed, open, isolate: async (_kind: unknown, _item: unknown, _name: unknown, body: () => Promise<unknown>) => body() } as unknown as Cycle);
+    return performed;
+  };
+  const repeated = () => Object.entries(state.actions).filter(([key]) => key.includes(':repeated')).map(([key, action]) => [key, action] as const);
+  const start = clock;
+  // Phase one: the refusal runs past ten minutes and the loop clears the carried approval.
+  while (!reported.length && clock - start < 3 * repeatedMergeRefusalMs) { await cycle(); clock += 61_000; }
+  assert.equal(reported.length, 1, 'the loop acts on the repeated refusal without a hand action');
+  item = await reload(item);
+  assert.deepEqual([item.mergeRefusal?.action, item.mergeRefusal?.sha], ['rereview', tipB], 'the first action is the rereview');
+  assert.equal(carriedApproval(item), null, 'the carried approval is cleared');
+  assert.equal(repeated().length, 1, 'one phase marker stands');
+  assert.match(repeated()[0][1].detail, /clears the carried approval/);
+
+  // The rereview is answered: a fresh approval of the same candidate arrives. The refusal
+  // persists, its since is preserved — and the handling re-arms: the next action is the rework
+  // the first phase's done marker must not absorb.
+  item = await engine.observe(item.id, item.revision, tip(item, { sha: tipB, baseSha: headA }, { baseTip: mergedA, baseTree: treeOf(headA), reviews: [...dismissed, { id: 99, reviewer: 'graphyard-reviewer[bot]', sha: tipB, state: 'APPROVED' }] }));
+  assert.equal(gate(item, 'review').passed, true, 'the fresh approval answers the rereview');
+  while (reported.length < 2 && clock - start < 6 * repeatedMergeRefusalMs) { await cycle(); clock += 61_000; }
+  assert.equal(reported.length, 2, 'the loop re-arms and takes the rework action');
+  assert.equal(reported[1].since, reported[0].since, 'the refusal has stood since the first attempt that gave this reason');
+  item = await reload(item);
+  assert.deepEqual([item.mergeRefusal?.action, item.mergeRefusal?.sha, item.mergeRefusal?.since], ['rework', tipB, new Date(start).toISOString()]);
+  assert.equal(repeated().length, 2, 'one phase marker per action');
+  assert.match(repeated().find(([, action]) => action.detail.includes('rework decision'))![1].detail, /marks candidate .* for a rework decision the approver judges/);
+  const decision = neededDecision(item, { autoMerge: true });
+  assert.deepEqual([decision?.action, decision?.binding], ['rework', `${tipB}:merge-refused`]);
+  // And the rework phase, too, is acted on once for this candidate and reason.
+  for (let pass = 0; pass < 3; pass++) { await cycle(); clock += 61_000; }
+  assert.equal(reported.length, 2);
 });
 

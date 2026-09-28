@@ -53,15 +53,19 @@ export const repeatedMergeRefusalMs = 10 * 60_000;
  * reason and the next step, and takes that step itself through the control plane: a carried
  * approval is cleared so the review gate requests a fresh review of the tip, and otherwise the
  * candidate is marked for a rework decision the approver judges. Either way the item leaves the
- * queue head and the next entry heads it. Acted on once per candidate and reason.
+ * queue head and the next entry heads it. Acted on once per candidate, reason and recovery phase:
+ * the phase is the carried binding the action would clear, so a re-review that is answered — the
+ * carry gone, the refusal standing — re-arms the handling and moves the candidate on to the rework
+ * action instead of being deduplicated away by the first phase's marker (GY-831 review). A carry
+ * re-bound to another review is a phase of its own.
  */
 export async function actOnRepeatedRefusal(cycle: Cycle, item: Work, mergeKey: string, reason: string, since: string) {
   const { state, effects, now, performed } = cycle;
   const minutes = Math.floor((now() - Date.parse(since)) / 60_000);
   if (now() - Date.parse(since) < repeatedMergeRefusalMs) return;
-  const key = `${mergeKey}:repeated`, previous = state.actions[key];
-  const carried = !!carriedApproval(item);
-  if (previous?.state === 'done' && previous.since === since && !carried) return;
+  const carry = carriedApproval(item), carried = !!carry;
+  const key = `${mergeKey}:repeated:${carry ? `carry:${carry.reviewId ?? 'unnumbered'}:${carry.originalSha}` : 'rework'}`, previous = state.actions[key];
+  if (previous?.state === 'done' && previous.since === since) return;
   // Like the refusal itself, the attention is the gate working, not a daemon fault: no fault kind.
   const next = carried
     ? `Graphyard clears the carried approval so the review gate requests a fresh review of tip ${item.candidate!.sha.slice(0, 12)}, and the next queue entry heads the queue meanwhile`

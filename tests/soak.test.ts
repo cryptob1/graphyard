@@ -72,7 +72,7 @@ const soakConfig: MasterConfig = masterConfigSchema.parse({ version: 1, url: 'ht
 
 /** The day, in simulated time from the start. */
 const start = Date.parse('2031-06-02T08:00:00Z');
-const plan = {
+const basePlan = {
   items: 15, releaseEveryMs: 15 * minute, workMs: 20 * minute,
   // GY-842: review panes of a previous day, standing agentless with their worktrees deleted.
   leftovers: 8,
@@ -92,7 +92,7 @@ const plan = {
   notice: 96 * minute,
 };
 const file = (n: number) => `src/soak/item-${n}.ts`;
-const files = (n: number) => plan.infrastructure.has(n) ? [file(n), `tests/helpers/soak-item-${n}.ts`] : [file(n)];
+const files = (n: number) => basePlan.infrastructure.has(n) ? [file(n), `tests/helpers/soak-item-${n}.ts`] : [file(n)];
 
 let pgServer: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
 before(async () => {
@@ -132,13 +132,22 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
  * parallel-tip window (GY-498): `window` is the configured `mergeQueue.parallelTips`, `reconfigure`
  * rewrites master config mid-day the way an operator's edit does (the next cycle republishes it),
  * and `failTip` names the item whose first speculative tip fails and keeps failing after its rerun.
+ * `stale` stages the GY-831 faults against two items, armed from the record the loop itself
+ * produced: `stuck` is the item whose published tip GitHub answers with a head other than the
+ * record's, so every guarded merge attempt refuses with one unchanged message, and `lostCarry` is
+ * the item whose carried review GitHub stops holding once the tip's carry decision bound it, so the
+ * re-post cannot use it.
  */
 let days = 0;
-async function simulateDay(options: { hours: number; regression?: 'approvers-left-open'; handApprovers?: boolean; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number } }) {
+async function simulateDay(options: { hours: number; regression?: 'approvers-left-open'; handApprovers?: boolean; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; plan?: Partial<typeof basePlan> }) {
   const dayStart = clock.now();
+  // A day may restage the shared scenario: the day-scoped view of the plan is what every fault
+  // below arms from, while each test's own assertions still read the shared base plan.
+  const plan = { ...basePlan, ...options.plan };
   const config: MasterConfig = options.queued
     ? masterConfigSchema.parse({ ...soakConfig, workers: [...workers, ...queueWorkers], mergeQueue: { optimistic: false, parallelTips: options.queued.window } })
     : soakConfig;
+  if (options.stale) config.reviewer = { slug: 'graphyard-reviewer', appId: 77_001, installationId: 77_002, credentialFile: '/outside/reviewer.json', boundAt: new Date(dayStart).toISOString() };
   const github = new SimulatedGitHub({ repository, baseBranch: 'main', appId: 1234, ciAppId: 15368, reviewerApps, ciMs: 5 * minute, reviewMs: 3 * minute, firstPullRequest: 100 * ++days },
     [...Array.from({ length: plan.items }, (_, index) => file(index + 1)), 'README.md']);
   const herdr = new SimulatedHerdr(() => clock.now());
@@ -169,12 +178,17 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   herdr.shell(foreignPane, '/home/vish');
   const numberOf = (work: Pick<Work, 'key'>) => items.findIndex(item => item.key === work.key) + 1;
   for (const n of plan.rework) github.verdicts.set(items[n - 1].key, ['CHANGES_REQUESTED']);
-  github.unstable.add(items[plan.unstable - 1].key); github.slowRecompute.add(items[plan.slowRecompute - 1].key);
+  if (plan.unstable) github.unstable.add(items[plan.unstable - 1].key);
+  if (plan.slowRecompute) github.slowRecompute.add(items[plan.slowRecompute - 1].key);
   github.exhaustedProfiles.add('claude-reviewer');
-  github.flaky.set(items[plan.flaky.rerunPasses - 1].key, 'rerun-passes'); github.flaky.set(items[plan.flaky.rerunFails - 1].key, 'rerun-fails');
+  if (plan.flaky.rerunPasses) github.flaky.set(items[plan.flaky.rerunPasses - 1].key, 'rerun-passes');
+  if (plan.flaky.rerunFails) github.flaky.set(items[plan.flaky.rerunFails - 1].key, 'rerun-fails');
   // GY-498: in the queue-only day one item's first tip fails and keeps failing after its rerun, so
   // the window has to attribute the failure to it and rebuild the tips behind it without it.
   if (options.queued?.failTip) github.flaky.set(items[options.queued.failTip - 1].key, 'rerun-fails');
+  // GY-831: the lostCarry item's reviews are the bound reviewer App's own, whose approval a
+  // Graphyard-authored tip carries — and whose review the day will take away once it is carried.
+  if (options.stale) github.botReviewers.add(items[options.stale.lostCarry - 1].key);
 
   // ---- Workers: the loop dispatches, the simulated session claims, works, pushes and submits (or dies). ----
   interface Session { work: string; key: string; branch: string; profile: WorkerProfile; epoch: number; attempt: number; pane: string; pushAt: number; diesAt: number | null; state: 'working' | 'submitted' | 'dead'; syncs: number; syncedFor?: string; refusedSince?: number }
@@ -269,6 +283,10 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   const transport = async (path: string, data: any, key: string = id()) => {
     const match = /^work\/([^/]+)\/merge-acquire$/.exec(path);
     if (!match) {
+      // A carried approval the re-post could not use is reported by the guarded merge itself
+      // (GY-831), through the same mutation path as the merge request.
+      const stale = /^work\/([^/]+)\/mergerefused$/.exec(path);
+      if (stale) return await engine.execute(principals.coordinator, 'mergerefused', stale[1], data, key);
       // The loop's own configuration publication (GY-330, GY-498, GY-500, GY-516) goes the same way.
       if (path === 'merge-queue') return await api(principals.coordinator, 'POST', 'merge-queue', data);
       throw new Error(`Unexpected mutation ${path}`);
@@ -374,6 +392,10 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   let peakWindow = 0;
   const seenTips = new Set<string>();
   let released = 0, split = false, noticed = false, deploys = 0, cycles = 0, reportedDispatches = 0;
+  // GY-831: when each staged fault armed, and what the lost carry named, so the test can assert the
+  // recovery against the exact candidate and review the faults were staged on.
+  const stale: { stuckArmedAt: number | null; stuckHead: string | null; stuckReported: boolean; lostAt: number | null; carried: { reviewer: string; reviewId: number; originalSha: string } | null } =
+    { stuckArmedAt: null, stuckHead: null, stuckReported: false, lostAt: null, carried: null };
   const jobsDue = async () => Number((await store.pool.query('SELECT count(*) AS due FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now())')).rows[0].due);
   for (let elapsed = 0; elapsed <= options.hours * hour;) {
     const now = clock.now();
@@ -421,6 +443,39 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
         const sha = item.candidate?.sha, refused = (item.gates ?? []).flatMap(gate => gate.passed ? [] : gate.reasons)
           .find(reason => /would revert \d+ files? outside its planned files/.test(reason));
         if (sha && refused && !landingRefusals.some(entry => entry.key === item.key && entry.sha === sha)) landingRefusals.push({ key: item.key, sha, elapsed });
+      }
+      // GY-831: arm the staged faults once, from the record the loop itself produced. The stuck
+      // item's fault holds only the published tip it was armed on — a rework round's new head is
+      // never armed, so the round the rework decision asks for is what lands. The lostCarry item's
+      // fault takes the carried review away once the tip's carry decision has bound it and before
+      // the tip's own CI finished, so the first guarded merge attempt finds nothing to re-post.
+      if (options.stale) for (const item of await store.list()) {
+        const speculation = item.queue?.speculation, candidate = item.candidate;
+        if (!speculation || !candidate || speculation.tip !== candidate.sha) continue;
+        // The queue may re-publish the tip before the loop's first refusal lands, so the fault
+        // re-arms on each published tip of the item until the record holds a refusal for the
+        // candidate — after that the fault is spent: the rework round's head is never armed.
+        if (options.stale.stuck === numberOf(item) && !stale.stuckReported) {
+          if (item.mergeRefusal?.sha === candidate.sha) stale.stuckReported = true;
+          else if (speculation.tip === candidate.sha) {
+            github.stuckHeads.add(candidate.sha);
+            stale.stuckHead = candidate.sha;
+            stale.stuckArmedAt ??= clock.now();
+          }
+        }
+        // The bound App's review is taken away once the tip's carry decision has bound it, so the
+        // re-post cannot use it and reports it at once. From then on the item's further reviews
+        // come from the ordinary reviewer identity, so no later approval re-binds the carry to a
+        // review the re-post could try to mint against.
+        if (options.stale.lostCarry === numberOf(item) && !stale.lostAt && speculation.carry?.approval.carried && typeof (speculation.carry.approval as { reviewId?: unknown }).reviewId === 'number') {
+          const carried = speculation.carry.approval as { reviewer: string; reviewId: number; originalSha: string };
+          const prRow = github.prs.get(candidate.pr)!;
+          if (prRow.reviews.some(review => review.id === carried.reviewId)) {
+            stale.lostAt = clock.now(); stale.carried = carried;
+            prRow.reviews = prRow.reviews.filter(review => review.id !== carried.reviewId);
+            github.botReviewers.delete(item.key);
+          }
+        }
       }
       // GY-498: sample the window after the pass's publications, then apply a mid-day master-config
       // edit, which the cycle about to run publishes the way an operator's edit is published.
@@ -475,7 +530,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   const final = (await store.list()).filter(item => items.some(entry => entry.id === item.id));
   if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
   return { items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, herdr, hand, escalations, spent, upgrades, refusalSamples, checkout, landingRefusals, foreignPane,
-    mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config };
+    mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, stale };
 }
 
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 180_000 }, async () => {
@@ -490,20 +545,20 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   // The day held what it was meant to: a merge about every fifteen minutes, the rework rounds, the deaths,
   // the deploys, the split, both merge states, auto-merge, and the failover.
   // One item broke main after its optimistic merge and was reverted and reopened, so it merged twice.
-  assert.equal(github.merges.length, plan.items + 1, 'fifteen items merged, one of them twice');
+  assert.equal(github.merges.length, basePlan.items + 1, 'fifteen items merged, one of them twice');
   const gaps = github.merges.slice(1).map((entry, index) => entry.at - github.merges[index].at).sort((a, b) => a - b);
   assert.ok(Math.abs(gaps[Math.floor(gaps.length / 2)] - 15 * minute) <= 5 * minute, `a merge about every fifteen minutes: ${github.merges.map(entry => `${entry.key} +${Math.round((entry.at - dayStart) / minute)} min`).join(', ')}`);
-  assert.ok(github.merges.some(entry => entry.key === items[plan.clean - 1].key && entry.state === 'CLEAN' && entry.mode === 'immediate'), `a CLEAN pull request merged at once: ${JSON.stringify(github.merges)}`);
-  assert.ok(github.merges.some(entry => entry.key === items[plan.unstable - 1].key && entry.state === 'UNSTABLE' && entry.mode === 'immediate'), 'an UNSTABLE pull request merged at once');
-  assert.ok(github.merges.some(entry => entry.key === items[plan.slowRecompute - 1].key && entry.mode === 'auto-merge'), 'one GitHub reported BLOCKED when asked was set to auto-merge, and GitHub merged it once it recomputed');
-  assert.equal(final.reduce((total, item) => total + (item.pipeline?.reworkRounds ?? 0), 0), plan.rework.size + 2, 'three rework rounds from review, the reverted optimistic merge, and the failed rerun');
-  assert.equal(sessions.filter(session => session.state === 'dead').length, plan.deaths.size, 'two workers died');
+  assert.ok(github.merges.some(entry => entry.key === items[basePlan.clean - 1].key && entry.state === 'CLEAN' && entry.mode === 'immediate'), `a CLEAN pull request merged at once: ${JSON.stringify(github.merges)}`);
+  assert.ok(github.merges.some(entry => entry.key === items[basePlan.unstable - 1].key && entry.state === 'UNSTABLE' && entry.mode === 'immediate'), 'an UNSTABLE pull request merged at once');
+  assert.ok(github.merges.some(entry => entry.key === items[basePlan.slowRecompute - 1].key && entry.mode === 'auto-merge'), 'one GitHub reported BLOCKED when asked was set to auto-merge, and GitHub merged it once it recomputed');
+  assert.equal(final.reduce((total, item) => total + (item.pipeline?.reworkRounds ?? 0), 0), basePlan.rework.size + 2, 'three rework rounds from review, the reverted optimistic merge, and the failed rerun');
+  assert.equal(sessions.filter(session => session.state === 'dead').length, basePlan.deaths.size, 'two workers died');
   // Every dispatch the launcher settled was reported by a later cycle (GY-616): one dispatch-done
   // per session, none lost between the hand-off and the drain.
   assert.equal(reportedDispatches, sessions.length, 'each settled dispatch launch was reported to a cycle');
-  assert.equal(production.deploys.length, plan.deploys.length, 'two production deploys');
-  assert.ok(final.find(item => item.key === items[plan.split.item - 1].key)!.plannedFiles.includes(`src/soak/item-${plan.split.item}-a.ts`), 'the split file re-planned its item onto the successors');
-  const reviewed = final.find(item => item.key === items[plan.exhaustedReviewer - 1].key)!;
+  assert.equal(production.deploys.length, basePlan.deploys.length, 'two production deploys');
+  assert.ok(final.find(item => item.key === items[basePlan.split.item - 1].key)!.plannedFiles.includes(`src/soak/item-${basePlan.split.item}-a.ts`), 'the split file re-planned its item onto the successors');
+  const reviewed = final.find(item => item.key === items[basePlan.exhaustedReviewer - 1].key)!;
   assert.ok(reviewed.reviewFailovers?.some(failover => failover.profile === 'claude-reviewer' && failover.exhaustion === 'usage-limit' && failover.nextProfile === 'cursor-reviewer'), `the exhausted reviewer bot failed over to the next profile: ${JSON.stringify(reviewed.reviewFailovers)}`);
   // GY-500: disjoint items merged optimistically and infrastructure changes queued; the one that
   // broke main was reverted head-bound within one CI duration of its failing post-merge run, and
@@ -511,10 +566,10 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   const ledger = async (kind: string) => (await store.pool.query(`SELECT kind, work_id, payload->'details' AS details, created_at FROM events WHERE kind LIKE $1 AND created_at >= $2 ORDER BY seq`, [kind, new Date(dayStart).toISOString()])).rows;
   const keyOf = (workId: string) => final.find(item => item.id === workId)?.key;
   const optimistic = (await ledger('optimistic.merged')).map(row => keyOf(row.work_id));
-  const culprit = items[plan.breaksMain - 1].key;
+  const culprit = items[basePlan.breaksMain - 1].key;
   // Items land in the queue too while main is red or another optimistic merge touches their files.
-  assert.ok(new Set(optimistic).size > plan.items / 2, `most items merged optimistically: ${optimistic.join(', ')}`);
-  for (const n of plan.infrastructure) assert.ok(!optimistic.includes(items[n - 1].key), `${items[n - 1].key} changes shared infrastructure and queued`);
+  assert.ok(new Set(optimistic).size > basePlan.items / 2, `most items merged optimistically: ${optimistic.join(', ')}`);
+  for (const n of basePlan.infrastructure) assert.ok(!optimistic.includes(items[n - 1].key), `${items[n - 1].key} changes shared infrastructure and queued`);
   assert.equal(optimistic.filter(key => key === culprit).length, 2, `${culprit} merged optimistically, and again after its rework round`);
   assert.deepEqual(github.reverts.map(entry => [entry.key, !!entry.merged]), [[culprit, true]], 'exactly one revert, of the culprit, and it landed');
   const [postMergeFailed] = (await ledger('optimistic.post-merge')).filter(row => keyOf(row.work_id) === culprit && row.details?.verdict === 'fail');
@@ -539,7 +594,7 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.ok(busiest <= 4, `the main guard reads at most a few commits' checks per cycle (${busiest})`);
   // GY-516: each flaky tip was rerun exactly once; the one whose rerun passed merged that tip with no
   // further round, and the one whose rerun failed again went back for one more and was still delivered.
-  const flaky = { passes: items[plan.flaky.rerunPasses - 1].key, fails: items[plan.flaky.rerunFails - 1].key };
+  const flaky = { passes: items[basePlan.flaky.rerunPasses - 1].key, fails: items[basePlan.flaky.rerunFails - 1].key };
   assert.deepEqual(github.reruns.map(entry => entry.key).sort(), Object.values(flaky).sort(), `one rerun per flaky tip: ${JSON.stringify(github.reruns)}`);
   const passed = github.reruns.find(entry => entry.key === flaky.passes)!, failed = github.reruns.find(entry => entry.key === flaky.fails)!;
   // The tip whose rerun passed is the one that lands, or the reviewed head it carried is what the
@@ -556,11 +611,11 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   // the day has. Each held only the build gate and cleared on the exact head it named, before any
   // worker could react: no ejection, no sync round, no rework.
   assert.ok(github.landingChecks > 0, 'the landing check ran during the simulated day');
-  assert.ok(github.landingBases.size >= plan.items, `the landing check judged moving bases (${github.landingBases.size})`);
+  assert.ok(github.landingBases.size >= basePlan.items, `the landing check judged moving bases (${github.landingBases.size})`);
   assert.ok(github.ancestorCompares > 0, `candidates bound behind the tip were compared from their merge base (${github.ancestorCompares} ancestor compares)`);
   assert.ok(github.blindCompares > 0, `the fault window answered compares without a usable merge base (${github.blindCompares} blind compares)`);
   assert.ok(landingRefusals.length >= 2, `the fault window caught every candidate bound behind it (${JSON.stringify(landingRefusals)})`);
-  assert.ok(landingRefusals.every(entry => entry.elapsed >= plan.blind.from - minute && entry.elapsed <= plan.blind.to + minute),
+  assert.ok(landingRefusals.every(entry => entry.elapsed >= basePlan.blind.from - minute && entry.elapsed <= basePlan.blind.to + minute),
     `a false landing refusal stood only inside the fault window: ${JSON.stringify(landingRefusals)}`);
   for (const entry of landingRefusals) {
     const landed = github.merges.find(merge => merge.key === entry.key);
@@ -578,7 +633,7 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.equal(upgrades.executors.length, production.deploys.length, 'one fleet restart per deploy');
   assert.equal(upgrades.self, production.deploys.length, 'one re-execution of the loop per deploy');
   assert.deepEqual(upgrades.executors, upgrades.checkouts.map(entry => entry.to), 'the fleet restarts against the tip the checkout moved to');
-  assert.ok(upgrades.checkouts[1].at >= dayStart + plan.dirtyCheckout.to, `the second deploy aligned only once the checkout was clean: ${summary}`);
+  assert.ok(upgrades.checkouts[1].at >= dayStart + basePlan.dirtyCheckout.to, `the second deploy aligned only once the checkout was clean: ${summary}`);
   assert.ok(refusalSamples.length >= 3, `the dirty checkout stood refused across the second deploy (${refusalSamples.length} cycles)`);
   assert.deepEqual(new Set(refusalSamples.map(sample => JSON.stringify(sample))).size, 1, `a standing refusal does not grow the cursor's actions: ${JSON.stringify(refusalSamples.slice(0, 3))}`);
   assert.equal(state.upgrade.refused, null, 'the refusal cleared with the alignment');
@@ -592,7 +647,7 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.equal(new Set(herdr.closed).size, herdr.closed.length, `no pane was closed twice: ${herdr.closed.join(', ')}`);
   assert.ok(!herdr.closed.includes(foreignPane), 'the pane Graphyard never launched is never closed');
   const reclaimed = herdr.closed.filter(pane => pane.includes(':left'));
-  assert.equal(reclaimed.length, plan.leftovers, 'every leftover pane of the previous day is reclaimed');
+  assert.equal(reclaimed.length, basePlan.leftovers, 'every leftover pane of the previous day is reclaimed');
   const passes = [...new Set(reclaimed.map(pane => herdr.closedAt.get(pane)))];
   assert.ok(passes.length >= 2, `the backlog drained over successive passes, not in one burst (${passes.length})`);
   // The bound paces every pass: however the backlog interleaves with the day's other panes, no
@@ -694,6 +749,96 @@ test('unit:soak-invariants-hold — hand-launched approvers that vanish or stop 
   assert.equal([...hand.values()].reduce((total, entry) => total + entry.refused, 0), 1, 'one relaunch was refused by a registry timeout, and retried');
 });
 
+test('unit:soak-invariants-hold — a guarded merge that refuses a queue head is acted on, never retried for good: a stuck candidate is re-reviewed and then reworked while the queue moves, a lost carried review is re-reviewed at once, and every invariant holds', { timeout: 300_000 }, async () => {
+  // GY-831 in the world the loop really runs in: the queue's own tip publication carries each
+  // item's approval, the guarded merge re-posts it through the bound reviewer App, and a refusal
+  // repeats every cycle until the ten-minute bound. Item two queues behind item one, so its tip is
+  // a Graphyard-authored merge carrying its approval, and GitHub answers every merge attempt for
+  // that tip with a head other than the record's — one unchanged refusal, past the bound: the loop
+  // clears the carried approval (rereview), and when the same refusal stands on — the carried
+  // approval answered by the tip's own exact review — the loop re-arms to the rework action
+  // instead of deduplicating the refusal away. Item four queues behind the stuck item with its
+  // reviews posted by the bound reviewer App; its carried review is taken away once the tip's
+  // carry decision bound it, so the re-post cannot use it and reports it at once. The rework round
+  // lands a head the fault was never armed on; the queue moves while both items are out of the
+  // head; and no merge refusal is recorded for any item the day did not stage.
+  const began = performance.now();
+  const stuck = 4, lostCarry = 2;
+  const { items, final, github, violations, failures, lost, escalations, state, herdr, stale, config, dayStart } =
+    await simulateDay({ hours: 4, queued: { window: 4, releaseEveryMs: 3 * minute }, stale: { stuck, lostCarry }, plan: { items: 6, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set([5]), deaths: new Set(), breaksMain: 0, flaky: { rerunPasses: 0, rerunFails: 0 } } });
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all ten items are delivered');
+  assert.deepEqual(violations, [], 'every system invariant holds across the refusals, the rereviews and the rework');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.deepEqual(lost, [], 'no worker lost its lease');
+  assert.ok(config.reviewer, 'the day runs with the bound reviewer identity the re-post needs');
+
+  // ---- The stuck candidate: refused past the bound, re-reviewed, then reworked. ----
+  const stuckItem = final.find(item => item.key === items[stuck - 1].key)!;
+  assert.ok(stale.stuckArmedAt && stale.stuckHead, 'the stuck fault armed on the item\'s own published tip');
+  const itemEvents = async (id: string, kind: string) => (await store.pool.query(
+    `SELECT payload->'details' AS details, created_at FROM events WHERE kind=$1 AND work_id=$2 AND created_at >= $3 ORDER BY seq`,
+    [kind, id, new Date(dayStart).toISOString()])).rows;
+  const stuckRefusals = await itemEvents(stuckItem.id, 'mergerefused');
+  assert.equal(stuckRefusals.length, 2, `the stuck candidate was refused to the control plane exactly twice: ${JSON.stringify(stuckRefusals.map(row => row.details?.reason?.slice(0, 80)))}`);
+  assert.match(stuckRefusals[0].details.reason, /changed on GitHub before merge/);
+  assert.equal(stuckRefusals[0].details.sha, stale.stuckHead, 'the refusal names the armed tip');
+  assert.equal(stuckRefusals[1].details.since, stuckRefusals[0].details.since, 'both actions answer the same standing refusal, dated from its first attempt');
+  assert.ok(stuckRefusals[1].details.since && new Date(stuckRefusals[0].created_at).getTime() - Date.parse(stuckRefusals[1].details.since) >= 9 * minute,
+    'the first action waited past the ten-minute bound');
+  assert.equal(stuckItem.pipeline?.reworkRounds ?? 0, 1, 'the rework decision sent the candidate back to its worker once');
+  const stuckMerged = github.merges.find(entry => entry.key === stuckItem.key)!;
+  assert.ok(stuckMerged, 'the stuck candidate was delivered');
+  assert.ok(!github.contains(stuckMerged.sha, stale.stuckHead!), 'what landed is the rework round\'s head, never the armed tip');
+  // The rework decision the loop requested for the merge refusal was judged, and no approver
+  // session for it is left open.
+  const decisions = await api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(stuckItem.id)}/decisions`);
+  const rework = (decisions.decisions as any[]).find(decision => decision.action === 'rework' && decision.input?.binding === `${stale.stuckHead}:merge-refused`);
+  assert.ok(rework, `the merge-refusal rework decision was requested: ${JSON.stringify((decisions.decisions as any[]).map(decision => [decision.action, decision.state]))}`);
+  assert.equal(rework.state, 'applied', 'the approver applied it');
+  assert.ok(![...herdr.agents.values()].some(agent => (agent.name ?? '').startsWith(`graphyard-approver-${stuckItem.key.toLowerCase()}-`)), 'no approver session for the rework decision is left open');
+  // Both phases raised the attention the criterion names: the reason, and the next step taken.
+  assert.ok(escalations.some(detail => detail.includes(stuckItem.key) && /same reason: .*changed on GitHub before merge\. Next step: Graphyard clears the carried approval/.test(detail)),
+    'the rereview phase names the reason and the clearing');
+  assert.ok(escalations.some(detail => detail.includes(stuckItem.key) && /same reason: .*changed on GitHub before merge\. Next step: Graphyard marks candidate .* for a rework decision/.test(detail)),
+    'the rework phase names the reason and the rework decision');
+  // Acted on once per phase: the loop's own record holds one done marker per recovery phase, each
+  // raised once, for this candidate and reason.
+  const repeated = Object.entries(state.actions).filter(([key]) => key.includes(':repeated') && key.includes(stuckItem.id));
+  assert.ok(repeated.length >= 1 && repeated.length <= 2, `one repeated-action marker per phase: ${JSON.stringify(repeated.map(([key, action]) => [key, action.state, action.attempts]))}`);
+  assert.ok(repeated.every(([, action]) => action.state === 'done' && action.attempts === 1), 'each phase acted once');
+
+  // ---- The queue moved while the stuck candidate could not land. ----
+  const stuckHistory = stuckItem.queueHistory ?? [];
+  const ejection = stuckHistory.find(entry => entry.event === 'ejected' && (entry.reason ?? '').startsWith('The guarded merge refused candidate '));
+  assert.ok(ejection, `the rework refusal ejected the stuck entry: ${JSON.stringify(stuckHistory.map(entry => [entry.event, entry.reason?.slice(0, 60)]))}`);
+  assert.ok(stuckHistory.some((entry, index) => entry.event === 'enqueued' && index > stuckHistory.indexOf(ejection!)), 'the reworked candidate re-entered the queue');
+  const ejectionAt = Date.parse(ejection!.at);
+  const moved = github.merges.filter(entry => entry.at >= ejectionAt && entry.at < stuckMerged.at && entry.key !== stuckItem.key);
+  assert.ok(moved.length >= 2, `the entries behind it merged while it was out of the head: ${moved.length} merges before it landed`);
+
+  // ---- The lost carried review: reported at once, re-reviewed, delivered. ----
+  const lostItem = final.find(item => item.key === items[lostCarry - 1].key)!;
+  assert.ok(stale.lostAt && stale.carried, 'the lost carry armed on the tip\'s own carry decision');
+  assert.equal(stale.carried.reviewer, 'graphyard-reviewer[bot]', 'the carried review was the bound reviewer App\'s own');
+  const lostEvents = await itemEvents(lostItem.id, 'mergerefused');
+  assert.ok(lostEvents.length >= 1, 'the unusable re-post was reported to the control plane');
+  assert.match(lostEvents[0].details.reason, new RegExp(`the approval of ${stale.carried.originalSha.slice(0, 12)} by graphyard-reviewer\\[bot\\] is no longer on the pull request`),
+    'the first refusal names the carried review it could not re-post');
+  assert.ok(new Date(lostEvents[0].created_at).getTime() - Date.parse(lostEvents[0].details.since ?? lostEvents[0].details.at ?? lostEvents[0].created_at) < 1_000,
+    'the refusal was reported the moment the re-post failed, not retried to a bound first');
+  assert.ok(Date.parse(lostEvents[0].created_at) - stale.lostAt <= 20 * minute, `the refusal was reported on the item's first merge attempt: ${Math.round((Date.parse(lostEvents[0].created_at) - stale.lostAt) / minute)} min after the carry was bound`);
+  assert.ok(github.merges.some(entry => entry.key === lostItem.key), 'the item whose carried review was lost was delivered anyway');
+
+  // ---- The faults stayed theirs: no other item recorded a merge refusal. ----
+  const others = (await store.pool.query(
+    `SELECT work_id, count(*) AS count FROM events WHERE kind='mergerefused' AND created_at >= $1 GROUP BY work_id`,
+    [new Date(dayStart).toISOString()])).rows;
+  assert.deepEqual(others.map(row => [row.work_id, Number(row.count)]).sort(), [[lostItem.id, lostEvents.length], [stuckItem.id, 2]].sort(),
+    `only the staged items were refused: ${JSON.stringify(others)}`);
+  const seconds = (performance.now() - began) / 1000;
+  assert.ok(seconds < 200, `the day runs inside its budget (${seconds.toFixed(1)} s)`);
+});
+
 test('unit:soak-invariants-hold — a loop change that breaks an invariant fails the soak: approver sessions the loop no longer closes are named within the hour', { timeout: 120_000 }, async () => {
   // The regression GY-403 was: approvers finished, nobody closed them. Here the loop's close reports
   // success and closes nothing, which no per-item gate of any change would notice.
@@ -703,3 +848,4 @@ test('unit:soak-invariants-hold — a loop change that breaks an invariant fails
   // The violation is a fault of its class on the loop's record, which files one item when it recurs.
   assert.equal(state.faults.instances.filter(instance => instance.kind === 'invariant:lingering-sessions' && instance.faultClass === 'session-liveness').length, 1);
 });
+
