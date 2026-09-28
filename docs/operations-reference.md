@@ -3,11 +3,11 @@
 
 ## Master coordination loop
 
-Restart `graphyard master run` freely; it never dispatches twice. `master status` → `daemon` gives health and `cycleTime` (30m p50/p95); logs: `journalctl --user -u graphyard-master`. `daemon.metrics.timings` time steps and calls over 1s; cycles over 60 s raise `loop` attention naming the three slowest. Launches run beside cycles (`run.launchConcurrency`, default 3); failed requests log route and SQL.
+Restart `graphyard master run` freely; it never dispatches twice. `master status` → `daemon` gives health and `cycleTime` (30m p50/p95); logs: `journalctl --user -u graphyard-master`. `daemon.metrics.timings` time steps and calls over 1s; cycles over 60 s raise `loop` attention naming the three slowest. Launches run beside cycles (`run.launchConcurrency`, default 3); failures log route and SQL.
 
 ### Perpetual master loop
 
-`master verify-deployment GY-N` refuses a release *unobserved*, *stale* (rerun), not serving the merge, or *already recording deployment* (follow-up item).
+`master verify-deployment GY-N` refuses a release *unobserved*, *stale* (rerun), not serving the merge, or *already recording deployment* (follow-up).
 
 ## Lost worker before submission
 
@@ -21,7 +21,7 @@ The loop settles a lapsed, verified-dead quarantine: its clock bound is a light 
 
 ## Submitted implementation needs rework
 
-Stop the worker, then `graphyard rework GY-N --previous-worker-stopped "reason"`; the next worker resubmits. `scripts/rework-causes.mjs` classifies the last 100 deliveries' rework rounds; `master status` reports the split (`speed.reworkRounds.ownChange`): median excluding out-of-item causes.
+Stop the worker, then `graphyard rework GY-N --previous-worker-stopped "reason"`; the next worker resubmits. `scripts/rework-causes.mjs` classifies the last 100 deliveries' rework rounds by recorded reason; `master status` reports the split (`speed.reworkRounds.ownChange`): median excluding out-of-item causes. GY-643 (2026-09-26) measured 55% own-change, 33% conflicts; raw median 2, 0 excluding them.
 
 ## Flaky CI check
 
@@ -50,7 +50,7 @@ Unchanged non-merge candidates spend **at most 40%** (`steadyStateShare`).
 
 ### The merge-path reserve
 
-Below **500 requests** (`GRAPHYARD_GITHUB_RESERVE`), non-merge observations wait for the reset (`githubBudget.deferrals`). Budgets are per token (`githubBudget.tokens`); one projected below it raises `github`.
+Below **500 requests** by default, `GRAPHYARD_GITHUB_RESERVE`, non-merge observations wait for the reset (`githubBudget.deferrals`). Budgets are per token (`githubBudget.tokens`); one projected below it raises `github`.
 
 ### What an observation costs
 
@@ -82,7 +82,7 @@ It stays Done, marked **delivered with failure**; revert through a new item, nev
 
 ## Merged but not deployed
 
-A merge production never served is a `delivery.deployment-incident` ([observation](deployment.md#production-deployment-observation)); fixed, it recovers once served.
+A merge production never served is a `delivery.deployment-incident` ([observation](deployment.md#production-deployment-observation)), recovered once served.
 
 ## Merge bypass
 
@@ -90,13 +90,9 @@ An ungated merge is a permanent violation: repair access, open a follow-up item,
 
 ## Credentials
 
-Rotate `GRAPHYARD_PRINCIPALS` and redeploy. Operator agents hold only listed capabilities: `graphyard operator-agent setup|list|rotate|revoke`.
+Rotate `GRAPHYARD_PRINCIPALS`, redeploy. Operator agents hold only listed capabilities: `graphyard operator-agent setup|list|rotate|revoke`.
 
 ## Proof authority grants
-
-```sh
-graphyard grants grant ci "integration:*,unit:*" "CI proofs"
-```
 
 `graphyard grants` lists live authority; only an `admin` grants or revokes, to `producer` principals: exact name, `kind:*`, prefix (`manual:gy-43/*`).
 
