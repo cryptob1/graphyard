@@ -121,7 +121,8 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   // Reviewer and producer profiles go in with their concurrency (GY-107): status reports, per
   // role, sessions running against the limit and the longest wait for a slot.
   const mergeQueue = mergeQueueStatus(master, snapshot, coordinator);
-  const sessions = await timedStep('build status', async () => nameOrphanSupervisors(nameUnresolvedThreads(buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews, master.baseBranch, coordinator, { producers, failures: dispatch.failures, retries }, await probeCandidateConflictsWithBudget(root, snapshot.work, dataDirectory()), { reviewers: master.reviewers, producers: master.producers }, master.cliPath, mergeQueue), snapshot.work, agentOwner),
+  const probe = await timedStep('conflicts', () => probeCandidateConflictsWithBudget(root, snapshot.work, dataDirectory()));
+  const sessions = await timedStep('build status', async () => nameOrphanSupervisors(nameUnresolvedThreads(buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews, master.baseBranch, coordinator, { producers, failures: dispatch.failures, retries }, probe, { reviewers: master.reviewers, producers: master.producers }, master.cliPath, mergeQueue), snapshot.work, agentOwner),
     snapshot.work, master.workers, runtime, Date.parse(snapshot.now)));
   // A check failed on the clock says so, against its budget; a routed scope request, its approver.
   const status = routedScopeStatus(await timedStep('timing failures', () => qualifyTimingFailures(sessions, snapshot.work, master.repository, ghCheckAnnotations(master.repository))), snapshot.work, cycling?.approvals);
@@ -189,6 +190,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     // The commits no reviewer session has ever obtained a verdict on, with the dismissed review.
     unobtainableReviews: unobtainable.map(item => ({ work: item.subject, ...item.review })),
     merger: { merger: merger.merger, detail: merger.detail }, autoMerge: master.autoMerge, ...optimisticStatus(master, snapshot.work), mergeQueue, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'each merge needs an approved merge decision: graphyard master decide GY-N merge REASON, approved by the approver agent',
+    conflictProbe: probe,
     // What the observation workers achieve and how far the queue head has drifted (GY-492).
     observationThroughput: observation, leaseHealth: health.report,
     versionSkew: mergeProtocolSkew(coordinator, cli), cli,
