@@ -2,7 +2,8 @@
 // structural item filed per recurring class.
 import { createHash } from 'node:crypto';
 import type { Work } from '../model.js';
-import { classified, classifyAttention, faultClasses, faultClassItem, faultClassPolicyFromEnv, recurringClasses, statusFaults, trackFaults, workFaults, type FaultClassPolicy, type FaultKind, type FaultObservation } from '../model/fault-classes.js';
+import { classified, classifyAttention, faultClasses, faultClassItem, faultClassPolicyFromEnv, recurringClasses, statusFaults, workFaults, type FaultClassPolicy, type FaultKind, type FaultObservation } from '../model/fault-classes.js';
+import { trackFaults } from '../model/fault-tracking.js';
 import { buildMasterStatus, diskThresholdBytes, type AttentionItem, type ContainmentAssessment, type ControlPlaneStatus, type HerdrAgent, type MasterConfig } from '../master.js';
 import { worktreeRootMinFreeBytes } from '../install/worktree-root.js';
 import { qualifyTimingFailures, type CheckAnnotations } from '../cli/timing-failures.js';
@@ -44,7 +45,8 @@ export interface FaultSources {
  * cause (a full ledger, a resource at its bound) is tracked as that cause alone. A derived line that
  * restates a fault the item's own record shows (the same kind, or a kind in `restatements`) is that
  * fault, so it is not counted twice; a different fault of the same class on the item is its own
- * instance. Nor is the one-hour dwell line (`gate`) counted, which is the ordinary pace of work — a
+ * instance. A line marked as restating a fault standing on another subject (an unserved kind only executors
+ * awaiting a restart serve, which the executors line names) is that fault too. Nor is the one-hour dwell line (`gate`) counted, which is the ordinary pace of work — a
  * gate nothing moves is `stalled-item`. Failed actions are not read here: the action history
  * retains failures long after they stopped mattering, so each is noted once, as it happens, by storeAction.
  */
@@ -60,8 +62,9 @@ export function cycleFaults(state: DaemonState, work: Work[], now: number, sourc
       derived.push({ ...classified('loop-failures'), subject: 'loop', text: `The loop could not derive this cycle's attention to classify it: ${message(error)}`.slice(0, 500) });
     }
     const listed = { work: status.work, attentionItems: [...(sources.loop ?? []), ...status.attentionItems, ...(sources.reported ?? [])] };
-    for (const item of classifyAttention(sources.attribute ? sources.attribute(listed) : listed.attentionItems))
-      if (item.kind !== 'gate' && !(sources.herdrUnavailable && herdrFaultKinds.has(item.kind))) derived.push({ kind: item.kind, faultClass: item.faultClass, subject: item.subject, text: item.text.slice(0, 500) });
+    const lines = classifyAttention(sources.attribute ? sources.attribute(listed) : listed.attentionItems), subjects = new Set(lines.map(item => item.subject));
+    for (const item of lines) // a line restating a fault that stands on another subject is that fault (GY-374)
+      if (item.kind !== 'gate' && !(sources.herdrUnavailable && herdrFaultKinds.has(item.kind)) && !(item.restates && subjects.has(item.restates))) derived.push({ kind: item.kind, faultClass: item.faultClass, subject: item.subject, text: item.text.slice(0, 500) });
     const reclaim = state.reclaim, below = (free: number | null | undefined, bound: number) => free !== null && free !== undefined && free < bound;
     if (reclaim && (below(reclaim.freeBytes, diskThresholdBytes(config)) || below(reclaim.rootFreeBytes, worktreeRootMinFreeBytes(config))))
       derived.push({ ...classified('disk-pressure'), subject: 'disk', text: `Free space below its configured bound at the last reclaim (${reclaim.at})` });
@@ -151,13 +154,13 @@ export async function fileRecurringFaultClasses(state: DaemonState, effects: Dae
     }
   }
 }
-/** The recurrences `master status` reports under daemon.faults: per class, the window's count and the item standing for it. */
+/** The recurrences `master status` reports under daemon.faults: per class, the window's count (baseline instances aside) and the item standing for it, and when the record began. */
 export function faultRecurrenceReport(state: Pick<DaemonState, 'faults'>, policy: FaultClassPolicy, now: number) {
   const instances = state.faults.instances;
   const linked = (faultClass: string) => [...new Set(instances.filter(entry => entry.faultClass === faultClass && entry.linkedTo).map(entry => entry.linkedTo!))];
-  return { policy, recorded: instances.length, standing: Object.keys(state.faults.open).length,
+  return { policy, recorded: instances.length, standing: Object.keys(state.faults.open).length, since: state.faults.since ?? null,
     classes: faultClasses.flatMap(faultClass => {
-      const from = now - policy.windowHours * 3_600_000, inWindow = instances.filter(entry => entry.faultClass === faultClass && Date.parse(entry.at) >= from);
+      const from = now - policy.windowHours * 3_600_000, inWindow = instances.filter(entry => entry.faultClass === faultClass && Date.parse(entry.at) >= from && !entry.baseline);
       return inWindow.length ? [{ faultClass, instances: inWindow.length, unlinked: inWindow.filter(entry => !entry.linkedTo).length, items: linked(faultClass), latest: inWindow.at(-1)!.at }] : [];
     }).sort((a, b) => b.instances - a.instances) };
 }

@@ -169,6 +169,10 @@ export function workFaults(work: Work, now: number): FaultObservation[] {
   return found;
 }
 
+// The tracking half (the loop's record, one cycle's observations) lives in fault-record.ts (GY-368), with the
+// record's baseline (GY-374) layered over it in fault-tracking.ts; its names re-export here so every import of this module keeps working, on this code path and on the base's.
+export { noteActionOutcome, noteFault, retainedFaultInstances, trackFaults, type FaultRecord } from './fault-tracking.js';
+
 // ---------------------------------------------------------------------------
 // Recurrence: one structural item per recurring class (AC-2).
 // ---------------------------------------------------------------------------
@@ -190,6 +194,8 @@ export const faultInstanceSchema = z.object({
   subject: z.string().max(200), text: z.string().max(500),
   at: z.string(), lastSeenAt: z.string(),
   linkedTo: z.string().max(50).nullable().default(null),
+  /** Standing when the loop's record began (GY-374): the installation's state then, never counted as a recurrence. */
+  baseline: z.boolean().optional(),
 }).strict();
 export type FaultInstance = z.infer<typeof faultInstanceSchema>;
 
@@ -214,13 +220,14 @@ export interface ClassRecurrence { faultClass: FaultClass; count: number; recent
  * Every class with an instance inside the window. A class files an item when the instances in the
  * window that no item accounts for yet reach the threshold and no open item names the class; with
  * an open item, every instance not yet linked is linked to it instead, however many there are.
- * Instances linked to an item that has since closed stay counted by it, never by a second one.
+ * Instances linked to an item that has since closed stay counted by it, never by a second one, and
+ * a `baseline` instance (standing when the record began, GY-374) is no occurrence in the window.
  */
 export function recurringClasses(instances: readonly FaultInstance[], work: readonly Work[], policy: FaultClassPolicy, now: number): ClassRecurrence[] {
   const from = now - policy.windowHours * 3_600_000;
   return faultClasses.flatMap(faultClass => {
     const all = instances.filter(entry => entry.faultClass === faultClass);
-    const recent = all.filter(entry => Date.parse(entry.at) >= from && Date.parse(entry.at) <= now && !entry.linkedTo);
+    const recent = all.filter(entry => Date.parse(entry.at) >= from && Date.parse(entry.at) <= now && !entry.linkedTo && !entry.baseline);
     const item = openFaultClassItem(work, faultClass);
     const unlinked = item ? all.filter(entry => !entry.linkedTo) : recent;
     if (!unlinked.length) return [];
@@ -243,8 +250,6 @@ export function statusFaults(status: any): FaultObservation[] {
   for (const entry of Array.isArray(status.executors?.attention) ? status.executors.attention : []) found.push(observe('executor', 'executors', String(entry?.text ?? entry?.kind ?? 'an action no executor serves')));
   return found;
 }
-
-export { noteActionOutcome, noteFault, retainedFaultInstances, trackFaults, type FaultRecord } from './fault-record.js';
 
 /** The backlog item one recurring class files: the class, its frequency and every instance as evidence. */
 export function faultClassItem(recurrence: Pick<ClassRecurrence, 'faultClass' | 'recent'>, policy: FaultClassPolicy, now: number) {

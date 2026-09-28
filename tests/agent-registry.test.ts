@@ -499,6 +499,32 @@ test('unit:registry-visibility — master status and the dashboard show each acc
   assert.ok(page.includes(new Date(resetsAt).toLocaleString()), 'the reset time');
 });
 
+test('unit:fleet-attention-grouping — multiple blocked roles, unassigned accounts, or missing roles are grouped into single attention items to prevent recurring configuration faults', () => {
+  const at = '2026-09-20T12:00:00.000Z', now = Date.parse(at), context = { actor: 'operator', at };
+  let registry = emptyRegistry();
+  const change = (kind: Parameters<typeof applyRegistryMutation>[1], input: unknown) => { registry = applyRegistryMutation(registry, kind, input, context).registry; };
+  change('apply', {
+    runtimes: [runtimeNamed('claude'), runtimeNamed('codex')],
+    models: [{ name: 'opus', id: 'claude-opus-5' }, { name: 'gpt', id: 'gpt-5.2-codex' }],
+    accounts: [
+      { name: 'account-a', runtime: 'claude', model: 'opus', credential: { host: HOST, home: '/a' } },
+      { name: 'account-b', runtime: 'codex', model: 'gpt', credential: { host: HOST, home: '/b' } },
+      { name: 'unused-1', runtime: 'claude', model: 'opus', credential: { host: HOST, home: '/u1' } },
+      { name: 'unused-2', runtime: 'codex', model: 'gpt', credential: { host: HOST, home: '/u2' } },
+    ],
+    roles: [
+      { name: 'worker', accounts: ['account-a'], concurrency: 1 },
+      { name: 'reviewer', accounts: ['account-b'], concurrency: 1 },
+    ],
+    reason: 'fixture'
+  });
+  const view = fleetView(registry, now, HOST);
+  const grouped = view.attention;
+  assert.ok(grouped.some(line => /2 accounts.*unused-1.*unused-2.*serve no role/.test(line)), `unassigned accounts are grouped: ${grouped.join(' | ')}`);
+  assert.ok(grouped.some(line => /3 roles.*approver.*escalation-handler.*producer.*not configured/.test(line)), `missing roles are grouped: ${grouped.join(' | ')}`);
+  assert.equal(grouped.filter(line => /serves no role|not configured/.test(line)).length, 2, 'unassigned and missing grouped into two items instead of five');
+});
+
 // ---------------------------------------------------------------------------
 // AC-5 — setup discovers the host and proposes a registry (the onboarding review is manual:registry-onboarding-review)
 // ---------------------------------------------------------------------------
