@@ -328,17 +328,22 @@ export function proofRework(work: Work): { reason: string; binding: string } | n
  * GY-868: a trusted manual record with executed = 0 is an unexercised finding too — no case ran, so
  * the criterion was never judged — and is answered here as well, never through rework or an
  * operator escalation.
+ * GY-917: the attestation is requested for every unexercised `manual:` finding, no longer only for
+ * a proof a criterion of this item names. A producer-runnable proof inherited from another change's
+ * bootstrap obligation was named by no local criterion, so this returned null for it — and the
+ * merge queue, reading that as "nothing can answer the record", ejected the entry into a strand
+ * nothing could answer (GY-910's narrowing). The queue now holds the entry for the attestation, so
+ * this requests it, naming the inherited obligation as the criterion the finding does not carry.
  */
 export function attestationDecision(work: Work): RoutineDecision | null {
   const candidate = work.candidate;
   if (!work.submission || work.reworkRequested || !candidate || work.stage === 'done' || work.observation?.merged) return null;
   const entry = unexercisedFindings(work).filter(finding => finding.proof.startsWith('manual:')).sort((a, b) => a.proof.localeCompare(b.proof))[0];
   if (!entry) return null;
-  const criterion = work.criteria.find(each => each.proofs.includes(entry.proof));
-  if (!criterion) return null;
+  const criterion = entry.criteria[0] ?? 'the criterion of the inherited obligation it discharges';
   const finding = entry.finding.length > 300 ? `${entry.finding.slice(0, 299)}…` : entry.finding;
   return { action: 'attest', input: { proof: entry.proof }, binding: `${candidate.sha}:attest:${entry.proof}`,
-    reason: `${work.key}: the attestation of ${entry.proof} on ${candidate.sha.slice(0, 12)} was recorded as not exercising ${criterion.id} ("${finding}"). The change is not at fault, so rework is the wrong remedy: this attestation carries the exercise record — ${entry.proof} fails against the candidate base ${candidate.baseSha.slice(0, 12)}, the tree without the change — and the approver confirms it by running the proof there and against the candidate before approving.` };
+    reason: `${work.key}: the attestation of ${entry.proof} on ${candidate.sha.slice(0, 12)} was recorded as not exercising ${criterion} ("${finding}"). The change is not at fault, so rework is the wrong remedy: this attestation carries the exercise record — ${entry.proof} fails against the candidate base ${candidate.baseSha.slice(0, 12)}, the tree without the change — and the approver confirms it by running the proof there and against the candidate before approving.` };
 }
 
 /**

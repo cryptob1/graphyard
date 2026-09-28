@@ -4,6 +4,9 @@ import type { CiRun } from './ci-proofs.js';
 import { evidenceBindsCandidate } from './carry.js';
 import { reservedForAttestation, type ClosedQuestionRecord } from './closed-question.js';
 import { inheritedObligations } from './bootstrap.js';
+// Re-exported beside `attachedCriteria`, its sibling in the which-criteria-attach-this-proof
+// concern: the attest precondition judges a proof required by an inherited obligation (GY-917).
+export { inheritedObligations };
 
 export type ArtifactKind = 'log' | 'report' | 'screenshot' | 'trace' | 'other';
 export type ArtifactAvailability = 'available' | 'expired' | 'redacted' | 'missing' | 'upload-failed' | 'external';

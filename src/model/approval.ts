@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { demand } from './refusal.js';
 import { proofSchema } from './proof.js';
 import { criterionSchema, resourcesSchema } from './policy.js';
-import { implementerIdentities, proofExerciseSchema } from './evidence.js';
+import { implementerIdentities, inheritedObligations, proofExerciseSchema } from './evidence.js';
 import { standingEscalations } from './escalation.js';
 import { closureKinds } from './closure.js';
 import { reconciliationRefusalPrefix } from '../merge-queue.js';
@@ -251,8 +251,8 @@ export function requiredDecisionCapabilities(action: DecisionAction, input: any,
   return capabilities;
 }
 
-/** The item must still be in the state the decision was requested against. */
-export function decisionPrecondition(action: DecisionAction, input: any, work: Work): string | null {
+/** The item must still be in the state the decision was requested against; `all` is the rest of the ledger, for an attest of a proof only an inherited obligation requires (GY-917). */
+export function decisionPrecondition(action: DecisionAction, input: any, work: Work, all: Work[] = []): string | null {
   if (action === 'recover') return work.stage === 'done' && work.containmentQuarantine ? null : 'Containment recovery applies to delivered work that is still quarantined';
   if (work.stage === 'done') return 'Delivered work is immutable; create a follow-up task';
   if ((action === 'release' || action === 'unblock' || action === 'resolve' || (action === 'close' && input.expectedRevision !== undefined)) && input.expectedRevision !== work.revision) return `Task revision changed (now ${work.revision}); reload and request again`;
@@ -260,7 +260,7 @@ export function decisionPrecondition(action: DecisionAction, input: any, work: W
   if (action === 'unblock' && !work.blocker) return 'Task has no blocker to clear';
   if (action === 'resolve' && !standingEscalations(work).some(entry => entry.trigger === input.trigger)) return `No standing ${input.trigger} escalation; standing: ${standingEscalations(work).map(entry => entry.trigger).join(', ') || 'none'}`;
   if (action === 'requirements' && input.expectedPolicyRevision !== work.policyRevision) return `Policy revision changed (now ${work.policyRevision}); reload and request again`;
-  if (action === 'attest' && !work.criteria.some(criterion => criterion.proofs.includes(input.proof))) return `${input.proof} is not required by any criterion of ${work.key}`;
+  if (action === 'attest' && !work.criteria.some(criterion => criterion.proofs.includes(input.proof)) && !inheritedObligations(work, all).some(obligation => obligation.proof === input.proof)) return `${input.proof} is not required by any criterion of ${work.key}`;
   if (action === 'attest' || action === 'merge') {
     if (!work.candidate || work.candidate.sha !== input.sha || work.candidate.baseSha !== input.baseSha || work.policyRevision !== input.policyRevision)
       return `The decision names ${String(input.sha).slice(0, 12)} but the current candidate is ${work.candidate?.sha.slice(0, 12) ?? 'none'} at policy revision ${work.policyRevision}`;

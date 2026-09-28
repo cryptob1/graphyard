@@ -10,6 +10,7 @@ import { localDirectory } from '../onboarding.js';
 import { broadScopeRefusals } from '../coordination.js';
 import { writeHarnessPermissions } from '../harness.js';
 import { type Work, escalationTriggers } from '../model.js';
+import { type ProofExercise } from '../model/evidence.js';
 import { branchContamination, pendingRestore } from '../merge-queue.js';
 import { type FleetLaunchAccount, type FleetProbe, selectFleetSession } from '../fleet.js';
 import { capacityRetryAt } from '../model/capacity.js';
@@ -117,11 +118,21 @@ export function decisionInput(action: string, work: Work, input: Record<string, 
  * the floor the approver's one confirming run guarantees; what the approver actually ran and saw
  * is recorded in its approval reason (see attestConfirmation). A requester that measured more
  * names its own `exercise`.
+ *
+ * GY-917: a proof inherited from a bootstrap obligation is named by no criterion of this item, so
+ * no criterion id can be written here. The record names no criterion instead, which is exact: the
+ * evidence command resolves the proof's single attached criterion — the inherited obligation's —
+ * when the attestation is applied (`attachedCriteria`, exerciseRefusal), and a proof attached to
+ * more than one criterion is the requester's to name by hand, as it already was.
  */
-export function attestationExercise(work: Pick<Work, 'criteria' | 'candidate'>, proof: unknown) {
+export function attestationExercise(work: Pick<Work, 'criteria' | 'candidate'>, proof: unknown): { exercise?: ProofExercise } {
   const criterion = work.criteria.find(entry => typeof proof === 'string' && entry.proofs.includes(proof));
-  if (!criterion || !work.candidate) return {};
-  return { exercise: { criterion: criterion.id, behaviour: `the diff of candidate ${work.candidate.sha.slice(0, 12)} against the candidate base ${work.candidate.baseSha.slice(0, 12)}; the proof fails on that base, as the approver confirms by running it and records in its approval reason`, result: 'fail' as const, executed: 1 } };
+  if (!criterion && typeof proof !== 'string') return {};
+  if (!work.candidate) return {};
+  const behaviour = `the diff of candidate ${work.candidate.sha.slice(0, 12)} against the candidate base ${work.candidate.baseSha.slice(0, 12)}; the proof fails on that base, as the approver confirms by running it and records in its approval reason`;
+  return criterion
+    ? { exercise: { criterion: criterion.id, behaviour, result: 'fail' as const, executed: 1 } }
+    : { exercise: { behaviour, result: 'fail' as const, executed: 1 } };
 }
 /**
  * GY-523. What an approver confirms before approving an attestation: the exercise record it carries
