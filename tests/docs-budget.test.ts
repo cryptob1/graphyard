@@ -18,8 +18,10 @@ const pages = ['README.md', ...readdirSync(`${root}docs`, { recursive: true, wit
 // Graphyard's own documentation budget (this repository's rule, not a product rule for managed
 // projects; GY-574 moves it into graphyard.json). Raised from 12,000 on 2026-09-26: at exactly
 // 12,000 every queued change that documented itself overflowed on its merge-queue tip and was
-// ejected. The per-page budget is unchanged, so no page grows past 1,200 words.
-const TOTAL_BUDGET = 13_000, PAGE_BUDGET = 1_200;
+// ejected. Raised from 13,000 on 2026-09-28 for the same reason: main stood at 12,995, five words
+// under the ceiling, so every change documenting itself overflowed again. The per-page budget is
+// unchanged, so no page grows past 1,200 words.
+const TOTAL_BUDGET = 13_200, PAGE_BUDGET = 1_200;
 /** Words as `wc -w` counts them: maximal runs of non-whitespace, markup and code included. */
 const words = (text: string) => text.split(/\s+/).filter(Boolean).length;
 

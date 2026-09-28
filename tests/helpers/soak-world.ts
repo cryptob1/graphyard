@@ -6,6 +6,7 @@ import type { AgentReview, ReviewRequest } from '../../src/model/review.js';
 import { heldBase, mergeableNow, queueRef, type BaseRefresh, type GitHubMergeQueueState, type LandingCheck, type QueuePlacement, type QueueSpeculation } from '../../src/merge-queue.js';
 import type { Succession } from '../../src/model/successors.js';
 import { revertRefusal, type OptimisticMerge, type OptimisticRevert } from '../../src/optimistic-merge.js';
+import { failedTestsAnnotation, readBaseBreak, type BaseBreak } from '../../src/master/base-break-refresh.js';
 
 // The outside world of the soak test (GY-404), simulated deterministically: one clock that both the
 // test process and the test Postgres read, a GitHub repository with pull requests, CI, a reviewer and
@@ -14,6 +15,12 @@ import { revertRefusal, type OptimisticMerge, type OptimisticRevert } from '../.
 
 export const minute = 60_000, hour = 60 * minute;
 export const sha = (...seed: (string | number)[]) => createHash('sha1').update(seed.join('\0')).digest('hex');
+/**
+ * The test the briefly broken base branch fails (GY-793): CI names it in the failed-tests
+ * annotation of the candidate pushed against the broken commit, of that commit's own run, and of
+ * the candidate's rerun, and the tip that fixed the branch does not name it.
+ */
+export const brokenBaseTest = 'tests/soak/base-branch.test.ts › the suite the base branch broke';
 const uuid = (hex: string) => `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 
 // ---------------------------------------------------------------------------
@@ -101,6 +108,15 @@ export class SimulatedGitHub {
   successions: Succession[] = [];
   /** Heads that break the required suite on the base branch once merged (GY-500): every base commit holding one fails until it is reverted. */
   breaking = new Set<string>();
+  /**
+   * GY-793: the base-branch commits that broke the required suite while they stood at the tip of a
+   * briefly broken main. CI reports the head pushed against one as failing `test` on the suite the
+   * commit broke, naming it in the failed-tests annotation the base-breakage judgement reads, and
+   * the run fails again on the rerun — the candidate is not the failure's author, its base was.
+   */
+  baseBreaks = new Set<string>();
+  /** The annotations CI published per check-run id: the failed-tests record GY-793's judgement parses. */
+  annotations = new Map<number, { message?: string | null }[]>();
   /** The revert pull requests the main guard opened, and the base commit each landed as. */
   reverts: { pr: number; key: string; head: string; files: string[]; merged: string | null; openedAt: number; mergedAt: number | null }[] = [];
   /** GitHub reads the main guard and the observation make for optimistic merges, per simulated minute. */
@@ -274,7 +290,14 @@ export class SimulatedGitHub {
     if (now - pr.pushed.get(head)! < this.options.ciMs) return [];
     if (!this.runs.has(head)) {
       const flake = this.flakeTips.get(pr.key) === head && this.flaky.has(pr.key);
-      this.runs.set(head, ['test', 'typecheck'].map(name => ({ name, result: flake && name === 'test' ? 'failure' : 'success', id: ++this.serial, attempt: 1, at: now })));
+      // GY-793: CI tests the head merged with the base it was pushed against, so a head whose base
+      // commit broke the suite fails `test` on it and names it, whatever the head itself changed.
+      const brokenBase = this.baseBreaks.has(pr.base);
+      this.runs.set(head, ['test', 'typecheck'].map(name => {
+        const run = { name, result: name === 'test' && (flake || brokenBase) ? 'failure' : 'success', id: ++this.serial, attempt: 1, at: now };
+        if (name === 'test' && brokenBase) this.annotations.set(run.id, [{ message: failedTestsAnnotation([brokenBaseTest]) }]);
+        return run;
+      }));
     }
     return this.runs.get(head)!.filter(run => run.at <= now);
   }
@@ -286,8 +309,25 @@ export class SimulatedGitHub {
     const pr = [...this.prs.values()].find(entry => entry.head === head)!;
     const now = clock.now();
     this.reruns.push({ key: pr.key, sha: head, checkRunId, at: now });
-    runs.push({ name: failed.name, result: this.flaky.get(pr.key) === 'rerun-fails' ? 'failure' : 'success', id: ++this.serial, attempt: failed.attempt + 1, at: now + this.options.ciMs });
+    // The rerun runs on the same commit, so a base-branch breakage fails it again (GY-793): only
+    // the flake whose rerun passes, or a run whose cause the head itself holds, comes back green.
+    const brokenBase = this.baseBreaks.has(pr.base) && failed.name === 'test';
+    const rerun = { name: failed.name, result: this.flaky.get(pr.key) === 'rerun-fails' || brokenBase ? 'failure' : 'success', id: ++this.serial, attempt: failed.attempt + 1, at: now + this.options.ciMs };
+    if (brokenBase) this.annotations.set(rerun.id, [{ message: failedTestsAnnotation([brokenBaseTest]) }]);
+    runs.push(rerun);
     return { runId: 900_000 + checkRunId };
+  }
+  /** The latest completed run of one check on one commit, as the base-breakage judgement reads the base's and the tip's own runs (GY-793). */
+  checkRun(commit: string, name: string): { id: number; conclusion: string | null } | null {
+    const pr = [...this.prs.values()].find(entry => entry.head === commit);
+    if (pr) {
+      const latest = this.checks(pr, clock.now()).filter(run => run.name === name).at(-1);
+      return latest ? { id: latest.id, conclusion: latest.result } : null;
+    }
+    const latest = this.commitChecks(commit, clock.now()).filter(run => run.name === name).at(-1);
+    // A broken base commit's failed run names the test it broke, as CI publishes it on every run.
+    if (latest && latest.result === 'failure' && this.commits.get(commit)?.broken) this.annotations.set(latest.id, [{ message: failedTestsAnnotation([brokenBaseTest]) }]);
+    return latest ? { id: latest.id, conclusion: latest.result } : null;
   }
   /** One minute of GitHub: CI finishes, reviewers post verdicts, reviewer Apps answer, and auto-merge lands what it may. */
   tick(now: number) {
@@ -366,10 +406,18 @@ export class SimulatedGitHub {
         const landing = pr.open && !pr.merged ? await world.landing(work, peers) : undefined;
         // Every landed peer the landing check reported (GY-756), as `observed KEY -> landed KEY`.
         world.landedReports.push(...(landing?.landed ?? []).map(entry => `${work.key} -> ${entry.key}`));
+        const observedChecks = world.checks(pr, now).map(run => ({ name: run.name, result: run.result, appId: options.ciAppId, id: run.id, attempt: run.attempt }));
+        // GY-793: the same base-breakage judgement the production observer runs, over this
+        // repository's own runs and annotations — read only for an open head the tip has moved
+        // past, so a candidate whose required check failed only on tests the base broke and the
+        // tip fixed is recorded for the refresh that answers it.
+        const baseBreak = pr.merged || !pr.open || world.contains(pr.head, world.tip) ? null : await readBaseBreak(
+          { required: work.policy.checks, checks: observedChecks, head: pr.head, built: pr.base, tip: world.tip, at: new Date(now).toISOString() },
+          { checkRun: (commit, name) => Promise.resolve(world.checkRun(commit, name)), annotations: runId => Promise.resolve(world.annotations.get(runId) ?? []) });
         return {
           clockOffset: { min: 0, max: 0 }, prState: pr.open ? 'open' : 'closed', draft: false, prCreatedAt: new Date(pr.createdAt).toISOString(),
           candidate: { sha: pr.head, baseSha: pr.base, pr: pr.number, branch: pr.branch, author: pr.author, createdAt: new Date(pr.createdAt).toISOString() },
-          checks: world.checks(pr, now).map(run => ({ name: run.name, result: run.result, appId: options.ciAppId, id: run.id, attempt: run.attempt })),
+          checks: observedChecks,
           // GitHub's latest verdict per reviewer, and the id of every review, as the real adapter reports them.
           reviews: [...new Map(pr.reviews.map(review => [review.reviewer, { ...review }])).values()], reviewIds: pr.reviews.map(review => review.id),
           // A reviewer App's verdict is read for the request the item is bound to, never for another.
@@ -379,6 +427,7 @@ export class SimulatedGitHub {
           protected: true, files: pr.files, scopeFiles: [], ...(landing ? { landing } : {}), at: new Date(now).toISOString(),
           // What the base changed since the bound base, which an optimistic merge (GY-500) needs disjoint from the head's files.
           ...(pr.open ? { baseChanges: world.baseChangesSince(pr.base) } : {}),
+          ...(baseBreak ? { baseBreak } : {}),
         };
       },
       // The main guard (GY-500): CI's verdict on base-branch commits, and the revert pull requests it opens and lands head-bound.
@@ -426,6 +475,27 @@ export class SimulatedGitHub {
         const pr = world.pr(work), at = new Date(clock.now()).toISOString();
         return { from: { sha: pr.head, baseSha: pr.base }, base: world.tip, baseTree: world.tree, policyRevision: work.policyRevision, at, head: pr.head, conflict: null, merge: null, carry: null,
           stale: { head: pr.head, base: world.tip, policyRevision: work.policyRevision, at, reading: `GitHub reported ${pr.head.slice(0, 12)} conflicting, but a test merge is clean` } } as BaseRefresh;
+      },
+      // GY-793: brings a candidate held only by a base-branch breakage onto the tip that fixed it —
+      // the same merge of the tip into the candidate's own branch GitHub's merge API makes for a
+      // queue refresh, recorded with trigger `base breakage` and the breakage it answered, so the
+      // engine decides the carry exactly as for any refresh. A moved tip or pull request refuses.
+      async refreshOntoFixedBase(work: Work, found: BaseBreak, beforeWrite: () => Promise<void> = async () => {}): Promise<BaseRefresh> {
+        const pr = world.pr(work), at = new Date(clock.now()).toISOString();
+        if (!work.candidate || work.queue || work.candidate.sha !== found.head) throw new Error('An unqueued candidate held by a base-branch breakage is required');
+        if (pr.head !== work.candidate.sha || pr.base !== work.candidate.baseSha || !pr.open || pr.merged) throw new Error('Pull request changed before the base refresh; retry');
+        if (world.tip !== found.fixedBy) throw new Error(`Base branch ${options.baseBranch} moved before the base refresh; retry`);
+        await beforeWrite();
+        const from = pr.head, onto = world.commits.get(world.tip)!, bound = work.candidate.baseSha;
+        const merged = world.record({ sha: sha('base-refresh', from, world.tip), tree: sha('tree', 'base-refresh', from, world.tip), parents: [from, world.tip],
+          files: [...new Set([...world.commits.get(from)!.files, ...onto.files])], at: clock.now(),
+          message: `Graphyard base refresh for ${work.key} onto ${options.baseBranch}: its failing tests were broken on ${found.builtOn.slice(0, 12)} and fixed by ${found.fixedBy.slice(0, 12)}` },
+          world.mergedContents(from, world.tip, work.plannedFiles ?? []));
+        pr.head = merged.sha; pr.base = world.tip; pr.pushed.set(merged.sha, clock.now());
+        return { from: { sha: found.head, baseSha: bound }, base: world.tip, baseTree: world.tree, policyRevision: work.policyRevision, at, head: merged.sha, conflict: null, carry: null,
+          trigger: 'base breakage', baseBreak: found,
+          merge: { from, parents: [from, world.tip], author: 'graphyard[bot]', authoredByApp: true, conflicts: false,
+            baseChanges: onto.files.filter(file => !world.commits.get(bound)!.files.includes(file)), diff: { reviewed: sha('patch', from), tip: sha('patch', from) } } } as BaseRefresh;
       },
       // Restores a branch that carries another item's unlanded commits (GY-127): back to the item's
       // own reviewed head, then the base branch merged onto it, exactly as production moves it.

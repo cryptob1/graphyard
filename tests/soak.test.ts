@@ -28,7 +28,7 @@ import type { ExhaustedProof } from '../src/daemon/decisions.js';
 import { performSelfUpgrade, type SelfUpgradeOutcome } from '../src/daemon/upgrade.js';
 import { defaultOptimisticExclude } from '../src/optimistic-merge.js';
 import { queuePlacement } from '../src/merge-queue.js';
-import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } from './helpers/soak-world.js';
+import { SimulatedGitHub, SimulatedHerdr, brokenBaseTest, clock, clockSql, hour, minute, sha } from './helpers/soak-world.js';
 
 /**
  * GY-404: per-item gates cannot catch faults that emerge from interaction over time, so this runs
@@ -56,8 +56,11 @@ import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } f
  * beside the cycle — outliving it, holding their profile from hand-off, and reported by the next
  * cycle — and the invariants hold on that detached path. Optimistic merge (GY-500) is on, as by
  * default: disjoint items land past the queue, two that change shared infrastructure queue, and one
+ * merges optimistically, two that change shared infrastructure queue, and one
  * breaks main after its optimistic merge, so the main guard reads the post-merge runs, reverts it
- * and reopens it. The loop publishes its merge-queue configuration every cycle it changes (GY-330,
+ * and reopens it. One candidate's required check fails only because main was briefly broken while
+ * its worker pushed, and the control plane brings it onto the tip that fixed the breakage with no
+ * rework round (GY-793). The loop publishes its merge-queue configuration every cycle it changes (GY-330,
  * GY-498, GY-500, GY-516), and a second, queue-only day runs the parallel-tip window (GY-498) over
  * every item: several tips validated at once, a failing tip ejecting only its own entry once the
  * tips ahead pass while the suffix rebuilds without it, and the window reconfigured mid-day and
@@ -99,6 +102,13 @@ const plan = {
   breaksMain: 10, infrastructure: new Set([13, 14]),
   // GY-516: a flake on a speculative tip whose one rerun passes, and one whose rerun fails again.
   flaky: { rerunPasses: 13, rerunFails: 14 },
+  // GY-793: item 2's worker pushes while a broken commit stands on main, so its candidate's `test`
+  // run fails on the suite that commit broke; the fix lands and completes CI minutes later, and the
+  // observation judges the failure a base breakage, so the control plane refreshes the candidate
+  // onto the fixed tip instead of asking for the rework round the failure is not the worker's to
+  // serve. The window holds only this item's push: item 1's own 20-minute work puts its push after
+  // the fix, and item 3 is released long after it.
+  baseBreak: { item: 2, brokenAt: 16 * minute, fixedAt: 19 * minute, pushAfterMs: 2 * minute },
   // GY-839: for one stretch of the day GitHub answers every open candidate's compares without a
   // usable merge base, so the landing comparison keeps the two-way endpoint diff and the base's
   // own new changes read as reverts — the reading this item fixes. The window covers the NOTICE
@@ -302,7 +312,9 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     await engine.execute(principal, 'workspace', work.id, { epoch, host: 'soak-host', path, branch }, id());
     const attempt = (attempts.get(key) ?? 0) + 1; attempts.set(key, attempt);
     const pane = herdr.open(profile.agentName, 'working', path);
-    sessions.push({ work: work.id, key, branch, profile, epoch, attempt, pane, pushAt: clock.now() + plan.workMs, diesAt: plan.deaths.has(n) && attempt === 1 ? clock.now() + plan.deathAfterMs : null, state: 'working', syncs: 0 });
+    // The base-break item's first attempt works fast and pushes inside the broken window (GY-793).
+    const pushAfterMs = mainDay && plan.baseBreak.item === n && attempt === 1 ? plan.baseBreak.pushAfterMs : plan.workMs;
+    sessions.push({ work: work.id, key, branch, profile, epoch, attempt, pane, pushAt: clock.now() + pushAfterMs, diesAt: plan.deaths.has(n) && attempt === 1 ? clock.now() + plan.deathAfterMs : null, state: 'working', syncs: 0 });
     // A scope scenario asks the moment it holds the lease, as a worker does, and keeps working
     // while the control plane decides. An ask carries at most fifty paths, so a wide ask is
     // filed in batches, which one open request of the attempt merges.
@@ -574,6 +586,9 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     return saved;
   };
   let outside: { key: string; sha: string; at: number } | null = null;
+  // GY-793: the commit that broke main, and the one that fixed it, so the day can be judged on
+  // what the refresh of the candidate built against the breakage named.
+  const baseBreak: { broken?: string; fixed?: string } = {};
   // GY-839: every false landing refusal the fault window produces, first seen per candidate head.
   const landingRefusals: { key: string; sha: string; elapsed: number }[] = [];
   // GY-498: the parallel-tip window as the day saw it — how many entries held a published tip at
@@ -613,6 +628,19 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       ? new Set([...github.prs.values()].filter(pr => pr.open).map(pr => pr.head)) : new Set<string>();
     // A change landed on main outside Graphyard, moving the base under candidates already pushed.
     if (!noticed && elapsed >= plan.notice) { noticed = true; github.commit('Add NOTICE to the base branch', [...github.files, 'NOTICE']); }
+    // GY-793: main is briefly broken by a direct commit and fixed by the next one. Item 2's worker
+    // pushes inside the window, so its candidate is built against the broken commit; the fix's own
+    // run completes one CI duration after it, which is when the judgement can first name the tip
+    // that fixed the breakage. Only the main day runs it: the other days exercise their own faults.
+    if (mainDay) {
+      if (!baseBreak.broken && elapsed >= plan.baseBreak.brokenAt) {
+        baseBreak.broken = github.commit('Break the base-branch suite', [...github.files, 'src/soak/base-broken.ts'], clock.now(), [github.tip], undefined, { broken: true }).sha;
+        github.baseBreaks.add(baseBreak.broken);
+      }
+      if (baseBreak.broken && !baseBreak.fixed && elapsed >= plan.baseBreak.fixedAt) {
+        baseBreak.fixed = github.commit('Fix the broken base-branch suite', github.files.filter(path => path !== 'src/soak/base-broken.ts'), clock.now(), [github.tip], undefined, { broken: false }).sha;
+      }
+    }
     // GY-551: twenty minutes in, the master requests a release of the last two items by hand and
     // puts each to an approver session it launches itself; neither session judges it.
     if (options.handApprovers && elapsed === 20 * minute) for (const [n, ending] of [[plan.items, 'vanishes'], [plan.items - 1, 'stops']] as const) {
@@ -720,12 +748,12 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   const final = (await store.list()).filter(item => items.some(entry => entry.id === item.id));
   if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
   return { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, herdr, hand, escalations, spent, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, landingRefusals, foreignPane,
-    mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted, approverPanes, herdrClosed: herdr.closed, diagnosisModel: settings.model };
+    mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted, approverPanes, herdrClosed: herdr.closed, diagnosisModel: settings.model, baseBreak };
 }
 
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 180_000 }, async () => {
   const began = performance.now();
-  const { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, state, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, herdr, landingRefusals, foreignPane, mergeQueuePosts, approverPanes, herdrClosed, diagnosisModel } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
+  const { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, state, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, herdr, landingRefusals, foreignPane, mergeQueuePosts, approverPanes, herdrClosed, diagnosisModel, decideCalls, baseBreak } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
   const undelivered = final.filter(item => item.stage !== 'done' || !item.delivery);
   assert.deepEqual(undelivered.map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
@@ -814,7 +842,8 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   // the tip, and the item delivers on the head the flake never touched — the superseded round is
   // what the plan comment above records, and tests/tip-flake-rerun.test.ts holds the path itself.
   const flaky = { passes: items[plan.flaky.rerunPasses - 1].key, fails: items[plan.flaky.rerunFails - 1].key };
-  assert.deepEqual(github.reruns.map(entry => entry.key).sort(), Object.values(flaky).sort(), `one rerun per flaky tip: ${JSON.stringify(github.reruns)}`);
+  const baseKey = items[plan.baseBreak.item - 1].key;
+  assert.deepEqual(github.reruns.map(entry => entry.key).sort(), [baseKey, ...Object.values(flaky)].sort(), `one rerun per flaky tip and one for the candidate built against the broken base: ${JSON.stringify(github.reruns)}`);
   const passed = github.reruns.find(entry => entry.key === flaky.passes)!, failed = github.reruns.find(entry => entry.key === flaky.fails)!;
   // The tip whose rerun passed is the one that lands, or the reviewed head it carried is what the
   // landed tip was rebuilt from: a republication resets the branch to that head (GY-568) and its
@@ -824,6 +853,23 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.equal(final.find(item => item.key === flaky.passes)!.pipeline?.reworkRounds ?? 0, 0, 'a flake whose rerun passed costs no rework round');
   assert.equal(final.find(item => item.key === flaky.fails)!.pipeline?.reworkRounds ?? 0, 0, 'the tip whose rerun failed was superseded by the out-of-queue merge before the round was asked');
   assert.ok(!github.contains(github.merges.find(entry => entry.key === flaky.fails)!.sha, failed.sha), 'and what landed for it is not the failed tip');
+  // GY-793: the candidate whose required check failed only because main was briefly broken while
+  // its worker pushed was refreshed onto the tip that fixed the breakage — once, with the breakage
+  // named on the record — and delivered with no rework round, no rework decision and no worker
+  // round of any kind: the failure the base caused asked nobody for a new head.
+  const baseBreakItem = final.find(item => item.key === baseKey)!;
+  const refreshed = baseBreakItem.baseRefresh!;
+  assert.equal(refreshed.trigger, 'base breakage', `the refresh names why the control plane touched the branch: ${JSON.stringify(baseBreakItem.baseRefresh)}`);
+  assert.equal(refreshed.baseBreak!.builtOn, baseBreak.broken, 'the record names the commit that broke the base');
+  assert.equal(refreshed.baseBreak!.fixedBy, baseBreak.fixed, 'the record names the tip that fixed it');
+  assert.deepEqual(refreshed.baseBreak!.checks, [{ check: 'test', tests: [brokenBaseTest] }], 'the record names the failing test the base caused');
+  const refreshedLedger = (await ledger('base.refreshed')).filter(row => keyOf(row.work_id) === baseKey);
+  assert.equal(refreshedLedger.length, 1, `exactly one base-breakage refresh for ${baseKey}: ${JSON.stringify(refreshedLedger)}`);
+  assert.equal(refreshedLedger[0].details.trigger, 'base breakage', `the ledger records the trigger: ${JSON.stringify(refreshedLedger)}`);
+  assert.ok(github.contains(baseBreakItem.delivery!.mergeSha, refreshed.head!), 'the item delivered on the head the refresh published');
+  assert.ok(github.contains(github.merges.find(merge => merge.key === baseKey)!.sha, baseBreak.fixed!), `${baseKey} landed on the fixed tip`);
+  assert.equal(baseBreakItem.pipeline?.reworkRounds ?? 0, 0, 'the base breakage cost no rework round');
+  assert.ok(!decideCalls.some(call => call.key === baseKey && call.action === 'rework'), 'no rework decision was requested for the base-break item');
   // GY-839: the landing check ran in the loop all day, over bases that moved under open candidates.
   // The three-way comparison from the merge base is what a candidate bound behind the tip was
   // judged by, and the fault window's blind answers are the only source of false landing refusals

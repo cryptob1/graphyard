@@ -161,14 +161,18 @@ test('unit:base-break-refresh — a candidate whose only failing test also fails
     prState: 'open', draft: false, baseTip: fixed, baseTree: treeOf(fixed), baseTipContained: false, files: ['src/queue.ts'], scopeFiles: [], at: new Date().toISOString(), baseBreak: found });
   work = await engine.observe(work.id, work.revision, seen(work));
   work = await engine.execute(producer, 'evidence', work.id, { proof: 'unit:rebase', sha: head, baseSha: main, policyRevision: 1, result: 'pass', executed: 3, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 }, scopeFiles: ['src/queue.ts'] }, randomUUID());
-  assert.deepEqual(work.gates.find(gate => gate.name === 'test')!.reasons, ['Required CI check test has not passed on the current candidate']);
+  // The gate says what has not passed and that the failed jobs' one rerun is owed first (GY-516);
+  // the rerun belongs to the queue's position-keeping and changes nothing the breakage answers.
+  assert.deepEqual(work.gates.find(gate => gate.name === 'test')!.reasons, ['Required CI check test has not passed on the current candidate; rerun: one rerun of its failed jobs is owed']);
 
-  // Nobody is asked for a new head: not the rework rule, not the next action, not the loop.
+  // Nobody is asked for a new head: not the rework rule, not the next action, not the loop. The
+  // owed rerun (GY-516) has the loop refresh its own reading first; a resync is the control
+  // plane's own read, never a round for the worker.
   assert.deepEqual(baseBreakHold(work), found);
   assert.equal(failedCheckRework(work), null, 'the failed check asks for no rework');
   const account = actionAccount(work, [work], new Date());
-  assert.equal(account.action, null, 'no request-rework action is named');
-  assert.deepEqual([account.wait?.kind, account.wait?.on], ['session', 'graphyard']);
+  assert.equal(account.action?.kind, 'resync', `no request-rework action is named: ${JSON.stringify(account.action)}`);
+  assert.match(account.action?.reason ?? '', /waiting on a fresh reading/);
   const decided: { action: string; reason: string }[] = [];
   const snapshot = (await store.workSnapshot()).work;
   await runCycle(loopConfig(), emptyDaemonState(loopConfig()), loopEffects(() => snapshot, decided));
