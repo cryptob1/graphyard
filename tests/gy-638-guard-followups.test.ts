@@ -12,6 +12,9 @@ import { regressionRefusals } from '../src/regression-guard.js';
 // queued tip that is stale with no landing regression owes no ejection: its wait is answered by
 // the queue re-speculating the tip from the item's own head, and that path is pinned here so the
 // wait cannot outlive the re-speculation.
+//
+// Every case's title begins with the item's proof name: a manual proof's cases are the ones whose
+// title begins with its name, so the proof runs exactly these and its evidence counts them.
 
 const at = '2026-09-26T23:10:00.000Z', now = new Date(at);
 const sha = (digit: string) => digit.repeat(40);
@@ -55,7 +58,7 @@ const build = (work: Work) => work.gates.find(gate => gate.name === 'build')!;
 const departedHead = (reason: string) => ({ ...item('GY-A', own['GY-A'], main, null, [fileOf('GY-A')]),
   queueEjection: { at, sequence: 1, reason, sha: own['GY-A'], policyRevision: 1, conflict: null } }) as Work;
 
-test('unit:stale-tip-waits-for-respeculation — a queued stale tip with no landing regression is not ejected: the build gate waits, and the queue re-speculating the tip from its own head ends the wait without a restore', () => {
+test('manual:review-followups-triaged: a queued stale tip with no landing regression is not ejected — the build gate waits, and the queue re-speculating the tip from its own head ends the wait without a restore', () => {
   const head = departedHead('Required CI check test did not pass on speculative tip 111111111111');
   const queued = successor('GY-B', 2, ['GY-A']);
   // The landing check lists only the entry's own file: nothing adverse is reported, yet the tip was
@@ -91,7 +94,7 @@ test('unit:stale-tip-waits-for-respeculation — a queued stale tip with no land
   assert.equal(ejectedTipRestore(settled, [head, settled]), null);
 });
 
-test('unit:unrepairable-restore-routes-to-rework — carried files on a head the restore could not repair are refused as any out-of-scope change and routed to rework, not to the resync that repeats', () => {
+test('manual:review-followups-triaged: carried files on a head the restore could not repair are refused as any out-of-scope change and routed to rework, not to the resync that repeats', () => {
   const head = departedHead('Pull request was closed without merging');
   const ejectedTip = successor('GY-B', 2, ['GY-A']);
   const unrepairable = {
