@@ -21,7 +21,7 @@ Ordinary review findings, rework, idle workers, and proof setup are not stopping
 
 `master run` is the `graphyard-master.service` unit ([supervision](onboarding.md#the-loop-must-be-supervised)); restart it (`systemctl --user restart graphyard-master`) when `daemon.liveness` is `stalled` or `absent`, never from a dirty checkout ([sessions](master-agent-sessions.md#workers-are-write-confined-to-their-worktree)).
 
-The loop also launches, wakes and rotates its own master session ([sessions](master-agent-sessions.md#the-loops-own-master-session)); `daemon.master` shows it.
+The loop launches, wakes and rotates the master session ([sessions](master-agent-sessions.md#the-loops-own-master-session)); `daemon.master` shows it.
 
 ### System-driven items
 

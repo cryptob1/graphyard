@@ -29,7 +29,7 @@ On a mid-session limit notice the loop commits worker changes as unpushed `WIP:`
 
 ## The loop's own master session
 
-The loop launches the master session as a fleet role (`master registry role set master ACCOUNTS …`), pinned to one live session; unconfigured, it launches nothing. `master start` stays: either path adopts a live session under `masterAgentName`, never two. The launch is a Herdr pane on the role's account, first request the master prompt plus a durable handover naming the standing judgement work. The loop relaunches from a fresh handover on exit (two missed readings: pane gone, or runtime gone from the pane), on a limit notice (account held), or past `run.masterSessionMinutes` (default 240), deferred during a merge. It wakes the session per cycle naming changed subjects; `run.masterHeartbeatMinutes` (default 30) of silence buys one heartbeat. `master status` shows it under `daemon.master`.
+The loop launches the master session as a fleet role (`master registry role set master ACCOUNTS …`), pinned to one live session; unconfigured, nothing launches. `master start` stays: either path adopts a live session under `masterAgentName`. The launch is a Herdr pane on the role's account, first request the master prompt plus a durable handover naming the standing judgement work. The loop relaunches from a fresh handover on exit (two missed readings: pane gone, or runtime gone from the pane), a limit notice (account held), or past `run.masterSessionMinutes` (default 240), deferred during a merge. It wakes the session per cycle naming changed subjects; `run.masterHeartbeatMinutes` (default 30) of silence buys one heartbeat. `master status` shows it under `daemon.master`.
 
 ## How a session starts
 
