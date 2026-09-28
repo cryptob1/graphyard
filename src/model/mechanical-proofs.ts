@@ -1,6 +1,7 @@
 import type { Work } from './work.js';
 import type { DispatchRequest, ReviewState } from './dispatch.js';
 import { currentEvidence } from './evidence.js';
+import { evidenceBindsCandidate } from './carry.js';
 import { requiredProofs } from './bootstrap.js';
 
 /**
@@ -26,12 +27,29 @@ export const producerGroupOf = (proof: string): ProducerGroup => proof.slice(0, 
  */
 export const mechanicalProof = (proof: string) => /^(unit|integration):/.test(proof);
 
+/**
+ * Which proofs are judged as attestations rather than counted from titles (GY-895): only the
+ * `manual:` family. Every other family — `unit:`, `integration:`, `e2e:` — keeps the title rule,
+ * so the exception never widens past the family the attestation rule was written for.
+ */
+export const attestedProof = (proof: string) => proof.startsWith('manual:');
+
+/**
+ * Whether one proof's trusted record reads as a pass (GY-895). A proof outside `manual:` keeps
+ * the title rule: executed counts the test cases whose titles carry the proof id, so a pass with
+ * none executed judged nothing. A `manual:` proof is judged as an independent attestation, never
+ * counted from titles, so its trusted pass proves it whatever it executed — the rule the producer
+ * prompts already state, which the scoring now applies too.
+ */
+export const evidenceProves = (proof: string, evidence: { result: string; executed: number; skipped: number }) =>
+  evidence.result === 'pass' && evidence.skipped === 0 && (attestedProof(proof) || evidence.executed > 0);
+
 export type ProofOutcome = 'proven' | 'unproven' | 'failed';
 /** Every automatable required proof with what the trusted evidence bound to this head says about it. */
 export function automatableOutcomes(work: Work, all: Work[], now: Date): { proof: string; group: ProducerGroup; outcome: ProofOutcome; producer?: string }[] {
   return requiredProofs(work, all).filter(proof => automatableProof(work, proof)).map(proof => {
     const evidence = currentEvidence(work, proof, now);
-    const outcome: ProofOutcome = !evidence ? 'unproven' : evidence.result === 'pass' && evidence.executed > 0 && evidence.skipped === 0 ? 'proven' : 'failed';
+    const outcome: ProofOutcome = !evidence ? 'unproven' : evidenceProves(proof, evidence) ? 'proven' : 'failed';
     return { proof, group: producerGroupOf(proof), outcome, ...(evidence ? { producer: evidence.producer } : {}) };
   });
 }
@@ -144,7 +162,10 @@ export function producerGroupDecisions(work: Work, all: Work[], now: Date, outco
  * GY-868: a trusted `manual:` record whose executed is 0 is a finding of the same kind, whatever
  * its result reads: executed counts the cases and checks the producer ran to judge the criterion,
  * so executed = 0 records a judgement never made, not a failure of the change. The loop answers it
- * through attestationDecision (GY-523) — never through rework or an operator escalation.
+ * through attestationDecision (GY-523) — never through rework or an operator escalation. GY-875:
+ * a record the carry decision bound to the current candidate is a finding of the candidate too,
+ * exactly as the merge queue's ejection check reads it; otherwise a carried record held a queue
+ * entry for an attestation nothing could name.
  */
 export interface UnexercisedFinding { proof: string; finding: string; criteria: string[]; behaviour: string | null }
 /** What a `manual:` record with no case executed is: a judgement never made (GY-868). */
@@ -153,7 +174,13 @@ export function unexercisedFindings(work: Work, sha: string | undefined = work.c
   if (!sha) return [];
   const findings = new Map<string, UnexercisedFinding>();
   for (const entry of work.evidence ?? []) {
-    if (entry.sha !== sha || entry.policyRevision !== work.policyRevision || (proofs && !proofs.includes(entry.proof))) continue;
+    // GY-875: a record carried onto the current candidate by a Graphyard-authored tip is bound to
+    // it exactly as an exact-sha record is (evidenceBindsCandidate) — the queue's ejection check
+    // reads carried evidence the same way, so a carried unexercised manual record holds the entry
+    // only while attestationDecision can see it and request the wait the hold names. Carry binds
+    // only the current candidate, so an explicitly named sha keeps the exact rule.
+    if (entry.sha !== sha && !(sha === work.candidate?.sha && evidenceBindsCandidate(work, entry))) continue;
+    if (entry.policyRevision !== work.policyRevision || (proofs && !proofs.includes(entry.proof))) continue;
     const criteria = entry.exercise?.criterion ? [entry.exercise.criterion] : work.criteria.filter(criterion => criterion.proofs.includes(entry.proof)).map(criterion => criterion.id);
     if (entry.unexercised) findings.set(entry.proof, { proof: entry.proof, finding: entry.unexercised, criteria, behaviour: entry.exercise?.behaviour ?? null });
     else if (entry.trusted && !entry.revocation && entry.proof.startsWith('manual:') && entry.executed === 0)
