@@ -1,7 +1,7 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdir, mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -15,6 +15,8 @@ import { Refusal, type Principal, type Work } from '../src/model.js';
 import { approverSessionName, decisionInput, masterConfigSchema, mergeExecutor, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { mergeBatchSize, mergeParallelTips, optimisticExcludeGlobs, optimisticMergeEnabled, rerunFailedChecks } from '../src/master/profiles.js';
 import { answeringWidening, emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
+import { codeReloadBetweenCycles } from '../src/daemon/run.js';
+import { codeReloadReason, needsAttention, readReclaimSightings, readResources, reclaimResources, resourceRegistry, revisionReloadGraceMs } from '../src/master-resources.js';
 import { plannedFilesMax, type ScopeRequestState } from '../src/model/scope.js';
 import { Launcher } from '../src/daemon/cycle.js';
 import { successorWidening } from '../src/model/successors.js';
@@ -53,7 +55,10 @@ import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } f
  * every item: several tips validated at once, a failing tip ejecting only its own entry once the
  * tips ahead pass while the suffix rebuilds without it, and the window reconfigured mid-day and
  * republished. A change to the loop that breaks an invariant fails here, in CI, before it merges;
- * a new behaviour that repeats per cycle, head or item belongs in this world.
+ * a new behaviour that repeats per cycle, head or item belongs in this world. So the
+ * loop runs supervised (GY-531): after each cycle it asks the real reload gate whether to exit onto
+ * the code its checkout holds, which an operator also pulls by hand once while a headless run is
+ * live, and every cycle runs the real reclaim pass, recording the names it sees held by nothing live.
  */
 const repository = 'owner/project';
 const PROOF = 'unit:soak-behaves';
@@ -85,7 +90,7 @@ const plan = {
   // GY-842: review panes of a previous day, standing agentless with their worktrees deleted.
   leftovers: 8,
   rework: new Set([3, 7, 11]), deaths: new Set([5, 9]), deathAfterMs: 8 * minute,
-  deploys: [2 * hour + 30 * minute, 5 * hour], dirtyCheckout: { from: 4 * hour + 50 * minute, to: 6 * hour }, split: { at: 45 * minute, item: 12 }, clean: 2, unstable: 4, slowRecompute: 8, exhaustedReviewer: 6,
+  deploys: [2 * hour + 30 * minute, 5 * hour], dirtyCheckout: { from: 4 * hour + 50 * minute, to: 6 * hour }, handPull: 75 * minute, split: { at: 45 * minute, item: 12 }, clean: 2, unstable: 4, slowRecompute: 8, exhaustedReviewer: 6,
   /** GY-500: the item whose first head breaks main after its optimistic merge, and the items that change shared infrastructure and so queue. */
   breaksMain: 10, infrastructure: new Set([13, 14]),
   // GY-516: a flake on a speculative tip whose one rerun passes, and one whose rerun fails again.
@@ -371,8 +376,12 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     if (retry.exhausted) abandoned.set(requestId, { requestId, work: item.key, sha: item.candidate.sha, group: 'unit', proofs: [PROOF], reason: `${retry.started} of its sessions failed`, attempts: runs().map(run => `${run.state}: ${run.resolution}`) });
     else if (retry.launch) producerRuns.push({ requestId, state: 'pending', requestedAt: at, closedAt: null, resolution: null });
   };
+  // A proof run stands for a headless run the loop started: a child process until it posts.
+  let headless = 0;
   const requestProof: DaemonEffects['requestProof'] = work => {
+    headless += 1;
     pending.push(async () => {
+      headless -= 1;
       const current = (await store.list()).find(item => item.id === work.id)!;
       if (!current.candidate || current.candidate.sha !== work.candidate?.sha || current.stage === 'done') return;
       // The trusted workflow publishes nothing for the spent head: only the dispatcher's producer runs stand for it.
@@ -434,7 +443,11 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     },
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
     exhaustedProofs: async () => [...abandoned.values()],
+    // The real reclaim pass (GY-531), on a directory of its own, recording what it sees each cycle.
+    reclaimResources: (work, agents) => reclaimResources(root, config, { work, agents }, { now: clock.now(), closePane: pane => herdr.close(pane) }),
   };
+  const root = await mkdtemp(join(tmpdir(), 'graphyard-soak-root-'));
+  await mkdir(join(root, '.graphyard'), { recursive: true });
   // The loop publishes the master's merge-queue settings each cycle they change (GY-330, GY-498,
   // GY-500, GY-516), exactly as daemonEffects wires it; the day records what was published, when.
   let publishedMergeQueue: string | null = null;
@@ -479,14 +492,14 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     if (op === 'symbolic-ref') throw Object.assign(new Error('fatal: ref HEAD is not a symbolic ref'), { status: 1 });
     if (op === 'status') return checkout.dirty ? ' M src/master.ts\n' : '';
     if (op === 'diff') { const [from, to] = operands[1].split('..'); return `${changedPaths(from, to).join('\n')}\n`; }
-    if (op === 'checkout') { assert.ok(!checkout.dirty, 'a dirty checkout is never touched'); upgrades.checkouts.push({ at: clock.now(), from: checkout.head, to: operands[2] }); checkout.head = operands[2]; return ''; }
+    if (op === 'checkout') { assert.ok(!checkout.dirty, 'a dirty checkout is never touched'); upgrades.checkouts.push({ at: clock.now(), from: checkout.head, to: operands[2] }); checkout.head = operands[2]; moves.add(checkout.head); return ''; }
     throw new Error(`the simulated coordinator checkout cannot answer git ${args.slice(2).join(' ')}`);
   };
   const selfUpgrade = (state: DaemonState) => performSelfUpgrade(config, state, {
     root: '/soak/coordinator', run: coordinatorGit, now: clock.now, persist: async () => {},
     restartExecutors: async to => { upgrades.executors.push(to); return { result: 'restarted', reason: null, coordinator: { commit: to }, held: [], restarted: [], unsupervised: [], forgotten: [] }; },
     // The supervisor re-executes the loop: the next process loads the release the checkout holds, as runDaemon records it.
-    restartSelf: async () => { upgrades.self++; state.release = { commit: checkout.head, dirty: checkout.dirty }; },
+    restartSelf: async () => { upgrades.self++; state.release = { commit: checkout.head, dirty: checkout.dirty }; noteRestart('self-upgrade'); },
   });
 
   // ---- The day. ----
@@ -496,7 +509,18 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   // Session launches run beside the cycle (GY-616): the loop carries one launcher across its
   // cycles, the way `runDaemon` does, and a launch settles in the interval after the cycle that
   // handed it over — here, before the simulated clock moves on.
-  const launcher = new Launcher();
+  let launcher = new Launcher();
+  // What the supervised loop's process loaded (GY-531): each restart, by the self-upgrade or by the
+  // reload gate, loads the checkout; the checkout's moves, and when it first stood ahead of the load.
+  let loaded = checkout.head, behindSince: number | null = null, deferred = 0, handRunEndsAt: number | null = null;
+  const restarts: { at: number; by: 'self-upgrade' | 'reload'; from: string; to: string; lagMs: number; launches: number; children: number }[] = [], moves = new Set<string>();
+  const resourceFaults: string[] = [], sightings: string[] = [];
+  const noteRestart = (by: 'self-upgrade' | 'reload', live: { launches: number; children: number } = { launches: launcher.pending, children: headless }) => {
+    restarts.push({ at: clock.now(), by, from: loaded, to: checkout.head, lagMs: behindSince === null ? 0 : clock.now() - behindSince, ...live });
+    loaded = checkout.head; behindSince = null;
+  };
+  const codeReload = () => codeReloadReason(root, process.pid, {
+    revision: () => ({ loaded, checkout: checkout.head, behind: loaded === checkout.head ? 0 : 1 }), children: () => headless });
   const violations: string[] = [], observed = new Set<string>(), failures: string[] = [], escalations: string[] = [], spent = new Set<string>(), actionKeys = new Set<string>();
   // Peers `processJob` reconciled from another item's landing check (GY-744), as `KEY merged|unmerged`.
   const reconciled: string[] = [];
@@ -568,6 +592,11 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       state = emptyDaemonState(config);
       restarted = true;
     }
+    // GY-531: an operator pulls the coordinator checkout onto the base tip by hand while a headless
+    // run the loop started is live for five minutes; the self-upgrade does not move it, so only the
+    // reload gate brings the loop onto that code, once the run has ended.
+    if (elapsed === plan.handPull) { checkout.head = github.tip; moves.add(checkout.head); headless += 1; handRunEndsAt = now + 5 * minute; }
+    if (handRunEndsAt !== null && now >= handRunEndsAt) { headless -= 1; handRunEndsAt = null; }
     const deploying = deploys < plan.deploys.length && elapsed >= plan.deploys[deploys];
     if (deploying) { production.build = sha('build', ++deploys); production.sha = github.tip; production.deploys.push({ at: now, build: production.build, sha: production.sha }); }
     // The world moves: GitHub, then the sessions. A deploy restarts the control plane once the
@@ -636,6 +665,21 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       const upgraded = await selfUpgrade(state);
       upgrades.outcomes.push(upgraded.outcome);
       if (upgraded.outcome === 'failed') failures.push(`${new Date(now).toISOString()}: self-upgrade failed: ${upgraded.reason}`);
+      // Then the reload gate, as runDaemon asks it after the self-upgrade: a reload restarts the loop.
+      if (checkout.head !== loaded) behindSince ??= clock.now();
+      const live = { launches: launcher.pending, children: headless };
+      if (await codeReloadBetweenCycles(true, launcher, codeReload, () => {})) {
+        // runDaemon logs what the settled launches did on its way out, since no next cycle of it will.
+        reportedDispatches += launcher.drain().filter(action => action.kind === 'dispatch' && action.state === 'done').length;
+        noteRestart('reload', live); launcher = new Launcher();
+      } else if (checkout.head !== loaded) deferred += 1;
+      // Neither the loop's code nor a name it gives back itself may warn while what undoes it is inside its bound.
+      const seen = await readReclaimSightings(root), agents = herdr.list();
+      const readings = readResources({ now: clock.now(), reviews: [], producers: [], profiles: { workers: config.workers, reviewers: config.reviewers ?? [], producers: config.producers ?? [] }, agents, work: await store.list(), plane: null, loop: null,
+        revision: { loaded, checkout: checkout.head, behind: loaded === checkout.head ? 0 : 1, movedAt: behindSince }, disk: null, unowned: seen }, resourceRegistry.filter(entry => entry.id === 'agent-names' || entry.id === 'loaded-revision'));
+      for (const reading of readings.filter(needsAttention)) resourceFaults.push(`+${Math.round(elapsed / minute)} min ${reading.id}: ${reading.detail}`);
+      const names = new Set(agents.map(agent => agent.name));
+      for (const key of Object.keys(seen ?? {})) if (!key.startsWith('unowned:') || !names.has(key.slice('unowned:'.length))) sightings.push(`+${Math.round(elapsed / minute)} min ${key} is recorded but nothing holds it`);
       if (upgraded.outcome === 'refused') refusalSamples.push({ keys: Object.keys(state.actions).filter(key => key.startsWith('upgrade:')).length, attempts: state.actions['upgrade:refused']?.attempts ?? 0 });
       for (const check of state.invariants.report as InvariantCheck[]) {
         if (check.observed) observed.add(check.invariant);
@@ -651,12 +695,13 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   const final = (await store.list()).filter(item => items.some(entry => entry.id === item.id));
   if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
   return { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, herdr, hand, escalations, spent, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, landingRefusals, foreignPane,
-    mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted };
+    mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted,
+    supervised: { restarts, moves, deferred, loaded, resourceFaults, sightings, seen: await readReclaimSightings(root) } };
 }
 
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 180_000 }, async () => {
   const began = performance.now();
-  const { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, state, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, herdr, landingRefusals, foreignPane, mergeQueuePosts } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
+  const { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, state, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, herdr, landingRefusals, foreignPane, mergeQueuePosts, supervised } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
   const undelivered = final.filter(item => item.stage !== 'done' || !item.delivery);
   assert.deepEqual(undelivered.map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
@@ -789,6 +834,22 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.equal(state.upgrade.refused, null, 'the refusal cleared with the alignment');
   assert.equal(state.upgrade.alignedRelease, production.deploys[1].sha, 'the loop stands aligned with the last deployed release');
   assert.equal(state.release?.commit, checkout.head, 'the re-executed loop reports the release the checkout holds');
+  // GY-531: supervised, the loop restarted once per move of its checkout, by the self-upgrade or by
+  // the reload gate and never both; the reload that the hand pull needed waited for the headless run
+  // and never came while a launch was live; each came inside the reading's grace, and neither the
+  // loaded revision nor a name the loop gives back itself raised attention.
+  const { restarts, moves, deferred, loaded, resourceFaults, sightings, seen } = supervised;
+  const reloads = restarts.filter(entry => entry.by === 'reload'), described = restarts.map(entry => `+${Math.round((entry.at - dayStart) / minute)} min ${entry.by} ${entry.from.slice(0, 7)}..${entry.to.slice(0, 7)}`).join(', ');
+  assert.equal(restarts.length, moves.size, `one restart per checkout move: ${described}`);
+  assert.ok(restarts.every(entry => entry.from !== entry.to), `no restart onto the code already loaded: ${described}`);
+  assert.equal(reloads.length, 1, `the hand pull, which the self-upgrade does not follow, was reloaded by the gate: ${described}`);
+  assert.ok(reloads[0].at >= dayStart + plan.handPull + 5 * minute && deferred >= 5, `the reload waited for the headless run to end (${deferred} cycles deferred): ${described}`);
+  assert.deepEqual(reloads.filter(entry => entry.launches || entry.children), [], 'no reload while a launch or a headless run was live');
+  assert.ok(Math.max(...restarts.map(entry => entry.lagMs)) < revisionReloadGraceMs, `each restart came inside the grace: ${described}`);
+  assert.equal(loaded, checkout.head, 'the loop ends the day on the code the checkout holds');
+  assert.deepEqual(resourceFaults, [], 'neither the loaded revision nor a name the loop gives back itself raised attention');
+  assert.deepEqual(sightings, [], 'the reclaim pass records only names still held: its sightings stay bounded');
+  assert.ok(Object.keys(seen ?? {}).length <= workers.length, `the sightings left are at most one per worker name: ${JSON.stringify(seen)}`);
   assert.ok(Object.keys(state.actions).filter(key => key.startsWith('upgrade:')).length <= production.deploys.length + 1, `the cursor holds one upgrade action per deploy and one refusal: ${Object.keys(state.actions).filter(key => key.startsWith('upgrade:')).join(', ')}`);
   // GY-842 across the day: every pane the day's launches opened went somewhere — closed once, by
   // the step that ended its session or by the bounded sweep — the operator's own pane was never

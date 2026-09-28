@@ -14,6 +14,17 @@ import { describeSelfUpgrade } from './upgrade.js';
 import { describeTimings } from '../master/timings.js';
 
 /**
+ * Why the loop should exit between cycles so its supervisor restarts it on the checkout's code, or
+ * null (GY-531). Only a supervised loop reloads, and never while a launch it handed over is still in
+ * flight: exiting would cut that launch short. The soak (tests/soak.test.ts) drives this same gate.
+ */
+export async function codeReloadBetweenCycles(supervised: boolean, launcher: Pick<Launcher, 'pending'>, codeReload: (() => string | null | Promise<string | null>) | undefined, log: (line: string) => void): Promise<string | null> {
+  if (!supervised || !codeReload || launcher.pending) return null;
+  try { return await codeReload(); }
+  catch (error) { log(`[graphyard-master] the loaded revision could not be compared with the checkout: ${message(error)}`); return null; }
+}
+
+/**
  * The compact daemon view `master status` joins onto Graphyard truth. `faultPolicy` is the recurrence
  * rule the faults are reported under: the loop passes the one it files by (effects.faultClassPolicy),
  * so the reported window and threshold are the filing ones; absent, the environment's.
@@ -107,6 +118,11 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
   environment?: Record<string, string | undefined>;
   /** Re-reads .graphyard/master.json before each cycle, so profiles, workspace, run settings and autoMerge apply without a restart. */
   reload?: () => Promise<ConfigReload>;
+  /**
+   * Why the loop should exit so its supervisor restarts it on the checkout's code, or null
+   * (codeReloadReason, GY-531). Asked after each completed cycle, only under a supervisor.
+   */
+  codeReload?: () => string | null | Promise<string | null>;
   /** The process whose unhandled rejections and uncaught exceptions the loop catches; defaults to this one. */
   process?: Pick<NodeJS.Process, 'on' | 'off'>;
   /** Reads how the coordinator checkout stands; defaults to reading it from the configured CLI launcher's root. */
@@ -126,7 +142,7 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
   const watchdog = watchdogPlan(options.environment ?? process.env, interval());
   for (const action of await noteWatchdog(state, watchdog, new Date(now()).toISOString(), effects.persist)) log(`[graphyard-master] ${action.kind} ${action.state}: ${action.detail}`);
   if (watchdog.supervised) { try { await effects.notify?.('ready'); } catch (error) { log(`[graphyard-master] supervisor notification failed: ${message(error)}`); } }
-  let stopping = false;
+  let stopping = false, reloading: string | null = null;
   // A supervisor's SIGTERM must land during the wait, not one whole interval later.
   const waking = new AbortController();
   const stop = () => { stopping = true; waking.abort(); };
@@ -227,6 +243,10 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
       // is for a cycle that hangs, and a thrown one has just proved it did not.
       if (watchdog.supervised) { try { await effects.notify?.('alive'); } catch (error) { log(`[graphyard-master] supervisor notification failed: ${message(error)}`); } }
       if (options.once || stopping) break;
+      // Under a supervisor that restarts it, a loop behind its checkout exits between cycles so the
+      // supervisor starts it on the code the checkout holds; the cursor is written on the way out.
+      reloading = await codeReloadBetweenCycles(watchdog.supervised, launcher, options.codeReload, log);
+      if (reloading) { log(`[graphyard-master] reloading: ${reloading}`); break; }
       try { await delay(wait, undefined, { signal: waking.signal }); } catch { /* woken to stop */ }
     } while (!stopping);
   } finally {
@@ -240,5 +260,5 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
     state.lock = null;
     await effects.persist(state).catch(() => {});
   }
-  return { cycles, failed, stopped: stopping };
+  return { cycles, failed, stopped: stopping, reloading };
 }

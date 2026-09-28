@@ -21,7 +21,7 @@ import { consentHoldItems } from './cli/consent-holds.js';
 import { untriagedAttention } from './triage.js';
 import { backlogCounts } from './model/machine-backlog.js';
 import { setupHealth } from './cli/master-setup.js';
-import { attributionFor, describeReading, loadedRevision, readDisk, readPlaneResources, readReclaimReports, readResources, resourceAttention, type ResourceReading } from './master-resources.js';
+import { attributionFor, describeReading, loadedRevision, readDisk, readPlaneResources, readReclaimReports, readReclaimSightings, readResources, resourceAttention, type ResourceReading } from './master-resources.js';
 
 /**
  * A launch refused by a full session ledger is attributed to that ledger (GY-131).
@@ -128,7 +128,7 @@ export async function resourceStatus(root: string, master: MasterConfig, observe
   const revision = lock && lock.host === master.hostId ? loadedRevision(root, lock.pid, deps.run, now) : null;
   const readings = readResources({ now, reviews: observed.reviews, producers: observed.producers, agents: observed.agents, work: observed.work,
     profiles: { workers: master.workers, reviewers: master.reviewers, producers: master.producers },
-    plane: await readPlaneResources(master.url, deps.fetcher), loop: observed.loop, revision, disk: await readDisk(root, master) });
+    plane: await readPlaneResources(master.url, deps.fetcher), loop: observed.loop, revision, disk: await readDisk(root, master), unowned: await readReclaimSightings(root) });
   const attention = resourceAttention(readings);
   return { readings, attention, report: resourceReport(readings, (await readReclaimReports(root)).at(-1) ?? null) };
 }
@@ -138,7 +138,7 @@ export function resourceReport(readings: ResourceReading[], lastReclaim: unknown
   const pressed = readings.filter(reading => reading.state === 'low' || reading.state === 'exhausted');
   return {
     summary: `${readings.length} resource reading(s): ${pressed.length ? pressed.map(reading => `${reading.id} ${reading.state}`).join(', ') : 'all within their warning lines'}${readings.some(reading => reading.state === 'unknown') ? `; unread: ${readings.filter(reading => reading.state === 'unknown').map(reading => reading.id).join(', ')}` : ''}`,
-    readings: readings.map(({ id, title, unit, used, bound, headroom, warnBelow, state, detail, owner, reclaim, reclaimable, waiting }) => ({ id, title, unit, used, bound, headroom, warnBelow, state, detail, owner, reclaim, reclaimable, ...(waiting === undefined ? {} : { waiting }) })),
+    readings: readings.map(({ id, title, unit, used, bound, headroom, warnBelow, state, detail, owner, reclaim, reclaimable, waiting, overdue }) => ({ id, title, unit, used, bound, headroom, warnBelow, state, detail, owner, reclaim, reclaimable, ...(waiting === undefined ? {} : { waiting }), ...(overdue === undefined ? {} : { overdue }) })),
     lastReclaim,
   };
 }
