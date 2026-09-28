@@ -8,6 +8,7 @@ import { launchAuthorization } from '../repository-setup.js';
 import { type HarnessPlan, type HarnessRule, writeHarnessPermissions, masterHarnessPlan, harnessDecision } from '../harness.js';
 import type { Work } from '../model.js';
 import type { MasterConfig, WorkerProfile } from './profiles.js';
+import { coordinatorCheckoutRoot, workerConfinementRefusal } from './profiles.js';
 import { atomicPrivateText, loadMasterConfig } from './config.js';
 import { accountLaunch } from './environments.js';
 import { type RequestDelivery, startAgentSession } from './launch.js';
@@ -266,6 +267,22 @@ export function masterHarness(root: string, config: MasterConfig, harness: strin
  */
 /** Every character an empty-source refspec's name can start with as typed: a ref name's first character, a quote, or an expansion. */
 export const emptySourceStarts = [...'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', ...'_.-/@\'"$`{~'];
+/**
+ * The coordinator checkout's own files, denied to a worker session's Edit and Write (GY-857).
+ * That checkout runs the loop and the executors, and worker sessions once wrote their
+ * half-finished work there by absolute path; a restart then loaded it. Every area the loaded
+ * code lives in is denied in both files the worker reads — its worktree's settings and its role
+ * file — while the worktree itself, and the managed state beside it under `.graphyard/`, stay
+ * its to write. A harness rule is a prompt policy; the lease, the worktree's own Git isolation
+ * and branch protection remain the enforcement.
+ */
+const checkoutAreas = ['src', 'tests', 'scripts', 'bin', 'docs', 'examples', 'integrations', 'web', 'browser-tests', 'design', 'deploy', 'docker'];
+export function coordinatorWriteDenials(coordinatorRoot: string): HarnessRule[] {
+  if (!coordinatorRoot || coordinatorRoot === '/') return [];
+  const absolute = `//${coordinatorRoot.replace(/^\//, '')}`;
+  const why = (area: string) => `The coordinator checkout runs the loop and the executors; this session writes only its assigned worktree, never ${area}/ there (GY-857).`;
+  return checkoutAreas.flatMap(area => [{ rule: `Edit(${absolute}/${area}/**)`, why: why(area) }, { rule: `Write(${absolute}/${area}/**)`, why: why(area) }]);
+}
 export function workerHarnessPlan(input: { cliPath: string; branch: string; baseBranch: string; credentialHome: string }): HarnessPlan {
   const cli = `node ${input.cliPath}`;
   const allow: HarnessRule[] = [
@@ -318,6 +335,7 @@ export function workerHarnessPlan(input: { cliPath: string; branch: string; base
   ];
   const deny: HarnessRule[] = [
     ...push.flatMap(([form, why]) => [{ rule: `Bash(git push ${form})`, why }, { rule: `Bash(git -* push ${form})`, why: `${why} Also behind git's global options.` }]),
+    ...coordinatorWriteDenials(coordinatorCheckoutRoot(input.cliPath)),
     { rule: 'Bash(git rebase:*)', why: 'sync merges the base branch; a rebase would re-resolve files outside the planned files.' },
     { rule: 'Bash(gh pr merge:*)', why: 'Workers never merge; the control plane\'s merge gate decides.' },
     { rule: 'Bash(gh pr review:*)', why: 'Workers never review their own work.' },
@@ -385,6 +403,11 @@ export function unrunnableRemedies(work: Work[], input: { cliPath: string; baseB
 }
 /** Install the worker rules in a freshly prepared worktree, only where Git already ignores them. */
 export async function installWorkerHarness(config: MasterConfig, profile: WorkerProfile, key: string, prepared: PreparedWorker) {
+  // GY-857: a profile whose own settings would turn its runtime's write confinement off is
+  // refused here, at the launch, whatever its kind — the worker never starts able to write
+  // outside its assigned worktree.
+  const refusal = workerConfinementRefusal(profile);
+  if (refusal) throw new Error(refusal);
   if (profile.kind !== 'claude') return { applied: false, reason: `No generated worker rules for ${profile.kind}` };
   try { await defaultChildRun('git', ['check-ignore', '--quiet', '--', '.claude/settings.local.json'], { cwd: prepared.path }); }
   catch { return { applied: false, reason: 'The worktree does not ignore .claude/settings.local.json, so no rules were written into it' }; }

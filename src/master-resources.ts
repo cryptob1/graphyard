@@ -543,6 +543,60 @@ export function describeReclaim(report: ResourceReclaimReport) {
   return parts.length ? `Resource reclaim: ${parts.join('; ')}` : null;
 }
 
+// ---- The host's panes (GY-842) -----------------------------------------------------------------
+
+/** The count of agentless panes a Graphyard launch opened past which attention is raised (GY-842). */
+export const agentlessPaneAttentionBound = 20;
+
+export interface PaneReclaimStatus {
+  at: string;
+  /** Panes the host's runtime reports (`herdr pane list`); null while it cannot be read. */
+  panes: number | null;
+  /** Panes a Graphyard launch opened: the pane ids its sessions recorded. */
+  launched: number;
+  /** Launched panes holding no agent — a runtime that exited and left its shell behind. */
+  agentless: number;
+  /** The oldest agentless launched pane, by the start its session recorded. */
+  oldest: { pane: string; work: string; kind: string; launchedAt: string } | null;
+  /** One attention item once agentless panes pass the bound, naming the counts and the remedy. */
+  attention: AttentionItem | null;
+}
+
+/**
+ * The pane picture of this host (GY-842): how many panes the runtime holds, how many a Graphyard
+ * launch opened, and how many of those stand agentless — the runtime exited and left its shell,
+ * which holds a pty, a process and memory whether or not anything runs in it. Herdr held 621 panes
+ * on 26 September 2026, 584 of them Graphyard's, agentless; the host throttled and every session
+ * and test run on it slowed. A pane counts as agentless only when the runtime reports the pane
+ * with no agent in it, and only a pane a Graphyard session recorded is Graphyard's — a pane the
+ * operator or another tool opened is never counted, and never closed. Only the handles `hostId`
+ * recorded count: the reading is this host's, and a remote handle naming the same pane coordinate
+ * is another host's launch, not this host's pane.
+ */
+export function paneReclaimStatus(panes: { pane_id?: string }[] | null, work: Work[], agents: HerdrAgent[] | null, now: number, hostId: string): PaneReclaimStatus {
+  // Every pane on the host, from the pane inventory; the agent inventory stands in for presence
+  // when the pane list could not be read, since it lists a session's pane while the pane exists.
+  const listed = new Set((panes ?? []).map(pane => pane.pane_id).filter((id): id is string => !!id));
+  // A launch's own record of its pane (GY-172): the handle every launcher registers, whatever its role.
+  const recorded = new Map<string, { work: Work; kind: string; launchedAt: string | null; running: boolean }>();
+  for (const item of work) for (const handle of item.sessions ?? []) if (handle.pane && handle.host === hostId)
+    recorded.set(handle.pane, { work: item, kind: handle.kind, launchedAt: Number.isFinite(Date.parse(handle.startedAt)) ? handle.startedAt : null, running: handle.state === 'running' });
+  // A pane with an agent in it is a live session, whatever its state: the inventory detects the agent.
+  const withAgent = new Set((agents ?? []).filter(agent => !!agent.agent && !!agent.pane_id).map(agent => agent.pane_id!));
+  const seenByRuntime = new Set((agents ?? []).map(agent => agent.pane_id).filter((id): id is string => !!id));
+  const present = (pane: string) => listed.has(pane) || (panes === null && seenByRuntime.has(pane));
+  const agentless = [...recorded.entries()].filter(([pane, record]) => present(pane) && !withAgent.has(pane));
+  const oldest = agentless.length
+    ? agentless.reduce((earliest, entry) => Date.parse(entry[1].launchedAt ?? '') < Date.parse(earliest[1].launchedAt ?? '') ? entry : earliest, agentless[0])
+    : null;
+  const reading = { panes: panes === null ? null : listed.size, launched: recorded.size, agentless: agentless.length,
+    oldest: oldest ? { pane: oldest[0], work: oldest[1].work.key, kind: oldest[1].kind, launchedAt: oldest[1].launchedAt ?? 'an unrecorded time' } : null };
+  const attention: AttentionItem[] = agentless.length > agentlessPaneAttentionBound ? [{ subject: 'agentless panes',
+    text: `Herdr holds ${reading.panes ?? 'an unknown number of'} pane(s) on this host and ${agentless.length} of the panes Graphyard launched stand agentless (past the ${agentlessPaneAttentionBound}-pane attention bound), the oldest pane ${reading.oldest!.pane} of ${reading.oldest!.work} (${reading.oldest!.kind}), launched ${reading.oldest!.launchedAt}. Each is a shell holding a pty and memory, and enough of them slow every session and test run on the host`,
+    ...agentOwner('master', 'the loop sweeps them itself, a bounded number per cycle, once agentless past its launch bound; graphyard master run --once runs a pass now') }] : [];
+  return { ...reading, at: new Date(now).toISOString(), attention: attention[0] ?? null };
+}
+
 // ---- The plane's health ------------------------------------------------------------------------
 
 /**
