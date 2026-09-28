@@ -5,27 +5,27 @@ Run this runbook from one instruction:
 
 > install Graphyard for OWNER/REPO on PROVIDER following docs/install.md
 
-A person is asked for exactly four things: **Which provider** (and `--workspace` on a multi-workspace Railway account); **Provider login** with an account they own; **the GitHub App confirmation click**, once; **Approval of the printed plan**. Never invent a fifth.
+A person is asked for exactly four things: **Which provider** (and `--workspace` on multi-workspace Railway); **Provider login** they own; **the GitHub App confirmation click**, once; **Approval of the printed plan**. Never invent a fifth.
 
 ## Hard rules
 
 - **Never print, echo, `cat`, log, paste, or commit a credential.**
 - **One principal per role:** `--workers N`; never share a worker credential.
 - **Workers never receive an admin, coordinator, or producer credential.**
-- **Proof producers get explicit grants only** (`--producer-proof NAME`, one per proof).
+- **Proof producers get explicit grants only** (`--producer-proof NAME` per proof).
 - Credentials live only in `~/.config/graphyard/<install>/`: directory `0700`, files `0600`.
 
 ## Preconditions
 
-Node 24; a checkout of `OWNER/REPO`; `export GRAPHYARD_CLI=/abs/path/graphyard/bin/graphyard.mjs`; `gh auth status` logged in as a repository admin with `repo,admin:repo_hook`.
+Node 24; a checkout of `OWNER/REPO`; `export GRAPHYARD_CLI=…`; `gh auth status` as repository admin (`repo,admin:repo_hook`).
 
-Worker and non-Actions unit-proof hosts need bubblewrap: `bwrap --unshare-all --ro-bind / / -- true` must succeed (Ubuntu 24.04: `sysctl kernel.apparmor_restrict_unprivileged_userns=0`).
+Worker and non-Actions unit-proof hosts need bubblewrap (`bwrap --unshare-all --ro-bind / / -- true`; Ubuntu 24.04: `sysctl kernel.apparmor_restrict_unprivileged_userns=0`).
 
 ### Providers
 
 - `railway`: `npm i -g @railway/cli`, `railway login`.
-- `hetzner`: `brew install hcloud`, `hcloud context create graphyard`; needs `--domain` and `--ssh-key NAME`.
-- `docker-host`: `ssh USER@HOST 'curl -fsSL https://get.docker.com | sh'`; needs `--ssh-host` and `--domain`.
+- `hetzner`: `hcloud context create graphyard` (`brew install hcloud` first); needs `--domain` and `--ssh-key NAME`.
+- `docker-host`: `ssh USER@HOST 'curl -fsSL https://get.docker.com | sh'`; needs `--ssh-host`, `--domain`.
 - `compose`: `curl -fsSL https://get.docker.com | sh`; local evaluation only.
 
 ## Step 1: print the plan
@@ -34,13 +34,13 @@ Worker and non-Actions unit-proof hosts need bubblewrap: `bwrap --unshare-all --
 node "$GRAPHYARD_CLI" install --provider PROVIDER --repo OWNER/REPO --plan
 ```
 
-Options: `--workers N`, `--producer-proof NAME`, `--required-check NAME`, `--domain`; `init --scan` [proposes](operations-reference.md#setup-proposals-and-drift) check and proof names.
+Options: `--workers N`, `--producer-proof NAME`, `--required-check NAME`, `--domain`; `init --scan` [proposes](operations-reference.md#setup-proposals-and-drift) names.
 
-**Verify:** `secretsRedacted` and every `preflight[].ok` are `true` (else run its `fix`).
+**Verify:** `secretsRedacted` and every `preflight[].ok` `true` (else run its `fix`).
 
 ## Step 2: approve the plan
 
-Show the human the plan and any `drift` for explicit approval.
+Show the human the plan and any `drift`.
 
 ## Step 3: apply
 
@@ -48,39 +48,39 @@ Show the human the plan and any `drift` for explicit approval.
 node "$GRAPHYARD_CLI" install --provider PROVIDER --repo OWNER/REPO --apply
 ```
 
-It writes credentials, sets [variables](deployment.md#variables), deploys, applies [branch protection](github.md#require-the-check). **Verify** `GET /healthz` answers.
+It writes credentials, sets [variables](deployment.md#variables), deploys, applies [branch protection](github.md#require-the-check); **Verify** `/healthz`.
 
 ## Step 4: the GitHub App confirmation
 
-At the printed `http://127.0.0.1:4311` the human registers and installs the App. **Verify:** the page reports *App registered and installation verified*.
+At the printed `http://127.0.0.1:4311` the human registers and installs the App; **Verify** *App registered and installation verified*.
 
 ## Step 5: read the summary
 
-**Verify:** `health` `true`, `status.role` `admin`, `webhook.delivered` `true` (compose polls instead), `profiles.master.configured` `true`. Follow `nextSteps`; never read a `tokenFile`.
+**Verify:** `health`, `webhook.delivered` (compose polls), `profiles.master.configured` `true`, `status.role` `admin`; follow `nextSteps`; never read a `tokenFile`.
 
 ## Step 6: the first pull request
 
-Dispatch a small item ([onboarding](onboarding.md#4-prove-the-first-pr)); once `Graphyard / merge` appears, rerun `--apply`. **Verify** the check required on the base branch.
+Dispatch a small item ([onboarding](onboarding.md#4-prove-the-first-pr)); once `Graphyard / merge` appears, rerun `--apply`; **Verify** the required check.
 
 `--plan` and `--apply` are idempotent (`"satisfied"`, `drift`); tokens never rotate.
 
 ## Self-contained host
 
-`--target host --ssh-host HOST` or `--target hetzner` runs server, Postgres, loop, executors, Herdr, Claude, Codex, OpenCode, Pi on one machine (systemd), credentials `0600` in `~graphyard/.config/graphyard/<install>/`. Sign in with the printed link.
+`--target host --ssh-host HOST` (or `--target hetzner`) runs server, Postgres, loop, executors, Herdr and the agent runtimes on one machine (systemd), credentials `0600` in `~graphyard/.config/graphyard/<install>/`; sign in with the printed link.
 
-**Sizing:** 3 GB per concurrent agent, 2 GB per verification slot, 2 GB base, max(10%, 4 GB) spare. Confirm `price` (`--confirm-price X` or `--max-monthly N`).
+**Sizing:** 3 GB per concurrent agent, 2 GB per verification slot, 2 GB base, max(10%, 4 GB) spare; confirmed with `--confirm-price` / `--max-monthly`.
 
-**Moving:** `--migrate` stops the old loop, fences `GRAPHYARD_MIGRATE_DATABASE_URL` (`db fence`), restores it; local logins move, others reconnect.
+**Moving:** `--migrate` stops the old loop, fences `GRAPHYARD_MIGRATE_DATABASE_URL` (`db fence`), restores; local logins move, others reconnect.
 
 ## Upgrading an existing installation
 
-A release needing a new App permission holds jobs using it. [Back up, deploy](deployment.md#backup-upgrade-rollback), then where `.graphyard/github-app.json` lives:
+A release needing a new App permission holds its jobs; [back up, deploy](deployment.md#backup-upgrade-rollback), then where `.graphyard/github-app.json` lives:
 
 ```sh
 node "$GRAPHYARD_CLI" github-setup --update-permissions --wait 600
 ```
 
-Confirm `doctor` shows `appPermissions.missing` empty; a re-run fixes `delegationLimits` drift (`Set GRAPHYARD_MAX_REVIEWERS=N`) and declares an undeclared operator `sessionKind human`, agents `ai`, tokens kept.
+Confirm `doctor` shows `appPermissions.missing` empty; a re-run fixes `delegationLimits` drift (`GRAPHYARD_MAX_REVIEWERS`) and declares `sessionKind` (operator `human`, agents `ai`).
 
 ## Failure handling
 
@@ -88,18 +88,18 @@ Confirm `doctor` shows `appPermissions.missing` empty; a re-run fixes `delegatio
 | --- | --- |
 | `Preflight is incomplete` | nothing created; run its `fix`, rerun |
 | `Railway workspace` preflight `false` | rerun with a listed `--workspace` |
-| `... must be able to read ...github-private-key.pem` | connect as `root` or run the printed `chown 1000:1000` |
+| `...github-private-key.pem` unreadable | connect as `root` or run the printed `chown 1000:1000` |
 | `did not become healthy` | `install --provider PROVIDER --repo OWNER/REPO --logs` |
 | `The GitHub App confirmation did not complete in time` | rerun `--apply`; it resumes |
-| `webhook.delivered` `false`, 401 | rerun `--apply`; it rewrites both secrets |
+| `webhook.delivered` `false`, 401 | rerun `--apply`; rewrites both secrets |
 | `Branch protection could not be applied` | `gh auth login` as a repository admin, rerun |
 | worktree dependencies `failed` | [bubblewrap](#preconditions) |
 | `Refusing to store installation credentials inside the managed repository` | point `GRAPHYARD_CONFIG_HOME` outside every worktree |
 
 ## Agent execution contract
 
-Follow steps 1–6, reporting verification and `nextSteps`; never weaken a gate to finish.
+Follow steps 1–6; report verification; never weaken a gate.
 
-## Manual fallback for unsupported platforms
+## Manual fallback (unsupported platforms)
 
 See [deployment](deployment.md#manual-fallback).
