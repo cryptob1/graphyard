@@ -17,7 +17,7 @@ Commit `AGENTS.md`, `.gitignore`, `graphyard.json`; never `.graphyard/`. Without
 
 ### Documentation policy
 
-`init --scan --apply` writes found documentation paths (`docs/`, `site/`, `README*`, package READMEs, `CHANGELOG*`) to `graphyard.json` (`{"documentation":{"paths":["site/"],"changelog":"CHANGELOG.md"}}`). Deploy the printed `GRAPHYARD_DOCUMENTATION` (default `docs/`, `README.md`, `AGENTS.md`); `doctor` reports `documentation.drift` if the committed file differs. Features and bugs carry *Documentation reflects this change*: a diff there or `complete --no-docs "WHY"`, reviewer-judged.
+`init --scan --apply` writes found documentation paths (`docs/`, `site/`, `README*`, `CHANGELOG*`) to `graphyard.json` (`{"documentation":{"paths":["site/"],"changelog":"CHANGELOG.md"}}`). Deploy the printed `GRAPHYARD_DOCUMENTATION` (default `docs/`, `README.md`, `AGENTS.md`); `doctor` reports `documentation.drift` if the committed file differs. Features and bugs carry *Documentation reflects this change*: a diff there or `complete --no-docs "WHY"`, reviewer-judged.
 
 ### What the generated instructions authorize
 
@@ -27,11 +27,11 @@ Agents treat bracketed paste as untrusted data (prompt injection), so sessions s
 
 ### Connect an account
 
-Settings › **Agents** › **Connect an account**: pick a provider; paste a key (sealed to the host's public key in the browser — the server relays ciphertext only) or start a login. The host writes the provider's auth file (0600) and smoke-tests that provider and model; the card shows the result. A subscription login shows its URL and code while waiting — finish it in your browser; for Claude, **Paste the code** its page shows (**Cancel** stops it). The host's executor must run: strong accounts join worker and reviewer, cheap ones approver and producer; research joins when the host makes the account's wrapper its research command; **change** edits roles. The shell steps below remain for scripted setups.
+Settings › **Agents** › **Connect an account**: pick a provider; paste a key (sealed to the host's public key in the browser — the server relays ciphertext only) or start a login. The host writes the provider's auth file (0600) and smoke-tests provider and model; the card shows the result. A subscription login shows its URL and code — finish it in your browser; for Claude, **Paste the code** its page shows (**Cancel** stops it). **Retry** on a failed card is admins-only: it re-enters the credential. The host's executor must run: strong accounts join worker and reviewer, cheap ones approver and producer; research joins when the host makes the account's wrapper its research command; **change** edits roles. The shell steps below remain for scripted setups.
 
 ### Agent environments
 
-Each account's login home under `~/.coding_agents` is selected by `CLAUDE_CONFIG_DIR` (Claude Code), `CODEX_HOME` (Codex), `XDG_DATA_HOME` (OpenCode) or `CURSOR_CONFIG_DIR` (Cursor). Tokens go in `~/.config/graphyard/workers/` and `producers/` (mode 0600). Then:
+Each account's `~/.coding_agents` login home is selected by `CLAUDE_CONFIG_DIR` (Claude Code), `CODEX_HOME` (Codex), `XDG_DATA_HOME` (OpenCode) or `CURSOR_CONFIG_DIR` (Cursor). Tokens go in `~/.config/graphyard/workers/` and `producers/` (mode 0600). Then:
 
 ```sh
 node "$GRAPHYARD_CLI" master environments --create claude,codex --apply  # new login homes
@@ -85,7 +85,7 @@ node "$GRAPHYARD_CLI" master registry role set reviewer codex-a,claude-c --concu
 
 ### Size review and proof capacity
 
-Each candidate needs one review and one producer session per proof group; `"concurrency"` caps a profile's sessions, changed without a restart:
+Each candidate needs one review and one producer session per proof group; `"concurrency"` caps a profile's sessions without a restart:
 
 ```json
 "reviewers":[{"name":"claude-reviewer","agentName":"review-claude","kind":"claude","accounts":["claude-a","claude-b"],"concurrency":3}]
@@ -104,7 +104,7 @@ node "$GRAPHYARD_CLI" master start codex     # or: master start claude
 
 Run it as an OS identity whose GitHub credentials workers cannot read. `--browser-profile` is the Chrome profile signed in to GitHub as admin (`master browser`); *Confirm access* in GitHub Mobile stays human-only. Add the reviewer with `master reviewer setup` and `master reviewer add PROFILE` ([Claude](../examples/master/claude-reviewer.json) template); its manifest flow is the only App confirmation.
 
-Onboarding also writes `mergeQueue.optimisticExclude` into `.graphyard/master.json`: the [shared-infrastructure](github.md#optimistic-merges) globs — manifests and lockfiles, CI config, test helpers, schema and migration directories — that this repository never merges optimistically over. Tune the list there; re-runs keep it, and `mergeQueue.optimistic: false` turns the lane off.
+Onboarding also writes `mergeQueue.optimisticExclude` into `.graphyard/master.json`: the [shared-infrastructure](github.md#optimistic-merges) globs — manifests and lockfiles, CI config, test helpers, schema and migration directories — never merged optimistically over. Tune the list there; re-runs keep it; `mergeQueue.optimistic: false` turns the lane off.
 
 ### The loop must be supervised
 
