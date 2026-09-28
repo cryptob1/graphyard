@@ -462,10 +462,11 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     catch (error) { if (error instanceof Refusal) throw Object.assign(new Error(JSON.stringify({ error: error.message })), { confirmedRefusal: error.status >= 400 && error.status < 500 }); throw error; }
   };
   // ---- Host memory (GY-612): below its floor the loop launches nothing, recording the crossing once each way. ----
-  // The queue-only day runs without the dip, the way it runs without the blind window: its fault
-  // is the bound candidates' recovery, which the main day exercises, and a launch pause under a
-  // full queue would only churn its window's choreography.
-  const dip = options.queued ? null : plan.memoryDip;
+  // The queue-only day and the capacity-wait day run without the dip, the way the queue-only day
+  // runs without the blind window: their faults are the bound candidates' recovery and the
+  // approvers' ordered relaunch, which the main day exercises, and a launch pause would only churn
+  // which of their decisions sit inside the window's choreography.
+  const dip = options.queued || options.capacityWait ? null : plan.memoryDip;
   const GiB = 2 ** 30;
   let memoryReads = 0;
   const memoryReading = (): HostMemoryReading => {
