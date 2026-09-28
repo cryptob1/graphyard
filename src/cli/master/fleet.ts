@@ -2,7 +2,7 @@
 import { readFile } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
 import { listHerdrAgents, masterHarness, masterSettingsFromArgs, producerCommand, registeredReview, saveMasterSettings, saveWorkerProfile, startMaster, workerProfileSchema } from '../../master.js';
-import { readReviewLedger, reviewCommand as launchReview } from '../../reviewer.js';
+import { readReviewLedger, reviewCommand as launchReview, resumeStoppedFollowUps } from '../../reviewer.js';
 import { readDispatchCursor } from '../../auto-dispatch.js';
 import { applyProtection, protectionPlan, readProtection } from '../../protection.js';
 import { writeHarnessPermissions } from '../../harness.js';
@@ -36,6 +36,11 @@ export async function fleetCommand(session: MasterSession): Promise<unknown> {
     const snapshot = await masterApi('work-snapshot'), work = snapshot.work.find((item: any) => item.id === args[0] || item.key === args[0]);
     if (work) assertHandReview(work, (await readReviewLedger(root)).reviews, (await readDispatchCursor(root, master)).failures, Date.parse(snapshot.now));
     return print(await reviewCommand(root, args, snapshot, await listHerdrAgents()));
+  }
+  // A follow-up filing the loop stopped retrying (GY-598) resumes once the cause its attention names is fixed (GY-603).
+  if (id === 'retry-resume') {
+    if (!args[0]) throw new Error('Use master retry-resume GY-N');
+    return print(await resumeStoppedFollowUps(root, master.repository, args[0]));
   }
   if (id === 'protection') {
     const { values } = parseArgs({ args, options: { apply: { type: 'boolean' } }, allowPositionals: false });
