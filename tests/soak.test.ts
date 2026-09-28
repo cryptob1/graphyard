@@ -862,7 +862,6 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
     assert.ok(landed && github.contains(landed.sha, entry.sha), `${entry.key} landed the exact head its false refusal named (${entry.sha.slice(0, 12)})`);
   }
   assert.ok(sessions.every(session => session.syncs === 0), 'no worker was woken to sync what was never wrong');
-<<<<<<< HEAD
   // GY-612: the host's memory dipped below its floor mid-morning and recovered. No worker launched
   // while it stood, the crossing is recorded once each way, and one memory-pressure fault stands
   // for the whole dip even though the consumers' ranking moved between cycles.
@@ -874,7 +873,6 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.deepEqual(launches.filter(during).map(at => new Date(at).toISOString()), [], 'no worker launched while the host was below its floor');
   assert.ok(launches.some(at => at - dayStart >= plan.memoryDip.until), 'launching resumed once memory recovered');
   assert.equal(state.faults.instances.filter(instance => instance.kind === 'memory-pressure').length, 1, 'one memory-pressure fault stands for the whole dip');
-=======
   // The diagnostician (GY-439) rode the same day. The three held-job windows recur past the
   // threshold, so the loop files the class's one recurring item and diagnoses it within the cycle
   // that files it, and the day's own churn (the dead workers' leases, the delivery budget) recurs
@@ -911,7 +909,6 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.ok(!(await store.list()).some(item => /Filed by the master loop from the diagnostician's diagnosis/.test(item.description ?? '')), 'the covering diagnoses filed no fix item');
   assert.ok(approverPanes.length > 0, 'the day launched approver sessions for its decisions');
   assert.deepEqual(approverPanes.filter(pane => !herdrClosed.includes(pane)), [], `every approver session the day launched was closed once its decision settled: ${JSON.stringify(herdrClosed)}`);
->>>>>>> refs/remotes/origin/main
   assert.ok(cycles > 24 * 6, `the loop cycled through the day (${cycles} cycles)`);
   // GY-437: the between-cycles self-upgrade ran after every cycle of the day. Each deploy aligned
   // the checkout once, and restarted the fleet and the loop once (every merge touches src/); the
