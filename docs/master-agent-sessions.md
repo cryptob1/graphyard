@@ -5,7 +5,7 @@
 
 Add a worker with `master worker add FILE` from a template ([Codex](../examples/master/codex-worker.json), [Claude](../examples/master/claude-worker.json), [Cursor](../examples/master/cursor-worker.json), [Muse](../examples/master/muse-worker.json)); tokens stay outside every worktree.
 
-Add reviewers with `master reviewer setup` and `master reviewer add FILE` (examples hold templates).
+Add reviewers with `master reviewer setup` and `master reviewer add FILE` ([Claude](../examples/master/claude-reviewer.json), [opencode](../examples/master/opencode-reviewer.json)).
 
 `master producer replace`, `master producer remove` and `master reviewer remove` apply next tick; `setup.attention` reports launch-stopping setup.
 
@@ -19,7 +19,7 @@ Sessions run in no-approval mode (`"approvals": "auto"`): `--permission-mode byp
 
 ### The coordinator checkout is confined at the OS level
 
-Every launched session — worker, reviewer, producer, approver — runs so the coordinator checkout is unwritable at the OS level, shell commands included (GY-888): a codex `--sandbox workspace-write` keeps it ungranted; every other runtime runs in a bubblewrap namespace that bind-mounts the checkout read-only and re-exposes only the session's own directory and the shared Git areas its worktree writes (objects, per-worktree admin, `graphyard/` branches, remote refs, `FETCH_HEAD`). A launch that cannot apply the confinement — bubblewrap missing, a non-Linux host, namespaces refused, a profile turning its runtime's confinement off — is refused with the reason named, never started unconfined. The master session is exempt (it runs the loop's own commands there). The loop and executors also never start from an uncommitted checkout; escalation names the dirty paths.
+Every launched session (worker, reviewer, producer, approver, headless included) runs so the coordinator checkout is unwritable to shell commands (GY-888). A codex `--sandbox workspace-write` keeps it ungranted unless its workspace or an `--add-dir` holds the checkout; then it carries the bubblewrap wrapper: the checkout bind-mounted read-only, PIDs unshared, `/proc` fresh, and only the session's own directory and worktree admin re-exposed beside the shared Git areas (objects, `graphyard/` branches, remote refs, `FETCH_HEAD`). A launch that cannot apply the confinement (bubblewrap missing, a non-Linux host, namespaces refused, a confinement-off profile, a checkout it cannot derive) is refused, naming the reason. The master session is exempt (it runs the loop's own commands there). The loop and executors never start from an uncommitted checkout; escalation names the dirty paths.
 
 ## Accounts and failover
 

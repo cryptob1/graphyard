@@ -10,7 +10,7 @@ import { withAutonomyContract } from '../autonomy.js';
 import { underTestRunner } from '../supervisor.js';
 import type { PartialWork } from '../model/capacity.js';
 import { type ConsentPrompt, detectConsentPrompt, settingsWarning, type ConsentAnswer, sameConsentPrompt } from '../consent-prompt.js';
-import { coordinatorCheckoutRoot, coordinatorConfinement, coordinatorConfinementRefusal, type CoordinatorConfinement, type ConfinementInput } from './profiles.js';
+import { bwrapOnPath, confinementRefusalText, coordinatorCheckoutRoot, coordinatorConfinement, coordinatorConfinementRefusal, mountNamespaceProbeResult, readOnlyMountWrapper, type CoordinatorConfinement, type ConfinementInput } from './profiles.js';
 import type { MasterRun } from './profiles.js';
 import { type HerdrAgent, herdrJson, herdrRun, stopCreatedHerdrTab } from './herdr.js';
 
@@ -103,19 +103,33 @@ export function writeLaunchFiles(directory: string, name: string, text: { role?:
 
 // ---- The confinement a session launch carries (GY-888) -------------------------------------------
 //
-// Every session the launcher starts — worker, reviewer, producer and approver — runs so that the
-// coordinator checkout this launcher itself runs from is unwritable at the OS level: a codex
-// workspace-write sandbox confines it by leaving it ungranted, every other runtime runs inside a
-// bubblewrap mount namespace that bind-mounts the checkout read-only (see profiles.ts). A launch
-// that can carry no confinement is refused with the reason named, never started unconfined. The
-// master session opts out (`confinement: false`): it runs the loop's own configuration and
-// administration commands from the coordinator root, under its own harness rules.
+// Every session the launcher starts — worker, reviewer, producer and approver, in a Herdr pane or
+// headless — runs so that the coordinator checkout this launcher itself runs from is unwritable at
+// the OS level: a codex workspace-write sandbox confines it by leaving it ungranted, every other
+// runtime runs inside a bubblewrap mount namespace that bind-mounts the checkout read-only (see
+// profiles.ts). A launch that can carry no confinement is refused with the reason named, never
+// started unconfined. The master session opts out (`confinement: false`): it runs the loop's own
+// configuration and administration commands from the coordinator root, under its own harness rules.
 
-/** The coordinator checkout the launching process itself runs from, or null under the test runner or when this is not the Graphyard CLI: nothing is confined there. */
-export const launcherCoordinatorRoot = (argv1: string | undefined = process.argv[1]): string | null => {
-  if (!argv1 || underTestRunner() || basename(argv1) !== 'graphyard.mjs') return null;
-  const root = coordinatorCheckoutRoot(argv1);
+/** Whether `argv1` is one of the launcher's own entries: `bin/graphyard.mjs` or the `src/cli.ts` child it spawns — in both the checkout is two levels up. */
+const cliEntry = (argv1: string) => ['graphyard.mjs', 'cli.ts'].includes(basename(argv1));
+/**
+ * The coordinator checkout the launching process itself runs from, or null when this is not the
+ * Graphyard CLI or the test runner is driving: nothing is confined there. Both entries count —
+ * `bin/graphyard.mjs`, which operators and prompts invoke, and the `src/cli.ts` child it spawns,
+ * which is what `process.argv[1]` holds inside the loop — so a launch is never confined against
+ * the wrong tree, and never silently unconfined in production (GY-888).
+ */
+export const launcherCoordinatorRoot = (argv1: string | undefined = process.argv[1], testRunner: boolean = underTestRunner()): string | null => {
+  if (!argv1 || testRunner || !cliEntry(argv1)) return null;
+  const root = coordinatorCheckoutRoot(resolve(argv1));
   return root && root !== '/' ? root : null;
+};
+/** Why the running process is the launcher yet its own coordinator checkout cannot be derived — the launch would start unconfined, so the caller refuses (GY-888); null when there is nothing to refuse on. */
+export const launcherRootUndetermined = (argv1: string | undefined = process.argv[1], testRunner: boolean = underTestRunner()): string | null => {
+  if (!argv1 || testRunner || !cliEntry(argv1)) return null;
+  const root = coordinatorCheckoutRoot(resolve(argv1));
+  return root && root !== '/' ? null : `this launcher's coordinator checkout could not be derived from its entry ${argv1}`;
 };
 /**
  * The shared Git paths a confined session's linked worktree writes that may not exist yet — the
@@ -130,15 +144,35 @@ export function prepareConfinedGitPaths(root: string): void {
   const fetchHead = join(gitDir, 'FETCH_HEAD');
   if (!existsSync(fetchHead)) closeSync(openSync(fetchHead, 'a'));
 }
-/** The confinement the launch of `kind` carries, or null when nothing needs confining; throws the named refusal when the kind can carry none. */
-export async function sessionConfinement(kind: string, args: readonly string[], options: { cwd?: string; directory: string }): Promise<CoordinatorConfinement | null> {
-  const root = launcherCoordinatorRoot();
-  if (!root) return null;
+/** The confinement the launch of `kind` carries, or null when nothing needs confining; throws the named refusal when the kind can carry none, or when the launcher's own checkout cannot be derived while running as the launcher. `coordinatorRoot` overrides the derived one, for a launcher embedded outside the CLI. */
+export async function sessionConfinement(kind: string, args: readonly string[], options: { cwd?: string; directory: string }, coordinatorRoot: string | null | undefined = undefined): Promise<CoordinatorConfinement | null> {
+  const root = coordinatorRoot !== undefined ? coordinatorRoot : launcherCoordinatorRoot();
+  if (!root) {
+    const undetermined = launcherRootUndetermined();
+    if (undetermined) throw new Error(confinementRefusalText(kind, options.directory, { undetermined }));
+    return null;
+  }
   const input: ConfinementInput = { kind, args, coordinatorRoot: root, sessionDirectory: resolve(options.cwd ?? options.directory) };
   const refusal = await coordinatorConfinementRefusal(input);
   if (refusal) throw new Error(refusal);
   prepareConfinedGitPaths(root);
   return coordinatorConfinement(input);
+}
+/**
+ * The confinement words for a headless run whose working directory is `cwd`, or the refusal that
+ * keeps it from starting (GY-888). Synchronous: the headless runner spawns without awaiting, so a
+ * host whose namespaces are known-refused refuses here, and one whose probe has not answered yet
+ * lets bubblewrap itself fail the spawn — either way the run fails instead of starting unconfined.
+ * The spawner that applies these words is src/runner/roles.ts confiningSpawn, which hands them to
+ * the runner's own spawn.
+ */
+export function headlessConfinementWrapper(root: string, cwd: string | undefined, bwrap: string | null = bwrapOnPath()): readonly string[] {
+  const head = `A headless session cannot be started with the coordinator checkout at ${root} unwritable at the OS level`;
+  if (cwd === undefined) throw new Error(`${head}: the run has no working directory to confine around. Graphyard never starts a session unconfined.`);
+  if (!bwrap) throw new Error(`${head}: bubblewrap (bwrap) is not installed. Graphyard never starts a session unconfined; install bubblewrap (e.g. apt install bubblewrap).`);
+  if (mountNamespaceProbeResult(bwrap) === false) throw new Error(`${head}: this host refuses the unprivileged namespaces bubblewrap needs. Graphyard never starts a session unconfined; allow unprivileged user namespaces on this host.`);
+  prepareConfinedGitPaths(root);
+  return readOnlyMountWrapper({ coordinatorRoot: root, sessionDirectory: resolve(cwd), bwrap });
 }
 /** The command line typed into the pane: the stem binding, then `prefix` (a supervisor), `wrap` (the coordinator confinement), the runtime, its arguments and the file references. */
 export function launchCommand(kind: string, args: string[], files: LaunchFiles, prefix: string[] = [], wrap: readonly string[] = []) {
@@ -313,6 +347,8 @@ export async function awaitRuntimeStart(pane: string, kind: string, command: str
 export interface SessionStart extends PromptDelivery, StartBounds { directory: string; role?: string | null; prefix?: string[]; confirm?: 'inline' | 'follow'; retry?: string; contract?: RegisteredLaunch | null;
   /** Opts this launch out of the coordinator confinement (GY-888): only the master session, which runs the loop's own commands from the coordinator root, does. */
   confinement?: false;
+  /** The coordinator checkout to confine against, when the launcher's own cannot be derived from its entry — a launcher embedded outside the CLI passes it, so its sessions are confined too (GY-888). */
+  coordinatorRoot?: string;
   /** Called once the command line is in the pane: from then on a supervisor may be running there (GY-273). */ onRun?: () => void;
   /** The pane's working directory, where the runtime starts (`directory` unless the tab opened elsewhere), and the environment its tab carries: what the runtime's `trust` step records the folder in. */ cwd?: string; environment?: Record<string, string> }
 export async function startAgentSession(name: string, kind: string, pane: string, args: string[], text: string, run: ChildRun | undefined, options: SessionStart) {
@@ -329,7 +365,7 @@ export async function startAgentSession(name: string, kind: string, pane: string
   // The coordinator checkout is unwritable for this session at the OS level (GY-888), or the
   // launch is refused with the reason named — never started unconfined. A failure here is a
   // launch failure like any other: the caller releases the claim and closes what it created.
-  const confinement = options.confinement === false ? null : await sessionConfinement(kind, args, options);
+  const confinement = options.confinement === false ? null : await sessionConfinement(kind, args, options, options.coordinatorRoot);
   // Every session carries the autonomy contract: in its role file when the runtime loads one,
   // otherwise at the start of its first request (GY-184).
   const carried = withAutonomyContract(!!launchRoleContracts[kind], { request: text, role: options.role });
