@@ -362,6 +362,23 @@ test('unit:agents-page-simple-default — the page opens on account cards and th
   assert.ok(!markup.includes('<details class="advanced" open'), 'Advanced is collapsed by default');
 });
 
+test('unit:retry-connect-admin-only — a failed connect offers Retry to an admin only, never to a coordinator (GY-901)', () => {
+  const at = new Date().toISOString();
+  const fleet: FleetView = {
+    revision: 1, updatedAt: at, configured: true, host: null,
+    runtimes: [], models: [], accounts: [], roles: [], sessions: [], refusals: [], lastMutation: null, attention: [],
+  };
+  const failed: ConnectView = {
+    id: randomUUID(), at, updatedAt: at, host: HOST, provider: 'chatgpt', state: 'failed', name: null, home: null,
+    url: null, code: null, error: 'Login failed: the code was wrong', detail: null, placement: null, worker: null,
+  };
+  const api = async () => { throw new Error('the page renders without fetching'); };
+  const render = (role: string) => renderToStaticMarkup(createElement(FleetPage, { api, status: { actor: { role }, fleet, connects: [failed] } } as any));
+  assert.ok(render('coordinator').includes('data-connect-error'), 'the coordinator still sees why the connect failed');
+  assert.ok(!render('coordinator').includes('data-retry-connect'), 'a coordinator is offered no Retry: the server refuses a coordinator\'s connect (403)');
+  assert.ok(render('admin').includes('data-retry-connect'), 'an admin keeps Retry');
+});
+
 test('connect helpers — parseLoginOutput and redactKey', () => {
   const printed = parseLoginOutput('Visit https://example.com/device and enter code ABCD-1234 to finish.');
   assert.equal(printed.url, 'https://example.com/device');
