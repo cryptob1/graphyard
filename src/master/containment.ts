@@ -71,7 +71,8 @@ export const controlPlaneClockTimeoutMs = 10_000;
  * is answered by the plane's static route from a file, touching neither the database nor the
  * store, and stamped with the plane's `Date` header. Its round trip, plus the second the header is
  * truncated to, is the width of the bound, which stays short on a plane whose work snapshot takes
- * seconds to build.
+ * seconds to build. Only a successful answer is trusted: an error page an intermediary dates
+ * itself is not the control plane's clock.
  */
 export async function readControlPlaneClock(url: string, deps: { fetcher?: typeof fetch; clock?: () => number; timeoutMs?: number } = {}): Promise<ControlPlaneClock> {
   const fetcher = deps.fetcher ?? fetch, clock = deps.clock ?? Date.now;
@@ -79,6 +80,7 @@ export async function readControlPlaneClock(url: string, deps: { fetcher?: typeo
   const response = await fetcher(`${url.replace(/\/+$/, '')}/`, { method: 'HEAD', signal: AbortSignal.timeout(deps.timeoutMs ?? controlPlaneClockTimeoutMs) });
   const after = clock();
   await response.body?.cancel().catch(() => undefined);
+  if (!response.ok) throw new Error(`The control plane answered HEAD / with ${response.status}, whose Date header is an intermediary's, not the control plane's clock`);
   const dated = Date.parse(response.headers.get('date') ?? '');
   if (!Number.isFinite(dated)) throw new Error(`The control plane answered HEAD / (${response.status}) without a readable Date header`);
   // The header names the second the plane answered in: its clock read somewhere in [dated, dated + 999].
@@ -97,7 +99,9 @@ export async function containmentClock(snapshotOffset: { min: number; max: numbe
 function namedClockBound(refusal: string, clock: { roundTripMs?: number; source?: ControlPlaneClock['source'] }, width: number) {
   if (!refusal.startsWith('Verifying host could not bound its clock against the control plane within ')) return refusal;
   const trip = clock.roundTripMs ?? width;
-  return `${refusal}: the ${clock.source ?? 'timed read'} of the control-plane clock took ${trip}ms round trip, so settlement waits on a faster control-plane read, not on a clock disagreement`;
+  // A caller that names no read measured its bounds the way the snapshot does (master status and
+  // master settle-containment read snapshotWithClock), so it is named for what it was.
+  return `${refusal}: the ${clock.source ?? 'snapshot read'} of the control-plane clock took ${trip}ms round trip, so settlement waits on a faster control-plane read, not on a clock disagreement`;
 }
 
 /**

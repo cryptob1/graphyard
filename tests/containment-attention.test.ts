@@ -326,14 +326,14 @@ test('unit:containment-settle-probe-time a probe run late in a long cycle is jud
  * GY-795: a loaded control plane takes seconds to build the work snapshot, so its read's round trip
  * alone exceeded the 5 s clock tolerance. The loop bounds its clock with a light timed read instead.
  */
-function slowPlane(options: { snapshotMs: number; timedReadMs: number | null }) {
+function slowPlane(options: { snapshotMs: number; timedReadMs: number | null; timedReadStatus?: number }) {
   // The host clock runs exactly with the plane's; the snapshot is stamped halfway through its read.
   let local = Date.parse(observedAt) - options.snapshotMs / 2;
   const fetched: string[] = [];
   const fetcher = (async (url: string, init: RequestInit) => {
     fetched.push(`${init.method} ${url}`);
     local += options.timedReadMs!;
-    return new Response(null, { headers: { date: new Date(local - options.timedReadMs! / 2).toUTCString() } });
+    return new Response(null, { status: options.timedReadStatus ?? 200, headers: { date: new Date(local - options.timedReadMs! / 2).toUTCString() } });
   }) as unknown as typeof fetch;
   const overrides: Partial<DaemonEffects> = {
     snapshot: async () => { local += options.snapshotMs; return { work: [lapsedQuarantine], now: observedAt }; },
@@ -358,6 +358,12 @@ test('unit:settle-clock-bound-fast-read a 12-second snapshot read and a 200 ms t
   // Without the timed read the snapshot's 12 s bound is all there is, and it cannot settle.
   const unmeasured = slowPlane({ snapshotMs: 12_000, timedReadMs: null });
   assert.deepEqual((await loop(lapsedQuarantine, unmeasured.overrides, undefined, unmeasured.clock)).settled, []);
+
+  // A dated error page is an intermediary's answer, not the plane's clock: the read is refused and
+  // the snapshot's 12 s bound stands, which cannot settle.
+  const errored = slowPlane({ snapshotMs: 12_000, timedReadMs: 200, timedReadStatus: 502 });
+  assert.deepEqual((await loop(lapsedQuarantine, errored.overrides, undefined, errored.clock)).settled, [],
+    'a dated 502 is not trusted as the control plane\'s clock');
 });
 
 test('unit:settle-clock-bound-fast-read the timed read bounds the offset by the Date header of a HEAD, and the snapshot bounds stand when it fails', async () => {
@@ -365,9 +371,15 @@ test('unit:settle-clock-bound-fast-read the timed read bounds the offset by the 
   const dated = (async () => { local += 150; return new Response(null, { headers: { date: new Date(Date.parse(observedAt)).toUTCString() } }); }) as unknown as typeof fetch;
   const clock = await readControlPlaneClock('https://graphyard.example/', { fetcher: dated, clock: () => local });
   assert.deepEqual(clock, { clockOffset: { min: -999, max: 150 }, roundTripMs: 150, source: 'timed read' }, 'the header is truncated to the second, so the bound is a second wider than the round trip');
-  const undated = (async () => { const response = new Response(null, { status: 502 }); response.headers.delete('date'); return response; }) as unknown as typeof fetch;
+  const undated = (async () => { const response = new Response(null); response.headers.delete('date'); return response; }) as unknown as typeof fetch;
   await assert.rejects(readControlPlaneClock('https://graphyard.example', { fetcher: undated }), /without a readable Date header/);
   assert.deepEqual(await containmentClock({ min: -6_000, max: 6_000 }, () => readControlPlaneClock('https://graphyard.example', { fetcher: undated })),
+    { clockOffset: { min: -6_000, max: 6_000 }, roundTripMs: 12_000, source: 'snapshot read' });
+  // An intermediary may date its own error page: a response that is not ok is refused before its
+  // Date header is read, so the snapshot bounds stand.
+  const errored = (async () => new Response(null, { status: 503, headers: { date: new Date(Date.parse(observedAt)).toUTCString() } })) as unknown as typeof fetch;
+  await assert.rejects(readControlPlaneClock('https://graphyard.example', { fetcher: errored }), /not the control plane's clock/);
+  assert.deepEqual(await containmentClock({ min: -6_000, max: 6_000 }, () => readControlPlaneClock('https://graphyard.example', { fetcher: errored })),
     { clockOffset: { min: -6_000, max: 6_000 }, roundTripMs: 12_000, source: 'snapshot read' });
 });
 
