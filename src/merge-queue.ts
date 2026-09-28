@@ -1039,6 +1039,16 @@ export function currentRestore(work: Pick<Work, 'candidate' | 'baseRefresh' | 'p
   // Pending: the contaminated head is still the candidate. Performed: the candidate is what the restore produced.
   return refresh.restore.contaminated === candidate.sha || refresh.head === candidate.sha ? refresh : null;
 }
+/**
+ * GY-638. Whether the restore recorded for exactly the current head found no own reviewed head
+ * under the foreign commits: no restore is left to promise this head, so its gates route it to
+ * rework instead of the resync whose fresh observation would only repeat the same refusal.
+ */
+export function unrepairableRestore(work: { candidate?: Work['candidate']; baseRefresh?: Work['baseRefresh']; policyRevision?: number }): boolean {
+  const refresh = work.baseRefresh, candidate = work.candidate, restore = refresh?.restore;
+  if (!restore || !candidate || refresh!.policyRevision !== work.policyRevision) return false;
+  return restore.outcome === 'unrepairable' && (restore.contaminated === candidate.sha || refresh!.head === candidate.sha);
+}
 /** A repair the coordinator requested for the current head that has not run yet. */
 export function pendingRestore(work: Work): BranchRestore | null {
   const refresh = currentRestore(work);
