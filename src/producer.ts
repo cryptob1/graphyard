@@ -19,6 +19,26 @@ import { liveRun, liveRunCheckouts, registeredRun } from './runner/registry.js';
 import { narrowRunner, piProducerPrompt, producerRunOptions, registryRunner, runOutcome, startNarrowRun, submitEvidence } from './runner/roles.js';
 import { runRecordSchema, type RunRecord, type Runner } from './runner/types.js';
 
+/** Read environment variables from a .env file for the producer. */
+export async function readProducerEnvironment(root: string): Promise<Record<string, string>> {
+  const envFile = resolve(root, '.env');
+  try {
+    const content = await readFile(envFile, 'utf8');
+    const env: Record<string, string> = {};
+    for (const line of content.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const [key, ...parts] = trimmed.split('=');
+      const value = parts.join('=');
+      if (key && value) env[key] = value;
+    }
+    return env;
+  } catch (error: any) {
+    if (error?.code === 'ENOENT') return {};
+    throw error;
+  }
+}
+
 /**
  * Producer sessions launched for the control plane's producer requests (model/dispatch.ts).
  *
@@ -243,7 +263,7 @@ export function producerPrompt(config: Pick<MasterConfig, 'repository' | 'cliPat
   const worktree = checkout.worktree, stripped = resolve(checkout.directory, 'exercise');
   const evidenceFile = (proof: string) => resolve(checkout.directory, `${proof.replace(/[^a-zA-Z0-9]+/g, '-')}.evidence.json`);
   return `You are an independent Graphyard proof producer for ${config.repository}, principal ${profile.principal}. Produce trusted evidence for work item ${binding.key} (pull request #${binding.pr}) at exact head ${binding.sha} against base ${binding.baseSha} under policy revision ${binding.policyRevision}, for the ${binding.group} proof group: ${binding.proofs.join(', ')}. `
-    + `Your Graphyard credential is the file named by GRAPHYARD_TOKEN_FILE and is used only by node ${config.cliPath}; never print, copy, cat, or echo it or any other credential, and never read .graphyard/connection.json, .graphyard/credentials.json, .env, or anything under ~/.config. `
+    + `Your Graphyard credential is the file named by GRAPHYARD_TOKEN_FILE and is used only by node ${config.cliPath}; never print, copy, cat, or echo it or any other credential, and never read .graphyard/connection.json, .graphyard/credentials.json, .env, or anything under ~/.config. For live install proofs, HCLOUD_TOKEN and HETZNER_SPEND_CAP_USD_MONTHLY are available in your environment. `
     + `Work in a detached worktree of the exact head, created only at the path Graphyard allocated for this session under its managed worktree root — never in this checkout, never under .graphyard/worktrees and never under a temporary directory: git fetch origin ${binding.sha} && git worktree add --detach ${worktree} ${binding.sha}. Install and build there, then run what establishes each proof — start from the tests and scripts named for the proof (grep the proof name under tests/ and scripts/) and the acceptance criteria in node ${config.cliPath} status ${binding.key}. Run the project's tests through its own runners — node ${config.cliPath} verify ${binding.key} in that worktree, or npm test — which withhold every GRAPHYARD_* and HERDR_* variable from the tests and reserve free test ports themselves; a proof's cases are the ones whose title begins with its name, counted from a run of its whole test file, never narrowed with --test-name-pattern, and that title rule applies to unit: and integration: proofs only. A manual: proof is judged, not counted from titles: its executed is the number of test cases and checks you ran to judge the criterion, recorded with its exercise record. `
     + 'Do not edit, commit, push, rebase or merge the candidate, do not claim Graphyard work, do not post a review, and never weaken, skip or narrow a test to make a proof pass. '
     + `A proof that passes against an unchanged tree proves nothing, so for each proof that passes also show it exercises its criterion: in a second detached worktree of the same head at ${stripped} (git worktree add --detach ${stripped} ${binding.sha}), remove the behaviour the criterion the proof is attached to describes — revert or stub exactly the lines of the change that implement it — and run the same proof there. `
@@ -332,8 +352,9 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
     let pane: string | undefined, tabId: string | undefined, delivery: RequestDelivery | undefined, consent: z.infer<typeof consentAnswerSchema>[] = [];
     try {
       const harness = await prepareSessionHarness(root, config, { role: 'producer', kind: launch.kind, profile: profile.name, credentialFiles: [profile.credentialFile] });
+      const producerEnv = await readProducerEnvironment(root);
       const environment = { ...launch.environment, GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: profile.credentialFile, GRAPHYARD_HOST_ID: config.hostId, GRAPHYARD_PRODUCER: `${binding.key}@${binding.sha}`,
-        GRAPHYARD_PRODUCER_BINDING: `${binding.key}@${binding.sha}@${binding.baseSha}@${binding.policyRevision}` };
+        GRAPHYARD_PRODUCER_BINDING: `${binding.key}@${binding.sha}@${binding.baseSha}@${binding.policyRevision}`, ...producerEnv };
       const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root,
         '--label', `${binding.key} ${binding.group} proofs · ${agentName}`, ...Object.entries(environment).flatMap(([name, value]) => ['--env', `${name}=${value}`]), '--no-focus'], dependencies.run));
       pane = created.pane; tabId = created.tab;
@@ -403,7 +424,8 @@ async function launchHeadlessProducer(root: string, config: MasterConfig, work: 
   const ledger = await readProducerLedger(root);
   try { await saveProducerLedger(root, { ...ledger, producers: [...ledger.producers, record] }); }
   catch (error) { await removeSessionCheckout(root, dirname(checkout.directory), checkout.directory).catch(() => {}); await registry?.release('the producer record could not be written'); throw error; }
-  const environment = { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: profile.credentialFile, GRAPHYARD_HOST_ID: config.hostId, GRAPHYARD_PRODUCER: `${binding.key}@${binding.sha}` };
+  const producerEnv = await readProducerEnvironment(root);
+  const environment = { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: profile.credentialFile, GRAPHYARD_HOST_ID: config.hostId, GRAPHYARD_PRODUCER: `${binding.key}@${binding.sha}`, ...producerEnv };
   let started: ReturnType<typeof startNarrowRun>;
   try {
     started = startNarrowRun({ runner, name: session.agentName, role: 'producer', work: binding.key, subject: session.id,
