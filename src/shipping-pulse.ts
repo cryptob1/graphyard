@@ -1,5 +1,6 @@
 import type pg from 'pg';
 import { currentEvidence, type Work } from './model.js';
+import { evidenceProves } from './model/mechanical-proofs.js';
 import { DELIVERY_EVENT_PREDICATE, DELIVERY_REPOSITORY_INSTANT } from './store.js';
 
 export const SHIPPING_PULSE_WEEKS = 12;
@@ -110,7 +111,8 @@ function deliveredQuality(snapshot: AuthorizedSnapshot | null, recorded: unknown
   const work = { ...snapshot, evidence: snapshot.evidence ?? [], workspaces: snapshot.workspaces ?? [] } as Work;
   const passed = required.filter(proof => {
     const evidence = currentEvidence(work, proof, asOf);
-    return !!evidence && evidence.result === 'pass' && evidence.executed > 0 && evidence.skipped === 0;
+    // GY-895: the same pass rule the gates apply — a manual: proof is judged, never counted from titles.
+    return !!evidence && evidenceProves(proof, evidence);
   });
   return { passingProofs: passed.length, requiredProofs: required.length, violations };
 }
