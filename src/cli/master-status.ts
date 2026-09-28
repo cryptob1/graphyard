@@ -77,7 +77,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   let reviewRecords = (await readReviewLedger(root)).reviews, reviewRuntime = { available: true, reason: null as string | null };
   const { snapshot, clockOffset } = await timedStep('snapshot', () => snapshotWithClock(() => masterApi('work-snapshot')));
   const sections = new ReportSections(); // optional sections (GY-422)
-  // Sessions the dispatcher launched are settled against this snapshot: a head change cancels them here too.
+  // Sessions the dispatcher launched settle against this snapshot: a head change cancels them too.
   try { reviewRecords = (await timedStep('reconcile reviews', () => reconcileReviews(root, master, { work: snapshot.work, agents: runtime.available ? runtime.agents : null }))).reviews; }
   catch (error) { reviewRuntime = { available: false, reason: `Reviewer verdicts could not be reconciled with GitHub: ${error instanceof Error ? error.message : 'unknown reason'}` }; }
   let producerRecords = (await readProducerLedger(root)).producers;
@@ -85,23 +85,23 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const reviews = summarizeReviews(reviewRecords), producers = summarizeProducers(producerRecords);
   // Every request whose last session failed or expired, with its attempts and the next relaunch.
   const retries = [...sessionRetries(reviewRecords, Date.now()), ...sessionRetries(producerRecords, Date.now())];
-  // Setup that silently stops every launch, and the loop's supervision (GY-114), read from the host.
+  // Setup that silently stops every launch, and the loop's supervision (GY-114), read on the host.
   const { setup, attention: setupItems } = await timedStep('setup', () => setupHealth(root, master, dependencies.supervisorHost));
   // Status reads the cursor as the loop would; the loop logs and persists any repair it makes.
   const dispatchCursor = await readDispatchCursor(root, master, () => {}).catch(error => ({ error: error instanceof Error ? error.message : 'Master dispatch cursor is unreadable' }));
   const stuck = stuckRequestReport({ reviews: reviewRecords, producers: producerRecords }, Date.now());
   const dispatch = 'error' in dispatchCursor ? { running: false, failures: [] as { requestId: string; kind: string; attempts: number; reason: string; at: string; nextAt: string }[], error: dispatchCursor.error } : withStuckRequests(dispatchSummary(dispatchCursor, Date.now(), master.run.dispatchIntervalSeconds * 1000, master.run.awaitReviewers ?? defaultAwaitReviewers.logins), stuck.stuck);
-  // A dispatcher failing its tick launches nothing; it is named before the requests it is not launching.
+  // A dispatcher failing its tick launches nothing; named before the requests it is not launching.
   const dispatchItems = dispatchFailureAttention(dispatch);
   const containment = await timedStep('containment', () => assessContainment(snapshot.work, { hostId: master.hostId, observedAt: snapshot.now, clockOffset }));
-  // Disk is reported from the host, not from the cursor: the loop may be stopped, and the volume
-  // filling is what stops it. The plan is `master reclaim`'s, over the inventory the loop cached
+  // Disk is reported from the host, not the cursor: the loop may be stopped, and the volume
+  // filling is what stops it. The plan is `master reclaim`'s, over the loop's cached inventory
   // (GY-360): walking a thousand trees per call made status take minutes.
   const worktrees = worktreesDirectory(root);
   const inventory = await timedStep('worktrees', () => statusWorktreeInventory(root).catch(() => ({ entries: [], at: null, cached: false }))), trees = inventory.entries, reclaimPlan = planWorktreeReclaim(trees, snapshot.work, { now: Date.now(), idleMs: reclaimIdleMs(master) });
   const disk = diskPressure(worktrees, await freeBytes(worktrees), diskThresholdBytes(master), reclaimPlan);
   // The managed worktree root is a volume of its own as often as not: proof and review checkouts
-  // live there, and it is judged against its own minimum and budget before a write there fails.
+  // live there, judged against its own minimum and budget before a write there fails.
   const managedRoot = await timedStep('managed root', () => managedRootStatus(root, master, [...reviewRecords, ...producerRecords]));
   const diskAttention = [...diskPressureAttention(disk), ...managedRoot.attention];
   const daemonState = await readDaemonState(root, master).catch(error => ({ error: error instanceof Error ? error.message : 'Master daemon state is unreadable' }));
@@ -109,22 +109,21 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const cycling = 'error' in daemonState ? null : daemonSummary(daemonState, Date.now(), intervalMs, master.hostId);
   const daemon = cycling ?? { running: false, error: (daemonState as { error: string }).error };
   // The loop's own health comes before every work item: an absent or stalled coordinator is why
-  // nothing else on this list is moving; a cycle past its interval names its costly step.
+  // nothing else is moving; a cycle past its interval names its costly step.
   const loopItems: AttentionItem[] = cycling
     ? [...loopAttention({ liveness: cycling.liveness, silence: cycling.silence, budget: cycling.budget, failures: cycling.failures, cost: cycling.cost }), ...slowCycleAttention(cycling), ...approverLaunchAttention(cycling)]
     : [{ subject: 'loop', text: `The master loop's cursor cannot be read, so whether it is cycling is unknown: ${(daemonState as { error: string }).error}`, ...agentOwner('master', 'graphyard master restart (a supervised deployment restarts it on its own: systemctl --user restart graphyard-master)') }];
-  // Browser administration is reported beside the work it unblocks: a pending sudo code is
-  // the one thing the operator must act on, and the recent ledger entries say who changed what.
+  // Browser administration is reported beside the work it unblocks: a pending sudo code is the
+  // one thing the operator must act on; the recent ledger entries say who changed what.
   const administration = { browser: master.browser ? { profile: master.browser.profile } : null, ...summarizeAdministration((await readAdministrationLedger(root)).entries, await readSudoState(root)) };
-  // A worker session Herdr no longer reports, on an assignment whose lease is still advancing, is
-  // an orphaned supervisor rather than a session that finished; it is named with what reclaims it.
-  // Reviewer and producer profiles go in with their concurrency (GY-107): status reports, per
-  // role, sessions running against the limit and the longest wait for a slot.
+  // A worker session Herdr no longer reports on a lease still advancing is an orphaned supervisor,
+  // named with what reclaims it. Reviewer and producer profiles go in with their concurrency
+  // (GY-107): status reports, per role, sessions running against the limit and the longest wait.
   const mergeQueue = mergeQueueStatus(master, snapshot, coordinator);
   const probe = await timedStep('conflicts', () => probeCandidateConflictsWithBudget(root, snapshot.work, dataDirectory()));
   const sessions = await timedStep('build status', async () => nameOrphanSupervisors(nameUnresolvedThreads(buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews, master.baseBranch, coordinator, { producers, failures: dispatch.failures, retries }, probe, { reviewers: master.reviewers, producers: master.producers }, master.cliPath, mergeQueue), snapshot.work, agentOwner),
     snapshot.work, master.workers, runtime, Date.parse(snapshot.now)));
-  // A check failed on the clock says so, against its budget; a routed scope request, its approver.
+  // A check failed on the clock says so, against its budget; a routed scope request its approver.
   const status = routedScopeStatus(await timedStep('timing failures', () => qualifyTimingFailures(sessions, snapshot.work, master.repository, ghCheckAnnotations(master.repository))), snapshot.work, cycling?.approvals);
   // Rework rounds by cause (GY-643), out-of-item causes removed, cached beside the worktree
   // inventory (GY-725); a failed read marks the section.
@@ -133,13 +132,13 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   // A waiting sudo prompt is the operator confirming their own GitHub credential on their device.
   const sudo = administration.sudo;
   // A request whose session settled without satisfying its gate: nothing runs for it, nothing
-  // refused, and nothing relaunches until it is named here with the command that answers it.
-  // A review every session settled on a dismissal for is the stronger statement of the same
-  // request (GY-100), reported once as the review that cannot be obtained on that commit.
+  // refused, and nothing relaunches until it is named here with the command that answers it. A
+  // review every session settled on a dismissal is the stronger statement of the same request
+  // (GY-100), reported once as the review that cannot be obtained on that commit.
   const unobtainable = unobtainableReviewAttention(status.work, reviews.completed as SettledReviewSession[]);
   const unanswered = unansweredRequestAttention(status.work);
-  // An open item the control plane names no action for. Those waiting on another item or on a
-  // live session are accounted and raise nothing; what is left is named, with what is missing.
+  // An open item the control plane names no action for. Those waiting on another item or a live
+  // session are accounted and raise nothing; what is left is named, with what is missing.
   const actionless = actionlessItems(snapshot.work, new Date(snapshot.now));
   const liveness = livenessStatus(snapshot); // GY-201: open items holding no obligation, with ages
   // Requests, conflicts, stalls, executors and owed judgments: derivedAttention, which the loop reads too.
@@ -148,16 +147,16 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
       // The intervention report is slow: status reads the loop's copy, or a bounded live read.
       reports: 'bounded', reportBoundMs: dependencies.reportReadBoundMs, sections });
   const lag = await timedStep('release lag', () => releaseLagStatus(root, master.baseBranch, snapshot.work, { cliCommit: cli.commit, loop: cycling, executors: releases.executors }));
-  // Stalls: a mergeable pending merge (GY-344), a repair-lane merge (GY-406), a main red after optimistic merges (GY-500),
+  // Stalls: a mergeable pending merge (GY-344), a repair-lane merge (GY-406), main red after optimistic merges (GY-500),
   // queue-head lag (GY-492), slow renewals (GY-558).
   const observation = observationThroughputStatus(coordinator, snapshot), health = leaseHealthStatus(coordinator);
   const stalledItems = [...derivedStalls, ...mergeStallAttention(snapshot), ...observation.attention, ...landingAttention(snapshot.work), ...health.attention];
-  // Exactly one component merges (GY-245): the loop, where one is installed or running, else the executors.
+  // Exactly one component merges (GY-245): the loop when installed or running, else the executors.
   const merger = installationMerger({ loop: { configured: !!setup.supervisor.installed, running: !!cycling?.running, autoMerge: master.autoMerge },
     declaration: executors.supervision.declaration, served: executors.presence.served });
   const attentionItems = [...diskAttention, ...scopeRequests, ...unanswered, ...conflicted, ...stuck.attentionItems, ...stalledItems, ...actorless, ...stalled, ...overlong, ...budget, ...triage, ...owed.items, ...(sudo ? [...status.attentionItems, { subject: 'installation', text: sudo.instruction,
     ...(Date.parse(sudo.deadline) <= Date.now() ? agentOwner('master', `graphyard master browser ${sudo.flow}`) : humanOwner('issuing credentials to people', sudo.instruction)) }] : [...status.attentionItems])];
-  // First: loop health, dispatcher, unclaimable actions, merger, release lag (GY-437); nothing below moves until they do.
+  // First: loop health, dispatcher, unclaimable actions, merger, release lag (GY-437); nothing below moves before them.
   const ahead = [...loopItems, ...dispatchItems, ...executors.attention, ...merger.attention, ...lag.attention];
   attentionItems.unshift(...ahead);
   // Setup that stops every launch, or leaves the loop unsupervised, is the master's to repair.
@@ -171,8 +170,8 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   // resource at its bound is then rewritten to name that resource (GY-132).
   const attributed = ledgerRefusalAttention({ work: status.work, attentionItems: [...nameUnobtainableReviews(attentionItems as (AttentionItem & { requestId?: string })[], unobtainable), ...decisions.attentionItems],
     counts: { ...status.counts, dispatchUnanswered: unanswered.length, dispatchUnobtainableReview: unobtainable.length, unansweredDecisions: decisions.unanswered.length, refusedDecisions: decisions.refused, reviewConflicts: conflicted.length, stuckRequests: stuck.stuck.length, stalledActions: stalled.length, overlongSessions: overlong.length, needsHuman: owed.rows.length, humanOnly: humanOnly.length,
-      // Items with no action, split the way a reader has to read them: one waiting on another
-      // item is the pipeline working, one with nothing moving it is the pipeline stopped.
+      // Items with no action, split the way a reader reads them: one waiting on another item is
+      // the pipeline working, one with nothing moving it is the pipeline stopped.
       actionless: actionless.length, actorless: actorless.length, livenessViolations: liveness.violations, waitingOnAnother: actionless.filter(entry => entry.outcome === 'waiting-on').length, stalled: stalledItems.length,
       ...backlog,
       attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + conflicted.length + stuck.attentionItems.length + stalledItems.length + actorless.length + stalled.length + overlong.length + triage.length + ahead.length + releases.attention.length + overflow.length + budget.length + (throughput.attention ? 1 : 0) + observation.attention.length + owed.counted + resources.attention.length } }, snapshot.work);
@@ -231,8 +230,8 @@ export async function reportedAttention(root: string, master: MasterConfig, mast
     generatedFiles.push({ subject: 'installation', text: `The repository generated-file manifest is unreadable: ${error instanceof Error ? error.message : 'unknown reason'}`,
       ...agentOwner('master', `Fix ${generatedManifestScript} so --list prints the generated paths; master status reports the deployment drift again once it does`) });
   }
-  // Per-item reads run bounded-concurrently and each read below is a step of the recorder in force (GY-377);
-  // a section whose route fails is named in `unavailable` and the rest is still built (GY-422).
+  // Per-item reads run bounded-concurrently; each read below is its recorder's step (GY-377); a
+  // section whose route fails is named in `unavailable` and the rest is still built (GY-422).
   const sections = observed.sections ?? new ReportSections();
   const overflow = await sections.optional('escalation contexts', 'GET /api/work/:id/context', () => contextOverflows(masterApi, snapshot.work), () => [] as Awaited<ReturnType<typeof contextOverflows>>);
   const reports = slowReportReader(master, masterApi, observed.reports, observed.reportBoundMs);
