@@ -50,14 +50,18 @@ export const settledSql = `COALESCE(d.document->>'stage' = 'done' AND ${absent("
  * document as the lateral `r` from one read of its top-level fields (each `d.document->` detoasts
  * the whole document again): the candidate's head and base, the heads the open review, the open
  * producer requests and the `keep` most recent dispatch requests name, and the records a carry
- * decision on the queue's tip or the base refresh carried.
+ * decision on the queue's tip, the base refresh, or a refused merge's kept decision (GY-904)
+ * carried. When `mergerefused` ejects a queued tip the queue record goes with it, so
+ * `mergeRefusal.carry` is the only binding its carried proofs still have: the projection reads it
+ * beside the other two, or the daemon the snapshot feeds sees every carried proof as missing and
+ * launches trusted-proof workflows or raises a manual-proof escalation a fresh review never owed.
  */
-export const coordinationRelevance = (keep: number) => `LATERAL jsonb_to_record(d.document) AS f(candidate jsonb, "autoDispatch" jsonb, queue jsonb, "baseRefresh" jsonb)
+export const coordinationRelevance = (keep: number) => `LATERAL jsonb_to_record(d.document) AS f(candidate jsonb, "autoDispatch" jsonb, queue jsonb, "baseRefresh" jsonb, "mergeRefusal" jsonb)
   CROSS JOIN LATERAL (SELECT f.candidate->>'sha' AS head, f.candidate->>'baseSha' AS base,
     ARRAY(SELECT f."autoDispatch"->'review'->>'sha'
       UNION SELECT p.request->>'sha' FROM jsonb_array_elements(${array(`f."autoDispatch"->'producers'`)}) AS p(request)
       UNION SELECT h.request->>'sha' FROM jsonb_array_elements(${tail(`f."autoDispatch"->'history'`, keep)}) AS h(request)) AS requested,
-    ARRAY(SELECT c.carried->>'evidenceId' FROM jsonb_array_elements(${array("f.queue->'speculation'->'carry'->'evidence'")} || ${array(`f."baseRefresh"->'carry'->'evidence'`)}) AS c(carried)
+    ARRAY(SELECT c.carried->>'evidenceId' FROM jsonb_array_elements(${array(`f.queue->'speculation'->'carry'->'evidence'`)} || ${array(`f."baseRefresh"->'carry'->'evidence'`)} || ${array(`f."mergeRefusal"->'carry'->'evidence'`)}) AS c(carried)
       WHERE c.carried->'carried' = 'true'::jsonb) AS carried) AS r`;
 /**
  * The evidence records the coordination view keeps, decided in SQL so a long history of superseded

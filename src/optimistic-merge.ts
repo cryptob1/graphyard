@@ -15,6 +15,7 @@
 // guard (`guardMain` in github.ts). The same records feed master status and Insights.
 import type { Work } from './model/work.js';
 import { documentationGlobMatches } from './model/documentation-glob.js';
+import { standingMergeRefusal } from './merge-queue.js';
 import { recordRework } from './pipeline-speed.js';
 
 declare module './model/work.js' {
@@ -147,6 +148,10 @@ const passGuard = (all: Parameters<typeof mainGuard>[0]): GuardState => {
  * - the observation is of this head, and it lists both the head's files and the files the base
  *   changed since the head's bound base (unknown is never disjoint);
  * - those two sets are disjoint, and neither touches shared infrastructure;
+ * - no standing refusal of the guarded merge binds the candidate (GY-904): a merge the guard
+ *   refused — a rework decision awaited, a carried review to refresh — must not land past the
+ *   lane because the queue record was never there to eject. The refusal is the gate's own
+ *   judgement of this candidate, and it holds until the decision resolves or the head changes;
  * - no other item's optimistic merge is in flight on an overlapping file, and main is not red
  *   from an optimistic merge still being traced or reverted.
  */
@@ -157,6 +162,8 @@ export function optimisticEligibility(work: Work, all: Work[], input: { enabled:
   if (!input.enabled) reasons.push('Optimistic merge is off (mergeQueue.optimistic is false)');
   if (!input.gatesPass) reasons.push('Not every gate passes on its own head');
   if (work.queue) reasons.push('Already in the merge queue');
+  const refusal = standingMergeRefusal(work);
+  if (refusal) reasons.push(`The guarded merge refused this candidate and the refusal stands: ${refusal}`);
   if (!candidate || !observation || observation.candidate.sha !== candidate.sha || observation.candidate.baseSha !== candidate.baseSha || observation.merged) {
     reasons.push('No current observation of its own head');
     return { eligible: false, reasons };

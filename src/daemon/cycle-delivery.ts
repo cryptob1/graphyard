@@ -1,6 +1,7 @@
 // Concern: cycle steps 5–7 — shepherd reviews and proofs, the guarded merge, deployment verification.
 import { carriedApproval, reviewProviderOf, reviewerProfileFor, exhaustedReviewerProfiles, deploySmokeRequired, deliveryState, rollbackGuidance } from '../model.js';
 import { mergedWithoutAuthorization, unauthorizedMergeViolation, approvedMerge, transientMergeRace } from '../master.js';
+import { GuardRefusalError } from '../master/merge.js';
 import { type Work } from '../model.js';
 import { queueSequencingReason } from '../merge-queue.js';
 import type { DaemonAction } from './state.js';
@@ -218,13 +219,19 @@ export async function mergeStep(cycle: Cycle) {
           if (reread) { target = reread; continue; }
         }
         // A refusal is the gate working, not a daemon fault: record it (no fault kind, so it is no
-        // recurrence instance and files no structural item) and keep cycling. The refusal keeps the
-        // time it was first given while its detail stays the same (GY-831).
+        // recurrence instance and files no structural item) and keep cycling. The refusal keeps
+        // the time it was first given while its detail stays the same (GY-831).
         const detail = `Guarded merge refused for ${item.key}${race ? ` after ${retries + 1} attempt(s) this cycle, each lost to a concurrent write; not counted toward the backoff` : ''}: ${message(error)}`;
         const since = !race && previous?.state === 'failed' && previous.detail === detail ? previous.since ?? previous.at : new Date(now()).toISOString();
         performed.push(await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'failed', detail,
           attempts: race ? previous?.attempts ?? 0 : state.actions[key].attempts, cycle: state.cycle, ...(race ? {} : { since }) }, now(), effects.persist, null));
-        if (!race) await actOnRepeatedRefusal(cycle, target, key, message(error), since);
+        // Only a refusal the merge's own checks gave — a typed GuardRefusalError (GY-904) — is a
+        // judgement about the candidate, so only it is acted on past the loop's bound: a carry
+        // cleared or a rework decision asked for. A transport, credential or control-plane failure
+        // refuses nothing about the candidate; an implementation change cannot repair it, so it
+        // stays a retryable operational failure on the ordinary merge backoff (GY-202) and never
+        // ejects an otherwise valid candidate from the queue.
+        if (!race && error instanceof GuardRefusalError) await actOnRepeatedRefusal(cycle, target, key, message(error), since);
         return;
       }
     }

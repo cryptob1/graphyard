@@ -137,7 +137,11 @@ const commands = {
   // carried approval it could not re-post, or one reason repeated since `since`. The control plane
   // decides what follows from the record: a carried approval is cleared so the review gate asks
   // for a fresh review of the tip, and otherwise the candidate is marked for a rework decision.
-  mergerefused: z.object({ sha, baseSha: sha, policyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000), since: z.iso.datetime().optional() }).strict(),
+  // `rejected` names the carried approval the reporter judged (GY-904): present and null when it
+  // judged none, the review's identity when it judged one — so a binding refreshed meanwhile is
+  // never cleared over a refusal that names another review.
+  mergerefused: z.object({ sha, baseSha: sha, policyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000), since: z.iso.datetime().optional(),
+    rejected: z.object({ reviewer: z.string().trim().min(1).max(200), reviewId: z.number().int().positive().optional(), originalSha: sha }).strict().nullable().optional() }).strict(),
 } as const;
 const executorName = z.string().trim().min(1).max(200).regex(/^[^\u0000-\u001f\u007f]+$/);
 const actionClaimSchema = z.object({
@@ -828,6 +832,19 @@ export class Engine {
         demand(candidate && candidate.sha === data.sha && candidate.baseSha === data.baseSha && work.policyRevision === data.policyRevision && !work.observation?.merged,
           `${work.key} candidate changed since the refused merge; the refusal no longer describes it`, 409);
         const carried = carriedApproval(work), at = now.toISOString();
+        // GY-904. A report that names the review it judged (the failed re-post, or the carried
+        // approval the loop's snapshot held) is answered only while the carried binding is still
+        // that review: a newer approval observed in between re-binds the carry, and clearing the
+        // refreshed binding over a refusal that names another review would race a valid
+        // `review.carry-refreshed` into an unnecessary review request and queue ejection. The
+        // reporter reads GitHub afresh on its next attempt and succeeds through the new binding.
+        if (data.rejected !== undefined) {
+          const named = data.rejected, refreshed = !!named !== !!carried
+            || !!named && !!carried && (named.reviewer.toLowerCase() !== carried.reviewer.toLowerCase() || named.originalSha !== carried.originalSha || named.reviewId !== carried.reviewId);
+          demand(!refreshed, named
+            ? `${work.key}'s carried approval is no longer the review this refusal names (${named.reviewer}${named.reviewId !== undefined ? ` review ${named.reviewId}` : ''} of ${named.originalSha.slice(0, 12)}); it was re-bound to a newer approval and the merge is retried against that one`
+            : `${work.key} carries an approval this refusal did not judge; it is left standing and the merge is retried against it`, 409);
+        }
         if (carried) {
           // Every record that carried the approval onto this candidate stops carrying it, naming the
           // review it could not re-post so the same dismissal is never restored over the refusal.
