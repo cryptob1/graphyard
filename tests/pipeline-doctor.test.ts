@@ -118,6 +118,16 @@ test('unit:doctor-scheduled-and-scoped — the doctor runs every ten minutes by 
     ['a path glob', [...words('grep', 'token'), glob('src/**/*.ts')]],
     ['a node script glob', [...words('node'), glob('*.mjs'), ...words('master', 'status')]],
     ['a path outside the checkout', words('cat', '/home/someone/.graphyard/operator-agent.token')],
+    ['the installation credentials inside the checkout', words('cat', '.graphyard/credentials.json')],
+    ['the installation credentials by absolute path', words('cat', `${process.cwd()}/.graphyard/credentials.json`)],
+    ['an environment file', words('cat', '.env')],
+    ['an environment file variant', words('grep', 'TOKEN', '.env.local')],
+    ['an environment file by absolute path', words('cat', `${process.cwd()}/.env`)],
+    ['an environment file under a directory', words('cat', 'fixtures/.env')],
+    ['a committed environment file', words('git', 'show', 'HEAD:.env')],
+    ['an option naming an environment file', words('rg', '--ignore-file=.env', 'x')],
+    ['an ssh key inside the checkout', words('cat', 'fixtures/id_rsa')],
+    ['a netrc inside the checkout', words('head', '.netrc')],
     ['a home path', words('grep', '-r', 'token', '~')],
     ['a parent path', words('cat', '../../secrets.token')],
     ['an option naming an outside path', words('rg', '--ignore-file=/etc/passwd', 'x')],
@@ -160,7 +170,8 @@ test('unit:doctor-scheduled-and-scoped — the doctor runs every ten minutes by 
   for (const line of ["grep '->' README.md", 'jq ".a > 1" x.json', 'gh pr view 12 && git log -1']) assert.equal(doctorRedirects(line), false, `${line} does not redirect`);
   for (const segment of [words('node', master.cliPath, 'master', 'status'), words('git', 'branch', '--show-current'), words('git', 'branch', '--list', 'graphyard/*'), words('git', 'worktree', 'list'),
     words('git', 'diff', 'main...HEAD'), words('gh', 'pr', 'checks', '12'), words('gh', 'pr', 'view', '12'), words('rg', 'doctor', 'src'),
-    words('sort', '--stable', '--sort=human', 'README.md'), words('sort', '-r', '-n', 'README.md'), words('sort', '--parallel=4', 'README.md'), words('sort', '--random-source=seed', 'README.md'), words('cat', `${process.cwd()}/README.md`)])
+    words('sort', '--stable', '--sort=human', 'README.md'), words('sort', '-r', '-n', 'README.md'), words('sort', '--parallel=4', 'README.md'), words('sort', '--random-source=seed', 'README.md'), words('cat', `${process.cwd()}/README.md`),
+    words('cat', '.github/workflows/ci.yml'), words('cat', 'fixtures/credentials.example.json'), words('git', 'show', 'HEAD:package.json')])
     assert.deepEqual(doctorSegmentAllowed(segment, guard), { allow: true }, `${segment.map(word => word.value).join(' ')} is a read inside the checkout`);
   assert.equal(doctorSegmentAllowed(words('node', master.cliPath, 'master', 'merge', 'GY-74'), guard).allow, false, 'the named CLI still refuses merge');
 

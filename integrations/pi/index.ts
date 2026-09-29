@@ -254,7 +254,9 @@ export function doctorRedirects(line: string) {
  * evidence submission and a lease command are refused by name. `node` runs the Graphyard CLI
  * script and nothing else: no option (`-e`, `--require`) and no other script. The read-only
  * programs and git's and gh's read subcommands run with every path they name inside the checkout,
- * so the operator-agent credential, which is kept outside every checkout, is never read.
+ * so the operator-agent credential, which is kept outside every checkout, is never read — and the
+ * local secret files that resolve inside the checkout (`.env`, `.graphyard/credentials.json`) are
+ * refused by name, because the checkout boundary is not a read boundary for them.
  */
 export function doctorSegmentAllowed(words: ShellWord[], context: DoctorGuardContext = { cwd: process.cwd(), cli: process.env.GRAPHYARD_DOCTOR_CLI }): GuardVerdict {
   const { index, wrapped } = commandIndex(words);
@@ -291,6 +293,8 @@ export function doctorSegmentAllowed(words: ShellWord[], context: DoctorGuardCon
     allowed = ghReads.get(rest[0]?.value ?? '')?.has(rest[1]?.value ?? '') ?? false;
   }
   if (!allowed) return { allow: false, reason: doctorRefusal(`${program}${rest[0] ? ` ${rest[0].value}` : ''}`) };
+  const secret = rest.find(word => doctorSecretFile(word.value));
+  if (secret) return { allow: false, reason: doctorRefusal(`reading ${secret.value}, a local secret file the checkout boundary does not cover,`) };
   const outside = rest.find(word => doctorPathOutside(word.value, context));
   return outside ? { allow: false, reason: doctorRefusal(`reading ${outside.value}, a path outside the checkout ${context.cwd},`) } : { allow: true };
 }
@@ -328,6 +332,25 @@ function doctorPathOutside(value: string, context: DoctorGuardContext) {
     try { statSync(resolve(context.cwd, path)); } catch { return false; }
   }
   return !within(physical(resolve(context.cwd, path), true));
+}
+/**
+ * Whether a word names a local secret file, wherever it sits: an environment file, Graphyard's
+ * installation credentials, or the classic credential files a clone can carry. These resolve inside
+ * the checkout, so the checkout boundary is not a read boundary for them; naming one is refused
+ * whether or not the file exists, because probing a secret path is itself information. A git
+ * revision path (`HEAD:.env`) and an option's path (`--ignore-file=.env`) are judged by their path.
+ */
+const doctorSecretBasenames = new Set(['.git-credentials', '.netrc', 'id_rsa', 'id_dsa', 'id_ecdsa', 'id_ed25519']);
+function doctorSecretFile(value: string) {
+  for (const part of value.split(':')) {
+    const path = part.startsWith('-') ? part.includes('=') ? part.slice(part.indexOf('=') + 1) : '' : part;
+    if (!path) continue;
+    const base = path.split('/').pop() ?? '';
+    if (/^\.env(?:\.|$)/.test(base)) return true;
+    if (base === 'credentials.json' && /(?:^|\/)\.graphyard(?:\/|$)/.test(path)) return true;
+    if (doctorSecretBasenames.has(base)) return true;
+  }
+  return false;
 }
 function doctorCommandWords(words: string[]): GuardVerdict {
   const command = words.find(word => !word.startsWith('-') && word !== 'master');

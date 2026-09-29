@@ -50,7 +50,7 @@ Each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `linge
 
 ### The pipeline doctor
 
-Every `run.doctor.intervalMinutes` the loop launches the **doctor**: sanctioned commands only (`scope`, `requirements`, `unblock`, `decide`+`approver`, `settle-containment`, `close`, `create`, `release`); a run posts a per-item event and summary, unactionable findings escalate or file deduplicated faults; each cycle it settles a submitted attempt's lapsed fence, clears a covered blocker, relaunches an approver unanswered. Off: `run.doctor.enabled=false`.
+Every `run.doctor.intervalMinutes` the loop launches the **doctor**: sanctioned commands only (`scope`, `requirements`, `unblock`, `decide`+`approver`, `settle-containment`, `close`, `create`, `release`); reads refuse secrets (`.env`, `.graphyard/credentials.json`); a run posts per-item events and a summary, unactionable findings escalate or file deduplicated faults; each cycle settles a submitted lapsed fence, clears a covered blocker, relaunches an unanswered approver. Off: `run.doctor.enabled=false`.
 
 ## Research and diagnosis
 
