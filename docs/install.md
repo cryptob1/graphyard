@@ -1,11 +1,11 @@
 <!-- page: Start here | 0 | the one command and upgrades. -->
 # Install Graphyard
 
-Run this runbook from one instruction:
+One instruction runs this runbook:
 
 > install Graphyard for OWNER/REPO on PROVIDER following docs/install.md
 
-A person is asked for exactly four things: **Which provider** (and `--workspace` on multi-workspace Railway); **Provider login** they own; **the GitHub App confirmation click**, once; **Approval of the printed plan**. Never invent a fifth.
+A person is asked for four things: **Which provider** (and `--workspace` on multi-workspace Railway); **Provider login** they own; **the GitHub App confirmation click**, once; **Approval of the printed plan**. Never invent a fifth.
 
 ## Hard rules
 
@@ -56,17 +56,17 @@ At the printed `http://127.0.0.1:4311` the human registers and installs the App;
 
 ## Step 5: read the summary
 
-**Verify:** `health`, `webhook.delivered` (compose polls), `profiles.master.configured` `true`, `status.role` `admin`; follow `nextSteps`; never read a `tokenFile`.
+**Verify:** `health`, `webhook.delivered`, `profiles.master.configured` `true`, `status.role` `admin`; follow `nextSteps`; never read a `tokenFile`.
 
 ## Step 6: the first pull request
 
 Dispatch a small item ([onboarding](onboarding.md#4-prove-the-first-pr)); once `Graphyard / merge` appears, rerun `--apply`; **Verify** the required check.
 
-`--plan` and `--apply` are idempotent (`"satisfied"`, `drift`); tokens never rotate.
+`--plan` and `--apply` are idempotent; tokens never rotate.
 
 ## Self-contained host
 
-`--target host --ssh-host HOST` (or `--target hetzner`) runs server, Postgres, loop, executors, Herdr and the agent runtimes on one machine (systemd), credentials `0600` in `~graphyard/.config/graphyard/<install>/`; sign in with the printed link.
+`--target host --ssh-host HOST` (or `--target hetzner`) runs server, Postgres, loop, executors, Herdr and the agent runtimes on one systemd machine, credentials `0600` in `~graphyard/.config/graphyard/<install>/`; sign in with the printed link.
 
 **Sizing:** 3 GB per concurrent agent, 2 GB per verification slot, 2 GB base, max(10%, 4 GB) spare; confirmed with `--confirm-price` / `--max-monthly`.
 

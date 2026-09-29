@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { composeBundle, composeRunning, emptyObservation, hetznerAddress, httpHealth, markersFromEnvFile, readRemote, type AdapterContext, type AdapterObservation, type BundleFile, type ProviderAdapter } from './adapters.js';
 import { fingerprint, generateToken, workerPrincipals } from './secrets.js';
@@ -375,13 +376,16 @@ async function migrateLedger(ctx: AdapterContext, remote: Transport) {
   await local.exec('sh', ['-c', `DATABASE_URL="$(cat)"; export DATABASE_URL; exec "$0" "$1" db fence`, host.localNode, host.localCli], { input: host.migrationSource, timeout: 300_000 });
   await local.exec('sh', ['-c', withDatabase('db backup'), host.localNode, host.localCli, file], { input: host.migrationSource, timeout: 1_800_000 });
   await local.exec('sh', ['-c', withDatabase('db verify'), host.localNode, host.localCli, file], { input: host.migrationSource, timeout: 600_000 });
-  const backup = await local.exec('cat', [file], { timeout: 600_000 });
+  // Read the file from this machine's disk rather than through a command's output buffer: a grown
+  // ledger exceeds the transport's exec cap, while db verify and db restore already hold the whole
+  // file in memory, so the copy to the host can too.
+  const backup = await readFile(file, 'utf8');
   const target = `${layout.migrationDirectory}/backup.json`;
-  await remote.putFile(target, backup.stdout, 0o600, host.owner ?? undefined);
+  await remote.putFile(target, backup, 0o600, host.owner ?? undefined);
   const hostDatabase = `postgres://graphyard:${ctx.databasePassword}@127.0.0.1:${HOST_DATABASE_PORT}/graphyard`;
   await asUser(remote, layout.graphyard, 'sh', ['-c', `DATABASE_URL="$(cat)"; export DATABASE_URL; exec node "$0" db restore "$1"`, layout.cli, target], { input: hostDatabase, timeout: 1_800_000 });
   let digest = '';
-  try { digest = String(JSON.parse(backup.stdout)?.digest ?? ''); } catch { digest = ''; }
+  try { digest = String(JSON.parse(backup)?.digest ?? ''); } catch { digest = ''; }
   await remote.putFile(restoredMarker(layout), `${JSON.stringify({ restoredAt: new Date().toISOString(), digest })}\n`, 0o600, host.owner ?? undefined);
 }
 

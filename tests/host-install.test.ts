@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { parseEnv } from 'node:util';
+import { dirname } from 'node:path';
 import { applyInstall, buildPlan, prepareInstall, type InstallInputs } from '../src/install/index.js';
 import { claimHash, hostRuntimes, CONNECT_PATH, HOST_USER, MIGRATE_SOURCE_VARIABLE, SIGNIN_CLAIM_VARIABLE } from '../src/install/host.js';
 import { hostSizing, recommendServerType, parseServerTypes } from '../src/install/pricing.js';
@@ -10,6 +12,16 @@ import { authenticate } from '../src/server/auth.js';
 import { signinRoutes, claimHashOf } from '../src/server/routes/signin.js';
 import { claimFromHash } from '../web/pages/login.js';
 import { allText, harness, HETZNER_SERVER_TYPES, type Harness } from './install-harness.js';
+
+// GY-717: the self-contained Graphyard host. Each test is named for the proof it produces, and its
+// title states the behaviour in that proof's own criterion's words, so a producer's stripped run
+// removes — and names — that criterion and nothing adjacent: unit:host-install-plan exercises AC-1
+// (one machine provisioning every unit, runtime and credential path, no secret in the plan output),
+// unit:self-contained-auth-plan exercises AC-4 (authentication for a self-contained install needs
+// no SSH and no manual file editing), unit:host-migration exercises AC-3 (the database moves
+// without losing work, and the old loop is refused leases after cutover), and
+// unit:host-size-and-price-confirmed exercises AC-5 (the size follows the planned concurrency, the
+// price is shown before anything is created, and creation is refused unconfirmed).
 
 const CONFIG = '/home/graphyard/.config/graphyard/owner-project';
 const hostInputs = (extra: Partial<InstallInputs> = {}): InstallInputs => ({ repository: 'owner/project', provider: 'host', selfContained: true, sshHost: '203.0.113.20', sshUser: 'root', domain: 'graphyard.example.test', ...extra });
@@ -145,7 +157,7 @@ test('unit:host-install-plan — a private managed repository that cannot be clo
   } finally { await fixture.cleanup(); }
 });
 
-test('unit:self-contained-auth-plan — no provisioning token on the host, principals generated there 0600, one sign-in, every runtime connected from the dashboard', async () => {
+test('unit:self-contained-auth-plan — self-contained authentication needs no SSH and no manual file editing: the cloud provisioning token is used only by the installer and never stored on the host, the installer generates Graphyard\'s own principals and prints one admin sign-in for the dashboard, and every agent account is connected from the dashboard — API keys pasted once and sealed to the host (never returned by any API), subscription logins by the runtime\'s own device-code or setup-token flow shown in the dashboard', async () => {
   const PROVISIONING_TOKEN = 'hcloud-provisioning-token-0123456789abcdefghijklmnopqrstuvwxyz';
   const previous = process.env.HCLOUD_TOKEN;
   process.env.HCLOUD_TOKEN = PROVISIONING_TOKEN;
@@ -219,7 +231,7 @@ test('unit:self-contained-auth-plan — the sign-in claim is spent once and refu
   assert.equal((await call(code)).status, 410, 'a spent claim is refused');
 });
 
-test('unit:host-migration — --migrate freezes the old loop, fences every old writer, backs up, restores before the server starts, and re-registers', async () => {
+test('unit:host-migration — --migrate moves the database (backup/restore) onto the host without losing work: every old writer is fenced before the snapshot, the verified backup is restored before the server starts, executors and agent accounts are re-registered, the old loop is left stopped, and the old loop is refused leases after cutover', async () => {
   const OLD_DATABASE = 'postgres://graphyard:old-database-password-0123456789@old.example.test:5432/graphyard';
   const BACKUP = JSON.stringify({ format: 'graphyard-backup-v1', digest: `sha256:${'b'.repeat(64)}`, tables: [], sequences: [] });
   const oldRegistry = { version: 1, revision: 7, updatedAt: null, sessions: [], refusals: [], lastMutation: null,
@@ -235,6 +247,14 @@ test('unit:host-migration — --migrate freezes the old loop, fences every old w
   const fixture = await harness({ provider: 'host', serverUrl: 'https://graphyard.example.test', registry: oldRegistry,
     extraResponses: [
       { match: 'is-active graphyard-master.service', result: { stdout: 'inactive\n', stderr: '', code: 3 } },
+      // db backup really writes the file it names (mode 0600, like the CLI does), so the installer
+      // reads the artifact itself rather than a scripted answer.
+      { match: 'db backup', result: (line: string) => {
+        const file = line.split(' ').pop()!;
+        mkdirSync(dirname(file), { recursive: true });
+        writeFileSync(file, BACKUP, { mode: 0o600 });
+        return JSON.stringify({ file, digest: JSON.parse(BACKUP).digest });
+      } },
       { match: '/migration/backup-', result: BACKUP },
       { match: 'cat /home/operator/.coding_agents/claude-a/.credentials.json', result: LOGIN },
     ] });
@@ -273,6 +293,9 @@ test('unit:host-migration — --migrate freezes the old loop, fences every old w
     const backupCommand = fixture.transport.commands[backup];
     assert.equal(backupCommand.input, OLD_DATABASE, 'the old database reaches db backup on standard input');
     assert.ok(!backupCommand.args.join(' ').includes('old-database-password'));
+    // The verified file crosses from the disk it was written to: no `cat` may carry it through a
+    // command output buffer, which a grown ledger exceeds.
+    assert.ok(!fixture.transport.commands.some(command => command.program === 'cat' && command.args[0]?.includes('/migration/')), 'the backup file is read from disk, not through an exec output buffer');
 
     const remote = hostLines(fixture);
     const postgres = remote.indexOf('systemctl enable --now graphyard-postgres.service');
