@@ -118,6 +118,24 @@ export function boardApi(path: string, role = 'admin') {
   if (route === 'interventions') return { total: 1, deliveries: 3, ratePerDelivery: 0.33, window: { days: 30 }, open: 1, waitedMs: 10 * hour, ledger: { truncated: false, rows: 40 },
     byKindAndStage: [], costliest: [], patterns: [], policy: { threshold: 3, windowDays: 7 }, judgements: [], interventions: [],
     trend: Array.from({ length: 5 }, (_, index) => ({ from: at((index - 5) * 7 * 24 * hour), interventions: index === 4 ? 1 : 0, deliveries: index % 2, waitedMs: index === 4 ? 10 * hour : 0 })) };
+  // The Tests page (GY-162): one flaky case with history, one skipped, one never run.
+  if (route === 'tests') return testsSummary();
   if (route === 'agent-registry') return { configured: false, attention: [], roles: [], accounts: [], runtimes: [], models: [], sessions: [], refusals: [] };
   return fixtureApi(path, role);
+}
+
+/** What `GET /api/tests` answers over this board: every case with its latest result and history. */
+export function testsSummary() {
+  const sha = (n: number) => `${n}`.repeat(40).slice(0, 40);
+  const run = (seq: number, result: 'pass' | 'fail' | 'skipped', commit: number, scenarioId = 'checkout-pays') => ({ seq, scenarioId, proof: `e2e:${scenarioId}`, result, scenarioRevision: 1, environment: 'staging',
+    executed: 4, skipped: result === 'skipped' ? 1 : 0, sha: sha(commit), baseSha: sha(9), policyRevision: 1, workId: 'w', workKey: 'GY-16', pr: 40 + commit,
+    run: { kind: 'github-actions', id: String(9000 + seq), attempt: 1, url: null }, evidenceId: `e${seq}`, producer: 'e2e-producer', at: at(-seq * hour) });
+  const entry = (id: string, title: string, runs: ReturnType<typeof run>[], extra: Record<string, unknown> = {}) => ({ id, title, purpose: `${title}.`, testPath: `tests/e2e/${id}.spec.ts`, environment: 'staging', revision: 1,
+    changed: { at: at(-72 * hour), by: 'operator' }, links: [{ key: 'GY-16', title: 'Checkout', stage: 'review', criteria: ['AC-1'] }], latest: runs[0] ?? null, staleRevision: false,
+    runs: runs.length, failures: runs.filter(r => r.result === 'fail').length, lastFailure: runs.find(r => r.result === 'fail') ?? null, flaky: false, flakyReason: null, history: runs, ...extra });
+  return { window: 20, cases: [
+    entry('checkout-pays', 'Checkout takes payment', [run(1, 'fail', 3), run(2, 'pass', 3), run(3, 'pass', 2)], { flaky: true, flakyReason: `passed and failed on commit ${sha(3).slice(0, 8)}` }),
+    entry('refund-issued', 'Refunds are issued', [run(4, 'skipped', 3, 'refund-issued')]),
+    entry('login-works', 'Signing in works', [], { links: [] }),
+  ] };
 }
