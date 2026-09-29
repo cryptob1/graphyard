@@ -15,7 +15,10 @@ export { nameOrphanSupervisors, orphanSupervisorAttention, supervisorReclaimComm
  * standing with a session that never started. A launch that fails due to approver capacity
  * (all accounts spent, role concurrency limit reached) is not counted against the launch bound;
  * the loop relaunches it when capacity frees, oldest decision first. `master status` shows both
- * as needing attention: one awaiting relaunch, one waiting for a slot.
+ * as needing attention: one awaiting relaunch, one waiting for a slot. The capacity wait is kept
+ * on the watch only while it is the newest launch state (GY-920): a later launch — adopted,
+ * failed for another reason, or successful — clears it, so the classification here follows the
+ * launch rather than a wait that is over.
  */
 export function approverLaunchAttention(daemon: {
   approvals?: { key: string; work: string; action: string; decision: string; agentName: string | null; launches: number; launchedAt: string | null; requestedAt: string; settledAt: string | null; capacity?: string | null }[];
@@ -26,7 +29,10 @@ export function approverLaunchAttention(daemon: {
     if (watch.settledAt) return [];
     // GY-849: Decisions waiting for approver capacity (not counted against launch attempts) are
     // shown as waiting for a slot with the live sessions holding the role, not as stalled.
-    if (watch.capacity) {
+    // GY-920: the wait is classified only while it is still the newest launch state. A watch whose
+    // launch went on anyway — an adopted session, or one the loop holds in flight — is classified
+    // by that launch below, never by a wait the launch superseded.
+    if (watch.capacity && !watch.agentName) {
       // GY-849: the wait is the loop's to clear — it relaunches the decision itself, oldest
       // waiting decision first, once an account or slot frees — so the remedy names no command:
       // a hand `master approver` here would race the relaunch the watch already covers.

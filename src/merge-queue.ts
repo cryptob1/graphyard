@@ -1,10 +1,11 @@
 import type { Evidence, Observation, ScopeFile, Work } from './model.js';
-import { evidenceBindsCandidate, type ApprovalIdentity, type CarriedApproval, type CarriedProof, type QueueCarry, type RequiredApproval, type TipMerge } from './model/carry.js';
-import { reviewProviderOf } from './model/review.js';
+import { carriedApproval, evidenceBindsCandidate, type ApprovalIdentity, type CarriedApproval, type CarriedProof, type QueueCarry, type RequiredApproval, type TipMerge } from './model/carry.js';
+import { exactApproval, reviewProviderOf } from './model/review.js';
 import { pathScopesOverlap } from './model/scope.js';
 import { queuedRegressions, staleTipRegressions } from './regression-guard.js';
 import { missingAncestryReason, missingBaseAncestry } from './merge-base-ancestry.js';
 import type { BaseBreak } from './master/base-break-refresh.js';
+import { ciCheckName } from './model/ci-refusal.js';
 
 // Graphyard publishes speculative tips outside refs/heads and refs/tags: the namespace is
 // owned by the App, is never a branch a worker can push, and never appears as a PR head.
@@ -196,7 +197,8 @@ export function tipReplacesHead(work: Pick<Work, 'candidate' | 'queue' | 'policy
  * named here, and the test gate, which judges the candidate's own change, stands. A check that
  * failed on the tip is an adverse conclusion that ejects the entry (`ejectionReason`), after
  * which this returns null and the test gate refuses it as ever. `testReasons` are the test gate's
- * refusals for the tip.
+ * refusals for the tip; only the CI-pending ones (`ciPendingReason`) are the tip's validation, and
+ * the caller lifts only those from the test gate.
  */
 export const tipValidationPrefix = 'Merge queue is validating speculative tip ';
 /**
@@ -209,6 +211,9 @@ export const tipValidationPrefix = 'Merge queue is validating speculative tip ';
 export function tipValidation(work: Pick<Work, 'key' | 'candidate' | 'policyRevision'>, queue: QueueEntry | null, testReasons: string[]): string[] | null {
   const speculation = queue?.speculation, candidate = work.candidate;
   if (!speculation || !candidate || speculation.tip !== candidate.sha || speculation.base !== candidate.baseSha || speculation.policyRevision !== work.policyRevision) return null;
+  // Only a CI-pending refusal is the tip's validation (GY-332): any other test-gate refusal is the
+  // candidate's own and is never relabelled as queue progress, whatever the tip's state.
+  const pending = testReasons.filter(ciPendingReason);
   // Parallel tips (GY-498): the entry is validated by the window of tips it merges behind, each
   // judged on its own observation. Every tip ahead of it passed and its own tip is the only one
   // still unjudged: today's wording, naming its tip. Any earlier tip unjudged is named too, so CI
@@ -223,11 +228,11 @@ export function tipValidation(work: Pick<Work, 'key' | 'candidate' | 'policyRevi
     // still being validated and name themselves, since a failure among them would be inherited.
     const ahead = tips.slice(0, -1).filter(tip => tip.ci !== 'pass' && tip.tip);
     if (failing && failing === tips.at(-1) && ahead.length) return ahead.map(tip => `${tipValidationPrefix}${tip.tip?.slice(0, 12)}: speculative tip ${failing.tip?.slice(0, 12)} of ${work.key} failed ${failing.failedCheck}, and is attributed to it only once the tips ahead pass`);
-    if (failing && failing === tips.at(-1)) return testReasons.map(reason => `${tipValidationPrefix}${failing.tip?.slice(0, 12)}: ${reason}`);
+    if (failing && failing === tips.at(-1)) return pending.map(reason => `${tipValidationPrefix}${failing.tip?.slice(0, 12)}: ${reason}`);
     if (failing) return [`Waiting for speculative tip ${failing.tip?.slice(0, 12)} to resolve: Required CI check ${failing.failedCheck} failed on it and ${work.key} is not the cause; its tip holds the same change and is rebuilt once the entry that caused it leaves the queue`];
     const unjudged = tips.filter(tip => tip.ci !== 'pass' && tip.tip);
     if (!unjudged.length) return null;
-    if (unjudged.length === 1 && unjudged[0] === tips.at(-1) && testReasons.length) return testReasons.map(reason => `${tipValidationPrefix}${unjudged[0].tip?.slice(0, 12)}: ${reason}`);
+    if (unjudged.length === 1 && unjudged[0] === tips.at(-1) && pending.length) return pending.map(reason => `${tipValidationPrefix}${unjudged[0].tip?.slice(0, 12)}: ${reason}`);
     return unjudged.map(tip => `${tipValidationPrefix}${tip.tip?.slice(0, 12)}: the tips ahead of ${work.key}'s are still being validated`);
   }
   const batch = queue?.batch;
@@ -236,10 +241,16 @@ export function tipValidation(work: Pick<Work, 'key' | 'candidate' | 'policyRevi
   // the plan merges or ejects others ahead of it, or waits for the tip it would test to be
   // published, nothing is required of it until it is replanned: its placement holds the merge.
   if (batch && (batch.state === 'waiting' || !batch.underTest?.tip)) return [];
-  if (!testReasons.length) return null;
+  if (!pending.length) return null;
   const under = batch?.underTest?.tip ?? candidate.sha;
-  return testReasons.map(reason => `${tipValidationPrefix}${under.slice(0, 12)}: ${reason}`);
+  return pending.map(reason => `${tipValidationPrefix}${under.slice(0, 12)}: ${reason}`);
 }
+/**
+ * The one test-gate refusal the tip's own validation accounts for: a required CI check that has not
+ * yet passed on the candidate (GY-332). Any other test-gate refusal is the candidate's own and
+ * stays on the test gate, never relabelled as queue progress.
+ */
+export const ciPendingReason = (reason: string) => ciCheckName(reason) !== null;
 /** The carry decisions on record that moved bindings onto `sha`, under the current policy: a base refresh's, or a tip's. */
 export function onto(work: Pick<Work, 'queue' | 'baseRefresh' | 'policyRevision'>, sha: string): QueueCarry[] {
   return [work.queue?.speculation?.carry, work.baseRefresh?.carry].filter((carry): carry is QueueCarry => !!carry && carry.to.sha === sha && carry.policyRevision === work.policyRevision);
@@ -954,6 +965,33 @@ export function unpublishableEntry(work: Work): { sequence: number; mergeSha: st
   return { sequence: work.queue.sequence, mergeSha: work.observation.mergeSha ?? null, refusal: refusedReconciliation(work) };
 }
 /**
+ * GY-831. The guarded merge's refusal the loop reported for one candidate: a carried approval it
+ * could not re-post, or one reason repeated past the loop's bound. `rereview` cleared the carried
+ * approval so the review gate asks for a fresh review of the tip; `rework` asks the approver for
+ * the rework decision, since nothing the control plane holds re-binds it. `approval` names the
+ * review that could not be re-posted; `carry` keeps the decision that applied to the candidate,
+ * approval re-required, because the queue ejection the refusal causes drops the tip's record and
+ * its carried proofs must still bind.
+ */
+export interface MergeRefusal {
+  sha: string; baseSha: string; policyRevision: number; reason: string; since: string; at: string; by: string; action: 'rereview' | 'rework';
+  approval?: { reviewer: string; reviewId?: number; originalSha: string }; carry?: QueueCarry | null;
+}
+/** The ejection reason of an entry the guarded merge kept refusing (GY-831); re-entry reads it back. */
+export const mergeRefusalEjectionPrefix = 'The guarded merge refused candidate ';
+/**
+ * GY-831. The merge refusal the control plane recorded for exactly the current candidate, while it
+ * still stands, worded as the queue ejection it causes: a head the guarded merge cannot land must
+ * not hold every entry behind it. A `rereview` refusal stands until a fresh approval binds the
+ * candidate again, and the entry may then re-enter; a `rework` one stands for the candidate's life.
+ */
+export function standingMergeRefusal(work: Work): string | null {
+  const refusal = work.mergeRefusal, candidate = work.candidate;
+  if (!refusal || !candidate || refusal.sha !== candidate.sha || refusal.baseSha !== candidate.baseSha || refusal.policyRevision !== work.policyRevision) return null;
+  if (refusal.action === 'rereview' && (exactApproval(work) || carriedApproval(work))) return null;
+  return `${mergeRefusalEjectionPrefix}${candidate.sha.slice(0, 12)} since ${refusal.since}: ${refusal.reason.slice(0, 600)}; ${refusal.action === 'rereview' ? 'a fresh review of it is requested' : 'it awaits a rework decision'}, and the entry leaves the queue so the next one heads it`;
+}
+/**
  * Explicit, observed failure of a queued entry's speculative validation. Missing or pending
  * inputs keep an entry queued; only a reported adverse result removes it.
  */
@@ -969,6 +1007,8 @@ export function ejectionReason(work: Work, ciAppIds: number[], all: Work[] = [],
   if (work.policyRevision !== work.queue.policyRevision) return `Policy revision changed from ${work.queue.policyRevision} to ${work.policyRevision} after this entry was queued`;
   if (work.blocker) return `Queued work was blocked: ${work.blocker}`;
   if (work.violations.length) return `Queued work has an open violation: ${work.violations[0]}`;
+  const refused = standingMergeRefusal(work);
+  if (refused) return refused;
   const candidate = work.candidate, observation = work.observation;
   if (!candidate || !observation || observation.candidate.sha !== candidate.sha || observation.candidate.baseSha !== candidate.baseSha) return null;
   const tip = candidate.sha.slice(0, 12);
