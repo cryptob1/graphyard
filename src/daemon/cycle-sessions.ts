@@ -492,13 +492,15 @@ function scopeChange(item: Work) {
  * 1e–1f. A worker told nothing waits for ever (GY-524). While a live attempt has a blocker or a
  * scope request open, the loop marks what it waits on; once none is open, the session is re-prompted
  * once with what changed and the exact next command — unless it is already active — and the
- * re-prompt goes on its handle, so the item's history shows it. A worker holding a live lease with
- * nothing open that shows no activity for `idleLeaseMs` is idle-with-lease: its handle says so,
- * naming the pane, and it is re-prompted once; still inactive `idleLeaseMs` later, its attempt is
- * handed to a new one that keeps its branch.
+ * re-prompt goes on its handle, so the item's history shows it. The once is kept on the cursor as a
+ * waiting action outside the prunable action ledger (GY-923), keyed by the decision's own instant,
+ * so a busy installation cannot re-prompt a decision whose ledger row was retired. A worker holding
+ * a live lease with nothing open that shows no activity for `idleLeaseMs` is idle-with-lease: its
+ * handle says so, naming the pane, and it is re-prompted once; still inactive `idleLeaseMs` later,
+ * its attempt is handed to a new one that keeps its branch.
  */
 async function resumeStep(cycle: Cycle, failedOver: Set<string>) {
-  const { config, state, effects, now, clock, performed, isolate, agents, heldBy } = cycle;
+  const { config, state, effects, now, clock, performed, isolate, agents, heldBy, open } = cycle;
   const live = new Set<string>();
   for (const profile of config.workers.filter(worker => worker.mode === 'launch')) await isolate('session', heldBy(profile), profile.name, async () => {
     const item = heldBy(profile);
@@ -570,6 +572,10 @@ async function resumeStep(cycle: Cycle, failedOver: Set<string>) {
     //     the attempt's epoch (GY-544), so a recent one nobody was told of since counts as waited on.
     //     A blocker cleared between two cycles leaves no such record on the item, so it is left
     //     to the idle-with-lease re-prompt below.
+    //     The once-per-decision promise is kept on the cursor outside the prunable ledger (GY-923):
+    //     the row that remembers a sent prompt is a waiting action, which `pruneDaemonState` never
+    //     retires, keyed by the decision's own instant — so a busy installation that resolves more
+    //     actions than the ledger retains cannot make the same decision prompt a second time.
     const waited = [state.actions[keys.blocker], state.actions[keys.scope]].filter((action): action is DaemonAction => action?.state === 'waiting');
     const decision = item.scopeDecision, decidedAt = decision?.epoch === epoch ? Date.parse(decision.at) : NaN;
     const unmarked = !state.actions[keys.scope] && Number.isFinite(decidedAt) && now() - decidedAt <= idleLeaseMs
@@ -584,13 +590,17 @@ async function resumeStep(cycle: Cycle, failedOver: Set<string>) {
       if (previous && previous.state !== 'failed') { await drop(keys.blocker, keys.scope); return; }
       // No session to tell (1d settles a dead one), or one on a runtime prompt (1b answers that first).
       if (!agent || !pane || status === 'blocked') return;
-      if (status === 'working') { await entry(promptKey, 'done', `${item.key} epoch ${epoch}: ${changed}; ${profile.agentName} is already active, so it is not re-prompted`); await drop(keys.blocker, keys.scope); return; }
+      // Both outcomes are recorded as the durable dedup row (GY-923): a waiting action survives the
+      // resolved-action prune, so an already-consumed resolution cannot prompt a second time once a
+      // busy stretch retires the ledger rows around it. The sweep at the end of this step retires
+      // the row once nothing recent can match it again.
+      if (status === 'working') { await entry(promptKey, 'waiting', `${item.key} epoch ${epoch}: ${changed}; ${profile.agentName} is already active, so it is not re-prompted`); await drop(keys.blocker, keys.scope); return; }
       if (!effects.promptSession || !readyToRetry(previous, state.cycle)) return;
       const attempts = (previous?.attempts ?? 0) + 1;
       await entry(promptKey, 'started', `${item.key} epoch ${epoch}: ${changed}; re-prompting ${profile.agentName} in pane ${pane} to resume`, attempts);
       try {
         await effects.promptSession(agent, resumePromptText(config.cliPath, item, epoch, changed));
-        performed.push(await entry(promptKey, 'done', `${item.key} epoch ${epoch}: ${changed}; ${profile.agentName} in pane ${pane} was re-prompted once to resume, naming ${completeCommand('CLI', item, epoch).replace('node CLI ', '')}`, attempts));
+        performed.push(await entry(promptKey, 'waiting', `${item.key} epoch ${epoch}: ${changed}; ${profile.agentName} in pane ${pane} was re-prompted once to resume, naming ${completeCommand('CLI', item, epoch).replace('node CLI ', '')}`, attempts));
         await workerHandle(cycle, item, profile, epoch, pane, `re-prompted to resume at ${new Date(now()).toISOString()}: ${changed}`, false);
         await drop(keys.blocker, keys.scope, keys.idle);
       } catch (error) {
@@ -632,8 +642,15 @@ async function resumeStep(cycle: Cycle, failedOver: Set<string>) {
       performed.push(await entry(reclaimKey, 'failed', `${profile.agentName} on ${item.key} epoch ${epoch} is ${reason}, but its attempt could not be handed on: ${message(error)}`, attempts));
     }
   });
-  // A wait whose attempt no longer holds a live lease has nobody left to tell.
-  const stale = Object.entries(state.actions).filter(([key, action]) => action.state === 'waiting' && waitPrefixes.some(prefix => key.startsWith(prefix)) && !live.has(key));
+  // A wait whose attempt no longer holds a live lease has nobody left to tell. A resume-prompt dedup
+  // row (GY-923) is swept once it can dedupe nothing again: its item is gone, or the row is older
+  // than the recency window any decision it could match must fall in — a decision matches only when
+  // the row was written at or after it and both sit within `idleLeaseMs` of now, so a row past that
+  // window is inert by construction.
+  const stale = Object.entries(state.actions).filter(([key, action]) => action.state === 'waiting'
+    && (waitPrefixes.some(prefix => key.startsWith(prefix)) && !live.has(key)
+      || key.startsWith('resume:prompt:')
+        && (!open.some(item => key.startsWith(`resume:prompt:${item.id}:`)) || now() - Date.parse(action.at) > idleLeaseMs)));
   for (const [key] of stale) delete state.actions[key];
   if (stale.length) await effects.persist(state);
 }
@@ -651,13 +668,27 @@ async function resumeStep(cycle: Cycle, failedOver: Set<string>) {
  * listing (GY-544), so an exited runtime is acted on as step 1 acts on one: only when Herdr read
  * the handle's workspace at all, and only once the same sight stands on a later cycle and
  * launchAppearanceMs after it was first seen.
+ *
+ * The witnessed reason is retained on the cursor for the retry (GY-923): a close that got as far as
+ * closing the pane can still fail to update the registry, and the pane it closed — a sole pane
+ * empties its workspace's listing — can then never be witnessed again, which would leave the handle
+ * running for ever. The exit is kept as a waiting action (which the resolved-action prune never
+ * retires) from the first close attempt, and a retry that cannot re-witness the sight finishes on
+ * that evidence — never while Herdr still lists a live agent in the pane, which would mean the
+ * exit no longer stands.
  */
+
+/** The cursor row that carries a witnessed exit across its close attempts, outside the prunable ledger (GY-923). */
+const closeEvidenceKey = (item: Pick<Work, 'id'>, handle: { id: string; startedAt: string }) => `close-evidence:implementation:${item.id}:${handle.id}:${handle.startedAt}`;
+
 async function closeExitedWorkerSessions(cycle: Cycle, runtime: { agents: HerdrAgent[]; available: boolean } | null) {
   const { config, state, effects, snapshot, clock, now, performed, isolate } = cycle;
   if (!effects.recordSession) return;
-  const sighted = new Set<string>();
+  const sighted = new Set<string>(), evidenced = new Set<string>();
   for (const item of snapshot.work) for (const handle of item.sessions ?? []) {
     if (handle.kind !== 'implementation' || handle.state !== 'running' || handle.host !== config.hostId) continue;
+    const evidenceKey = closeEvidenceKey(item, handle);
+    evidenced.add(evidenceKey);
     const leased = !!item.lease && item.lease.owner === handle.principal && Date.parse(item.lease.expiresAt) > clock;
     const seenKey = `exited:implementation:${item.id}:${handle.id}:${handle.startedAt}`;
     let reason: string | null = null;
@@ -677,15 +708,24 @@ async function closeExitedWorkerSessions(cycle: Cycle, runtime: { agents: HerdrA
         reason = `${exited} (first seen at ${seen.at})`;
       }
     }
+    if (!reason) {
+      // The earlier attempt's evidence completes the retry the sight no longer supports (GY-923).
+      // Never against a live agent: while Herdr lists one in the pane, the exit does not stand.
+      const evidence = state.actions[evidenceKey];
+      if (evidence && !(runtime?.available && handle.pane && runtime.agents.some(agent => agent.pane_id === handle.pane && agent.agent)))
+        reason = `${evidence.detail} (witnessed before the earlier close attempt, whose pane is gone, so the sight cannot be taken again)`;
+    }
     if (!reason) continue;
     const key = `close:implementation:${item.id}:${handle.id}:${handle.startedAt}`, previous = state.actions[key];
     if (previous?.state === 'done' || !readyToRetry(previous, state.cycle)) continue;
     const found = reason, attempts = (previous?.attempts ?? 0) + 1;
+    if (!state.actions[evidenceKey]) await record(state, evidenceKey, { kind: 'close', work: item.key, principal: handle.principal, state: 'waiting', detail: found, attempts: 1, cycle: state.cycle }, now(), effects.persist);
     await isolate('close', item, handle.id, async () => {
       const entry = (outcome: 'done' | 'failed', detail: string) => record(state, key, { kind: 'close', work: item.key, principal: handle.principal, state: outcome, detail, attempts, cycle: state.cycle }, now(), effects.persist);
       try {
         // The pane goes first, so the record never says finished beside a pane still standing. A
-        // close that fails leaves the handle running: the step is retried whole on a later cycle.
+        // close that fails leaves the handle running: the step is retried whole on a later cycle,
+        // on the retained exit evidence once the pane is gone and cannot be witnessed again (GY-923).
         let closed = '';
         if (handle.pane) {
           try { await effects.closeSession(handle.pane); closed = `; pane ${handle.pane} closed`; }
@@ -696,12 +736,14 @@ async function closeExitedWorkerSessions(cycle: Cycle, runtime: { agents: HerdrA
         // Its sighting goes with it, in this cycle's sweep.
         sighted.delete(seenKey);
       } catch (error) {
-        performed.push(await entry('failed', `Could not close implementation session ${handle.id} of ${item.key}: ${message(error)}`));
+        performed.push(await entry('failed', `Could not close implementation session ${handle.id} of ${item.key}: ${message(error)}; its witnessed exit is retained and the registry update is retried`));
       }
     });
   }
-  // A sighting that did not stand this cycle — the agent reappeared, or its handle was closed — starts over.
-  const lapsed = Object.keys(state.actions).filter(key => key.startsWith('exited:implementation:') && state.actions[key].state === 'waiting' && !sighted.has(key));
+  // A sighting that did not stand this cycle — the agent reappeared, or its handle was closed — starts over,
+  // and evidence whose handle is no longer a running implementation session here is swept with it (GY-923).
+  const lapsed = Object.keys(state.actions).filter(key => key.startsWith('exited:implementation:') && state.actions[key].state === 'waiting' && !sighted.has(key)
+    || key.startsWith('close-evidence:implementation:') && !evidenced.has(key));
   for (const key of lapsed) delete state.actions[key];
   if (lapsed.length) await effects.persist(state);
 }
