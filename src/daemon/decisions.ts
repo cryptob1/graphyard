@@ -82,11 +82,29 @@ export const observedFrom = (work: Work) => work.observation
   ? `[Decided from the GitHub observation taken at ${work.observation.at} of candidate ${work.observation.candidate.sha}; if the item has moved since, this request no longer describes it.]`
   : '[Decided with no GitHub observation of the item.]';
 /**
+ * Whether a rework binding is specifically a merge-conflict one — the 40-character binding
+ * `syncConflict` writes (`<head>:sync:<base tip>` or `<head>:queue-conflict:<sequence>:<base tip>`),
+ * not the generic gate binding `next-action.ts` produces. Only these name a conflict GitHub itself
+ * reported, which stays valid for the exact head and base tip it binds however old the observation
+ * that carried it is (GY-807).
+ */
+export function isSyncConflictBinding(binding: string): boolean {
+  return /^[a-f0-9]{40}:sync:/.test(binding) || /^[a-f0-9]{40}:queue-conflict:/.test(binding);
+}
+/**
  * Why a rework request must wait for a fresh observation, or null when the one on the item may be
  * decided from. The reason names the stale observation — its time and head — and never its age,
  * so it reads the same on every cycle it stands.
+ *
+ * `binding` is the rework decision's own binding, passed by the caller from the decision it is
+ * about to request — never read off `work.nextAction`, whose binding is the generic gate binding
+ * and cannot name these grounds. A conflict binding returns null at once: GitHub reported the
+ * conflict against the exact head and base tip the binding names, and neither moves without a
+ * push, so a stale observation that carries it is still actionable and waiting for a fresher one
+ * left the item actorless with nothing moving it (GY-807).
  */
-export function reworkObservationWait(work: Work, now: number, pause: GitHubPause | null): string | null {
+export function reworkObservationWait(work: Work, now: number, pause: GitHubPause | null, binding: string): string | null {
+  if (isSyncConflictBinding(binding)) return null;
   const observation = work.observation;
   if (!observation) return `${work.key}: rework waits for a GitHub observation of the item; there is none to decide from`;
   const seen = `the last GitHub observation (taken at ${observation.at} of head ${observation.candidate.sha.slice(0, 12)})`;

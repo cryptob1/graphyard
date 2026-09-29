@@ -165,6 +165,8 @@ export async function scopeStep(cycle: Cycle) {
       const decision = decided.scopeDecision;
       if (!decision) throw new Error('The control plane answered without a decision');
       settled.set(item.id, decided);
+      // An approved answer has lifted the blockers the ask earned in the same mutation (GY-807,
+      // engine applyScopeDecision), so the settled copy already reads unblocked.
       // An additive refusal no finding grounds is put to the independent approver in step 4c, on
       // this same cycle: naming `master scope` would leave it waiting for a master to be around. Its
       // wait is measured when the approver answers, the decision the worker actually waits on.
