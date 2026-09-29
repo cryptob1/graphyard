@@ -95,6 +95,12 @@ export interface DaemonEffects {
   replan?: (work: Work, paths: string[], reason: string) => Promise<unknown>;
   merge: (work: Work) => Promise<unknown>;
   /**
+   * GY-831. Report a guarded merge refused for one reason since `since` to the control plane,
+   * which clears a carried approval (a fresh review is requested) or marks the candidate for a
+   * rework decision.
+   */
+  refuseMerge?: (work: Work, reason: string, since: string) => Promise<Work>;
+  /**
    * The deployed release and which deliveries it serves. The containment the previous observation
    * retained is handed back so the cycle re-derives only what the release has not already been
    * shown to contain (see `observeDeployment`).
@@ -673,6 +679,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
         '-f', `pr=${work.submission!.pr}`, '-f', `work_id=${work.id}`, '-f', `policy_revision=${work.policyRevision}`]);
     },
     merge: work => mergeExecutor(current(), snapshot, mutate, deps.executor, randomUUID(), run)(work),
+    refuseMerge: (work, reason, since) => mutate(`work/${work.id}/mergerefused`, { sha: work.candidate!.sha, baseSha: work.candidate!.baseSha, policyRevision: work.policyRevision, reason: reason.slice(0, 2000), since }),
     // `root` is this checkout: containment is derived from its object store, never from the forge.
     observeDeployment: (delivered, retained) => observeDeployment(current(), delivered, run, fetcher, () => Date.now(), { root, retained }),
     publishProductionEnvironment: async () => {
