@@ -174,7 +174,7 @@ test('unit:cli-reads-bounded-snapshot — CLI commands read bounded snapshot or 
     const cwd = await mkdtemp(join(tmpdir(), 'graphyard-bounded-reads-sync-'));
     const originRepo = join(cwd, 'origin'), clone = join(cwd, 'clone');
     const git = async (repo: string, ...args: string[]) => (await execFile('git', ['-c', 'user.name=Test', '-c', 'user.email=test@localhost', ...args], { cwd: repo })).stdout.trim();
-    const commit = async (repo: string, message: string) => { await execFile('git', ['add', '-A'], { cwd: repo }); await execFile('git', ['commit', '-q', '-m', message], { cwd: repo }); return git(repo, 'rev-parse', 'HEAD'); };
+    const commit = async (repo: string, message: string) => { await execFile('git', ['add', '-A'], { cwd: repo }); await git(repo, 'commit', '-q', '-m', message); return git(repo, 'rev-parse', 'HEAD'); };
     const task = { id: 'task', key: 'GY-1', plannedFiles: ['src/scoped/'], workspaces: [{ epoch: 1, host: hostname(), path: clone, branch: 'graphyard/gy-1-1' }] };
     const syncServer = createServer((request: IncomingMessage, response: ServerResponse) => {
       const [path] = (request.url ?? '').split('?');
