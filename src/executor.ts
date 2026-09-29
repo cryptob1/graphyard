@@ -7,6 +7,9 @@ import type { ActionRow } from './model/actions.js';
 import type { DispatchRequest } from './model/dispatch.js';
 import { actionJudgment, type NextActionKind } from './model/next-action.js';
 import { describeObservationJob, resyncUnobservedPrefix } from './model/action-kinds.js';
+import { actionWaitError } from './model/action-progress.js';
+import { capacityRefusal, roleAtCapacity } from './fleet.js';
+import { permissionRequestMark } from './github-permissions.js';
 import type { SessionHandleInput } from './model/sessions.js';
 import { registeredLaunch } from './model/session-state.js';
 import { answeredByPendingSession, independentProducerProfiles } from './producer.js';
@@ -66,7 +69,7 @@ export function resyncWaitingSince(row: Pick<ActionRow, 'claim' | 'history'>): s
   let since = row.claim?.claimedAt ?? null;
   for (const entry of [...row.history].reverse()) {
     if (entry.event === 'claimed') { since = entry.at; continue; }
-    if (entry.event === 'reclaimed' || (entry.event === 'failed' && (entry.reason ?? '').includes(resyncUnobservedPrefix))) continue;
+    if (entry.event === 'reclaimed' || entry.event === 'waited' || (entry.event === 'failed' && (entry.reason ?? '').includes(resyncUnobservedPrefix))) continue;
     break;
   }
   return since;
@@ -209,7 +212,17 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
     const workers = config().workers;
     const health = profileHealth(workers, await effects.workerCredentials(workers), agents, statelessProfiles, Date.parse(observedAt) || Date.now());
     const choices = health.filter(entry => entry.healthy);
-    if (!choices.length) throw new Error(`no worker profile can take ${work.key}: ${health.map(entry => `${entry.profile.name} (${entry.reason})`).join('; ') || 'no launch profile is configured'}`);
+    if (!choices.length) {
+      const refusals = health.map(entry => `${entry.profile.name} (${entry.reason})`).join('; ') || 'no launch profile is configured';
+      // A role whose every profile the fleet holds at its concurrency limit is a wait for a slot
+      // (GY-948), the same doctrine the approver path (GY-190) and the dispatcher's own launches
+      // (GY-205) follow: the refusal names the wait, settles the row as one, and the row is
+      // attempted again on the wait recheck — the launch happens on the first pass one frees.
+      // Anything else among the refusals is a fault somebody can fix now, and stays a failure.
+      if (health.length > 0 && health.every(entry => roleAtCapacity(entry.reason ?? '')))
+        throw actionWaitError(`${work.key} waits for a worker slot, dispatched again on the first pass one frees: ${refusals}`);
+      throw new Error(`no worker profile can take ${work.key}: ${refusals}`);
+    }
     const workspace = config().herdrWorkspace;
     // The loop dispatches beside the executors, each from its own snapshot of Herdr. A profile
     // another dispatcher holds is refused before anything is claimed and the next healthy one is
@@ -226,7 +239,14 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
           subject: `${work.key}: ${work.title}`.slice(0, 300), state: 'running',
         }, () => effects.dispatchWorker(work, choice.profile, agents, { work: all, now: observedAt }), launched => launched, attachTo);
       } catch (error) {
-        if (!dispatchReserved(error)) throw error;
+        if (!dispatchReserved(error)) {
+          // The role filled between the health check and the selection: the registry's own refusal
+          // for its concurrency limit is the same wait for a slot the profiles' health would have
+          // named (GY-948), and no other profile of the role can take it either.
+          const full = capacityRefusal(error);
+          if (full) throw actionWaitError(`${work.key} waits for a worker slot, dispatched again on the first pass one frees: ${full}`);
+          throw error;
+        }
         if (error.resource === 'work') return `${work.key} is left to the dispatcher already launching it: ${error.message}`;
         held.push(error.message);
         continue;
@@ -282,7 +302,18 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
       // A control plane from before GY-607 cannot say whether it observed; its answer is taken as
       // the re-read it always was, and the executor reports that it could not tell.
       if (result && typeof result.observed !== 'boolean') return `re-read ${work.key} from the provider and reconciled it; the control plane does not report observations, so none was awaited`;
-      if (!result?.observed) throw new Error(`${work.key}: ${resyncUnobservedPrefix}; ${describeObservationJob(result?.job, Date.now())}; the claim woke it and leaves the row waiting for the observation`);
+      if (!result?.observed) {
+        const job = result?.job ?? null, condition = describeObservationJob(job, Date.now());
+        // A job held because the App lacks a permission is parked on one of the three decisions
+        // only a human may make (AGENTS.md): the remedy is the operator's, at the URL the hold
+        // already names. Settling it as a failure would drive the row through the same
+        // failure-run → stall → escalation machinery as any fault (GY-948) with nobody able to
+        // move it, so it settles as the row's named operator wait instead, and the row completes
+        // on a later claim once the permission is accepted and an observation saves.
+        if (job?.heldUntil && Date.parse(job.heldUntil) > Date.now() && (job.heldReason ?? '').includes(permissionRequestMark))
+          throw actionWaitError(`${work.key}: ${resyncUnobservedPrefix}; ${condition}; the row waits for the operator the hold names`);
+        throw new Error(`${work.key}: ${resyncUnobservedPrefix}; ${condition}; the claim woke it and leaves the row waiting for the observation`);
+      }
       return `observed ${work.key} at ${result.observedAt}, after the claim at ${since}`;
     },
     reclaim: async action => {
@@ -360,7 +391,7 @@ export interface ReleaseGuard {
   resumed?: () => Promise<unknown> | unknown;
   /** Every claim this executor makes, so the record beside it says what release each ran on. */
   claimed?: (action: ActionRow) => Promise<unknown> | unknown;
-  settled?: (action: ActionRow, result: 'done' | 'failed', reason: string) => Promise<unknown> | unknown;
+  settled?: (action: ActionRow, result: 'done' | 'failed' | 'wait', reason: string) => Promise<unknown> | unknown;
   /**
    * The executor's half of the restart exclusion: `claiming` announces a claim before `fenced`
    * looks for a restart under way (returning what stands, or null); a claim that finds a fence, or

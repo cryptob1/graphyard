@@ -172,8 +172,8 @@ test('unit:dispatch-race-guard the refusal names the pending dispatch action whi
   assert.match(released!, /GY-7 was released at .*, within the loop's 10s dispatch interval/);
   // A backoff that ends before a hand launch could reach its lease claim is the executor's next claim: refused.
   const backingOff = dispatchRaceRefusal(item({ actionQueue: { actions: [dispatchRow({ attempts: 1, retryAt: new Date(now.getTime() + 20_000).toISOString() })], history: [] } }), now, window);
-  assert.match(backingOff!, new RegExp(`dispatch action ${dispatchRow().id} .* is in a failure backoff that ends at .*, inside the ${handDispatchFenceMs / 1000}s a hand dispatch has to reach its lease claim`));
-  assert.match(dispatchRaceRefusal(item({ actionQueue: { actions: [dispatchRow({ attempts: 1, retryAt: new Date(now.getTime() + handDispatchFenceMs - 1).toISOString() })], history: [] } }), now, window)!, /failure backoff/);
+  assert.match(backingOff!, new RegExp(`dispatch action ${dispatchRow().id} .* is waiting to be attempted again at .*, inside the ${handDispatchFenceMs / 1000}s a hand dispatch has to reach its lease claim`));
+  assert.match(dispatchRaceRefusal(item({ actionQueue: { actions: [dispatchRow({ attempts: 1, retryAt: new Date(now.getTime() + handDispatchFenceMs - 1).toISOString() })], history: [] } }), now, window)!, /waiting to be attempted again/);
   // Past the interval, with nothing queued, and a row whose backoff outlasts the fence: a hand dispatch is the recovery.
   assert.equal(dispatchRaceRefusal(item(), now, { intervalMs: 10_000, releasedAt: iso(-11_000) }), null);
   assert.equal(dispatchRaceRefusal(item({ actionQueue: { actions: [dispatchRow({ attempts: 1, retryAt: new Date(now.getTime() + handDispatchFenceMs + 60_000).toISOString() })], history: [] } }), now, window), null);
@@ -197,7 +197,7 @@ test('unit:dispatch-race-guard master dispatch is refused naming the pending act
     assert.match(through, /Unknown worker profile claude-worker/); assert.doesNotMatch(through, /dispatch interval|claimable|claimed by/);
     // A row whose failure backoff ends within the fence is the executor's next claim, and master dispatch says so.
     state.work = [item({ systemDriven: false, actionQueue: { actions: [dispatchRow({ attempts: 1, retryAt: iso(30_000) })], history: [] } })];
-    assert.match(await master.refusal(['dispatch', 'GY-7', 'claude-worker']), new RegExp(`GY-7: dispatch action ${dispatchRow().id} .* is in a failure backoff that ends at .*; the dispatcher claims it then, so master dispatch is refused`));
+    assert.match(await master.refusal(['dispatch', 'GY-7', 'claude-worker']), new RegExp(`GY-7: dispatch action ${dispatchRow().id} .* is waiting to be attempted again at .*; the dispatcher claims it then, so master dispatch is refused`));
   } finally { await master.close(); }
 });
 
@@ -476,7 +476,7 @@ test('unit:dispatch-race-guard a hand launch through a long backoff claims nothi
   // The headroom outlasts the lease claim itself: the claim child's two CLI requests (the work read, then the claim), each bounded by its 30s timeout, plus its startup; and the fence outlasts the headroom.
   assert.ok(handDispatchClaimMarginMs > 2 * handDispatchClaimTimeoutMs && handDispatchClaimTimeoutMs >= 30_000 && handDispatchFenceMs > handDispatchClaimMarginMs);
   // Time spent reading after the snapshot is counted against the backoff: 61s gone brings its end inside the fence, and the hand dispatch is refused.
-  await assert.rejects(assertHandDispatch(backedOff, now, 10, async () => [], Date.now() - 61_000), /is in a failure backoff that ends at .*master dispatch is refused/);
+  await assert.rejects(assertHandDispatch(backedOff, now, 10, async () => [], Date.now() - 61_000), /is waiting to be attempted again at .*master dispatch is refused/);
   assert.deepEqual(await assertHandDispatch(item({ systemDriven: false }), now, 10, async () => []), {}, 'no backoff, no deadline');
   const master = await masterHarness({ work: [backedOff] });
   try {

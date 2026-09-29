@@ -149,7 +149,7 @@ const actionClaimSchema = z.object({
   leaseSeconds: z.number().int().min(10).max(900).optional(),
   work: z.string().min(1).max(200).optional(),
 }).strict();
-const actionSettleSchema = z.object({ executor: executorName.optional(), result: z.enum(['done', 'failed']), reason: z.string().trim().min(1).max(2000) }).strict();
+const actionSettleSchema = z.object({ executor: executorName.optional(), result: z.enum(['done', 'failed', 'wait']), reason: z.string().trim().min(1).max(2000) }).strict();
 // A renewal carries no result: it says only that the executor named on the claim is still
 // inside the handler, and asks for the lease it already holds to run on.
 const actionRenewSchema = z.object({ executor: executorName.optional(), leaseSeconds: z.number().int().min(10).max(900).optional() }).strict();

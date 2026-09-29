@@ -74,12 +74,18 @@ export function blockedFeatures(shortfalls: readonly PermissionShortfall[]): Per
 export const permissionLabel = (permission: string) => permissionLabels[permission] ?? permission;
 export const describePermission = (permission: string, level: PermissionLevel) => `${permissionLabel(permission)}: ${level}`;
 /**
+ * The clause that marks a remedy as the operator's alone: a pending permission request only the
+ * operator can accept. `describeShortfall` ends every shortfall sentence with it, and the
+ * executor's resync reads it to settle the row as an operator wait rather than a failure (GY-948).
+ */
+export const permissionRequestMark = 'accept the pending permission request at ';
+/**
  * One operator-facing sentence per shortfall. It names the missing permission, why it is
  * needed, and the installation page where a pending permission request is accepted.
  */
 export function describeShortfall(shortfall: PermissionShortfall, app: string, installationUrl: string) {
   const held = shortfall.features.map(feature => featureLabels[feature]).join(', ');
-  return `App ${app} lacks ${describePermission(shortfall.permission, shortfall.required)}${shortfall.granted ? ` (installed with ${shortfall.granted})` : ''}, which ${held} needs to ${shortfall.reasons[shortfall.reasons.length - 1]}; accept the pending permission request at ${installationUrl}`;
+  return `App ${app} lacks ${describePermission(shortfall.permission, shortfall.required)}${shortfall.granted ? ` (installed with ${shortfall.granted})` : ''}, which ${held} needs to ${shortfall.reasons[shortfall.reasons.length - 1]}; ${permissionRequestMark}${installationUrl}`;
 }
 /** The Markdown table the setup guide carries; a test keeps the guide equal to this output. */
 export function permissionTable(set: readonly PermissionRequirement[]) {

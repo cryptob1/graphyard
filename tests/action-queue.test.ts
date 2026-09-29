@@ -12,7 +12,7 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { evaluate, standingEscalations, type Observation, type Principal, type Work } from '../src/model.js';
-import { actionClaimMs, actionId, actionRenewIntervalMs, claimable, claimAction, idleActionable, openActions, queueSnapshot, reconcileActions, renewClaim, settleAction, type ActionRow } from '../src/model/actions.js';
+import { actionClaimMs, actionId, actionRenewIntervalMs, actionStall, actionWaitRecheckMs, claimable, claimAction, idleActionable, openActions, queueSnapshot, reconcileActions, renewClaim, settleAction, type ActionRow } from '../src/model/actions.js';
 import { actionJudgment, executorRunnableKinds, llmRoles, mechanicalActionKinds, nextAction, nextActionKinds, nextActionLlmRoles, refusalAction, type NextActionKind } from '../src/model/next-action.js';
 import { agentRequestLimit, agentRequestTypes, deciderFor, humanDecisions, leaseHeldRequestTypes, openAgentRequests, requestResolutionRefusal } from '../src/model/agent-requests.js';
 import { reconcileAutoDispatch, reviewNeed } from '../src/model/dispatch.js';
@@ -476,6 +476,40 @@ test('integration:action-queue-leases — actions are durable leased rows: a dea
   const retired = item.actionQueue!.history.at(-1)!;
   assert.equal(retired.id, claimed.action!.id);
   assert.equal(retired.result, 'done', 'a completed row becomes history untouched when its situation moves on');
+});
+
+// GY-948: a named wait is the third settlement, beside done and failed — the row rechecks on the
+// wait interval, counts toward no stall, and the queue reports the wait it named.
+test('integration:action-wait-settlement — a wait settles the row open on the wait recheck, never as a failure, and the ledger and queue carry it', async () => {
+  const pending = await submitted();
+  const item = await proveHead(await engine.observe(pending.id, pending.revision, observation(pending, { reviews: [] })));
+  const claimed = await engine.claimNextAction(executorA, { host: 'host-1', kinds: ['request-review'] }, randomUUID());
+  assert.ok(claimed.action, `open rows did not include a request-review row: ${JSON.stringify((await reload(item)).actionQueue?.actions ?? [])}`);
+  assert.equal(claimed.action!.kind, 'request-review');
+  const waitSentence = 'GY-1 waits for a reviewer slot, launched on the first tick one frees: role reviewer is at its concurrency limit (1 of 1 live)';
+  const settled = await engine.settleClaimedAction(executorA, claimed.action!.id, { result: 'wait', reason: waitSentence }, randomUUID());
+  assert.equal(settled.action.state, 'pending', 'a wait leaves the row open');
+  assert.equal(settled.action.result, 'wait');
+  assert.equal(settled.action.resolution, waitSentence);
+  assert.equal(settled.action.claim, null, 'a wait releases its claim');
+  assert.equal(actionStall(settled.action), null, 'a wait joins no failure run');
+  assert.ok(settled.action.retryAt, 'the row rechecks on the wait interval');
+  assert.ok(Date.parse(settled.action.retryAt!) - Date.now() <= actionWaitRecheckMs + 5_000 && Date.parse(settled.action.retryAt!) > Date.now(), `the recheck is the fixed wait interval, not a backoff (${settled.action.retryAt})`);
+  assert.equal(claimable(settled.action, new Date(Date.parse(settled.action.retryAt!))), true, 'claimable again the instant the recheck passes');
+
+  const stored = await reload(item);
+  const row = stored.actionQueue!.actions.find(entry => entry.id === claimed.action!.id)!;
+  assert.deepEqual(row.history.at(-1), { at: row.history.at(-1)!.at, event: 'waited', requester: 'graphyard', executor: executorA.id, result: 'wait', reason: waitSentence });
+  const waited = (await events(stored, 'action.waited')).filter(event => event.payload.details.id === claimed.action!.id);
+  assert.equal(waited.length, 1, 'the ledger carries the wait beside the document that caused it');
+  assert.equal(waited[0].payload.details.result, 'wait');
+
+  const snapshot = queueSnapshot([stored], new Date());
+  const entry = snapshot.backoff.find(candidate => candidate.id === claimed.action!.id);
+  assert.ok(entry, 'the waiting row is on the queue, not invisible');
+  assert.equal(entry!.wait, waitSentence, 'the queue reports the wait the row named');
+  assert.equal(entry!.stall, null, 'and no stall: the wait names a condition outside the row');
+  assert.equal(snapshot.stalled.length, 0, 'a waited row is never counted among the stalled');
 });
 
 // ---- The fleet: handlers that stand in for the sessions a real executor launches --------------
