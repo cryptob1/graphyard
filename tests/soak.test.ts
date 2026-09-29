@@ -531,7 +531,11 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       throw Object.assign(new Error('No healthy agent account for the approver: every approver account is spent until its quota resets'), { capacityExhausted: true });
     }
     const unjudged = hand.get(decision);
-    if (!unjudged) capacityLaunched.push({ decision, key: work.key, elapsed: clock.now() - dayStart });
+    // The relaunch bound is counted in cycles, so the launch is recorded on the day's own schedule
+    // (`elapsed`, advanced one simulated minute per cycle): the simulated clock also runs real time
+    // forward since the day was installed, and a launch recorded on it would overrun a two-cycle
+    // bound by however slow the host was, not by any cycle the loop spent.
+    if (!unjudged) capacityLaunched.push({ decision, key: work.key, elapsed });
     if (unjudged) {
       unjudged.launches += 1;
       if (unjudged.key === items[plan.items - 1].key && unjudged.launches === 1) { unjudged.refused += 1; throw new Error('the agent registry for the approver role is unreachable: timeout'); }
@@ -781,7 +785,10 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   // GY-852: the reassigned item's own pane and the pane the reused name came to hold.
   const reassign = { pane: null as string | null, phantom: null as string | null, phantomGone: false };
   const jobsDue = async () => Number((await store.pool.query('SELECT count(*) AS due FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now())')).rows[0].due);
-  for (let elapsed = 0; elapsed <= options.hours * hour;) {
+  // The day's schedule position, hoisted so the launch effects record against it: one cycle is one
+  // simulated minute, and a launch the cycle handed over settles before the position advances.
+  let elapsed = 0;
+  for (; elapsed <= options.hours * hour;) {
     const now = clock.now();
     // Scheduled events: releases, the file split on main, the deploys. The queue-only day runs with
     // the split past its end: the re-plan and its stale-tip flush are the main day's scenario, and
