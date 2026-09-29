@@ -35,7 +35,7 @@ Never pasted ([authorization](onboarding.md#what-the-generated-instructions-auth
 
 #### How the request reaches the runtime
 
-The launcher writes `.graphyard/launch/NAME.request` (and a Claude session's `NAME.role`), mode 0600, removed with the checkout, and types:
+The launcher writes `.graphyard/launch/NAME.request` (and Claude's `NAME.role`), mode 0600, removed with the checkout, and types:
 
 ```
 GY=/path/to/checkout/.graphyard/launch/NAME; claude … --settings /path/to/repo/.graphyard/harness/producer-PROFILE.json --append-system-prompt-file "$GY.role" "$(cat "$GY.request")"
@@ -45,7 +45,7 @@ The typed line is bounded at **512 bytes** whatever the request is.
 
 #### The start bound reads the pane
 
-The runtime is **ready** when Herdr reports it active with no prompt, or its banner shows (`the claude runtime is on screen while Herdr reports it unknown`). Ready within **60 seconds** (`run.launchStartSeconds`) starts; one still starting gets **120 seconds** (`started.extended`). It is refused with the case and the pane's last non-empty line, never Herdr's own `agent_not_found`: `the claude runtime never started within 60 s (command still echoing)`, `… was still starting after 120 s`, `… is blocked before it is ready`; retried as `Automatic producer launch for GY-N refused 1 time(s)`. A failed launch stops its supervisor, closes its pane, releases its claim.
+The runtime is **ready** when Herdr reports it active with no prompt or its banner shows (`the claude runtime is on screen while Herdr reports it unknown`). Ready within **60 seconds** (`run.launchStartSeconds`) starts; one still starting gets **120 seconds** (`started.extended`). It is refused with the case and the pane's last non-empty line, never Herdr's own `agent_not_found`: `the claude runtime never started within 60 s (command still echoing)`, `… was still starting after 120 s`, `… is blocked before it is ready`; retried as `Automatic producer launch for GY-N refused 1 time(s)`. A failed launch stops its supervisor, closes its pane, releases its claim.
 
 #### First-run consent prompts
 
@@ -59,11 +59,11 @@ A reviewer or producer is `awaiting acknowledgement` until 30 s active (`counts.
 
 When a live attempt's blocker or scope request resolves, its inactive session is re-prompted once (item, epoch, change, `complete GY-N EPOCH PR`); blocking again on that epoch ends the attempt and its blocker; a fresh session, preferably another runtime, takes over. **Idle-with-lease** (30 quiet minutes, nothing open) is re-prompted once, then after 30 more handed to a new attempt on its branch.
 
-Every paste goes to the **pane on the attempt's own session handle**, never the profile's reusable agent name another session may hold (GY-852); a gone pane hands the attempt on, nowhere else.
+Every paste goes to the **pane on the attempt's own session handle**, never the profile's reusable agent name another session may hold (GY-852); a gone pane hands the attempt on.
 
 ### Panes are closed and reclaimed
 
-Every launch records its pane on the item's session handle; when the loop ends that session — finished, failed, ended by the loop, a lead it cannot keep — it closes the pane in the same step and records the close. Research and triage run headless, opening no pane. A per-cycle sweep is the backstop: it closes panes Graphyard launched **on this host**, whose session has ended or whose worktree is gone, matched only against what this host's launchers recorded, once agentless past the launch bound (**120 s**), at most **6** a pass — never a pane Graphyard did not launch, one with an agent, or one whose worktree holds a live lease. Each pass records the host's pane count and oldest agentless pane on the loop cursor (`master status` `daemon.actions`), raising attention once agentless panes exceed **20** (`daemon.escalations`) and recording the drain at zero.
+Every launch records its pane on the item's session handle; when the loop ends that session — finished, failed, ended by the loop, a lead it cannot keep — it closes the pane in the same step and records the close. Research and triage run headless, opening no pane. A per-cycle sweep is the backstop: it closes panes Graphyard launched **on this host**, whose session has ended or whose worktree is gone, matched only against what this host's launchers recorded, once agentless past the launch bound (**120 s**), at most **6** a pass — never a pane Graphyard did not launch, one with an agent, or one whose worktree holds a live lease. Each pass records the host's pane count and oldest agentless pane (`master status` `daemon.actions`), raising attention once agentless panes exceed **20** (`daemon.escalations`) and recording the drain at zero.
 
 ### The dispatcher's own state
 
