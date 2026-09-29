@@ -16,7 +16,10 @@
 // findings — so a reduction that came from somewhere else is not credited to the change. It
 // relaxes nothing: a miss is printed as a finding with the measured values and a named follow-up,
 // the window is never narrowed, no delivery is dropped, and the exit status of a missed claim is
-// 2. A claim run records to `.graphyard/measurements/rework-claim`, beside — never inside — the
+// 2 (an undelivered claim reports `not judged` and exits 2 as well, never a crash). A claim run
+// that measured its window but lost its cause classification exits 1: the mechanical share is
+// never quietly missing from a printed report. A claim run records to
+// `.graphyard/measurements/rework-claim`, beside — never inside — the
 // routine speed reports, and its recorded JSON names the merge commit it measured after, the
 // window basis, the exact command line and the ledger provenance of every counted figure.
 //
@@ -207,9 +210,11 @@ export function classifyRounds(work, ledger, { since = null, until = null } = {}
     const dedupeKey = `${event.work_id}|${candidate}|${binding ?? cause ?? 'unclassified'}`;
     const round = { key: keyOf.get(event.work_id) ?? `work ${String(event.work_id ?? '').slice(0, 8)}`, at: event.created_at, candidate, cause: cause ?? 'unclassified',
       grounds: binding ? 'decision binding' : cause ? 'reason template' : 'none', reason: snippet(reason) };
-    if (round.cause === 'unclassified') unclassified.push(round);
     if (rounds.has(dedupeKey)) { duplicates++; continue; }
     rounds.set(dedupeKey, round);
+    // Only deduplicated rounds reach the audit lists: a round counted twice would inflate the
+    // unclassified share as well as the total.
+    if (round.cause === 'unclassified') unclassified.push(round);
   }
   const counted = [...rounds.values()];
   const causes = Object.fromEntries(reworkCauses.map(cause => [cause, counted.filter(round => round.cause === cause).length]));
@@ -246,13 +251,14 @@ export function measure(work, now, options, summarize, context = {}) {
   const sinceMs = claim.window.since ? Date.parse(claim.window.since) : null;
   const ledger = context.ledger ?? null;
   const untilMs = options.until ? Date.parse(options.until) : null;
-  // Without ledger rows in hand there is nothing to classify: the claim's window and verdict are
-  // still reported, and the classification is absent rather than empty.
+  // Classification follows the claim's own measurement: a claim that measured nothing (its window
+  // unknown, so `before`/`after` are null) classifies nothing, and the run still reports the
+  // window and verdict truthfully instead of crashing on the absent halves.
   // The before side covers exactly the ledger range read for it (`ledger.readSince`), named, so
   // an unread stretch is never reported as a stretch without rework.
   const beforeSince = ledger?.readSince ?? options.since ?? null;
   const rounds = ledger && { ...ledger, rework: (ledger.rework ?? []).filter(event => event.work_id !== claim.itemId) };
-  const findings = sinceMs === null || !ledger ? null : {
+  const findings = !claim.delivered || !claim.after || !ledger ? null : {
     basis: claim.window.basis, since: claim.window.since, until: options.until ?? null, beforeSince,
     before: classifyRounds(withoutClaim(work, claim.item), rounds, { since: beforeSince ? Date.parse(beforeSince) : null, until: sinceMs }),
     after: classifyRounds(withoutClaim(work, claim.item), rounds, { since: sinceMs, until: untilMs }),
@@ -411,6 +417,10 @@ export async function main(argv = process.argv.slice(2), env = process.env, deps
     context.eventsRead = context.ledger.eventsRead;
   }
   const report = measure(snapshot.work, now, options, deps.summarize ?? await summarizer(), context);
+  // AC-2's share is the claim run's second deliverable: a window that was measured but whose
+  // rework-cause classification is missing is an error, never a report that quietly omits it.
+  if (report.claim?.delivered && report.claim.window.since && !report.findings)
+    throw new Error(`The ${options.claim} window was measured but its rework-cause classification is missing: AC-2's mechanical-finding share cannot be reported, so the run refuses to print a report that quietly omits it`);
   if (options.record) {
     await mkdir(options.record, { recursive: true });
     const file = join(options.record, `${report.measuredAt.replace(/[:.]/g, '-')}.json`);

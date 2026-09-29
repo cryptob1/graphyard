@@ -82,7 +82,7 @@ node scripts/measure-pipeline-speed.mjs --claim GY-115 --record .graphyard/measu
 ```
 
 - **Window**: deliveries merged after GY-115's merge commit (named), GY-115 excluded. It starts at the deployment observation of a release carrying it, else at the merge instant, named as the weaker basis. Deployed-revision ancestry is informational.
-- **Counted**: the median of `speed.reworkRounds` (ledger-replayed timelines, coverage named) against the fixed pre-merge median of 2, judged over at least ten deliveries. A miss is the finding: measured values, a named follow-up, exit code 2; window, population and baseline are never narrowed.
+- **Counted**: the median of `speed.reworkRounds` (ledger-replayed timelines, coverage named) against the fixed pre-merge median of 2, judged over at least ten deliveries. A miss is the finding: measured values, a named follow-up, exit code 2; window, population and baseline are never narrowed. An undelivered claim reports `not judged` (exit 2), never a crash; a measured window whose cause classification is missing exits 1 — the share is never quietly missing.
 - **Causes**: `rework` events of submitted items, per head and cause, over the window and an equal-length window before the merge (or `--since`), classified by decision binding (`:proof:`, `:ci:` mechanical; `:threads:`, `:verdict:` review; `:conflict:`, `:sync:` integration), else the loop's reason templates. The mechanical share of finding rounds is reported for both, reconciled against the summary's count.
 
 ## Guarded merges
