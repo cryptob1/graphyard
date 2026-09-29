@@ -33,7 +33,7 @@ that host's loop. `sessions.unseen` lists stale handles. `dispatch.sessionReconc
 
 - **Vanished**: missing from two consecutive listings.
 - **Ended**: agentless pane or terminal state; `idle`, `done` and
-  `blocked` are deliberately not terminal.
+  `blocked` are not terminal.
 - **Superseded**: a review or proof session for a head the item moved past; a delivered item is closed the same
   way as any other. Implementation sessions are left to the lease.
 - **Duplicate**: the older of two sessions for one role and head.
@@ -60,7 +60,7 @@ One follow-up item per parent; approvals append their findings. With `run.resear
 
 ## Automatic dispatch at submit
 
-A candidate passing the build gate gets, in `autoDispatch`, one producer request per proof group (`unit`, `integration`, `manual` for `producerProofs`), then a review request once its unit and integration proofs pass (`proofs-pending` until then; failure reworks). **The loop launches each request within 30 seconds**: every `dispatchIntervalSeconds` it starts the reviewer profile (`run.reviewerProfile`) and one producer session per proof group on a `master producer add FILE` profile ([template](../examples/master/claude-producer.json); `.graphyard/reviews.json`, `.graphyard/producers.json`). A reviewer launch awaits the head's bot reviews (`run.awaitReviewers`) for `awaitReviewersMinutes` (default 8), skipping one that last posted a usage-limit notice until it next reviews (`skipped: <bot> exhausted since <time>`; `dispatch.botReviewers`).
+A candidate passing the build gate gets, in `autoDispatch`, one producer request per proof group (`unit`, `integration`, `manual` for `producerProofs`), then a review request once unit and integration proofs pass (`proofs-pending` until then; failure reworks). **The loop launches each request in 30 seconds**: every `dispatchIntervalSeconds` it starts the reviewer profile (`run.reviewerProfile`) and one producer session per proof group on `master producer add FILE` profiles ([template](../examples/master/claude-producer.json); `.graphyard/reviews.json`, `.graphyard/producers.json`). A reviewer launch awaits the head's bot reviews (`run.awaitReviewers`) for `awaitReviewersMinutes`, skipping one that last posted a usage-limit notice until it next reviews (`skipped: <bot> exhausted since <time>`; `dispatch.botReviewers`).
 
 **Concurrency is per role.** A profile's `concurrency` (1–20, default 1) caps its simultaneous sessions, each with a name unique to its request above one. It applies without a restart; lowering it drains sessions first (`longestWaitMs`); a role starved ten minutes counts in `counts.concurrencyStarved`.
 
@@ -78,19 +78,19 @@ A passing producer records `"exercise"`: the proof rerun with the criterion's be
 "exercise":{"criterion":"AC-1","behaviour":"the lease expiry check in claim()","result":"fail","executed":4}
 ```
 
-A pass is trusted only when that stripped run failed with a case executed; otherwise it is recorded as not exercising its criterion rather than as passing (`unexercised`, `evidence.exercise.refused`); the loop requests rework quoting it. When every proof a group has left is such a finding, the next action is `request-rework`, and `master status` names it as awaiting rework for a non-exercising proof. `decide attest` adds `exercise` (fails on base), approver-confirmed; unexercised `manual:` proofs re-attest, never rework; attestations carry only on a kept patch-id.
+A pass is trusted only when that stripped run failed with a case executed; otherwise it is recorded `unexercised`, not passing (`evidence.exercise.refused`), and the loop requests rework quoting it. When every proof a group has left is such a finding, the next action is `request-rework`; `master status` names it awaiting rework for a non-exercising proof. `decide attest` adds `exercise` (fails on base), approver-confirmed; unexercised `manual:` proofs re-attest, never rework; attestations carry only on a kept patch-id.
 
 ## Stalled-gate recovery
 
-A `fault-class-stalled-gate` fault (three in 24h) — an item holding a failing gate nothing moves — recovers every cycle: a conflicting head gets its sync rework at once — the binding names head and base tip, so a stale observation decides; an approved answer lifts the refusal blocker and a worker's own `Blocked on scope:` report, in the same mutation, and nothing else.
+`fault-class-stalled-gate` faults (three in 24h: an item holding a failing gate nothing moves) recover every cycle: a conflicting head's sync rework fires immediately, its conflict binding decisive from a stale observation; an approved scope answer lifts the refusal blocker and the worker's `Blocked on scope:` report in the same mutation.
 
 ## Guarded merges
 
-`master merge GY-N|--all` asks [GitHub to merge](github.md#merge-queue) only under current authorization for the exact head, base and policy; protocol skew refuses (`… deploy main first`).
+`master merge GY-N|--all` asks [GitHub to merge](github.md#merge-queue) only under current authorization for the exact head, base and policy; protocol skew refuses.
 
 ### Repair lane
 
-The first of two no-admin-bypass exceptions: a `"repair": "merge-path"` item (`mergePath` files only) stalled 15 minutes, checks passed, given an approver's `master decide GY-N repair-merge REASON`, merges through the App's ruleset bypass, audited (`repair.merged`), flagged until a normal merge.
+The first no-admin-bypass exception: a `"repair": "merge-path"` item (`mergePath` files only) stalled 15 minutes, checks passed, given an approver's `master decide GY-N repair-merge REASON`, merges through the App's ruleset bypass, audited (`repair.merged`), flagged until a normal merge.
 
 The main guard's revert ([optimistic merges](github.md#optimistic-merges)) is the second: a confirmed required-suite failure on main traced to the culprit lands a revert built on the base tip — refused when a later merge touched the culprit's files — head-bound through the same bypass, recorded `optimistic.revert.*` not `repair.merged`, the item reopened as rework.
 
