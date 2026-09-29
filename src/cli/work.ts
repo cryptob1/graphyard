@@ -1,10 +1,43 @@
 import { readFile } from 'node:fs/promises';
-import { wholeDocument } from '../model/work-summary.js';
-import { inheritedObligations } from '../model.js';
+import { isSummary, wholeDocument } from '../model/work-summary.js';
+import { inheritedObligations, type Work } from '../model.js';
 import { diagnose, fileConflicts, obligationLedger, proofAuthorization, proofPreview, resourceConflicts } from '../coordination.js';
 import { handoff } from '../repository-setup.js';
 import { eventHistoryLimits, parseEventHistoryFlags } from '../events-history.js';
 import { defineCommands } from './registry.js';
+
+/**
+ * The snapshot fields the obligation readers (`obligations`, `diagnose`) derive from every entry
+ * (src/model/bootstrap.ts): the deferred declarations live in `criteria`, the discharge evidence
+ * and its candidate binding in `evidence`, and inheritance overlaps `plannedFiles`. A settled
+ * delivery's summary carries all three, so it is used as it is; a summary served without any of
+ * them is read whole. Keying the read on every field the derivation needs, not on `criteria`
+ * alone, is what keeps a future summary trim from being used silently (GY-562, the GY-447 review
+ * follow-ups).
+ */
+const obligationFields = ['criteria', 'plannedFiles', 'evidence'] as const;
+/** How many summary documents the obligation readers read at once. */
+const obligationReadConcurrency = 4;
+
+/**
+ * The snapshot as the obligation readers need it: every entry that carries the fields above as it
+ * is, every summary served without one of them read whole. The reads run a few at a time, so a
+ * future summary trim degrades to a bounded slower correct ledger rather than one unbounded
+ * request per settled delivery all at once (GY-562, the GY-447 review follow-ups).
+ */
+export async function obligationDocuments<T extends { id: string }>(entries: T[], read: (path: string) => Promise<any>): Promise<Work[]> {
+  const documents = new Array<Work>(entries.length);
+  let next = 0;
+  const readers = Array.from({ length: Math.min(obligationReadConcurrency, entries.length) }, async () => {
+    while (next < entries.length) {
+      const index = next++, entry = entries[index];
+      documents[index] = isSummary(entry) && obligationFields.some(field => !Array.isArray((entry as Partial<Work>)[field]))
+        ? await wholeDocument(entry, read) : entry as unknown as Work;
+    }
+  });
+  await Promise.all(readers);
+  return documents;
+}
 
 /** Reading work: control-plane status, the ledger, diagnosis, creation and history. */
 export const workCommands = defineCommands([
@@ -23,19 +56,22 @@ export const workCommands = defineCommands([
       if (!listed) throw new Error(`Unknown work item ${id}`);
       // A settled delivery is a summary in the snapshot (GY-422); its diagnosis reads the whole document.
       const item = await wholeDocument(listed, api);
+      // Obligations inherited from a delivered dependency derive from its criteria, planned files
+      // and discharge evidence (GY-562): a summary served without one of those is read whole.
+      const all = await obligationDocuments(snapshot.work, api);
       // A required proof nobody is authorized to produce can never be satisfied; report it
       // alongside the other blockers rather than leaving it to be discovered at acceptance.
       let authorities: any[] = [];
       try { authorities = (await api('proof-grants')).authorities ?? []; } catch { /* reported as unknown authority below */ }
-      const authorization = proofAuthorization(item, authorities, snapshot.work);
-      return print({ key: item.key, observedAt: snapshot.now, diagnostics: diagnose(item, snapshot.work, Date.parse(snapshot.now), snapshot.jobs), overlaps: fileConflicts(item, snapshot.work), proofs: proofPreview(item, snapshot.work), obligations: inheritedObligations(item, snapshot.work),
+      const authorization = proofAuthorization(item, authorities, all);
+      return print({ key: item.key, observedAt: snapshot.now, diagnostics: diagnose(item, all, Date.parse(snapshot.now), snapshot.jobs), overlaps: fileConflicts(item, snapshot.work), proofs: proofPreview(item, all), obligations: inheritedObligations(item, all),
         proofAuthority: authorization, proofGaps: authorization.filter(entry => !entry.producers.length).map(entry => entry.proof) });
     },
   },
   {
     name: 'obligations',
     help: ['  obligations                  List every deferred bootstrap proof still owed and who inherits it'],
-    run: async ({ api, print }) => print(obligationLedger((await api('work-snapshot')).work)),
+    run: async ({ api, print }) => print(obligationLedger(await obligationDocuments((await api('work-snapshot')).work, api))),
   },
   {
     name: 'list',
