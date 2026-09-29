@@ -15,6 +15,7 @@ import type { Cycle } from './cycle.js';
 import { budgetedPage, docsHeadroom, docsHeadroomText, docsTrimItem, docsWords, openDocsTrimItem, repositoryConfigFile, repositoryDocsBudget, type DocsHeadroom, type DocsWordBudget, type DocsWordCount } from '../model/documentation.js';
 import { agentOwner } from '../master/attention.js';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
+import { diagnosisStep, standingFaultClassItem } from './diagnosis.js';
 import { candidateKey } from './reconcile.js';
 import { checkInvariants, invariantFaultKind, invariantFaults } from '../model/invariants.js';
 
@@ -137,7 +138,7 @@ export function endFailingRuns(state: Pick<DaemonState, 'actions' | 'faults'>, p
  */
 export async function fileRecurringFaultClasses(state: DaemonState, effects: DaemonEffects, work: Work[], clock: number, now: () => number, performed: DaemonAction[]) {
   const policy = effects.faultClassPolicy ?? faultClassPolicyFromEnv(process.env);
-  for (const recurrence of recurringClasses(state.faults.instances, work, policy, clock)) {
+  for (const recurrence of recurringClasses(state.faults.instances, work, policy, clock, standingFaultClassItem)) {
     if (recurrence.item) { for (const instance of recurrence.unlinked) instance.linkedTo = recurrence.item.key; continue; }
     if (!recurrence.file || !effects.fileFaultClass) continue;
     const key = faultActionKey(recurrence.faultClass), previous = state.actions[key];
@@ -295,4 +296,7 @@ export async function faultStep(cycle: Cycle, assessments: Record<string, Contai
     new Date(clock).toISOString(), partial || (herdrRead.available ? false : new Set<string>([...herdrFaultKinds, invariantFaultKind('lingering-sessions')])));
   await fileRecurringFaultClasses(state, effects, snapshot.work, clock, now, performed);
   await fileDocsTrim(state, effects, snapshot.work, reported?.docs, now, performed);
+  // 7c. Each recurring-fault item filed (this cycle included) and each invariant violation past its
+  //     bound gets its diagnosis, and each diagnosis moves on by one decision (GY-439).
+  await diagnosisStep(cycle);
 }

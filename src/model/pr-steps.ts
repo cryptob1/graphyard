@@ -1,8 +1,9 @@
 import { carriedBindings, deliveryState, isClosed, type Gate, type Work } from '../model.js';
-import { latestCheck, tipValidationPrefix } from '../merge-queue.js';
+import { latestCheck, tipValidationPrefix, type TipView } from '../merge-queue.js';
 import { leftFlowAt, noRelease, servedFor, type ReleaseView } from './release.js';
 import type { PipelineTimeline } from '../pipeline-speed.js';
 import { assignment } from './assignment.js';
+import { ciCheckName } from './ci-refusal.js';
 import { statusDuration, type StatusDuration } from './duration.js';
 import { plainReason, statusSince } from './plain-status.js';
 
@@ -71,7 +72,7 @@ export function checkStates(work: Work, ciAppIds: readonly number[] | null = nul
   // A queued entry's CI on its own speculative tip is refused by the merge gate instead (GY-292,
   // `tipValidation`), with the test gate's own wording after the queue's prefix.
   const reasons = [...gate?.reasons ?? [], ...tipChecks(work)];
-  const named = (name: string) => !gate || reasons.includes(`Required CI check ${name} has not passed on the current candidate`);
+  const named = (name: string) => !gate || reasons.some(reason => ciCheckName(reason) === name);
   return (work.policy.checks ?? []).map(name => {
     if (!named(name)) return { name, state: 'passed' };
     const runs = (work.observation?.checks ?? []).filter(check => check.name === name && !!ciAppIds?.includes(check.appId));
@@ -95,6 +96,12 @@ function tipChecks(work: Work): string[] {
 export function batchedWith(work: Work): { number: number; ahead: string[] } | null {
   const batch = work.queue?.batch, at = batch?.members.indexOf(work.key) ?? -1;
   return batch && at > 0 ? { number: batch.batch, ahead: batch.members.slice(0, at) } : null;
+}
+
+/** One in-flight parallel tip (GY-498) as the Merge step names it: position, entries, CI state. */
+export function describeTip(tip: TipView): string {
+  const state = tip.ci === 'pass' ? 'passed' : tip.ci === 'fail' ? `failed ${tip.failedCheck ?? 'a check'}` : tip.ci === 'running' ? 'running' : tip.tip ? 'waiting for CI' : 'not published yet';
+  return `tip ${tip.position} (${tip.entries.join(', ')}) ${state}`;
 }
 
 /** The review refusal no reviewer can answer: every configured reviewer profile is exhausted. */
@@ -176,6 +183,14 @@ export function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: n
       // CI on the entry's own speculative tip: the merge step validating the combined result,
       // shown here as a substate of Merge, never as a return to Test (GY-292).
       // A batched entry names the members ahead of it in its batch, whose combination its tip holds (GY-330).
+      // Under the parallel-tip window (GY-498) the entry merges behind every tip up to its own, all
+      // running CI at once: each is named with its position, the entries it holds and its CI state.
+      const tips = work.queue?.tips;
+      if (tips?.length) {
+        const checks = tipChecks(work).length ? checkStates(work, release.ciAppIds) : [];
+        const done = checks.length ? ` · ${checks.filter(check => check.state === 'passed').length} of ${checks.length} checks done` : '';
+        return { detail: `validating ${tips.length === 1 ? 'its tip' : `${tips.length} parallel tips`}: ${tips.map(describeTip).join('; ')}${done}`, who: 'Automated checks' };
+      }
       if (tipChecks(work).length) {
         const checks = checkStates(work, release.ciAppIds);
         const batch = batchedWith(work);
