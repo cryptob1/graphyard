@@ -315,12 +315,12 @@ async function abandonLaunch(error: unknown, pane: string | undefined, tabId: st
  */
 export const approverSessionId = (decision: string) => `approver:${decision}`;
 /**
- * The approver's own copy of the repository (GY-564): a clone with its own refs, index and working
- * tree, detached at the candidate head (or the current head when none is bound), with no remote.
+ * The approver's own copy of the repository (GY-564): a clone with its own refs, index, working tree and object store, detached at the candidate head (or the current head when none is bound), with no remote.
+ * Nothing is shared with the operator's repository (GY-926): no `--shared` alternates — git-clone(1) calls them dangerous: gc/prune there can delete objects the approver's clone needs, and the file would name the operator's store — and no hardlinks.
  * The bound SHA is fetched while the remote exists; one the repository cannot supply refuses the launch rather than silently detach at HEAD, where the approver would judge an unrelated tree.
  */
 export async function approverClone(root: string, target: string, sha?: string, run: ChildRun = defaultChildRun) {
-  await run('git', ['clone', '--quiet', '--shared', '--no-checkout', root, target], { cwd: root });
+  await run('git', ['clone', '--quiet', '--no-hardlinks', '--no-checkout', root, target], { cwd: root });
   if (sha) try { await run('git', ['-C', target, 'fetch', '--quiet', 'origin', sha], { cwd: target }); } catch { /* not in the operator's repository */ }
   await run('git', ['-C', target, 'remote', 'remove', 'origin'], { cwd: target });
   await run('git', ['-C', target, 'checkout', '--quiet', '--detach', sha ?? 'HEAD'], { cwd: target });
