@@ -14,6 +14,7 @@ import { carriedApproval, carryRefusal, currentCarry, decideCarry, describeQueue
 import { assertReviewCandidate } from '../src/reviewer.js';
 import { diagnose } from '../src/coordination.js';
 import { buildMasterStatus, refuseStaleCarry, repostCarriedApproval, StaleCarriedApprovalError, type MasterConfig } from '../src/master.js';
+import { GuardRefusalError } from '../src/master/merge.js';
 import { mergeStep, repeatedMergeRefusalMs } from '../src/daemon/cycle-delivery.js';
 import type { Cycle } from '../src/daemon/cycle.js';
 import { neededDecision } from '../src/daemon/decisions.js';
@@ -440,7 +441,7 @@ test('unit:stale-carried-approval-rereviewed — one refused re-post clears the 
   assert.ok(failure instanceof StaleCarriedApprovalError, String(failure));
   const reported: string[] = [];
   const mutation = async (path: string, data: unknown, requestId?: string) => { reported.push(path); return engine.execute(coordinator, 'mergerefused', second.id, data, requestId ?? randomUUID()); };
-  await assert.rejects(refuseStaleCarry(second, failure, mutation, (item, step) => `${item.id}:${step}`), /Graphyard cleared the carried approval: the review gate requests a fresh review of tip .*, and the next queue entry heads the queue meanwhile/);
+  await assert.rejects(refuseStaleCarry(second, failure, carriedApproval(second)!, mutation, (item, step) => `${item.id}:${step}`), /Graphyard cleared the carried approval: the review gate requests a fresh review of tip .*, and the next queue entry heads the queue meanwhile/);
   assert.deepEqual(reported, [`work/${second.id}/mergerefused`], 'one refused re-post is reported once');
 
   second = await reload(second);
@@ -479,7 +480,7 @@ test('unit:repeated-merge-refusal-acted — a guarded merge refused for the same
   const effects = {
     snapshot: async () => ({ work: [view(await reload(item))], now: new Date(clock).toISOString() }),
     persist: async () => {},
-    merge: async () => { throw new Error(`${item.key} merge refused: ${reason}`); },
+    merge: async () => { throw new GuardRefusalError(`${item.key} merge refused: ${reason}`); },
     refuseMerge: async (work: Work, text: string, since: string) => { reported.push({ reason: text, since }); return engine.execute(coordinator, 'mergerefused', work.id, { sha: work.candidate!.sha, baseSha: work.candidate!.baseSha, policyRevision: work.policyRevision, reason: text, since }, randomUUID()); },
   };
   const cycle = async () => {
@@ -540,7 +541,7 @@ test('unit:repeated-merge-refusal-acted — a rereview that a fresh approval ans
   const effects = {
     snapshot: async () => ({ work: [view(await reload(item))], now: new Date(clock).toISOString() }),
     persist: async () => {},
-    merge: async () => { throw new Error(reason); },
+    merge: async () => { throw new GuardRefusalError(reason); },
     refuseMerge: async (work: Work, text: string, since: string) => { reported.push({ reason: text, since }); return engine.execute(coordinator, 'mergerefused', work.id, { sha: work.candidate!.sha, baseSha: work.candidate!.baseSha, policyRevision: work.policyRevision, reason: text, since }, randomUUID()); },
   };
   const cycle = async () => {

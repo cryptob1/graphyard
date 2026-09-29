@@ -4,6 +4,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { productionEnvironmentFromEnv } from '../flow-analytics.js';
 import { type ChildRun, ChildWaitLedger, childRunner } from '../child-runner.js';
 import type { Work } from '../model.js';
+import { carriedApproval } from '../model/carry.js';
 import type { DecisionSituation } from '../model/approval.js';
 import type { ScopeRequestState } from '../model/scope.js';
 import { successorWidening } from '../model/successors.js';
@@ -687,7 +688,14 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
         '-f', `pr=${work.submission!.pr}`, '-f', `work_id=${work.id}`, '-f', `policy_revision=${work.policyRevision}`]);
     },
     merge: work => mergeExecutor(current(), snapshot, mutate, deps.executor, randomUUID(), run)(work),
-    refuseMerge: (work, reason, since) => mutate(`work/${work.id}/mergerefused`, { sha: work.candidate!.sha, baseSha: work.candidate!.baseSha, policyRevision: work.policyRevision, reason: reason.slice(0, 2000), since }),
+    refuseMerge: (work, reason, since) => {
+      // The report names the carried approval the loop judged (GY-904) — read from the same
+      // snapshot the ten-minute handler read — so the control plane refuses to clear a binding an
+      // approval refreshed since, and the next attempt re-posts through that newer binding.
+      const carried = carriedApproval(work);
+      return mutate(`work/${work.id}/mergerefused`, { sha: work.candidate!.sha, baseSha: work.candidate!.baseSha, policyRevision: work.policyRevision, reason: reason.slice(0, 2000), since,
+        rejected: carried ? { reviewer: carried.reviewer, ...(carried.reviewId !== undefined ? { reviewId: carried.reviewId } : {}), originalSha: carried.originalSha } : null });
+    },
     // `root` is this checkout: containment is derived from its object store, never from the forge.
     observeDeployment: (delivered, retained) => observeDeployment(current(), delivered, run, fetcher, () => Date.now(), { root, retained }),
     publishProductionEnvironment: async () => {
