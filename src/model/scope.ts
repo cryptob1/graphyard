@@ -1,5 +1,5 @@
 import { documentationGlobMatches } from './documentation-glob.js';
-import { type CollapsedScope, collapseArea, collapsePlannedFiles, describeWidening, plannedFilesCovered, routableScopeRequest } from './scope-collapse.js';
+import { type CollapsedScope, collapseArea, collapsePlannedFiles, describeWidening, plannedFilesCovered, routableScopeRequest, terminalScopeRefusal } from './scope-collapse.js';
 // Deliberately bounded scope syntax: exact paths or directory prefixes ending /, /*, /**.
 // Unsupported glob expressions are not interpreted as semantic dependency knowledge.
 export function pathScope(value: string) {
@@ -253,6 +253,8 @@ export function redecidableScopeRefusal(item: { plannedFiles?: readonly string[]
 
 /** The additive widening a refused request asks the approver for (GY-549): defined beside the fold it proposes, in model/scope-collapse.ts. */
 export { routableScopeRequest };
+/** Whether the standing refusal is the terminal over-cap one `master scope` can never carry (GY-936): defined beside the fold, in model/scope-collapse.ts. */
+export { terminalScopeRefusal };
 
 /** The requested paths the item's plannedFiles do not yet cover — what is still being asked for. */
 export const unplannedPaths = (plannedFiles: readonly string[] | undefined, paths: readonly string[]) =>
