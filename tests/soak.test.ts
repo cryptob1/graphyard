@@ -274,7 +274,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   const dayPlan = options.reviews
     ? { ...plan, items: 12, releaseEveryMs: 12 * minute, rework: new Set([3, 7]), deploys: [2 * hour + 30 * minute],
         dirtyCheckout: { from: 6 * hour, to: 7 * hour }, split: { ...plan.split, at: 6 * hour },
-        deaths: new Set<number>(), scoped: new Set<number>(), misread: new Set<number>(), exits: new Set<number>(), heldJob: { at: [] as number[], forMs: 0 } }
+        deaths: new Set<number>(), scoped: new Set<number>(), misread: new Set<number>(), exits: new Set<number>(), heldJob: { at: [] as number[], forMs: 0 }, flaky: { rerunPasses: 0, rerunFails: 0 } }
     : plan;
   const github = new SimulatedGitHub({ repository, baseBranch: 'main', appId: 1234, ciAppId: 15368, reviewerApps, ciMs: 5 * minute, reviewMs: 3 * minute, firstPullRequest: 100 * ++days },
     [...Array.from({ length: dayPlan.items }, (_, index) => file(index + 1)), 'README.md']);
