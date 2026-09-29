@@ -19,24 +19,34 @@ import { liveRun, liveRunCheckouts, registeredRun } from './runner/registry.js';
 import { narrowRunner, piProducerPrompt, producerRunOptions, registryRunner, runOutcome, startNarrowRun, submitEvidence } from './runner/roles.js';
 import { runRecordSchema, type RunRecord, type Runner } from './runner/types.js';
 
-/** Read environment variables from a .env file for the producer. */
+/**
+ * The local secrets a live-install proof producer may receive from the repo-root .env
+ * (operator-approved for GY-49's live installs, GY-73). Nothing else in .env leaves it,
+ * and none of these names can shadow a control-plane variable.
+ */
+export const producerEnvNames = ['HCLOUD_TOKEN', 'HETZNER_SPEND_CAP_USD_MONTHLY'] as const;
+
+/** Read the producer-approved environment variables from the repo-root .env file. */
 export async function readProducerEnvironment(root: string): Promise<Record<string, string>> {
   const envFile = resolve(root, '.env');
+  let content: string;
   try {
-    const content = await readFile(envFile, 'utf8');
-    const env: Record<string, string> = {};
-    for (const line of content.split('\n')) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith('#')) continue;
-      const [key, ...parts] = trimmed.split('=');
-      const value = parts.join('=');
-      if (key && value) env[key] = value;
-    }
-    return env;
+    content = await readFile(envFile, 'utf8');
   } catch (error: any) {
     if (error?.code === 'ENOENT') return {};
     throw error;
   }
+  const env: Record<string, string> = {};
+  for (const line of content.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const separator = trimmed.indexOf('=');
+    if (separator <= 0) continue;
+    const key = trimmed.slice(0, separator).trim();
+    const value = trimmed.slice(separator + 1).trim().replace(/^['"]|['"]$/g, '');
+    if ((producerEnvNames as readonly string[]).includes(key) && value) env[key] = value;
+  }
+  return env;
 }
 
 /**
