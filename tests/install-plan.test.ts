@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { buildPlan, coreEnv, githubEnv, materializeInstall, prepareInstall, repositoryRoot } from '../src/install/index.js';
 import { protectionPayload, protectionSatisfied, CHECK_NAME } from '../src/install/github.js';
-import { fingerprint } from '../src/install/secrets.js';
+import { fingerprint, principalOfRole, writeInstallRecord } from '../src/install/secrets.js';
 import { installIdFor, REDACTED } from '../src/install/types.js';
 import { appKey, harness, satisfiedProtection, WEBHOOK_SECRET, GRAPHYARD_APP_ID } from './install-harness.js';
 
@@ -72,6 +72,51 @@ test('--plan produces a complete ordered plan and redacts every value that is a 
     const serialized = JSON.stringify(materialized);
     for (const token of applied.tokens.values()) assert.ok(!serialized.includes(token));
     assert.ok(!serialized.includes(applied.context.databasePassword));
+  } finally { await fixture.cleanup(); }
+});
+
+test('unit:install-plan-names-undeclared-operator — a plan over an install whose operator declares no sessionKind names it undeclared, and the roster it writes declares the operator human', async () => {
+  const fixture = await harness({ provider: 'railway', installed: true });
+  try {
+    // An installation the way an installer predating declared session kinds left it: credentials
+    // exist, and the install record's principals carry no sessionKind at all.
+    const first = await prepareInstall(fixture.root, { repository: 'owner/project', provider: 'railway' }, fixture.deps, 'apply');
+    await materializeInstall(first);
+    const at = new Date().toISOString();
+    await writeInstallRecord(first.directory, {
+      version: 1, installId: first.installId, repository: 'owner/project', provider: 'railway', baseBranch: 'main',
+      reviewPolicy: 'github', domain: null, url: 'https://graphyard-owner-project.up.railway.app',
+      principals: first.principals.map(principal => ({ id: principal.id, role: principal.role, fingerprint: fingerprint(first.tokens.get(principal.id)!) })),
+      github: null, reviewers: [], profiles: [], createdAt: at, updatedAt: at,
+    }, first.vault);
+
+    // Re-planning the existing deployment names the operator as the undeclared human it is,
+    // in the drift and on the operator's own credentials row.
+    const session = await prepareInstall(fixture.root, { repository: 'owner/project', provider: 'railway' }, fixture.deps, 'plan');
+    const plan = await buildPlan(session);
+    const operatorId = `${session.installId}-operator`;
+    const named = plan.drift.find(entry => entry.action === 'local.credentials' && entry.field === 'sessionKind')!;
+    assert.match(named.expected, new RegExp(`${operatorId} declared sessionKind human`));
+    assert.match(named.observed, new RegExp(`${operatorId} declares no sessionKind; human-only requests have no one who can answer them`));
+    const operatorRow = plan.actions.find(action => action.id === 'local.credentials')!.values!.find(value => value.name === operatorId)!;
+    assert.match(operatorRow.note!, /deployed without a sessionKind, this apply declares it human/);
+
+    // The roster this plan writes (and --apply deploys) declares the operator human and every
+    // agent principal ai, which is the documented install-scoped repair.
+    const written = JSON.parse(coreEnv(session).find(value => value.name === 'GRAPHYARD_PRINCIPALS')!.value) as { role: string; sessionKind?: string }[];
+    assert.equal(written.find(principal => principal.role === 'admin')!.sessionKind, 'human');
+    assert.ok(written.filter(principal => principal.role !== 'admin').every(principal => principal.sessionKind === 'ai'));
+    assert.equal(plan.principals.find(principal => principal.id === operatorId)!.sessionKind, 'human');
+
+    // An install with no record is not named undeclared: a fresh plan declares its operator
+    // human from the start and reports no such drift.
+    const fresh = await harness({ provider: 'railway' });
+    try {
+      const freshSession = await prepareInstall(fresh.root, { repository: 'owner/project', provider: 'railway' }, fresh.deps, 'plan');
+      const freshPlan = await buildPlan(freshSession);
+      assert.ok(!freshPlan.drift.some(entry => entry.action === 'local.credentials' && entry.field === 'sessionKind'));
+      assert.equal(principalOfRole(freshPlan.principals, 'admin').sessionKind, 'human');
+    } finally { await fresh.cleanup(); }
   } finally { await fixture.cleanup(); }
 });
 
