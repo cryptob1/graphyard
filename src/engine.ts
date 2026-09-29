@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { hostname } from 'node:os';
 import { stableJson } from './model/stable-json.js';
 import { z } from 'zod';
 import type { PoolClient } from 'pg';
@@ -7,22 +8,23 @@ import { leaseCommands } from './store/pools.js';
 import { compactHeartbeatReceipt } from './store/receipts.js';
 import { authorizedForProof, unauthorizedProofs } from './proof-grants.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, submittedEpoch, type Attestation, requireCurrent, createSchema, criterionSchema, bindingApproval, carriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type ApprovalIdentity, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type Lease, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
+import { activeLease, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, submittedEpoch, type Attestation, requireCurrent, createSchema, criterionSchema, bindingApproval, carriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type ApprovalIdentity, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type EvidenceAttestation, type Lease, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
 import { Refusal, demandWork } from './model/refusal.js';
 import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
 import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
-import { branchContamination, nextQueueEntries, disprovedConflict, currentRestore, decideIdentityCarry, defaultMergeBatchSize, mergeBatchSizeEvent, dismissedApproval, keptTipCarry, onto, pendingRestore, reviewedFilesOf, queueHistoryLimit, queueSequencingReason, reconciliationRefusalPrefix, tipReplacesHead, type BaseRefresh, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type QueueSpeculation, type RestoredApproval } from './merge-queue.js';
+import { branchContamination, nextQueueEntries, disprovedConflict, withDisprovedConflict, currentRestore, decideIdentityCarry, defaultMergeBatchSize, defaultParallelTips, mergeParallelTipsEvent, mergeBatchSizeEvent, dismissedApproval, keptTipCarry, onto, pendingRestore, reviewedFilesOf, queueHistoryLimit, queueSequencingReason, reconciliationRefusalPrefix, reconcileCheckReruns, rerunFailedChecksEvent, tipReplacesHead, checkRerunLimit, type BaseRefresh, type CheckRerun, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type QueueSpeculation, type RestoredApproval } from './merge-queue.js';
 import { queueEjectionRecord } from './model/queue.js';
 import { githubFromEnv, mergeBandQueueDepth } from './github.js';
 import { regressionRefusals } from './regression-guard.js';
 import { ciFamilyAllows, ciProofFamilies, ciRunBindingSchema, ciRunRefusal, isCiProducer, refuseCiProducer, staleCiAttemptRefusal, type CiRunObservation } from './model/ci-proofs.js';
 import { decideScopeRequest, liveScopeWidening, scopeRefusalBlocker, type ScopeDecision } from './model/scope.js';
-import { mergedScopeRequest, plannedFilesCovered } from './model/scope-collapse.js';
+import { mergedScopeRequest, plannedFilesCovered, widenedPlannedFiles } from './model/scope-collapse.js';
 import { configuredDocumentation, documentationObligation, recordDocumentationSubmission, type DocumentationPolicy } from './model/documentation.js';
 import { liveDispatchHandleIds, reconcileAutoDispatch, type DispatchTransition } from './model/dispatch.js';
 import { reconcileReviewConflict, type ReviewConflictTransition } from './model/review-conflict.js';
 import { nextAction, nextActionKinds, sameAction } from './model/next-action.js';
+import { recordScenarioRun } from './test-runs.js';
 import type { ObservationJobState } from './model/action-kinds.js';
 import { claimCandidatesParams, claimCandidatesSql } from './model/action-candidates.js';
 import { claimAction, openActions, reconcileActions, renewClaim, settleAction, settleDelivered, type ActionRow } from './model/actions.js';
@@ -33,6 +35,8 @@ import { beginAttempt, endAttempt, endLapsedAttempt, recordIntervention, recordR
 import { foldDecisions, type Decision } from './model/approval.js';
 import { coveringWindow, directMergeAuthorization, directMergeFromEnv, directMergeWindows, sweepDirectMerges, type DirectMergeWindow } from './direct-merge.js';
 import { repairAuditEvent, repairScopeRefusal, type RepairAudit } from './master/repair-lane.js';
+import { applyPostMerge, applyRevert, currentLane, defaultOptimisticExclude, defaultOptimisticMerge, optimisticEligibility, optimisticExcludeEvent, optimisticMergeEvent, parseOptimisticExclude, type OptimisticRevert, type PostMergeVerdict } from './optimistic-merge.js';
+import { defaultRerunFailedChecks, maxRerunFailedChecks } from './master/profiles.js';
 
 const epoch = z.number().int().positive();
 const sha = z.string().regex(/^[a-f0-9]{40}$/);
@@ -235,8 +239,10 @@ function applyScopeDecision(work: Work, request: NonNullable<Work['scopeRequest'
   work.scopeRequest = verdict.state === 'approved' ? null : { ...request, decision };
   if (verdict.state === 'approved') {
     // Non-weakening intent the item already carried: applied to the live attempt, which
-    // keeps its lease and its containment fence exactly as an operator widening would.
-    work.plannedFiles = [...new Set([...(work.plannedFiles ?? []), ...verdict.paths])];
+    // keeps its lease and its containment fence exactly as an operator widening would. A wide
+    // ask is folded into directory entries, as a routed one is, rather than overrun the cap;
+    // an ask no fold represents was refused by the rule above, never applied past the cap.
+    work.plannedFiles = widenedPlannedFiles(work, verdict.paths).plannedFiles;
     work.policyRevision++;
     work.formalReviewResetRequired = true; work.formalReviewBaseline = undefined;
     work.observation = null; work.mergeAuthorization = null; work.reviewRequest = null;
@@ -365,11 +371,44 @@ type GracedLease = Lease & { renewalFault?: { at: string; error: string } };
 export class RenewalFault extends Refusal {
   constructor(message: string, readonly grace: { at: string; graceUntil: string; now: string } | null) { super(message, 503); }
 }
+/** The SQLSTATE classes a failed renewal may blame on the server (GY-671): connection exceptions,
+ * insufficient resources, program limits, operator intervention (statement timeouts among them),
+ * system errors and internal errors. Client-caused classes — bad data, constraint violations,
+ * syntax, privileges, serialization and deadlock — are the request's own and earn nothing. */
+const renewalFaultSqlClasses = new Set(['08', '53', '54', '57', '58', 'XX']);
+/** The connection-level failures a renewal may blame on the server, named by message or errno. */
+const renewalFaultMessage = /connection|terminated|timed? ?out|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|socket hang up/i;
+/** The connection errnos a failed renewal may blame on the server, whatever its message says. */
+const renewalFaultErrnos = /^ECONN(RESET|REFUSED|ABORTED)|^ETIMEDOUT$|^EPIPE$|^E(HOST|NET)UNREACH$|^EAI_AGAIN$/;
+/**
+ * What a failed renewal blames on the server, or null when it may not (GY-558, narrowed by
+ * GY-671): only infrastructure trouble — lost or timed-out connections, statement timeouts and
+ * the database's server-error classes — never a programming error. A TypeError in a heartbeat
+ * must surface as the bug it is instead of silently extending the lease it broke, so anything
+ * this cannot name as the server's fault is answered as a refusal, with no grace and no record.
+ */
+export function renewalFaultOf(error: unknown): string | null {
+  if (error instanceof Refusal) return error.status >= 500 ? `HTTP ${error.status}: ${error.message}` : null;
+  if (error instanceof z.ZodError) return null;
+  const code = (error as { code?: unknown } | null)?.code;
+  if (typeof code === 'string') {
+    if (renewalFaultErrnos.test(code)) return `${code}: ${(error as Error).message}`;
+    if (/^[0-9A-Z]{5}$/.test(code)) return renewalFaultSqlClasses.has(code.slice(0, 2)) ? `SQLSTATE ${code}: ${(error as Error).message}` : null;
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  return renewalFaultMessage.test(message) ? message : null;
+}
 /** How far back heartbeat health looks, and the p95 latency above which `master status` raises it (GY-558). */
 export const leaseHealthWindowMs = 10 * 60_000, heartbeatLatencyAttentionMs = 5_000;
 /**
  * Heartbeat latency and the renewals refused or failed server-side, over the last ten minutes in
- * this server process (GY-558), reported by GET /api/status as `leaseHealth`.
+ * this server process (GY-558), reported by GET /api/status as `leaseHealth`. The window is one
+ * process's own, and the report says so (`scope` and `process`, GY-671): a multi-replica
+ * deployment serves renewals from every replica and each reports separately, so fleet-wide p95
+ * and failure counts are the per-replica reports compared, not one number. Aggregating them in
+ * the server was declined there — it needs cross-replica state the store does not hold and would
+ * put metric writes beside the coordination path — so the attention item repeats the caveat
+ * whenever it is raised, naming the process that measured it.
  */
 export class LeaseHealth {
   private samples: { at: number; ms: number; outcome: 'renewed' | 'refused' | 'failed' }[] = [];
@@ -389,10 +428,11 @@ export class LeaseHealth {
     const percentile = (p: number) => sorted.length ? sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(p * sorted.length) - 1))] : null;
     const p50Ms = percentile(0.5), p95Ms = percentile(0.95);
     const refused = this.samples.filter(sample => sample.outcome === 'refused').length, failed = this.samples.filter(sample => sample.outcome === 'failed').length;
+    const reportedBy = `${hostname()}/${process.pid}`;
     const attention = p95Ms !== null && p95Ms > heartbeatLatencyAttentionMs
-      ? `Lease renewals are slow: heartbeat p95 ${p95Ms} ms (p50 ${p50Ms} ms) over the last 10 minutes exceeds ${heartbeatLatencyAttentionMs} ms across ${sorted.length} renewal(s), ${failed} failed server-side and ${refused} refused; a renewal slower than the lease loses it — find what holds the coordination lock or the lease pool in the server logs`
+      ? `Lease renewals are slow: heartbeat p95 ${p95Ms} ms (p50 ${p50Ms} ms) over the last 10 minutes exceeds ${heartbeatLatencyAttentionMs} ms across ${sorted.length} renewal(s), ${failed} failed server-side and ${refused} refused; a renewal slower than the lease loses it — find what holds the coordination lock or the lease pool in the server logs. This window is one server process's own (${reportedBy}); a multi-replica deployment reports each replica separately, so slow renewals served by other replicas are missing here.`
       : null;
-    return { windowMs: leaseHealthWindowMs, renewals: sorted.length, p50Ms, p95Ms, refused, failed, thresholdMs: heartbeatLatencyAttentionMs, attention };
+    return { windowMs: leaseHealthWindowMs, renewals: sorted.length, p50Ms, p95Ms, refused, failed, thresholdMs: heartbeatLatencyAttentionMs, attention, scope: 'process' as const, process: reportedBy };
   }
 }
 
@@ -429,7 +469,80 @@ export class Engine {
   async loadMergeBatchSize() {
     const row = (await this.store.pool.query('SELECT (payload->>\'batchSize\')::int AS size FROM events WHERE work_id IS NULL AND kind=$1 ORDER BY seq DESC LIMIT 1', [mergeBatchSizeEvent])).rows[0];
     this.mergeBatchSize = Number.isSafeInteger(row?.size) && row.size >= 1 ? row.size : defaultMergeBatchSize;
+    const optimistic = (await this.store.pool.query('SELECT payload->\'optimistic\' AS optimistic FROM events WHERE work_id IS NULL AND kind=$1 ORDER BY seq DESC LIMIT 1', [optimisticMergeEvent])).rows[0]?.optimistic;
+    this.optimisticMerge = typeof optimistic === 'boolean' ? optimistic : defaultOptimisticMerge;
     return this.mergeBatchSize;
+  }
+  /**
+   * Whether an eligible entry merges optimistically, past the queue (GY-500): the master's
+   * `mergeQueue.optimistic` as it last published it, read back with the batch size; on by default.
+   */
+  optimisticMerge = defaultOptimisticMerge;
+  /**
+   * How many queue positions are validated at once (GY-498): the master's `mergeQueue.parallelTips`
+   * as it last published it, read back from the installation ledger by `loadParallelTips`, else
+   * the default of 4. Every evaluation validates the first that many speculative tips at once.
+   */
+  parallelTips = defaultParallelTips;
+  /** Reads the parallel-tip window the master last published from the installation ledger. */
+  async loadParallelTips() {
+    const row = (await this.store.pool.query('SELECT (payload->>\'parallelTips\')::int AS tips FROM events WHERE work_id IS NULL AND kind=$1 ORDER BY seq DESC LIMIT 1', [mergeParallelTipsEvent])).rows[0];
+    this.parallelTips = Number.isSafeInteger(row?.tips) && row.tips >= 1 ? row.tips : defaultParallelTips;
+    return this.parallelTips;
+  }
+  /**
+   * How many times a required check that failed on a candidate sha is rerun before the failure
+   * counts (GY-516): `mergeQueue.rerunFailedChecks` as the master publishes it, else the product
+   * default (src/master/profiles.ts); 0 disables.
+   */
+  rerunFailedChecks = defaultRerunFailedChecks;
+  /** `mergeQueue.rerunFailedChecks` as the master last published it (POST /api/merge-queue), read back from the installation ledger, else the default. */
+  async loadRerunFailedChecks() {
+    const row = (await this.store.pool.query('SELECT (payload->>\'rerunFailedChecks\')::int AS reruns FROM events WHERE work_id IS NULL AND kind=$1 ORDER BY seq DESC LIMIT 1', [rerunFailedChecksEvent])).rows[0];
+    this.rerunFailedChecks = Number.isSafeInteger(row?.reruns) && row.reruns >= 0 && row.reruns <= maxRerunFailedChecks ? row.reruns : defaultRerunFailedChecks;
+    return this.rerunFailedChecks;
+  }
+  /**
+   * The repository's shared-infrastructure globs (GY-503): the master's `mergeQueue.optimisticExclude`
+   * as it last published it, read back with the batch size; the product defaults otherwise.
+   */
+  optimisticExclude: readonly string[] = defaultOptimisticExclude;
+  /** `mergeQueue.optimisticExclude` as the master last published it (POST /api/merge-queue), read back from the installation ledger, else the defaults. */
+  async loadOptimisticExclude() {
+    const row = (await this.store.pool.query('SELECT payload->\'optimisticExclude\' AS exclude FROM events WHERE work_id IS NULL AND kind=$1 ORDER BY seq DESC LIMIT 1', [optimisticExcludeEvent])).rows[0];
+    this.optimisticExclude = parseOptimisticExclude(row?.exclude) ?? defaultOptimisticExclude;
+    return this.optimisticExclude;
+  }
+  /**
+   * Records the outcome of asking GitHub to rerun an owed check (GY-516), made by the integration
+   * job outside any transaction: `requested` holds the failure until the rerun concludes,
+   * `refused` lets it stand, and the entry is re-evaluated at once either way.
+   */
+  async recordCheckRerun(id: string, jobToken: string, owed: Pick<CheckRerun, 'sha' | 'check' | 'failedRunId'>, outcome: { state: 'requested' | 'refused'; runId?: number; detail?: string }) {
+    return this.store.transaction(async (db, now) => {
+      const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
+      requireCurrent(job, 'Integration job lease expired or superseded');
+      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const work = all.find(w => w.id === id);
+      demand(work, 'Work item not found', 404);
+      const index = (work.checkReruns ?? []).findIndex(entry => entry.sha === owed.sha && entry.check === owed.check && entry.failedRunId === owed.failedRunId);
+      if (index < 0 || work.checkReruns![index].state !== 'owed') return work;
+      const rerun: CheckRerun = { ...work.checkReruns![index], state: outcome.state, ...(outcome.runId !== undefined ? { runId: outcome.runId } : {}), ...(outcome.detail ? { detail: outcome.detail } : {}), ...(outcome.state === 'refused' ? { resolvedAt: now.toISOString() } : {}) };
+      work.checkReruns = work.checkReruns!.map((entry, at) => at === index ? rerun : entry).slice(-checkRerunLimit);
+      const queuedBefore = work.queue?.sequence ?? null;
+      this.evaluate(work, all, now);
+      await this.recordEjection(db, work, all, queuedBefore, now);
+      await this.recordDispatch(db, work, now);
+      await save(db, work, 'github', `check.rerun.${outcome.state}`, now, rerun);
+      return work;
+    });
+  }
+  /** A queue entry the evaluation just derived out is recorded as an ejection, and the entries behind it are woken. */
+  private async recordEjection(db: PoolClient, work: Work, all: Work[], queuedBefore: number | null, now: Date, extra: Record<string, unknown> = {}) {
+    if (queuedBefore === null || work.queue || work.queueEjection?.sequence !== queuedBefore) return;
+    await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'queue.ejected',
+      JSON.stringify({ details: { sequence: queuedBefore, reason: work.queueEjection.reason, conflict: work.queueEjection.conflict ?? null, ...extra, at: now.toISOString() } })]);
+    for (const behind of nextQueueEntries(all, work.id, Math.max(mergeBandQueueDepth, this.mergeBatchSize, this.parallelTips))) await wakeJob(db, behind.id);
   }
   // The launch fence is a deployment-independent safety default; only tests shorten it.
   constructor(public store: Store, public ciAppIds: number[] = [15368], public leaseSeconds = 120, public repository = process.env.GITHUB_REPOSITORY ?? '', public launchFence = launchFenceMs) {}
@@ -453,16 +566,26 @@ export class Engine {
    * observed and that observation saved, so the ordinary delivery path records it merged, with its
    * merge commit, now rather than whenever its own observation comes round — and the stale state
    * that named it unlanded does not recur. A failure is logged and left to that later observation.
+   *
+   * GY-756. The peer is re-read before it is observed, so several observations in one round that
+   * name the same peer do not each observe it from their own stale snapshot: once one has saved, the
+   * rest find it delivered, or already observed at this head against this base tip, and skip it.
+   * A peer that is not merged (its commits reached the branch while its pull request closed
+   * unmerged) has that observation saved all the same, so it is not re-observed on every cycle
+   * until the base branch moves.
    */
   async reconcileLanded(observation: Observation | null, all: Work[], observer = this.submissionObserver) {
     const reconciled: Work[] = [];
     if (!observer) return reconciled;
     for (const entry of observation?.landing?.landed ?? []) {
-      const peer = all.find(item => item.key === entry.key && item.stage !== 'done' && item.submission?.pr === entry.pr);
-      if (!peer) continue;
+      const known = all.find(item => item.key === entry.key);
+      if (!known) continue;
       try {
+        const peer: Work | undefined = (await this.store.pool.query('SELECT document FROM work_items WHERE id=$1', [known.id])).rows[0]?.document;
+        if (!peer || peer.stage === 'done' || peer.submission?.pr !== entry.pr) continue;
+        if (peer.observation && peer.observation.candidate.sha === entry.head && observation!.baseTip && peer.observation.baseTip === observation!.baseTip) continue;
         const seen = await observer(peer, all);
-        if (seen.merged) reconciled.push(await this.observe(peer.id, peer.revision, seen));
+        reconciled.push(await this.observe(peer.id, peer.revision, seen));
       } catch (error) {
         console.error(`[landing] reconciling ${entry.key}'s landed pull request #${entry.pr} failed: ${(error as Error).message}`);
       }
@@ -500,10 +623,13 @@ export class Engine {
   }
   /**
    * Run one command. A renewal is timed and counted in `leaseHealth` (GY-558), and one that fails
-   * server-side — a connection or statement timeout, a lost connection — is recorded against its
-   * lease (`recordRenewalFault`) and answered 503 with the grace that record earned.
+   * server-side — what `renewalFaultOf` blames on the server: a connection or statement timeout,
+   * a lost connection, the database's server-error classes — is recorded against its lease
+   * (`recordRenewalFault`) and answered 503 with the grace that record earns. Any other failure,
+   * a programming error included, is refused without a grace, so bugs surface instead of
+   * extending the lease they broke (GY-671).
    */
-  async execute(actor: Principal, command: Command, id: string | null, input: unknown, key: string, context: { observation?: Observation; ciRun?: CiRunObservation | null } = {}) {
+  async execute(actor: Principal, command: Command, id: string | null, input: unknown, key: string, context: { observation?: Observation; ciRun?: CiRunObservation | null; attestation?: EvidenceAttestation } = {}) {
     if (command !== 'heartbeat') return this.executeCommand(actor, command, id, input, key, context);
     const started = new Date();
     try {
@@ -511,7 +637,7 @@ export class Engine {
       this.leaseHealth.record('renewed', Date.now() - started.getTime());
       return work;
     } catch (error) {
-      const fault = !(error instanceof Refusal && error.status < 500) && !(error instanceof z.ZodError);
+      const fault = renewalFaultOf(error) !== null;
       this.leaseHealth.record(fault ? 'failed' : 'refused', Date.now() - started.getTime());
       if (!fault || !id) throw error;
       throw await this.recordRenewalFault(actor, id, Number((input as { epoch?: unknown } | null)?.epoch), started, error);
@@ -520,12 +646,17 @@ export class Engine {
   /** Heartbeat latency and the renewals refused or failed server-side, in this server process (GY-558). */
   readonly leaseHealth = new LeaseHealth();
   /**
-   * Record a renewal that failed server-side inside its lease's expiry window (GY-558), on the
-   * lease pool and without the coordination lock: a `lease.renewal-failed` event naming the owner,
-   * epoch and the time the renewal arrived. `renewalGrace` then keeps the lease valid until the next
-   * successful renewal or one further lease period from that time, whichever comes first. A record
-   * the database refuses is retried in the background until that period has passed. The returned
-   * refusal carries the grace, so the worker's supervisor keeps retrying through it.
+   * Record a renewal that failed server-side inside its lease's expiry window (GY-558): a
+   * `lease.renewal-failed` event naming the owner, epoch and the time the renewal arrived,
+   * written without the coordination lock. `renewalGrace` then keeps the lease valid until the
+   * next successful renewal or one further lease period from that time, whichever comes first.
+   * The record is written on the main pool, not the lease pool (GY-671): the lease pool is
+   * reserved for the lease commands, and the very exhaustion that failed the renewal must not
+   * also fail the record of it. A record the database refuses is retried in the background until
+   * that period has passed. The refusal carries the grace the record earns even before it has
+   * landed (GY-671) — the same one period from the renewal's arrival `renewalGrace` will grant
+   * once it does — so the worker's supervisor extends its local deadline as far as the server
+   * will hold the lease, instead of stopping at the old deadline while the server still keeps it.
    */
   private async recordRenewalFault(actor: Principal, id: string, epoch: number, at: Date, error: unknown) {
     const reason = (error instanceof Error ? error.message : String(error)).slice(0, 300);
@@ -533,7 +664,7 @@ export class Engine {
     const payload = JSON.stringify({ owner: actor.id, epoch, at: at.toISOString(), error: reason });
     const until = at.getTime() + this.leaseSeconds * 1000;
     // Only a live lease of this owner and epoch earns a grace; the refusal says what it earned.
-    const write = async () => (await this.store.leasePool.query(`WITH live AS (
+    const write = async () => (await this.store.pool.query(`WITH live AS (
         SELECT id, CASE WHEN document->'lease' ? 'renewalFault' THEN (document->'lease'->>'expiresAt')::timestamptz
           ELSE GREATEST((document->'lease'->>'expiresAt')::timestamptz, $7::timestamptz) END AS grace_until
         FROM work_items WHERE (id::text=$1 OR document->>'key'=$1) AND document->'lease'->>'owner'=$2
@@ -547,10 +678,11 @@ export class Engine {
       const retry = () => setTimeout(() => { if (Date.now() < until) write().catch(retry); }, 1000).unref();
       retry();
     }
-    const grace = recorded ? { at: at.toISOString(), graceUntil: recorded.grace_until.toISOString(), now: recorded.now.toISOString() } : null;
+    const grace = recorded ? { at: at.toISOString(), graceUntil: recorded.grace_until.toISOString(), now: recorded.now.toISOString() }
+      : unrecorded !== null ? { at: at.toISOString(), graceUntil: new Date(until).toISOString(), now: new Date().toISOString() } : null;
     return new RenewalFault(grace
-      ? `Lease renewal failed server-side (${reason}); the failure is recorded and the lease stays valid until ${grace.graceUntil} or the next successful renewal`
-      : `Lease renewal failed server-side (${reason})${unrecorded ? `; the failure could not be recorded yet (${unrecorded.slice(0, 200)})` : '; no live lease of this owner and epoch was found to keep'}`, grace);
+      ? `Lease renewal failed server-side (${reason}); ${unrecorded === null ? 'the failure is recorded and the lease stays valid' : 'the record is being retried and the lease is kept'} until ${grace.graceUntil} or the next successful renewal`
+      : `Lease renewal failed server-side (${reason}); no live lease of this owner and epoch was found to keep`, grace);
   }
   /**
    * A lease past its expiry that a recorded server-side renewal fault still covers (GY-558): the
@@ -570,7 +702,7 @@ export class Engine {
     lease.expiresAt = new Date(Math.max(expires, Date.parse(fault.at) + leaseMs)).toISOString();
     return true;
   }
-  private async executeCommand(actor: Principal, command: Command, id: string | null, input: unknown, key: string, context: { observation?: Observation; ciRun?: CiRunObservation | null } = {}) {
+  private async executeCommand(actor: Principal, command: Command, id: string | null, input: unknown, key: string, context: { observation?: Observation; ciRun?: CiRunObservation | null; attestation?: EvidenceAttestation } = {}) {
     demand(Object.hasOwn(commands, command), 'Unknown command', 404);
     // Leads coordinate through rulings; no lifecycle command is lead-permitted.
     demand(actor.role !== 'slice-lead' || leadMay(command), 'Slice leads cannot perform lifecycle mutations', 403);
@@ -1147,10 +1279,14 @@ export class Engine {
         // GY-135: a pass is trusted only beside a recorded run that fails with the criterion's
         // behaviour removed; otherwise it is kept, untrusted, as not exercising its criterion.
         const unexercised = trusted && data.proof !== deploySmokeProof ? exerciseRefusal(work, all, data) : null;
-        const evidence: Evidence = { ...data, id: randomUUID(), producer: actor.id, trusted: trusted && !unexercised, at: now.toISOString(), ...(ciRun ? { ciRun } : {}), ...(unexercised ? { unexercised } : {}) };
+        // An approved attest decision names itself on the record it applies (GY-615), which is what
+        // lets a Graphyard-authored refresh of the same patch carry it; see model/carry.ts.
+        const evidence: Evidence = { ...data, id: randomUUID(), producer: actor.id, trusted: trusted && !unexercised, at: now.toISOString(), ...(ciRun ? { ciRun } : {}), ...(unexercised ? { unexercised } : {}), ...(context.attestation ? { attestation: context.attestation } : {}) };
         if (unexercised) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, actor.id, 'evidence.exercise.refused',
           JSON.stringify({ details: { proof: data.proof, criteria: attachedCriteria(work, all, data.proof), behaviour: data.exercise?.behaviour ?? null, sha: data.sha, reason: unexercised } })]);
         work.evidence.push(evidence);
+        // GY-162: a trusted e2e: record is also a run of its test case, appended to the case's history.
+        await recordScenarioRun(db, work, evidence);
         if (data.proof === deploySmokeProof) work.delivery!.smoke = { evidenceId: evidence.id, result: data.result, sha: data.sha, mergeSha: data.baseSha, producer: actor.id, at: evidence.at, executed: data.executed, skipped: data.skipped, ...(data.url ? { url: data.url } : {}) };
         if (trusted && data.policyRevision !== work.policyRevision) raiseEscalation(work, { trigger: 'evidence-policy-conflict', reason: `Evidence policy v${data.policyRevision} conflicts with current policy v${work.policyRevision}`, at: now.toISOString(), actor: actor.id });
       }
@@ -1423,6 +1559,43 @@ export class Engine {
       return result;
     });
   }
+  /**
+   * The main guard's reading of one optimistic merge commit (GY-500): the required suite's verdict,
+   * read on the merge commit or on `on` (the revert it is re-tested on), written onto the merge and
+   * to the ledger as `optimistic.post-merge` when it changed.
+   */
+  async recordPostMerge(id: string, mergeSha: string, verdict: PostMergeVerdict, on?: string): Promise<Work> {
+    return this.store.transaction(async (db, now) => {
+      const work: Work = (await db.query('SELECT document FROM work_items WHERE id=$1 FOR UPDATE', [id])).rows[0]?.document;
+      demand(work, 'Work item not found', 404);
+      demand(work.optimisticMerges?.some(entry => entry.mergeSha === mergeSha), `${work.key} has no optimistic merge ${mergeSha.slice(0, 12)}`, 409);
+      if (!applyPostMerge(work, mergeSha, verdict, now, on)) return work;
+      await save(db, work, 'graphyard', 'optimistic.post-merge', now, { mergeSha, on: on ?? mergeSha, ...verdict });
+      return work;
+    });
+  }
+  /**
+   * One step of an optimistic merge's revert (GY-500), on the culprit item: opened, refused, or
+   * merged. A merged revert reopens the item for a rework round with the failure attached
+   * (`reopenReverted`); the merge, its verdict and the revert stay on its record. Every step is
+   * saved under its own event (`optimistic.revert.opened`, `.refused`, `.merged`).
+   */
+  async recordOptimisticRevert(id: string, mergeSha: string, revert: OptimisticRevert): Promise<Work> {
+    return this.store.transaction(async (db, now) => {
+      const work: Work = (await db.query('SELECT document FROM work_items WHERE id=$1 FOR UPDATE', [id])).rows[0]?.document;
+      demand(work, 'Work item not found', 404);
+      demand(work.optimisticMerges?.some(entry => entry.mergeSha === mergeSha), `${work.key} has no optimistic merge ${mergeSha.slice(0, 12)}`, 409);
+      const delivered = work.stage === 'done';
+      if (!applyRevert(work, mergeSha, revert, now)) return work;
+      if (delivered && work.stage !== 'done') {
+        const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(row => row.document);
+        this.evaluate(work, all.map(item => item.id === work.id ? work : item), now);
+        await this.recordDispatch(db, work, now);
+      }
+      await save(db, work, 'graphyard', `optimistic.revert.${revert.state}`, now, { mergeSha, revert, ...(work.reopened && work.stage !== 'done' ? { reopened: work.reopened } : {}) });
+      return work;
+    });
+  }
   /** The latest merge request the coordinator recorded for the item, or null (GY-258). */
   async enqueueRequest(id: string, db: { query: (text: string, values: unknown[]) => Promise<{ rows: any[] }> } = this.store.pool): Promise<MergeEnqueueRequest | null> {
     return (await db.query("SELECT payload->'details' AS request FROM events WHERE work_id=$1 AND kind='merge.enqueue.requested' ORDER BY seq DESC LIMIT 1", [id])).rows[0]?.request ?? null;
@@ -1508,6 +1681,9 @@ export class Engine {
         ...(kept !== undefined && speculation.carriedBase ? { carriedBase: speculation.carriedBase } : {}),
         ...(carry ? { carry: { approval: carry.approval.carried ? 'carried' : 'required', evidence: Object.fromEntries(carry.evidence.map(entry => [entry.proof, entry.carried ? 'carried' : 'required'])) } } : {}) });
       await wakeJob(db, work.id);
+      // Publication makes the next prediction buildable before this tip's CI finishes.
+      // Each successor publishes under its own integration lease and request budget.
+      for (const behind of nextQueueEntries(all, work.id, Math.max(mergeBandQueueDepth, this.parallelTips))) await wakeJob(db, behind.id);
       return work;
     });
   }
@@ -1618,7 +1794,8 @@ export class Engine {
         // onto the head, and the stored observation has its conflict disproved.
         const kept = work.baseRefresh?.head === refresh.from.sha ? work.baseRefresh : null;
         work.baseRefresh = { ...(kept ?? {}), ...refresh, merge: kept?.merge ?? null, carry: kept?.carry ?? null, ...(kept?.restoredApproval ? { restoredApproval: kept.restoredApproval } : {}) };
-        if (work.observation?.conflicting && disprovedConflict(work, work.observation)) work.observation = { ...work.observation, conflicting: false, mergeable: true };
+        const disproved = work.observation?.conflicting ? disprovedConflict(work, work.observation) : null;
+        if (disproved) work.observation = withDisprovedConflict(work.observation!, disproved);
         this.evaluate(work, all, now);
         await this.recordDispatch(db, work, now);
         await save(db, work, 'graphyard', 'base.stale-mergeability', now, { head: refresh.from.sha, base: refresh.base, reading: refresh.stale.reading });
@@ -1634,6 +1811,9 @@ export class Engine {
         ...(refresh.conflict ? { conflict: refresh.conflict } : {}),
         ...(carry ? { carry: { approval: carry.approval.carried ? 'carried' : 'required', evidence: Object.fromEntries(carry.evidence.map(entry => [entry.proof, entry.carried ? 'carried' : 'required'])) } } : {}) });
       await wakeJob(db, work.id);
+      // Publication makes the next prediction buildable before this tip's CI finishes.
+      // Each successor publishes under its own integration lease and request budget.
+      for (const behind of nextQueueEntries(all, work.id, Math.max(mergeBandQueueDepth, this.parallelTips))) await wakeJob(db, behind.id);
       return work;
     });
   }
@@ -1795,9 +1975,20 @@ export class Engine {
     // One request, one verdict (GY-124): two verdicts from one identity on one head for one request
     // are recorded as a conflict and withheld from the observation before any gate reads it.
     this.conflictTransitions.set(work, [...(this.conflictTransitions.get(work) ?? []), ...reconcileReviewConflict(work, now)]);
-    const result = evaluate(work, all, now, this.ciAppIds, this.mergeBatchSize);
+    // The queue is validated by the parallel-tip window (GY-498): entries carry the tips they merge
+    // behind, ejection is decided by prefix attribution, and the test and merge gates read the
+    // window's validation instead of the batch's combined tip. An entry eligible past all of it
+    // (GY-500) evaluates with the optimistic lane instead.
+    const result = evaluate(work, all, now, this.ciAppIds, { batchSize: this.mergeBatchSize, optimistic: this.optimisticMerge, optimisticExclude: this.optimisticExclude, parallelTips: this.parallelTips });
     if (work.stage !== result.stage) work.stageEnteredAt = now.toISOString();
     Object.assign(work, result);
+    // The optimistic lane (GY-500) the merge gate just passed on: an unqueued candidate authorized
+    // to merge holds it, with the time it first did. A merged head keeps the lane it merged on.
+    if (!work.observation?.merged) {
+      const lane = work.stage === 'merge' && !work.queue && work.gates.every(gate => gate.passed) && !work.violations.length
+        ? optimisticEligibility(work, all, { enabled: this.optimisticMerge, gatesPass: true, exclude: this.optimisticExclude }) : null;
+      work.optimistic = lane?.eligible ? currentLane(work, lane.lane, now) : null;
+    }
     if (work.gates.some(g => !g.passed) || work.violations.length) work.mergeAuthorization = null;
     else if (work.candidate && !work.observation?.merged && (!work.mergeAuthorization || work.mergeAuthorization.sha !== work.candidate.sha || work.mergeAuthorization.baseSha !== work.candidate.baseSha)) {
       work.mergeAuthorization = { sha: work.candidate.sha, baseSha: work.candidate.baseSha, policyRevision: work.policyRevision, at: now.toISOString() };
@@ -1933,7 +2124,7 @@ export class Engine {
     // standing refusal already answered (GY-94) — is recorded as an ejection, and the entries
     // behind it are woken to predict against the real base.
     const ejected = queuedBefore !== null && !work.queue && work.queueEjection?.sequence === queuedBefore;
-    if (ejected) ledger.push({ kind: 'queue.ejected', details: { sequence: queuedBefore, reason: work.queueEjection!.reason } });
+    if (ejected) ledger.push({ kind: 'queue.ejected', details: { sequence: queuedBefore, reason: work.queueEjection!.reason, conflict: work.queueEjection!.conflict ?? null } });
     // A stuck batch the evaluation dissolved (GY-506) is recorded on the ledger once, when it happened.
     const dissolved = work.queue?.batchDissolved ?? null;
     if (dissolved && JSON.stringify(dissolved) !== JSON.stringify(dissolvedBefore)) ledger.push({ kind: 'queue.batch-dissolved', details: { ...dissolved } });
@@ -2106,8 +2297,11 @@ export class Engine {
       // A conflict the control plane's own test merge of this head onto this tip found clean is
       // GitHub's stale reading (GY-375): it is stored disproved — the head merges cleanly, which is
       // all GitHub's `mergeable: false` withheld from an open, non-draft pull request — so nothing
-      // refreshes, holds or reworks it for that reading again.
-      work.observation = observation.conflicting && disprovedConflict(work, observation) ? { ...observation, conflicting: false, mergeable: true } : observation;
+      // refreshes, holds or reworks it for that reading again. GitHub's raw reading is kept beside
+      // it under `disproved` (GY-390), so the stored observation `graphyard status` prints still
+      // carries what GitHub reported.
+      const disproved = observation.conflicting ? disprovedConflict(work, observation) : null;
+      work.observation = disproved ? withDisprovedConflict(observation, disproved) : observation;
       // A submission recorded without an observation has no files (GY-293): the first observation
       // of that pull request records what its diff changes inside the documentation paths, so a
       // docs diff reads as satisfied rather than waiting for the reviewer to judge it.
@@ -2124,6 +2318,12 @@ export class Engine {
       // An approval GitHub withdrew for a merge-base change on this unchanged head binds again
       // before the gates read the record, so no review request is opened for it (GY-127).
       const restoredApproval = observation.merged ? null : this.restoreDismissedApproval(work, now);
+      // A required check that just failed on this candidate is owed one rerun before it counts, and
+      // a rerun that concluded is resolved with its own conclusion (GY-516), before the gates read it.
+      const reruns = reconcileCheckReruns(work, this.ciAppIds, this.rerunFailedChecks, now);
+      if (reruns.transitions.length || work.checkReruns) work.checkReruns = reruns.reruns;
+      for (const transition of reruns.transitions) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', transition.kind,
+        JSON.stringify({ details: { ...transition.rerun, at: now.toISOString() } })]);
       this.evaluate(work, all, now);
       if (restoredApproval) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'review.restored',
         JSON.stringify({ details: { ...restoredApproval, baseSha: observation.candidate.baseSha, policyRevision: work.policyRevision } })]);
@@ -2162,6 +2362,14 @@ export class Engine {
             ...(mergedAtRepository ? { mergedAtRepository, repositoryClockOffsetMs: repositoryClockOffsetMs! } : {}) };
           work.delivery = reconciliation ? Object.assign(delivery, { reconciliation }) : operatorAuthorization ? Object.assign(delivery, { operatorAuthorization }) : delivery;
           if (repairLane) work.repairLane = repairLane;
+          // A head merged on its optimistic lane (GY-500) is guarded after the merge: its merge
+          // commit's required suite is read by the main guard, which reverts it if main broke.
+          const lane = work.optimistic;
+          if (lane && lane.head === observation.candidate.sha) {
+            work.optimisticMerges = [...(work.optimisticMerges ?? []), { lane, pr: observation.candidate.pr, mergeSha: observation.mergeSha, mergedAt: observation.mergedAt!, postMerge: null, revert: null }];
+            await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'optimistic.merged',
+              JSON.stringify({ details: { head: lane.head, baseSha: lane.baseSha, baseTip: lane.baseTip, files: lane.files, baseChanges: lane.baseChanges, laneAt: lane.at, pr: observation.candidate.pr, mergeSha: observation.mergeSha, mergedAt: observation.mergedAt, at: now.toISOString() } })]);
+          }
           if (reconciliation) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, reconciliation.requestedBy, 'merge.reconciled',
             JSON.stringify({ details: { ...reconciliation, mergeSha: observation.mergeSha, mergedAt: observation.mergedAt, authorizationRevision, evidenceAsOf, gatesNow: work.gates.filter(gate => !gate.passed).map(gate => ({ name: gate.name, reasons: gate.reasons })), at: now.toISOString() } })]);
           if (operatorAuthorization) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, operatorAuthorization.operator, 'merge.operator-authorized',
@@ -2172,7 +2380,7 @@ export class Engine {
           settleDelivered(work, all, now);
           // The queue shifted. The entries that can land next (the head and its batch) are woken now; the rest are observed on
           // their own schedule and re-predict their base when they near the head.
-          for (const behind of nextQueueEntries(all, work.id, Math.max(mergeBandQueueDepth, this.mergeBatchSize))) await wakeJob(db, behind.id);
+          for (const behind of nextQueueEntries(all, work.id, Math.max(mergeBandQueueDepth, this.mergeBatchSize, this.parallelTips))) await wakeJob(db, behind.id);
         } else {
           if (!work.violations.includes(violation)) work.violations.push(violation);
           if (refusedReconciliation) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'merge.reconciliation.refused',
@@ -2183,11 +2391,7 @@ export class Engine {
       // it is woken to predict against the real base. For a merged entry that could never publish
       // a speculative tip, the ejection is its refused reconciliation (GY-94): nothing is delivered,
       // and the ledger keeps the refusal and the exit side by side.
-      if (queuedBefore !== null && !work.queue && work.queueEjection?.sequence === queuedBefore) {
-        await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'queue.ejected',
-          JSON.stringify({ details: { sequence: queuedBefore, reason: work.queueEjection.reason, ...(refusedReconciliation ? { decision: refusedReconciliation.decision, mergeSha: observation.mergeSha } : {}), at: now.toISOString() } })]);
-        for (const behind of nextQueueEntries(all, work.id, Math.max(mergeBandQueueDepth, this.mergeBatchSize))) await wakeJob(db, behind.id);
-      }
+      await this.recordEjection(db, work, all, queuedBefore, now, refusedReconciliation ? { decision: refusedReconciliation.decision, mergeSha: observation.mergeSha } : {});
       // A stuck batch the evaluation dissolved (GY-506) is recorded on the ledger once, when it happened.
       const dissolved = work.queue?.batchDissolved ?? null;
       if (dissolved && JSON.stringify(dissolved) !== JSON.stringify(dissolvedBefore)) {
