@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { hostname } from 'node:os';
 import { stableJson } from './model/stable-json.js';
 import { z } from 'zod';
 import type { PoolClient } from 'pg';
@@ -7,7 +8,7 @@ import { leaseCommands } from './store/pools.js';
 import { compactHeartbeatReceipt } from './store/receipts.js';
 import { authorizedForProof, unauthorizedProofs } from './proof-grants.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, submittedEpoch, type Attestation, requireCurrent, createSchema, criterionSchema, bindingApproval, carriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type ApprovalIdentity, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type EvidenceAttestation, type Lease, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
+import { activeLease, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, submittedEpoch, type Attestation, requireCurrent, createSchema, criterionSchema, bindingApproval, carriedApproval, currentCarry, refreshedCarriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type ApprovalIdentity, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type EvidenceAttestation, type Lease, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
 import { Refusal, demandWork } from './model/refusal.js';
 import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
@@ -136,6 +137,11 @@ const commands = {
   // the base tip it names into a candidate a repaired base failure held (GY-528). The reconciliation
   // job runs it and records it on `baseRefresh`, where the binding carry decides what the head keeps.
   refresh: z.object({ reason: z.string().trim().min(1).max(2000), base: sha }).strict(),
+  // The coordinator reporting that the guarded merge refused this exact candidate (GY-831): a
+  // carried approval it could not re-post, or one reason repeated since `since`. The control plane
+  // decides what follows from the record: a carried approval is cleared so the review gate asks
+  // for a fresh review of the tip, and otherwise the candidate is marked for a rework decision.
+  mergerefused: z.object({ sha, baseSha: sha, policyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000), since: z.iso.datetime().optional() }).strict(),
 } as const;
 const executorName = z.string().trim().min(1).max(200).regex(/^[^\u0000-\u001f\u007f]+$/);
 const actionClaimSchema = z.object({
@@ -374,11 +380,44 @@ type GracedLease = Lease & { renewalFault?: { at: string; error: string } };
 export class RenewalFault extends Refusal {
   constructor(message: string, readonly grace: { at: string; graceUntil: string; now: string } | null) { super(message, 503); }
 }
+/** The SQLSTATE classes a failed renewal may blame on the server (GY-671): connection exceptions,
+ * insufficient resources, program limits, operator intervention (statement timeouts among them),
+ * system errors and internal errors. Client-caused classes — bad data, constraint violations,
+ * syntax, privileges, serialization and deadlock — are the request's own and earn nothing. */
+const renewalFaultSqlClasses = new Set(['08', '53', '54', '57', '58', 'XX']);
+/** The connection-level failures a renewal may blame on the server, named by message or errno. */
+const renewalFaultMessage = /connection|terminated|timed? ?out|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|socket hang up/i;
+/** The connection errnos a failed renewal may blame on the server, whatever its message says. */
+const renewalFaultErrnos = /^ECONN(RESET|REFUSED|ABORTED)|^ETIMEDOUT$|^EPIPE$|^E(HOST|NET)UNREACH$|^EAI_AGAIN$/;
+/**
+ * What a failed renewal blames on the server, or null when it may not (GY-558, narrowed by
+ * GY-671): only infrastructure trouble — lost or timed-out connections, statement timeouts and
+ * the database's server-error classes — never a programming error. A TypeError in a heartbeat
+ * must surface as the bug it is instead of silently extending the lease it broke, so anything
+ * this cannot name as the server's fault is answered as a refusal, with no grace and no record.
+ */
+export function renewalFaultOf(error: unknown): string | null {
+  if (error instanceof Refusal) return error.status >= 500 ? `HTTP ${error.status}: ${error.message}` : null;
+  if (error instanceof z.ZodError) return null;
+  const code = (error as { code?: unknown } | null)?.code;
+  if (typeof code === 'string') {
+    if (renewalFaultErrnos.test(code)) return `${code}: ${(error as Error).message}`;
+    if (/^[0-9A-Z]{5}$/.test(code)) return renewalFaultSqlClasses.has(code.slice(0, 2)) ? `SQLSTATE ${code}: ${(error as Error).message}` : null;
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  return renewalFaultMessage.test(message) ? message : null;
+}
 /** How far back heartbeat health looks, and the p95 latency above which `master status` raises it (GY-558). */
 export const leaseHealthWindowMs = 10 * 60_000, heartbeatLatencyAttentionMs = 5_000;
 /**
  * Heartbeat latency and the renewals refused or failed server-side, over the last ten minutes in
- * this server process (GY-558), reported by GET /api/status as `leaseHealth`.
+ * this server process (GY-558), reported by GET /api/status as `leaseHealth`. The window is one
+ * process's own, and the report says so (`scope` and `process`, GY-671): a multi-replica
+ * deployment serves renewals from every replica and each reports separately, so fleet-wide p95
+ * and failure counts are the per-replica reports compared, not one number. Aggregating them in
+ * the server was declined there — it needs cross-replica state the store does not hold and would
+ * put metric writes beside the coordination path — so the attention item repeats the caveat
+ * whenever it is raised, naming the process that measured it.
  */
 export class LeaseHealth {
   private samples: { at: number; ms: number; outcome: 'renewed' | 'refused' | 'failed' }[] = [];
@@ -398,10 +437,11 @@ export class LeaseHealth {
     const percentile = (p: number) => sorted.length ? sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(p * sorted.length) - 1))] : null;
     const p50Ms = percentile(0.5), p95Ms = percentile(0.95);
     const refused = this.samples.filter(sample => sample.outcome === 'refused').length, failed = this.samples.filter(sample => sample.outcome === 'failed').length;
+    const reportedBy = `${hostname()}/${process.pid}`;
     const attention = p95Ms !== null && p95Ms > heartbeatLatencyAttentionMs
-      ? `Lease renewals are slow: heartbeat p95 ${p95Ms} ms (p50 ${p50Ms} ms) over the last 10 minutes exceeds ${heartbeatLatencyAttentionMs} ms across ${sorted.length} renewal(s), ${failed} failed server-side and ${refused} refused; a renewal slower than the lease loses it — find what holds the coordination lock or the lease pool in the server logs`
+      ? `Lease renewals are slow: heartbeat p95 ${p95Ms} ms (p50 ${p50Ms} ms) over the last 10 minutes exceeds ${heartbeatLatencyAttentionMs} ms across ${sorted.length} renewal(s), ${failed} failed server-side and ${refused} refused; a renewal slower than the lease loses it — find what holds the coordination lock or the lease pool in the server logs. This window is one server process's own (${reportedBy}); a multi-replica deployment reports each replica separately, so slow renewals served by other replicas are missing here.`
       : null;
-    return { windowMs: leaseHealthWindowMs, renewals: sorted.length, p50Ms, p95Ms, refused, failed, thresholdMs: heartbeatLatencyAttentionMs, attention };
+    return { windowMs: leaseHealthWindowMs, renewals: sorted.length, p50Ms, p95Ms, refused, failed, thresholdMs: heartbeatLatencyAttentionMs, attention, scope: 'process' as const, process: reportedBy };
   }
 }
 
@@ -592,8 +632,11 @@ export class Engine {
   }
   /**
    * Run one command. A renewal is timed and counted in `leaseHealth` (GY-558), and one that fails
-   * server-side — a connection or statement timeout, a lost connection — is recorded against its
-   * lease (`recordRenewalFault`) and answered 503 with the grace that record earned.
+   * server-side — what `renewalFaultOf` blames on the server: a connection or statement timeout,
+   * a lost connection, the database's server-error classes — is recorded against its lease
+   * (`recordRenewalFault`) and answered 503 with the grace that record earns. Any other failure,
+   * a programming error included, is refused without a grace, so bugs surface instead of
+   * extending the lease they broke (GY-671).
    */
   async execute(actor: Principal, command: Command, id: string | null, input: unknown, key: string, context: { observation?: Observation; ciRun?: CiRunObservation | null; attestation?: EvidenceAttestation } = {}) {
     if (command !== 'heartbeat') return this.executeCommand(actor, command, id, input, key, context);
@@ -603,7 +646,7 @@ export class Engine {
       this.leaseHealth.record('renewed', Date.now() - started.getTime());
       return work;
     } catch (error) {
-      const fault = !(error instanceof Refusal && error.status < 500) && !(error instanceof z.ZodError);
+      const fault = renewalFaultOf(error) !== null;
       this.leaseHealth.record(fault ? 'failed' : 'refused', Date.now() - started.getTime());
       if (!fault || !id) throw error;
       throw await this.recordRenewalFault(actor, id, Number((input as { epoch?: unknown } | null)?.epoch), started, error);
@@ -612,12 +655,17 @@ export class Engine {
   /** Heartbeat latency and the renewals refused or failed server-side, in this server process (GY-558). */
   readonly leaseHealth = new LeaseHealth();
   /**
-   * Record a renewal that failed server-side inside its lease's expiry window (GY-558), on the
-   * lease pool and without the coordination lock: a `lease.renewal-failed` event naming the owner,
-   * epoch and the time the renewal arrived. `renewalGrace` then keeps the lease valid until the next
-   * successful renewal or one further lease period from that time, whichever comes first. A record
-   * the database refuses is retried in the background until that period has passed. The returned
-   * refusal carries the grace, so the worker's supervisor keeps retrying through it.
+   * Record a renewal that failed server-side inside its lease's expiry window (GY-558): a
+   * `lease.renewal-failed` event naming the owner, epoch and the time the renewal arrived,
+   * written without the coordination lock. `renewalGrace` then keeps the lease valid until the
+   * next successful renewal or one further lease period from that time, whichever comes first.
+   * The record is written on the main pool, not the lease pool (GY-671): the lease pool is
+   * reserved for the lease commands, and the very exhaustion that failed the renewal must not
+   * also fail the record of it. A record the database refuses is retried in the background until
+   * that period has passed. The refusal carries the grace the record earns even before it has
+   * landed (GY-671) — the same one period from the renewal's arrival `renewalGrace` will grant
+   * once it does — so the worker's supervisor extends its local deadline as far as the server
+   * will hold the lease, instead of stopping at the old deadline while the server still keeps it.
    */
   private async recordRenewalFault(actor: Principal, id: string, epoch: number, at: Date, error: unknown) {
     const reason = (error instanceof Error ? error.message : String(error)).slice(0, 300);
@@ -625,7 +673,7 @@ export class Engine {
     const payload = JSON.stringify({ owner: actor.id, epoch, at: at.toISOString(), error: reason });
     const until = at.getTime() + this.leaseSeconds * 1000;
     // Only a live lease of this owner and epoch earns a grace; the refusal says what it earned.
-    const write = async () => (await this.store.leasePool.query(`WITH live AS (
+    const write = async () => (await this.store.pool.query(`WITH live AS (
         SELECT id, CASE WHEN document->'lease' ? 'renewalFault' THEN (document->'lease'->>'expiresAt')::timestamptz
           ELSE GREATEST((document->'lease'->>'expiresAt')::timestamptz, $7::timestamptz) END AS grace_until
         FROM work_items WHERE (id::text=$1 OR document->>'key'=$1) AND document->'lease'->>'owner'=$2
@@ -639,10 +687,11 @@ export class Engine {
       const retry = () => setTimeout(() => { if (Date.now() < until) write().catch(retry); }, 1000).unref();
       retry();
     }
-    const grace = recorded ? { at: at.toISOString(), graceUntil: recorded.grace_until.toISOString(), now: recorded.now.toISOString() } : null;
+    const grace = recorded ? { at: at.toISOString(), graceUntil: recorded.grace_until.toISOString(), now: recorded.now.toISOString() }
+      : unrecorded !== null ? { at: at.toISOString(), graceUntil: new Date(until).toISOString(), now: new Date().toISOString() } : null;
     return new RenewalFault(grace
-      ? `Lease renewal failed server-side (${reason}); the failure is recorded and the lease stays valid until ${grace.graceUntil} or the next successful renewal`
-      : `Lease renewal failed server-side (${reason})${unrecorded ? `; the failure could not be recorded yet (${unrecorded.slice(0, 200)})` : '; no live lease of this owner and epoch was found to keep'}`, grace);
+      ? `Lease renewal failed server-side (${reason}); ${unrecorded === null ? 'the failure is recorded and the lease stays valid' : 'the record is being retried and the lease is kept'} until ${grace.graceUntil} or the next successful renewal`
+      : `Lease renewal failed server-side (${reason}); no live lease of this owner and epoch was found to keep`, grace);
   }
   /**
    * A lease past its expiry that a recorded server-side renewal fault still covers (GY-558): the
@@ -791,6 +840,23 @@ export class Engine {
         demand(!requestedBaseRefresh(work), `A refresh of ${work.key} head ${candidate!.sha.slice(0, 12)} is already requested; the reconciliation job runs it`);
         // Beside `baseRefresh`, not in it: an approval an earlier refresh carried onto this head still binds until the merge runs.
         work.baseRefreshRequest = { head: candidate!.sha, base: data.base, policyRevision: work.policyRevision, by: actor.id, at: now.toISOString(), reason: data.reason };
+      }
+      if (command === 'mergerefused') {
+        demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
+        const candidate = work.candidate;
+        demand(candidate && candidate.sha === data.sha && candidate.baseSha === data.baseSha && work.policyRevision === data.policyRevision && !work.observation?.merged,
+          `${work.key} candidate changed since the refused merge; the refusal no longer describes it`, 409);
+        const carried = carriedApproval(work), at = now.toISOString();
+        if (carried) {
+          // Every record that carried the approval onto this candidate stops carrying it, naming the
+          // review it could not re-post so the same dismissal is never restored over the refusal.
+          const refused = { reviewer: carried.reviewer, ...(carried.reviewId !== undefined ? { reviewId: carried.reviewId } : {}), originalSha: carried.originalSha, at };
+          const reason = `the guarded merge could not use the carried approval of ${carried.originalSha.slice(0, 12)} by ${carried.reviewer}${carried.reviewId !== undefined ? ` (review ${carried.reviewId})` : ''}: ${data.reason}; a fresh independent approval of ${candidate!.sha.slice(0, 12)} is required`;
+          for (const carry of onto(work, candidate!.sha)) if (carry.approval.carried) carry.approval = { carried: false, reason: reason.slice(0, 2000), refused };
+        }
+        work.mergeRefusal = { sha: data.sha, baseSha: data.baseSha, policyRevision: data.policyRevision, reason: data.reason, since: data.since ?? at, at, by: actor.id, action: carried ? 'rereview' : 'rework',
+          ...(carried ? { approval: { reviewer: carried.reviewer, ...(carried.reviewId !== undefined ? { reviewId: carried.reviewId } : {}), originalSha: carried.originalSha } } : {}),
+          carry: structuredClone(currentCarry(work)) };
       }
       if (command === 'reviewpolicy') {
         if (actor.role !== 'operator-agent') admin(actor);
@@ -1845,6 +1911,11 @@ export class Engine {
     if (exactApproval(work) || carriedApproval(work)) return null;
     const dismissed = dismissedApproval(work);
     if (!dismissed) return null;
+    // A carried approval the guarded merge could not re-post (GY-831) is not restored from the
+    // same dismissed review: the refusal re-required the review, and only a new approval answers it.
+    const standing = currentCarry(work)?.approval, refusal = work.mergeRefusal;
+    const refused = standing && !standing.carried && standing.refused ? standing.refused : refusal?.sha === work.candidate?.sha ? refusal?.approval : undefined;
+    if (refused && refused.reviewer.toLowerCase() === dismissed.reviewer.toLowerCase() && refused.reviewId === dismissed.reviewId) return null;
     const candidate = work.candidate!, observation = work.observation!, at = now.toISOString();
     const short = candidate.sha.slice(0, 12);
     const review = dismissed.reviewId !== undefined ? ` (review ${dismissed.reviewId})` : '';
@@ -2295,6 +2366,16 @@ export class Engine {
       // An approval GitHub withdrew for a merge-base change on this unchanged head binds again
       // before the gates read the record, so no review request is opened for it (GY-127).
       const restoredApproval = observation.merged ? null : this.restoreDismissedApproval(work, now);
+      // A newer approval of the head the tip was built from replaces the carried binding (GY-831),
+      // so the re-post before the merge names a review the pull request still holds.
+      const refreshed = observation.merged ? null : refreshedCarriedApproval(work);
+      const carrying = refreshed ? currentCarry(work) : null;
+      if (refreshed && carrying) {
+        const replaced = carrying.approval as CarriedApproval;
+        carrying.approval = refreshed;
+        await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'review.carry-refreshed',
+          JSON.stringify({ details: { reviewer: refreshed.reviewer, reviewId: refreshed.reviewId, sha: refreshed.originalSha, replaced: { reviewId: replaced.reviewId ?? null, sha: replaced.originalSha }, candidate: work.candidate!.sha } })]);
+      }
       // A required check that just failed on this candidate is owed one rerun before it counts, and
       // a rerun that concluded is resolved with its own conclusion (GY-516), before the gates read it.
       const reruns = reconcileCheckReruns(work, this.ciAppIds, this.rerunFailedChecks, now);

@@ -1,6 +1,6 @@
 import type { Evidence, Observation, ScopeFile, Work } from './model.js';
-import { evidenceBindsCandidate, type ApprovalIdentity, type CarriedApproval, type CarriedProof, type QueueCarry, type RequiredApproval, type TipMerge } from './model/carry.js';
-import { reviewProviderOf } from './model/review.js';
+import { carriedApproval, evidenceBindsCandidate, type ApprovalIdentity, type CarriedApproval, type CarriedProof, type QueueCarry, type RequiredApproval, type TipMerge } from './model/carry.js';
+import { exactApproval, reviewProviderOf } from './model/review.js';
 import { pathScopesOverlap } from './model/scope.js';
 import { queuedRegressions, staleTipRegressions } from './regression-guard.js';
 import { missingAncestryReason, missingBaseAncestry } from './merge-base-ancestry.js';
@@ -984,6 +984,33 @@ export function unpublishableEntry(work: Work): { sequence: number; mergeSha: st
   return { sequence: work.queue.sequence, mergeSha: work.observation.mergeSha ?? null, refusal: refusedReconciliation(work) };
 }
 /**
+ * GY-831. The guarded merge's refusal the loop reported for one candidate: a carried approval it
+ * could not re-post, or one reason repeated past the loop's bound. `rereview` cleared the carried
+ * approval so the review gate asks for a fresh review of the tip; `rework` asks the approver for
+ * the rework decision, since nothing the control plane holds re-binds it. `approval` names the
+ * review that could not be re-posted; `carry` keeps the decision that applied to the candidate,
+ * approval re-required, because the queue ejection the refusal causes drops the tip's record and
+ * its carried proofs must still bind.
+ */
+export interface MergeRefusal {
+  sha: string; baseSha: string; policyRevision: number; reason: string; since: string; at: string; by: string; action: 'rereview' | 'rework';
+  approval?: { reviewer: string; reviewId?: number; originalSha: string }; carry?: QueueCarry | null;
+}
+/** The ejection reason of an entry the guarded merge kept refusing (GY-831); re-entry reads it back. */
+export const mergeRefusalEjectionPrefix = 'The guarded merge refused candidate ';
+/**
+ * GY-831. The merge refusal the control plane recorded for exactly the current candidate, while it
+ * still stands, worded as the queue ejection it causes: a head the guarded merge cannot land must
+ * not hold every entry behind it. A `rereview` refusal stands until a fresh approval binds the
+ * candidate again, and the entry may then re-enter; a `rework` one stands for the candidate's life.
+ */
+export function standingMergeRefusal(work: Work): string | null {
+  const refusal = work.mergeRefusal, candidate = work.candidate;
+  if (!refusal || !candidate || refusal.sha !== candidate.sha || refusal.baseSha !== candidate.baseSha || refusal.policyRevision !== work.policyRevision) return null;
+  if (refusal.action === 'rereview' && (exactApproval(work) || carriedApproval(work))) return null;
+  return `${mergeRefusalEjectionPrefix}${candidate.sha.slice(0, 12)} since ${refusal.since}: ${refusal.reason.slice(0, 600)}; ${refusal.action === 'rereview' ? 'a fresh review of it is requested' : 'it awaits a rework decision'}, and the entry leaves the queue so the next one heads it`;
+}
+/**
  * Explicit, observed failure of a queued entry's speculative validation. Missing or pending
  * inputs keep an entry queued; only a reported adverse result removes it.
  */
@@ -999,6 +1026,8 @@ export function ejectionReason(work: Work, ciAppIds: number[], all: Work[] = [],
   if (work.policyRevision !== work.queue.policyRevision) return `Policy revision changed from ${work.queue.policyRevision} to ${work.policyRevision} after this entry was queued`;
   if (work.blocker) return `Queued work was blocked: ${work.blocker}`;
   if (work.violations.length) return `Queued work has an open violation: ${work.violations[0]}`;
+  const refused = standingMergeRefusal(work);
+  if (refused) return refused;
   const candidate = work.candidate, observation = work.observation;
   if (!candidate || !observation || observation.candidate.sha !== candidate.sha || observation.candidate.baseSha !== candidate.baseSha) return null;
   const tip = candidate.sha.slice(0, 12);
