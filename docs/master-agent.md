@@ -46,7 +46,7 @@ another session's handle finished to free a slot.
 
 ### System invariants
 
-Each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `lingering-sessions` (30 min), `refresh-churn` (3 per own head), `merge-stall` (10 min), `cycle-p90` (30 s), `untriaged-backlog` (24 h), `deploy-lease-loss` (0); thresholds: `invariants` in `.graphyard/master.json`.
+Each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `lingering-sessions` (30 min), `refresh-churn` (3 per own head), `merge-stall` (10 min), `cycle-p90` (30 s), `untriaged-backlog` (24 h), `deploy-lease-loss` (0); thresholds: `invariants` in `.graphyard/master.json`; `tests/soak.test.ts` enforces.
 
 ## Research and diagnosis
 
@@ -56,7 +56,7 @@ With `run.research` set (`model`, `timeoutMinutes` 15, `tokenBudget`), a feature
 
 ## Machine-filed backlog
 
-One follow-up item per parent; approvals append their findings. With `run.research`, Pi triages machine-filed items (release, close, merge; closure needs approval), `triageConcurrency` (default 2) at once. Untriaged past 24h raises attention.
+One follow-up item per parent; approvals append their findings. With `run.research`, Pi triages machine-filed items (release, close, merge; closure needs approval), `triageConcurrency` at once. Untriaged past 24h raises attention.
 
 ## Automatic dispatch at submit
 
