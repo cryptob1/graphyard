@@ -34,7 +34,7 @@ The gate requires `GITHUB_CI_APP_IDS` CI checks, current-head approval, trusted 
 
 ## Merge queue
 
-A failed required check reruns once on the unchanged head before rework or ejection, on the newest check-run ID from configured CI Apps; an owed or accepted rerun expires after 15 minutes without a new run; Actions: write is required: preflight diagnoses a missing grant, rerun requests hold until accepted.
+A failed required check reruns once on the unchanged head before rework or ejection, on the newest check-run ID from configured CI Apps; an owed or accepted rerun expires after 15 minutes without a new run; Actions: write is required: preflight diagnoses a missing grant, rerun requests hold until accepted. A spent rerun on a candidate head — expired, or failed again — is the record's own grounds for a new head: the control plane reworks it itself; without a spent rerun the loop's judged decision decides.
 
 Once gated, the candidate's speculative tip, pushed onto the candidate branch and `refs/graphyard/queue/KEY`, binds every check, review and proof; a failed check, requested changes, revoked proof, conflict or rework ejects it back, one conflicting only with entries ahead of it re-enters unchanged once one lands or leaves. It passes the check for an authorized head and merge group, then merges through GitHub; protection decides; withdrawal dequeues; queueless `CLEAN`, `UNSTABLE`, `HAS_HOOKS` PRs merge at once, head-bound.
 

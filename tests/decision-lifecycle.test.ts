@@ -101,21 +101,24 @@ test('integration:decision-stale-on-revision-race — an approval refused on a r
   const requested = await decide(master.token, work, 'release', { expectedRevision: pinned }, 'Next by priority');
   assert.equal(requested.status, 200, JSON.stringify(requested.body));
   assert.equal(requested.body.state, 'requested');
-  // A dispatch-grade mutation moves the item while the request waits for its approver.
+  // The release decision is pinned to the unreleased-backlog state its judgement rests on (GY-951).
+  assert.deepEqual(requested.body.pin, { stage: 'backlog', ready: false, blocker: null, policyRevision: work.policyRevision });
+  // A dispatch-grade mutation moves the item while the request waits for its approver: the
+  // criteria revision moves the pin itself, so the approval is refused all the same.
   work = await extraCriterion(work);
   const refused = await approve(approver.token, work, requested.body.id, 'Approved in principle');
   assert.equal(refused.status, 409);
   assert.match(refused.body.error, new RegExp(`Task revision changed \\(now ${work.revision}\\); reload and request again; the decision was not applied`));
-  // The refusal settled the decision in its own transaction: terminal, with the reason and both revisions.
+  // The refusal settled the decision in its own transaction: terminal, with the reason and both pins.
   const listed = await ok(master.token, 'GET', `work/${work.key}/decisions`);
   const stale = listed.decisions.find((entry: any) => entry.id === requested.body.id);
   assert.equal(stale.state, 'stale');
   assert.match(stale.outcome, /Task revision changed/);
-  assert.deepEqual(stale.race, { expected: { revision: pinned }, current: { revision: work.revision } });
+  assert.deepEqual(stale.race, { expected: { stage: 'backlog', ready: false, blocker: null, policyRevision: 1 }, current: { stage: 'backlog', ready: false, blocker: null, policyRevision: work.policyRevision } });
   const recorded = (await events(work)).find(row => row.kind === 'decision.stale');
   assert.equal(recorded.actor, approver.id);
-  assert.deepEqual(recorded.payload.expected, { revision: pinned });
-  assert.deepEqual(recorded.payload.current, { revision: work.revision });
+  assert.deepEqual(recorded.payload.expected, { stage: 'backlog', ready: false, blocker: null, policyRevision: 1 });
+  assert.deepEqual(recorded.payload.current, { stage: 'backlog', ready: false, blocker: null, policyRevision: work.policyRevision });
   assert.match(recorded.payload.reason, /revision changed/);
   assert.equal(recorded.payload.observedBy.id, approver.id);
   // A new request of the same action is accepted immediately and completes.
@@ -144,6 +147,75 @@ test('integration:decision-stale-on-revision-race — an approval refused on a r
   assert.equal(late.status, 409); assert.match(late.body.error, /already stale/);
   const takeBack = await withdraw(master.token, work, requested.body.id, 'Too late for that');
   assert.equal(takeBack.status, 409); assert.match(takeBack.body.error, /already stale/);
+});
+
+test('integration:release-decision-pinned — a release or unblock decision survives the bookkeeping that moves the revision, and its own material change still settles it stale', async () => {
+  // GY-951: a release whose request and approval are bookkeeping apart applies. Between them the
+  // loop recorded a session on the item — one of the movers (a heartbeat, a session report, a
+  // workspace registration, a dispatch row) that made every such approval settle stale, cost a
+  // decide-and-approve round trip, and counted as a decision fault each time.
+  let work = await created('pinned-release');
+  const atRequest = work.revision;
+  const requested = await decide(master.token, work, 'release', { expectedRevision: work.revision }, 'Next by priority');
+  assert.equal(requested.status, 200, JSON.stringify(requested.body));
+  const pinAtRequest = { stage: 'backlog', ready: false, blocker: null, policyRevision: work.policyRevision };
+  assert.deepEqual(requested.body.pin, pinAtRequest, 'the request records the unreleased-backlog state the release was judged on');
+  await ok(token(operator), 'POST', `work/${work.id}/session`, { id: 'session-pinned-release', kind: 'coordination', runtime: 'pi', host: 'decision-host', subject: `${work.key} triage`, state: 'running' });
+  work = await reload(work.id);
+  assert.ok(work.revision > atRequest, 'the bookkeeping moved the item revision');
+  const approved = await approve(approver.token, work, requested.body.id, 'The item is still the unreleased backlog work I read');
+  assert.equal(approved.status, 200, JSON.stringify(approved.body));
+  assert.equal(approved.body.state, 'applied');
+  work = await reload(work.id);
+  assert.equal(work.stage, 'ready');
+  assert.equal((await events(work)).some(row => row.kind === 'decision.stale'), false, 'no race was recorded for the release');
+  // The blocker a release was judged on is part of its pin: one cleared between the request and
+  // the approval is a material change, and the approval settles the decision stale instead of
+  // releasing an item whose grounds moved.
+  let blocked = await overwrite(await created('pinned-release-blocked'), document => { document.blocker = 'Waiting on a credential'; });
+  const blockedRequest = await decide(master.token, blocked, 'release', { expectedRevision: blocked.revision }, 'Release it so the blocker is judged by work');
+  assert.equal(blockedRequest.status, 200, JSON.stringify(blockedRequest.body));
+  assert.deepEqual(blockedRequest.body.pin, { stage: 'backlog', ready: false, blocker: 'Waiting on a credential', policyRevision: blocked.policyRevision });
+  blocked = await engine.execute(operator, 'unblock', blocked.id, { reason: 'The credentials were issued', expectedRevision: blocked.revision }, randomUUID());
+  const blockedRefused = await approve(approver.token, blocked, blockedRequest.body.id, 'Approved from the record I read');
+  assert.equal(blockedRefused.status, 409);
+  const blockedSettled = (await ok(master.token, 'GET', `work/${blocked.key}/decisions`)).decisions.find((entry: any) => entry.id === blockedRequest.body.id);
+  assert.equal(blockedSettled.state, 'stale');
+  assert.deepEqual(blockedSettled.race.expected, { stage: 'backlog', ready: false, blocker: 'Waiting on a credential', policyRevision: blocked.policyRevision });
+  assert.equal(blockedSettled.race.current.blocker, null, 'the blocker cleared beneath the request, and the pin caught it');
+  // An unblock is pinned to the blocker it clears: bookkeeping between the request and the
+  // approval leaves it appliable, while a blocker re-set with different grounds is a fresh
+  // incident the approval cannot clear.
+  let held = await created('pinned-unblock');
+  held = await engine.execute(operator, 'ready', held.id, {}, randomUUID());
+  held = await engine.execute(implementer, 'claim', held.id, {}, randomUUID());
+  held = await engine.execute(implementer, 'blocked', held.id, { epoch: held.epoch, reason: 'plannedFiles cannot cover src/index.ts' }, randomUUID());
+  const unblockRequest = await decide(master.token, held, 'unblock', { expectedRevision: held.revision }, 'The credentials are issued');
+  assert.equal(unblockRequest.status, 200, JSON.stringify(unblockRequest.body));
+  assert.deepEqual(unblockRequest.body.pin, { blocker: 'plannedFiles cannot cover src/index.ts', stage: 'build' });
+  const atUnblockRequest = held.revision;
+  await ok(token(operator), 'POST', `work/${held.id}/session`, { id: 'session-pinned-unblock', kind: 'coordination', runtime: 'pi', host: 'decision-host', subject: `${held.key} triage`, state: 'running' });
+  held = await reload(held.id);
+  assert.ok(held.revision > atUnblockRequest, 'the bookkeeping moved the item revision');
+  const unblockApproved = await approve(approver.token, held, unblockRequest.body.id, 'The same blocker, still standing');
+  assert.equal(unblockApproved.status, 200, JSON.stringify(unblockApproved.body));
+  assert.equal(unblockApproved.body.state, 'applied');
+  assert.equal((await reload(held.id)).blocker, null);
+  assert.equal((await events(held)).some(row => row.kind === 'decision.stale'), false, 'no race was recorded for the unblock');
+  // A different blocker standing when the approval arrives is one the approver never read.
+  let replaced = await created('pinned-unblock-replaced');
+  replaced = await engine.execute(operator, 'ready', replaced.id, {}, randomUUID());
+  replaced = await engine.execute(implementer, 'claim', replaced.id, {}, randomUUID());
+  replaced = await engine.execute(implementer, 'blocked', replaced.id, { epoch: replaced.epoch, reason: 'plannedFiles cannot cover src/index.ts' }, randomUUID());
+  const replacedRequest = await decide(master.token, replaced, 'unblock', { expectedRevision: replaced.revision }, 'The credentials are issued');
+  assert.equal(replacedRequest.status, 200, JSON.stringify(replacedRequest.body));
+  replaced = await engine.execute(implementer, 'blocked', replaced.id, { epoch: replaced.epoch, reason: 'The sandbox refuses the worktree path' }, randomUUID());
+  const replacedRefused = await approve(approver.token, replaced, replacedRequest.body.id, 'Approved from the record I read');
+  assert.equal(replacedRefused.status, 409);
+  const replacedSettled = (await ok(master.token, 'GET', `work/${replaced.key}/decisions`)).decisions.find((entry: any) => entry.id === replacedRequest.body.id);
+  assert.equal(replacedSettled.state, 'stale');
+  assert.equal(replacedSettled.race.current.blocker, 'The sandbox refuses the worktree path', 'the new blocker is not cleared behind the old one');
+  assert.equal((await reload(replaced.id)).blocker, 'The sandbox refuses the worktree path');
 });
 
 test('integration:decision-pinning-scope — resolve is pinned to what it acts on and attest to the candidate head and policy, so unrelated item changes do not invalidate them', async () => {

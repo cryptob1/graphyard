@@ -13,12 +13,13 @@ import { Refusal, demandWork } from './model/refusal.js';
 import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
 import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
-import { branchContamination, nextQueueEntries, disprovedConflict, withDisprovedConflict, currentRestore, decideIdentityCarry, defaultMergeBatchSize, defaultParallelTips, mergeParallelTipsEvent, mergeBatchSizeEvent, dismissedApproval, keptTipCarry, onto, pendingRestore, reviewedFilesOf, queueHistoryLimit, queueSequencingReason, reconciliationRefusalPrefix, reconcileCheckReruns, rerunFailedChecksEvent, tipReplacesHead, checkRerunLimit, type BaseRefresh, type CheckRerun, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type QueueSpeculation, type RestoredApproval } from './merge-queue.js';
+import { branchContamination, nextQueueEntries, disprovedConflict, withDisprovedConflict, currentRestore, decideIdentityCarry, defaultMergeBatchSize, defaultParallelTips, mergeParallelTipsEvent, mergeBatchSizeEvent, dismissedApproval, keptTipCarry, onto, pendingRestore, reviewedFilesOf, queueHistoryLimit, queueSequencingReason, reconciliationRefusalPrefix, reconcileCheckReruns, rerunFailedChecksEvent, checkReruns, tipReplacesHead, checkRerunLimit, type BaseRefresh, type CheckRerun, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type QueueSpeculation, type RestoredApproval } from './merge-queue.js';
 import { queueEjectionRecord } from './model/queue.js';
 import { githubFromEnv, mergeBandQueueDepth } from './github.js';
 import { regressionRefusals } from './regression-guard.js';
 import { ciFamilyAllows, ciProofFamilies, ciRunBindingSchema, ciRunRefusal, isCiProducer, refuseCiProducer, staleCiAttemptRefusal, type CiRunObservation } from './model/ci-proofs.js';
 import { decideScopeRequest, liveScopeWidening, scopeRefusalBlocker, type ScopeDecision } from './model/scope.js';
+import { failedRequiredChecks } from './model/refusal-mapping.js';
 import { mergedScopeRequest, plannedFilesCovered, widenedPlannedFiles } from './model/scope-collapse.js';
 import { configuredDocumentation, documentationObligation, recordDocumentationSubmission, type DocumentationPolicy } from './model/documentation.js';
 import { liveDispatchHandleIds, reconcileAutoDispatch, type DispatchTransition } from './model/dispatch.js';
@@ -2051,6 +2052,53 @@ export class Engine {
     for (const transition of conflicts) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', transition.event, JSON.stringify({ details: { ...transition.conflict, at: now.toISOString() } })]);
   }
   /**
+   * GY-951. The rework a required check that failed on the exact current candidate head calls for
+   * once its one rerun has been spent (GY-516) has one correct answer, and the answer is the
+   * record's own: GitHub reported the failure on this head, the rerun it was owed never appeared
+   * or ran and failed again, and no reading of the record says anything else. So the control
+   * plane settles the round itself, in the same save that would otherwise surface it — where a
+   * `request-rework` state no executor may run would stand until a decide-and-approve session
+   * pair repeated the record's own reading, and each such wait counted as a decision fault.
+   *
+   * The spent rerun is what makes the grounds final, and the guard is exact: a failure its
+   * rerun still holds waits for that rerun, and a failure with no rerun record at all — a run
+   * GitHub named without an id, or reruns disabled — may still be cleared by the next reading,
+   * so it stays with the loop's judged decision, exactly as before. A round whose grounds a
+   * person or an agent judged (a review verdict, unresolved threads) is never settled here, and
+   * neither is one whose record does not yet attest a stopped worker: a live lease or an
+   * unsettled containment fence leaves it to the loop's two-party decision.
+   *
+   * Applied with the `rework` command's own effects, under the coordination lock the caller
+   * already holds: the lapsed lease is discarded with its stopped-worker attestation, the
+   * assignment preserved, the attempt's scope request closed, and the save carries the document
+   * the attestation is read back from. The caller re-evaluates after it, so the saved document
+   * names the dispatch the fresh attempt needs, never the rework it answered.
+   */
+  private async settleMechanicalRework(db: PoolClient, work: Work, now: Date): Promise<boolean> {
+    if (!work.candidate) return false;
+    const candidate = work.candidate.sha;
+    const spent = (check: string) => { const last = checkReruns(work).filter(entry => entry.sha === candidate && entry.check === check).at(-1); return !!last && (last.state === 'expired' || last.state === 'failed'); };
+    const failed = failedRequiredChecks(work).filter(spent);
+    if (!failed.length) return false;
+    if (work.lease && Date.parse(work.lease.expiresAt) > now.getTime()) return false;
+    if (work.containmentQuarantine && ((!work.lease || Date.parse(work.lease.expiresAt) > now.getTime())
+      || (!!work.containmentQuarantine.launchExpiresAt && Date.parse(work.containmentQuarantine.launchExpiresAt) > now.getTime()))) return false;
+    const reason = `${work.key}: required CI check${failed.length === 1 ? '' : 's'} ${failed.join(', ')} failed on candidate ${work.candidate!.sha.slice(0, 12)} after its one rerun was spent. No gate passes a head whose required checks failed, and the grounds are the record's own, so the control plane returns the candidate to a worker itself: no decision round trip stands between the failure and the fresh attempt it calls for.`;
+    if (work.lease) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'lease.expired',
+      JSON.stringify({ details: { owner: work.lease.owner, epoch: work.lease.epoch, expiresAt: work.lease.expiresAt, submission: work.submission, cause: 'stopped-by-attestation',
+        attestation: { kind: 'stopped-worker', source: 'rework', epoch: work.epoch, actor: 'graphyard', at: now.toISOString(), reason }, at: now.toISOString() } })]);
+    const closedScope = closeEndedScopeRequest(work, now, 'rework');
+    if (closedScope) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'scope.closed', JSON.stringify({ details: closedScope })]);
+    work.reworkRequested = true;
+    work.containmentQuarantine = null;
+    preserveAssignment(work);
+    recordRework(work, now);
+    work.lease = null;
+    if (work.leadHold?.action === 'send-back') releaseLeadHold(work);
+    await save(db, work, 'graphyard', 'rework', now, { reason, previousWorkerStopped: true, mechanical: true, trigger: 'ci-failed', checks: failed, sha: work.candidate!.sha });
+    return true;
+  }
+  /**
    * How long one reconciliation batch may hold the coordination lock before it yields (GY-274).
    * The first tick after a deploy re-evaluated every item under one lock for 65 s, and every
    * heartbeat queued behind it until the workers' supervisors gave up.
@@ -2147,6 +2195,9 @@ export class Engine {
     const queuedBefore = work.queue?.sequence ?? null;
     const dissolvedBefore = work.queue?.batchDissolved ?? null;
     this.evaluate(work, all, now);
+    // A mechanical rework the record itself calls for (GY-951) is settled before the save that
+    // would surface it, and the re-evaluation names what the fresh attempt needs instead.
+    if (await this.settleMechanicalRework(db, work, now)) this.evaluate(work, all, now);
     // A queue entry the evaluation derived out — here, a merged entry whose reconciliation a
     // standing refusal already answered (GY-94) — is recorded as an ejection, and the entries
     // behind it are woken to predict against the real base.
@@ -2362,6 +2413,11 @@ export class Engine {
       for (const transition of reruns.transitions) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', transition.kind,
         JSON.stringify({ details: { ...transition.rerun, at: now.toISOString() } })]);
       this.evaluate(work, all, now);
+      // A mechanical rework the record itself calls for (GY-951) is settled in this very save:
+      // the rerun that just expired here would otherwise publish a `request-rework` state the
+      // next reader counts as a decision fault. The re-evaluation names what the fresh attempt
+      // needs instead, and the item's save carries the settled round.
+      if (await this.settleMechanicalRework(db, work, now)) this.evaluate(work, all, now);
       if (restoredApproval) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'review.restored',
         JSON.stringify({ details: { ...restoredApproval, baseSha: observation.candidate.baseSha, policyRevision: work.policyRevision } })]);
       // A head found carrying another item's unlanded commits is named on the ledger once per head

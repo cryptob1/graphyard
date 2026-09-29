@@ -19,9 +19,10 @@ const pages = ['README.md', ...readdirSync(`${root}docs`, { recursive: true, wit
 // projects; GY-574 moves it into graphyard.json). Raised from 12,000 on 2026-09-26: at exactly
 // 12,000 every queued change that documented itself overflowed on its merge-queue tip and was
 // ejected. Raised from 13,000 on 2026-09-29 (GY-945): the set sat at 12,999 — one word of room —
-// and the fleet panel's documentation needed ~60. The per-page budget is unchanged, so no page
-// grows past 1,200 words.
-const TOTAL_BUDGET = 13_100, PAGE_BUDGET = 1_200;
+// and the fleet panel's documentation needed ~60. Raised from 13,100 on 2026-09-29 (GY-951): the
+// set sat at exactly 13,100, and documenting the decision pins and the control plane's own
+// mechanical rework needed ~140. The per-page budget is unchanged, so no page grows past 1,200.
+const TOTAL_BUDGET = 13_250, PAGE_BUDGET = 1_200;
 /** Words as `wc -w` counts them: maximal runs of non-whitespace, markup and code included. */
 const words = (text: string) => text.split(/\s+/).filter(Boolean).length;
 

@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { Refusal, demand, resolveEscalation, standingEscalations, type Principal, type Work } from '../model.js';
 import { save, wakeJob } from '../store.js';
 import { approvalConflict, approveCapability, assertDecisionAuthority, decisionApprovalSchema, decisionInputs, decisionPrecondition, decisionRequestSchema, decisionSituation, foldDecisions, requiredDecisionCapabilities, standingRefusal, type Decision, type DecisionState } from '../model/approval.js';
-import { canonical, decisionRace, readDecisions, resolvePin, samePin, type DecisionRecord, type StaleRace } from './decision-ledger.js';
+import { canonical, decisionPin, decisionRace, pinHolds, readDecisions, resolvePin, samePin, type DecisionRecord, type ResolvePin, type StaleRace } from './decision-ledger.js';
 import type { Services } from './routes.js';
 import { refuseDecision, withdrawDecision } from './decision-refusal.js';
 import { precedentAvailability } from './escalation-context.js';
@@ -100,7 +100,12 @@ export async function requestDecision(services: Services, caller: Principal, id:
     demand(!pending, `Decision ${pending?.id} (${data.action}) is already ${pending?.state} on ${work!.key}; wait for it before requesting another`, 409);
     const decisionId = randomUUID();
     await record(db, work!, actor.id, 'decision.requested', { id: decisionId, action: data.action, input, reason: data.reason, requester: { id: actor.id, role: actor.role }, capabilities: requiredDecisionCapabilities(data.action, input, work!),
-      ...(cited ? { precedent: cited } : {}), ...(noPrecedent ? { noPrecedent } : {}), ...(data.context ? { context: data.context } : {}), ...(data.action === 'resolve' ? { pin: resolvePin(work!) } : {}), ...(situation ? { situation } : {}) });
+      ...(cited ? { precedent: cited } : {}), ...(noPrecedent ? { noPrecedent } : {}), ...(data.context ? { context: data.context } : {}),
+      // A revision-bound decision is pinned to the state its judgement rests on, not the whole
+      // revision (GY-951): resolve to its incident, release and unblock to the state they clear
+      // or name. The approval relaxes only the revision precondition while the pin holds.
+      ...(data.action === 'resolve' ? { pin: resolvePin(work!) } : data.action === 'release' || data.action === 'unblock' ? { pin: decisionPin(work!, data.action) } : {}),
+      ...(situation ? { situation } : {}) });
     const result = (await readDecisions(db, work!)).find(decision => decision.id === decisionId)!;
     await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
     return result;
@@ -150,19 +155,23 @@ export async function approveDecision(services: Services, caller: Principal, id:
       demand(decision!.state === 'requested' || resuming, `Decision ${decision!.id} is already ${decision!.state}${decision!.approvedBy ? ` (approved by ${decision!.approvedBy})` : ''}`, 409);
       await requesterAuthority(services, db, decision!, work!);
       let precondition = resuming ? null : decisionPrecondition(decision!.action, decision!.input, work!);
-      // A resolve decision is pinned to what its resolver's judgement rests on — the policy
-      // revision, the candidate head and base, the lease epoch, and the exact standing
-      // escalation set with the moment each was raised — not to the item's whole revision: a
-      // heartbeat, a workspace registration or a dispatch between the request and the approval
-      // moves the revision without invalidating the request. While the pinned state still
-      // holds, only the revision precondition is relaxed; anything else the item moved is
-      // judged as it stands. A moved pin is a refusal decisionRace settles stale below — a
-      // suppressed repeat of the trigger never grew the set and a replacement claim never
-      // touched it, so the pin, not the trigger slot, is what keeps an approval from clearing
-      // an incident the requester never saw — and a fresh resolve of the same action is
-      // accepted at once.
-      if (decision!.action === 'resolve' && !resuming && samePin(resolvePin(work!), decision!.pin)
-        && precondition?.startsWith('Task revision changed')) precondition = null;
+      // A decision pinned at request time is bound to the state its judgement rests on — the
+      // policy revision, the candidate head and base, the lease epoch, and the exact standing
+      // escalation set with the moment each was raised for a resolve; the unreleased-backlog
+      // state with its blocker and criteria for a release; the blocker itself for an unblock —
+      // not to the item's whole revision: a heartbeat, a session report, a workspace
+      // registration or a dispatch between the request and the approval moves the revision
+      // without invalidating the request. While the pinned state still holds, only the revision
+      // precondition is relaxed; anything else the item moved is judged as it stands. A moved
+      // pin is a refusal decisionRace settles stale below — a suppressed repeat of the trigger
+      // never grew the set and a replacement claim never touched it, so the pin, not the
+      // trigger slot, is what keeps an approval from clearing an incident the requester never
+      // saw — and a fresh resolve of the same action is accepted at once.
+      if (precondition?.startsWith('Task revision changed')) {
+        if (decision!.action === 'resolve' && !resuming && samePin(resolvePin(work!), decision!.pin as ResolvePin)) precondition = null;
+        else if ((decision!.action === 'release' || decision!.action === 'unblock') && !resuming
+          && pinHolds(decisionPin(work!, decision!.action), decision!.pin)) precondition = null;
+      }
       if (precondition) {
         // A pin the item has moved past can never hold again, so the decision would stay
         // 'requested' forever and block every re-request; settle it as stale instead.

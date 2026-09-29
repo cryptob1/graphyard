@@ -182,9 +182,13 @@ test('unit:tip-flake-rerun-once — a failed check on a candidate head outside t
   assert.deepEqual(step.reruns, []);
   assert.deepEqual(step.work.checkReruns!.map(entry => entry.state), ['failed']);
   assert.deepEqual(gate(step.work, 'test').reasons, [failing + '; rerun: failed again after rerunning its failed jobs']);
-  // The second failure on the same sha is the worker's: the rework round is asked for as before.
+  // The second failure on the same sha is the worker's: the grounds are the record's own, so the
+  // control plane settles the round itself (GY-951), in the save that would otherwise publish the
+  // owed decision — and the loop asks for no decision the record already answered.
   assert.equal(refusalAction(step.work, 'test', failing), 'request-rework');
-  assert.deepEqual([routineDecision(step.work, { autoMerge: true }, Date.now())?.action, routineDecision(step.work, { autoMerge: true }, Date.now())?.binding], ['rework', `${head}:ci:test`]);
+  assert.equal(step.work.reworkRequested, true, 'the mechanical round is settled, not requested');
+  assert.deepEqual((await kinds(step.work)).filter(kind => kind === 'rework'), ['rework']);
+  assert.equal(routineDecision(step.work, { autoMerge: true }, Date.now()), null, 'no decision for grounds the record already answered');
   // A rerun GitHub accepted but never ran stops holding after the visibility bound.
   const record = { sha: head, check: 'test', failedRunId: 41, state: 'requested' as const, at: new Date(Date.now() - checkRerunVisibilityMs).toISOString() };
   const expired = reconcileCheckReruns({ ...step.work, checkReruns: [record], observation: seen(step.work, { sha: head, baseSha: main }, [run('test', 41, 'failure')]) }, [15368], 1, new Date());
@@ -291,8 +295,12 @@ test('manual:review-followups-triaged GY-731.2: custom and empty CI trust config
   assert.deepEqual(gate(work, 'test').ciAppIds, [777]);
   assert.equal(routineDecision(work, { autoMerge: true }, Date.now()), null);
   work = await custom.observe(work.id, work.revision, seen(work, candidate, [...checks, { ...run('test', 12, 'failure'), appId: 777 }]));
+  assert.deepEqual(gate(work, 'test').ciAppIds, [777]);
   assert.equal(refusalAction(work, 'test', gate(work, 'test').reasons[0]), 'request-rework');
-  assert.equal(routineDecision(work, { autoMerge: true }, Date.now())?.action, 'rework');
+  // The second failure on the trusted run is the record's own grounds: the control plane settles
+  // the round itself (GY-951) and the loop asks for no decision the record already answered.
+  assert.equal(work.reworkRequested, true);
+  assert.equal(routineDecision(work, { autoMerge: true }, Date.now()), null);
   const empty = new Engine(store, [], 120, 'owner/project');
   work = await empty.observe(work.id, work.revision, seen(work, candidate, checks));
   assert.deepEqual(gate(work, 'test').ciAppIds, []);
