@@ -1,4 +1,4 @@
-import { baseRefreshConflict, defaultMergeBatchSize, describeTipWindow, ejectedTipRestore, ejectionReason, nextQueueSequence, pendingBaseRefresh, pendingRestore, predictQueue, predecessorWait, predecessorWaitText, queueHistoryLimit, queueBatch, queuePlacement, sameMergeBatch, sameTips, stuckBatchMs, windowBatchView } from '../merge-queue.js';
+import { baseRefreshConflict, defaultMergeBatchSize, describeTipWindow, ejectedTipRestore, ejectionReason, mergeRefusalEjectionPrefix, standingMergeRefusal, nextQueueSequence, pendingBaseRefresh, pendingRestore, predictQueue, predecessorWait, predecessorWaitText, queueHistoryLimit, queueBatch, queuePlacement, sameMergeBatch, sameTips, stuckBatchMs, windowBatchView } from '../merge-queue.js';
 import type { QueueEjection, QueueHistoryEntry, QueuePlacement } from '../merge-queue.js';
 import type { Work } from './work.js';
 import { behindBaseHold } from './behind-base.js';
@@ -30,7 +30,7 @@ export function placeInQueue(work: Work, all: Work[], now: Date, ciAppIds: numbe
   const candidate = work.candidate;
   let queue = work.queue ?? null, queueSequence = work.queueSequence ?? 0, ejection = work.queueEjection ?? null;
   const record = (event: QueueHistoryEntry['event'], reason?: string, tip?: string) => {
-    history.push({ at: now.toISOString(), event, sequence: queueSequence, ...(reason ? { reason } : {}), ...(tip ? { tip } : {}) });
+    history.push({ at: now.toISOString(), event, sequence: queueSequence, ...(reason ? { reason } : {}), ...(tip ? { tip } : {}), ...(event === 'ejected' ? { conflict: null } : {}) });
     if (history.length > queueHistoryLimit) history.splice(0, history.length - queueHistoryLimit);
   };
   const probe = { ...work, queue, queueSequence, gates: [], violations: work.violations } as Work;
@@ -47,7 +47,9 @@ export function placeInQueue(work: Work, all: Work[], now: Date, ciAppIds: numbe
     ejection = { at: now.toISOString(), sequence: queue.sequence, reason, sha: candidate?.sha ?? null, policyRevision: work.policyRevision, conflict: null };
     record('ejected', reason, queue.speculation?.tip ?? candidate?.sha);
     queue = null;
-  } else if (!queue && eligible && (!(ejection && candidate && ejection.sha === candidate.sha && ejection.policyRevision === work.policyRevision) || predecessorReentry(work, all))) {
+  } else if (!queue && eligible && (!(ejection && candidate && ejection.sha === candidate.sha && ejection.policyRevision === work.policyRevision) || predecessorReentry(work, all)
+    // A candidate ejected for a merge refusal a fresh approval has since answered re-enters (GY-831).
+    || ejection!.reason.startsWith(mergeRefusalEjectionPrefix) && !standingMergeRefusal(work))) {
     queueSequence = nextQueueSequence(all);
     queue = { sequence: queueSequence, enqueuedAt: now.toISOString(), policyRevision: work.policyRevision, speculation: null };
     ejection = null;
@@ -134,7 +136,7 @@ export function queueEjectionRecord(work: Work, all: Work[], reason: string, now
   const predecessors = conflict ? placement?.predecessors ?? [] : null;
   const ejection: QueueEjection = { at, sequence, reason, sha: work.candidate?.sha ?? null, policyRevision: work.policyRevision,
     conflict: conflict ? { base: placement?.predictedBase ?? null } : null, ...(predecessors ? { predecessors } : {}) };
-  const history = [...(work.queueHistory ?? []), { at, event: 'ejected' as const, sequence, reason, ...(work.queue!.speculation ? { tip: work.queue!.speculation.tip } : {}), ...(predecessors ? { predecessors } : {}) }].slice(-queueHistoryLimit);
+  const history = [...(work.queueHistory ?? []), { at, event: 'ejected' as const, sequence, reason, conflict: ejection.conflict, ...(work.queue!.speculation ? { tip: work.queue!.speculation.tip } : {}), ...(predecessors ? { predecessors } : {}) }].slice(-queueHistoryLimit);
   return { ejection, history };
 }
 
