@@ -82,7 +82,7 @@ A pass is trusted only when that stripped run failed with a case executed; other
 
 ## Stalled-gate recovery
 
-A `fault-class-stalled-gate` fault (three in 24h) — an item holding a failing gate nothing moves — recovers every cycle: a conflicting head gets its sync rework at once — the binding names head and base tip, so a stale observation decides; an approved answer clears refusal and scope blockers.
+A `fault-class-stalled-gate` fault (three in 24h) — an item holding a failing gate nothing moves — recovers every cycle: a conflicting head gets its sync rework at once — the binding names head and base tip, so a stale observation decides; an approved answer lifts the refusal blocker and a worker's own `Blocked on scope:` report, in the same mutation, and nothing else.
 
 ## Guarded merges
 

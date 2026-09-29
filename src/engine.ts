@@ -230,13 +230,14 @@ export function closeEndedScopeRequest(work: Work, now: Date, by: string) {
 const attemptEndingCommands = new Set<string>(['submit', 'release', 'rework', 'requirements', 'unblock']);
 /**
  * Whether a blocker is one a scope answer settles (GY-807): the loop's own refusal blocker, or a
- * worker's report naming the scope ask it waits on. An approved answer must clear both here, in
- * the mutation that applies the answer — clearing one on a daemon's ephemeral copy would change
- * nothing once the snapshot reloads, and the item would stay blocked on a request that no longer
- * exists with nothing moving it.
+ * worker's report in the known `Blocked on scope:` format naming the scope ask it waits on. An
+ * approved answer must clear both here, in the mutation that applies the answer — clearing one on
+ * a daemon's ephemeral copy would change nothing once the snapshot reloads, and the item would
+ * stay blocked on a request that no longer exists with nothing moving it. Any other occurrence of
+ * the word "scope" — an unrelated blocker that merely mentions it — is no scope answer's to lift.
  */
 export const scopeSettledBlocker = (blocker: string | null | undefined): boolean =>
-  !!blocker && (blocker.startsWith(scopeRefusalBlocker) || /\bscope\b/i.test(blocker));
+  !!blocker && (blocker.startsWith(scopeRefusalBlocker) || /^blocked on scope:/i.test(blocker.trim()));
 function applyScopeDecision(work: Work, request: NonNullable<Work['scopeRequest']>, now: Date): ScopeDecision {
   const verdict = decideScopeRequest(work, request);
   const decision: ScopeDecision = { state: verdict.state, reason: verdict.reason, at: now.toISOString(), decidedBy: 'graphyard',

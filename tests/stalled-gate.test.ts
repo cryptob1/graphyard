@@ -98,11 +98,14 @@ test('manual:fault-class-stalled-gate — GY-534/574: a conflict rework is decid
 });
 
 test('manual:fault-class-stalled-gate — GY-531: a scope answer settles its own blocker, and nothing else', () => {
-  // The loop's own refusal blocker, and a worker's report naming the ask it waits on.
+  // The loop's own refusal blocker, and a worker's report in the known format naming the ask it waits on.
   assert.ok(scopeSettledBlocker(`${scopeRefusalBlocker}: docs/ is outside the widening rule`));
   assert.ok(scopeSettledBlocker("Blocked on scope: 'graphyard complete GY-531 8 312' was refused with 'Out-of-scope regression: tests/stalled-gate.test.ts differs from the base branch tip'"));
-  // A blocker no scope answer earned stays standing.
+  assert.ok(scopeSettledBlocker('  blocked on scope: tests/soak.test.ts is outside the planned files'), 'the known report format settles wherever it opens the report');
+  // A blocker no scope answer earned stays standing — including one that merely contains the word.
   assert.ok(!scopeSettledBlocker('Blocked: waiting for the operator to decide whether to open a third-party account'));
+  assert.ok(!scopeSettledBlocker('Blocked: the legal scope of the paid vendor account is unresolved'), 'an unrelated blocker that merely mentions scope is not a scope ask');
+  assert.ok(!scopeSettledBlocker('Unblocked pending review; see the scope discussion in the ticket'), 'a later mention of the word settles nothing');
   assert.ok(!scopeSettledBlocker(null));
 });
 
