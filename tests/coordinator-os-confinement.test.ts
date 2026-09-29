@@ -156,6 +156,55 @@ test('unit:coordinator-write-blocked-for-shell — every runtime kind launches c
   }
 });
 
+test('unit:allocated-checkout-re-exposed — a reviewer or producer launched from the coordinator root gets its allocated checkout writable, never the checkout itself', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'graphyard-confinement-session-'));
+  try {
+    const { root } = coordinatorFixture(base);
+    // The terminal reviewer and producer launch shape (reviewer.ts, producer.ts): the pane starts
+    // from the coordinator root — where its request and the shared Git paths live — while the
+    // launch allocates a checkout of its own beside it. The sandbox-claim check keeps the
+    // runtime's working directory as its workspace root, and the read-only mount re-exposes the
+    // allocated checkout separately (GY-888, review finding).
+    const allocated = join(root, '.graphyard', 'review-checkout');
+    mkdirSync(allocated, { recursive: true });
+    const options = { directory: allocated, cwd: root };
+    const bwrap = bwrapOnPath();
+    const namespacesWork = process.platform === 'linux' && !!bwrap && await sessionMountNamespaceWorks(bwrap);
+    if (!namespacesWork) {
+      await assert.rejects(() => sessionConfinement('claude', [], options, root), /never starts a session unconfined/, 'a host that cannot confine refuses the launch');
+      return;
+    }
+    const claudeConfinement = await sessionConfinement('claude', [], options, root);
+    assert.ok(claudeConfinement, 'the launch carries a confinement');
+    assert.equal(claudeConfinement.mechanism, 'read-only-mount');
+    const rootIdx = claudeConfinement.wrapper.indexOf(root);
+    assert.ok(rootIdx > 0 && claudeConfinement.wrapper[rootIdx - 1] === '--ro-bind' && claudeConfinement.wrapper[rootIdx + 1] === root, 'the checkout the session starts in is bound read-only');
+    const allocatedIdx = claudeConfinement.wrapper.indexOf(allocated);
+    assert.ok(allocatedIdx > 0 && claudeConfinement.wrapper[allocatedIdx - 1] === '--bind' && claudeConfinement.wrapper[allocatedIdx + 1] === allocated, 'the allocated checkout is re-exposed writable');
+    // The sandbox never claims a session whose workspace root is the checkout itself: a codex
+    // reviewer or producer would grant the checkout writable through its own working directory,
+    // so it carries the mount wrapper like every other runtime.
+    const codexConfinement = await sessionConfinement('codex', ['--sandbox', 'workspace-write'], options, root);
+    assert.ok(codexConfinement, 'the codex launch carries a confinement');
+    assert.equal(codexConfinement.mechanism, 'read-only-mount', 'a codex session started from the checkout is mount-confined, not sandbox-confined');
+    assert.ok(codexConfinement.wrapper.includes(allocated), 'the codex mount also re-exposes the allocated checkout');
+    // Prove it with a real shell: a command typed at the coordinator root cannot write the
+    // checkout, while the allocated checkout takes the session's writes.
+    const probe = [
+      'if touch "$1/coordinator-write-probe" 2>/dev/null; then echo WRITE-ALLOWED; else echo WRITE-BLOCKED; fi',
+      'touch "$2/session-write-probe" && echo SESSION-WROTE',
+    ].join('\n');
+    const run = spawnSync(codexConfinement.wrapper[0], [...codexConfinement.wrapper.slice(1, -1), '/bin/sh', '-c', probe, 'sh', root, allocated],
+      { encoding: 'utf8', timeout: 60_000, killSignal: 'SIGKILL' });
+    assert.equal(run.status, 0, `the confined shell ran successfully: ${run.stderr}`);
+    assert.ok(run.stdout.includes('WRITE-BLOCKED'), 'a shell command from the coordinator root cannot write the checkout');
+    assert.ok(run.stdout.includes('SESSION-WROTE'), 'the allocated checkout takes the session\'s writes');
+    assert.ok(!run.stdout.includes('WRITE-ALLOWED'), 'the checkout is never writable');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
 test('unit:unconfined-launch-refused — a launch that cannot apply the confinement is refused with the reason named, never started unconfined', async () => {
   const confined = { kind: 'claude', args: [] as string[], coordinatorRoot: '/coordinator', sessionDirectory: '/coordinator/wt' };
   // No mount namespace without Linux, without bubblewrap, or on a host that refuses the namespaces.

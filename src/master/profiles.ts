@@ -525,7 +525,10 @@ export interface ConfinementInput {
   kind: string;
   args: readonly string[];
   coordinatorRoot: string;
+  /** The directory the runtime starts in — also the workspace root its own sandbox would grant (GY-888). */
   sessionDirectory: string;
+  /** The directory the launch allocates for the session's own writes, re-exposed by the read-only mount; defaults to `sessionDirectory`. A terminal reviewer or producer starts from the coordinator root (`sessionDirectory`) while its allocated checkout is a directory beside it (GY-888, review finding): the mount re-exposes the allocated checkout, never the root it starts in. */
+  allocatedDirectory?: string;
   /** Defaults to this host's platform. */
   platform?: string;
   /** The bubblewrap executable; null when it is known absent, the PATH lookup when unset. */
@@ -706,7 +709,7 @@ export async function coordinatorConfinement(input: ConfinementInput): Promise<C
     return { mechanism: 'runtime-sandbox', wrapper: [], detail: `the ${input.kind} workspace-write sandbox keeps every path but its granted workspace directories read-only, and the coordinator checkout at ${input.coordinatorRoot} lies outside every one of them` };
   const refusal = await coordinatorConfinementRefusal(input);
   if (refusal) throw new Error(refusal);
-  const root = resolve(input.coordinatorRoot), directory = resolve(input.sessionDirectory);
+  const root = resolve(input.coordinatorRoot), directory = resolve(input.allocatedDirectory ?? input.sessionDirectory);
   const wrapper = readOnlyMountWrapper({ coordinatorRoot: root, sessionDirectory: directory, bwrap: input.bwrap ?? undefined });
   const reexposed = wrapper.filter((word, index) => index > 0 && wrapper[index - 1] === '--bind');
   return { mechanism: 'read-only-mount', wrapper,

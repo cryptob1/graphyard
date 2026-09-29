@@ -144,7 +144,7 @@ export function prepareConfinedGitPaths(root: string): void {
   const fetchHead = join(gitDir, 'FETCH_HEAD');
   if (!existsSync(fetchHead)) closeSync(openSync(fetchHead, 'a'));
 }
-/** The confinement the launch of `kind` carries, or null when nothing needs confining; throws the named refusal when the kind can carry none, or when the launcher's own checkout cannot be derived while running as the launcher. `coordinatorRoot` overrides the derived one, for a launcher embedded outside the CLI. */
+/** The confinement the launch of `kind` carries, or null when nothing needs confining; throws the named refusal when the kind can carry none, or when the launcher's own checkout cannot be derived while running as the launcher. `coordinatorRoot` overrides the derived one, for a launcher embedded outside the CLI. The sandbox-claim check models the runtime's workspace root as its working directory (`cwd` when the pane starts elsewhere, GY-888); the read-only mount re-exposes the allocated `directory` separately, so a terminal reviewer or producer that starts from the coordinator root still gets its own checkout writable while the root stays read-only (GY-888, review finding). */
 export async function sessionConfinement(kind: string, args: readonly string[], options: { cwd?: string; directory: string }, coordinatorRoot: string | null | undefined = undefined): Promise<CoordinatorConfinement | null> {
   const root = coordinatorRoot !== undefined ? coordinatorRoot : launcherCoordinatorRoot();
   if (!root) {
@@ -152,7 +152,8 @@ export async function sessionConfinement(kind: string, args: readonly string[], 
     if (undetermined) throw new Error(confinementRefusalText(kind, options.directory, { undetermined }));
     return null;
   }
-  const input: ConfinementInput = { kind, args, coordinatorRoot: root, sessionDirectory: resolve(options.cwd ?? options.directory) };
+  const workspaceRoot = resolve(options.cwd ?? options.directory), allocated = resolve(options.directory);
+  const input: ConfinementInput = { kind, args, coordinatorRoot: root, sessionDirectory: workspaceRoot, ...(allocated === workspaceRoot ? {} : { allocatedDirectory: allocated }) };
   const refusal = await coordinatorConfinementRefusal(input);
   if (refusal) throw new Error(refusal);
   prepareConfinedGitPaths(root);
