@@ -301,6 +301,13 @@ export interface OptimisticRevert {
   pr: number | null; head: string | null; mergeSha: string | null; refusal: string | null;
   /** For a refused revert: the base branch commit whose required suite passed again, which ends the hold on optimistic merges. */
   resolvedBy?: { sha: string; at: string } | null;
+  /**
+   * Set once, by the guard tick that first found this revert overdue (GY-925): the instant the
+   * threshold was crossed, on the guard's own clock. Readers without a clock of their own —
+   * master status's attention text — read this recorded fact instead of recomputing overdue, so
+   * what the ledger recorded and what is rendered cannot drift across hosts whose clocks differ.
+   */
+  overdueAt?: string;
 }
 
 /** The item's latest optimistic merge, when its current delivery is one. */
@@ -381,7 +388,8 @@ const duration = (ms: number) => ms >= 3_600_000 ? `${Math.floor(ms / 3_600_000)
  * on the culprit's own merge commit — the CI duration its verdict's `observedAt` reads against the
  * merge time — floored at two guard ticks so a fast suite never flags within the tick its verdict
  * was observed in. One threshold for the guard's own description and for the `optimistic.revert.pending`
- * event github.ts records, so the attention text and the ledger never drift.
+ * event github.ts records, whose turn to overdue is also stamped on the revert (`overdueAt`), so the
+ * attention text and the ledger never drift.
  */
 export const revertOverdueThresholdMs = (culprit: Pick<GuardMerge, 'mergedAt' | 'observedAt'>): number =>
   Math.max(culprit.observedAt ? Math.max(0, Date.parse(culprit.observedAt) - Date.parse(culprit.mergedAt)) : 0, 2 * mainGuardIntervalMs);
@@ -393,15 +401,22 @@ export const revertWaitedMs = (revert: Pick<OptimisticRevert, 'at'>, now: Date):
 export const revertOverdue = (guard: Extract<GuardState, { state: 'reverting' }>, now: Date): boolean =>
   revertWaitedMs(guard.revert, now) > revertOverdueThresholdMs(guard.culprit);
 
-export function describeGuard(guard: GuardState, now: Date = new Date()): string {
+/**
+ * The guard's own prose. A caller that passes no clock can only repeat recorded fact: overdue is
+ * claimed from the revert's `overdueAt` stamp, never from this host's wall clock, so a description
+ * rendered on another host reads exactly what the ledger recorded (GY-925). Callers that hold a
+ * clock of their own — the guard tick — pass it and read the live wait besides.
+ */
+export function describeGuard(guard: GuardState, now?: Date): string {
   switch (guard.state) {
     case 'green': return guard.window.length ? `main is green after ${guard.window.at(-1)!.key}` : 'no optimistic merge is awaiting its post-merge run';
     case 'pending': return `the required suite is running on main after ${guard.window.filter(merge => merge.verdict === 'pending').map(merge => `${merge.key} (${merge.mergeSha.slice(0, 12)})`).join(', ')}`;
     case 'await': return `main failed after an optimistic merge; bisecting ${guard.window.map(merge => merge.key).join(', ')}, waiting for the required suite on ${guard.probe.key}'s merge ${guard.probe.mergeSha.slice(0, 12)}`;
     case 'culprit': return `${guard.culprit.key}'s merge ${guard.culprit.mergeSha.slice(0, 12)} broke main (${guard.culprit.failing.join(', ') || 'required checks failed'})${guard.kept.length ? `; ${guard.kept.map(merge => merge.key).join(', ')} stay${guard.kept.length === 1 ? 's' : ''}` : ''}`;
     case 'reverting': {
-      const overdue = revertOverdue(guard, now);
-      return `reverting ${guard.culprit.key}'s merge ${guard.culprit.mergeSha.slice(0, 12)}${guard.revert.pr ? ` through PR #${guard.revert.pr}` : ''}${overdue ? `; the revert is overdue: it has waited ${duration(revertWaitedMs(guard.revert, now))} against the ${duration(revertOverdueThresholdMs(guard.culprit))} attention threshold, and holds every optimistic merge with main red` : ''}`;
+      const thresholdMs = revertOverdueThresholdMs(guard.culprit);
+      const waitedMs = guard.revert.overdueAt ? Date.parse(guard.revert.overdueAt) - Date.parse(guard.revert.at) : now ? revertWaitedMs(guard.revert, now) : null;
+      return `reverting ${guard.culprit.key}'s merge ${guard.culprit.mergeSha.slice(0, 12)}${guard.revert.pr ? ` through PR #${guard.revert.pr}` : ''}${waitedMs !== null && waitedMs > thresholdMs ? `; the revert is overdue: it has waited ${duration(waitedMs)} against the ${duration(thresholdMs)} attention threshold, and holds every optimistic merge with main red` : ''}`;
     }
     case 'refused': return `${guard.culprit.key}'s merge ${guard.culprit.mergeSha.slice(0, 12)} broke main (${guard.culprit.failing.join(', ') || 'required checks failed'}) and cannot be reverted automatically: ${guard.revert.refusal}`;
   }
