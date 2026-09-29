@@ -1,5 +1,6 @@
 import type { Work } from './model.js';
 import { isDelivered } from './model/closure.js';
+import { specRulesPrompt } from './model/spec-check.js';
 import { followUpEntries, followUpParent, machineKind, overdueTriage, triageAttention, triageJudgementSchema, untriaged, type TriageJudgement } from './model/machine-backlog.js';
 import { agentOwner, type AttentionItem } from './master/attention.js';
 import type { ResearchSettings } from './research.js';
@@ -46,6 +47,7 @@ export function triagePrompt(config: { repository: string }, work: Work, all: re
     + `Recently delivered items: ${delivered.map(item => `${item.key} ${clip(item.title, 120)}`).join('; ') || 'none'}. `
     + `Other open items: ${open.map(item => `${item.key} [${item.stage}] ${clip(item.title, 120)}`).join('; ') || 'none'}. `
     + 'Read this checkout (the base branch) where it helps, and judge the item. Choose exactly one: release it with a priority from 0 (most urgent) to 4, when it names real work still worth doing; close it with a reason, naming as ref the delivered item that already fixed it, or with no ref when it is not worth doing; or merge it into another open item that already covers it, naming that item as into. '
+    + `Judge every item against the rules its spec is held to: ${specRulesPrompt} They are the release gate — verify by searching this checkout that every file, route and symbol a criterion names is held by a planned file or described as created; do not release an item whose criteria name code the plannedFiles do not cover, and never weaken a criterion to fit them: close it with that reason, or leave it untriaged for the master to rewrite the requirements. `
     + 'A closure or merge is applied only after an independent approver agrees, so state the evidence it can check. This session is read-only and nobody reads it: do not edit, commit, push, claim work or ask anyone anything. '
     + `Then call the ${triageTool} tool exactly once with outcome, priority, ref or into as the outcome needs, and reason, and stop.`;
 }

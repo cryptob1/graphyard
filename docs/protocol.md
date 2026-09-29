@@ -10,3 +10,4 @@
 4. [Evidence and proof authority](protocol/evidence.md) — evidence, grants, revocation.
 5. [GitHub webhook and review providers](protocol/github-webhook.md) — webhook and dispatch records.
 6. [Pipeline timeline](protocol/pipeline-speed.md) — the `pipeline` field.
+7. [The spec check](protocol/spec-check.md) — the spec check on create, requirements and release.
