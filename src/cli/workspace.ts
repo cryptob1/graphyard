@@ -99,7 +99,7 @@ async function syncWork({ api, print, base: serverUrl }: CliContext, work: any) 
   if (conflicts.length) {
     const landed = new Set(git('rev-list', `${mergeBase}..${baseTip}`).split('\n').filter(Boolean));
     // Attribution is a courtesy: an unreadable snapshot never hides the conflict list.
-    const all: Work[] = await api('work-snapshot?view=bounded').then((snapshot: any) => Array.isArray(snapshot?.work) ? snapshot.work : []).catch(() => []);
+    const all: Work[] = await api('work-snapshot?view=coordination').then((snapshot: any) => Array.isArray(snapshot) ? snapshot : Array.isArray(snapshot?.work) ? snapshot.work : []).catch(() => []);
     const remaining = attributeConflicts(conflicts, all, sha => landed.has(sha), generated?.files ?? []);
     print({ key: work.key, base: `origin/${baseBranch}`, baseTip, merged: false, conflicts: remaining, regenerated, detail, plannedFiles: work.plannedFiles,
       next: `Resolve each remaining conflict (each names the shipped items that landed it), stage it, and rerun sync ${work.key}: it regenerates the generated files from the resolved sources and commits the merge. Files outside plannedFiles must match origin/${baseBranch} byte-for-byte: git checkout ${baseTip.slice(0, 12)} -- PATH restores one.` });
@@ -300,7 +300,7 @@ export const workspaceCommands = defineCommands([
               requestId => api(`work/${work.id}/quarantine`, { epoch, settlementHash: containment!.settlementHash, ...(scope ? { scope } : {}) }, requestId),
               { epoch, settlementHash: containment!.settlementHash, exclusiveResources, requestId: containment!.requestId, ...(scope ? { scope } : {}) },
             ),
-            revalidate: async () => revalidateContainment(await api('work-snapshot?view=bounded'), {
+            revalidate: async () => revalidateContainment(await api('work-snapshot?view=coordination'), {
               workId: work.id, principal: workerStatus.actor.id, epoch, settlementHash: containment!.settlementHash,
               exclusiveResources, workspace,
             }),

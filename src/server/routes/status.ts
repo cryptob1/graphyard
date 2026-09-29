@@ -179,43 +179,33 @@ export const statusRoutes = defineRoutes('status', [
         const visibleWork = operatorVisible(snapshot.work);
         return { ...snapshot, work: visibleWork, jobs: actor.role === 'operator-agent' ? snapshot.jobs.filter(job => visibleWork.some(work => work.id === job.work_id)) : snapshot.jobs };
       };
-      // Paging support for bounded and full views: cursor is work item number, pageSize limits results
-      const cursor = url.searchParams.get('cursor') ? Number(url.searchParams.get('cursor')) : undefined;
-      const pageSize = url.searchParams.get('pageSize') ? Math.min(Number(url.searchParams.get('pageSize')), 1000) : 100;
-      if (view === 'bounded') {
-        const full = await boundedSnapshot(services.engine.store.pool);
-        const scoped = scope(full);
-        let items = scoped.work;
-        // Apply cursor-based paging: filter items after the cursor, then take pageSize items
-        if (cursor !== undefined) {
-          items = items.filter((w: any) => w.number !== undefined && w.number > cursor);
-        }
-        const hasMore = items.length > pageSize;
-        const paged = items.slice(0, pageSize);
-        const result: any = { ...scoped, work: paged, view };
-        if (hasMore && paged.length > 0) {
-          result.nextCursor = (paged[paged.length - 1] as any).number;
-          result.hasMore = true;
-        }
-        return result;
+      // Paging (GY-864): a reader that must still walk every document — an export, a migration —
+      // asks for `cursor` (the number of the work item it last saw, the suffix of its key) and
+      // `pageSize`, and streams page by page instead of loading the whole ledger into one
+      // response. Only a request that names one of the two is paged; every other response is
+      // what it always was, so no reader is truncated silently. The coordination view, the
+      // loop's own bounded poll, is not paged. Both paged views order items by work number.
+      const cursorParam = url.searchParams.get('cursor'), pageSizeParam = url.searchParams.get('pageSize');
+      const maxPageSize = 1000, defaultPageSize = 100;
+      const wantsPaging = cursorParam !== null || pageSizeParam !== null;
+      let cursor: number | undefined, pageSize = defaultPageSize;
+      if (wantsPaging) {
+        cursor = cursorParam === null ? undefined : Number(cursorParam);
+        pageSize = pageSizeParam === null ? defaultPageSize : Number(pageSizeParam);
+        demand(cursor === undefined || Number.isSafeInteger(cursor) && cursor >= 0, 'cursor must be a work item number', 400);
+        demand(Number.isSafeInteger(pageSize) && pageSize >= 1 && pageSize <= maxPageSize, `pageSize must be an integer from 1 to ${maxPageSize}`, 400);
+        demand(view !== 'coordination', 'the coordination view is not paged; it is the bounded read the loop polls', 400);
       }
-      if (view === 'full') {
-        const full = await services.engine.store.workSnapshot();
-        const scoped = scope(full);
-        let items = scoped.work;
-        // Apply cursor-based paging: filter items after the cursor, then take pageSize items
-        if (cursor !== undefined) {
-          items = items.filter((w: any) => w.number !== undefined && w.number > cursor);
-        }
-        const hasMore = items.length > pageSize;
-        const paged = items.slice(0, pageSize);
-        const result: any = { ...scoped, work: paged, view };
-        if (hasMore && paged.length > 0) {
-          result.nextCursor = (paged[paged.length - 1] as any).number;
-          result.hasMore = true;
-        }
-        return result;
-      }
+      const paged = <T extends { work: Work[] }>(snapshot: T): T & { hasMore?: boolean; nextCursor?: number } => {
+        if (!wantsPaging) return snapshot;
+        const numberOf = (item: Work) => { const digits = /(\d+)$/.exec(item.key ?? '')?.[1]; return digits === undefined ? NaN : Number(digits); };
+        const remaining = cursor === undefined ? snapshot.work : snapshot.work.filter(item => numberOf(item) > cursor!);
+        const kept = remaining.slice(0, pageSize);
+        const more = remaining.length > kept.length;
+        return { ...snapshot, work: kept, hasMore: more, ...(more && kept.length ? { nextCursor: numberOf(kept[kept.length - 1]) } : {}) };
+      };
+      if (view === 'bounded') return paged({ ...scope(await boundedSnapshot(services.engine.store.pool)), view });
+      if (view === 'full') return paged(scope(await services.engine.store.workSnapshot()));
       // The coordination view is trimmed in the database (GY-185): the histories it bounds never
       // leave it whole, and what the SQL cut is added to what the view says it left out.
       const { trimmed, ...snapshot } = await services.engine.store.coordinationSnapshot();

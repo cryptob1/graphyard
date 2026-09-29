@@ -1,188 +1,277 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { execFile as execFileCallback } from 'node:child_process';
+import { promisify } from 'node:util';
+import { mkdtemp, rm, writeFile, readFile, mkdir } from 'node:fs/promises';
+import { tmpdir, hostname } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import EmbeddedPostgres from 'embedded-postgres';
-import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
-import type { Principal } from '../src/model.js';
-import { boundedSnapshot, workDocument } from '../src/store/bounded-snapshot.js';
-import type { Work } from '../src/model.js';
+import { server } from '../src/server.js';
+import { Store } from '../src/store.js';
+import { masterConfigSchema, type MasterConfig } from '../src/master.js';
+import { approveScopeRequest, masterStatusReport } from '../src/cli/master-status.js';
+import { coordinationViewHeader } from '../src/server/work-view.js';
+import type { Principal, Work } from '../src/model.js';
 
 /**
- * GY-864: CLI reads use a bounded snapshot: master status, scope and worker sync/complete
- * never fetch every document. The work-snapshot endpoint supports paging so remaining
- * full readers stream instead of loading every document at once.
+ * GY-864: CLI reads use a bounded snapshot: master status, master scope and the worker commands
+ * in src/cli/workspace.ts read the trimmed coordination snapshot or a single item by key, never
+ * the full work-snapshot; and GET /api/work-snapshot is paged (cursor and page size) so any
+ * remaining full reader streams instead of loading every document at once.
  *
- * unit:cli-reads-bounded-snapshot — master status, master scope, and worker commands in
- * src/cli/workspace.ts read the trimmed coordination snapshot or a single item by key,
- * never the full work-snapshot. A test with 900 items of 300 KB histories asserts each
- * command issues no full work-snapshot read and bytes read are bounded independently of
- * delivered items.
+ * unit:cli-reads-bounded-snapshot — against a recording control plane holding 900 items whose
+ * delivered documents weigh 300 KB each, master status, master scope and the worker's sync are
+ * driven for real: each issues no full work-snapshot read, and the bytes each reads stay flat
+ * while the delivered weight grows.
  *
- * unit:work-snapshot-paged — GET /api/work-snapshot is paged (cursor and page size) so
- * any remaining full reader streams instead of loading every document at once.
+ * unit:work-snapshot-paged — against the real server, a paged walk (cursor, pageSize) of the
+ * full and default views covers every item exactly once, unpaged responses are unchanged, and
+ * the coordination view stays the loop's unpaged bounded poll.
  */
 
-const operator: Principal = { id: 'operator', role: 'admin', sessionKind: 'human' };
-const worker: Principal = { id: 'agent-a', role: 'worker', runtime: 'claude' };
-const coordinator: Principal = { id: 'coordinator', role: 'coordinator', runtime: 'claude' };
+const execFile = promisify(execFileCallback);
+const launcher = new URL('../bin/graphyard.mjs', import.meta.url).pathname;
+const hex = (letter: string) => letter.repeat(40);
+const operator: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'human' };
+const credentials = [operator].map(principal => ({ ...principal, token: `bounded-${principal.id}-${'x'.repeat(32)}` }));
+const operatorToken = credentials[0].token;
 
-let database: EmbeddedPostgres, store: Store, engine: Engine;
+let database: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 864;
   database = new EmbeddedPostgres({
     databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-bounded-reads-')),
-    user: 'graphyard',
-    password: 'testing-only',
-    port,
-    persistent: false,
-    onLog: () => {},
-    onError: () => {},
+    user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {},
     postgresFlags: ['-h', '127.0.0.1'],
   });
   await database.initialise();
   await database.start();
-  await database.createDatabase('graphyard_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`);
+  await database.createDatabase('graphyard_bounded_reads');
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_bounded_reads`);
   await store.init();
   engine = new Engine(store, [15368], 120, 'owner/project');
-  engine.principals = [operator, worker, coordinator];
+  engine.principals = credentials;
+  engine.submissionObserver = null;
+  http = server(engine, credentials);
+  await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
+  url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
 });
 
 after(async () => {
+  http?.close();
   if (store) await store.close();
   if (database) await database.stop();
 });
 
-test('unit:cli-reads-bounded-snapshot — CLI commands read bounded snapshot or single item, not full work-snapshot', async () => {
-  // Create work items with history to demonstrate bounded reads.
-  // The test verifies that boundedSnapshot and workDocument don't load full histories.
-  const itemCount = 50; // Reduced for test environment
+const get = async (path: string, token = operatorToken) => {
+  const response = await fetch(`${url}/api/${path}`, { headers: { Authorization: `Bearer ${token}` } });
+  const text = await response.text();
+  return { status: response.status, body: JSON.parse(text) as any, bytes: text.length };
+};
 
-  const items = [];
-  for (let i = 0; i < itemCount; i++) {
-    let item = await engine.execute(operator, 'create', null, {
-      title: `Scaled item ${i + 1}`,
-      plannedFiles: ['src/'],
-      criteria: [{ id: 'AC-1', text: 'test criterion', proofs: ['unit:test'] }],
-    }, randomUUID());
-    item = await engine.execute(operator, 'ready', item.id, {}, randomUUID());
-    items.push(item);
-
-    // Add some evidence to create history
-    const proof = 'x'.repeat(10000); // 10KB proof
-    for (let j = 0; j < 3; j++) {
-      await engine.execute(worker, 'evidence', item.id, {
-        proof,
-        ciRun: null,
-      }, randomUUID()).catch(() => {}); // Some may fail, but that's ok
+/** A recording control plane: a ledger of 900 items whose delivered documents weigh 300 KB each. */
+function recordingControlPlane() {
+  const heavyBytes = 300 * 1024;
+  const state = { delivered: 890, reads: [] as { path: string; coordination: boolean }[], violations: [] as string[], bytes: 0 };
+  const items = (): Work[] => Array.from({ length: 900 }, (_, index): Work => {
+    const key = `GY-${index + 1}`, delivered = index < state.delivered;
+    return {
+      id: `work-${index + 1}`, key, stage: delivered ? 'done' : 'build', title: `Item ${index + 1}`,
+      plannedFiles: ['docs/'], dependencies: [], criteria: [], gates: [], violations: [], workspaces: [], evidence: [],
+      policy: { checks: [], review: false },
+      revision: 1, policyRevision: 1, epoch: 0,
+      lease: key === 'GY-900'
+        ? { owner: 'worker', epoch: 4, expiresAt: new Date(Date.now() + 600_000).toISOString() }
+        : delivered ? null : { owner: 'worker', epoch: 1, expiresAt: new Date(Date.now() + 600_000).toISOString() },
+      candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], observation: null,
+      ready: false, blocker: null, priority: 1, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), stageEnteredAt: new Date().toISOString(),
+      ...(key === 'GY-900' ? { scopeRequest: { epoch: 4, paths: ['docs/b.md'], reason: 'the extra doc is part of the layout work', requestedBy: 'worker', at: new Date().toISOString() } } : {}),
+      ...(delivered ? { delivery: { mergeSha: hex('a'), mergedAt: new Date().toISOString() } } : {}),
+    } as unknown as Work;
+  });
+  // What one whole document weighs; only the single-item route ever materializes it.
+  const whole = (item: Work) => ({ ...item, history: 'x'.repeat(heavyBytes) });
+  const trimmed = (item: Work) => ({ ...item, history: undefined });
+  const json = (response: ServerResponse, body: unknown) => {
+    const text = JSON.stringify(body);
+    state.bytes += text.length;
+    response.setHeader('Content-Type', 'application/json');
+    response.end(text);
+  };
+  const httpServer = createServer((request: IncomingMessage, response: ServerResponse) => {
+    const [path, query = ''] = (request.url ?? '').split('?');
+    const view = new URLSearchParams(query).get('view');
+    if (request.method === 'GET' && path === '/api/work-snapshot') {
+      const coordination = view === 'coordination' || String(request.headers[coordinationViewHeader.toLowerCase()]) === 'coordination';
+      state.reads.push({ path: 'work-snapshot', coordination });
+      if (!coordination) { state.violations.push(`full work-snapshot read (${request.url})`); return json(response, { error: 'full reads are refused here' }); }
+      return json(response, { now: new Date().toISOString(), view: 'coordination', omitted: { evidence: 0, dispatchHistory: 0, queueHistory: 0, actionHistory: 0, sessions: 0 }, jobs: [], work: items().map(trimmed) });
     }
-  }
+    const single = /^\/api\/work\/(GY-\d+)$/.exec(path);
+    if (request.method === 'GET' && single) {
+      state.reads.push({ path: `single ${single[1]}`, coordination: false });
+      return json(response, whole(items()[Number(single[1].slice(3)) - 1]));
+    }
+    if (request.method === 'GET' && path === '/api/work') return json(response, items());
+    if (request.method === 'GET' && path === '/api/status') return json(response, { baseBranch: 'main', repository: 'owner/project', actor: { id: 'worker-a', role: 'worker' } });
+    if (request.method === 'POST') return json(response, { plannedFiles: ['docs/a.md', 'docs/b.md'], recorded: true });
+    return json(response, { decisions: [] });
+  });
+  const listen = new Promise<string>(resolve => httpServer.listen(0, '127.0.0.1', () => resolve(`http://127.0.0.1:${(httpServer.address() as { port: number }).port}`)));
+  return { state, listen, close: () => new Promise<void>(resolve => { httpServer.close(() => resolve()); httpServer.closeAllConnections(); }) };
+}
 
-  // Test AC-1a: boundedSnapshot returns only open items and settled summaries, not full documents.
-  // This should be much smaller than fetching all items with full histories.
-  const bounded = await boundedSnapshot(store.pool);
-  assert.ok(bounded.work.length > 0, 'bounded snapshot contains open items');
-  assert.ok(bounded.work.length <= itemCount, 'bounded snapshot contains at most the number of created items');
+const masterFixture = async () => {
+  const root = await mkdtemp(join(tmpdir(), 'graphyard-bounded-reads-master-'));
+  const directory = await mkdtemp(join(tmpdir(), 'graphyard-bounded-reads-credentials-'));
+  const credentialFile = join(directory, 'coordinator.token');
+  await writeFile(credentialFile, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
+  const master: MasterConfig = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile,
+    cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'host-a',
+    masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [] });
+  return { root, master, dispose: () => Promise.all([rm(root, { recursive: true, force: true }), rm(directory, { recursive: true, force: true })]) };
+};
 
-  // Test AC-1b: workDocument fetches a single item by key, not the full snapshot.
-  if (bounded.work.length > 0) {
-    const firstKey = bounded.work[0].key;
-    const singleItem = await workDocument(store.pool, firstKey);
-    assert.ok(singleItem, `workDocument found item ${firstKey}`);
-    assert.equal(singleItem.key, firstKey, 'workDocument returns correct item');
-  }
+test('unit:cli-reads-bounded-snapshot — CLI commands read bounded snapshot or single item, not full work-snapshot', async () => {
+  const control = recordingControlPlane();
+  const origin = await control.listen;
+  const { root, master, dispose: disposeFixture } = await masterFixture();
+  const weight = () => control.state.delivered * 300 * 1024;
+  try {
+    // Master status: one trimmed coordination read, and its bytes ignore the delivered weight.
+    const statusReads = async () => {
+      control.state.reads.length = 0; control.state.violations.length = 0; control.state.bytes = 0;
+      const coordinationApi = (path: string, credential?: string, timeoutMs?: number, headers?: Record<string, string>) =>
+        fetch(`${origin}/api/${path}`, { headers: { ...(headers ?? {}), Authorization: 'Bearer coordinator-token' } }).then(response => response.json());
+      await masterStatusReport(root, master, coordinationApi as unknown as Parameters<typeof masterStatusReport>[2], { actor: { id: 'coordinator-1' } }, { commit: null });
+      return { reads: [...control.state.reads], violations: [...control.state.violations], bytes: control.state.bytes };
+    };
+    const first = await statusReads();
+    assert.deepEqual(first.violations, [], 'master status issues no full work-snapshot read');
+    assert.deepEqual(first.reads.filter(read => read.path === 'work-snapshot').map(read => read.coordination), [true], 'master status reads the coordination view, by header, on the work-snapshot path');
+    assert.ok(first.bytes < 5_000_000 && weight() > 250_000_000, `master status read ${first.bytes} bytes of an otherwise ${weight()}-byte ledger`);
+    control.state.delivered = 40;
+    const second = await statusReads();
+    assert.deepEqual(second.violations, []);
+    assert.ok(second.bytes <= first.bytes && second.bytes < 5_000_000 && weight() < 15_000_000, `the bytes master status reads stay flat (${second.bytes} against ${first.bytes}) while the delivered weight drops from over 250 MB to under 15 MB`);
+    control.state.delivered = 890;
 
-  // Test AC-1c: Verify bytes read for bounded snapshot are bounded.
-  // The bounded snapshot should be significantly smaller than if we fetched all full documents.
-  const boundedJson = JSON.stringify(bounded);
-  const boundedBytes = Buffer.byteLength(boundedJson, 'utf8');
-  // Bounded snapshot should be reasonable in size
-  assert.ok(boundedBytes < 50 * 1024 * 1024, `bounded snapshot bytes (${boundedBytes}) should be < 50MB`);
+    // Master scope: the one item by key, and no snapshot read at all.
+    control.state.reads.length = 0; control.state.violations.length = 0;
+    const workRoot = await mkdtemp(join(tmpdir(), 'graphyard-bounded-reads-scope-'));
+    const decided = await approveScopeRequest(workRoot, { url: origin } as unknown as MasterConfig, ['GY-900', 'The extra doc is part of the layout work'],
+      { coordinator: path => fetch(`${origin}/api/${path}`).then(response => response.json()), operatorToken: async () => 'operator-agent-token-'.padEnd(40, 'o') });
+    assert.deepEqual(control.state.violations, [], 'master scope issues no full work-snapshot read');
+    assert.deepEqual(control.state.reads.map(read => read.path), ['single GY-900'], 'master scope reads the one item by key');
+    assert.equal(decided.recorded, true);
+    await rm(workRoot, { recursive: true, force: true });
+
+    // The worker's sync: the attribution read on a conflict is the trimmed coordination view.
+    const cwd = await mkdtemp(join(tmpdir(), 'graphyard-bounded-reads-sync-'));
+    const originRepo = join(cwd, 'origin'), clone = join(cwd, 'clone');
+    const git = async (repo: string, ...args: string[]) => (await execFile('git', ['-c', 'user.name=Test', '-c', 'user.email=test@localhost', ...args], { cwd: repo })).stdout.trim();
+    const commit = async (repo: string, message: string) => { await execFile('git', ['add', '-A'], { cwd: repo }); await execFile('git', ['commit', '-q', '-m', message], { cwd: repo }); return git(repo, 'rev-parse', 'HEAD'); };
+    const task = { id: 'task', key: 'GY-1', plannedFiles: ['src/scoped/'], workspaces: [{ epoch: 1, host: hostname(), path: clone, branch: 'graphyard/gy-1-1' }] };
+    const syncServer = createServer((request: IncomingMessage, response: ServerResponse) => {
+      const [path] = (request.url ?? '').split('?');
+      response.setHeader('Content-Type', 'application/json');
+      if (path === '/api/status') return response.end(JSON.stringify({ baseBranch: 'main', repository: 'owner/project', actor: { id: 'worker-a', role: 'worker' } }));
+      if (path === '/api/work') return response.end(JSON.stringify([task]));
+      if (path === '/api/work-snapshot') {
+        control.state.reads.push({ path: 'work-snapshot', coordination: (request.url ?? '').includes('view=coordination') });
+        if (!(request.url ?? '').includes('view=coordination')) { control.state.violations.push(`full work-snapshot read (${request.url})`); response.statusCode = 500; return response.end('{"error":"full reads are refused here"}'); }
+        return response.end(JSON.stringify({ now: new Date().toISOString(), work: [task] }));
+      }
+      return response.end(JSON.stringify({}));
+    });
+    control.state.reads.length = 0; control.state.violations.length = 0;
+    await new Promise<void>(resolve => syncServer.listen(0, '127.0.0.1', resolve));
+    const syncOrigin = `http://127.0.0.1:${(syncServer.address() as { port: number }).port}`;
+    try {
+      await mkdir(originRepo, { recursive: true });
+      await execFile('git', ['init', '-q', '--initial-branch', 'main'], { cwd: originRepo });
+      await writeFile(join(originRepo, 'shared.txt'), 'base\n');
+      await commit(originRepo, 'Base');
+      await execFile('git', ['clone', '-q', originRepo, clone]);
+      await execFile('git', ['checkout', '-q', '-b', 'graphyard/gy-1-1'], { cwd: clone });
+      await writeFile(join(clone, 'shared.txt'), 'mine\n');
+      await commit(clone, 'Mine');
+      await writeFile(join(originRepo, 'shared.txt'), 'theirs\n');
+      await commit(originRepo, 'Theirs');
+      const sync = execFile(process.execPath, [launcher, 'sync', 'GY-1'], { cwd: clone, env: { ...process.env, GRAPHYARD_URL: syncOrigin, GRAPHYARD_TOKEN: 'fixture' } });
+      await assert.rejects(sync, (error: { code: number }) => error.code === 1, 'sync reports the conflict and exits non-zero');
+      assert.deepEqual(control.state.violations, [], 'the sync attribution read is not a full work-snapshot read');
+      assert.deepEqual(control.state.reads.filter(read => read.path === 'work-snapshot').map(read => read.coordination), [true], 'the sync attribution read is the coordination view');
+    } finally { syncServer.closeAllConnections(); await new Promise<void>(resolve => { syncServer.close(() => resolve()); setTimeout(resolve, 2_000).unref(); }); await rm(cwd, { recursive: true, force: true }); }
+
+    // The watch supervisor's containment revalidation reads the same view (the source carries
+    // both workspace reads, and master status's read rides the coordination header from the
+    // report-cache module).
+    const workspaceSource = await readFile(new URL('../src/cli/workspace.ts', import.meta.url), 'utf8');
+    assert.equal(workspaceSource.split('work-snapshot?view=coordination').length - 1, 2, 'sync attribution and containment revalidation read the coordination view');
+    assert.doesNotMatch(workspaceSource, /work-snapshot\?view=bounded/, 'no CLI read asks for the unbounded default');
+    const statusSource = await readFile(new URL('../src/cli/master-status.ts', import.meta.url), 'utf8');
+    assert.match(statusSource, /coordinationStep\(run => timedStep\('snapshot', run\), masterApi\)/, 'master status reads through the coordination snapshot step');
+    const stepSource = await readFile(new URL('../src/cli/coordination-snapshot.ts', import.meta.url), 'utf8');
+    assert.match(stepSource, /read\('work-snapshot', undefined, undefined, \{ \[coordinationViewHeader\]: 'coordination' \}\)/, 'the coordination step sends the coordination header');
+  } finally { await control.close(); await disposeFixture(); }
 });
 
 test('unit:work-snapshot-paged — GET /api/work-snapshot supports paging with cursor and pageSize', async () => {
-  // Create multiple work items to test paging
-  const itemsToCreate = 25;
-  const items = [];
-
-  for (let i = 0; i < itemsToCreate; i++) {
+  for (let index = 0; index < 30; index++) {
     const item = await engine.execute(operator, 'create', null, {
-      title: `Paging test item ${i + 1}`,
-      plannedFiles: ['src/'],
+      title: `Paged item ${index + 1}`, plannedFiles: ['src/'],
       criteria: [{ id: 'AC-1', text: 'test', proofs: ['unit:test'] }],
-    }, randomUUID());
-    items.push(item);
+    }, randomUUID()) as Work;
+    if (index % 3 === 0) await engine.execute(operator, 'ready', item.id, {}, randomUUID());
   }
+  const keys = (body: any) => (body.work as Work[]).map(item => Number((/(\d+)$/.exec(item.key ?? '') ?? [])[1]));
+  const whole = await get('work-snapshot?view=full');
+  const defaultWhole = await get('work-snapshot');
+  const every = keys(whole.body).sort((a, b) => a - b);
+  assert.equal(every.length, 30, 'the ledger holds the items');
+  assert.equal(whole.body.view, undefined, 'the full view response is unchanged');
+  assert.equal(defaultWhole.body.view, 'bounded', 'the default view response is unchanged');
+  assert.equal(defaultWhole.body.hasMore, undefined, 'an unpaged response carries no paging fields');
+  assert.equal(defaultWhole.body.nextCursor, undefined, 'an unpaged response names no cursor');
 
-  // Test AC-2a: Bounded snapshot returns items (paging is handled server-side)
-  const bounded = await boundedSnapshot(store.pool);
-  assert.ok(bounded.work.length > 0, 'bounded snapshot returns work items');
-  assert.ok(bounded.work.length >= itemsToCreate, 'bounded snapshot includes all created items');
-
-  // Test AC-2b: Bounded snapshot includes all items without truncation (client-side paging)
-  // The server-side paging is tested through integration tests that call the HTTP endpoint
-  const allItems: Work[] = [...bounded.work];
-  const uniqueIds = new Set(allItems.map(w => w.id));
-  assert.equal(uniqueIds.size, allItems.length, 'all bounded snapshot items are unique');
-
-  // Test AC-2c: Verify bounded snapshot is smaller than fetching full work
-  // This demonstrates the bounded approach vs. full approach
-  const boundedJson = JSON.stringify(bounded);
-  const boundedBytes = Buffer.byteLength(boundedJson, 'utf8');
-  // Bounded snapshots should be reasonable in size
-  assert.ok(boundedBytes < 100 * 1024 * 1024, `bounded snapshot bytes (${boundedBytes}) should be reasonable`);
-
-  // Test AC-2d: Single item fetch by key works for fine-grained reads
-  if (bounded.work.length > 0) {
-    const singleItem = await workDocument(store.pool, bounded.work[0].key);
-    assert.ok(singleItem, 'workDocument fetches single item');
-    assert.equal(singleItem.key, bounded.work[0].key, 'single item has correct key');
+  // A paged walk of the full view covers every item exactly once, in order.
+  const walked: number[] = []; let cursor: number | undefined; let pages = 0;
+  while (true) {
+    const page = await get(`work-snapshot?view=full&pageSize=7${cursor === undefined ? '' : `&cursor=${cursor}`}`);
+    assert.equal(page.status, 200, JSON.stringify(page.body));
+    const numbers = keys(page.body);
+    assert.ok(numbers.length <= 7 && numbers.length > 0, 'each page carries at most pageSize items');
+    assert.deepEqual(numbers, [...numbers].sort((a, b) => a - b), 'each page is ordered by work number');
+    walked.push(...numbers);
+    pages++;
+    if (!page.body.hasMore) { assert.equal(page.body.nextCursor, undefined, 'the last page names no next cursor'); break; }
+    assert.equal(page.body.nextCursor, numbers.at(-1), 'the next cursor is the page it ended on');
+    cursor = page.body.nextCursor;
+    assert.ok(pages < 10, 'the walk terminates');
   }
-});
+  assert.deepEqual(walked.sort((a, b) => a - b), every, 'the paged walk covers every item exactly once');
+  assert.ok(pages > 1, 'the walk took more than one page');
 
-test('unit:cli-reads-bounded-snapshot — boundedSnapshot does not load full histories', async () => {
-  // Create a work item with a history
-  let item = await engine.execute(operator, 'create', null, {
-    title: 'Large history test',
-    plannedFiles: ['src/'],
-    criteria: [{ id: 'AC-1', text: 'test', proofs: ['unit:test'] }],
-  }, randomUUID());
-  item = await engine.execute(operator, 'ready', item.id, {}, randomUUID());
+  // The default (bounded) view pages the same way, and never invents or loses items.
+  const boundedPage = await get('work-snapshot?pageSize=5');
+  assert.equal(boundedPage.body.view, 'bounded');
+  assert.equal(keys(boundedPage.body).length, 5);
+  assert.equal(boundedPage.body.hasMore, true);
+  assert.equal(boundedPage.body.nextCursor, keys(boundedPage.body).at(-1));
 
-  // Add evidence to create history entries
-  const proof = 'y'.repeat(100000); // 100KB proof
-  for (let i = 0; i < 2; i++) {
-    await engine.execute(worker, 'evidence', item.id, {
-      proof,
-      ciRun: null,
-    }, randomUUID()).catch(() => {});
-  }
-
-  // Get the bounded snapshot
-  const bounded = await boundedSnapshot(store.pool);
-  const boundedItem = bounded.work.find(w => w.id === item.id);
-
-  // Get the full work document
-  const full = await workDocument(store.pool, item.id);
-
-  // Verify both exist
-  assert.ok(boundedItem, 'bounded snapshot contains the item');
-  assert.ok(full, 'full document retrieved');
-
-  // Both should have the same key and type
-  if (boundedItem && full) {
-    assert.equal(boundedItem.key, full.key, 'both versions have same key');
-    assert.equal(boundedItem.id, full.id, 'both versions have same id');
-  }
-
-  // The test verifies that we can fetch a single item by key,
-  // rather than requiring a full snapshot read
-  const singleByKey = await workDocument(store.pool, item.key);
-  assert.ok(singleByKey, 'can fetch single item by key without full snapshot');
-  assert.equal(singleByKey.key, item.key, 'single fetch returns correct item');
+  // Paging is opt-in and validated; the coordination view stays the loop's unpaged poll.
+  assert.equal((await get('work-snapshot?pageSize=0')).status, 400);
+  assert.equal((await get('work-snapshot?pageSize=1001')).status, 400);
+  assert.equal((await get('work-snapshot?cursor=-1')).status, 400);
+  assert.equal((await get('work-snapshot?cursor=soon')).status, 400);
+  assert.equal((await get('work-snapshot?view=coordination&pageSize=5')).status, 400);
+  const coordination = await get('work-snapshot?view=coordination');
+  assert.equal(coordination.body.view, 'coordination');
+  assert.equal(keys(coordination.body).length, 30, 'the coordination view is not paged');
+  assert.equal(coordination.body.hasMore, undefined, 'the coordination view carries no paging fields');
 });
