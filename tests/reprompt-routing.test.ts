@@ -216,10 +216,13 @@ test('unit:reprompt-pane-gone — a recorded pane gone from the runtime ends the
     const reclaim = state.actions['resume:reclaim:work-252:1'];
     assert.equal(reclaim?.state, 'done');
     assert.match(reclaim.detail, /keeping the attempt's branch/);
-    const closedHandle = log.sessions.at(-1)!;
-    assert.equal(closedHandle.state, 'finished');
-    assert.equal(closedHandle.id, 'alpha-principal:1');
-    assert.match(closedHandle.outcome ?? '', /closed as failed: idle with a live lease/);
+    // The reclaim ends the attempt on the record. In the same cycle the exited-session sweep may
+    // also close the attempt's own dead pane, and the two handle writes are unordered (the
+    // reclaim's is fire-and-forget), so the reclaim's write is matched, not ordered last.
+    const reclaimHandle = log.sessions.filter(entry => entry.id === 'alpha-principal:1' && /closed as failed: idle with a live lease/.test(entry.outcome ?? ''));
+    assert.equal(reclaimHandle.length, 1, `the reclaim closed the attempt's handle: ${JSON.stringify(log.sessions.map(entry => entry.outcome))}`);
+    assert.equal(reclaimHandle[0].state, 'finished');
+    assert.ok(log.closed.every(pane => pane === 'w1:pMine'), 'only the attempt\'s own dead pane was ever closed');
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
