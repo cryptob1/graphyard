@@ -460,7 +460,7 @@ export class SimulatedGitHub {
         if (requested) {
           const from = pr.head, bound = pr.base, tip = world.tip, merged = sha('refresh', from, tip), onto = world.commits.get(tip)!;
           const changed = onto.files.filter(file => !world.commits.get(bound)!.files.includes(file));
-          world.record({ sha: merged, tree: sha('tree', merged), parents: [from, tip], files: [...new Set([...world.commits.get(from)!.files, ...onto.files])], at: clock.now(), message: `Graphyard base refresh for ${work.key}` });
+          world.record({ sha: merged, tree: sha('tree', merged), parents: [from, tip], files: [...new Set([...world.commits.get(from)!.files, ...onto.files])], at: clock.now(), message: `Graphyard base refresh for ${work.key}` }, world.mergedContents(from, tip, work.plannedFiles ?? []));
           pr.head = merged; pr.base = tip; pr.pushed.set(merged, clock.now());
           return { from: { sha: from, baseSha: bound }, base: tip, baseTree: onto.tree, policyRevision: work.policyRevision, at, head: merged, conflict: null, carry: null, trigger: 'base failure repaired',
             requested: { by: requested.by, at: requested.at, reason: requested.reason },
