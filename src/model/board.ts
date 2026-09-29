@@ -2,7 +2,7 @@ import type { Work } from './work.js';
 import { isClosed } from './closure.js';
 import { deliveryState } from './delivery.js';
 import { answerCommand, parkedOnHuman, type HumanRequestRow } from './human-request.js';
-import { scopeRefusalBlocker } from './scope.js';
+import { scopeRefusalBlocker, terminalScopeRefusal } from './scope.js';
 import { shortShas } from './format.js';
 import { OVERDUE_MINUTES, statusDuration } from './duration.js';
 import { phaseOf, plainReason, plainStatus, statusSince } from './plain-status.js';
@@ -208,11 +208,13 @@ const refusalsOf = (work: Work, gate: string) => work.gates.find(entry => entry.
 
 /**
  * The exact command that takes the next step, when there is one to run: a scope refusal is
- * `master scope`, a recorded blocker `master unblock`, an escalation `master decide … resolve`, a
- * merged item production does not serve `master verify-deployment`, a candidate every other gate
- * passed (merging, or stranded there) `master merge`, a review `master review`, backlog
- * `master release`, and a human-only decision the answer its row names. Null where the next step
- * is a session already running or a turn nobody can take early.
+ * `master scope` — or `master requirements` where no fold represents the ask under the cap, which
+ * the plain union `master scope` posts cannot carry (GY-936) — a recorded blocker `master unblock`,
+ * an escalation `master decide … resolve`, a merged item production does not serve
+ * `master verify-deployment`, a candidate every other gate passed (merging, or stranded there)
+ * `master merge`, a review `master review`, backlog `master release`, and a human-only decision the
+ * answer its row names. Null where the next step is a session already running or a turn nobody can
+ * take early.
  */
 export function nextCommand(work: Work, group: Group | null, actor: ActorRole, humanRow?: HumanRequestRow): string | null {
   const key = work.key;
@@ -220,7 +222,8 @@ export function nextCommand(work: Work, group: Group | null, actor: ActorRole, h
   if (actor === 'approver') return `graphyard master decisions ${key}`;
   if (actor === 'reviewer') return `graphyard master review ${key}`;
   if (group === 'backlog') return actor === 'master' ? `graphyard master release ${key}` : null;
-  if (work.scopeRequest && work.blocker?.startsWith(scopeRefusalBlocker)) return `graphyard master scope ${key}`;
+  if (work.scopeRequest && work.blocker?.startsWith(scopeRefusalBlocker))
+    return terminalScopeRefusal(work) ? `graphyard master requirements ${key} FILE REASON` : `graphyard master scope ${key}`;
   if (work.blocker) return `graphyard master unblock ${key} REASON`;
   if (work.stage === 'done') return actor === 'master' ? `graphyard master verify-deployment ${key}` : null;
   if (refusalsOf(work, 'merge').some(reason => escalation.test(reason))) return `graphyard master decide ${key} resolve REASON`;

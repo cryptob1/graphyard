@@ -55,6 +55,14 @@ export const stoppedStates = ['idle', 'done', 'blocked'];
 export const launcherRetry = (error: unknown) => { const retryAt = (error as { retryAt?: unknown } | null)?.retryAt; return typeof retryAt === 'string' ? retryAt : null; };
 export const failoverKey = (role: CapacityRole, work: Work, attempt: string | number) => `failover:${role}:${work.id}:${attempt}`;
 export const capacityKey = (role: CapacityRole) => `capacity:${role}`;
+/**
+ * The address a paste to a session is delivered to (GY-852): the pane, which is the session's own
+ * stable coordinate, and only for a session the runtime lists without one — a session the loop
+ * cannot see in any pane — its name. Profiles reuse agent names across sessions, so a paste
+ * resolved by name first lands on whichever session holds the name now, which is how one item's
+ * re-prompt reached another item's pane (2026-09-26).
+ */
+export const promptTarget = (agent: Pick<HerdrAgent, 'name' | 'pane_id'>) => agent.pane_id ?? agent.name ?? '';
 
 /** An item the loop files as the operator-agent: a fault-class item, or the docs trim item (GY-574), which names no class. */
 export type LoopFiledItem = Omit<ReturnType<typeof faultClassItem>, 'origin'> & Partial<Pick<ReturnType<typeof faultClassItem>, 'origin'>>;
@@ -578,7 +586,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // The decline is typed into the pane and given a moment to close the dialog, so the instruction
     // that follows lands in the runtime's input rather than in the closing menu.
     answerSession: async (agent, keys) => { await run('herdr', ['pane', 'send-keys', agent.pane_id!, ...keys]); await delay(2_000); },
-    promptSession: async (agent, text) => { await deliverPrompt(agent.name ?? agent.pane_id!, text, run); },
+    promptSession: async (agent, text) => { await deliverPrompt(promptTarget(agent), text, run); },
     reportCapacity: (work, event) => mutate(`work/${work.id}/capacity`, event),
     recordResearch: (work, event) => mutate(`work/${work.id}/research`, event),
     research: { cwd: root },
