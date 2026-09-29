@@ -1,5 +1,6 @@
 // Concern: disk pressure, worktree dependency reclamation, managed checkouts and shared installs.
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { statfs, readdir, lstat, realpath, rm, mkdir, symlink, writeFile, readFile, rename, appendFile, unlink, rmdir } from 'node:fs/promises';
 import { resolve, dirname, basename } from 'node:path';
 import type { ChildRun } from '../child-runner.js';
@@ -549,4 +550,96 @@ async function compatibleInstall(installed: string, worktree: string): Promise<t
     if (createHash('sha256').update(a).digest('hex') !== createHash('sha256').update(b).digest('hex')) return `${name} differs from the install at ${installed}, so this head installs its own dependencies`;
   }
   return true;
+}
+
+// ---- Stale attempt worktrees hold the item's branch (GY-860) -------------------------------------
+
+/** What an earlier attempt's worktree held when an allocation released its branch: where it was, what it pointed at, the operation it was mid-way through, and the uncommitted diff it carried. */
+export interface PreservedWorktree { path: string; head: string; branchTip: string; op: 'rebase' | 'merge' | 'cherry-pick' | null; refs: string; diff: string; at: string }
+
+/** The git a branch release runs: the asynchronous runner, so a launcher on this loop never blocks on a child. */
+export type BranchGit = (cwd: string, ...args: string[]) => Promise<string>;
+
+/** The in-progress operation a worktree is stopped inside, or null; each state directory lives in that worktree's own git dir. */
+async function inProgressOperation(git: BranchGit, path: string): Promise<PreservedWorktree['op']> {
+  const gitPath = async (name: string) => resolve(path, (await git(path, 'rev-parse', '--git-path', name)).trim());
+  if (existsSync(await gitPath('rebase-merge')) || existsSync(await gitPath('rebase-apply'))) return 'rebase';
+  if (existsSync(await gitPath('MERGE_HEAD'))) return 'merge';
+  if (existsSync(await gitPath('CHERRY_PICK_HEAD'))) return 'cherry-pick';
+  return null;
+}
+
+/** The branch a stopped rebase is rewriting, read from its own state, or empty. */
+async function rebaseHeadName(git: BranchGit, path: string): Promise<string> {
+  for (const state of ['rebase-merge', 'rebase-apply']) {
+    const directory = resolve(path, (await git(path, 'rev-parse', '--git-path', state)).trim());
+    if (!existsSync(directory)) continue;
+    try { return (await readFile(resolve(directory, 'head-name'), 'utf8')).trim(); } catch { return ''; }
+  }
+  return '';
+}
+
+/**
+ * Free the item's branch for a new attempt's worktree (GY-860 AC-1). When any worktree still
+ * holds it — checked out, or stopped inside a rebase naming it — the holder's state is captured,
+ * the operation is ended, and its HEAD is detached, so `git worktree add` on the branch succeeds.
+ * The branch ref itself never moves. A holder that is the new attempt's own path (the same epoch
+ * allocated again after a failed attempt) keeps its worktree: it is re-attached to the branch and
+ * returned with `reused`, so the caller skips creation instead of failing on the existing path.
+ */
+export async function releaseHeldBranch(root: string, branch: string, targetPath: string, run: ChildRun): Promise<{ preserved: PreservedWorktree; reused: boolean } | null> {
+  const ref = `refs/heads/${branch}`;
+  // Quiet git answers empty on a refusal; the caller decides what a refusal means.
+  const quiet = async (...args: string[]) => { try { return await run('git', args); } catch { return ''; } };
+  const git: BranchGit = async (cwd, ...args) => quiet('-C', cwd, ...args);
+  // Registrations whose directory is gone hold nothing but still refuse a new checkout.
+  await quiet('-C', root, 'worktree', 'prune');
+  const raw = await git(root, 'worktree', 'list', '--porcelain', '-z');
+  if (!raw.trim()) return null;
+  const branchTip = (await git(root, 'rev-parse', '--verify', ref)).trim();
+  for (const record of raw.split('\0\0')) {
+    const fields = record.split('\0');
+    const holderPath = fields.find(field => field.startsWith('worktree '))?.slice('worktree '.length);
+    if (!holderPath || !existsSync(holderPath)) continue;
+    // A rebase detaches the holder's HEAD, so the branch shows neither in the porcelain record
+    // nor as HEAD: the rebase's own head-name is what still holds it.
+    const op = await inProgressOperation(git, holderPath);
+    const headName = op === 'rebase' ? await rebaseHeadName(git, holderPath) : '';
+    if (!fields.includes(`branch ${ref}`) && headName !== ref) continue;
+    const diffLimit = 100_000;
+    const tracked = await git(holderPath, 'diff', 'HEAD');
+    const untracked = (await git(holderPath, 'ls-files', '--others', '--exclude-standard')).trim();
+    const fullDiff = tracked + (untracked ? `${tracked ? '\n' : ''}-- untracked files --\n${untracked}` : '');
+    const preserved: PreservedWorktree = {
+      path: holderPath,
+      head: (await git(holderPath, 'rev-parse', 'HEAD')).trim(),
+      branchTip,
+      op,
+      refs: (await git(holderPath, 'show-ref')).trim().slice(0, 20_000),
+      diff: fullDiff.length > diffLimit ? `${fullDiff.slice(0, diffLimit)}\n… truncated after ${diffLimit} characters` : fullDiff,
+      at: new Date().toISOString(),
+    };
+    const reused = resolve(holderPath) === resolve(targetPath);
+    const letGo = (args: string[]) => quiet('-C', holderPath, ...args);
+    if (op === 'rebase') await letGo(['rebase', '--abort']);
+    if (op === 'merge') await letGo(['merge', '--abort']);
+    if (op === 'cherry-pick') await letGo(['cherry-pick', '--abort']);
+    await letGo(reused ? ['checkout', '--quiet', branch] : ['checkout', '--detach', '--quiet']);
+    return { preserved, reused };
+  }
+  return null;
+}
+
+/**
+ * Release this attempt's claim as a workspace failure (GY-860 AC-2): the control plane keeps the
+ * git message on the item and, while the attempt is still the untouched claim, undoes it, so the
+ * epoch returns and no attempt is consumed. A release the server refuses must not hide the
+ * original git failure, so the refusal is carried on the thrown error instead.
+ */
+export async function releaseUnderFailure(mutate: (name: string, data: unknown) => Promise<unknown>, epoch: number, message: string) {
+  try { await mutate('release', { epoch, failure: { message: message.slice(0, 2000) } }); }
+  catch (releaseError) {
+    if (releaseError instanceof Error && /Lease missing, expired, or superseded/.test(releaseError.message)) return;
+    throw Object.assign(new Error(`The workspace failure was recorded, but the claim could not be released as one: ${releaseError instanceof Error ? releaseError.message : String(releaseError)}`), { cause: releaseError });
+  }
 }

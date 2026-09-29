@@ -6,6 +6,7 @@ import { type CapacityRole, capacitySignature, standingCapacity, describeCapacit
 import { parkedOnHuman, humanDecisionLabel, answerCommand } from '../model/human-request.js';
 import { humanNeededActions } from '../model/next-action.js';
 import { assertDispatchable, dispatchReserved, type ContainmentAssessment, type EscalationSession, type RoleCapacity, roleCapacity } from '../master.js';
+import { workspaceDispatchFailure } from '../master/dispatch.js';
 import { standingEscalations } from '../model/escalation.js';
 import { registeredLaunch } from '../model/session-state.js';
 import { type DaemonAction, message } from './state.js';
@@ -242,8 +243,13 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
           await effects.persist(state);
           return;
         }
-        recordProfileFailure(state, current.profile, message(error), now());
-        performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: current.profile.principal, epoch: item.epoch, state: 'failed', detail: `Dispatch of ${item.key} to ${current.profile.name} failed: ${message(error)}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+        // GY-860 AC-2: a failure about the item's own workspace is the host's git state, not the
+        // profile's — it puts no profile into its failure cool-off. The worktree command has
+        // already released the claim with its git message, which hands the epoch back, and the
+        // item's record here keeps that message.
+        const workspace = workspaceDispatchFailure(message(error));
+        if (!workspace) recordProfileFailure(state, current.profile, message(error), now());
+        performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: current.profile.principal, epoch: item.epoch, state: 'failed', detail: `Dispatch of ${item.key} to ${current.profile.name} failed: ${message(error)}${workspace ? " (the item's workspace could not be prepared on this host; the profile is not cooled off and the attempt epoch was released)" : ''}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
         return;
       }
     }

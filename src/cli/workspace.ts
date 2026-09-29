@@ -7,11 +7,16 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import type { Work } from '../model.js';
 import { supervise, systemdContainment } from '../supervisor.js';
 import { attributeConflicts, hasConflictMarkers, localScopeFindings, managedServerUrl, parseGeneratedManifest, regenerateManagedBlocks, type GeneratedManifest } from '../sync.js';
-import { ensureWorktreeDependencies, managedInstructions, npmCi, type DependencyInstaller } from '../repository-setup.js';
+import { managedInstructions } from '../repository-setup.js';
 import { managedMasterInstructions } from '../master.js';
 import { assertRepository, discover } from '../onboarding.js';
 import { acknowledgeContainment, containmentCredentials, establishContainment, revalidateContainment, settleContainment } from '../quarantine.js';
 import { environmentBlocker, environmentFailure } from '../worker-sandbox.js';
+import { runChild } from '../child-runner.js';
+import { releaseHeldBranch, releaseUnderFailure, type PreservedWorktree } from '../master/worktrees.js';
+import { installUnderLease } from '../daemon/sessions.js';
+// The installer lives with the session-lease helpers it renews; the CLI path is kept for tests.
+export { installUnderLease };
 import type { CliContext } from './context.js';
 import { defineCommands, workMutation } from './registry.js';
 
@@ -122,30 +127,6 @@ async function syncWork({ api, print, base: serverUrl }: CliContext, work: any) 
   if (refused.length) process.exitCode = 1;
 }
 
-/**
- * Bring a new worktree's dependencies in line with its lockfile while renewing the lease every
- * `intervalMs`. When an install is needed the lease is renewed first, so npm never starts under a
- * lease about to lapse. Renewals run one at a time, and the install is reported only after the last
- * one has answered: the first refused renewal stops the install, or fails a finished one, with the
- * refusal. The epoch that asked for the worktree is no longer held, so nothing more is done in it.
- */
-export async function installUnderLease(worktree: string, renew: () => Promise<unknown>, subject: string,
-  options: { install?: DependencyInstaller; intervalMs?: number } = {}) {
-  const stop = new AbortController();
-  let renewal: Promise<void> | null = null, keepalive: ReturnType<typeof setInterval> | undefined;
-  const beat = () => renewal = renew().then(() => {}, error => {
-    stop.abort(new Error(`The lease heartbeat for ${subject} was refused while installing dependencies, so the install was stopped: ${error instanceof Error ? error.message : String(error)}`));
-  }).finally(() => { renewal = null; });
-  const install: DependencyInstaller = async (cwd, signal) => {
-    await beat(); signal?.throwIfAborted();
-    keepalive = setInterval(() => { if (!renewal && !stop.signal.aborted) beat(); }, options.intervalMs ?? 30_000);
-    await (options.install ?? npmCi)(cwd, signal);
-  };
-  const result = await ensureWorktreeDependencies(worktree, install, stop.signal).finally(async () => { clearInterval(keepalive); await renewal; });
-  if (stop.signal.aborted) throw stop.signal.reason;
-  return result;
-}
-
 /** Local worktrees and the supervised worker launch. */
 export const workspaceCommands = defineCommands([
   {
@@ -208,7 +189,11 @@ export const workspaceCommands = defineCommands([
   {
     name: 'worktree',
     scope: 'work',
-    help: ['  worktree GY-N EPOCH [BASE]    Reserve and create a local isolated worktree'],
+    help: [
+      '  worktree GY-N EPOCH [BASE]    Reserve and create a local isolated worktree; an earlier',
+      '                                attempt\'s worktree still holding the branch is preserved and',
+      '                                released, so the allocation succeeds (GY-860)',
+    ],
     async run(context, work) {
       const { args, api, print } = context;
       const mutate = workMutation(context, work);
@@ -227,21 +212,31 @@ export const workspaceCommands = defineCommands([
         startPoint = remoteBranch;
       }
       const hostId = context.individualHostId();
-      await mutate('workspace', { epoch, host: hostId, path, branch });
+      // GY-860 AC-1: an earlier attempt's worktree that still holds this branch — checked out, or
+      // stopped inside a rebase, merge or cherry-pick — never fails this allocation: its state is
+      // preserved onto the item, its operation ended, its HEAD detached; the branch ref never moves.
+      let released: { preserved: PreservedWorktree; reused: boolean } | null;
+      try { released = await releaseHeldBranch(root, branch, path, runChild); }
+      catch (error) {
+        const detail = error instanceof Error ? error.message : 'git failed';
+        await releaseUnderFailure(mutate, epoch, `Releasing an earlier attempt's hold on ${branch} failed: ${detail}`);
+        throw new Error(`Git worktree creation failed while releasing an earlier attempt's hold on ${branch}: ${detail}. The claim was released as a workspace failure, so the attempt costs nothing; repair the host and it redispatches.`);
+      }
+      await mutate('workspace', { epoch, host: hostId, path, branch, ...(released ? { preserved: released.preserved } : {}) });
       await mkdir(resolve(root, '.graphyard/worktrees'), { recursive: true });
       const exists = spawnSync('git', ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`]).status === 0;
       try {
-        if (work.submission && exists) {
-          const records = execFileSync('git', ['worktree', 'list', '--porcelain', '-z'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] }).split('\0\0');
-          for (const record of records) {
-            const fields = record.split('\0'); const priorPath = fields.find(field => field.startsWith('worktree '))?.slice(9);
-            if (priorPath && fields.includes(`branch refs/heads/${branch}`)) execFileSync('git', ['-C', priorPath, 'checkout', '--detach', '--quiet'], { stdio: ['ignore', 'ignore', 'inherit'] });
-          }
-        }
-        execFileSync('git', exists ? ['worktree', 'add', path, branch] : ['worktree', 'add', '-b', branch, path, startPoint], { stdio: ['ignore', 'ignore', 'inherit'] });
+        if (!released?.reused) execFileSync('git', exists ? ['worktree', 'add', path, branch] : ['worktree', 'add', '-b', branch, path, startPoint], { stdio: ['ignore', 'ignore', 'inherit'] });
         if (work.submission) execFileSync('git', ['-C', path, 'reset', '--hard', startPoint], { stdio: ['ignore', 'ignore', 'inherit'] });
       }
-      catch { throw new Error('Git worktree creation failed. Reservation remains for safety; inspect the event and repair locally. Do not reuse the branch for another task.'); }
+      catch (error) {
+        // GY-860 AC-2: this failure is the host's git state, not the attempt's — the claim is
+        // released with the git message (which undoes the epoch), so the launcher's own release
+        // afterwards finds nothing left to release.
+        const detail = error instanceof Error ? error.message : 'git worktree failed';
+        await releaseUnderFailure(mutate, epoch, detail);
+        throw new Error(`Git worktree creation failed: ${detail}. The claim was released as a workspace failure, so the attempt costs nothing; inspect the event and repair the host before it redispatches.`);
+      }
       // A checkout whose lockfile the reachable install does not match gets its own install now,
       // so the session never starts on the wrong dependency versions. The lease is kept alive
       // while npm runs; the session's supervisor takes over heartbeats once it starts. A refused
