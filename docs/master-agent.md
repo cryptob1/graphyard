@@ -66,7 +66,7 @@ A candidate passing the build gate gets, in `autoDispatch`, one producer request
 
 **Requests always settle.** A gone pane (`pane_not_found`) is closed. No request outlives its own token: expired, unreported by Herdr, it settles `expired`; one still pending counts in `dispatch.sessionReconcile.stuck`. Unanswered sessions relaunch elsewhere (12 per request, then `dispatch.abandoned`); an unposted reviewer is reminded first. Killed or vanished producer runs spend no attempt; spent attempts raise `escalation:proof-exhausted`, then a quoting rework.
 
-**Every role fails over on spent quota** or waits as one `capacity` line.
+**Every role fails over on spent quota** or waits as one `capacity` line, uncounted, relaunching oldest-first.
 
 The master never launches reviews or producers by hand, except `master review GY-N [PROFILE]` once the loop stops relaunching.
 
@@ -78,7 +78,7 @@ A passing producer records `"exercise"`: the proof rerun with the criterion's be
 "exercise":{"criterion":"AC-1","behaviour":"the lease expiry check in claim()","result":"fail","executed":4}
 ```
 
-A pass is trusted only when that stripped run failed with a case executed; otherwise it is recorded as not exercising its criterion rather than as passing (`unexercised`, `evidence.exercise.refused`); the loop requests rework quoting it. When every proof a unit or integration group has left is such a finding, the item's next action is `request-rework`, naming the proof, the criterion and the mutation that survived, and `master status` names it as awaiting rework for a non-exercising proof rather than as an unanswered producer request. `decide attest` adds `exercise` (fails on base), approver-confirmed; unexercised `manual:` proofs: re-attest, never rework. Attestations carry only on a kept patch-id.
+A pass is trusted only when that stripped run failed with a case executed; otherwise it is recorded as not exercising its criterion rather than as passing (`unexercised`, `evidence.exercise.refused`); the loop requests rework quoting it, for automated proofs. When every proof a unit or integration group has left is such a finding, the next action is `request-rework`, naming proof, criterion and surviving mutation, and `master status` names it as awaiting rework for a non-exercising proof rather than as an unanswered producer request. `decide attest` adds `exercise` (fails on base), approver-confirmed; unexercised `manual:` proofs: re-attest, never rework. Attestations carry only on a kept patch-id.
 
 ## Guarded merges
 
