@@ -1,6 +1,6 @@
 import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { agentOwner, type AttentionItem } from './master.js';
+import { agentOwner, type AttentionItem, type ControlPlaneStatus } from './master.js';
 import { actionIdleMs, actionRetryDelay, type ActionRecord, type ActionRow } from './model/actions.js';
 import { acceptedMergeAt, nearestRankPercentiles, pipelineSpeed, type Percentiles } from './pipeline-speed.js';
 import type { Work } from './model.js';
@@ -473,6 +473,27 @@ export async function claimContainmentFrom({ revision, mergeSha, claim, reposito
     if (error?.status === 1) return { contains: false, reason: `${mergeSha.slice(0, 12)} is not an ancestor of the deployed ${revision.slice(0, 12)}` };
     return { contains: null, reason: `git could not compare ${mergeSha.slice(0, 12)} with the deployed ${revision.slice(0, 12)} from ${repository}: ${(error?.stderr || error?.message || `exit ${error?.status}`).toString().trim().slice(0, 200)}` };
   }
+}
+
+/**
+ * The daemon effect behind `measureThroughput` (GY-393), here beside the claim arithmetic it
+ * feeds: the deployed release's identity comes from the control plane's status document, never
+ * from a checkout; the claim's containment is asked of the checkout's own object store; and the
+ * report is recorded in the measurement script's directory and format, so a reader cannot tell a
+ * loop-taken measurement from a manual one. A release that moved between the cycle's observation
+ * and this read refuses, and the cycle measures the release it observed again next cycle.
+ */
+export async function loopThroughputMeasurement({ work, now, sha }: { work: Work[]; now: string; sha: string },
+  deps: { status: () => Promise<ControlPlaneStatus & Record<string, unknown>>; origin: string; root: string; run: (command: string, args: string[]) => string | Promise<string> }):
+  Promise<{ revision: string | null; verdict: 'verified' | 'unverified'; file: string; reason: string }> {
+  const status = await deps.status();
+  const { revision, source } = deployedRevision(status);
+  if (revision && revision.toLowerCase() !== sha.toLowerCase()) throw new Error(`the control plane now reports release ${revision.slice(0, 12)}, not the ${sha.slice(0, 12)} this cycle observed; measuring the observed one again next cycle`);
+  const containment = await claimContainmentFrom({ revision, mergeSha: work.find(item => item.key === throughputClaim.item)?.delivery?.mergeSha ?? null, claim: throughputClaim.item, repository: deps.root }, deps.run);
+  const report = verifyThroughput(work, Number.isFinite(Date.parse(now)) ? Date.parse(now) : Date.now(), { claimKey: throughputClaim.item,
+    deployed: { revision, revisionSource: source, version: (status.release as { version?: string | null } | undefined)?.version ?? null, origin: deps.origin,
+      observedAt: typeof status.now === 'string' ? status.now : now, containsClaim: containment.contains, reason: containment.reason } });
+  return { revision, verdict: report.verdict, file: await recordThroughputMeasurement(deps.root, report), reason: report.reason };
 }
 
 export interface ThroughputVisibility {

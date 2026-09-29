@@ -35,7 +35,7 @@ import { readCredentialFile } from '../master.js';
 import { onceAnnotations, timingFaultAttention, type ReportedAttention } from './faults.js';
 import type { daemonSummary } from './run.js';
 import { observeDeployment } from './deployment.js';
-import { claimContainmentFrom, deployedRevision, recordThroughputMeasurement, throughputClaim, verifyThroughput } from '../throughput.js';
+import { loopThroughputMeasurement } from '../throughput.js';
 import { detectLoopSupervisorUnit, performSelfUpgrade, type SelfUpgradeOutcome } from './upgrade.js';
 import { readRelease, restartExecutors } from '../executor-fleet.js';
 import { serverCallName, timedCall, timedFetch, timedRun } from '../master/timings.js';
@@ -698,23 +698,11 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       publishedMergeQueue = published;
     },
     recordDeployment: (work, observation) => mutate(`work/${work.id}/deployment`, { sha: observation.sha, mergeSha: work.delivery!.mergeSha, source: observation.source, observedAt: observation.observedAt }),
-    // The loop's own post-deploy measurement (GY-393): the deployed release's identity comes from
-    // the control plane's status document, never from this checkout; the claim's containment is
-    // asked of this checkout's object store, the one `root` holds; and the report is recorded in
-    // the measurement script's directory and format, so a reader cannot tell them apart. A release
-    // that moved between the observation and this read refuses, and the cycle measures it again.
-    measureThroughput: async ({ work, now, sha }) => {
-      const config = current();
-      const status = await asCoordinator('status');
-      const { revision, source } = deployedRevision(status);
-      if (revision && revision.toLowerCase() !== sha.toLowerCase()) throw new Error(`the control plane now reports release ${revision.slice(0, 12)}, not the ${sha.slice(0, 12)} this cycle observed; measuring the observed one again next cycle`);
-      const containment = await claimContainmentFrom({ revision, mergeSha: work.find(item => item.key === throughputClaim.item)?.delivery?.mergeSha ?? null, claim: throughputClaim.item, repository: root }, run);
-      const report = verifyThroughput(work, Number.isFinite(Date.parse(now)) ? Date.parse(now) : Date.now(), { claimKey: throughputClaim.item,
-        deployed: { revision, revisionSource: source, version: status.release?.version ?? null, origin: new URL(config.url).origin,
-          observedAt: typeof status.now === 'string' ? status.now : now, containsClaim: containment.contains, reason: containment.reason } });
-      const file = await recordThroughputMeasurement(root, report);
-      return { revision, verdict: report.verdict, file, reason: report.reason };
-    },
+    // The loop's own post-deploy measurement (GY-393), its body in src/throughput.ts beside the
+    // claim arithmetic it feeds: the release identity comes from the control plane's status, the
+    // containment from this checkout's object store, and the report lands in the measurement
+    // script's directory and format, so a reader cannot tell them apart.
+    measureThroughput: ({ work, now, sha }) => loopThroughputMeasurement({ work, now, sha }, { status: () => asCoordinator('status'), origin: new URL(current().url).origin, root, run }),
     exhaustedProofs: async () => Object.entries((await readDispatchCursor(root, current(), () => {})).abandoned).filter(([, entry]) => entry.kind === 'producer')
       .map(([requestId, entry]) => ({ requestId, work: entry.work, sha: entry.sha, group: entry.group ?? null, proofs: entry.proofs ?? [], attempts: entry.attempts, reason: entry.reason })),
     requestSmoke: async work => {

@@ -27,6 +27,8 @@ import type { ExhaustedProof } from '../src/daemon/decisions.js';
 import { performSelfUpgrade, type SelfUpgradeOutcome } from '../src/daemon/upgrade.js';
 import { defaultOptimisticExclude } from '../src/optimistic-merge.js';
 import { queuePlacement } from '../src/merge-queue.js';
+import { ProductionWatch, REDEPLOY_COOLDOWN_MS, type DeploymentProvider, type ProviderDeployment } from '../src/production-watch.js';
+import { buildIdentity } from '../src/protocol-version.js';
 import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } from './helpers/soak-world.js';
 
 /**
@@ -65,7 +67,14 @@ import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } f
  * The loop records every worker's session handle and may prompt a session (GY-544): three workers
  * ask for scope that is decided before the loop's next cycle sees the request, two panes are
  * misread by Herdr as holding no agent for one cycle, and one worker's runtime exits and leaves
- * its pane on a bare shell.
+ * its pane on a bare shell. The real production watch (GY-393) runs beside the loop on its own
+ * passes over the same sparse production, the way an installation whose provider cannot deploy on
+ * request is observed, and the loop takes the post-deploy throughput measurement itself: every
+ * release the simulated day observes serving is measured exactly once, on the loop's per-release
+ * action, even where the day's churn evicts the cursor's action records. The day after this one
+ * hands the watch a redeploy-capable provider, so the watch's own recovery — the drift it is asked
+ * to deploy away, the attempts it must not stack, the refusals it must not spin on — is exercised
+ * the same way, beside the same loop.
  */
 const repository = 'owner/project';
 const PROOF = 'unit:soak-behaves';
@@ -127,6 +136,11 @@ const plan = {
   // of the `held-jobs` fault class inside the recurrence window, so the loop files the class's one
   // recurring item and the diagnostician diagnoses it (GY-439).
   heldJob: { at: [40, 80, 120].map(offset => offset * minute), forMs: 2 * minute },
+  // GY-393: the watch day's provider episodes. The provider refuses the watch's redeploys for the
+  // window's first two and a half hours and accepts after; every accepted redeploy builds for ten
+  // minutes before it serves; and at four hours the provider's own auto-deploy stalls in flight
+  // for forty minutes, so the watch must hold its ask while an attempt is under way.
+  watch: { buildMs: 10 * minute, refuse: { from: 15 * minute, to: 2 * hour + 30 * minute }, stall: { at: 4 * hour, forMs: 40 * minute } },
   // GY-544: scope asked and answered between two cycles, and a live pane Herdr misreads for one cycle.
   // The scope overlay cannot ride item ten: an applied scope decision binds the approval baseline to
   // the attempt's first pull request (the requirement-review reset), and item ten's optimistic revert
@@ -233,7 +247,7 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
  * and `failTip` names the item whose first speculative tip fails and keeps failing after its rerun.
  */
 let days = 0;
-async function simulateDay(options: { hours: number; regression?: 'approvers-left-open'; handApprovers?: boolean; capacityWait?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number } }) {
+async function simulateDay(options: { hours: number; regression?: 'approvers-left-open'; handApprovers?: boolean; capacityWait?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; watch?: boolean; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number } }) {
   const dayStart = clock.now();
   const config: MasterConfig = options.queued
     ? masterConfigSchema.parse({ ...soakConfig, workers: [...workers, ...queueWorkers], mergeQueue: { optimistic: false, parallelTips: options.queued.window } })
@@ -376,7 +390,14 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       const head = sha('head', session.key, session.epoch);
       if (numberOf(session) === plan.breaksMain && session.attempt === 1) github.breaking.add(head);
       const pr = github.push(session.key, session.branch, principal.id, head, files(numberOf(session)));
-      await engine.execute(principal, 'submit', session.work, { epoch: session.epoch, pr: pr.number, documentation: 'A simulated item: it changes no documented behaviour' }, id());
+      try { await engine.execute(principal, 'submit', session.work, { epoch: session.epoch, pr: pr.number, documentation: 'A simulated item: it changes no documented behaviour' }, id()); }
+      catch (error) {
+        // A submit the server refuses is never absorbed: the item moved under this worker, and the
+        // refusal names the exact world that did it, so the crash carries its own diagnosis.
+        const current = (await store.list()).find(item => item.id === session.work);
+        console.error(`submit refused for ${session.key} epoch ${session.epoch}: pushed ${session.branch} as #${pr.number}; the item stands at stage ${current?.stage} with submission ${JSON.stringify(current?.submission)} and lease ${JSON.stringify(current?.lease)}: ${error instanceof Error ? error.message : String(error)}`);
+        throw error;
+      }
       session.state = 'submitted';
       // Its work done, the runtime exits and leaves the pane behind (GY-842); the loop's session
       // end closes it in the same step, or the sweep reclaims it as the backstop.
@@ -458,11 +479,19 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     pending.push(async () => {
       const refuseDue = !!options.refuseReworkOf?.includes(numberOf(work)) && !refused.some(entry => entry.key === work.key)
         && (await api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(work.id)}/decisions`)).decisions.some((entry: { id: string; action: string }) => entry.id === decision && entry.action === 'rework');
-      if (refuseDue) {
-        await api(principals.approver, 'POST', `work/${work.id}/approve`, { action: 'refuse', decision, reason: `Refused: ${work.key}'s rework rests on grounds this approver does not accept` });
-        refused.push({ key: work.key, decision });
-      } else {
-        await api(principals.approver, 'POST', `work/${work.id}/approve`, { decision, reason: `Approved: the loop's routine ${decision} decision for ${work.key} rests on what it verified` });
+      try {
+        if (refuseDue) {
+          await api(principals.approver, 'POST', `work/${work.id}/approve`, { action: 'refuse', decision, reason: `Refused: ${work.key}'s rework rests on grounds this approver does not accept` });
+          refused.push({ key: work.key, decision });
+        } else {
+          await api(principals.approver, 'POST', `work/${work.id}/approve`, { decision, reason: `Approved: the loop's routine ${decision} decision for ${work.key} rests on what it verified` });
+        }
+      } catch (error) {
+        // A real approver session ends here rather than crashing: when the item moved between the
+        // request and the approval, the server refuses the approval (409), settles the decision
+        // stale, and the loop re-requests it for a fresh approver — the refusal is the designed
+        // protection, so the session that receives it has nothing left to judge.
+        if (!(error instanceof Error) || !/\(409\): Task revision changed/.test(error.message)) throw error;
       }
       herdr.status(pane, 'done');
     });
@@ -503,6 +532,79 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
 
   // ---- Production: two deploys, each a new control-plane build serving the base tip it was cut from. ----
   const production = { build: sha('build', 0), sha: github.tip, deploys: [] as { at: number; build: string; sha: string }[] };
+  // GY-393: the real production watch runs beside the loop, the way runDaemon starts it, reading
+  // this provider through the real DeploymentProvider interface. The ledger holds the deployments
+  // the day's deploys made, newest first, and — on the watch day — the redeploys the watch asks
+  // for and the auto-deploy that stalls in flight. `production.sha` stays what production serves:
+  // a redeploy or a stalled auto-deploy serves its commit only once its build completes, and the
+  // watch's own recovery is what asks for it. Without `options.watch` the provider cannot deploy
+  // on request, the watch stays observe-only, and the day's production moves only at its deploys.
+  const providerLedger: { id: string; status: 'success' | 'building'; commit: string; at: number }[] = [{ id: 'deploy-base', status: 'success', commit: production.sha, at: dayStart }];
+  const redeployBuilds: { id: string; dueAt: number; commit: string }[] = [];
+  const watchAsks: { at: number; outcome: 'asked' | 'refused'; whileBuilding: boolean }[] = [];
+  const redeployErrors: { at: number; error: string }[] = [];
+  const redeployed: { id: string; at: number; sha: string }[] = [];
+  let stalled = false;
+  const settleRedeploys = () => {
+    const now = clock.now();
+    while (redeployBuilds.length && redeployBuilds[0].dueAt <= now) {
+      const build = redeployBuilds.shift()!;
+      providerLedger.find(entry => entry.id === build.id)!.status = 'success';
+      production.sha = build.commit;
+      redeployed.push({ id: build.id, at: now, sha: build.commit });
+    }
+  };
+  const providerDeployment = (entry: { id: string; status: 'success' | 'building'; commit: string; at: number }): ProviderDeployment =>
+    ({ id: entry.id, status: entry.status, providerStatus: entry.status === 'success' ? 'SUCCESS' : 'BUILDING', commit: entry.commit, branch: 'main', createdAt: new Date(entry.at).toISOString(), updatedAt: null, url: null });
+  const watchProvider: DeploymentProvider = {
+    name: 'soak', description: 'the simulated hosting provider',
+    list: async () => providerLedger.map(providerDeployment),
+    ...(options.watch ? {
+      redeploy: async () => {
+        const at = clock.now();
+        const refuse = at - dayStart >= plan.watch.refuse.from && at - dayStart < plan.watch.refuse.to;
+        // The ask is what the watch decided; `whileBuilding` records whether it stacked onto an
+        // attempt in flight, which the assertions below refuse to see.
+        watchAsks.push({ at, outcome: refuse ? 'refused' : 'asked', whileBuilding: providerLedger[0]?.status === 'building' });
+        if (refuse) throw new Error("this hour's deploy budget is spent; the ask is retried after the cooldown, not sooner");
+        const entry = { id: `redeploy-${providerLedger.length}`, status: 'building' as const, commit: github.tip, at };
+        providerLedger.unshift(entry);
+        redeployBuilds.push({ id: entry.id, dueAt: at + plan.watch.buildMs, commit: entry.commit });
+        redeployBuilds.sort((a, b) => a.dueAt - b.dueAt);
+        return { id: entry.id };
+      },
+    } : {}),
+  };
+  // The watch's GitHub adapter, spelled the way the control plane's is: `contains(base, head)`
+  // asks whether head contains base, and `aheadBy` counts main's commits past what production serves.
+  const watchGithub = {
+    request: async () => { throw new Error('the soak watch adapter answers contains and aheadBy directly'); },
+    contains: async (base: string, head: string) => github.contains(head, base),
+    aheadBy: async (serving: string) => {
+      let at = github.tip, ahead = 0;
+      while (at && at !== serving && github.commits.has(at)) { ahead++; at = github.commits.get(at)!.parents[0]; }
+      return ahead;
+    },
+  };
+  const watch = new ProductionWatch(store, { provider: watchProvider, github: watchGithub, build: buildIdentity({ GRAPHYARD_BUILD_SHA: production.build }), baseBranch: 'main', now: clock.now });
+  // The watch passes run on the main day — observe-only, the way an installation whose provider
+  // cannot deploy on request is observed — and on the watch day, which carries its recovery
+  // assertions. The scenario days exercise their own faults and run without its passes.
+  const watching = options.watch || (!options.queued && !options.handApprovers && !options.regression && !options.scope && !options.capacityWait && !options.refuseReworkOf);
+  // GY-393: the loop takes the post-deploy throughput measurement itself, once per release it
+  // observes serving. The simulated effect records per release what the real one records as a
+  // report file, so a loop that skips a release, measures one it never observed, or re-measures
+  // a release it has already measured fails the assertions below instead of passing silently.
+  const baseTip = production.sha;
+  const measurements = new Map<string, number>();
+  const measureThroughput: DaemonEffects['measureThroughput'] = async ({ sha }) => {
+    measurements.set(sha, (measurements.get(sha) ?? 0) + 1);
+    return { revision: sha, verdict: 'verified' as const, file: `.graphyard/measurements/throughput/${sha.slice(0, 12)}.json`, reason: `The soak's throughput claim holds against ${sha.slice(0, 12)}` };
+  };
+  // Every release the loop could observe serving: `production.sha` as each cycle found it. A value
+  // that stood for less than one cycle (superseded inside a deploy minute) was never observed and
+  // is measured by nothing, so the assertion holds the loop to exactly what it saw.
+  const servedSeen = new Set<string>();
   const snapshot = async () => { const read = await store.coordinationSnapshot(); return { work: read.work, now: read.now, jobs: read.jobs }; };
   const transport = async (path: string, data: any, key: string = id()) => {
     const match = /^work\/([^/]+)\/merge-acquire$/.exec(path);
@@ -569,6 +671,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       return { source: 'endpoint', sha: production.sha, at: new Date(clock.now()).toISOString(), reason: null, deployed: serving.map(item => item.key), pending: delivered.filter(item => !serving.includes(item)).map(item => item.key) };
     },
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    measureThroughput,
     promptSession,
     exhaustedProofs: async () => [...abandoned.values()],
   };
@@ -706,7 +809,16 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       restarted = true;
     }
     const deploying = deploys < plan.deploys.length && elapsed >= plan.deploys[deploys];
-    if (deploying) { production.build = sha('build', ++deploys); production.sha = github.tip; production.deploys.push({ at: now, build: production.build, sha: production.sha }); }
+    if (deploying) { production.build = sha('build', ++deploys); production.sha = github.tip; production.deploys.push({ at: now, build: production.build, sha: production.sha }); providerLedger.unshift({ id: `deploy-${deploys}`, status: 'success', commit: production.sha, at: now }); }
+    // GY-393, watch day: the provider's own auto-deploy starts at the stall and sits in flight —
+    // building, never failing — until the stall ends, so main moves ahead of what production
+    // serves while an attempt is under way and the watch must hold its ask until it completes.
+    if (options.watch && !stalled && elapsed >= plan.watch.stall.at) {
+      stalled = true;
+      providerLedger.unshift({ id: 'auto-deploy', status: 'building', commit: github.tip, at: now });
+      redeployBuilds.push({ id: 'auto-deploy', dueAt: now + plan.watch.stall.forMs, commit: github.tip });
+      redeployBuilds.sort((a, b) => a.dueAt - b.dueAt);
+    }
     // The plane reports its held integration job only inside the flap windows (GY-439's recurring fault).
     heldJobs = plan.heldJob.at.some(at => elapsed >= at && elapsed < at + plan.heldJob.forMs);
     // The world moves: GitHub, then the sessions. A deploy restarts the control plane once the
@@ -726,7 +838,18 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       engine.directMergeEnvironment = { since: new Date(now).toISOString(), until: new Date(now + minute).toISOString(), reason: 'Soak: an operator merges one pull request by hand', setBy: 'environment', enabledAt: new Date(now).toISOString(), source: 'environment', event: null };
       outside = { key: byHand.key, sha: github.mergeOutside(byHand, now).sha, at: now };
     }
+    // GY-393: the real production watch runs beside the loop, as runDaemon starts it: its own pass,
+    // at most once per poll interval, reading the provider and comparing main with what it serves.
+    // A redeploy a pass asked for serves only when its build completes, which the provider settles
+    // between passes. The watch runs on the main day and on the watch day, which carry its
+    // assertions; the scenario days run without its passes.
+    if (watching) {
+      settleRedeploys();
+      const watchReport = await watch.tick();
+      if (watchReport.redeployError) redeployErrors.push({ at: now, error: watchReport.redeployError });
+    }
     if (!deploying) {
+      servedSeen.add(production.sha);
       for (const act of pending.splice(0)) await act();
       await engine.reconcile();
       for (let guard = 0; guard < 200 && await jobsDue(); guard++) await processJob(engine, adapter);
@@ -799,12 +922,13 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
   return { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, herdr, hand, escalations, spent, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, landingRefusals, foreignPane,
     mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted, approverPanes, herdrClosed: herdr.closed, diagnosisModel: settings.model, capacityRefused, capacityLaunched, capacityWaiters,
-    decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen };
+    decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen,
+    baseTip, measurements, servedSeen, watchAsks, redeployErrors, redeployed };
 }
 
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 180_000 }, async () => {
   const began = performance.now();
-  const { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, state, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, herdr, landingRefusals, foreignPane, mergeQueuePosts, approverPanes, herdrClosed, diagnosisModel, decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
+  const { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, state, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, herdr, landingRefusals, foreignPane, mergeQueuePosts, approverPanes, herdrClosed, diagnosisModel, decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, baseTip, measurements, servedSeen } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
   const undelivered = final.filter(item => item.stage !== 'done' || !item.delivery);
   assert.deepEqual(undelivered.map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
@@ -853,6 +977,14 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   // per session, none lost between the hand-off and the drain.
   assert.equal(reportedDispatches, sessions.length, 'each settled dispatch launch was reported to a cycle');
   assert.equal(production.deploys.length, plan.deploys.length, 'two production deploys');
+  // The loop's own measurement (GY-393): every release observed serving — the base tip the day
+  // starts on, then each deploy — was measured exactly once, and the last measurement stands
+  // against the release now serving. A loop that re-measures, skips a release, or measures a
+  // release the observation never saw fails here; so does one whose dedup depends on cursor
+  // records the day's churn prunes away.
+  assert.deepEqual([...measurements.keys()].sort(), [...servedSeen].sort(), 'one throughput measurement per release the day observed serving');
+  assert.ok([...measurements.values()].every(count => count === 1), `each release is measured exactly once: ${JSON.stringify([...measurements])}`);
+  assert.equal(state.throughput?.revision, production.sha, 'the last measurement is against the release now serving');
   assert.ok(final.find(item => item.key === items[plan.split.item - 1].key)!.plannedFiles.includes(`src/soak/item-${plan.split.item}-a.ts`), 'the split file re-planned its item onto the successors');
   const reviewed = final.find(item => item.key === items[plan.exhaustedReviewer - 1].key)!;
   assert.ok(reviewed.reviewFailovers?.some(failover => failover.profile === 'claude-reviewer' && failover.exhaustion === 'usage-limit' && failover.nextProfile === 'cursor-reviewer'), `the exhausted reviewer bot failed over to the next profile: ${JSON.stringify(reviewed.reviewFailovers)}`);
@@ -1009,6 +1141,62 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.deepEqual(final.flatMap(item => (item.sessions ?? []).filter(handle => handle.kind === 'implementation' && handle.state === 'running').map(handle => `${item.key} ${handle.id}`)), [], 'every implementation handle is closed once its item is delivered');
   const seconds = (performance.now() - began) / 1000;
   assert.ok(seconds < 120, `the day runs well inside the three minutes the CI test job allows it (${seconds.toFixed(1)} s)`);
+});
+
+test('unit:soak-invariants-hold — the production watch recovers a lagging release itself: redeploys a cooldown apart, none stacked on an attempt in flight, a refusal reported and not spun on, and every release the day served measured exactly once', { timeout: 180_000 }, async () => {
+  // GY-393: with a redeploy-capable provider the watch asks the provider to deploy main's newest
+  // commit on the drift it observes, instead of leaving the fix to "trigger the deployment" — a
+  // master session that is routinely not running, which is how the drift grew unchecked. Beside
+  // the real loop over a whole day: the day's first asks fall inside the provider's refusal
+  // window and are reported on the pass, never spun on — the next ask still waits the cooldown
+  // out; an accepted ask builds for ten minutes before it serves, and an attempt in flight is
+  // never stacked onto; at four hours the provider's own auto-deploy stalls in flight for forty
+  // minutes and holds the ask the same way; each completed attempt is what production then
+  // serves, and the loop observes and measures every release the day served exactly once.
+  const began = performance.now();
+  const { final, github, violations, failures, lost, production, state, measurements, servedSeen, watchAsks, redeployErrors, redeployed, dayStart } =
+    await simulateDay({ hours: 6, watch: true });
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
+  assert.deepEqual(violations, [], 'every system invariant holds across the redeploys');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.deepEqual(lost, [], 'no worker lost its lease');
+  // The recovery ran, more than once, and bounded: asks sit at least one cooldown apart, and the
+  // provider was never asked while a deployment was in flight — not the watch's own building
+  // redeploy, and not the stalled auto-deploy either.
+  assert.ok(watchAsks.length >= 4, `the watch asked the provider to redeploy on the drift it observed: ${JSON.stringify(watchAsks)}`);
+  for (let index = 1; index < watchAsks.length; index++)
+    assert.ok(watchAsks[index].at - watchAsks[index - 1].at >= REDEPLOY_COOLDOWN_MS,
+      `asks hold the cooldown (${Math.round((watchAsks[index].at - watchAsks[index - 1].at) / minute)} min apart): ${JSON.stringify(watchAsks)}`);
+  assert.ok(watchAsks.every(ask => !ask.whileBuilding), `no ask was stacked onto a deployment in flight: ${JSON.stringify(watchAsks)}`);
+  assert.ok(watchAsks.every(ask => ask.at < dayStart + plan.watch.stall.at || ask.at >= dayStart + plan.watch.stall.at + plan.watch.stall.forMs),
+    `no ask inside the stalled auto-deploy's window: ${JSON.stringify(watchAsks)}`);
+  // The refusal window: asks were refused there, each refusal stood on its pass, and the asks the
+  // watch was allowed past the window were no sooner than the cooldown allows — a provider that
+  // refuses or crash-loops cannot turn the watch into a deploy loop.
+  const refusedAsks = watchAsks.filter(ask => ask.outcome === 'refused');
+  assert.ok(refusedAsks.length >= 2, `the provider refused the window's asks: ${JSON.stringify(watchAsks)}`);
+  assert.ok(refusedAsks.every(ask => ask.at - dayStart >= plan.watch.refuse.from && ask.at - dayStart < plan.watch.refuse.to), 'refusals only fell inside the refusal window');
+  assert.ok(redeployErrors.length >= refusedAsks.length, `every refusal stood on its pass: ${JSON.stringify(redeployErrors)}`);
+  const asked = watchAsks.filter(ask => ask.outcome === 'asked');
+  assert.ok(asked.length >= 2, `the watch redeployed once the provider accepted again: ${JSON.stringify(watchAsks)}`);
+  assert.ok(asked.every(ask => ask.at - dayStart >= plan.watch.refuse.to), 'no ask was accepted inside the refusal window');
+  // Every accepted ask built for the build window and then served, and the stalled auto-deploy
+  // served the commit it started on once its stall ended: what production serves advanced by
+  // them, the loop observed what it could, and each completion's commit is contained in what the
+  // day ended serving (a completion superseded inside a deploy minute was never observed, and is
+  // measured by nothing).
+  assert.ok(redeployed.length >= 3, `the accepted asks and the stalled auto-deploy completed and served: ${JSON.stringify(redeployed)}`);
+  const stalledDeploy = redeployed.find(entry => entry.id === 'auto-deploy');
+  assert.ok(stalledDeploy && stalledDeploy.at - dayStart >= plan.watch.stall.at + plan.watch.stall.forMs, `the stalled auto-deploy completed only after its stall: ${JSON.stringify(redeployed)}`);
+  assert.ok(redeployed.every(entry => servedSeen.has(entry.sha) || github.contains(production.sha, entry.sha)),
+    `every completion is in what the day served: ${JSON.stringify({ served: [...servedSeen].map(entry => entry.slice(0, 12)), completions: redeployed.map(entry => entry.sha.slice(0, 12)) })}`);
+  // The loop followed the recovery: every release it observed serving was measured exactly once,
+  // and the last measurement stands against the release now serving.
+  assert.deepEqual([...measurements.keys()].sort(), [...servedSeen].sort(), 'one throughput measurement per release the day observed serving');
+  assert.ok([...measurements.values()].every(count => count === 1), `each release is measured exactly once: ${JSON.stringify([...measurements])}`);
+  assert.equal(state.throughput?.revision, production.sha, 'the last measurement is against the release now serving');
+  const seconds = (performance.now() - began) / 1000;
+  assert.ok(seconds < 150, `the watch day runs inside its budget (${seconds.toFixed(1)} s)`);
 });
 
 test('unit:soak-invariants-hold — the parallel-tip window validates several queue positions at once, a failing tip ejects only its own entry while the suffix rebuilds without it, and a mid-day window change is republished, with every system invariant holding', { timeout: 180_000 }, async () => {

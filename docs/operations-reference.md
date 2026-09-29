@@ -82,7 +82,7 @@ It stays Done, marked **delivered with failure**; revert through a new item, nev
 
 ## Merged but not deployed
 
-A merge production never served is a `delivery.deployment-incident` ([observation](deployment.md#production-deployment-observation)); fixed, it recovers once served.
+A merge production never served is a `delivery.deployment-incident` ([observation](deployment.md#production-deployment-observation)); served, it recovers.
 
 ## Merge bypass
 

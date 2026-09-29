@@ -225,7 +225,11 @@ export async function deploymentStep(cycle: Cycle) {
   if (effects.measureThroughput && delivered.length && observed?.sha) {
     const key = `measurement:throughput:${observed.sha}`;
     const previous = state.actions[key], attempts = previous?.attempts ?? 0;
-    if (attempts < maxThroughputMeasurementAttempts && readyToRetry(previous, state.cycle)) {
+    // The cursor's action records are pruned past their bound, so the dedup cannot rest on this
+    // release's record alone: a long-serving release outlives it, and without the retained
+    // `state.throughput` answer the next cycle would measure the same release again.
+    const measured = state.throughput?.revision?.toLowerCase() === observed.sha.toLowerCase();
+    if (!measured && attempts < maxThroughputMeasurementAttempts && readyToRetry(previous, state.cycle)) {
       await record(state, key, { kind: 'deployment', work: null, principal: null, state: 'started',
         detail: `Measuring the throughput claim against the release ${observed.sha.slice(0, 12)} observed from ${observed.source}`, attempts: attempts + 1, cycle: state.cycle }, now(), effects.persist);
       try {
