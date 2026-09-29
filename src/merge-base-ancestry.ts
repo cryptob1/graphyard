@@ -58,3 +58,17 @@ export function mergeBaseDismissalAttention(key: string, dismissal: MergeBaseDis
       ? `The ${missingAncestryReason(dismissal.ancestry)}; the approval is not re-posted before a merge attempt meanwhile`
       : `The head contains ${tip}, so the approval is restored and re-posted through the reviewer App before the merge`);
 }
+
+/**
+ * Whether the control plane has already answered a merge-base dismissal (GY-733): it restored
+ * the dismissed approval on the unchanged head, or it republished the queue tip onto the base
+ * branch tip the dismissal was measured against. Either way the review has settled — the approval
+ * stands again, or a new head carries or asks for its own — so the dismissal is history the row
+ * shows, not a review that fails to converge. GY-487's dismissal was restored 13 seconds after
+ * GitHub recorded it and the tip republished 8 seconds later, yet it was counted as a fault.
+ */
+export function mergeBaseDismissalSettled(work: Pick<Work, 'queue'>, dismissal: MergeBaseDismissal, restored: { sha: string; reviewId?: number } | null): boolean {
+  if (restored && restored.sha === dismissal.sha && (restored.reviewId === undefined || dismissal.reviewId === null || restored.reviewId === dismissal.reviewId)) return true;
+  const speculation = work.queue?.speculation;
+  return !!speculation && !!dismissal.baseTip && speculation.tip !== dismissal.sha && speculation.base === dismissal.baseTip;
+}

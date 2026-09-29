@@ -1,7 +1,7 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -27,6 +27,10 @@ import type { ExhaustedProof } from '../src/daemon/decisions.js';
 import { performSelfUpgrade, type SelfUpgradeOutcome } from '../src/daemon/upgrade.js';
 import { defaultOptimisticExclude } from '../src/optimistic-merge.js';
 import { queuePlacement } from '../src/merge-queue.js';
+import { emptyDispatchCursor, runDispatchTick, type DispatchCursor, type DispatchEffects } from '../src/auto-dispatch.js';
+import { readReviewLedger, reconcileReviews, reviewRecordSchema, updateReviewLedger } from '../src/reviewer.js';
+import { reviewConflictAttention } from '../src/model/review-conflict.js';
+import { mergeWork } from '../src/master/merge.js';
 import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } from './helpers/soak-world.js';
 
 /**
@@ -238,30 +242,137 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
  * re-post cannot use it.
  */
 let days = 0;
-async function simulateDay(options: { hours: number; regression?: 'approvers-left-open'; handApprovers?: boolean; capacityWait?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; plan?: Partial<typeof basePlan> }) {
+async function simulateDay(options: { hours: number; regression?: 'approvers-left-open'; handApprovers?: boolean; capacityWait?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; plan?: Partial<typeof basePlan>;
+  /** GY-733: the day's reviews come from reviewer sessions the loop's own dispatcher launches and
+   *  reconciles through the real review ledger, and four items stage the recorded fault shapes on
+   *  top: `unread` has a verdict the observation cannot read for eight minutes, `duplicate` draws a
+   *  second agreeing approval from a session the ledger has no record of, `conflict` a change
+   *  request that disagrees with its standing approval, and `dismissal` an approval GitHub
+   *  dismissed for a merge-base change. */
+  reviews?: { unread: number; duplicate: number; conflict: number; dismissal: number } }) {
   const dayStart = clock.now();
   // A day may restage the shared scenario: the day-scoped view of the plan is what every fault
   // below arms from, while each test's own assertions still read the shared base plan.
   const plan = { ...basePlan, ...options.plan };
-  const config: MasterConfig = options.queued
-    ? masterConfigSchema.parse({ ...soakConfig, workers: [...workers, ...queueWorkers], mergeQueue: { optimistic: false, parallelTips: options.queued.window } })
-    : soakConfig;
+  const config: MasterConfig = options.reviews
+    ? masterConfigSchema.parse({ ...soakConfig,
+        reviewer: { appId: 55_003, installationId: 55_004, slug: 'soak-reviewer', credentialFile: '/outside/soak-reviewer.json', boundAt: new Date(dayStart).toISOString() },
+        reviewers: [{ name: 'soak-reviewer', agentName: 'soak-reviewer-1', kind: 'claude' }],
+        run: { ...soakConfig.run, awaitReviewersMinutes: 0 } })
+    : options.queued
+      ? masterConfigSchema.parse({ ...soakConfig, workers: [...workers, ...queueWorkers], mergeQueue: { optimistic: false, parallelTips: options.queued.window } })
+      : soakConfig;
   if (options.stale) config.reviewer = { slug: 'graphyard-reviewer', appId: 77_001, installationId: 77_002, credentialFile: '/outside/reviewer.json', boundAt: new Date(dayStart).toISOString() };
   // The spent producer request (GY-496) is a main-day fault, like the blind window and the split:
-  // the queue-only, hand-approver and regression days exercise their own faults and would only
-  // inherit this one's rework round.
-  const mainDay = !options.queued && !options.handApprovers && !options.regression && !options.scope;
+  // the queue-only, hand-approver, reviews and regression days exercise their own faults and would
+  // only inherit this one's rework round.
+  const mainDay = !options.queued && !options.handApprovers && !options.regression && !options.scope && !options.reviews;
+  // The compact day a reviews option runs: twelve items, released every twelve minutes, whose
+  // reviews come from the loop's own reviewer sessions rather than the simulated plain reviewer.
+  // The main day's own scenario rides (deaths, exits, misreads, scope, the held-job flap) are
+  // left out: the four staged review shapes are this day's faults.
+  const dayPlan = options.reviews
+    ? { ...plan, items: 12, releaseEveryMs: 12 * minute, rework: new Set([3, 7]), deploys: [2 * hour + 30 * minute],
+        dirtyCheckout: { from: 6 * hour, to: 7 * hour }, split: { ...plan.split, at: 6 * hour },
+        deaths: new Set<number>(), scoped: new Set<number>(), misread: new Set<number>(), exits: new Set<number>(), heldJob: { at: [] as number[], forMs: 0 }, flaky: { rerunPasses: 0, rerunFails: 0 } }
+    : plan;
   const github = new SimulatedGitHub({ repository, baseBranch: 'main', appId: 1234, ciAppId: 15368, reviewerApps, ciMs: 5 * minute, reviewMs: 3 * minute, firstPullRequest: 100 * ++days },
-    [...Array.from({ length: plan.items }, (_, index) => file(index + 1)), 'README.md']);
+    [...Array.from({ length: dayPlan.items }, (_, index) => file(index + 1)), 'README.md']);
   const herdr = new SimulatedHerdr(() => clock.now());
   const adapter = github.adapter();
+  // ---- GY-733: the day's reviewer sessions, as the real loop launches and reconciles them. The
+  // ---- dispatch tick launches each session through the world's launch effect, which records it in
+  // ---- the real review ledger under the request it answers; the session posts its verdict to the
+  // ---- simulated repository `reviewMs` after its launch; the tick's own reconcileReviews (the real
+  // ---- one, reading the repository for the verdict) settles it. On top of that the four scenarios
+  // ---- stage the recorded fault shapes: an observation that cannot read GitHub while a verdict
+  // ---- stands, a second agreeing approval from a session the ledger has no record of, a change
+  // ---- request that disagrees with the standing approval, and a merge-base dismissal.
+  const reviews = options.reviews;
+  const bot = 'soak-reviewer[bot]';
+  let reviewSerial = 900_000;
+  const reviewLaunches: { work: string; requestId: string; sha: string; profile: string }[] = [];
+  const reviewWaits: { work: string; requestId: string; reason: string }[] = [];
+  const injected = { blind: 0, duplicate: 0, conflict: 0, dismissal: 0 };
+  const blindUntil = new Map<string, number>();
+  const postedSessions = new Set<string>();
+  let reviewRoot: string | null = null;
+  if (reviews) {
+    reviewRoot = await mkdtemp(join(tmpdir(), 'graphyard-soak-reviews-'));
+    await mkdir(join(reviewRoot, '.graphyard'), { recursive: true });
+  }
+  /** Herdr's own CLI, as the review reconciliation reads it: closing a pane and listing them. */
+  const herdrRun = async (_command: string, args: string[]) => {
+    if (args[0] === 'pane' && args[1] === 'close') { herdr.close(args[2]!); return '{}'; }
+    if (args[0] === 'pane' && args[1] === 'list') return JSON.stringify({ panes: herdr.paneList() });
+    return '{}';
+  };
+  /** One reviewer session's launch: a pending record in the real ledger, a pane in Herdr, nothing else. */
+  const launchWorldReview = async (item: Work, request: { id: string; pr: number; sha: string; baseSha: string; policyRevision: number }, profile: { name: string; agentName: string }) => {
+    const root = reviewRoot!;
+    const attempt = (await readReviewLedger(root)).reviews.filter(entry => entry.requestId === request.id).length + 1;
+    const agentName = attempt > 1 ? `${profile.agentName}-${attempt}` : profile.agentName;
+    const id = randomUUID(), pane = herdr.open(agentName, 'working');
+    await updateReviewLedger(root, ledger => {
+      ledger.reviews.push(reviewRecordSchema.parse({ id, key: item.key, pr: request.pr, sha: request.sha, baseSha: request.baseSha, policyRevision: request.policyRevision,
+        profile: profile.name, agentName, pane, sessionDirectory: join(root, '.graphyard', 'review-sessions', id), requestedAt: new Date(clock.now()).toISOString(),
+        tokenExpiresAt: new Date(clock.now() + 3_600_000).toISOString(), state: 'pending', requestId: request.id, attempt }));
+    });
+    return { pane, agentName };
+  };
+  /** A session that has judged posts its verdict on the repository, and finishes; the tick's
+   *  reconcile settles its record from what GitHub now shows. */
+  const reviewerSessionsTick = async (now: number) => {
+    if (!reviews || !reviewRoot) return;
+    for (const record of (await readReviewLedger(reviewRoot)).reviews.filter(entry => entry.state === 'pending' && !entry.launching)) {
+      if (postedSessions.has(record.id) || now - Date.parse(record.requestedAt) < github.options.reviewMs) continue;
+      postedSessions.add(record.id);
+      const pr = github.prs.get(record.pr);
+      if (!pr) continue;
+      pr.reviews.push({ reviewer: bot, sha: record.sha, state: 'APPROVED', id: ++reviewSerial, submittedAt: new Date(now).toISOString() });
+      if (record.pane && herdr.agents.get(record.pane)) herdr.status(record.pane, 'done');
+      // GY-430's shape: the verdict stands on GitHub while the item's observation cannot read it.
+      if (record.key === items[reviews.unread - 1].key && !blindUntil.has(record.key)) { blindUntil.set(record.key, now + 8 * minute); injected.blind++; }
+    }
+  };
+  /** The world's staged faults, injected once the item's first approval has been read. */
+  const stageReviewFaults = async (now: number) => {
+    if (!reviews) return;
+    for (const item of await store.list()) {
+      if (item.stage === 'done' || !item.candidate) continue;
+      const pr = github.prs.get(item.candidate.pr);
+      const satisfied = item.autoDispatch?.history.some(request => request.kind === 'review' && request.state === 'satisfied' && request.sha === item.candidate!.sha);
+      if (!pr || !satisfied || pr.merged) continue;
+      if (item.key === items[reviews.duplicate - 1].key && injected.duplicate === 0) {
+        injected.duplicate++;
+        pr.reviews.push({ reviewer: bot, sha: item.candidate.sha, state: 'APPROVED', id: ++reviewSerial, submittedAt: new Date(now).toISOString() });
+      } else if (item.key === items[reviews.conflict - 1].key && injected.conflict === 0) {
+        injected.conflict++;
+        pr.reviews.push({ reviewer: bot, sha: item.candidate.sha, state: 'CHANGES_REQUESTED', id: ++reviewSerial, submittedAt: new Date(now).toISOString() });
+      } else if (item.key === items[reviews.dismissal - 1].key && injected.dismissal === 0) {
+        injected.dismissal++;
+        github.commit('Add a colophon to the base branch', [...github.files]);
+        const approval = [...pr.reviews].reverse().find(review => review.reviewer === bot && review.sha === item.candidate!.sha && review.state === 'APPROVED');
+        if (approval) { approval.state = 'DISMISSED'; Object.assign(approval, { dismissal: { reason: 'The merge-base changed after approval.', mergeBase: true, verdict: 'approved', commit: null, at: new Date(now).toISOString(), by: 'owner' } }); }
+      }
+    }
+  };
+  // The item's observation cannot read GitHub while its verdict stands unread: the read times out,
+  // exactly as the reads that outran the old retry grace did (GY-430).
+  const observing = reviews
+    ? { ...adapter, observe: async (work: Work, peers?: Work[]) => {
+        const until = blindUntil.get(work.key);
+        if (until !== undefined && clock.now() < until) throw new Error(`GitHub did not answer the observation of ${work.key} in 15000ms: the read timed out`);
+        return adapter.observe(work, peers);
+      } } as typeof adapter
+    : adapter;
   const moveClock = async (ms: number) => { clock.advance(ms); await store.pool.query('UPDATE simulated_clock SET offset_ms=$1', [clock.offsetMs]); };
   await moveClock(0);
 
   // ---- The fifteen items, created in the backlog and released one every fifteen minutes. ----
-  const releaseEveryMs = options.queued?.releaseEveryMs ?? plan.releaseEveryMs;
+  const releaseEveryMs = options.queued?.releaseEveryMs ?? dayPlan.releaseEveryMs;
   const items: Work[] = [];
-  for (let n = 1; n <= plan.items + (options.scope ? 3 : 0); n++) {
+  for (let n = 1; n <= dayPlan.items + (options.scope ? 3 : 0); n++) {
     // The scope scenarios carry their own intake: item wideRule plans twenty files under the
     // directory its criterion names; item unrepresentable plans plannedFilesMax entries outside
     // every directory of the one path its criterion implies.
@@ -272,8 +383,8 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
         plannedFiles: bulk18,
         criteria: [{ id: 'AC-1', text: `Item ${n} behaves, and ${scopePlan.unrepresentablePath} moves onto the shared helper too`, proofs: [PROOF] }] }
       : {};
-    let work = await engine.execute(principals.operator, 'create', null, { title: `Soak item ${n}`, plannedFiles: files(n), criteria: [{ id: 'AC-1', text: plan.scoped.has(n) ? `Item ${n} behaves, with its fixture ${fixture(n)}` : `Item ${n} behaves`, proofs: [PROOF] }], ...scopeIntake }, id());
-    if (n === plan.exhaustedReviewer) work = await engine.execute(principals.operator, 'reviewpolicy', work.id, { provider: 'agent', expectedPolicyRevision: work.policyRevision, reason: 'Reviewed by the reviewer bots',
+    let work = await engine.execute(principals.operator, 'create', null, { title: `Soak item ${n}`, plannedFiles: files(n), criteria: [{ id: 'AC-1', text: dayPlan.scoped.has(n) ? `Item ${n} behaves, with its fixture ${fixture(n)}` : `Item ${n} behaves`, proofs: [PROOF] }], ...scopeIntake }, id());
+    if (n === dayPlan.exhaustedReviewer) work = await engine.execute(principals.operator, 'reviewpolicy', work.id, { provider: 'agent', expectedPolicyRevision: work.policyRevision, reason: 'Reviewed by the reviewer bots',
       reviewerProfiles: [{ name: 'claude-reviewer', runtime: 'claude', reviewerApp: 'claude-reviewer' }, { name: 'cursor-reviewer', runtime: 'cursor', reviewerApp: 'cursor-reviewer' }] }, id());
     items.push(work);
   }
@@ -281,7 +392,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   // ---- reclaim removed while the panes stood on. Enough of them that the sweep's per-pass bound
   // ---- is what paces the drain, and one pane Graphyard never launched that it must never touch.
   // Pane ids are this simulated world's own, so two days on one control plane never collide.
-  const world = `w${days}:`, leftovers = plan.leftovers, foreignPane = `${world}operator`;
+  const world = `w${days}:`, leftovers = dayPlan.leftovers, foreignPane = `${world}operator`;
   for (let index = 0; index < leftovers; index++) {
     const work = items[index], pane = `${world}left${index}`;
     herdr.shell(pane, `/tmp/soak/leftover-${index} (deleted)`);
@@ -290,12 +401,15 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   }
   herdr.shell(foreignPane, '/home/vish');
   const numberOf = (work: Pick<Work, 'key'>) => items.findIndex(item => item.key === work.key) + 1;
-  for (const n of plan.rework) github.verdicts.set(items[n - 1].key, ['CHANGES_REQUESTED']);
-  if (plan.unstable) github.unstable.add(items[plan.unstable - 1].key);
-  if (plan.slowRecompute) github.slowRecompute.add(items[plan.slowRecompute - 1].key);
+  for (const n of dayPlan.rework) github.verdicts.set(items[n - 1].key, ['CHANGES_REQUESTED']);
+  if (dayPlan.unstable) github.unstable.add(items[dayPlan.unstable - 1].key);
+  if (dayPlan.slowRecompute) github.slowRecompute.add(items[dayPlan.slowRecompute - 1].key);
   github.exhaustedProfiles.add('claude-reviewer');
-  if (plan.flaky.rerunPasses) github.flaky.set(items[plan.flaky.rerunPasses - 1].key, 'rerun-passes');
-  if (plan.flaky.rerunFails) github.flaky.set(items[plan.flaky.rerunFails - 1].key, 'rerun-fails');
+  if (dayPlan.flaky.rerunPasses) github.flaky.set(items[dayPlan.flaky.rerunPasses - 1].key, 'rerun-passes');
+  if (dayPlan.flaky.rerunFails) github.flaky.set(items[dayPlan.flaky.rerunFails - 1].key, 'rerun-fails');
+  // The reviews day's verdicts come from the loop's own reviewer sessions, never from the plain
+  // reviewer: an approval it posted would satisfy the request before any session launched.
+  if (reviews) for (const item of items) github.mutedReviewers.add(item.key);
   // GY-498: in the queue-only day one item's first tip fails and keeps failing after its rerun, so
   // the window has to attribute the failure to it and rebuild the tips behind it without it.
   if (options.queued?.failTip) github.flaky.set(items[options.queued.failTip - 1].key, 'rerun-fails');
@@ -333,9 +447,9 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     await engine.execute(principal, 'workspace', work.id, { epoch, host: 'soak-host', path, branch }, id());
     const attempt = (attempts.get(key) ?? 0) + 1; attempts.set(key, attempt);
     const pane = herdr.open(profile.agentName, 'working', path);
-    sessions.push({ work: work.id, key, branch, profile, epoch, attempt, pane, pushAt: clock.now() + plan.workMs, diesAt: !options.capacityWait && plan.deaths.has(n) && attempt === 1 ? clock.now() + plan.deathAfterMs : null,
-      exitsAt: plan.exits.has(n) && attempt === 1 ? clock.now() + plan.exitAfterMs : null, state: 'working', syncs: 0,
-      scopeAt: plan.scoped.has(n) && attempt === 1 ? clock.now() + plan.scopeAfterMs : null, misreadAt: plan.misread.has(n) && attempt === 1 ? clock.now() + plan.misreadAfterMs : null, misread: false });
+    sessions.push({ work: work.id, key, branch, profile, epoch, attempt, pane, pushAt: clock.now() + dayPlan.workMs, diesAt: !options.capacityWait && dayPlan.deaths.has(n) && attempt === 1 ? clock.now() + dayPlan.deathAfterMs : null,
+      exitsAt: dayPlan.exits.has(n) && attempt === 1 ? clock.now() + dayPlan.exitAfterMs : null, state: 'working', syncs: 0,
+      scopeAt: dayPlan.scoped.has(n) && attempt === 1 ? clock.now() + dayPlan.scopeAfterMs : null, misreadAt: dayPlan.misread.has(n) && attempt === 1 ? clock.now() + dayPlan.misreadAfterMs : null, misread: false });
     // A scope scenario asks the moment it holds the lease, as a worker does, and keeps working
     // while the control plane decides. An ask carries at most fifty paths, so a wide ask is
     // filed in batches, which one open request of the attempt merges.
@@ -388,7 +502,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
         continue;
       }
       const head = sha('head', session.key, session.epoch);
-      if (numberOf(session) === plan.breaksMain && session.attempt === 1) github.breaking.add(head);
+      if (numberOf(session) === dayPlan.breaksMain && session.attempt === 1) github.breaking.add(head);
       const pr = github.push(session.key, session.branch, principal.id, head, files(numberOf(session)));
       await engine.execute(principal, 'submit', session.work, { epoch: session.epoch, pr: pr.number, documentation: 'A simulated item: it changes no documented behaviour' }, id());
       session.state = 'submitted';
@@ -462,7 +576,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     if (!unjudged) capacityLaunched.push({ decision, key: work.key, elapsed: clock.now() - dayStart });
     if (unjudged) {
       unjudged.launches += 1;
-      if (unjudged.key === items[plan.items - 1].key && unjudged.launches === 1) { unjudged.refused += 1; throw new Error('the agent registry for the approver role is unreachable: timeout'); }
+      if (unjudged.key === items[dayPlan.items - 1].key && unjudged.launches === 1) { unjudged.refused += 1; throw new Error('the agent registry for the approver role is unreachable: timeout'); }
       const agentName = approverSessionName(work, decision), pane = herdr.open(agentName);
       pending.push(async () => { herdr.status(pane, 'done'); });
       return { agentName, pane };
@@ -534,7 +648,19 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   };
   // One executor instance for the loop's process, and a fresh request per merge the loop asks for, as `master run` wires it.
   const executor = { principal: principals.coordinator.id, instance: `soak-${randomUUID()}` };
-  const merge: DaemonEffects['merge'] = work => mergeExecutor(config, snapshot, transport, executor, randomUUID(), github.gh(repository))(work);
+  // A reviews day runs the real guarded merge itself, so a carried approval is re-posted through the
+  // reviewer App on the simulated repository — the native re-post the real one makes through GitHub.
+  const repostApproval = async (latest: Work, carried: { originalSha: string }) => {
+    const pr = github.prs.get(latest.candidate!.pr)!;
+    const reviewId = ++reviewSerial;
+    pr.reviews.push({ reviewer: bot, sha: latest.candidate!.sha, state: 'APPROVED', id: reviewId, submittedAt: new Date(clock.now()).toISOString() });
+    return { posted: true, reviewId, reason: `re-posted the carried approval of ${carried.originalSha.slice(0, 12)} as ${bot} on ${latest.candidate!.sha.slice(0, 12)}` };
+  };
+  const merge: DaemonEffects['merge'] = reviews
+    ? work => mergeWork(config, work, snapshot,
+        (latest, authorization) => transport(`work/${latest.id}/merge-acquire`, { enqueue: true, expectedRevision: authorization.revision, sha: authorization.sha, baseSha: authorization.baseSha, policyRevision: authorization.policyRevision, ...(latest.queue?.speculation?.tip ? { queueTip: latest.queue.speculation.tip } : {}), executor: executor.instance }, randomUUID()),
+        github.gh(repository), repostApproval)
+    : work => mergeExecutor(config, snapshot, transport, executor, randomUUID(), github.gh(repository))(work);
   const refuseMerge: DaemonEffects['refuseMerge'] = (work, reason, since) => api(principals.coordinator, 'POST', `work/${work.id}/mergerefused`, { sha: work.candidate!.sha, baseSha: work.candidate!.baseSha, policyRevision: work.policyRevision, reason: reason.slice(0, 2000), since });
   // The diagnostician (GY-439), faked: its run answers from the evidence the prompt carries, and
   // its filing and deciding ride the same routes the production wiring uses, as the master's
@@ -550,6 +676,24 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   };
   // The control plane's status read the faults are classified from; `heldJobs` is the flap below.
   let heldJobs = false;
+  // The dispatcher the loop runs beside the cycle, over the real review ledger this host keeps.
+  const dispatchCursor: DispatchCursor | null = reviews && reviewRoot ? emptyDispatchCursor(config) : null;
+  const dispatchEffects: DispatchEffects | null = reviews && reviewRoot ? {
+    snapshot,
+    agents: () => herdr.list(),
+    credentials: async profiles => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])),
+    reconcileReviews: (work, agents) => reconcileReviews(reviewRoot!, config, {
+      observe: (record, _identity, answered) => {
+        const latest = (github.prs.get(record.pr)?.reviews ?? []).filter(review => review.reviewer === bot && review.sha === record.sha && !answered.has(review.id)).at(-1);
+        return latest ? { state: latest.state, reviewer: bot, reviewId: latest.id, submittedAt: latest.submittedAt } : null;
+      },
+      run: herdrRun, work, agents, now: () => new Date(clock.now()),
+    }),
+    reconcileProducers: async () => ({ producers: [] }),
+    launchReview: (item, request, profile) => launchWorldReview(item, request, profile),
+    launchProducer: async () => { throw new Error('no producer session is launched in this world: its proofs run through the daemon\'s own requestProof effect'); },
+    persist: async () => {},
+  } : null;
   const effects: DaemonEffects = {
     agents: () => herdr.list(),
     herdr: () => ({ agents: herdr.list(), available: true }),
@@ -557,7 +701,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     recordSession,
     credentials: async profiles => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])),
     snapshot, dispatch, requestProof, approver, merge, refuseMerge,
-    closeSession: pane => { if (options.regression === 'approvers-left-open' && /approver/.test(herdr.agents.get(pane)?.name ?? '')) return; herdr.close(pane); },
+    closeSession: pane => { if (options.regression === 'approvers-left-open' && /approver/.test(herdr.agents.get(pane)?.name ?? '')) return; try { herdr.close(pane); } catch { /* a pane that is already gone is the state the close wanted */ } },
     decide: (work, action, reason, input = {}) => {
       const bound = decisionInput(action, work, input);
       decideCalls.push({ key: work.key, action, reason, input: bound });
@@ -591,6 +735,12 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     promptSession,
     exhaustedProofs: async () => [...abandoned.values()],
   };
+  // A reviews day derives the conflict attention the way the shipped loop does, from the real
+  // review ledger: the line is what the fault class counts, so the soak can hold it to the rule.
+  if (reviews && reviewRoot) effects.reportedAttention = async work => ({
+    items: reviewConflictAttention(work, (await readReviewLedger(reviewRoot)).reviews)
+      .map(({ subject, text, next }) => ({ subject, text, next, role: 'control plane' as const, approvedBy: null, human: false, humanOnly: null })),
+  });
   // The loop publishes the master's merge-queue settings each cycle they change (GY-330, GY-498,
   // GY-500, GY-516), exactly as daemonEffects wires it; the day records what was published, when.
   let publishedMergeQueue: string | null = null;
@@ -685,15 +835,15 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     // Scheduled events: releases, the file split on main, the deploys. The queue-only day runs with
     // the split past its end: the re-plan and its stale-tip flush are the main day's scenario, and
     // a queue of tips built before the split only ejects in a cascade the day cannot recover from.
-    while (released < plan.items && elapsed >= released * releaseEveryMs) await engine.execute(principals.operator, 'ready', items[released++].id, {}, id());
+    while (released < dayPlan.items && elapsed >= released * releaseEveryMs) await engine.execute(principals.operator, 'ready', items[released++].id, {}, id());
     // The scope scenarios release beside the fifteen: the wide asks early enough to decide well
     // before their workers push, the unrepresentable one so its refusal stands for hours.
     for (const [slot, n] of [[30, scopePlan.wideRule], [35, scopePlan.wideFinding], [40, scopePlan.unrepresentable]] as const)
       if (options.scope && !releasedScope.has(n) && elapsed >= slot * minute) { await engine.execute(principals.operator, 'ready', items[n - 1].id, {}, id()); releasedScope.add(n); }
-    const splitAt = options.queued ? options.hours * hour + hour : plan.split.at;
+    const splitAt = options.queued ? options.hours * hour + hour : dayPlan.split.at;
     if (!split && elapsed >= splitAt) {
       split = true;
-      const from = file(plan.split.item), successors = [`src/soak/item-${plan.split.item}-a.ts`, `src/soak/item-${plan.split.item}-b.ts`];
+      const from = file(dayPlan.split.item), successors = [`src/soak/item-${dayPlan.split.item}-a.ts`, `src/soak/item-${dayPlan.split.item}-b.ts`];
       const commit = github.commit(`Split ${from}\n\nGraphyard-Successor: ${from} -> ${successors.join(', ')}`, [...github.files.filter(path => path !== from), ...successors]);
       github.successions.push(...successors.map(to => ({ from, to, commit: commit.sha, similarity: 70 })));
     }
@@ -701,14 +851,14 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     // usable merge base; afterwards its answers carry the true one again. The queue-only day runs
     // with the window past its end: its fault is the bound candidates' recovery, which the main
     // day exercises, and a queue full of false landing refusals would only churn sync rounds.
-    const blind = options.queued ? { from: options.hours * hour + hour, to: options.hours * hour + 2 * hour } : plan.blind;
+    const blind = options.queued ? { from: options.hours * hour + hour, to: options.hours * hour + 2 * hour } : dayPlan.blind;
     github.staleMergeBase = elapsed >= blind.from && elapsed < blind.to
       ? new Set([...github.prs.values()].filter(pr => pr.open).map(pr => pr.head)) : new Set<string>();
     // A change landed on main outside Graphyard, moving the base under candidates already pushed.
-    if (!noticed && elapsed >= plan.notice) { noticed = true; github.commit('Add NOTICE to the base branch', [...github.files, 'NOTICE']); }
+    if (!noticed && elapsed >= dayPlan.notice) { noticed = true; github.commit('Add NOTICE to the base branch', [...github.files, 'NOTICE']); }
     // GY-551: twenty minutes in, the master requests a release of the last two items by hand and
     // puts each to an approver session it launches itself; neither session judges it.
-    if (options.handApprovers && elapsed === 20 * minute) for (const [n, ending] of [[plan.items, 'vanishes'], [plan.items - 1, 'stops']] as const) {
+    if (options.handApprovers && elapsed === 20 * minute) for (const [n, ending] of [[dayPlan.items, 'vanishes'], [dayPlan.items - 1, 'stops']] as const) {
       const current = (await store.list()).find(item => item.id === items[n - 1].id)!;
       const decision = await api(principals.operatorAgent, 'POST', `work/${current.id}/decide`, { action: 'release', input: decisionInput('release', current, {}), reason: `Soak: a hand-requested release of ${current.key} its approver never judges` });
       hand.set(decision.id, { key: current.key, launches: 0, refused: 0 });
@@ -728,31 +878,38 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       state = emptyDaemonState(config);
       restarted = true;
     }
-    const deploying = deploys < plan.deploys.length && elapsed >= plan.deploys[deploys];
+    const deploying = deploys < dayPlan.deploys.length && elapsed >= dayPlan.deploys[deploys];
     if (deploying) { production.build = sha('build', ++deploys); production.sha = github.tip; production.deploys.push({ at: now, build: production.build, sha: production.sha }); }
     // The plane reports its held integration job only inside the flap windows (GY-439's recurring fault).
-    heldJobs = plan.heldJob.at.some(at => elapsed >= at && elapsed < at + plan.heldJob.forMs);
+    heldJobs = dayPlan.heldJob.at.some(at => elapsed >= at && elapsed < at + dayPlan.heldJob.forMs);
     // The world moves: GitHub, then the sessions. A deploy restarts the control plane once the
     // sessions have renewed: for the rest of that minute nothing reaches it, the loop included.
     github.tick(now);
     await workersTick(now);
+    // The sessions the dispatcher launched post their verdicts, and the staged faults land on the
+    // record as it stands, before the cycle observes any of it.
+    await reviewerSessionsTick(now);
+    await stageReviewFaults(now);
     await producersTick(now);
     // GY-756: the out-of-queue merge. Git shows it landed at once; its item records it unlanded
     // until an observation — its own, or another candidate's landing check — reconciles it.
-    // The queue-only day runs without it: a tip the window published is not merged by hand.
-    const byHand = options.queued ? undefined : [...github.prs.values()].find(pr => pr.key === items[plan.outOfQueue.item - 1].key && pr.open);
-    // It lands in a minute another open candidate is observed while its own item is not, so the
-    // landing check of that other candidate is what reconciles it, as it was for GY-744's peer.
-    const due = async () => new Set((await store.pool.query('SELECT work_id FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now())')).rows.map(row => row.work_id as string));
-    const handItem = items[plan.outOfQueue.item - 1];
-    if (!outside && !deploying && byHand && now - byHand.createdAt >= plan.outOfQueue.afterMs && await due().then(ids => !ids.has(handItem.id) && [...github.prs.values()].some(pr => pr.open && pr !== byHand && ids.has(items.find(item => item.key === pr.key)!.id)))) {
-      engine.directMergeEnvironment = { since: new Date(now).toISOString(), until: new Date(now + minute).toISOString(), reason: 'Soak: an operator merges one pull request by hand', setBy: 'environment', enabledAt: new Date(now).toISOString(), source: 'environment', event: null };
-      outside = { key: byHand.key, sha: github.mergeOutside(byHand, now).sha, at: now };
+    // The queue-only and reviews days run without it: a tip the window published is not merged by
+    // hand, and the reviews day's compact plan has no out-of-queue item.
+    if (!options.queued && !options.reviews) {
+      const byHand = [...github.prs.values()].find(pr => pr.key === items[plan.outOfQueue.item - 1].key && pr.open);
+      // It lands in a minute another open candidate is observed while its own item is not, so the
+      // landing check of that other candidate is what reconciles it, as it was for GY-744's peer.
+      const due = async () => new Set((await store.pool.query('SELECT work_id FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now())')).rows.map(row => row.work_id as string));
+      const handItem = items[plan.outOfQueue.item - 1];
+      if (!outside && !deploying && byHand && now - byHand.createdAt >= plan.outOfQueue.afterMs && await due().then(ids => !ids.has(handItem.id) && [...github.prs.values()].some(pr => pr.open && pr !== byHand && ids.has(items.find(item => item.key === pr.key)!.id)))) {
+        engine.directMergeEnvironment = { since: new Date(now).toISOString(), until: new Date(now + minute).toISOString(), reason: 'Soak: an operator merges one pull request by hand', setBy: 'environment', enabledAt: new Date(now).toISOString(), source: 'environment', event: null };
+        outside = { key: byHand.key, sha: github.mergeOutside(byHand, now).sha, at: now };
+      }
     }
     if (!deploying) {
       for (const act of pending.splice(0)) await act();
       await engine.reconcile();
-      for (let guard = 0; guard < 200 && await jobsDue(); guard++) await processJob(engine, adapter);
+      for (let guard = 0; guard < 200 && await jobsDue(); guard++) await processJob(engine, observing);
       for (const item of await store.list()) {
         const sha = item.candidate?.sha, refused = (item.gates ?? []).flatMap(gate => gate.passed ? [] : gate.reasons)
           .find(reason => /would revert \d+ files? outside its planned files/.test(reason));
@@ -829,13 +986,20 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       // The interval between cycles is when a hand-off launch settles; the day's clock waits for
       // them so the world never acts on a half-finished launch.
       await launcher.idle();
+      // The dispatcher runs beside the cycle, as it does in `master run`: one real tick per cycle,
+      // launching reviewer sessions and judging what each settled one posted.
+      if (dispatchEffects && dispatchCursor) {
+        const tick = await runDispatchTick(config, dispatchCursor, dispatchEffects, clock.now);
+        for (const launch of tick.launched.filter(entry => entry.kind === 'review')) reviewLaunches.push({ work: launch.work, requestId: launch.requestId, sha: launch.sha, profile: launch.profile });
+        for (const wait of tick.waiting.filter(entry => entry.kind === 'review')) reviewWaits.push({ work: wait.work, requestId: wait.requestId, reason: wait.reason });
+      }
       // GY-544: the loop's exited-session sightings stay bounded by the implementation handles still running here.
       const exitedRows = Object.keys(state.actions).filter(key => key.startsWith('exited:implementation:'));
       const running = (await store.list()).flatMap(item => (item.sessions ?? []).filter(handle => handle.kind === 'implementation' && handle.state === 'running' && handle.host === config.hostId)).length;
       exitedRowsSeen += exitedRows.length;
       if (exitedRows.length > running) violations.push(`${new Date(now).toISOString()} (+${Math.round(elapsed / minute)} min) ${exitedRows.length} exited-session sighting(s) for ${running} running implementation handle(s)`);
       // Between cycles, as runDaemon runs it: the self-upgrade against the simulated checkout.
-      checkout.dirty = elapsed >= plan.dirtyCheckout.from && elapsed < plan.dirtyCheckout.to;
+      checkout.dirty = elapsed >= dayPlan.dirtyCheckout.from && elapsed < dayPlan.dirtyCheckout.to;
       const upgraded = await selfUpgrade(state);
       upgrades.outcomes.push(upgraded.outcome);
       if (upgraded.outcome === 'failed') failures.push(`${new Date(now).toISOString()}: self-upgrade failed: ${upgraded.reason}`);
@@ -853,9 +1017,12 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   engine.reconcileLanded = reconcileLanded; engine.directMergeEnvironment = null;
   const final = (await store.list()).filter(item => items.some(entry => entry.id === item.id));
   if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
+  if (process.env.SOAK_TRACE && reviewRoot) console.error(`reviews: ${reviewLaunches.length} launch(es), ${reviewWaits.length} wait(s); injected: ${JSON.stringify(injected)}; launches: ${JSON.stringify(reviewLaunches.map(launch => [launch.work, launch.requestId.slice(0, 8)]))}; ledger: ${JSON.stringify((await readReviewLedger(reviewRoot)).reviews.map(record => [record.key, record.requestId?.slice(0, 8), record.attempt, record.state, record.verdict?.state ?? null, (record.resolution ?? '').slice(0, 120)]))}`);
+  const reviewDay = reviews ? { launches: reviewLaunches, waits: reviewWaits, injected } : null;
+  if (reviewRoot) await rm(reviewRoot, { recursive: true, force: true });
   return { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, herdr, hand, escalations, spent, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, landingRefusals, foreignPane,
     mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted, stale, approverPanes, herdrClosed: herdr.closed, diagnosisModel: settings.model, capacityRefused, capacityLaunched, capacityWaiters,
-    decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen };
+    decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, reviewDay };
 }
 
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 180_000 }, async () => {
@@ -1152,6 +1319,70 @@ test('unit:soak-invariants-hold — hand-launched approvers that vanish or stop 
     assert.ok(![...herdr.agents.values()].some(agent => agent.name === approverSessionName(final.find(item => item.key === key)!, decision)), `${key}: no approver session for it is left open`);
   }
   assert.equal([...hand.values()].reduce((total, entry) => total + entry.refused, 0), 1, 'one relaunch was refused by a registry timeout, and retried');
+});
+
+test('unit:soak-invariants-hold — reviewer sessions across a simulated day: a verdict the observation cannot read is waited on without a second launch, agreeing verdicts and an answered dismissal raise nothing, a standing conflict is raised once and resolved by the fresh review, and every invariant holds', { timeout: 240_000 }, async () => {
+  // GY-733: the three review-convergence faults of GY-100, GY-430 and GY-487 were all loops that
+  // treated a review which had settled as one that had not, and each repeats per cycle, head and
+  // item — so the behaviour belongs in this world. The day runs the real dispatcher beside the real
+  // cycle: its sessions live in the real review ledger, launch through the real tick, reconcile
+  // through the real reconcileReviews against the simulated repository, and the four staged shapes
+  // are the recorded instances replayed at day scale. The fault class the loop keeps counting is
+  // review-convergence itself, so the day is held to its rule: what has settled is never a fault.
+  const began = performance.now();
+  const scenarios = { unread: 1, duplicate: 11, conflict: 12, dismissal: 8 };
+  const { items, final, violations, failures, lost, state, reviewDay } = await simulateDay({ hours: 5, reviews: scenarios });
+  const day = reviewDay!;
+  const keyOf = (n: number) => items[n - 1].key;
+  const idOf = (key: string) => final.find(item => item.key === key)!.id;
+  const workEvents = async (kind: string, key: string) =>
+    (await store.pool.query('SELECT payload FROM events WHERE kind=$1 AND work_id=$2 ORDER BY seq', [kind, idOf(key)])).rows;
+  assert.deepEqual(final.filter(item => item.stage !== 'done' || !item.delivery).map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all twelve items are delivered');
+  assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.deepEqual(lost, [], 'no worker lost its lease');
+  // GY-430: the session's approval stood on GitHub for eight minutes while every observation read
+  // timed out. The tick waited on the unread verdict across cycles and never launched a second
+  // session for the request; once ingestion caught up, the approval reached the gates and delivered.
+  const unreadKey = keyOf(scenarios.unread);
+  const unreadWaits = day.waits.filter(wait => wait.work === unreadKey && /no further attempt is launched until the observation of/.test(wait.reason));
+  assert.ok(unreadWaits.length >= 3, `the dispatcher waited on the unread verdict across cycles (${unreadWaits.length}): ${JSON.stringify(day.waits.filter(wait => wait.work === unreadKey))}`);
+  const unreadRequest = final.find(item => item.key === unreadKey)!.autoDispatch!.history.find(request => request.kind === 'review')!.id;
+  assert.equal(day.launches.filter(launch => launch.requestId === unreadRequest).length, 1, 'no second reviewer session was launched while the first verdict stood unread');
+  assert.equal(day.injected.blind, 1, 'the unread verdict was staged once');
+  // GY-100: two agreeing approvals on one request — the second from a session the ledger has no
+  // record of — are one answer given twice, and the gates act on the standing approval.
+  assert.deepEqual(await workEvents('review.conflicted', keyOf(scenarios.duplicate)), [], 'the agreeing pair raised no conflict');
+  assert.equal(day.injected.duplicate, 1);
+  // GY-487: GitHub dismissed the approval for a merge-base change after the base branch moved; the
+  // control plane restored it on the unchanged head, and the answered dismissal was never a fault.
+  assert.equal(day.injected.dismissal, 1);
+  assert.equal((await workEvents('review.restored', keyOf(scenarios.dismissal))).length, 1, 'the dismissed approval was restored');
+  assert.equal(state.faults.instances.filter(instance => instance.kind === 'merge-base-dismissed').length, 0, 'the answered dismissal was never a fault');
+  // A disagreement is still the conflict GY-124 withholds: raised once, named as attention, and
+  // resolved by the fresh review the next request launched — which alone reaches the gates.
+  const conflictKey = keyOf(scenarios.conflict);
+  assert.equal(day.injected.conflict, 1);
+  const conflicted = await workEvents('review.conflicted', conflictKey);
+  assert.equal(conflicted.length, 1, `the disagreement was one conflict: ${JSON.stringify(conflicted)}`);
+  const resolved = await workEvents('review.conflict-resolved', conflictKey);
+  assert.equal(resolved.length, 1, 'the conflict resolved once');
+  assert.ok(resolved[0].payload.details.resolvedBy, 'a fresh review resolved the conflict');
+  const conflictInstances = state.faults.instances.filter(instance => instance.kind === 'review-conflict' && instance.subject === conflictKey);
+  assert.equal(conflictInstances.length, 1, `the standing conflict was one instance, not one per cycle: ${JSON.stringify(state.faults.instances.filter(instance => instance.kind === 'review-conflict'))}`);
+  assert.deepEqual(conflictInstances.map(instance => instance.lastSeenAt > instance.at), [true], 'the conflict stood while it was real');
+  // Nothing of the class stands at the end of the day, and every reviewed head drew its sessions
+  // within the rule: one per request, except the conflicted head's fresh request, whose first
+  // session answered with the standing change request the observation had read and whose second
+  // posted the approval that resolved the conflict.
+  assert.deepEqual(Object.keys(state.faults.open).filter(key => /^(review-conflict|merge-base-dismissed|unobtainable-review)\|/.test(key)), [], 'no review-convergence fault stands at the end of the day');
+  const perRequest = new Map<string, number>();
+  for (const launch of day.launches) perRequest.set(launch.requestId, (perRequest.get(launch.requestId) ?? 0) + 1);
+  assert.ok(perRequest.size >= 13, `every reviewed head drew its session (${perRequest.size} requests over ${day.launches.length} launches)`);
+  const freshConflictRequest = final.find(item => item.key === conflictKey)!.autoDispatch!.history.filter(request => request.kind === 'review').at(-1)!.id;
+  assert.deepEqual([...perRequest.entries()].filter(([, count]) => count > 1).map(([requestId]) => requestId), [freshConflictRequest],
+    `only the conflicted head's fresh request launched twice: ${JSON.stringify([...perRequest.entries()])}`);
+  assert.ok((performance.now() - began) / 1000 < 200, `the day runs inside its budget (${((performance.now() - began) / 1000).toFixed(1)} s)`);
 });
 
 test('unit:soak-invariants-hold — a guarded merge that refuses a queue head is acted on, never retried for good: a stuck candidate is re-reviewed and then reworked while the queue moves, a lost carried review is re-reviewed at once, and every invariant holds', { timeout: 300_000 }, async () => {

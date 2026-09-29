@@ -5,7 +5,7 @@ The master (`coordinator`) routes, merges, verifies deployments, administers Git
 
 ## Agents approve agents
 
-The master acts without asking. Three decisions are human-only: goals and priorities, spending money or opening third-party accounts, and issuing credentials to people ([who decides](glossary.md#who-decides)); everything else it applies alone or through an approver agent; never ask a human to run what an agent may run.
+The master acts without asking. Three decisions are human-only: goals and priorities, spending money or opening third-party accounts, and issuing credentials to people; everything else it applies alone or through an approver agent; never ask a human to run what an agent may run.
 
 ## Operate
 
@@ -14,12 +14,12 @@ Keep cycling: status, dispatch, review, merge, deployment verification. Stop onl
 1. `master status` on startup and events.
 2. `master run` dispatches ready work in `schedule.order`.
 3. Merge exact candidates passing every gate; rework findings.
-4. `master verify-deployment GY-N` after delivery ([refusals](operations-reference.md#perpetual-master-loop)). Railway: set `productionEnvironment`.
+4. `master verify-deployment GY-N` after delivery. Railway: set `productionEnvironment`.
 5. Close finished agent sessions; repeat.
 
 Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions. `controlPlane.production` flags main ahead of production.
 
-`master run` is the `graphyard-master.service` unit ([supervision](onboarding.md#the-loop-must-be-supervised)); restart it (`systemctl --user restart graphyard-master`) when `daemon.liveness` is `stalled` or `absent`, never from a dirty checkout ([sessions](master-agent-sessions.md#workers-are-write-confined-to-their-worktree)).
+`master run` is the `graphyard-master.service` unit ([supervision](onboarding.md#the-loop-must-be-supervised)); restart it (`systemctl --user restart graphyard-master`) when `daemon.liveness` is `stalled` or `absent`, never from a dirty checkout.
 
 ### System-driven items
 
@@ -46,25 +46,25 @@ another session's handle finished to free a slot.
 
 ### System invariants
 
-Each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `lingering-sessions` (30 min), `refresh-churn` (3 per own head), `merge-stall` (10 min), `cycle-p90` (30 s), `untriaged-backlog` (24 h), `deploy-lease-loss` (0). Faults per class; thresholds: `invariants` in `.graphyard/master.json`; `tests/soak.test.ts` enforces.
+Each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `lingering-sessions` (30 min), `refresh-churn` (3 per own head), `merge-stall` (10 min), `cycle-p90` (30 s), `untriaged-backlog` (24 h), `deploy-lease-loss` (0); thresholds: `invariants` in `.graphyard/master.json`; `tests/soak.test.ts` enforces.
 
 ## Research and diagnosis
 
-With `run.research` set (`model`, `timeoutMinutes` 15, `tokenBudget`), a feature (or `"research": true`) gets one read-only Pi briefing per revision. Product questions: Needs you; build follows the recommendation, a differing answer reworks, failure never blocks.
+With `run.research` set (`model`, `timeoutMinutes` 15, `tokenBudget`), a feature (or `"research": true`) gets one read-only Pi briefing per revision. Product questions: Needs you; build follows the recommendation; a differing answer reworks.
 
 `Recurring <class> faults` items, `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`: `model`/`fallbackModel`/`serverLogCommand`/registry role); approved decisions release its fix or close-as-duplicate; post-delivery recurrences re-file.
 
 ## Machine-filed backlog
 
-One follow-up item per parent; approvals append their findings. With `run.research`, Pi triages machine-filed items (release, close, merge; closure needs approval), `triageConcurrency` (default 2) at once. Untriaged past 24h raises attention; status counts `machineUntriaged`/`operatorBacklog`.
+One follow-up item per parent; approvals append their findings. With `run.research`, Pi triages machine-filed items (release, close, merge; closure needs approval), `triageConcurrency` at once. Untriaged past 24h raises attention.
 
 ## Automatic dispatch at submit
 
-A candidate passing the build gate gets, in `autoDispatch`, one producer request per proof group (`unit`, `integration`, `manual` for `producerProofs`), then a review request once its unit and integration proofs pass (`proofs-pending` until then; failure means rework). **The loop launches each request within 30 seconds**: every `dispatchIntervalSeconds` it starts the reviewer profile (`run.reviewerProfile`) and one producer session per proof group on a `master producer add FILE` profile ([template](../examples/master/claude-producer.json)), (`.graphyard/reviews.json`, `.graphyard/producers.json`). A reviewer launch awaits the head's bot reviews (`run.awaitReviewers`) for `awaitReviewersMinutes` (default 8, 0 disables), skipping one that last posted a usage-limit notice until it next reviews (`skipped: <bot> exhausted since <time>`; `dispatch.botReviewers`).
+A candidate passing the build gate gets, in `autoDispatch`, one producer request per proof group (`unit`, `integration`, `manual` for `producerProofs`), then a review request once its unit and integration proofs pass (`proofs-pending` until then; failure means rework). **The loop launches each request within 30 seconds**: every `dispatchIntervalSeconds` it starts the reviewer profile (`run.reviewerProfile`) and one producer session per proof group on a `master producer add FILE` profile ([template](../examples/master/claude-producer.json)), (`.graphyard/producers.json`). A reviewer launch awaits the head's bot reviews (`run.awaitReviewers`) for `awaitReviewersMinutes` (default 8, 0 disables), skipping one that last posted a usage-limit notice until it next reviews (`skipped: <bot> exhausted since <time>`; `dispatch.botReviewers`).
 
 **Concurrency is per role.** A profile's `concurrency` (1–20, default 1) caps its simultaneous sessions, each with a name unique to its request above one. It applies without a restart; lowering it drains sessions first (`longestWaitMs`); a role starved ten minutes counts in `counts.concurrencyStarved`.
 
-**Requests always settle.** A gone pane (`pane_not_found`) is closed. No request outlives its own token: expired, unreported by Herdr, it settles `expired`; one still pending counts in `dispatch.sessionReconcile.stuck`. Unanswered sessions relaunch elsewhere (12 per request, then `dispatch.abandoned`); an unposted reviewer is reminded first. Killed or vanished producer runs spend no attempt; spent attempts raise `escalation:proof-exhausted`, then a quoting rework.
+**Requests always settle.** A gone pane (`pane_not_found`) is closed. No request outlives its own token: expired, unreported by Herdr, it settles `expired`; one still pending counts in `dispatch.sessionReconcile.stuck`. Unanswered sessions relaunch elsewhere (12 per request, then `dispatch.abandoned`); an unposted reviewer is reminded first, a verdict the observation has not read holds each relaunch; agreeing verdicts are no conflict, disagreeing ones wait for a fresh review, a done item's conflict is never raised. Killed or vanished producer runs spend no attempt; spent attempts raise `escalation:proof-exhausted`, then a quoting rework.
 
 **Every role fails over on spent quota** or waits as one `capacity` line, uncounted, relaunching oldest-first.
 

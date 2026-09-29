@@ -151,16 +151,32 @@ export type DispatchCursor = z.infer<typeof dispatchCursorSchema>;
 export const dispatchRetryMinMs = 30_000, dispatchRetryMaxMs = 600_000, dispatchFailureLimit = requestAttemptLimit;
 /**
  * GY-193. A reviewer that judged the head but did not post is reminded once to post (reviewer.ts
- * reconcileReviews) and relaunched when no verdict follows within this bound. A session that settled
- * on a verdict the control plane has not read yet is given this long before the request, still
- * standing, is attempted again: a second verdict on the same request is otherwise withheld with the first.
+ * reconcileReviews) and relaunched when no verdict follows within this bound.
  */
-export const reviewerReminderBoundMs = reviewVerdictReminderMs, verdictIngestGraceMs = 5 * 60_000;
+export const reviewerReminderBoundMs = reviewVerdictReminderMs;
+
+/**
+ * Whether the item's observation has read a verdict a settled reviewer session posted (GY-733).
+ * Until it has, the request is not attempted again, however long the read takes: the verdict
+ * stands on GitHub, so a second session could only post a second verdict on the same request. A
+ * fixed five-minute grace used to stand in for this, and when GitHub reads were timing out the
+ * relaunch outran the read (GY-430): its approval and the first were both withheld as a conflict and a
+ * third review was spent. The read is judged by the review ids the observation lists, else by
+ * the observation being taken after the verdict was posted.
+ */
+export function verdictObserved(item: Pick<Work, 'observation'>, sha: string, verdict: { reviewId?: number; submittedAt?: string }): boolean {
+  const observation = item.observation;
+  if (!observation || observation.candidate.sha !== sha) return false;
+  if (verdict.reviewId !== undefined && (observation.reviewIds?.includes(verdict.reviewId) || observation.reviews.some(review => review.id === verdict.reviewId))) return true;
+  if (observation.reviewIds && verdict.reviewId !== undefined) return false;
+  const posted = Date.parse(verdict.submittedAt ?? '');
+  return Number.isFinite(posted) && Date.parse(observation.at) > posted;
+}
 
 // The producer's finding that a proof does not exercise its criterion is read by the planner too (GY-817).
 export { unexercisedFindings };
 /** A session record as the dispatcher reads it from either ledger. */
-type DispatchedSession = { requestId?: string; state: string; requestedAt: string; closedAt?: string; resolution?: string; profile?: string; attempt?: number; acknowledgedAt?: string; verdict?: { state: string } };
+type DispatchedSession = { requestId?: string; state: string; requestedAt: string; closedAt?: string; resolution?: string; profile?: string; attempt?: number; acknowledgedAt?: string; verdict?: { state: string; reviewId?: number; submittedAt?: string } };
 const requestSessions = (records: DispatchedSession[], requestId: string) => records.filter(record => record.requestId === requestId);
 /** Every attempt a request had, as the attention item names them. */
 export const describeAttempts = (records: DispatchedSession[], requestId: string) => requestSessions(records, requestId).slice(-30)
@@ -767,14 +783,14 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
       if (!retry.last || retry.last.state === 'pending') { tick.skipped++; return false; }
       // A session that settled while its request still stands for the same head answered nothing
       // the gates accept (GY-193): the next attempt launches on this tick, on another profile first,
-      // up to the dispatch failure limit. Only a verdict the control plane may not have read yet is
-      // waited on first, since a second verdict on one request is withheld together with the first.
+      // up to the dispatch failure limit. A verdict the control plane has not read yet is waited on
+      // until the observation reads it (GY-733): another session could only post a second verdict
+      // on the same request.
       const last = requestSessions(records, request.id).at(-1)!;
-      const settledAt = Date.parse(last.closedAt ?? last.requestedAt);
       const settled = `${role} session attempt ${retry.attempts} ${last.state} without satisfying the request: ${last.resolution ?? 'no reason recorded'}`;
-      if (kind === 'review' && last.verdict && last.verdict.state !== 'DISMISSED' && now() - settledAt < verdictIngestGraceMs) {
+      if (kind === 'review' && last.verdict && last.verdict.state !== 'DISMISSED' && !verdictObserved(item, request.sha, last.verdict)) {
         tick.skipped++;
-        wait(kind, item, request, `${role} session attempt ${retry.attempts} posted ${last.verdict.state}; the control plane is given until ${new Date(settledAt + verdictIngestGraceMs).toISOString()} to read it before another attempt`);
+        wait(kind, item, request, `${role} session attempt ${retry.attempts} posted ${last.verdict.state}${last.verdict.reviewId !== undefined ? ` (review ${last.verdict.reviewId})` : ''}; no further attempt is launched until the observation of ${request.sha.slice(0, 12)} reads it (last read ${item.observation?.at ?? 'never'})`);
         return false;
       }
       if (retry.attempts >= dispatchFailureLimit) { tick.skipped++; abandon(kind, item, request, records, `${settled}, after ${retry.attempts} sessions`); return false; }
