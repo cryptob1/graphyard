@@ -1669,6 +1669,9 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
    * engine records in place of a refresh: the candidate keeps its head, review and proofs. A
    * confirmed conflict writes nothing either: the refusal names it, trigger `conflict confirmed`,
    * and the candidate goes back to the worker, exactly as a stale candidate always did.
+   *
+   * A candidate whose required check failed while it is behind the base tip (GY-534) is the one
+   * refresh that writes: the base is merged into its branch and CI answers again on the result.
    */
   async refreshCandidateBase(work: Work, beforeWrite: () => Promise<void> = async () => {}): Promise<BaseRefresh> {
     const candidate = work.candidate;
@@ -1682,6 +1685,20 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     const record = (fields: Partial<BaseRefresh>): BaseRefresh => ({ from, base: branch.tip, baseTree: branch.tree,
       policyRevision: work.policyRevision, at: new Date().toISOString(), head: null, conflict: null, merge: null, carry: null, trigger: 'conflict confirmed', ...fields });
     await beforeWrite();
+    // A required check failed on a head behind the base tip (GY-534): the base is merged into the
+    // candidate's own branch, so CI answers again on a head that contains whatever main fixed since.
+    // A conflict writes nothing and goes back to the worker, as any confirmed conflict does.
+    const needed = baseRefreshNeeded(work);
+    if (needed?.trigger === 'failed check behind base') {
+      const trigger = 'failed check behind base' as const;
+      let merged: string | null;
+      try { merged = await this.mergeBranch(pr.head.ref, branch.tip, `Graphyard base refresh for ${work.key} onto ${this.config.base}: required check ${needed.check} failed behind the base tip`); }
+      catch (error) {
+        if (!(error instanceof SpeculativeConflict)) throw error;
+        return record({ trigger, conflict: `Required check ${needed.check} failed on candidate ${candidate!.sha.slice(0, 12)}, which does not contain base branch tip ${branch.tip.slice(0, 12)} and cannot be brought onto it without resolving a conflict, which is content nobody reviewed or proved: ${error.message}. Run graphyard sync ${work.key}, resolve it and push.` });
+      }
+      return record({ trigger, head: merged ?? candidate!.sha, merge: merged ? await this.describeMerge(candidate!.sha, merged, candidate!.baseSha, branch.tip) : null });
+    }
     // GitHub's `mergeable: false` is not trusted on its own (GY-375): it is recomputed lazily after
     // the base moves and read clean candidates as conflicting, and every refresh they were given
     // dropped their review and proofs. The conflict is confirmed first by a test merge that never

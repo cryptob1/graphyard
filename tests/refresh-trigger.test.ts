@@ -121,7 +121,7 @@ test('unit:clean-candidate-not-refreshed — GitHub reporting a clean unqueued c
   // Main moves; GitHub's first reading after it says the head conflicts. It does not.
   const conflicting = (item: Work) => seen(item, { sha: head, baseSha: main }, { baseTip: moved, baseTree: treeOf(moved), baseTipContained: false, mergeable: false, conflicting: true });
   work = await engine.observe(work.id, work.revision, conflicting(work));
-  assert.deepEqual(baseRefreshNeeded(work), { head, boundBase: main, baseTip: moved }, 'GitHub reading alone asks for a confirmation');
+  assert.deepEqual(baseRefreshNeeded(work), { head, boundBase: main, baseTip: moved, trigger: 'conflict confirmed', check: null }, 'GitHub reading alone asks for a confirmation');
   const clean = provider(work, moved, 'clean');
   await onlyJob(work);
   const job = adapter(conflicting, clean.github);

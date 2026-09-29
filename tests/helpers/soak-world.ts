@@ -3,7 +3,7 @@ import { landingCheck, scopeLookupBudget, type GitHub, type LandingGitHub } from
 import type { HerdrAgent } from '../../src/master.js';
 import type { Observation, Work } from '../../src/model.js';
 import type { AgentReview, ReviewRequest } from '../../src/model/review.js';
-import { heldBase, mergeableNow, queueRef, type BaseRefresh, type GitHubMergeQueueState, type LandingCheck, type QueuePlacement, type QueueSpeculation } from '../../src/merge-queue.js';
+import { baseRefreshNeeded, heldBase, mergeableNow, queueRef, type BaseRefresh, type GitHubMergeQueueState, type LandingCheck, type QueuePlacement, type QueueSpeculation } from '../../src/merge-queue.js';
 import type { Succession } from '../../src/model/successors.js';
 import { revertRefusal, type OptimisticMerge, type OptimisticRevert } from '../../src/optimistic-merge.js';
 
@@ -99,6 +99,10 @@ export class SimulatedGitHub {
   unstable = new Set<string>(); slowRecompute = new Set<string>();
   /** Successions (renames and splits) recorded on the base branch. */
   successions: Succession[] = [];
+  /** Whether the required `test` check fails on a head (GY-534); every head passes when unset. */
+  failsTest: ((key: string, head: string) => boolean) | null = null;
+  /** Every failed-check base refresh the control plane performed, in order. */
+  failedCheckRefreshes: { key: string; from: string; head: string; base: string; at: number }[] = [];
   /** Heads that break the required suite on the base branch once merged (GY-500): every base commit holding one fails until it is reverted. */
   breaking = new Set<string>();
   /** The revert pull requests the main guard opened, and the base commit each landed as. */
@@ -282,7 +286,8 @@ export class SimulatedGitHub {
     if (now - pr.pushed.get(head)! < this.options.ciMs) return [];
     if (!this.runs.has(head)) {
       const flake = this.flakeTips.get(pr.key) === head && this.flaky.has(pr.key);
-      this.runs.set(head, ['test', 'typecheck'].map(name => ({ name, result: flake && name === 'test' ? 'failure' : 'success', id: ++this.serial, attempt: 1, at: now })));
+      // GY-534: a scenario can fail the required `test` check on any head it points `failsTest` at.
+      this.runs.set(head, ['test', 'typecheck'].map(name => ({ name, result: name === 'test' && (flake || !!this.failsTest?.(pr.key, head)) ? 'failure' : 'success', id: ++this.serial, attempt: 1, at: now })));
     }
     return this.runs.get(head)!.filter(run => run.at <= now);
   }
@@ -294,7 +299,10 @@ export class SimulatedGitHub {
     const pr = [...this.prs.values()].find(entry => entry.head === head)!;
     const now = clock.now();
     this.reruns.push({ key: pr.key, sha: head, checkRunId, at: now });
-    runs.push({ name: failed.name, result: this.flaky.get(pr.key) === 'rerun-fails' ? 'failure' : 'success', id: ++this.serial, attempt: failed.attempt + 1, at: now + this.options.ciMs });
+    // A rerun reruns the failed job on the same commit, so its answer is the head's own: a flake
+    // marked `rerun-fails` fails again, and so does a failure a scenario pins on the head with
+    // `failsTest` (GY-534) — a deterministic failure does not pass because it was asked to run twice.
+    runs.push({ name: failed.name, result: this.flaky.get(pr.key) === 'rerun-fails' || !!this.failsTest?.(pr.key, head) ? 'failure' : 'success', id: ++this.serial, attempt: failed.attempt + 1, at: now + this.options.ciMs });
     return { runId: 900_000 + checkRunId };
   }
   /** One minute of GitHub: CI finishes, reviewers post verdicts, reviewer Apps answer, and auto-merge lands what it may. */
@@ -431,8 +439,18 @@ export class SimulatedGitHub {
           merge: { from, parents: [from, predicted], author: 'graphyard[bot]', authoredByApp: true, conflicts: false, baseChanges: changed, diff: { reviewed: sha('patch', from), tip: sha('patch', from) } } };
       },
       async refreshCandidateBase(work: Work): Promise<BaseRefresh> {
-        // No candidate in this world conflicts: a GitHub reading that says so is stale, as GY-375 found.
         const pr = world.pr(work), at = new Date(clock.now()).toISOString();
+        // A required check that failed behind the base tip (GY-534): the base is merged into the
+        // candidate's own branch, as GitHub's /merges does, and CI answers again on the result.
+        if (baseRefreshNeeded(work)?.trigger === 'failed check behind base') {
+          const from = pr.head, bound = pr.base, tip = world.tip, head = sha('refresh', from, tip), onto = world.commits.get(tip)!;
+          world.record({ sha: head, tree: sha('tree', head), parents: [from, tip], files: [...new Set([...world.commits.get(from)!.files, ...onto.files])], at: clock.now(), message: `Graphyard base refresh for ${work.key}` });
+          pr.head = head; pr.base = tip; pr.pushed.set(head, clock.now());
+          world.failedCheckRefreshes.push({ key: work.key, from, head, base: tip, at: clock.now() });
+          return { from: { sha: from, baseSha: bound }, base: tip, baseTree: onto.tree, policyRevision: work.policyRevision, at, head, conflict: null, carry: null, trigger: 'failed check behind base',
+            merge: { from, parents: [from, tip], author: 'graphyard[bot]', authoredByApp: true, conflicts: false, baseChanges: onto.files.filter(file => !world.commits.get(bound)!.files.includes(file)), diff: { reviewed: sha('patch', from), tip: sha('patch', from) } } } as BaseRefresh;
+        }
+        // No candidate in this world conflicts: a GitHub reading that says so is stale, as GY-375 found.
         return { from: { sha: pr.head, baseSha: pr.base }, base: world.tip, baseTree: world.tree, policyRevision: work.policyRevision, at, head: pr.head, conflict: null, merge: null, carry: null,
           stale: { head: pr.head, base: world.tip, policyRevision: work.policyRevision, at, reading: `GitHub reported ${pr.head.slice(0, 12)} conflicting, but a test merge is clean` } } as BaseRefresh;
       },

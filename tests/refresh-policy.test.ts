@@ -81,7 +81,7 @@ test('unit:refresh-only-head-and-conflicts — main moving under three candidate
   const placement = queuePlacement(head, all, now.getTime())!;
   assert.deepEqual([placement.position, placement.predictedBase, placement.current, placement.publishable], [0, moved, false, true]);
   // The conflicting one: the control plane tries the merge, which records the conflict for its worker.
-  assert.deepEqual(baseRefreshNeeded(conflicting), { head: commit('c3'), boundBase: main, baseTip: moved });
+  assert.deepEqual(baseRefreshNeeded(conflicting), { head: commit('c3'), boundBase: main, baseTip: moved, trigger: 'conflict confirmed', check: null });
   // The clean one: nothing is rebuilt, and nothing about it changes.
   assert.equal(baseRefreshNeeded(clean), null);
   assert.equal(pendingBaseRefresh(clean), null);

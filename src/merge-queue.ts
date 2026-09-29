@@ -562,7 +562,20 @@ export interface BaseRefresh {
   stale?: StaleMergeability | null;
 }
 /** Why a branch was written by the control plane rather than by its worker (GY-375). */
-export type RefreshTrigger = 'conflict confirmed' | 'ejection restore' | 'repair';
+export type RefreshTrigger = 'conflict confirmed' | 'failed check behind base' | 'ejection restore' | 'repair';
+
+/** Check results that report a failure, as opposed to a run still to answer. */
+export const failedCheckResults = ['failure', 'timed_out', 'action_required', 'cancelled'];
+/**
+ * The first check the policy requires whose newest trusted run on the observed current head
+ * reported a failure — the failure a `failed check behind base` refresh answers (GY-534). The
+ * run that decides is the one the test gate reads (`requiredCheck`: newest by immutable
+ * check-run ID, within the configured CI Apps), so a same-named check another App reported
+ * cannot set a branch rewrite in motion.
+ */
+export function failedCheckForRefresh(work: Pick<Work, 'candidate' | 'observation' | 'gates' | 'policy'>): string | null {
+  return work.policy.checks.find(name => { const latest = requiredCheck(work, name); return !!latest && failedCheckResults.includes(latest.result); }) ?? null;
+}
 /**
  * A GitHub `mergeable: false` the control plane's own test merge showed to be clean (GY-375).
  * GitHub recomputes mergeability lazily after the base moves and can report a clean head
@@ -650,27 +663,69 @@ export function heldBase(work: Pick<Work, 'candidate' | 'baseRefresh' | 'policyR
  * stale (`staleMergeability`), writes nothing to the candidate's branch, and later observations of
  * the same head and tip are stored with the conflict disproved. A candidate that merges cleanly keeps its head, its CI, its review and its proofs, bound
  * to the base it was built on (`heldBase`), and its stage; one whose mergeability GitHub has not
- * computed yet waits for the next observation. One attempt per head, base tip and policy revision:
+ * computed yet waits for the next observation. The one other candidate refreshed is one whose
+ * required check failed while it is behind the tip (GY-534, trigger `failed check behind base`):
+ * it needs a new head either way, and the head the base gives it is the one that answers a
+ * failure main has already fixed. One attempt per head, base tip and policy revision:
  * a refresh already recorded for the same three is never repeated, so neither a conflict nor a
  * published head makes the reconciliation job spin.
  */
-export function baseRefreshNeeded(work: Work): { head: string; boundBase: string; baseTip: string } | null {
+export function baseRefreshNeeded(work: Work): { head: string; boundBase: string; baseTip: string; trigger: 'conflict confirmed' | 'failed check behind base'; check: string | null } | null {
   const candidate = work.candidate, observation = work.observation;
   if (!work.submission || work.reworkRequested || work.stage === 'done' || work.queue || work.blocker) return null;
   if (!candidate || !observation || observation.merged || observation.prState === 'closed' || observation.draft) return null;
   if (observation.candidate.sha !== candidate.sha) return null;
   const baseTip = observation.baseTip;
   if (observation.baseTipContained !== false || !baseTip || baseTip === candidate.baseSha) return null;
-  if (observation.conflicting !== true) return null;
+  if (refreshInFlight(work)) return null;
   const refresh = work.baseRefresh;
-  if (refresh && refresh.from.sha === candidate.sha && refresh.base === baseTip && refresh.policyRevision === work.policyRevision) return null;
+  const recorded = !!refresh && refresh.from.sha === candidate.sha && refresh.base === baseTip && refresh.policyRevision === work.policyRevision;
+  // A required check that failed on a head behind the base tip (GY-534). The failure may be the
+  // base's own, already fixed upstream — a clock timebomb main has since removed — and a head that
+  // does not contain the fix can never pass it. Asking for a new head there owes a two-party
+  // rework decision the approver refuses on exactly those grounds, and the item owes it again.
+  // The control plane brings the head onto the base tip itself and CI answers again against it; a
+  // failure that survives on the refreshed head, which contains the tip, is the head's own and goes
+  // back to its worker. Once per worker head: a head this very refresh produced is never refreshed
+  // for a failed check again, so a genuinely broken head reaches rework after one extra CI round
+  // however often the base moves. A stale-mergeability reading for the pair wrote nothing, so it
+  // does not count as the attempt.
+  const check = failedCheckForRefresh(work);
+  if (check) {
+    // A head the queue ejected is the queue's to answer, not the refresh's: the ejection names the
+    // check, and the queue's re-entry, restore or rework recovers the item. Between an ejection and
+    // that recovery the entry stands unqueued on its failed tip, and refreshing it here would set
+    // eject, refresh, re-enter, fail, eject spinning past the churn bound (GY-375).
+    if ((work.queueHistory ?? []).some(entry => entry.event === 'ejected' && entry.tip === candidate.sha)) return null;
+    const produced = refresh?.head === candidate.sha && refresh.trigger === 'failed check behind base' && !refresh.stale;
+    if (produced || recorded && !refresh!.stale) return null;
+  } else if (observation.conflicting !== true || recorded) return null;
   // A head found carrying another item's unlanded commits is not brought onto a moved base: a
   // repair requested for it runs first and replaces it, and a head found unrepairable would only
   // carry the foreign commits along, with the record that names the remedy (rework) replaced by
   // a refresh that says nothing of them (GY-127).
   const restore = currentRestore(work)?.restore;
   if (restore && restore.contaminated === candidate.sha && (restore.performedAt === null || restore.outcome === 'unrepairable')) return null;
-  return { head: candidate.sha, boundBase: candidate.baseSha, baseTip };
+  return check ? { head: candidate.sha, boundBase: candidate.baseSha, baseTip, trigger: 'failed check behind base', check }
+    : { head: candidate.sha, boundBase: candidate.baseSha, baseTip, trigger: 'conflict confirmed', check: null };
+}
+
+/**
+ * A failed-check refresh (GY-534) that published a new head the observation has not caught up
+ * with yet, or null. Binding the refresh re-evaluates the item while its candidate and observation
+ * still name the old, failing head, and `recorded` in `baseRefreshNeeded` no longer calls it
+ * pending: read on its own, that head would owe a rework decision for exactly the failure the
+ * refresh answered. Until an observation taken after the refresh reads the branch, the refresh is
+ * in flight: the failure maps to a fresh reading, no rework is owed, and the same worker head is
+ * not refreshed again however far main moves meanwhile. A reading taken after the refresh that
+ * still shows the old head ends the window, so a push that did not stick falls back to rework.
+ */
+export function refreshInFlight(work: Pick<Work, 'candidate' | 'observation' | 'baseRefresh' | 'policyRevision'>): BaseRefresh | null {
+  const refresh = work.baseRefresh, candidate = work.candidate, observation = work.observation;
+  if (!refresh || !candidate || refresh.trigger !== 'failed check behind base' || refresh.stale || refresh.conflict || !refresh.head) return null;
+  if (refresh.head === candidate.sha || refresh.from.sha !== candidate.sha || refresh.policyRevision !== work.policyRevision) return null;
+  if (observation && observation.candidate.sha === candidate.sha && Date.parse(observation.at) > Date.parse(refresh.at)) return null;
+  return refresh;
 }
 
 /** The unresolved conflict a base refresh reported for exactly this candidate and branch head, or null. */
@@ -685,10 +740,10 @@ export function baseRefreshConflict(work: Pick<Work, 'candidate' | 'observation'
  * waits for. `master status` reads it to keep such an item out of the attention list: nobody is
  * waiting on a person, a review round, or a proof round for it.
  */
-export function pendingBaseRefresh(work: Work): { baseTip: string; boundBase: string } | null {
+export function pendingBaseRefresh(work: Work): { baseTip: string; boundBase: string; trigger: 'conflict confirmed' | 'failed check behind base'; check: string | null } | null {
   if (baseRefreshConflict(work)) return null;
   const needed = baseRefreshNeeded(work);
-  return needed ? { baseTip: needed.baseTip, boundBase: needed.boundBase } : null;
+  return needed ? { baseTip: needed.baseTip, boundBase: needed.boundBase, trigger: needed.trigger, check: needed.check } : null;
 }
 
 /** The carry decision a base refresh made for exactly the current candidate, for status and diagnose. */

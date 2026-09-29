@@ -1,4 +1,4 @@
-import { checkRerunHeld, requiredCheck, queueSequencingReason } from '../merge-queue.js';
+import { baseRefreshNeeded, checkRerunHeld, failedCheckResults, queueSequencingReason, refreshInFlight, requiredCheck } from '../merge-queue.js';
 import { reviewNeed } from './dispatch.js';
 import { standingEscalations } from './escalation.js';
 import { leadHoldRefusal } from './delegation.js';
@@ -125,7 +125,8 @@ export function reviewStandstill(work: Work, all: Work[] = [work], now = new Dat
 
 /**
  * The single action kind a refusal maps to. `work` decides the three cases the refusal text cannot:
- * a CI check that reported a failure (rework) rather than one still to answer (re-read), a
+ * a CI check that reported a failure (rework, or a re-read that runs the base refresh when the head
+ * is behind the base tip) rather than one still to answer (re-read), a
  * merge-gate refusal raised by a standing escalation or lead hold rather than by the queue, and a
  * review refusal standing over a head no review can be asked for (`reviewStandstill`).
  */
@@ -133,8 +134,14 @@ export function refusalAction(work: Work, gate: string, refusal: string, all: Wo
   const name = gate === 'test' ? ciCheckName(refusal) : null;
   if (name !== null) {
     const latest = requiredCheck(work, name);
+    if (!latest || !failedCheckResults.includes(latest.result)) return 'resync';
     // A failure held by its one owed or running rerun (GY-516) is answered by the rerun's reading.
-    return latest && ['failure', 'timed_out', 'action_required', 'cancelled'].includes(latest.result) && !checkRerunHeld(work, name) ? 'request-rework' : 'resync';
+    if (checkRerunHeld(work, name)) return 'resync';
+    // A failed check on a head behind the base tip is answered by the control plane's own base
+    // refresh (GY-534), which the fresh reading runs: the failure may be one main already fixed,
+    // and a rework decision owed for it is refused on exactly those grounds. A refresh that already
+    // published its head is answered by the reading that sees that head, not by rework either.
+    return baseRefreshNeeded(work)?.trigger === 'failed check behind base' || refreshInFlight(work) ? 'resync' : 'request-rework';
   }
   if (gate === 'review') {
     const standstill = reviewStandstill(work, all, now);
