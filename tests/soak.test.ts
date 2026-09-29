@@ -113,6 +113,11 @@ const basePlan = {
   // a worker could even react to them.
   blind: { from: 96 * minute, to: 98 * minute },
   notice: 96 * minute,
+  // GY-852: the item whose worker idles with its live lease, loses its pane, and whose profile's
+  // agent name another session then holds — the loop must reclaim the attempt without pasting
+  // into or closing that pane, and still deliver the item. The reassigned day carries it alone:
+  // its plan is trimmed to this fault, so it never shares an item with the main day's.
+  reassigned: 5,
   // GY-496: item 1's first head has its producer runs killed (exit 143) twice, then failing until
   // the request is spent; the loop escalates it once and requests one rework for that head. The
   // fault-free first item hosts it because GY-756's out-of-queue merge needs the last released
@@ -270,7 +275,7 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
  * re-post cannot use it.
  */
 let days = 0;
-async function simulateDay(options: { hours: number; regression?: 'approvers-left-open'; handApprovers?: boolean; capacityWait?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; plan?: Partial<typeof basePlan> }) {
+async function simulateDay(options: { hours: number; regression?: 'approvers-left-open'; handApprovers?: boolean; capacityWait?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; plan?: Partial<typeof basePlan> }) {
   const dayStart = clock.now();
   // A day may restage the shared scenario: the day-scoped view of the plan is what every fault
   // below arms from, while each test's own assertions still read the shared base plan.
@@ -350,7 +355,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   const hold = new Set(options.scope ? [items[scopePlan.unrepresentable - 1].key] : []);
 
   // ---- Workers: the loop dispatches, the simulated session claims, works, pushes and submits (or dies). ----
-  interface Session { work: string; key: string; branch: string; profile: WorkerProfile; epoch: number; attempt: number; pane: string; pushAt: number; diesAt: number | null; exitsAt: number | null; state: 'working' | 'submitted' | 'dead' | 'exited'; syncs: number; syncedFor?: string; refusedSince?: number;
+  interface Session { work: string; key: string; branch: string; profile: WorkerProfile; epoch: number; attempt: number; pane: string; pushAt: number; diesAt: number | null; exitsAt: number | null; dispatchAt: number; state: 'working' | 'submitted' | 'dead' | 'exited' | 'idling' | 'reclaimed'; syncs: number; syncedFor?: string; refusedSince?: number;
     scopeAt: number | null; misreadAt: number | null; misread: boolean }
   const sessions: Session[] = [], lost: string[] = [];
   // GY-888: every session launch the day makes carries the coordinator confinement through the
@@ -388,10 +393,14 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     await confine('worker', key);
     await engine.execute(principal, 'workspace', work.id, { epoch, host: 'soak-host', path, branch }, id());
     const attempt = (attempts.get(key) ?? 0) + 1; attempts.set(key, attempt);
-    const pane = herdr.open(profile.agentName, 'working', path);
-    sessions.push({ work: work.id, key, branch, profile, epoch, attempt, pane, pushAt: clock.now() + plan.workMs, diesAt: !options.capacityWait && plan.deaths.has(n) && attempt === 1 ? clock.now() + plan.deathAfterMs : null,
-      exitsAt: plan.exits.has(n) && attempt === 1 ? clock.now() + plan.exitAfterMs : null, state: 'working', syncs: 0,
-      scopeAt: plan.scoped.has(n) && attempt === 1 ? clock.now() + plan.scopeAfterMs : null, misreadAt: plan.misread.has(n) && attempt === 1 ? clock.now() + plan.misreadAfterMs : null, misread: false });
+    // GY-852: the reassigned item's first session takes the lease and then sits at its prompt for
+    // ever, as an idle worker does, so the loop's idle re-prompt and reclaim run against it.
+    const idling = options.reassigned === n && attempt === 1;
+    const pane = herdr.open(profile.agentName, idling ? 'done' : 'working', path);
+    sessions.push({ work: work.id, key, branch, profile, epoch, attempt, pane, pushAt: idling ? Number.MAX_SAFE_INTEGER : clock.now() + plan.workMs,
+      diesAt: !options.capacityWait && !idling && plan.deaths.has(n) && attempt === 1 ? clock.now() + plan.deathAfterMs : null,
+      exitsAt: !idling && plan.exits.has(n) && attempt === 1 ? clock.now() + plan.exitAfterMs : null, dispatchAt: clock.now(), state: idling ? 'idling' : 'working', syncs: 0,
+      scopeAt: !idling && plan.scoped.has(n) && attempt === 1 ? clock.now() + plan.scopeAfterMs : null, misreadAt: !idling && plan.misread.has(n) && attempt === 1 ? clock.now() + plan.misreadAfterMs : null, misread: false });
     // A scope scenario asks the moment it holds the lease, as a worker does, and keeps working
     // while the control plane decides. An ask carries at most fifty paths, so a wide ask is
     // filed in batches, which one open request of the attempt merges.
@@ -402,7 +411,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     return { key, epoch, pane, agentName: profile.agentName };
   };
   const workersTick = async (now: number) => {
-    for (const session of sessions.filter(entry => entry.state === 'working')) {
+    for (const session of sessions.filter(entry => entry.state === 'working' || entry.state === 'idling')) {
       if (session.diesAt !== null && now >= session.diesAt) { herdr.kill(session.pane); session.state = 'dead'; continue; }
       // The runtime exits and leaves a bare shell in its pane; its supervisor keeps the lease a few
       // minutes more, then releases it, so the item goes to a new attempt without a lease loss.
@@ -431,9 +440,15 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       // The unrepresentable item's worker stays live on its refused ask: the item is blocked on
       // scope, so it neither pushes nor submits.
       if (now < session.pushAt || hold.has(session.key)) {
-        // A renewal refused is lease loss: the supervisor stops the session, as `watch` does.
+        // A renewal refused is lease loss: the supervisor stops the session, as `watch` does. An
+        // idling session whose lease the loop itself ended is not lost — it was reclaimed (GY-852).
         try { await engine.execute(principal, 'heartbeat', session.work, { epoch: session.epoch }, id()); }
-        catch (error) { if (!(error instanceof Refusal)) throw error; herdr.kill(session.pane); session.state = 'dead'; lost.push(`${session.key} epoch ${session.epoch}: ${error.message}`); }
+        catch (error) {
+          if (!(error instanceof Refusal)) throw error;
+          herdr.kill(session.pane);
+          if (session.state === 'idling') { session.state = 'reclaimed'; continue; }
+          session.state = 'dead'; lost.push(`${session.key} epoch ${session.epoch}: ${error.message}`);
+        }
         // The refused ask stands for hours; near the day's end the worker releases the item with
         // the refusal standing, ending its attempt cleanly instead of lapsing in a later day.
         if (hold.has(session.key) && now >= dayStart + options.hours * hour - 20 * minute) {
@@ -489,8 +504,9 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   const promptSession: DaemonEffects['promptSession'] = async (agent, text) => {
     const session = sessions.find(entry => entry.pane === agent.pane_id);
     prompts.push({ key: session?.key ?? '?', epoch: session?.epoch ?? 0, pane: agent.pane_id!, text });
-    // The prompted session resumes.
-    herdr.status(agent.pane_id!, 'working');
+    // The prompted session resumes — unless it is the scenario's stuck worker, which ignores the
+    // paste and stays at its prompt, as the idle worker the loop must reclaim does (GY-852).
+    if (session?.state !== 'idling') herdr.status(agent.pane_id!, 'working');
   };
 
   // ---- Approvers and producers: sessions the loop launches, each acting on the minute after. ----
@@ -584,7 +600,11 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
 
   // ---- Production: two deploys, each a new control-plane build serving the base tip it was cut from. ----
   const production = { build: sha('build', 0), sha: github.tip, deploys: [] as { at: number; build: string; sha: string }[] };
-  const snapshot = async () => { const read = await store.coordinationSnapshot(); return { work: read.work, now: read.now, jobs: read.jobs }; };
+  // GY-852: the reassigned day runs on a control plane the earlier days share, so its loop reads
+  // only its own items: an earlier day's half-finished item (a rework decision nobody adopted)
+  // would otherwise be dispatched, pushed and refused here for its linked pull request.
+  const ownItems = options.reassigned ? new Set(items.map(item => item.id)) : null;
+  const snapshot = async () => { const read = await store.coordinationSnapshot(); return { work: ownItems ? read.work.filter(item => ownItems.has(item.id)) : read.work, now: read.now, jobs: read.jobs }; };
   const transport = async (path: string, data: any, key: string = id()) => {
     const match = /^work\/([^/]+)\/merge-acquire$/.exec(path);
     if (!match) {
@@ -655,6 +675,18 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       return { source: 'endpoint', sha: production.sha, at: new Date(clock.now()).toISOString(), reason: null, deployed: serving.map(item => item.key), pending: delivered.filter(item => !serving.includes(item)).map(item => item.key) };
     },
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    // What the loop's reclaim path needs to end an attempt on the record (GY-852): the partial
+    // work kept on its branch, and the capacity report that ends the lease in the same transaction.
+    // They ride the reassigned day alone, whose attempt is the one the loop reclaims; the other
+    // days' dead workers lapse as they always did.
+    ...(options.reassigned ? {
+      reportCapacity: async (work: Work, event: Record<string, unknown>) => api(principals.coordinator, 'POST', `work/${work.id}/capacity`, event),
+      preserveWork: async (work: Work, epoch: number) => {
+        const current = (await store.list()).find(item => item.id === work.id)!;
+        const workspace = current.workspaces.find(entry => entry.epoch === epoch);
+        return workspace ? { state: 'committed' as const, commit: sha('wip', work.key, epoch), branch: workspace.branch, detail: 'kept as WIP' } : { state: 'not-applicable' as const, detail: 'this world records no worktree' };
+      },
+    } : {}),
     promptSession,
     exhaustedProofs: async () => [...abandoned.values()],
   };
@@ -746,6 +778,8 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   const stale: { stuckArmedAt: number | null; stuckHead: string | null; stuckReported: boolean; lostAt: number | null; carried: { reviewer: string; reviewId: number; originalSha: string } | null } =
     { stuckArmedAt: null, stuckHead: null, stuckReported: false, lostAt: null, carried: null };
   const releasedScope = new Set<number>();
+  // GY-852: the reassigned item's own pane and the pane the reused name came to hold.
+  const reassign = { pane: null as string | null, phantom: null as string | null, phantomGone: false };
   const jobsDue = async () => Number((await store.pool.query('SELECT count(*) AS due FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now())')).rows[0].due);
   for (let elapsed = 0; elapsed <= options.hours * hour;) {
     const now = clock.now();
@@ -799,6 +833,25 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     if (deploying) { production.build = sha('build', ++deploys); production.sha = github.tip; production.deploys.push({ at: now, build: production.build, sha: production.sha }); }
     // The plane reports its held integration job only inside the flap windows (GY-439's recurring fault).
     heldJobs = plan.heldJob.at.some(at => elapsed >= at && elapsed < at + plan.heldJob.forMs);
+    // GY-852: the idling worker's pane dies after its re-prompt, and the profile's agent name is
+    // taken by another session standing at its prompt — the shape that delivered one item's
+    // re-prompt into another item's pane. Once the loop has reclaimed the attempt, the other
+    // session ends on its own.
+    if (options.reassigned) {
+      const reassigned = options.reassigned;
+      const idled = sessions.find(entry => entry.key === items[reassigned - 1].key && entry.state === 'idling');
+      if (idled) {
+        if (!reassign.pane && now >= idled.dispatchAt + 36 * minute) {
+          herdr.kill(idled.pane);
+          reassign.pane = idled.pane;
+          reassign.phantom = herdr.open(idled.profile.agentName, 'done');
+        }
+        if (reassign.phantom && !reassign.phantomGone) {
+          const current = (await store.list()).find(item => item.id === items[reassigned - 1].id)!;
+          if (current.lease === null || current.lease.epoch !== idled.epoch) { reassign.phantomGone = true; herdr.kill(reassign.phantom); idled.state = 'reclaimed'; }
+        }
+      }
+    }
     // The world moves: GitHub, then the sessions. A deploy restarts the control plane once the
     // sessions have renewed: for the rest of that minute nothing reaches it, the loop included.
     github.tick(now);
@@ -922,7 +975,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
   return { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, herdr, hand, escalations, spent, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, landingRefusals, foreignPane,
     mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted, stale, approverPanes, herdrClosed: herdr.closed, diagnosisModel: settings.model, capacityRefused, capacityLaunched, capacityWaiters,
-    decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, confined, unconfinedRefusals };
+    decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, reassign, confined, unconfinedRefusals };
 }
 
 /**
@@ -1483,3 +1536,33 @@ test('unit:soak-invariants-hold — a loop change that breaks an invariant fails
   assert.equal(state.faults.instances.filter(instance => instance.kind === 'invariant:lingering-sessions' && instance.faultClass === 'session-liveness').length, 1);
 });
 
+test('unit:soak-invariants-hold — a worker idle past its bound whose pane died is reclaimed without pasting into or closing the pane the reused agent name holds, and is still delivered', { timeout: 300_000 }, async () => {
+  // GY-852: one worker takes its lease and then idles at its prompt for ever. Past the idle bound
+  // the loop re-prompts it once — in its own pane. The pane then dies and the profile's agent name
+  // is taken by another session (the shape that delivered GY-589's re-prompt to GY-831-4's pane),
+  // so the reclaim runs while the name holds a pane this attempt does not own: nothing is pasted
+  // into it, nothing closes it, and the item is handed to a new attempt that delivers it. The
+  // routing repeats per cycle here, which is why it lives in this world.
+  const n = basePlan.reassigned;
+  const { items, final, violations, failures, lost, herdrClosed, prompts, state, reassign } = await simulateDay({
+    hours: 6, reassigned: n,
+    plan: { items: 6, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), breaksMain: 0, infrastructure: new Set([5]), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, outOfQueue: { item: 6, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 6 } },
+  });
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}`), [], 'all six items are delivered');
+  assert.deepEqual(violations, [], 'every system invariant holds across the idle re-prompt and the reclaim');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.deepEqual(lost, [], 'no lease was lost: the idle attempt was reclaimed');
+  assert.ok(reassign.pane && reassign.phantom, `the scenario ran: ${JSON.stringify(reassign)}`);
+  assert.ok(reassign.phantomGone, 'the other session ended once the attempt was reclaimed');
+  // Every paste went to the pane it was addressed to: the idle re-prompt reached the worker's own
+  // pane exactly once, and the pane the reused name holds received nothing, ever.
+  const mine = prompts.filter(entry => entry.key === items[n - 1].key);
+  assert.deepEqual(mine.map(entry => entry.pane), [reassign.pane], `the re-prompt reached only its own pane: ${JSON.stringify(prompts.map(entry => entry.pane))}`);
+  assert.ok(!prompts.some(entry => entry.pane === reassign.phantom), 'no paste ever reached the pane the reused name holds');
+  assert.ok(!herdrClosed.includes(reassign.phantom!), 'the loop never closed the pane the reused name holds');
+  // The reclaim is on the record with why, and the attempt it ended was followed by a delivered one.
+  const reclaim = state.actions[`resume:reclaim:${items[n - 1].id}:1`];
+  assert.equal(reclaim?.state, 'done');
+  assert.match(reclaim.detail, /its pane .* has been gone from the runtime .* keeping the attempt's branch/);
+  assert.equal(final.find(item => item.key === items[n - 1].key)!.stage, 'done', 'the item was delivered by its next attempt');
+});

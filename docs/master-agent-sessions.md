@@ -19,13 +19,13 @@ Sessions run in no-approval mode (`"approvals": "auto"`): `--permission-mode byp
 
 ### The coordinator checkout is confined at the OS level
 
-Every launched session runs with the checkout unwritable to shell commands (GY-888). A codex `--sandbox workspace-write` confines only while every granted path touching the checkout or its `.git` stays inside the session's worktree and admin directory; a wider grant gives up the claim. Every other launch runs under bubblewrap: the checkout bind-mounted read-only, PIDs unshared, `/proc` fresh, channels hidden (session bus, systemd managers, `/run/dbus`), only the session's own and worktree-admin directories re-exposed beside the shared Git areas (objects, `graphyard/` branches, remote refs, `FETCH_HEAD`); each hidden channel is masked at its canonical path, since bubblewrap up to 0.11 cannot mount through an absolute symlink (`/var/run` → `/run`). A launch that cannot apply it (bubblewrap missing, non-Linux, refused namespaces, confinement off, an underivable checkout) is refused with the reason. The master session is exempt (the loop's commands run there). The loop and executors never start from an uncommitted checkout; escalation names the dirty paths.
+Every launched session runs with the checkout unwritable to shell commands (GY-888). A codex `--sandbox workspace-write` confines only while every granted path touching the checkout or its `.git` stays inside the session's worktree and admin directory; a wider grant gives up the claim. Every other launch runs under bubblewrap: the checkout bind-mounted read-only, PIDs unshared, `/proc` fresh, channels hidden (session bus, systemd managers, `/run/dbus`), only the session's own and worktree-admin directories re-exposed beside the shared Git areas (objects, `graphyard/` branches, remote refs, `FETCH_HEAD`); each hidden channel is masked at its canonical path, since bubblewrap up to 0.11 cannot mount through an absolute symlink (`/var/run` → `/run`). A launch that cannot apply it (bubblewrap missing, non-Linux, refused namespaces, confinement off, an underivable checkout) is refused with the reason. The master session is exempt (the loop's commands run there). The loop and executors never start, self-upgrade or restart from a checkout holding uncommitted work; escalation names the dirty paths and the leases they match.
 
 ## Accounts and failover
 
 A profile's `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`), unless the [agent registry](onboarding.md#configure-the-fleet) defines the role. A launch takes the first logged-in account under `run.quotaCeilingPercent`, else **fails over** (`dispatch.accounts`).
 
-On a mid-session limit notice the loop commits worker changes as unpushed `WIP:`, records `capacity.exhausted` (not `lease-loss`), then relaunches on the next account or awaits the first reset.
+On a mid-session limit notice the loop commits worker changes as unpushed `WIP:`, records `capacity.exhausted` (not `lease-loss`), then relaunches on the next account or awaits the reset.
 
 ## How a session starts
 
@@ -49,19 +49,21 @@ The runtime is **ready** when Herdr reports it active with no prompt, or its ban
 
 #### First-run consent prompts
 
-A runtime stopped on a first-run prompt is **`awaiting consent`**. The launcher answers only `hooks-continue-untrusted` (**Continue without trusting**) and `telemetry-decline`, with the least-privilege option, never one that grants hook execution or a sandbox escape; everything else, above all a **credential** or **payment** prompt, is escalated. A worker is held in `.graphyard/launch/NAME.consent` (attach: `herdr pane attach`); after **15 minutes** the supervisor stops renewing and stops the session, so the item is dispatchable again.
+A runtime stopped on a first-run prompt is **`awaiting consent`**. The launcher answers only `hooks-continue-untrusted` (**Continue without trusting**) and `telemetry-decline`, with the least-privilege option, never one that grants hook execution or a sandbox escape; everything else, above all a **credential** or **payment** prompt, is escalated. A worker is held in `.graphyard/launch/NAME.consent` (attach: `herdr pane attach`); after **15 minutes** its supervisor stops renewing and stops it, so the item is dispatchable again.
 
 ### Acknowledgement, the one re-prompt, and never started
 
-A reviewer or producer is `awaiting acknowledgement` until 30 s of activity (`counts.dispatchAwaiting`). Quiet after `run.acknowledgementSeconds` (default 90), it is re-prompted once; settling resultless makes it **`never started`**, relaunched cost-free; three exhaust the request (`retry.neverStarted`).
+A reviewer or producer is `awaiting acknowledgement` until 30 s of activity (`counts.dispatchAwaiting`); quiet past `run.acknowledgementSeconds` (default 90), it is re-prompted once, and settling resultless makes it **`never started`**, relaunched a minute later without retry cost until three exhaust the request (`retry.neverStarted`).
 
 ### Resume, idle-with-lease and exited sessions
 
-When a live attempt's blocker or scope request resolves, its inactive session is re-prompted once (item, epoch, change, `complete`); blocking again on that epoch ends the attempt, and a fresh session, preferably another runtime, takes over. **Idle-with-lease** (30 quiet minutes, nothing open) is re-prompted once, then handed to a new attempt on its branch.
+When a live attempt's blocker or scope request resolves, its inactive session is re-prompted once (item, epoch, change, `complete GY-N EPOCH PR`) on its handle; blocking again on that epoch ends the attempt and its blocker, and a fresh session, preferably another runtime, takes over. **Idle-with-lease** (30 quiet minutes, nothing open) is re-prompted once, then after 30 more handed to a new attempt on its branch.
+
+Every paste goes to the **pane on the attempt's own session handle**, never the profile's reusable agent name, which another session may hold (GY-852); a gone pane hands the attempt on, pasting nowhere else.
 
 ### Panes are closed and reclaimed
 
-Every launch records its pane on the session handle; when the loop ends that session — finished, failed, ended by the loop, or a lead it cannot keep — it closes the pane and records the close. Research and triage runs are headless and open no pane. A per-cycle sweep is the backstop: it closes agentless panes Graphyard launched **on this host** whose session has ended or whose worktree is gone, once they have stood agentless past the launch bound (**120 s**), at most **6** per pass — never a pane Graphyard did not launch, one with an agent, or one whose worktree holds a live lease. Each pass records the host's pane count (`daemon.actions`) and raises attention once agentless panes exceed **20** (`daemon.escalations`); a host that once held a backlog records the drain at zero.
+Every launch records its pane on the item's session handle; when the loop ends that session — finished, failed, ended by the loop, or a lead it cannot keep — it closes the pane in the same step and records the close. Research and triage run headless and open no pane. A per-cycle sweep is the backstop: it closes panes Graphyard launched **on this host**, matched only against the panes this host's launchers recorded, once agentless past the launch bound (**120 s**) with their session ended or their worktree gone, at most **6** per pass — never a pane Graphyard did not launch, one with an agent in it, or one whose worktree holds a live lease. Each pass records the host's pane count, the agentless Graphyard panes and the oldest on the loop cursor (`master status` `daemon.actions`), raising attention once agentless panes exceed **20** (`daemon.escalations`) and recording the drain when the count reaches zero.
 
 ### The dispatcher's own state
 
