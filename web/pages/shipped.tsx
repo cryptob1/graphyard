@@ -1,8 +1,8 @@
 import { isClosed, isDelivered, type Work } from '../../src/model';
 import { CandidatePr } from '../candidate';
-import { plainStatus } from '../plain-status';
+import { plainStatus } from '../../src/model/plain-status';
 import { releasedAt } from '../groups';
-import { releaseView } from '../release';
+import { releaseView } from '../../src/model/release';
 import { Explained } from '../components/term';
 import type { Dashboard } from './dashboard';
 

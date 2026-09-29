@@ -1,12 +1,13 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { classify, shippedThisWeek } from '../groups';
-import { releaseView } from '../release';
-import { prSteps, stepIds, stepLabel, type StepId } from '../pr-steps';
+import { releaseView } from '../../src/model/release';
+import { prSteps, stepIds, stepLabel, type StepId } from '../../src/model/pr-steps';
 import { positionsAt, replayFrames, replaySeconds, replayWindowMs, transitionsFromRows, type ReplayFrame } from '../flow-replay';
-import { formatDuration } from '../duration';
+import { formatDuration } from '../../src/model/duration';
 import { readStepRows } from '../step-moves';
 import { ShippingPulse, usePulse, type PulseRead } from '../shipping-pulse';
 import FlowAnalytics from '../flow-analytics';
+import OptimisticMerges from '../optimistic-merges';
 import type { Work } from '../../src/model';
 import type { HumanRequestRow } from '../../src/model/human-request';
 import type { Dashboard } from './dashboard';
@@ -16,15 +17,37 @@ const reducedMotion = () => typeof window !== 'undefined' && !!window.matchMedia
 const minutes = (ms: number | null | undefined) => ms === null || ms === undefined ? '—' : formatDuration(ms / 60000);
 
 /**
+ * The flow report the Flow panel's step medians, time split and daily landings read. It is read
+ * on its own (GY-705), so the medians appear as soon as it answers and never wait on the replay rows.
+ */
+export async function readFlowReport(api: Dashboard['api']) {
+  return (await api('analytics/flow?window=7')) ?? null;
+}
+
+/** The replay frames of the last day's recorded step moves, read page by page (`readStepRows`). */
+export async function readReplay(api: Dashboard['api'], now: number) {
+  const since = new Date(now - replayWindowMs).toISOString();
+  const moves = await readStepRows(api, since);
+  return { frames: replayFrames(transitionsFromRows(moves.rows), now), truncated: !moves.complete };
+}
+
+/**
  * What the Flow panel reads from the control plane: the flow report and the replay frames of the
- * last day's recorded step moves, read page by page (`readStepRows`). Tolerant of what a real board returns — a report without step
+ * last day's recorded step moves. The two reads settle independently (GY-705): a failed or slow
+ * replay read never discards the report, and each failure is named on its own
+ * (`reportError`, `replayError`, present only on a failed read). Tolerant of what a real board returns — a report without step
  * or throughput figures, a drill-down without rows — so an item with no observation, reviews or
  * candidate never stops the panel (GY-161, AC-12).
  */
 export async function readFlow(api: Dashboard['api'], now: number) {
-  const since = new Date(now - replayWindowMs).toISOString();
-  const [flow, moves] = await Promise.all([api('analytics/flow?window=7'), readStepRows(api, since)]);
-  return { report: flow ?? null, frames: replayFrames(transitionsFromRows(moves.rows), now), truncated: !moves.complete };
+  const [flow, replay] = await Promise.allSettled([readFlowReport(api), readReplay(api, now)]);
+  return {
+    report: flow.status === 'fulfilled' ? flow.value : null,
+    frames: replay.status === 'fulfilled' ? replay.value.frames : [],
+    truncated: replay.status === 'fulfilled' && replay.value.truncated,
+    ...(flow.status === 'rejected' ? { reportError: (flow.reason as Error).message } : {}),
+    ...(replay.status === 'rejected' ? { replayError: (replay.reason as Error).message } : {}),
+  };
 }
 
 /**
@@ -89,7 +112,30 @@ export function LandedPerDay({ report }: { report: any }) {
       : <div key={entry.bucket} className="landed-day uncovered" data-bucket={entry.bucket} data-uncovered="true" title={`${entry.bucket.slice(0, 10)} was not read`}>
         <span>—</span><small>{new Date(entry.bucket).toISOString().slice(5, 10)} not read</small>
       </div>)}</div> : <p className="muted">{report ? coverage ? 'No day of this window was read.' : 'Nothing landed in this window.' : 'Reading the recorded deliveries…'}</p>}
+    <MergeQueuePace report={report}/>
   </section>;
+}
+
+/**
+ * The merge queue's pace (GY-498), from the flow report's `mergeQueue`: merges per hour over the
+ * window the merges were read for, and the median time a merged entry waited in the queue. An
+ * unmeasured figure reads Unavailable, never zero; a figure from fewer than `sparseSamples` merges
+ * reads '—' with its sample count, the report's sparse-data convention, so a quiet repository never
+ * shows a rate or median drawn from two samples as if it were the week's.
+ */
+export function MergeQueuePace({ report }: { report: any }) {
+  const pace = report?.mergeQueue;
+  if (!report) return null;
+  const sparse = (n: number | undefined) => typeof n === 'number' && n < sparseSamples;
+  const rateSparse = sparse(pace?.merges) && typeof pace?.mergesPerHour === 'number';
+  const perHour = typeof pace?.mergesPerHour === 'number' ? (rateSparse ? '—' : String(pace.mergesPerHour)) : 'Unavailable';
+  const waitSparse = sparse(pace?.queueWait?.n) && typeof pace?.queueWait?.medianMs === 'number';
+  const wait = typeof pace?.queueWait?.medianMs === 'number' ? (waitSparse ? '—' : minutes(pace.queueWait.medianMs)) : 'Unavailable';
+  const figure = { display: 'flex', flexDirection: 'column', gap: '2px' } as const, value = { margin: 0, fontWeight: 600 } as const;
+  return <dl className="merge-pace" data-flow="merge-queue" aria-label="Merge queue pace" style={{ display: 'flex', gap: '24px', margin: '12px 0 0' }}>
+    <div data-pace="merges-per-hour" style={figure}><dt className="muted">Merges per hour</dt><dd style={value} data-sparse={rateSparse || undefined} title={rateSparse ? `Fewer than ${sparseSamples} merges` : undefined}>{perHour}</dd>{rateSparse && <small className="muted step-sparse" data-sparse="sparse">{pace.merges} merges</small>}</div>
+    <div data-pace="median-queue-wait" style={figure}><dt className="muted">Median queue wait</dt><dd style={value} data-sparse={waitSparse || undefined} title={waitSparse ? `Fewer than ${sparseSamples} merges` : undefined}>{wait}{typeof pace?.queueWait?.n === 'number' && pace.queueWait.n > 0 && !waitSparse && <small> of {pace.queueWait.n} merged</small>}</dd>{waitSparse && <small className="muted step-sparse" data-sparse="sparse">{pace.queueWait.n} merged</small>}</div>
+  </dl>;
 }
 
 /** Fewer samples than this make a step's median sparse (src/flow-analytics.ts `sparseSampleSize`). */
@@ -156,6 +202,63 @@ export function flowNow(work: Dashboard['work'], now: number, status: Dashboard[
   const inFlow = [...byGroup.moving, ...byGroup.blocked, ...rework];
   const entries = inFlow.map(item => ({ item, steps: prSteps(item, now, release) })).filter(entry => entry.steps.current);
   return { byGroup, release, entries, outside: { upNext: byGroup['up-next'].length - rework.length } };
+}
+
+/** The dots one Now column shows before its '+N more' control (GY-705); the step header above it carries the column's full count. */
+export const nowColumnLimit = 12;
+/** Initial density before the lane is measured (also used by server rendering). */
+export const nowPerRow = 2;
+const nowRowHeight = 28;
+/** Reserve a 24px target plus spacing, or enough room for a labelled pill. */
+export const nowRowCapacity = (width: number, compact: boolean) =>
+  Math.max(1, Math.min(nowColumnLimit, Math.floor(width / stepIds.length / (compact ? 28 : 88))));
+/** Where the `index`th dot of a step column stands: its wrapped row, and its slot in that row. */
+const nowSlot = (step: StepId, index: number, nowPerRow: number) => `${(stepIds.indexOf(step) + (index % nowPerRow + 0.5) / nowPerRow) / stepIds.length * 100}%`;
+const nowTop = (row: number) => `${10 + row * nowRowHeight}px`;
+
+/**
+ * The Now view (GY-705): every item in the flow at its true step, its column wrapping the dots
+ * to the measured width and showing at most `nowColumnLimit` of them before a '+N more' control
+ * that expands the column (and folds it again). The lane is only as tall as its fullest shown
+ * column, and CSS caps it (an expanded column scrolls inside it), so a busy step never makes the
+ * panel tall. A dot is keyed by its item, so it moves only when that item changes step.
+ */
+export function NowLane({ entries, blocked, expanded, onToggle, onSelect }: {
+  entries: ReturnType<typeof flowNow>['entries'];
+  blocked: ReadonlySet<string>;
+  expanded: ReadonlySet<StepId>;
+  onToggle: (step: StepId) => void;
+  onSelect: (id: string) => void;
+}) {
+  const laneRef = useRef<HTMLDivElement>(null);
+  const [perRow, setPerRow] = useState(nowPerRow);
+  useEffect(() => {
+    const lane = laneRef.current;
+    if (!lane) return;
+    const compact = window.matchMedia('(max-width:1250px)');
+    const measure = () => setPerRow(nowRowCapacity(lane.clientWidth, compact.matches));
+    const observer = new ResizeObserver(measure);
+    observer.observe(lane);
+    compact.addEventListener('change', measure);
+    measure();
+    return () => { observer.disconnect(); compact.removeEventListener('change', measure); };
+  }, []);
+  const columns = stepIds.map(step => {
+    const all = entries.filter(entry => entry.steps.current === step);
+    const open = expanded.has(step) && all.length > nowColumnLimit;
+    return { step, all, open, shown: open ? all : all.slice(0, nowColumnLimit) };
+  });
+  // A column with more than the limit gives its control a row of its own under its dots.
+  const rows = Math.max(1, ...columns.map(({ all, shown }) => Math.ceil(shown.length / perRow) + (all.length > nowColumnLimit ? 1 : 0)));
+  return <div ref={laneRef} className="flow-lane now-lane" data-flow="now" style={{ height: `${20 + rows * nowRowHeight}px` }}>
+    {columns.flatMap(({ step, all, open, shown }) => [
+      ...shown.map(({ item, steps }, index) => <button type="button" key={item.id} className={`now-dot group-${blocked.has(item.id) ? 'blocked' : 'moving'}`} data-step={steps.current} data-key={item.key}
+        data-row={Math.floor(index / perRow)} style={{ left: nowSlot(step, index, perRow), top: nowTop(Math.floor(index / perRow)) }} title={`${item.key}: ${steps.label}`} aria-label={`${item.key} at ${stepLabel[step]}: ${steps.label}`} onClick={() => onSelect(item.id)}><span className="mono">{item.key}</span></button>),
+      all.length > nowColumnLimit && <button type="button" key={`more-${step}`} className="now-more" data-step={step} data-hidden={open ? 0 : all.length - shown.length} aria-expanded={open}
+        style={{ left: column(step), top: nowTop(Math.ceil(shown.length / perRow)) }} aria-label={open ? `Show fewer items at ${stepLabel[step]}` : `Show all ${all.length} items at ${stepLabel[step]}`}
+        onClick={() => onToggle(step)}>{open ? 'Show fewer' : <>+{all.length - shown.length}<span className="now-more-word"> more</span></>}</button>,
+    ])}
+  </div>;
 }
 
 /**
@@ -264,11 +367,15 @@ export function ReplaySection({ frames, truncated, initial, clock = browserClock
  * The Flow panel is build to live, one column per pull-request step.
  *
  * - **Now** places every open item at its true step (`prSteps`, the same reading the Work page
- *   draws). A dot is keyed by its item, so it moves only when that item's step changes.
+ *   draws) straight from the work snapshot, before either read below answers. A dot is keyed by its
+ *   item, so it moves only when that item's step changes. A column wraps its dots and shows at most
+ *   `nowColumnLimit` before a '+N more' control, so a busy step never makes the panel tall (GY-705).
  * - **Last 24 hours, replayed** plays the recorded step changes (web/flow-replay.ts) in
  *   twenty seconds, once the viewer presses its play button; a return to Build is rework and is drawn red.
  * - **Landed on main per day** and **where the time goes** are the flow report's own daily
- *   deliveries and per-step dwell medians, computed from the same recorded step moves.
+ *   deliveries and per-step dwell medians, computed from the same recorded step moves. The report
+ *   and the replay rows are read independently: the medians render as soon as the report answers,
+ *   and a failed or slow replay read shows its own notice without blanking them (GY-705).
  *
  * Every animation stops under prefers-reduced-motion: the replay then shows its last frame with
  * a slider to step through it in place of the play button, and the CSS rule turns the dots' movement off.
@@ -278,16 +385,18 @@ export default function InsightsPage({ work, status, api, token, observedAt, set
   const [report, setReport] = useState<any>(null);
   const [frames, setFrames] = useState<ReplayFrame[] | null>(null);
   const [truncated, setTruncated] = useState(false);
-  const [error, setError] = useState('');
+  const [reportError, setReportError] = useState('');
+  const [replayError, setReplayError] = useState('');
+  const [expanded, setExpanded] = useState<ReadonlySet<StepId>>(() => new Set());
   const [detailed, setDetailed] = useState(false);
   const pulse = usePulse(token);
   useEffect(() => {
     let active = true;
-    readFlow(api, now).then(flow => {
-      if (!active) return;
-      // Loading only shows the replay: it waits, still at its first frame, for the viewer to press play.
-      setReport(flow.report); setFrames(flow.frames); setTruncated(flow.truncated);
-    }).catch((e: Error) => { if (active) setError(e.message); });
+    // The report and the replay rows are read independently (GY-705): the medians render the
+    // moment the report answers, and a failed or slow replay read never blanks them.
+    readFlowReport(api).then(flow => { if (active) setReport(flow); }, (e: Error) => { if (active) setReportError(e.message); });
+    // Loading only shows the replay: it waits, still at its first frame, for the viewer to press play.
+    readReplay(api, now).then(replay => { if (active) { setFrames(replay.frames); setTruncated(replay.truncated); } }, (e: Error) => { if (active) setReplayError(e.message); });
     return () => { active = false; };
     // Read once per visit: the replay is the last day's record, not a live feed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -295,31 +404,28 @@ export default function InsightsPage({ work, status, api, token, observedAt, set
 
   // The page reads the release view flowNow classified with, so every figure uses one reading.
   const { byGroup, release, entries: now7, outside } = flowNow(work, now, status);
-  // Each dot stands in its step's column, one row per item already there, so no two dots overlap.
-  const row = new Map<string, number>(); const perStep = new Map<StepId, number>();
-  for (const { item, steps } of now7) { const n = perStep.get(steps.current!) ?? 0; row.set(item.id, n); perStep.set(steps.current!, n + 1); }
-  const nowHeight = Math.max(170, 24 + Math.max(0, ...perStep.values()) * 22 + 40);
   // Per-step medians come from the same recorded step moves the replay plays (the report's stepDwell);
   // the slowest step is named only among those with enough samples over a fully read window.
+  const count = (step: StepId) => now7.filter(entry => entry.steps.current === step).length;
   const times = new Map(stepTimes(report).steps.map(entry => [entry.step, entry]));
   const counted = [...times.values()].filter(entry => !entry.marked && entry.medianMs !== null && entry.medianMs > 0);
   const slowest = counted.length ? counted.reduce((a, b) => b.medianMs! > a.medianMs! ? b : a).step : null;
   return <>
     <div className="page-heading"><div><h1>Insights</h1><p className="summary">How work moves from build to live. {now7.length} {now7.length === 1 ? 'item is' : 'items are'} in the flow now.</p></div></div>
     <Headline shipped={shippedThisWeek(work, now, release).length} moving={byGroup.moving.length} waiting={byGroup['needs-you']} now={now} pulse={pulse} requests={status?.humanOnly}/>
-    {error && <p className="notice" role="status">The recorded history could not be read: {error}. The Now view below is live.</p>}
+    {replayError && <p className="notice" role="status" data-flow="replay-error">The recorded history could not be read: {replayError}. The Now view below is live, and the step medians come from the flow report.</p>}
+    {reportError && <p className="notice" role="status" data-flow="report-error">The flow report could not be read: {reportError}. The step medians and where the time goes are unavailable until it answers; the Now view below is live.</p>}
     <section className="flow-panel" aria-label="Flow">
       <div className="flow-subhead flow-title"><h2>Flow</h2><span>Build to live, one column per step.</span></div>
-      <div className="flow-columns-head">{stepIds.map(step => <div key={step} className={step === slowest ? 'flow-step slowest' : 'flow-step'}>
-        <strong>{stepLabel[step]}</strong><span>{now7.filter(entry => entry.steps.current === step).length} now · median {minutes(times.get(step)?.medianMs)}</span><StepMarker time={times.get(step)!}/>{step === slowest && <small>slowest step</small>}
+      <div className="flow-columns-head">{stepIds.map(step => <div key={step} className={step === slowest ? 'flow-step slowest' : 'flow-step'} data-count={count(step)}>
+        <strong>{stepLabel[step]}</strong><span>{count(step)} now<span className="flow-median" data-median={times.get(step)?.medianMs ?? ''}> · median {minutes(times.get(step)?.medianMs)}</span></span><StepMarker time={times.get(step)!}/>{step === slowest && <small>slowest step</small>}
       </div>)}</div>
-      <div className="flow-subhead"><span className="dot live"/><h3>Now</h3><span>Real time. A dot moves only when its item changes step.</span></div>
-      <div className="flow-lane now-lane" data-flow="now" style={{ height: `${nowHeight}px` }}>{now7.map(({ item, steps }) => <button type="button" key={item.id} className={`now-dot group-${byGroup.blocked.includes(item) ? 'blocked' : 'moving'}`} data-step={steps.current} data-key={item.key}
-        data-row={row.get(item.id)} style={{ left: column(steps.current!), top: `${12 + row.get(item.id)! * 22}px` }} title={`${item.key}: ${steps.label}`} aria-label={`${item.key} at ${stepLabel[steps.current!]}: ${steps.label}`} onClick={() => setSelected(item.id)}><span className="mono">{item.key}</span></button>)}
-        <p className="outside">Waiting outside the flow: {byGroup['needs-you'].length} {byGroup['needs-you'].length === 1 ? 'needs' : 'need'} you · {outside.upNext} up next · {byGroup.backlog.length} in backlog</p>
-      </div>
+      <div className="flow-subhead"><span className="dot live"/><h3>Now</h3><span>Real time. A dot moves only when its item changes step.</span>
+        <p className="outside">Waiting outside the flow: {byGroup['needs-you'].length} {byGroup['needs-you'].length === 1 ? 'needs' : 'need'} you · {outside.upNext} up next · {byGroup.backlog.length} in backlog</p></div>
+      <NowLane entries={now7} blocked={new Set(byGroup.blocked.map(item => item.id))} expanded={expanded} onSelect={setSelected}
+        onToggle={step => setExpanded(previous => { const next = new Set(previous); if (!next.delete(step)) next.add(step); return next; })}/>
       <div className="flow-subhead"><h3>Last 24 hours, replayed</h3><span>Recorded step changes played back in {replaySeconds} s. Red dots went back to Build for rework.</span></div>
-      {frames === null ? <p className="muted flow-wait">{error ? 'No recorded history to replay.' : 'Reading the recorded step changes…'}</p>
+      {frames === null ? <p className="muted flow-wait">{replayError ? 'No recorded history to replay.' : 'Reading the recorded step changes…'}</p>
         : frames.length === 0 ? <p className="muted flow-wait">No item changed step in the last 24 hours.</p>
           : <ReplaySection frames={frames} truncated={truncated}/>}
     </section>
@@ -327,6 +433,7 @@ export default function InsightsPage({ work, status, api, token, observedAt, set
       <LandedPerDay report={report}/>
       <WhereTimeGoes report={report}/>
     </div>
+    <OptimisticMerges work={work} enabled={status?.mergeQueue?.optimistic}/>
     <details className="insight-details" onToggle={event => { if (event.currentTarget.open) setDetailed(true); }}><summary>Show details</summary>
       {detailed && <div className="insight-details-body"><InsightsDetails pulse={pulse} repository={status?.repository} api={api} token={token} canAudit={['admin', 'coordinator', 'producer'].includes(status?.actor?.role)}/></div>}
     </details>

@@ -155,7 +155,9 @@ test('integration:scope-request-flow — the request surfaces to the master and 
   await engine.execute(implementer, 'release', work.id, { epoch: work.epoch }, randomUUID());
   work = await reload(work.id);
   assert.equal(scopeRequestAttention({ work: [work], now: new Date().toISOString() }).length, 0, 'a request whose lease ended is never surfaced');
-  await assert.rejects(approveScopeRequest(process.cwd(), masterScopeConfig(), [work.key], { coordinator: snapshotRead }), /no longer holds the lease/);
+  // The release ended the attempt that asked, so it closed the request (GY-597): nothing is left to approve.
+  assert.equal(work.scopeRequest, null, 'the ended attempt\'s request is closed');
+  await assert.rejects(approveScopeRequest(process.cwd(), masterScopeConfig(), [work.key], { coordinator: snapshotRead }), /no open scope request to approve/);
   work = await engine.execute(implementer, 'claim', work.id, {}, randomUUID());
   assert.equal(work.scopeRequest, null, 'a fresh attempt asks afresh');
 });
@@ -177,4 +179,12 @@ test('unit:live-scope-change-guard — only adding planned files is a live widen
   const bootstrapped = { ...current, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'], bootstrap: { reason: 'harness', contractPaths: ['src/a.ts'], declaredBy: 'op', declaredAt: 't0', policyRevision: 1 } }] };
   const echoed = { ...bootstrapped, criteria: [{ proofs: ['unit:works'], id: 'AC-1', text: 'Works', bootstrap: { policyRevision: 1, declaredAt: 't0', declaredBy: 'op', contractPaths: ['src/a.ts'], reason: 'harness' } }], plannedFiles: ['src/a.ts', 'src/b.ts'] };
   assert.equal(liveScopeWidening(bootstrapped, echoed), true, 'a verbatim echo of the stored criteria, any key order, widens');
+});
+
+test('integration:repair-scope-on-requirements — a merge-path repair keeps its plannedFiles within the merge path on every requirements revision (GY-428)', async () => {
+  let work = await engine.execute(operator, 'create', randomUUID(), { title: 'Repair the merge path', plannedFiles: ['src/merge-queue.ts'], criteria: [{ id: 'AC-1', text: 'Merges again', proofs: ['unit:merges'] }], repair: 'merge-path' }, randomUUID());
+  await assert.rejects(engine.execute(operator, 'requirements', work.id, { ...widen(work, ['src/engine.ts']), reason: 'Widen past the merge path' }, randomUUID()),
+    /carries "repair": "merge-path" but plans files outside the merge path .*: src\/engine\.ts/);
+  work = await engine.execute(operator, 'requirements', work.id, { ...widen(work, ['src/daemon/cycle.ts']), reason: 'Widen within the merge path' }, randomUUID());
+  assert.deepEqual(work.plannedFiles, ['src/merge-queue.ts', 'src/daemon/cycle.ts']);
 });

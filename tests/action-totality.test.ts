@@ -16,7 +16,7 @@ import { actionAccount, actionJudgment, gateRefusalCatalogue, nextAction, refusa
 import { accountOutcome, actionlessItems, stallBoundMs, stalledItems, type AccountOutcome } from '../src/model/action-account.js';
 import { stalledItemAttention } from '../src/cli/master-status.js';
 import { actionableSubjects } from '../src/master-daemon.js';
-import { actionlessCards, stalledCards } from '../web/pages/actionless.js';
+import { actionlessCards, stalledCards } from '../src/model/actionless.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
 import OverviewPage from '../web/pages/overview.js';
 import { boardFromStatus } from '../src/model/board.js';
@@ -199,6 +199,12 @@ test('integration:action-mapping-total-over-states — every refusal the engine 
     { name: 'diff never compared', work: { ...unproven, observation: { ...unproven.observation!, scopeFiles: undefined } } as Work },
     { name: 'out of scope against the bound base', work: { ...unproven, plannedFiles: ['docs/'], observation: { ...unproven.observation!, scopeFiles: [scopeFile] } } as Work },
     { name: 'would revert work on the commit it lands on', work: { ...unproven, plannedFiles: ['docs/'], observation: { ...unproven.observation!, scopeFiles: [], landing: { base: sha40('cc'), files: [landingFile] } } } as Work },
+    // GY-568: a speculative tip built behind an entry that left the queue unlanded waits for its restore,
+    // and files another open candidate's commits put on the head are that candidate's, not rework.
+    { name: 'stale speculative tip after its predecessor left the queue', work: { ...unproven, key: 'GY-STALE', queueHistory: [{ at: now.toISOString(), event: 'predicted', sequence: 5, tip: head, predecessors: ['GY-GONE'], from: sha40('0e') }] } as Work,
+      all: [{ ...other, id: randomUUID(), key: 'GY-GONE', queue: null } as Work, { ...unproven, key: 'GY-STALE' } as Work] },
+    { name: 'files another candidate\'s commits carried', work: { ...unproven, plannedFiles: ['docs/'], observation: { ...unproven.observation!, scopeFiles: [], landing: { base: sha40('cc'), files: [landingFile], foreign: [{ key: 'GY-FOREIGN', pr: 9, head: sha40('0f') }] } } } as Work,
+      all: [{ ...other, id: randomUUID(), key: 'GY-FOREIGN', plannedFiles: ['src/a.ts'] } as Work, unproven] },
     // A unit or integration proof that failed on the head returns it to its worker before review (GY-115).
     { name: 'mechanical proof failed', work: { ...unproven, evidence: [{ ...proven.evidence[0], id: randomUUID(), result: 'fail' as const }] } as Work },
     { name: 'no approval', work: { ...unproven, observation: { ...unproven.observation!, reviews: [] } } as Work },

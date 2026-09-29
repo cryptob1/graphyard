@@ -5,13 +5,18 @@ import { agentOwner, type AttentionItem } from '../master.js';
  * plane's own account of it in `GET /api/status`: `githubBudget` (the live budget, the pause in
  * force, what the last hour was spent on) and `webhooks` (whether deliveries are arriving).
  *
- * Three items, each the incident it is rather than the symptoms it produces:
+ * Four kinds of item, each the incident it is rather than the symptoms it produces:
  *
  * - **A pause** is one item over every job it stops. Twenty paused jobs used to be twenty
  *   identical errors, and the one thing they all meant — GitHub refused, until when, and what
  *   spent the budget — was said nowhere. The per-job errors stay in the ledger.
  * - **A projected exhaustion** is raised while the budget is still there to keep: the spend rate
- *   over the last ten minutes reaches zero before the reset does.
+ *   over the last ten minutes reaches zero before the reset does. It names the pace the
+ *   observation workers are held to (GY-567), which is what brings the spend back under the reset.
+ * - **A token projected under the reserve** (GY-690) is one item per installation token whose
+ *   own spend rate, read from its own header series and so counting every caller, leaves less
+ *   than the merge-path reserve at that token's reset. The pace already holds back what callers
+ *   outside it spend; this is raised while there is still time to act on the rest.
  * - **A silent webhook** is a broken webhook, not a slower control plane: no delivery for an hour
  *   while pull requests are open, named with the App settings page that fixes it, instead of
  *   being compensated by polling without a word.
@@ -24,6 +29,8 @@ export interface BudgetStatus {
     paused: { since: string; until: string; reason: string } | null;
     lastHour: { requests: number; byKind: { kind: string; requests: number }[] };
     deferrals?: { work: string; until: string; reason: string }[];
+    pace?: { tier: string; perMinute: number | null } | null;
+    tokens?: { token: string; current: boolean; remaining: number; resetAt: string | null; perMinute: number; otherPerMinute: number; projectedAtReset: number | null; belowReserveAtReset: boolean }[];
   } | null;
   webhooks?: { lastDeliveryAt: string | null; lastHour: number; configured?: boolean; settingsUrl: string | null; openPullRequests: number } | null;
   jobs?: { work_id: string; error: string | null }[];
@@ -49,8 +56,17 @@ export function exhaustionAttention(status: BudgetStatus): AttentionItem[] {
   const budget = status.githubBudget;
   if (!budget || budget.paused || !budget.exhaustsBeforeReset || !budget.projectedExhaustionAt) return [];
   return [{ subject: 'github',
-    text: `GitHub budget: ${budget.remaining ?? '?'}${budget.limit !== null ? ` of ${budget.limit}` : ''} requests remain and the spend rate is ${budget.perMinute}/min over the last ten minutes; at that rate the budget is exhausted at ${budget.projectedExhaustionAt}, before it resets at ${budget.resetAt ?? 'an unknown time'}${budget.belowReserve ? `; it is already below the ${budget.reserve}-request merge-path reserve, so only merge-gate candidates and webhook wakes are observed` : ''}`,
+    text: `GitHub budget: ${budget.remaining ?? '?'}${budget.limit !== null ? ` of ${budget.limit}` : ''} requests remain and the spend rate is ${budget.perMinute}/min over the last ten minutes; at that rate the budget is exhausted at ${budget.projectedExhaustionAt}, before it resets at ${budget.resetAt ?? 'an unknown time'}${budget.pace?.perMinute != null ? `; observation workers are paced to ${budget.pace.perMinute}/min (${budget.pace.tier}) so the spend above the reserve lasts until the reset` : ''}${budget.belowReserve ? `; it is already below the ${budget.reserve}-request merge-path reserve, so only merge-gate candidates and webhook wakes are observed` : ''}`,
     ...agentOwner('master', `graphyard status (githubBudget) names the spend by kind; below the ${budget.reserve}-request reserve non-merge observations yield on their own, so nothing needs stopping — reduce open candidates or wait for the reset if the spend is not observation`) }];
+}
+
+/** Each installation token whose own spend leaves less than the merge-path reserve at its reset (GY-690). */
+export function tokenProjectionAttention(status: BudgetStatus): AttentionItem[] {
+  const budget = status.githubBudget;
+  if (!budget || budget.paused) return [];
+  return (budget.tokens ?? []).filter(token => token.belowReserveAtReset && token.projectedAtReset !== null).map(token => ({ subject: 'github',
+    text: `GitHub token ${token.token}${token.current ? ' (the one observation is paced on)' : ''}: ${token.remaining} requests remain until ${token.resetAt ?? 'an unknown reset'}, spent at ${token.perMinute}/min (${token.otherPerMinute}/min outside the observation pace); at that rate ${token.projectedAtReset} remain at the reset, below the ${budget.reserve}-request merge-path reserve`,
+    ...agentOwner('master', `graphyard status (githubBudget.tokens, githubBudget.lastHour) names the token and the spend by kind; the observation pace already yields to the other callers, so what is left to cut is their spend — review and producer launches, merges, the loop's own reads — until ${token.resetAt ?? 'the reset'}`) }));
 }
 
 /** No webhook delivery for an hour while pull requests are open: a broken webhook, named as one. */
@@ -66,8 +82,8 @@ export function webhookAttention(status: BudgetStatus, now: number): AttentionIt
     ...agentOwner('master', `Check the App webhook settings at ${settings} (URL https://YOUR-HOST/api/github/webhook, the secret matching GITHUB_WEBHOOK_SECRET, deliveries listed under ${settings}/advanced); a delivery that arrives clears this`) }];
 }
 
-/** Every budget item, in the order an operator reads them: the pause, the exhaustion ahead, the silent webhook. */
+/** Every budget item, in the order an operator reads them: the pause, the exhaustion ahead, each token short of its reserve, the silent webhook. */
 export function githubBudgetAttention(status: BudgetStatus | null | undefined, now = Date.now()): AttentionItem[] {
   if (!status) return [];
-  return [...pauseAttention(status), ...exhaustionAttention(status), ...webhookAttention(status, now)];
+  return [...pauseAttention(status), ...exhaustionAttention(status), ...tokenProjectionAttention(status), ...webhookAttention(status, now)];
 }

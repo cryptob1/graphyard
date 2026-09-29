@@ -11,7 +11,7 @@ The `admin` credential holder declaring `sessionKind: "human"`, who alone decide
 
 ### 2. AI agent
 
-A model acting through a runtime, with only its credential's authority.
+A model acting through a runtime with only its credential's authority.
 
 **Canonical usage:** name the role (*worker*, *master*, *approver*, *reviewer*, *proof producer*).
 
@@ -65,15 +65,17 @@ The supervisor that launches sessions and reports their liveness.
 
 ## Who decides
 
-The master applies non-weakening intent (create, release, unblock, add requirements) directly. Rewriting requirements, resolving escalations, rework, recovery, `manual:` attestation, proof grants, repair-lane merges and merges with automatic merging off are requested with `graphyard master decide GY-N ACTION REASON` and applied by a separate approver with `graphyard master approve GY-N DECISION REASON`; the server refuses an approver that requested the decision, held an assignment on the item, produced its evidence, or would receive the grant. Reviewers, producers and the merge gate decide the rest. A human-only decision parks the item (`graphyard park`) until the human answers (`graphyard answer` or **Work → Needs you**).
+The master applies non-weakening intent (create, release, unblock, add requirements) directly. Rewriting requirements, resolving escalations, rework, recovery, `manual:` attestation, proof grants, repair-lane merges, triage closures and merges with automatic merging off are requested with `graphyard master decide GY-N ACTION REASON` and applied by a separate approver with `graphyard master approve GY-N DECISION REASON`; the server refuses an approver that requested the decision, held an assignment on the item, produced its evidence, or would receive the grant. Reviewers, producers and the merge gate decide the rest. A human-only decision [parks](master-agent-reference.md#items-scope-and-human-waits) the item until the human answers.
 
 ## Diagram legend
 
-- Amber rounded box: Human operator.
-- Green rounded box: Agent session with one role and credential.
-- Blue square box: Graphyard control plane.
-- Violet box or container: Herdr runtime.
-- Grey square box: GitHub and other external facts.
-- Dashed chip: Credential, lease epoch, or worktree.
-- Solid arrow: Authenticated command.
-- Dashed arrow: Observation, never authority.
+| Shape and colour | Term |
+| --- | --- |
+| Amber rounded box | Human operator |
+| Green rounded box | Agent session with one role and credential |
+| Blue square box | Graphyard control plane |
+| Violet box or container | Herdr runtime |
+| Grey square box | GitHub and other external facts |
+| Dashed chip | Credential, lease epoch, or worktree |
+| Solid arrow | Authenticated command |
+| Dashed arrow | Observation, never authority |

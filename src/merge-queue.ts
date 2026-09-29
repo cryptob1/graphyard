@@ -1,9 +1,10 @@
 import type { Evidence, Observation, ScopeFile, Work } from './model.js';
-import { evidenceBindsCandidate, type ApprovalIdentity, type CarriedApproval, type CarriedProof, type QueueCarry, type RequiredApproval, type TipMerge } from './model/carry.js';
-import { reviewProviderOf } from './model/review.js';
+import { carriedApproval, evidenceBindsCandidate, type ApprovalIdentity, type CarriedApproval, type CarriedProof, type QueueCarry, type RequiredApproval, type TipMerge } from './model/carry.js';
+import { exactApproval, reviewProviderOf } from './model/review.js';
 import { pathScopesOverlap } from './model/scope.js';
-import { queuedRegressions } from './regression-guard.js';
+import { queuedRegressions, staleTipRegressions } from './regression-guard.js';
 import { missingAncestryReason, missingBaseAncestry } from './merge-base-ancestry.js';
+import { ciCheckName } from './model/ci-refusal.js';
 
 // Graphyard publishes speculative tips outside refs/heads and refs/tags: the namespace is
 // owned by the App, is never a branch a worker can push, and never appears as a PR head.
@@ -39,9 +40,25 @@ export interface QueueSpeculation {
   reviewedHead?: string;
   /** An approval GitHub dismissed for a merge-base change on this very tip, restored as the binding approval; see `restoredApproval`. */
   restoredApproval?: RestoredApproval | null;
+  /**
+   * An approval of the tip this publication replaced, read from the pull request's current reviews
+   * immediately before the new tip was force-pushed (GY-519): the item's stored observation can
+   * predate the approval, and republishing without reading it would drop a review of the patch
+   * being republished. The carry decided at publication carries it exactly as an observed approval.
+   */
+  observedApproval?: ObservedApproval | null;
   /** Why the tip was built (GY-375): the queue head is the one candidate brought onto the base unasked. */
   trigger?: 'queue-head';
 }
+/** An approval GitHub held at one moment, as the publisher read it: the reviewer, its id and the head it approved. */
+export interface ObservedApproval { reviewer: string; reviewId?: number; sha: string }
+/**
+ * A `head_ref_force_pushed` event on the pull request's timeline (GY-519): who pushed, when, and
+ * between which commits. `byApp` is true only when GitHub named the control-plane App's own bot
+ * identity as the actor — the fact that separates a republication the control plane made itself
+ * from a push by anyone else.
+ */
+export interface HeadForcePush { at: string | null; by: string | null; byApp: boolean; before: string | null; after: string | null }
 /**
  * One unresolved review thread on a candidate's pull request: who opened it (the author of its
  * first comment, and whether GitHub reports that author as a bot), and the path and line it is
@@ -61,7 +78,7 @@ export interface ReviewThread { id?: string; author: string; bot?: boolean; path
  * before threads were observed.
  */
 export interface ConversationResolution { required: boolean; unresolved: ReviewThread[] }
-declare module './model/work.js' { interface Observation { conversations?: ConversationResolution } }
+declare module './model/work.js' { interface Observation { conversations?: ConversationResolution; headForcePushes?: HeadForcePush[] } }
 
 /** `author on path:line`, the way every refusal and attention line names a thread. */
 export const describeThread = (thread: ReviewThread) => `${thread.author} on ${thread.path}${thread.line === null ? '' : `:${thread.line}`}${thread.outdated ? ' (outdated)' : ''}`;
@@ -146,6 +163,23 @@ export interface QueueEntry {
    * to eject only the member a bisection isolates, and status and the dashboard show it.
    */
   batch?: MergeBatchView | null;
+  /**
+   * The parallel tips this entry merges behind (GY-498): the window positions 1..position+1, each
+   * with what it holds and what CI said about it. Present only under a parallel-tip window, and
+   * only on an entry inside it; `tipValidation` reads it instead of the batch's combined tip.
+   */
+  tips?: TipView[] | null;
+  /**
+   * When the entry's head batch last sat in 'testing' with no published tip (GY-506): the timer
+   * the dissolution waits on. Kept on the head member's entry, dropped when the state passes.
+   */
+  batchStall?: { since: string } | null;
+  /**
+   * The dissolved stuck batch (GY-506): its members validate as single-entry batches in their
+   * existing order until one of them leaves the queue, which ends the dissolution and lets the
+   * ordinary batch plan resume. Recorded on the head member's entry with the queue history.
+   */
+  batchDissolved?: { at: string; members: string[] } | null;
 }
 /** The published tip that replaces a queued entry's head on the next observation, or null when the head is the tip. */
 export function tipReplacesHead(work: Pick<Work, 'candidate' | 'queue' | 'policyRevision'>): string | null {
@@ -162,7 +196,8 @@ export function tipReplacesHead(work: Pick<Work, 'candidate' | 'queue' | 'policy
  * named here, and the test gate, which judges the candidate's own change, stands. A check that
  * failed on the tip is an adverse conclusion that ejects the entry (`ejectionReason`), after
  * which this returns null and the test gate refuses it as ever. `testReasons` are the test gate's
- * refusals for the tip.
+ * refusals for the tip; only the CI-pending ones (`ciPendingReason`) are the tip's validation, and
+ * the caller lifts only those from the test gate.
  */
 export const tipValidationPrefix = 'Merge queue is validating speculative tip ';
 /**
@@ -175,16 +210,46 @@ export const tipValidationPrefix = 'Merge queue is validating speculative tip ';
 export function tipValidation(work: Pick<Work, 'key' | 'candidate' | 'policyRevision'>, queue: QueueEntry | null, testReasons: string[]): string[] | null {
   const speculation = queue?.speculation, candidate = work.candidate;
   if (!speculation || !candidate || speculation.tip !== candidate.sha || speculation.base !== candidate.baseSha || speculation.policyRevision !== work.policyRevision) return null;
+  // Only a CI-pending refusal is the tip's validation (GY-332): any other test-gate refusal is the
+  // candidate's own and is never relabelled as queue progress, whatever the tip's state.
+  const pending = testReasons.filter(ciPendingReason);
+  // Parallel tips (GY-498): the entry is validated by the window of tips it merges behind, each
+  // judged on its own observation. Every tip ahead of it passed and its own tip is the only one
+  // still unjudged: today's wording, naming its tip. Any earlier tip unjudged is named too, so CI
+  // runs on every tip of the window at once; an earlier failing tip is the queue resolving an
+  // inherited failure, which this entry waits out instead of being ejected for.
+  const tips = queue?.tips;
+  if (tips?.length) {
+    // A tip that is not published is not being validated: the placement's own reason says the
+    // predicted tip has not been published, and naming nothing here keeps that refusal standing.
+    const failing = tips.find(tip => tip.ci === 'fail' && tip.tip);
+    // Its own tip failed: attributed once every tip ahead passed; until then the tips ahead are
+    // still being validated and name themselves, since a failure among them would be inherited.
+    const ahead = tips.slice(0, -1).filter(tip => tip.ci !== 'pass' && tip.tip);
+    if (failing && failing === tips.at(-1) && ahead.length) return ahead.map(tip => `${tipValidationPrefix}${tip.tip?.slice(0, 12)}: speculative tip ${failing.tip?.slice(0, 12)} of ${work.key} failed ${failing.failedCheck}, and is attributed to it only once the tips ahead pass`);
+    if (failing && failing === tips.at(-1)) return pending.map(reason => `${tipValidationPrefix}${failing.tip?.slice(0, 12)}: ${reason}`);
+    if (failing) return [`Waiting for speculative tip ${failing.tip?.slice(0, 12)} to resolve: Required CI check ${failing.failedCheck} failed on it and ${work.key} is not the cause; its tip holds the same change and is rebuilt once the entry that caused it leaves the queue`];
+    const unjudged = tips.filter(tip => tip.ci !== 'pass' && tip.tip);
+    if (!unjudged.length) return null;
+    if (unjudged.length === 1 && unjudged[0] === tips.at(-1) && pending.length) return pending.map(reason => `${tipValidationPrefix}${unjudged[0].tip?.slice(0, 12)}: ${reason}`);
+    return unjudged.map(tip => `${tipValidationPrefix}${tip.tip?.slice(0, 12)}: the tips ahead of ${work.key}'s are still being validated`);
+  }
   const batch = queue?.batch;
   // A batch behind the head waits its turn: no CI is required of it until it heads the queue, and
   // its queue position already holds the merge. A member the plan merges is validated, and while
   // the plan merges or ejects others ahead of it, or waits for the tip it would test to be
   // published, nothing is required of it until it is replanned: its placement holds the merge.
   if (batch && (batch.state === 'waiting' || !batch.underTest?.tip)) return [];
-  if (!testReasons.length) return null;
+  if (!pending.length) return null;
   const under = batch?.underTest?.tip ?? candidate.sha;
-  return testReasons.map(reason => `${tipValidationPrefix}${under.slice(0, 12)}: ${reason}`);
+  return pending.map(reason => `${tipValidationPrefix}${under.slice(0, 12)}: ${reason}`);
 }
+/**
+ * The one test-gate refusal the tip's own validation accounts for: a required CI check that has not
+ * yet passed on the candidate (GY-332). Any other test-gate refusal is the candidate's own and
+ * stays on the test gate, never relabelled as queue progress.
+ */
+export const ciPendingReason = (reason: string) => ciCheckName(reason) !== null;
 /** The carry decisions on record that moved bindings onto `sha`, under the current policy: a base refresh's, or a tip's. */
 export function onto(work: Pick<Work, 'queue' | 'baseRefresh' | 'policyRevision'>, sha: string): QueueCarry[] {
   return [work.queue?.speculation?.carry, work.baseRefresh?.carry].filter((carry): carry is QueueCarry => !!carry && carry.to.sha === sha && carry.policyRevision === work.policyRevision);
@@ -239,7 +304,7 @@ export function decideIdentityCarry(input: IdentityCarryInput): QueueCarry {
   const reviewedTouched = input.reviewedFiles.filter(path => changed.includes(path));
   const approval: CarriedApproval | RequiredApproval = !input.approval ? { carried: false, reason: `no approval was bound to the reviewed head ${shortSha(from.sha)}` }
     : reviewedTouched.length ? { carried: false, reason: `${who} changed reviewed files ${listPaths(reviewedTouched)}; a fresh independent approval of ${shortSha(to.sha)} is required` }
-    : { ...input.approval, carried: true, originalSha: input.approval.sha, reason: `approval of ${shortSha(from.sha)} by ${input.approval.reviewer} carried to ${tip}: ${who} changed none of the ${input.reviewedFiles.length} reviewed files` };
+    : { ...input.approval, carried: true, originalSha: input.approval.sha, reason: `approval of ${shortSha(input.approval.sha)} by ${input.approval.reviewer}${input.approval.reviewId !== undefined ? ` (review ${input.approval.reviewId})` : ''} carried to ${tip}: ${who} changed none of the ${input.reviewedFiles.length} reviewed files` };
   const evidence = input.proofs.map(({ proof, evidence }): CarriedProof => {
     if (!evidence) return { proof, carried: false, reason: `no trusted evidence was bound to the reviewed head ${shortSha(from.sha)}` };
     if (!changed.length) return { proof, carried: true, evidenceId: evidence.id, producer: evidence.producer, reason: `evidence ${evidence.id} from ${evidence.producer} carried to ${tip}: ${who} changed no file relative to ${shortSha(from.baseSha)}` };
@@ -258,11 +323,21 @@ export interface QueueEjection {
    * branch tip itself. Absent on other ejections and on records that predate the rule.
    */
   predecessors?: string[];
+  /**
+   * GY-252. Whether the ejection was a speculative-merge conflict (github.ts SpeculativeConflict),
+   * recorded as a typed fact rather than read back from `reason`: `{ base }` names the tip the
+   * conflicting merge was attempted onto (the predicted base, null when no prediction was held),
+   * null marks any other ejection. Absent only on records that predate the field, which
+   * `speculativeConflict` still reads from their reason.
+   */
+  conflict?: { base: string | null } | null;
 }
 export interface QueueHistoryEntry {
-  at: string; event: 'enqueued' | 'predicted' | 'ejected'; sequence: number; reason?: string; tip?: string;
+  at: string; event: 'enqueued' | 'predicted' | 'ejected' | 'dissolved'; sequence: number; reason?: string; tip?: string;
   /** For a prediction: the entries the tip was published behind, and the item's own reviewed head it was built from. For a speculative-conflict ejection: the entries the conflicting merge was predicted behind (GY-321). */
   predecessors?: string[]; from?: string;
+  /** For an ejection: the ejection's typed conflict record (`QueueEjection.conflict`), so the audit trail tells a conflict from any other ejection without reading `reason` (GY-583). Absent on other events and on entries that predate the field. */
+  conflict?: { base: string | null } | null;
 }
 
 /**
@@ -288,10 +363,18 @@ export interface ReviewDismissal {
   verdict: 'approved' | 'changes_requested' | 'commented' | null;
   /** The commit GitHub attributed the dismissal to, when it named one. */
   commit: string | null;
-  at: string | null; by: string | null; unread?: string;
+  at: string | null; by: string | null;
+  /** The actor was the control-plane App's own bot identity (GY-519); absent on records that predate the field. */
+  byApp?: boolean;
+  unread?: string;
 }
-/** The record of an approval the control plane restored after GitHub dismissed it for a merge-base change on an unchanged head. */
-export interface RestoredApproval { reviewer: string; reviewId?: number; sha: string; dismissal: ReviewDismissal; at: string }
+/**
+ * The record of an approval the control plane restored after GitHub dismissed it for a merge-base
+ * change (GY-127 unchanged head, GY-519 replaced tip). `sha` is the tip the restored binding binds;
+ * `originalSha` names the tip the approval was actually given on when a republication had replaced
+ * it — the approval id, the approved tip and the carried-to tip are what the record must show.
+ */
+export interface RestoredApproval { reviewer: string; reviewId?: number; sha: string; originalSha?: string; dismissal: ReviewDismissal; at: string }
 /** GitHub's own dismissal message when `dismiss_stale_reviews` fires on a merge-base change, and nothing looser. */
 export const mergeBaseDismissalPattern = /^\s*the merge-base changed after approval\.?\s*$/i;
 /** The verdict a timeline `review_dismissed` event names, when it is one GitHub reports. */
@@ -304,31 +387,70 @@ export function reviewDismissal(review: Observation['reviews'][number]): ReviewD
   return review.state === 'DISMISSED' && dismissal && typeof dismissal === 'object' ? dismissal : null;
 }
 /**
- * An approval of exactly the current head that GitHub dismissed with its merge-base reason: the
- * head the reviewer approved is the head the branch still has, so nothing the reviewer judged has
- * changed. It is distinguished from a withdrawn verdict by the recorded reason and the recorded
+ * An approval GitHub dismissed with its merge-base reason that the control plane can restore as
+ * the binding one. Two shapes:
+ *
+ * - An approval of exactly the current head: the head the reviewer approved is the head the branch
+ *   still has, so nothing the reviewer judged has changed (GY-127).
+ * - An approval of a tip the control plane itself replaced (GY-519): the head sha changed, but the
+ *   reviewer judged the same patch. The dismissal must be GitHub's own merge-base dismissal, and
+ *   both the dismissal and the `head_ref_force_pushed` event that caused it must be the
+ *   control-plane App's; the approved tip must be one the queue itself published from the same
+ *   author head the current tip was built from, with the patch-id it was approved under unchanged.
+ *   Anything else — the author head moved, the patch changed, a person dismissed, a person pushed —
+ *   restores nothing.
+ *
+ * A dismissal is distinguished from a withdrawn verdict by the recorded reason and the recorded
  * verdict, never inferred from timing: the reason must be GitHub's exact merge-base message, and
- * the dismissed review must have been an approval — a dismissed change request is a change
- * request the reviewer gave and never an approval, whatever message its dismissal carried. Only a
- * formal GitHub approval from someone other than the author qualifies — the same identity rule
- * `exactApproval` applies, baseline included. The engine restores such an
- * approval as the binding one (see `Engine.observe`) so no review round and no attempt is spent on
- * a commit the reviewer already approved; the reviewer App re-posts it before the merge.
+ * the dismissed review must have been an approval — a dismissed change request is a change request
+ * the reviewer gave and never an approval, whatever message its dismissal carried. Only a formal
+ * GitHub approval from someone other than the author qualifies — the same identity rule
+ * `exactApproval` applies, baseline included. The engine restores such an approval as the binding
+ * one (see `Engine.observe`) so no review round and no attempt is spent on a commit the reviewer
+ * already approved; the reviewer App re-posts it before the merge. `originalSha` names the tip the
+ * approval was given on when a republication replaced it.
  */
-export function dismissedApproval(work: Work): { reviewer: string; reviewId?: number; sha: string; dismissal: ReviewDismissal } | null {
+export function dismissedApproval(work: Work): { reviewer: string; reviewId?: number; sha: string; originalSha?: string; dismissal: ReviewDismissal } | null {
   const candidate = work.candidate, observation = work.observation;
   if (!candidate || !observation || observation.candidate.sha !== candidate.sha || observation.candidate.baseSha !== candidate.baseSha || observation.merged) return null;
   if (!work.policy.review || reviewProviderOf(work.policy) !== 'github') return null;
   const baseline = work.formalReviewBaseline;
   for (const review of observation.reviews) {
-    if (review.state !== 'DISMISSED' || review.sha !== candidate.sha || review.reviewer === candidate.author) continue;
+    if (review.state !== 'DISMISSED' || review.reviewer === candidate.author) continue;
     const dismissal = reviewDismissal(review);
     if (!dismissal?.mergeBase || dismissal.verdict !== 'approved') continue;
     if (work.formalReviewResetRequired && !(baseline?.pr === candidate.pr && baseline.policyRevision === work.policyRevision && Number.isSafeInteger(review.id) && review.id! > 0 && !baseline.reviewIds.includes(review.id!))) continue;
-    return { reviewer: review.reviewer, ...(review.id !== undefined ? { reviewId: review.id } : {}), sha: candidate.sha, dismissal };
+    if (review.sha === candidate.sha) return { reviewer: review.reviewer, ...(review.id !== undefined ? { reviewId: review.id } : {}), sha: candidate.sha, dismissal };
+    const replaced = appDismissed(dismissal) && replacedTipDismissal(work, review.sha, candidate.sha);
+    if (replaced) return { reviewer: review.reviewer, ...(review.id !== undefined ? { reviewId: review.id } : {}), sha: candidate.sha, originalSha: review.sha, dismissal };
   }
   return null;
 }
+/**
+ * Whether a dismissal of an approval of `approvedSha` was the control plane's own republication of
+ * that tip as `candidateSha` (GY-519): the queue published the approved tip from the author head
+ * the current tip is built from, the current tip's carry shows the patch-id unchanged since that
+ * author head, and the App's own force-pushes lead from the approved tip to the current one.
+ */
+function replacedTipDismissal(work: Work, approvedSha: string, candidateSha: string): boolean {
+  const speculation = work.queue?.speculation;
+  if (!speculation || speculation.tip !== candidateSha || speculation.policyRevision !== work.policyRevision) return false;
+  const authorHead = speculation.reviewedHead ?? speculation.merge?.from ?? null;
+  if (!authorHead || speculation.carry?.ground?.rule !== 'diff unchanged') return false;
+  // The approved tip was this queue's own publication from that same author head, or the author
+  // head itself — either way the reviewer judged exactly the patch the current tip re-shows.
+  const published = approvedSha === authorHead
+    || (work.queueHistory ?? []).some(entry => entry.event === 'predicted' && entry.tip === approvedSha && entry.from === authorHead);
+  if (!published) return false;
+  // The App's own pushes must lead from the approved tip to the current head; one push by anyone
+  // else along the way breaks the chain.
+  const pushes = (work.observation?.headForcePushes ?? []).filter(entry => entry.byApp && /^[a-f0-9]{40}$/.test(entry.before ?? '') && /^[a-f0-9]{40}$/.test(entry.after ?? ''));
+  const reaches = (from: string, to: string, fuel: number): boolean =>
+    from === to || fuel > 0 && pushes.some(entry => entry.before === from && reaches(entry.after!, to, fuel - 1));
+  return reaches(approvedSha, candidateSha, pushes.length + 1);
+}
+/** Whether a recorded dismissal names the control-plane App as its actor; records that predate the attribution restore nothing across a head change. */
+export const appDismissed = (dismissal: ReviewDismissal): boolean => dismissal.byApp === true;
 /** The restored approval that binds the current candidate, for status and the merge broker's re-post; null when none does. */
 export function restoredApproval(work: Pick<Work, 'candidate' | 'queue' | 'baseRefresh' | 'policyRevision'>): RestoredApproval | null {
   const candidate = work.candidate;
@@ -337,6 +459,29 @@ export function restoredApproval(work: Pick<Work, 'candidate' | 'queue' | 'baseR
   if (speculation?.tip === candidate.sha && speculation.policyRevision === work.policyRevision && speculation.restoredApproval?.sha === candidate.sha) return speculation.restoredApproval;
   const refresh = work.baseRefresh;
   return refresh?.head === candidate.sha && refresh.policyRevision === work.policyRevision && refresh.restoredApproval?.sha === candidate.sha ? refresh.restoredApproval : null;
+}
+/**
+ * The approval of exactly `sha` in a pull request's current reviews, as the publisher reads them
+ * immediately before force-pushing a new tip over it (GY-519), under the identity rule
+ * `exactApproval` applies: a formal GitHub approval by
+ * someone other than the author, after the requirement-review baseline when one is set. The last
+ * matching review wins, so the identity names the verdict GitHub currently holds. Null when the
+ * list shows none — never a guess from an earlier head's reviews.
+ */
+export function approvalOfHead(reviews: unknown[], sha: string, author: string | null, pr: number, work: Pick<Work, 'formalReviewResetRequired' | 'formalReviewBaseline' | 'policyRevision'>): ObservedApproval | null {
+  let found: ObservedApproval | null = null;
+  for (const row of reviews as { state?: unknown; commit_id?: unknown; user?: { login?: unknown }; id?: unknown }[]) {
+    if (row?.state !== 'APPROVED' || row.commit_id !== sha) continue;
+    const reviewer = typeof row.user?.login === 'string' ? row.user.login : null;
+    const id = Number.isSafeInteger(row.id) ? row.id as number : null;
+    if (!reviewer || reviewer === author) continue;
+    if (work.formalReviewResetRequired) {
+      const baseline = work.formalReviewBaseline;
+      if (!(baseline?.pr === pr && baseline.policyRevision === work.policyRevision && id !== null && id > 0 && !baseline.reviewIds.includes(id))) continue;
+    }
+    found = { reviewer, ...(id !== null ? { reviewId: id } : {}), sha };
+  }
+  return found;
 }
 export interface QueuePlacement {
   /**
@@ -436,6 +581,13 @@ export function staleMergeability(work: Pick<Work, 'candidate' | 'observation' |
 export function disprovedConflict(work: Pick<Work, 'baseRefresh' | 'policyRevision'>, observation: Pick<Observation, 'candidate' | 'baseTip'>): StaleMergeability | null {
   const stale = work.baseRefresh?.stale;
   return stale && stale.head === observation.candidate.sha && stale.base === observation.baseTip && stale.policyRevision === work.policyRevision ? stale : null;
+}
+/**
+ * The observation with its conflict disproved by `stale` (GY-375): it reads mergeable and not
+ * conflicting, and GitHub's raw reading is kept beside that under `disproved` (GY-390).
+ */
+export function withDisprovedConflict<T extends Pick<Observation, 'mergeable' | 'conflicting' | 'disproved'>>(observation: T, stale: StaleMergeability): T {
+  return { ...observation, mergeable: true, conflicting: false, disproved: { mergeable: observation.mergeable, conflicting: !!observation.conflicting, reading: stale.reading } };
 }
 /**
  * A branch that carried another item's unlanded commits, and what the control plane did about it.
@@ -557,9 +709,14 @@ export function currentBaseRefreshCarry(work: Pick<Work, 'candidate' | 'baseRefr
  * actually land on — the live base-branch tip, or the predicted base of a tip published behind
  * entries that have not landed yet:
  *
- * - `files`: every out-of-scope file of the pull request's diff, which the provider recomputes
- *   against the moving base, compared with that commit. Present only when it differs by tree from
- *   the bound base, where `scopeFiles` already is this comparison.
+ * - `files`: the head's changes since its merge base with the landing commit, each outside the
+ *   planned scope judged by the three-way merge result of the head onto that commit (GY-863):
+ *   a branch carrying an earlier version of a change the commit has since extended merges to
+ *   exactly what the commit holds, so it is not a revert; a head that restores the merge-base
+ *   version over the commit's still is. Files only the base changed are inherited by a
+ *   three-way merge, not reverted. Recomputed on every observation, including unchanged heads
+ *   previously refused. Present when the landing tree differs from the bound base, or a
+ *   predicted base needs its own diff.
  * - `carried`: other items' unlanded candidates whose commits this head has in its history — a
  *   speculative tip pushed onto its branch leaves them there — while its tree holds their files as
  *   the landing commit does. Merging such a head makes the provider record the other pull request
@@ -722,6 +879,8 @@ export function predictQueue(all: Work[], now: number): QueuePlacement[] {
       ? unancestored ? `Speculative tip on predicted base ${predictedBase.slice(0, 12)} has not been published onto that exact commit: ${missingAncestryReason(unancestored)}`
       : `Speculative tip on predicted base ${predictedBase.slice(0, 12)} has not been published and validated for this candidate`
       : `Waiting for ${ahead[position - 1]?.key ?? 'the queue head'} to publish its speculative tip`);
+    // A failed check awaiting its one rerun (GY-516) holds this position; master status says so.
+    if (current) reasons.push(...pendingCheckReruns(work).map(line => `${tipValidationPrefix}${line}`));
     placements.push({
       id: work.id, key: work.key, position, size, sequence: entry.sequence, enqueuedAt: entry.enqueuedAt,
       waitMs: Math.max(0, now - Date.parse(entry.enqueuedAt)), predecessors: ahead.map(item => item.key), skipped, ...(passedOver ? { passedOver } : {}),
@@ -738,7 +897,7 @@ export function predictQueue(all: Work[], now: number): QueuePlacement[] {
  * Kept beside the messages above so a wording change is visible here.
  */
 export function queueSequencingReason(reason: string) {
-  return /^(Merge queue position \d+ of \d+: |Speculative tip on predicted base [0-9a-f]+ has not been published|Waiting for \S+ to publish its speculative tip$|Merge queue is validating speculative tip [0-9a-f]+: )/.test(reason) || !!predecessorWaitReason(reason);
+  return /^(Merge queue position \d+ of \d+: |Speculative tip on predicted base [0-9a-f]+ has not been published|Waiting for \S+ to publish its speculative tip$|Merge queue is validating speculative tip [0-9a-f]+: |Waiting for speculative tip [0-9a-f]+ to resolve: )/.test(reason) || !!predecessorWaitReason(reason);
 }
 export function queuePlacement(work: Work, all: Work[], now: number) {
   return predictQueue(all, now).find(placement => placement.id === work.id) ?? null;
@@ -756,6 +915,24 @@ export function latestCheck(checks: Observation['checks']): Observation['checks'
     if (latest.id !== undefined) return latest;
     return check;
   }, undefined);
+}
+
+declare module './model/work.js' {
+  interface Gate {
+    /** The server's trusted CI Apps, recorded on the test gate for downstream decisions. */
+    ciAppIds?: number[];
+  }
+}
+
+/**
+ * Select exactly the run the test gate uses, including its configured App trust boundary.
+ * Legacy snapshots without that metadata use the engine's historical GitHub Actions default;
+ * the next gate evaluation records the installation's actual configuration, including [].
+ */
+export function requiredCheck(work: Pick<Work, 'candidate' | 'observation' | 'gates'>, name: string, ciAppIds: readonly number[] = work.gates.find(gate => gate.name === 'test')?.ciAppIds ?? [15368]) {
+  const observation = work.observation, candidate = work.candidate;
+  if (!candidate || !observation || observation.candidate.sha !== candidate.sha || observation.candidate.baseSha !== candidate.baseSha) return undefined;
+  return latestCheck(observation.checks.filter(run => run.name === name && ciAppIds.includes(run.appId)));
 }
 
 /**
@@ -781,10 +958,37 @@ export function unpublishableEntry(work: Work): { sequence: number; mergeSha: st
   return { sequence: work.queue.sequence, mergeSha: work.observation.mergeSha ?? null, refusal: refusedReconciliation(work) };
 }
 /**
+ * GY-831. The guarded merge's refusal the loop reported for one candidate: a carried approval it
+ * could not re-post, or one reason repeated past the loop's bound. `rereview` cleared the carried
+ * approval so the review gate asks for a fresh review of the tip; `rework` asks the approver for
+ * the rework decision, since nothing the control plane holds re-binds it. `approval` names the
+ * review that could not be re-posted; `carry` keeps the decision that applied to the candidate,
+ * approval re-required, because the queue ejection the refusal causes drops the tip's record and
+ * its carried proofs must still bind.
+ */
+export interface MergeRefusal {
+  sha: string; baseSha: string; policyRevision: number; reason: string; since: string; at: string; by: string; action: 'rereview' | 'rework';
+  approval?: { reviewer: string; reviewId?: number; originalSha: string }; carry?: QueueCarry | null;
+}
+/** The ejection reason of an entry the guarded merge kept refusing (GY-831); re-entry reads it back. */
+export const mergeRefusalEjectionPrefix = 'The guarded merge refused candidate ';
+/**
+ * GY-831. The merge refusal the control plane recorded for exactly the current candidate, while it
+ * still stands, worded as the queue ejection it causes: a head the guarded merge cannot land must
+ * not hold every entry behind it. A `rereview` refusal stands until a fresh approval binds the
+ * candidate again, and the entry may then re-enter; a `rework` one stands for the candidate's life.
+ */
+export function standingMergeRefusal(work: Work): string | null {
+  const refusal = work.mergeRefusal, candidate = work.candidate;
+  if (!refusal || !candidate || refusal.sha !== candidate.sha || refusal.baseSha !== candidate.baseSha || refusal.policyRevision !== work.policyRevision) return null;
+  if (refusal.action === 'rereview' && (exactApproval(work) || carriedApproval(work))) return null;
+  return `${mergeRefusalEjectionPrefix}${candidate.sha.slice(0, 12)} since ${refusal.since}: ${refusal.reason.slice(0, 600)}; ${refusal.action === 'rereview' ? 'a fresh review of it is requested' : 'it awaits a rework decision'}, and the entry leaves the queue so the next one heads it`;
+}
+/**
  * Explicit, observed failure of a queued entry's speculative validation. Missing or pending
  * inputs keep an entry queued; only a reported adverse result removes it.
  */
-export function ejectionReason(work: Work, ciAppIds: number[], all: Work[] = [], batch: MergeBatchView | null = null): string | null {
+export function ejectionReason(work: Work, ciAppIds: number[], all: Work[] = [], batch: MergeBatchView | null = null, window: TipWindowView | null = null): string | null {
   if (!work.queue || work.stage === 'done') return null;
   // A merged entry waits for its reconciliation, which delivers it and drops it from the order.
   // A refused reconciliation is a reported adverse conclusion about the entry itself (GY-94).
@@ -796,38 +1000,80 @@ export function ejectionReason(work: Work, ciAppIds: number[], all: Work[] = [],
   if (work.policyRevision !== work.queue.policyRevision) return `Policy revision changed from ${work.queue.policyRevision} to ${work.policyRevision} after this entry was queued`;
   if (work.blocker) return `Queued work was blocked: ${work.blocker}`;
   if (work.violations.length) return `Queued work has an open violation: ${work.violations[0]}`;
+  const refused = standingMergeRefusal(work);
+  if (refused) return refused;
   const candidate = work.candidate, observation = work.observation;
   if (!candidate || !observation || observation.candidate.sha !== candidate.sha || observation.candidate.baseSha !== candidate.baseSha) return null;
   const tip = candidate.sha.slice(0, 12);
   if (observation.prState === 'closed') return 'Pull request was closed without merging';
+  // A tip still built behind an entry that left without landing (GY-568) is not reverting anything
+  // of its own: when its tree shows a refused conclusion — the unlanded work of the entries it was
+  // built behind — it leaves the queue so the control plane restores it, and the reason says so.
+  // A tip whose tree shows nothing refused is not ejected: the queue rebuilds it from the item's
+  // own reviewed head instead. The gate reads the tree before the carried-items excusal (GY-871):
+  // the carried work is what the restore is for, never this entry's revert.
+  const unexcused = staleTipRegressions(work, observation, all);
+  const stale = unexcused.length ? staleSpeculativeTip(work, all) : null;
+  if (stale) return `Speculative tip ${tip} was built behind ${stale.departed.join(', ')}, which left the merge queue without landing; landing it on ${unexcused[0].base.slice(0, 12)} would carry their unlanded work (${unexcused.map(entry => entry.text).join('; ')}), so the branch is restored to its own reviewed head`;
   // The base this entry would land on holds work its head would delete, revert or rewrite: an
   // observed adverse conclusion about the tip, which only a new head can answer. It names every
-  // file and the item that owns it; a file the observation could not compare ejects nothing.
+  // file and the item that owns it; a file the observation could not compare ejects nothing, and
+  // a file carried from another item's commits on this head is excused exactly as the build gate
+  // excuses it (GY-871), so nothing that passed build is ejected over the same files.
   const regressions = queuedRegressions(work, observation, all);
   if (regressions.length) return `Landing speculative tip ${tip} on ${regressions[0].base.slice(0, 12)} would revert work outside its planned files: ${regressions.map(entry => entry.text).join('; ')}`;
   // Observations retain every run, including superseded ones; only the newest trusted run
   // for a required check decides, exactly as the test gate does, so a successful retry
   // never leaves an entry ejected by the failure it replaced.
-  const check = work.policy.checks.find(name => {
-    const run = latestCheck(observation.checks.filter(entry => entry.name === name && ciAppIds.includes(entry.appId)));
-    return !!run && failedConclusions.has(run.result);
-  });
-  // A batch member's tip holds every member ahead of it, so a failure there is not yet its own
-  // (GY-330): it is ejected only when the batch plan isolates it — its tip fails on a prefix known
-  // to pass, or on the base — and otherwise stays queued while the bisection runs. A head that is
-  // not its published tip holds no other member, and fails on its own as ever.
+  const check = failedRequiredCheck(work, observation, ciAppIds);
+  // Under a parallel-tip window (GY-498) the prefix tips isolate the culprit in one round instead
+  // of a bisection. Outside the window nothing is required of the entry yet, and a failure on a
+  // tip it still holds is inherited from the entries ahead (the waiting batch's rule); a head that
+  // is not its published tip holds no other entry and fails on its own. Inside the window, the
+  // entry is ejected when its own tip is the FIRST failing one — the tip ahead of it passed, so
+  // the failure is what this entry's change added. An earlier failing tip, or a published tip
+  // whose prediction moved on (a predecessor landed or left; the tip is rebuilt there before it is
+  // judged again), means the failure is inherited: the entry stays queued.
   const speculation = work.queue.speculation;
+  const publishedTip = speculation?.tip === candidate!.sha && speculation.base === candidate!.baseSha;
+  if (check && window) {
+    if (!window.tips.length) return publishedTip ? null : `Required CI check ${check} did not pass on speculative tip ${tip}`;
+    const own = window.own;
+    if (!own?.tip && publishedTip) return null;
+    if (own && own.tip === candidate!.sha && window.firstFailure && window.firstFailure !== own) return null;
+    // Its own tip failing is attributed to it only once every tip ahead is a known pass (GY-471):
+    // a tip ahead still running may yet fail on the same change, and the failure is then inherited.
+    if (own && own.tip === candidate!.sha && !aheadPassed(window)) return null;
+    const passedAhead = own && own.tip === candidate!.sha && window.firstFailure === own && window.tips.length > 1
+      ? `, attributed to this entry: speculative tip ${window.tips.at(-2)!.tip?.slice(0, 12)} ahead of it passed ${check}`
+      : '';
+    return `Required CI check ${check} did not pass on speculative tip ${tip}${rerunOutcome(work, candidate.sha, check)}${passedAhead}`;
+  }
   const planned = !!batch && speculation?.tip === candidate.sha && speculation.base === candidate.baseSha;
   const isolated = !planned || batch!.step.kind === 'eject' && batch!.step.member === work.key;
-  if (check && isolated) return `Required CI check ${check} did not pass on speculative tip ${tip}${planned && batch!.size > 1 ? `, isolated by bisecting batch ${batch.batch} (${batch.members.join(', ')})` : ''}`;
+  if (check && isolated) return `Required CI check ${check} did not pass on speculative tip ${tip}${rerunOutcome(work, candidate.sha, check)}${planned && batch!.size > 1 ? `, isolated by bisecting batch ${batch.batch} (${batch.members.join(', ')})` : ''}`;
   if (observation.reviews.some(review => review.sha === candidate.sha && review.state === 'CHANGES_REQUESTED')) return `Review requested changes on speculative tip ${tip}`;
   // Unresolved threads are the reviewer's inputs, not a reason to eject; only a branch that still
   // requires conversation resolution (protection drift) makes a merge GitHub cannot land.
   const threads = conversationProtectionRefusal(work);
   if (threads) return threads;
   // Evidence binds the tip exactly or carried across a Graphyard-authored tip; either way a
-  // failure or a withdrawal of it is an adverse conclusion about this tip.
-  const proof = work.evidence.find(item => item.trusted && item.result === 'fail' && evidenceBindsCandidate(work, item) && item.policyRevision === work.policyRevision);
+  // failure or a withdrawal of it is an adverse conclusion about this tip. One record is not:
+  // a trusted `manual:` proof whose executed is 0 (GY-868) judged nothing — it is the unexercised
+  // finding the gates read it as (producerManualFailures excludes it), answered by the attestation
+  // the loop requests for it exact or carried (unexercisedFindings reads the carry), so the entry
+  // is held for that attestation rather than ejected for a failure no rework would ever be
+  // requested for (GY-875). GY-910: that attestation is requested only for a proof a criterion of
+  // this item names (attestationDecision, attestationExercise). A proof inherited from a bootstrap
+  // obligation is named by no local criterion, and for it nothing can request that attestation —
+  // proofRework excludes every unexercised manual finding and the proof group's failed state
+  // refuses a producer relaunch — so holding the entry for it would keep this entry and every
+  // entry behind it queued forever. The hold exempts only an attestable proof; any other
+  // executed = 0 record is the adverse conclusion it reads as and ejects, so the order moves and
+  // the control plane restores the branch.
+  const proof = work.evidence.find(item => item.trusted && item.result === 'fail' && evidenceBindsCandidate(work, item) && item.policyRevision === work.policyRevision
+    && !(item.proof.startsWith('manual:') && item.executed === 0
+      && work.criteria.some(criterion => criterion.proofs.includes(item.proof))));
   if (proof) return `Proof ${proof.proof} failed on speculative tip ${tip}`;
   // A withdrawn proof is an explicit adverse conclusion, not a missing one: the entry leaves the
   // queue instead of holding its position while everything behind it waits.
@@ -847,6 +1093,16 @@ export function currentRestore(work: Pick<Work, 'candidate' | 'baseRefresh' | 'p
   if (!refresh?.restore || !candidate || refresh.policyRevision !== work.policyRevision) return null;
   // Pending: the contaminated head is still the candidate. Performed: the candidate is what the restore produced.
   return refresh.restore.contaminated === candidate.sha || refresh.head === candidate.sha ? refresh : null;
+}
+/**
+ * GY-638. Whether the restore recorded for exactly the current head found no own reviewed head
+ * under the foreign commits: no restore is left to promise this head, so its gates route it to
+ * rework instead of the resync whose fresh observation would only repeat the same refusal.
+ */
+export function unrepairableRestore(work: { candidate?: Work['candidate']; baseRefresh?: Work['baseRefresh']; policyRevision?: number }): boolean {
+  const refresh = work.baseRefresh, candidate = work.candidate, restore = refresh?.restore;
+  if (!restore || !candidate || refresh!.policyRevision !== work.policyRevision) return false;
+  return restore.outcome === 'unrepairable' && (restore.contaminated === candidate.sha || refresh!.head === candidate.sha);
 }
 /** A repair the coordinator requested for the current head that has not run yet. */
 export function pendingRestore(work: Work): BranchRestore | null {
@@ -895,8 +1151,63 @@ export function ejectedTipRestore(work: Work, all: Work[]): { contaminated: stri
   return { contaminated: contamination.head, foreign: contamination.foreign, own: contamination.own, reason: `ejected from the merge queue: ${ejection.reason}` };
 }
 
-/** The reason `advanceQueue` ejects an entry whose speculative merge conflicts (github.ts SpeculativeConflict). */
+/**
+ * GY-568. The speculative tip the current candidate is, when it was built behind predecessors of
+ * which one or more has since left the merge queue without landing: `departed` names them. Such a
+ * tip holds their unlanded commits by the queue's own construction, so its tree says nothing about
+ * the item's change until the control plane restores the branch to the item's own reviewed head
+ * (`ejectedTipRestore`) or the queue rebuilds the tip from it. Null for any other head: a worker's
+ * push, a restored or refreshed head, or a tip whose predecessors are all still queued ahead or landed.
+ */
+export function staleSpeculativeTip(work: Pick<Work, 'id' | 'candidate' | 'queueHistory'>, all: Work[]): { tip: string; own: string | null; predecessors: string[]; departed: string[] } | null {
+  const candidate = work.candidate;
+  if (!candidate) return null;
+  const predicted = [...(work.queueHistory ?? [])].reverse().find(entry => entry.event === 'predicted' && entry.tip === candidate.sha);
+  if (!predicted?.predecessors?.length) return null;
+  const departed = predicted.predecessors.filter(key => {
+    const item = all.find(entry => entry.key === key);
+    if (!item || item.id === work.id || item.stage === 'done' || item.observation?.merged) return false;
+    // Still queued ahead of where this tip was predicted: the tip holds it as the queue intends.
+    return !item.queue || item.queue.sequence > predicted.sequence;
+  });
+  return departed.length ? { tip: candidate.sha, own: predicted.from && predicted.from !== candidate.sha ? predicted.from : null, predecessors: predicted.predecessors, departed } : null;
+}
+/** The build-gate reason of a candidate waiting for its branch to be restored after a predecessor's ejection (GY-568). */
+export const restoringAfterEjectionPrefix = 'Restoring after predecessor ejection: ';
+/**
+ * GY-568. Why the tree of this candidate is not judged yet, or null when it may be. A stale
+ * speculative tip (`staleSpeculativeTip`) is refused by nothing its tree shows — no out-of-scope
+ * revert, no conflict, no failed mechanical proof — and sent to no worker: it waits under this one
+ * reason while the control plane restores the branch, and until GitHub is observed at the head the
+ * restore produced. Only a restore that found no own head (`unrepairable`) hands the head back to
+ * the gates, whose record names rework as the remedy.
+ */
+export function restoringAfterEjection(work: Work, all: Work[]): string | null {
+  if (work.stage === 'done' || work.observation?.merged || !work.submission) return null;
+  const stale = staleSpeculativeTip(work, all);
+  if (!stale) return null;
+  const refresh = currentRestore(work), restore = refresh?.restore;
+  if (restore?.outcome === 'unrepairable') return null;
+  const restored = restore?.performedAt && refresh!.head && refresh!.head !== stale.tip ? refresh!.head : null;
+  const own = stale.own ? `its own reviewed head ${stale.own.slice(0, 12)}` : 'its own reviewed head';
+  return `${restoringAfterEjectionPrefix}candidate ${stale.tip.slice(0, 12)} is a speculative tip built behind ${stale.departed.join(', ')}, which left the merge queue without landing, so its tree holds their unlanded work; ${restored
+    ? `Graphyard restored the branch to ${restored.slice(0, 12)} (${own} brought onto the base), and its gates are judged once GitHub is observed at that head`
+    : `Graphyard restores the branch to ${own} brought onto the base before its tree is judged`}, and no worker is asked to change it`;
+}
+
+/**
+ * The reason `advanceQueue` ejected an entry whose speculative merge conflicts, as it was worded
+ * before ejections recorded `conflict` (GY-252). Read only for those legacy records.
+ */
 export const speculativeConflictReason = /^Speculative merge of [0-9a-f]+ into .+ conflicts/;
+/**
+ * Whether an ejection was a speculative-merge conflict. The typed `conflict` field decides; the
+ * reason text is consulted only for a record written before the field existed, so rewording the
+ * conflict message can never stop a conflict from being recognised.
+ */
+export function speculativeConflict(ejection: Pick<QueueEjection, 'reason' | 'conflict'>): boolean {
+  return ejection.conflict === undefined ? speculativeConflictReason.test(ejection.reason) : !!ejection.conflict;
+}
 /**
  * GY-321. The predecessors a speculative-merge conflict of exactly the current head was found
  * behind, or null when the ejection is anything else: another reason, another head or policy, or a
@@ -907,7 +1218,7 @@ export const speculativeConflictReason = /^Speculative merge of [0-9a-f]+ into .
 export function predecessorConflict(work: Pick<Work, 'candidate' | 'queue' | 'queueEjection' | 'policyRevision'>): string[] | null {
   const ejection = work.queueEjection, candidate = work.candidate;
   if (work.queue || !ejection || !candidate || ejection.sha !== candidate.sha || ejection.policyRevision !== work.policyRevision) return null;
-  if (!speculativeConflictReason.test(ejection.reason) || !ejection.predecessors?.length) return null;
+  if (!speculativeConflict(ejection) || !ejection.predecessors?.length) return null;
   return ejection.predecessors;
 }
 /**
@@ -1059,11 +1370,43 @@ export function describeGitHubQueue(work: Pick<Work, 'observation'>): string | n
 // named, while every passing prefix merges. The chain of speculative tips already makes each
 // prefix of the queue a commit of its own — an entry's tip holds every validated entry ahead of it
 // — so a batch's combined tip is its last member's tip, and each half is a prefix tip.
+// The live queue now validates under a parallel-tip window instead (GY-498, below): every entry is
+// judged on its own tip and a failure is attributed by prefix, so no bisection is needed. The
+// batch plan remains the reference model runMergeBatches drives and the fallback when no window is
+// passed; the published batch size still widens the observation band and the wake depth.
 
 /** Consecutive entries one combined tip validates when master config sets no `mergeQueue.batchSize`; 1 is one tip per entry. */
 export const defaultMergeBatchSize = 4;
 /** The largest batch size master config and the control plane accept. */
 export const maxMergeBatchSize = 32;
+/**
+ * How long a head batch may sit in 'testing' with no published tip before it is dissolved
+ * (GY-506): ten minutes past the first evaluation that found the state, so a wedged batch costs
+ * the queue at most one CI-timeout's worth of waiting before its members validate singly again.
+ */
+export const stuckBatchMs = 10 * 60_000;
+/** Canonical JSON: object keys sorted, so two views equal in content compare equal whatever key order each holds. */
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(entry => canonicalJson(entry)).join(',')}]`;
+  if (value && typeof value === 'object') return `{${Object.keys(value as object).sort().map(key => `${JSON.stringify(key)}:${canonicalJson((value as Record<string, unknown>)[key])}`).join(',')}}`;
+  return JSON.stringify(value) ?? 'null';
+}
+/**
+ * Whether a re-derived batch view equals the one stored on the queue entry, content for content.
+ * Postgres jsonb does not preserve object key order, and the derived view names `batch` last
+ * while jsonb stores keys shortest-first: rewriting the stored entry with an equal view changed
+ * the document on every evaluation, so every reconcile pass re-saved every queued entry and every
+ * in-flight observation lost the revision race (GY-506). An equal view keeps the stored entry.
+ */
+export function sameMergeBatch(left: MergeBatchView | null | undefined, right: MergeBatchView | null | undefined): boolean {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  return canonicalJson(left) === canonicalJson(right);
+}
+/** Whether a re-derived parallel-tip slice (GY-498) equals the stored one, content for content, as `sameMergeBatch` compares batch views. */
+export function sameTips(left: TipView[] | null | undefined, right: TipView[] | null | undefined): boolean {
+  return canonicalJson(left ?? null) === canonicalJson(right ?? null);
+}
 /** The installation-ledger event recording the batch size the master published (POST /api/merge-queue). */
 export const mergeBatchSizeEvent = 'merge-queue.batch-size';
 /** A combined tip's verdict: every required check passed, or the first one that failed. */
@@ -1139,9 +1482,144 @@ export function tipVerdict(work: Work, ciAppIds: readonly number[] | null = null
   const speculation = work.queue?.speculation, candidate = work.candidate, observation = work.observation;
   if (!speculation || !candidate || speculation.tip !== candidate.sha || !observation || observation.candidate.sha !== candidate.sha) return undefined;
   const runs = (work.policy?.checks ?? []).map(name => ({ name, run: latestCheck((observation.checks ?? []).filter(entry => entry.name === name && (!ciAppIds || ciAppIds.includes(entry.appId)))) }));
-  const failed = runs.find(entry => !!entry.run && failedConclusions.has(entry.run.result));
-  if (failed) return { result: 'fail', check: failed.name };
+  // A failure awaiting its one rerun (GY-516) is not yet a verdict: the batch waits, as for a pending run.
+  const failed = failedRequiredCheck(work, observation, ciAppIds);
+  if (failed) return { result: 'fail', check: failed };
+  if (runs.some(entry => !!entry.run && failedConclusions.has(entry.run.result))) return undefined;
   return runs.every(entry => entry.run?.result === 'success') ? { result: 'pass' } : undefined;
+}
+
+// ---- Validating queue positions in parallel (GY-498) ---------------------------------------------
+// One combined tip at a time capped throughput: every entry waited for its predecessor's batch to
+// be judged and land, and a failure cost a bisection round per halving. As GitHub's own merge queue
+// and bors do, the queue instead validates speculative tips for the first `mergeQueue.parallelTips`
+// positions at once: tip k holds entries 1..k and is built on tip k-1 without waiting for tip k-1's
+// CI to finish, so all the window's tips run CI concurrently. An entry whose tip and every tip
+// ahead of it passed merges as soon as it heads the queue, with no CI left to wait for. When tip k
+// fails, the entries before it still merge; the failure is attributed to entry k — its tip is the
+// first failing one, so its change is what tip k-1 did not hold — and only the tips after k are
+// rebuilt on the new prediction. The verdicts come from the published tips' own observations, so
+// attribution needs no output reading: the prefix of passing tips isolates the culprit exactly as a
+// bisection would, in one round instead of log-many.
+
+/** How many queue positions are validated at once when master config sets no `mergeQueue.parallelTips`. */
+export const defaultParallelTips = 4;
+/** The largest parallel-tip window master config and the control plane accept (GY-498 review: beyond this, GitHub-side contention, not the queue plan, limits throughput). */
+export const maxParallelTips = 16;
+/** The installation-ledger event recording the parallel-tip window the master published (POST /api/merge-queue). */
+export const mergeParallelTipsEvent = 'merge-queue.parallel-tips';
+/** One in-flight speculative tip: what it holds, where it is published, and what CI said about it. */
+export interface TipView {
+  /** 1-based: this tip holds the first `position` validated entries. */
+  position: number;
+  /** The keys of the entries the tip holds, in queue order. */
+  entries: string[];
+  /** The published tip commit, or null while it is not published and bound for its entry. */
+  tip: string | null;
+  /** CI on the tip's required checks: `pass`, `fail`, `running` (some run reported and pending), or `none`. */
+  ci: 'pass' | 'fail' | 'running' | 'none';
+  /** The required check that failed, when `ci` is `fail`. */
+  failedCheck?: string;
+}
+/** The tips one queued entry merges behind, and what the window's verdicts mean for it. */
+export interface TipWindowView {
+  /** The entry's 0-based place in the validated chain. */
+  position: number;
+  /** The tips this entry merges behind: positions 1..position+1; empty once outside the window. */
+  tips: TipView[];
+  /** The first tip among them whose required checks failed, or null. */
+  firstFailure: TipView | null;
+  /** True when every tip this entry merges behind passed: nothing is left to wait for but its turn. */
+  validated: boolean;
+  /** The tip view of the entry's own published tip, when it is the current candidate; null otherwise. */
+  own: TipView | null;
+}
+/** True when every tip ahead of the entry's own passed: a failure on its own tip is then its change's. */
+export const aheadPassed = (view: Pick<TipWindowView, 'tips'>) => view.tips.slice(0, -1).every(tip => tip.ci === 'pass');
+/** The CI a published tip's required checks are at, read from the observation of exactly that commit. */
+function tipCi(work: Work, ciAppIds: readonly number[] | null): { ci: TipView['ci']; failedCheck?: string } {
+  const observation = work.observation, candidate = work.candidate;
+  if (!observation || !candidate || observation.candidate.sha !== candidate.sha) return { ci: 'none' };
+  const runs = (work.policy?.checks ?? []).map(name => ({ name, run: latestCheck(observation.checks.filter(entry => entry.name === name && (!ciAppIds || ciAppIds.includes(entry.appId)))) }));
+  const failed = runs.find(entry => !!entry.run && failedConclusions.has(entry.run.result) && !holdingCheckRerun(work, candidate.sha, entry.name, entry.run));
+  if (failed) return { ci: 'fail', failedCheck: failed.name };
+  if (runs.length > 0 && runs.every(entry => entry.run?.result === 'success')) return { ci: 'pass' };
+  return { ci: runs.some(entry => !!entry.run) ? 'running' : 'none' };
+}
+/**
+ * The parallel-tip window (GY-498) over the validated chain, per queued entry: the first
+ * `parallelTips` positions' tips, and for every entry the slice of them it merges behind. Entries
+ * outside the window get an empty `tips` slice: nothing is required of them until the entries
+ * ahead land, exactly as a waiting batch required nothing.
+ */
+export function describeTipWindow(all: Work[], placements: QueuePlacement[], parallelTips: number, ciAppIds: readonly number[] | null = null): Map<string, TipWindowView> {
+  const size = Math.max(1, Math.floor(parallelTips));
+  const tips = tipWindowStatus(all, placements, size, ciAppIds);
+  const views = new Map<string, TipWindowView>();
+  for (const [index, placement] of validatedChain(placements).entries()) {
+    if (index >= size) { views.set(placement.key, { position: index, tips: [], firstFailure: null, validated: false, own: null }); continue; }
+    const mine = tips.slice(0, index + 1);
+    views.set(placement.key, { position: index, tips: mine, firstFailure: mine.find(tip => tip.ci === 'fail') ?? null, validated: mine.every(tip => tip.ci === 'pass'), own: mine.at(-1) ?? null });
+  }
+  return views;
+}
+/** The placements the window validates, in queue order: every entry not passed over. */
+const validatedChain = (placements: QueuePlacement[]) => placements.filter(placement => !placement.passedOver).sort((a, b) => a.position - b.position || a.sequence - b.sequence);
+/**
+ * The in-flight tips (GY-498): the window's tips with what they hold and what CI said. Master
+ * status reports exactly these, and `describeTipWindow` slices them per entry for the gates, so
+ * the two never diverge.
+ */
+export function tipWindowStatus(all: Work[], placements: QueuePlacement[], parallelTips: number, ciAppIds: readonly number[] | null = null): TipView[] {
+  const size = Math.max(1, Math.floor(parallelTips)), chain = validatedChain(placements);
+  const byKey = new Map(all.map(work => [work.key, work]));
+  return chain.slice(0, size).map((placement, index) => {
+    const work = byKey.get(placement.key);
+    const published = !!placement.tip && !!work?.candidate && work.candidate.sha === placement.tip;
+    return { position: index + 1, entries: chain.slice(0, index + 1).map(entry => entry.key), tip: published ? placement.tip : null,
+      ...(published && work ? tipCi(work, ciAppIds) : { ci: 'none' as const }) };
+  });
+}
+/**
+ * The window as a batch view (GY-330 shape), recorded on the queue entry so the gates' existing
+ * readers — the dashboard's Merge step, status rows — show the window without a second display
+ * model. The summary names each in-flight tip with its position, its entries and its CI state.
+ */
+export function windowBatchView(key: string, view: TipWindowView, parallelTips: number): MergeBatchView {
+  const unjudged = view.tips.filter(tip => tip.ci !== 'pass');
+  const failing = view.firstFailure;
+  // An own failing tip behind an unjudged one is not attributed yet: the entry waits on the tip ahead.
+  const attributed = !!failing && failing === view.own && aheadPassed(view);
+  const pendingAhead = !!failing && failing === view.own && !attributed ? unjudged.find(tip => tip !== failing) ?? null : null;
+  const state: MergeBatchView['state'] = view.tips.length === 0 ? 'waiting' : attributed ? 'ejecting' : failing ? 'waiting' : unjudged.length ? 'testing' : 'merging';
+  const step: BatchStep = view.tips.length === 0 ? { kind: 'test', combination: [] }
+    : attributed ? { kind: 'eject', member: key, check: failing!.failedCheck! }
+      : pendingAhead ? { kind: 'test', combination: pendingAhead.entries }
+      : failing ? { kind: 'test', combination: failing.entries }
+      : unjudged.length ? { kind: 'test', combination: unjudged.at(-1)!.entries } : { kind: 'merge', members: view.tips.at(-1)!.entries };
+  const underTest = unjudged.length ? { members: unjudged.at(-1)!.entries, tip: unjudged.at(-1)!.tip } : null;
+  const said = (tip: TipView) => tip.ci === 'pass' ? 'passed' : tip.ci === 'fail' ? `failed ${tip.failedCheck}` : tip.ci === 'running' ? 'running' : 'not validated';
+  const summary = view.tips.length === 0 ? `outside the window of ${Math.max(1, Math.floor(parallelTips))} parallel tips; waits for the entries ahead to land`
+    : `${view.tips.map(tip => `tip ${tip.position} (${tip.entries.join(', ')}) ${said(tip)}`).join('; ')}`;
+  return { batch: 1, size: view.tips.length || 1, members: view.tips.at(-1)?.entries ?? [], tip: view.tips.at(-1)?.tip ?? null, underTest, state, step, summary };
+}
+/**
+ * Merges and queue waits as master status reports them (GY-498): merges in the trailing hour, by
+ * GitHub's merge time (the delivery's, else the observation's), and the median wait so far of the
+ * entries queued now. Insights reports the same two figures over its window from the flow facts.
+ */
+export interface MergeThroughput { mergesPerHour: number; medianQueueWaitMs: number | null }
+export function mergeThroughput(all: Work[], now: number): MergeThroughput {
+  const hourAgo = now - 3_600_000;
+  const mergedAt = (work: Work) => Date.parse(work.delivery?.mergedAt ?? (work.observation?.merged ? work.observation.mergedAt ?? '' : ''));
+  const mergesPerHour = all.filter(work => { const at = mergedAt(work); return at >= hourAgo && at <= now; }).length;
+  const waits = predictQueue(all, now).map(placement => placement.waitMs).sort((a, b) => a - b);
+  const median = waits.length ? waits.length % 2 ? waits[(waits.length - 1) / 2] : (waits[waits.length / 2 - 1] + waits[waits.length / 2]) / 2 : null;
+  return { mergesPerHour, medianQueueWaitMs: median };
+}
+/** What master status reports about the running queue (GY-498): the throughput Insights and the in-flight tips. */
+export function mergeQueueInsights(all: Work[], now: number, parallelTips: number, ciAppIds: readonly number[] | null = null) {
+  return { ...mergeThroughput(all, now), tips: tipWindowStatus(all, predictQueue(all, now), parallelTips, ciAppIds) };
 }
 /** One batch as master status and the dashboard show it: a substate of the Merge step, never a return to Test. */
 export interface MergeBatchView {
@@ -1160,15 +1638,28 @@ export interface MergeBatchView {
  * Each prefix of the chain is an entry's own tip, so a batch's combined tip is its last member's,
  * each half a bisection tests is the tip of the half's last member, and a verdict is the required
  * checks as observed on that tip. The head batch acts; the batches behind it wait their turn.
+ * Entries named by a live stuck-batch dissolution (GY-506) are validated one at a time: each is
+ * its own batch, in the chain's existing order, and no batch spans one of them.
  */
 export function describeMergeBatches(all: Work[], placements: QueuePlacement[], batchSize: number, ciAppIds: readonly number[] | null = null): Map<string, MergeBatchView> {
   const size = Math.max(1, Math.floor(batchSize));
   const chain = placements.filter(placement => !placement.passedOver).sort((a, b) => a.position - b.position || a.sequence - b.sequence);
   const byKey = new Map(all.map(work => [work.key, work]));
   const placed = new Map(chain.map(placement => [placement.key, placement]));
+  // The dissolutions on record that still hold: every member they named is still a live queued entry.
+  const live = new Set(chain.map(placement => placement.key));
+  const singles = new Set<string>();
+  for (const work of all) {
+    const dissolved = work.queue?.batchDissolved;
+    if (!dissolved || !dissolved.members.every(key => live.has(key))) continue;
+    for (const key of dissolved.members) if (live.has(key)) singles.add(key);
+  }
   const views = new Map<string, MergeBatchView>();
-  for (let start = 0, batch = 1; start < chain.length; start += size, batch++) {
-    const members = chain.slice(start, start + size).map(placement => placement.key);
+  let start = 0, batch = 1;
+  while (start < chain.length) {
+    let width = singles.has(chain[start].key) ? 1 : Math.min(size, chain.length - start);
+    if (width > 1) for (let end = start + 1; end < start + width; end++) if (singles.has(chain[end].key)) { width = end - start; break; }
+    const members = chain.slice(start, start + width).map(placement => placement.key);
     const tipOf = (key: string) => placed.get(key)?.tip ?? null;
     const verdict = (prefix: string[]) => { const last = byKey.get(prefix.at(-1)!); return last && tipOf(last.key) ? tipVerdict(last, ciAppIds) : undefined; };
     // The batches ahead are this batch's base: their combined tip is the tip of the entry just before it.
@@ -1179,13 +1670,14 @@ export function describeMergeBatches(all: Work[], placements: QueuePlacement[], 
     const state: MergeBatchView['state'] = !head ? 'waiting' : step.kind === 'merge' ? 'merging' : step.kind === 'eject' ? 'ejecting' : step.combination.length === members.length ? 'testing' : 'bisecting';
     const underTest = step.kind === 'test' ? { members: step.combination, tip: tipOf(step.combination.at(-1)!) } : null;
     const tip = tipOf(members.at(-1)!);
-    const named = `batch ${batch} (${members.join(', ')})`;
+    const named = `batch ${batch} (${members.join(', ')})${singles.has(members[0]) ? ', dissolved from a stuck batch' : ''}`;
     const summary = state === 'waiting' ? `${named} waits for batch ${batch - 1} to merge`
       : state === 'merging' ? `${named}: combined tip ${tipOf((step as { members: string[] }).members.at(-1)!)?.slice(0, 12) ?? 'unpublished'} passed; merging ${(step as { members: string[] }).members.join(', ')} in order`
       : state === 'ejecting' ? `${named}: ${(step as { member: string }).member} is isolated as failing ${(step as { check: string }).check} and is ejected; the rest stay queued`
       : state === 'bisecting' ? `${named}: the combined tip failed; bisecting on the tip of ${underTest!.members.join(', ')}${underTest!.tip ? ` (${underTest!.tip.slice(0, 12)})` : ''}`
       : `${named}: validating combined tip ${tip?.slice(0, 12) ?? '(not yet published)'}`;
     for (const key of members) views.set(key, { batch, size: members.length, members, tip, underTest, state, step, summary });
+    start += width; batch++;
   }
   return views;
 }
@@ -1202,4 +1694,146 @@ export function queueBatch(work: Pick<Work, 'key'>, all: Work[], now: number, ba
  */
 export function nextQueueEntries<W extends { id: string; stage: string; queue?: { sequence: number } | null }>(all: readonly W[], exclude: string, depth: number): W[] {
   return all.filter(other => other.id !== exclude && other.stage !== 'done' && other.queue).sort((a, b) => a.queue!.sequence - b.queue!.sequence).slice(0, depth);
+}
+
+/**
+ * GY-516. One rerun of a failed required check before it counts. A single infrastructure flake on
+ * a validated tip (a database torn down under a test, a runner lost) otherwise ejects the entry and
+ * costs the whole queue a review, proof and CI round for a failure that is not the change's. The
+ * control plane asks GitHub to rerun the failed jobs of that workflow run once, per candidate sha
+ * and check, and while the rerun is owed or running the failure holds: the entry keeps its queue
+ * position and every binding on the unchanged sha. The rerun's own conclusion then decides as any
+ * run does; a second failure on the same sha ejects, or returns the head to its worker, as before.
+ */
+declare module './model/work.js' {
+  interface Work {
+    /** GY-516: the reruns of failed required checks, per candidate sha and check (see `reconcileCheckReruns`). */
+    checkReruns?: CheckRerun[];
+  }
+}
+export interface CheckRerun {
+  /** The candidate sha (a published tip or a head) and the required check that failed on it. */
+  sha: string; check: string;
+  /** The failed check run the rerun answers; its workflow run is the one GitHub reruns. */
+  failedRunId: number;
+  /**
+   * `owed` until the control plane asks GitHub, `requested` once GitHub accepted, `refused` when it
+   * did not (the failure then stands), and the rerun's conclusion once observed: `passed` or
+   * `failed`. `expired` is a request whose rerun never appeared within `checkRerunVisibilityMs`.
+   */
+  state: 'owed' | 'requested' | 'refused' | 'passed' | 'failed' | 'expired';
+  at: string;
+  /** The workflow run GitHub reruns, once asked. */
+  runId?: number;
+  /** The check run of the rerun, once observed. */
+  rerunId?: number;
+  detail?: string;
+  resolvedAt?: string;
+}
+/** The installation-ledger event recording the rerun count the master published (POST /api/merge-queue). */
+export const rerunFailedChecksEvent = 'merge-queue.rerun-failed-checks';
+/** An owed or accepted rerun with no new check run after this long no longer holds the failure. */
+export const checkRerunVisibilityMs = 15 * 60_000;
+/** Rerun records kept on an item; older ones remain on the ledger. */
+export const checkRerunLimit = 20;
+const holdingRerun = new Set<CheckRerun['state']>(['owed', 'requested']);
+
+export function checkReruns(work: Pick<Work, 'checkReruns'>): CheckRerun[] {
+  return work.checkReruns ?? [];
+}
+/** The rerun holding `run`, the failed latest run of `check` on `sha`: owed or requested for exactly that run. */
+export function holdingCheckRerun(work: Pick<Work, 'checkReruns'>, sha: string, check: string, run: Observation['checks'][number] | undefined): CheckRerun | null {
+  if (!run || run.id === undefined || !failedConclusions.has(run.result)) return null;
+  return checkReruns(work).find(entry => entry.sha === sha && entry.check === check && entry.failedRunId === run.id && holdingRerun.has(entry.state)) ?? null;
+}
+/**
+ * Whether `check`'s newest run on the observed current candidate failed and is held by its one
+ * owed or requested rerun: the loop's decisions and the test gate's next action then wait for the
+ * rerun instead of returning the head to its worker, which would cost the bindings the rerun keeps.
+ */
+export function checkRerunHeld(work: Pick<Work, 'checkReruns' | 'candidate' | 'observation' | 'gates'>, check: string): boolean {
+  const observation = work.observation, sha = work.candidate?.sha;
+  if (!observation || !sha || observation.candidate.sha !== sha) return false;
+  return !!holdingCheckRerun(work, sha, check, requiredCheck(work, check));
+}
+/** The required check whose newest trusted run failed on the observed candidate and is not held by a rerun. */
+function failedRequiredCheck(work: Work, observation: Observation, ciAppIds: readonly number[] | null): string | undefined {
+  return (work.policy?.checks ?? []).find(name => {
+    const run = latestCheck((observation.checks ?? []).filter(entry => entry.name === name && (!ciAppIds || ciAppIds.includes(entry.appId))));
+    return !!run && failedConclusions.has(run.result) && !holdingCheckRerun(work, observation.candidate.sha, name, run);
+  });
+}
+/** A transition of a rerun record, as the engine writes it to the item's ledger. */
+export interface CheckRerunTransition { kind: 'check.rerun.owed' | 'check.rerun.passed' | 'check.rerun.failed' | 'check.rerun.expired' | 'check.rerun.requested'; rerun: CheckRerun }
+/**
+ * Brings the rerun records up to the observation just taken, before the gates read it: a rerun
+ * whose own run concluded is resolved with that conclusion, one that never appeared expires, and
+ * each required check whose newest run failed on the current candidate is owed one rerun while
+ * fewer than `limit` were made for that sha and check (0 disables). Pure: the engine records the
+ * transitions, and the GitHub request is made outside the transaction (`owedCheckReruns`).
+ */
+export function reconcileCheckReruns(work: Work, ciAppIds: readonly number[], limit: number, now: Date): { reruns: CheckRerun[]; transitions: CheckRerunTransition[] } {
+  const observation = work.observation, candidate = work.candidate, at = now.toISOString();
+  const transitions: CheckRerunTransition[] = [];
+  let reruns = checkReruns(work);
+  if (!observation || !candidate || observation.candidate.sha !== candidate.sha || observation.merged) return { reruns, transitions };
+  const latestOf = (name: string) => latestCheck((observation.checks ?? []).filter(entry => entry.name === name && ciAppIds.includes(entry.appId)));
+  reruns = reruns.map(entry => {
+    if (entry.sha !== candidate.sha || !holdingRerun.has(entry.state)) return entry;
+    const run = latestOf(entry.check);
+    if (run && run.id !== undefined && run.id !== entry.failedRunId) {
+      // GitHub's rerun is a new check run on the same sha: its conclusion is the rerun's outcome.
+      if (run.result === 'success') { const resolved = { ...entry, state: 'passed' as const, rerunId: run.id, resolvedAt: at }; transitions.push({ kind: 'check.rerun.passed', rerun: resolved }); return resolved; }
+      if (failedConclusions.has(run.result)) { const resolved = { ...entry, state: 'failed' as const, rerunId: run.id, resolvedAt: at }; transitions.push({ kind: 'check.rerun.failed', rerun: resolved }); return resolved; }
+      if (entry.state === 'owed') { const started = { ...entry, state: 'requested' as const, rerunId: run.id }; transitions.push({ kind: 'check.rerun.requested', rerun: started }); return started; }
+      return entry.rerunId === run.id ? entry : { ...entry, rerunId: run.id };
+    }
+    if (now.getTime() - Date.parse(entry.at) >= checkRerunVisibilityMs) {
+      const expired = { ...entry, state: 'expired' as const, detail: `${entry.state === 'owed' ? 'The rerun remained owed' : 'GitHub accepted the rerun'} but no new ${entry.check} run appeared within ${checkRerunVisibilityMs / 60_000} minutes`, resolvedAt: at };
+      transitions.push({ kind: 'check.rerun.expired', rerun: expired }); return expired;
+    }
+    return entry;
+  });
+  for (const name of work.policy?.checks ?? []) {
+    const run = latestOf(name);
+    if (!run || run.id === undefined || !failedConclusions.has(run.result)) continue;
+    const made = reruns.filter(entry => entry.sha === candidate.sha && entry.check === name);
+    if (made.some(entry => entry.failedRunId === run.id) || made.length >= limit) continue;
+    const owed: CheckRerun = { sha: candidate.sha, check: name, failedRunId: run.id, state: 'owed', at };
+    reruns = [...reruns, owed];
+    transitions.push({ kind: 'check.rerun.owed', rerun: owed });
+  }
+  return { reruns: reruns.slice(-checkRerunLimit), transitions };
+}
+/** The reruns the control plane still has to ask GitHub for: owed, on the current candidate, whose failed run is still the newest. */
+export function owedCheckReruns(work: Work, ciAppIds: readonly number[]): CheckRerun[] {
+  const observation = work.observation, candidate = work.candidate;
+  if (!observation || !candidate || observation.candidate.sha !== candidate.sha || observation.merged) return [];
+  return checkReruns(work).filter(entry => entry.sha === candidate.sha && entry.state === 'owed'
+    && latestCheck((observation.checks ?? []).filter(run => run.name === entry.check && ciAppIds.includes(run.appId)))?.id === entry.failedRunId);
+}
+/** What the last rerun of `check` on `sha` came to, as a clause for the failure it did not clear. */
+function rerunOutcome(work: Work, sha: string, check: string): string {
+  const last = checkReruns(work).filter(entry => entry.sha === sha && entry.check === check).at(-1);
+  return !last ? '' : last.state === 'failed' ? ', again after one rerun of its failed jobs'
+    : last.state === 'refused' ? `; its rerun was refused: ${last.detail ?? 'no reason given'}`
+    : last.state === 'expired' ? `; ${last.detail}` : '';
+}
+/** The test gate exposes the rerun even when this candidate has never entered the queue. */
+export function checkRerunStatus(work: Work, check: string): string {
+  const sha = work.candidate?.sha;
+  const last = checkReruns(work).filter(entry => entry.sha === sha && entry.check === check).at(-1);
+  if (!last) return '';
+  const state = last.state === 'owed' ? 'one rerun of its failed jobs is owed'
+    : last.state === 'requested' ? `its failed jobs are rerunning${last.runId ? ` (workflow run ${last.runId})` : ''}`
+    : last.state === 'failed' ? 'failed again after rerunning its failed jobs'
+    : last.state === 'passed' ? 'passed'
+    : `${last.state}: ${last.detail ?? 'no reason given'}`;
+  return `; rerun: ${state}`;
+}
+/** The reruns on the current candidate that still hold a failure, as `<sha>: <what is awaited>` lines. */
+export function pendingCheckReruns(work: Work): string[] {
+  const sha = work.candidate?.sha;
+  return checkReruns(work).filter(entry => entry.sha === sha && holdingRerun.has(entry.state))
+    .map(entry => `${entry.sha.slice(0, 12)}: required CI check ${entry.check} failed and ${entry.state === 'owed' ? 'one rerun of its failed jobs is owed' : `its failed jobs are rerunning${entry.runId ? ` (workflow run ${entry.runId})` : ''}`}; the entry keeps its position and bindings until the rerun concludes`);
 }

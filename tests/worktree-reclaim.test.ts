@@ -521,3 +521,71 @@ test('unit:worktree-removal-registered-only — a directory under the worktree r
     assert.equal(await readFile(join(path, 'notes.txt'), 'utf8'), 'not a worktree\n');
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+// GY-450: the follow-ups from GY-382's review. A hold depends only on the refs that could hold the
+// tree's branch, and a delivered item's directory Git no longer registers is reclaimed when nothing
+// in it is work.
+test('unit:worktree-hold-ignores-unrelated-refs — a fetch that moves an unrelated remote branch leaves a hold standing; the branch reaching its remote re-examines it', async () => {
+  const root = await host();
+  try {
+    const idleMs = 3 * hour;
+    const tree = assignment(root, 'GY-150', 1);
+    await writeFile(join(tree.path, 'source.ts'), 'export const value = 6;\n');
+    execFileSync('git', ['commit', '-qam', 'unpushed'], { cwd: tree.path });
+    await idleFor(tree.path, 4 * hour);
+    const snapshot = [work('GY-150', { workspaces: [workspace(tree.path, tree.branch, 1)], sessions: [endedSession(4 * hour)] } as Partial<Work>)];
+    const calls: string[][] = [];
+    const pass = async () => {
+      const report = await removeReclaimableWorktrees(root, snapshot, { idleMs, run: (command, args) => { calls.push(args); return runChild(command, args); }, baseBranch: 'main' });
+      await writeWorktreeInventoryCache(root, { at: report.at, entries: report.entries, held: report.held });
+      return report;
+    };
+    assert.match((await pass()).kept[0].reason, /Unpushed commits/);
+    calls.length = 0;
+    execFileSync('git', ['update-ref', 'refs/remotes/origin/unrelated', git(root, 'rev-parse', 'main')], { cwd: root });
+    execFileSync('git', ['update-ref', 'refs/remotes/origin/graphyard/gy-150-10', git(root, 'rev-parse', 'main')], { cwd: root });
+    const held = await pass();
+    assert.match(held.kept[0].reason, /Unpushed commits/);
+    assert.ok(!calls.some(args => args.includes(tree.path)), 'an unrelated remote ref re-examined the held tree');
+    execFileSync('git', ['update-ref', `refs/remotes/origin/${tree.branch}`, git(tree.path, 'rev-parse', 'HEAD')], { cwd: root });
+    assert.deepEqual((await pass()).removed.map(entry => entry.key), ['GY-150']);
+    assert.equal(await exists(tree.path), false);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('unit:worktree-orphan-reclaimed — a delivered item\'s directory Git no longer registers is removed when it holds only dependency trees, and reported when it holds anything else', async () => {
+  const root = await host(false);
+  try {
+    const idleMs = 3 * hour;
+    const empty = assignment(root, 'GY-160', 1), held = assignment(root, 'GY-161', 1), open = join(worktreesDirectory(root), 'GY-162-1');
+    // Git forgets both: the registry entries go, the directories stay behind with their `.git` pointers.
+    for (const tree of [empty, held]) {
+      for (const name of ['.gitignore', 'package-lock.json', 'source.ts']) await rm(join(tree.path, name));
+      await rm(join(root, '.git', 'worktrees', `${tree.path.split('/').pop()}`), { recursive: true });
+    }
+    execFileSync('git', ['worktree', 'prune'], { cwd: root });
+    await symlink(join(root, 'node_modules'), join(empty.path, 'node_modules'));
+    await writeFile(join(held.path, 'notes.txt'), 'leftover\n');
+    await mkdir(open, { recursive: true }); await writeFile(join(open, 'notes.txt'), 'in progress\n');
+    const snapshot = [
+      work('GY-160', { stage: 'done', workspaces: [workspace(empty.path, empty.branch, 1)] }),
+      work('GY-161', { stage: 'done', workspaces: [workspace(held.path, held.branch, 1)] }),
+      work('GY-162', { workspaces: [workspace(open, 'graphyard/gy-162-1', 1)], sessions: [endedSession(4 * hour)] } as Partial<Work>),
+    ];
+    const when = new Date(Date.now() - 4 * hour);
+    await utimes(join(open, 'notes.txt'), when, when); await idleFor(open, 4 * hour);
+    const report = await removeReclaimableWorktrees(root, snapshot, { idleMs, run: runChild, baseBranch: 'main' });
+    assert.deepEqual(report.errors, []);
+    assert.deepEqual(report.removed.map(entry => entry.key), ['GY-160']);
+    assert.match(report.removed[0].reason, /GY-160 is delivered; the directory was no longer a registered Git worktree/);
+    assert.equal(await exists(empty.path), false);
+    assert.equal(await readFile(join(root, 'node_modules', 'pg', 'index.js'), 'utf8'), sharedMarker, 'the shared install behind the link survives');
+    const kept = Object.fromEntries(report.kept.map(entry => [entry.key, entry.reason]));
+    assert.match(kept['GY-161'], /Not a registered Git worktree, and it holds 1 path\(s\) that are not dependency trees \(notes\.txt\)/);
+    assert.match(kept['GY-162'], /Not a registered Git worktree: its clean state cannot be judged/);
+    assert.equal(await readFile(join(held.path, 'notes.txt'), 'utf8'), 'leftover\n');
+    assert.equal(await readFile(join(open, 'notes.txt'), 'utf8'), 'in progress\n');
+    const audit = (await readFile(worktreeReclaimAuditFile(root), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+    assert.deepEqual(audit.map(entry => [entry.action, entry.key]), [['orphan-remove', 'GY-160']]);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

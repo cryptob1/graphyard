@@ -38,10 +38,10 @@ const running = (entry: string) => `${entry}->>'state' = 'running'`;
 
 /**
  * A delivery nothing is owed for any more: done, with no next action, no queue entry, no lease,
- * no action row and no running session. The SQL form of `deliverySettled` in src/server/work-view.ts;
- * the two must agree, and tests/store-locks.test.ts holds them to it.
+ * no containment quarantine, no action row and no running session. The SQL form of `deliverySettled`
+ * in src/server/work-view.ts; the two must agree, and tests/store-locks.test.ts holds them to it.
  */
-export const settledSql = `COALESCE(d.document->>'stage' = 'done' AND ${absent("d.document->'nextAction'")} AND ${absent("d.document->'queue'")} AND ${absent("d.document->'lease'")}
+export const settledSql = `COALESCE(d.document->>'stage' = 'done' AND ${absent("d.document->'nextAction'")} AND ${absent("d.document->'queue'")} AND ${absent("d.document->'lease'")} AND ${absent("d.document->'containmentQuarantine'")}
   AND ${length("d.document->'actionQueue'->'actions'")} = 0
   AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(${array("d.document->'sessions'")}) AS s(entry) WHERE ${running('s.entry')}), false)`;
 
@@ -76,7 +76,11 @@ const relevantEvidence = `((entry->>'sha' = r.head AND entry->>'baseSha' IS NOT 
  * resolved action rows cut to their `keep` most recent entries (each row to its last few attempt
  * records), and its running sessions with only the last few finished ones. A settled delivery
  * (`settled`, `keep` 0) keeps none of those histories and no finished session: nothing the loop
- * decides reads a finished delivery's history.
+ * decides reads a finished delivery's history. What does read a delivery's finished sessions reads
+ * the full snapshot instead — throughput attribution of coordination sessions and the session
+ * summaries — and containment recovery, which needs the quarantined epoch's finished session, only
+ * ever sees an unsettled item, since a quarantine keeps it out of `settledSql` (GY-257). A new
+ * reader of finished sessions belongs on the full snapshot, or must unsettle what it reads.
  */
 export const coordinationDocument = ({ keep, settled }: { keep: number; settled: boolean }) => `d.document - 'pipeline' - 'evidence' - 'observation' - 'queueHistory' - 'actionQueue' - 'autoDispatch' - 'sessions'
   || jsonb_build_object('evidence', (SELECT COALESCE(jsonb_agg(entry - 'artifacts' - 'scopeFiles' - 'provenance' ORDER BY position), '[]'::jsonb) FROM jsonb_array_elements(${array("d.document->'evidence'")}) WITH ORDINALITY AS e(entry, position) WHERE ${relevantEvidence}))

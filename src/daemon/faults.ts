@@ -12,6 +12,9 @@ import { type DaemonEffects, record } from './effects.js';
 import { loopAttention } from './liveness.js';
 import { daemonSummary } from './run.js';
 import type { Cycle } from './cycle.js';
+import { diagnosisStep, standingFaultClassItem } from './diagnosis.js';
+import { candidateKey } from './reconcile.js';
+import { checkInvariants, invariantFaultKind, invariantFaults } from '../model/invariants.js';
 
 /** The attention `master status` adds after buildMasterStatus, and its final attribution over the whole list. */
 export interface ReportedAttention { items: AttentionItem[]; attribute?: (status: { work: any[]; attentionItems: AttentionItem[] }) => AttentionItem[] }
@@ -130,7 +133,7 @@ export function endFailingRuns(state: Pick<DaemonState, 'actions' | 'faults'>, p
  */
 export async function fileRecurringFaultClasses(state: DaemonState, effects: DaemonEffects, work: Work[], clock: number, now: () => number, performed: DaemonAction[]) {
   const policy = effects.faultClassPolicy ?? faultClassPolicyFromEnv(process.env);
-  for (const recurrence of recurringClasses(state.faults.instances, work, policy, clock)) {
+  for (const recurrence of recurringClasses(state.faults.instances, work, policy, clock, standingFaultClassItem)) {
     if (recurrence.item) { for (const instance of recurrence.unlinked) instance.linkedTo = recurrence.item.key; continue; }
     if (!recurrence.file || !effects.fileFaultClass) continue;
     const key = faultActionKey(recurrence.faultClass), previous = state.actions[key];
@@ -161,7 +164,16 @@ export function faultRecurrenceReport(state: Pick<DaemonState, 'faults'>, policy
 }
 
 /**
+ * How often the loop reads the sources standing faults are observed from: the control plane's status, the attention
+ * `master status` adds and Herdr's inventory. They cost API and filesystem reads, and a fault that stands is one instance
+ * however often it is seen, so a cycle inside this interval of the last observation reads none of them. A fault that
+ * stood and cleared between two observations goes unseen, which counts nothing early toward a class.
+ */
+export const faultObservationIntervalMs = 60_000;
+/**
  * Step 7b: classify what this cycle saw standing wrong and file one item per recurring class.
+ * Standing faults are observed at most once per faultObservationIntervalMs; failed actions are noted as
+ * they happen, so every cycle still ends silent failing runs and files a class that reached its threshold.
  * A read that fails makes the cycle partial: faults its source would have shown were not
  * observed, so none standing ends this cycle (and none reopens as a new instance next cycle).
  * A Herdr that cannot be read lists no sessions, which would make every live lease a missing
@@ -169,18 +181,33 @@ export function faultRecurrenceReport(state: Pick<DaemonState, 'faults'>, policy
  */
 export async function faultStep(cycle: Cycle, assessments: Record<string, ContainmentAssessment>) {
   const { config, state, effects, now, snapshot, clock, performed, agents, credentials } = cycle;
+  // The cadence is the loop's own time, as the reads it spaces out are: the snapshot's clock need not move between cycles.
+  const policy = effects.faultClassPolicy ?? faultClassPolicyFromEnv(process.env), last = state.faults.observedAt ? Date.parse(state.faults.observedAt) : Number.NaN, local = now();
+  if (local >= last && local - last < faultObservationIntervalMs) { // a local clock that went back observes again
+    endFailingRuns(state, policy, clock);
+    return fileRecurringFaultClasses(state, effects, snapshot.work, clock, now, performed);
+  }
+  state.faults.observedAt = new Date(local).toISOString();
   let partial = false, reported: ReportedAttention | undefined;
   const herdrRead = effects.herdr ? await Promise.resolve(effects.herdr()).catch(() => ({ agents: [] as HerdrAgent[], available: false })) : { agents, available: true };
   const seen = herdrRead.available ? herdrRead.agents : [];
   const controlPlane = effects.controlPlane ? await effects.controlPlane().catch(() => { partial = true; return null; }) : null;
-  const summary = daemonSummary(state, clock, config.run.intervalSeconds * 1000, config.hostId);
+  const summary = daemonSummary(state, clock, config.run.intervalSeconds * 1000, config.hostId, policy);
   if (controlPlane && effects.reportedAttention) reported = await effects.reportedAttention(snapshot.work, controlPlane, { agents: seen, available: herdrRead.available, approvals: summary.approvals, loop: summary.liveness, now: new Date(clock).toISOString() })
     .catch(error => { partial = true; return { items: [{ subject: 'loop', text: `The loop could not read the attention master status adds to classify it: ${message(error)}`, kind: 'loop-failures' } as AttentionItem] }; });
   // The loop's own health lines, as master status puts them first: its cost, silence and delivery budget. The loop reading
   // them is cycling, so its liveness is not in question here, and a failed cycle is noted once as it happens (noteCycleFailure).
   const loop = loopAttention({ liveness: { ...summary.liveness, state: 'running' }, silence: summary.silence, budget: summary.budget, cost: summary.cost });
-  endFailingRuns(state, effects.faultClassPolicy ?? faultClassPolicyFromEnv(process.env), clock);
-  trackFaults(state.faults, cycleFaults(state, snapshot.work, clock, { config, agents: seen, credentials, containment: assessments, status: controlPlane, jobs: snapshot.jobs, reported: reported?.items, attribute: reported?.attribute, loop, herdrUnavailable: !herdrRead.available }),
-    new Date(clock).toISOString(), partial || (herdrRead.available ? false : herdrFaultKinds));
+  endFailingRuns(state, policy, clock);
+  // The system invariants (GY-404): properties of the running pipeline no per-item gate can see,
+  // judged on each observation over the same snapshot; each violation is one fault of its class below.
+  const invariants = checkInvariants(state.invariants, { work: snapshot.work, now: clock, thresholds: config.invariants, metrics: state.metrics, approvals: state.approvals,
+    agents: herdrRead.available ? seen : null, build: controlPlane?.build?.commit ?? null,
+    refusedMerges: new Set(snapshot.work.filter(item => item.candidate && state.actions[candidateKey('merge', item)]?.state === 'failed').map(item => item.id)) });
+  trackFaults(state.faults, [...cycleFaults(state, snapshot.work, clock, { config, agents: seen, credentials, containment: assessments, status: controlPlane, jobs: snapshot.jobs, reported: reported?.items, attribute: reported?.attribute, loop, herdrUnavailable: !herdrRead.available }), ...invariantFaults(invariants)],
+    new Date(clock).toISOString(), partial || (herdrRead.available ? false : new Set<string>([...herdrFaultKinds, invariantFaultKind('lingering-sessions')])));
   await fileRecurringFaultClasses(state, effects, snapshot.work, clock, now, performed);
+  // 7c. Each recurring-fault item filed (this cycle included) and each invariant violation past its
+  //     bound gets its diagnosis, and each diagnosis moves on by one decision (GY-439).
+  await diagnosisStep(cycle);
 }

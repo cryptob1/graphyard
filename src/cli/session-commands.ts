@@ -21,7 +21,10 @@ export const scopeRequestCommand: CliCommand = {
     '                                widening rule, a review finding or the independent approver',
     '                                decides it and the attempt keeps its lease. `scope-request',
     '                                GY-N EPOCH --wait` waits up to 9 minutes and prints the',
-    '                                outcome; `scope-request GY-N EPOCH -` withdraws the request.',
+    '                                outcome; `--wait` among the PATHs files the request and',
+    '                                then waits the same way. Any other argument before -- that',
+    '                                begins with - is refused. `scope-request GY-N EPOCH -`',
+    '                                withdraws the request.',
     '                                A free-text blocker is never needed for scope',
   ],
   async run(context, work) {
@@ -29,14 +32,33 @@ export const scopeRequestCommand: CliCommand = {
     const epoch = Number(args[0]);
     if (!Number.isInteger(epoch) || epoch < 1) throw new Error('Use scope-request GY-N EPOCH PATH... -- REASON, scope-request GY-N EPOCH --wait, or scope-request GY-N EPOCH - to withdraw');
     if (args[1] === '-') return print(await workMutation(context, work)('scope', { epoch, paths: [], reason: 'Withdrawn by the worker' }));
-    if (args[1] === '--wait') return print(await awaitScopeOutcome(context, work, epoch));
-    const separator = args.indexOf('--');
-    const paths = args.slice(1, separator < 0 ? args.length : separator);
-    const reason = separator < 0 ? '' : args.slice(separator + 1).join(' ').trim();
-    if (!paths.length || !reason) throw new Error('Name at least one PATH outside plannedFiles and give a REASON after --');
-    return print(await workMutation(context, work)('scope', { epoch, paths, reason }));
+    if (args[1] === '--wait' && args.length === 2) return print(await awaitScopeOutcome(context, work, epoch));
+    const { paths, reason, wait } = scopeRequestArgs(args.slice(1));
+    const filed = await workMutation(context, work)('scope', { epoch, paths, reason });
+    if (!wait) return print(filed);
+    // `--wait` among the paths files the request first and then waits on it, as the first-position
+    // form waits on one already filed (GY-522); the filed item carries the request the wait reads.
+    return print(await awaitScopeOutcome(context, filed as Work, epoch));
   },
 };
+
+/**
+ * The arguments of a scope request after EPOCH: PATH... before `--`, the REASON after it. `--wait`
+ * may stand anywhere before `--` and asks to wait for the outcome once the request is filed; any
+ * other argument there that begins with '-' is a flag this command does not have, and is refused
+ * by name rather than recorded as a planned path (GY-522).
+ */
+export function scopeRequestArgs(args: readonly string[]) {
+  const separator = args.indexOf('--');
+  const before = args.slice(0, separator < 0 ? args.length : separator);
+  const reason = separator < 0 ? '' : args.slice(separator + 1).join(' ').trim();
+  const wait = before.includes('--wait');
+  const paths = before.filter(arg => arg !== '--wait');
+  const flag = paths.find(arg => arg.startsWith('-'));
+  if (flag !== undefined) throw new Error(`scope-request does not accept ${flag}: only --wait may stand before --, and a PATH never begins with '-'`);
+  if (!paths.length || !reason) throw new Error('Name at least one PATH outside plannedFiles and give a REASON after --');
+  return { paths, reason, wait };
+}
 
 /**
  * The outcome of this attempt's open scope request, read from the item as the control plane holds

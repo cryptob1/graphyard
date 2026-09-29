@@ -1,4 +1,5 @@
 import type { NextActionKind } from './action-kinds.js';
+import { ciCheckRefusalPattern, ciCheckRefusalSource } from './ci-refusal.js';
 
 /**
  * The refusals the engine can produce, declared beside the mapping that has to cover them.
@@ -45,6 +46,11 @@ export const gateRefusalCatalogue: RefusalShape[] = [
     example: 'Candidate aaaaaaaaaaaa cannot be brought onto base branch tip bbbbbbbbbbbb without resolving a conflict, which is content nobody reviewed or proved: merge conflict. Run graphyard sync GY-1, resolve it and push; the approval and proofs bound to aaaaaaaaaaaa do not survive the resolution.' },
   { gate: 'build', id: 'diff-not-compared', match: /^Candidate diff has not been compared against the base branch tip/, kinds: ['resync'],
     example: 'Candidate diff has not been compared against the base branch tip; a fresh GitHub observation is required' },
+  // A stale speculative tip waits for the control plane's restore, and files another item's tip carried are that item's (GY-568).
+  { gate: 'build', id: 'restoring-after-ejection', match: /^Restoring after predecessor ejection: /, kinds: ['resync'],
+    example: 'Restoring after predecessor ejection: candidate aaaaaaaaaaaa is a speculative tip built behind GY-1, which left the merge queue without landing, so its tree holds their unlanded work; Graphyard restores the branch to its own reviewed head bbbbbbbbbbbb brought onto the base before its tree is judged, and no worker is asked to change it' },
+  { gate: 'build', id: 'carried-from-tip', match: /^Carried from another item's tip: /, kinds: ['resync'],
+    example: "Carried from another item's tip: 2 files the candidate would change belong to GY-1, whose unlanded commits this head carries (src/a.ts: deleted; that commit still holds it (carried from GY-1)); they are not this change's, so no worker is asked to revert them: the control plane restores the branch to the item's own reviewed head" },
   { gate: 'build', id: 'out-of-scope-count', match: /^Candidate changes \d+ files? outside its planned files/, kinds: ['request-rework'],
     example: 'Candidate changes 2 files outside its planned files that must match the base branch byte-for-byte; run graphyard sync GY-1, restore each file from origin/<base>, and push again' },
   { gate: 'build', id: 'out-of-scope-file', match: /^Out-of-scope regression: /, example: 'Out-of-scope regression: src/other.ts reverts GY-2', kinds: ['request-rework'] },
@@ -72,7 +78,7 @@ export const gateRefusalCatalogue: RefusalShape[] = [
     example: 'Every configured reviewer profile is exhausted for this candidate (reviewer-a); add reviewer capacity or select another review provider' },
   { gate: 'review', id: 'provider-reason', match: /.*/, example: 'Pull request is draft; mark it ready to request code review', kinds: ['request-review', 'request-rework', 'resync', 'escalate', 'dispatch'], free: true },
   // test
-  { gate: 'test', id: 'check-not-passed', match: /^Required CI check .+ has not passed on the current candidate$/, kinds: ['resync', 'request-rework'],
+  { gate: 'test', id: 'check-not-passed', match: ciCheckRefusalPattern, kinds: ['resync', 'request-rework'],
     example: 'Required CI check test has not passed on the current candidate' },
   // acceptance
   { gate: 'acceptance', id: 'criterion-unproven', match: /^AC-\d+: .+ needs trusted passing evidence/, kinds: ['dispatch', 'escalate'],
@@ -94,7 +100,7 @@ export const gateRefusalCatalogue: RefusalShape[] = [
   { gate: 'merge', id: 'queue-position', match: /^Merge queue position \d+ of \d+: .+ is ahead$/, example: 'Merge queue position 2 of 3: GY-1 is ahead', kinds: ['merge'] },
   { gate: 'merge', id: 'tip-unpublished', match: /^Speculative tip on predicted base [0-9a-f]+ has not been published and validated for this candidate$/, kinds: ['merge'],
     example: 'Speculative tip on predicted base bbbbbbbbbbbb has not been published and validated for this candidate' },
-  { gate: 'merge', id: 'tip-validating', match: /^Merge queue is validating speculative tip [0-9a-f]+: Required CI check .+ has not passed on the current candidate$/, kinds: ['merge'],
+  { gate: 'merge', id: 'tip-validating', match: new RegExp(`^Merge queue is validating speculative tip [0-9a-f]+: ${ciCheckRefusalSource}`), kinds: ['merge'],
     example: 'Merge queue is validating speculative tip aaaaaaaaaaaa: Required CI check test has not passed on the current candidate' },
   { gate: 'merge', id: 'tip-awaited', match: /^Waiting for \S+ to publish its speculative tip$/, example: 'Waiting for GY-1 to publish its speculative tip', kinds: ['merge'] },
   { gate: 'merge', id: 'predecessor-wait', match: /^Waiting for \S+(?:, \S+)* to land or leave the merge queue: /, kinds: ['merge'],

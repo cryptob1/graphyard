@@ -1,9 +1,10 @@
-import { queueSequencingReason } from '../merge-queue.js';
+import { checkRerunHeld, requiredCheck, queueSequencingReason } from '../merge-queue.js';
 import { reviewNeed } from './dispatch.js';
 import { standingEscalations } from './escalation.js';
 import { leadHoldRefusal } from './delegation.js';
 import type { Work } from './work.js';
 import type { NextActionKind } from './action-kinds.js';
+import { ciCheckName, ciCheckRefusalPattern } from './ci-refusal.js';
 
 /**
  * From a gate's refusal to the one action kind that answers it.
@@ -32,6 +33,11 @@ export const refusalRules: { gate: string | null; match: RegExp; kind: NextActio
   { gate: 'build', match: /^No workspace registered$/, kind: 'dispatch' },
   { gate: 'build', match: /^Pull request has not been independently observed$/, kind: 'resync' },
   { gate: 'build', match: /has not been compared against the base branch tip/, kind: 'resync' },
+  // A stale speculative tip, or files another item's unlanded tip put on this branch (GY-568): the
+  // control plane restores the branch, and the observation job that a fresh reading wakes runs it.
+  // Nothing in either is the worker's, so neither is rework. Before `conflict` below, which the
+  // attributed files' own detail may mention.
+  { gate: 'build', match: /^(Restoring after predecessor ejection|Carried from another item's tip): /, kind: 'resync' },
   { gate: 'build', match: /^(Candidate changes|Out-of-scope regression)/, kind: 'request-rework' },
   // A mechanical proof that failed on the head returns it to its worker before review (GY-115).
   { gate: 'build', match: /the head returns to its worker before review$/, kind: 'request-rework' },
@@ -49,7 +55,7 @@ export const refusalRules: { gate: string | null; match: RegExp; kind: NextActio
   { gate: 'review', match: /^Outstanding change requests/, kind: 'request-rework' },
   { gate: 'review', match: /.*/, kind: 'request-review' },
   // test: a check that failed needs a new head; one that has not answered yet needs a fresh read.
-  { gate: 'test', match: /^Required CI check .+ has not passed on the current candidate$/, kind: 'resync' },
+  { gate: 'test', match: ciCheckRefusalPattern, kind: 'resync' },
   // acceptance
   { gate: 'acceptance', match: /is no longer independent:/, kind: 'escalate' },
   { gate: 'acceptance', match: /needs trusted passing evidence/, kind: 'dispatch' },
@@ -124,11 +130,11 @@ export function reviewStandstill(work: Work, all: Work[] = [work], now = new Dat
  * review refusal standing over a head no review can be asked for (`reviewStandstill`).
  */
 export function refusalAction(work: Work, gate: string, refusal: string, all: Work[] = [work], now = new Date()): NextActionKind {
-  if (gate === 'test' && /^Required CI check (.+) has not passed on the current candidate$/.test(refusal)) {
-    const name = refusal.match(/^Required CI check (.+) has not passed on the current candidate$/)![1];
-    const runs = (work.observation?.checks ?? []).filter(check => check.name === name);
-    const latest = runs.length ? runs.reduce((newest, check) => (check.attempt ?? 0) >= (newest.attempt ?? 0) ? check : newest) : null;
-    return latest && ['failure', 'timed_out', 'action_required', 'cancelled'].includes(latest.result) ? 'request-rework' : 'resync';
+  const name = gate === 'test' ? ciCheckName(refusal) : null;
+  if (name !== null) {
+    const latest = requiredCheck(work, name);
+    // A failure held by its one owed or running rerun (GY-516) is answered by the rerun's reading.
+    return latest && ['failure', 'timed_out', 'action_required', 'cancelled'].includes(latest.result) && !checkRerunHeld(work, name) ? 'request-rework' : 'resync';
   }
   if (gate === 'review') {
     const standstill = reviewStandstill(work, all, now);

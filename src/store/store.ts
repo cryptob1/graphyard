@@ -1,14 +1,16 @@
 import pg from 'pg';
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import type { Work } from '../model.js';
 import type { IntegrationJob } from '../coordination.js';
-import { migration, tables } from './schema.js';
-import { releaseInfo, schemaVersion } from '../release.js';
 import { appendSave, resolvedPayloadSql } from './snapshot-delta.js';
 import { advisoryLocks } from './locks.js';
+import { runStartupMigration } from './migration-locks.js';
+// The startup migration's engine lives beside its locks and its recorded state (migration-locks.ts);
+// the lock budget stays exported here with the store that applies it.
+export { migrationAttemptLockTimeoutMs, migrationLockTimeoutMs } from './migration-locks.js';
 import { coordinationDocumentSql, coordinationRelevance, coordinationTail, coordinationTrimSql, detoasted, type CoordinationTrim } from './coordination-sql.js';
-import { namedStatements } from './statements.js';
-import { closePool, reserve, trackedPool } from './pools.js';
+import { namedPool, reportPool, type ReportPoolOptions } from './report-pool.js';
+import { closePool, leasePoolConnections, trackedPool } from './pools.js';
 
 export * from './snapshot-delta.js';
 export type { CoordinationTrim } from './coordination-sql.js';
@@ -22,19 +24,13 @@ export type { CoordinationTrim } from './coordination-sql.js';
  */
 export const storeConnectionTimeoutMs = 10_000, storeStatementTimeoutMs = 60_000;
 const coordinationLock = advisoryLocks.coordination;
-/** How long a migrating release may wait for locks in total: well inside Railway's 120-second health check. */
-export const migrationLockTimeoutMs = 30_000;
-/** The migration's statements ahead of the first table's DDL: the shared trigger function. */
-const migrationPrelude = migration.slice(0, migration.indexOf(tables[0].ddl));
-const literal = (text: string) => `'${text.replace(/'/g, "''")}'`;
-const newerSchema = (current: number) => new Error(`Database schema generation ${current} is newer than this release supports (${schemaVersion}); deploy the release that migrated it, or restore a backup taken at generation ${schemaVersion} or earlier`);
 
 /**
- * Which connections a transaction may use (GY-274). Lease renewals run on a reserved pool, so a
- * saturated main pool never lets a live worker's lease lapse; background work (the reconciliation
+ * Which connections a transaction may use (GY-274). Lease commands run on the lease pool (pools.ts, GY-558),
+ * so a saturated main pool never lets a live worker's lease lapse; background work (the reconciliation
  * tick, whose first pass after a deploy ran 65 s) holds at most half the main pool.
  */
-export type StoreLane = 'request' | 'lease' | 'background'; export const leaseLaneConnections = 2;
+export type StoreLane = 'request' | 'lease' | 'background';
 /** A counting semaphore over the background share; a waiter inherits a released permit directly. */
 export class BackgroundLane {
   private held = 0; private waiting: (() => void)[] = []; constructor(readonly limit: number) {}
@@ -48,123 +44,49 @@ export class BackgroundLane {
 
 export class Store {
   pool: pg.Pool;
-  /** Lease renewals only; `background` bounds the tick to half the main pool. */
-  leasePool: pg.Pool; readonly background: BackgroundLane;
-  constructor(url: string, options: { max?: number } = {}) {
+  /** Lease commands only (pools.ts `leaseCommands`); `background` bounds the tick to half the main pool; `reportPool` serves report reads only (report-pool.ts). */
+  leasePool: pg.Pool; readonly background: BackgroundLane; reportPool: pg.Pool;
+  constructor(url: string, options: { max?: number; leaseMax?: number } & ReportPoolOptions = {}) {
     const max = Math.max(2, Math.floor(options.max ?? 12));
-    this.pool = trackedPool(namedStatements(new pg.Pool({ connectionString: url, max, connectionTimeoutMillis: storeConnectionTimeoutMs, statement_timeout: storeStatementTimeoutMs })));
-    this.leasePool = trackedPool(new pg.Pool({ connectionString: url, max: leaseLaneConnections, connectionTimeoutMillis: storeConnectionTimeoutMs, statement_timeout: storeStatementTimeoutMs }));
-    this.background = new BackgroundLane(Math.max(1, Math.floor(max / 2)));
+    this.pool = namedPool(url, max, storeConnectionTimeoutMs, storeStatementTimeoutMs);
+    this.leasePool = trackedPool(new pg.Pool({ connectionString: url, max: Math.max(1, Math.floor(options.leaseMax ?? leasePoolConnections)), connectionTimeoutMillis: storeConnectionTimeoutMs, statement_timeout: storeStatementTimeoutMs }));
+    this.background = new BackgroundLane(Math.max(1, Math.floor(max / 2))); this.reportPool = reportPool(url, options, storeConnectionTimeoutMs, storeStatementTimeoutMs);
   }
   /**
    * Apply the additive migration and record the schema generation it reached. Running
    * against a database a newer release already migrated refuses: rolling the application
    * back under a schema it does not know is how columns and rows go missing silently.
    *
-   * A release whose generation and migration are already recorded starts without any
-   * coordination or table lock: it reads graphyard_schema and its comment (the digest of the
-   * migration that last ran) and skips the DDL, so a new container never queues behind a busy
-   * live replica. Only a release that must migrate takes a lock — the migration lock, never the
-   * coordination lock (GY-203) — and every
-   * lock wait of the migration shares one `lockTimeoutMs` deadline: each step's lock_timeout
-   * is the time left, and a watchdog cancels any lock wait still running at the deadline, so
-   * waits on the migration lock, across tables, and between the statements of one table's
-   * DDL never add up past it. The watchdog's connection is reserved before the migration begins,
-   * and a migration that cannot reserve it, or loses it past the deadline, fails at once.
-   * Startup then fails naming the lock, well inside the platform's
+   * A release whose generation, prelude and every table's DDL are already recorded starts
+   * without any coordination or table lock: it reads graphyard_schema and its comment (the
+   * digest of the migration that last ran, with a digest per table, GY-773) and skips the
+   * DDL, so a new container never queues behind a busy live replica. A release that must
+   * migrate takes a lock — the migration lock, never the coordination lock (GY-203) — but
+   * touches only the tables whose DDL is not already recorded: a table whose recorded digest
+   * matches this release's is skipped without any lock at all, so `ALTER TABLE ... ADD COLUMN
+   * IF NOT EXISTS` and a trigger rebuild on receipts never hold up the writes that stream
+   * through an unchanged events table. A release whose whole-migration digest is recorded at
+   * this generation but whose per-table digests are not records them alone: a matching whole
+   * digest proves every table's DDL ran, so the upgrade itself takes no lock on a work table.
+   *
+   * Every lock wait of the migration shares one `lockTimeoutMs` deadline: each step's
+   * lock_timeout is the time left, and a watchdog cancels any lock wait still running at the
+   * deadline, so waits on the migration lock, across tables, and between the statements of one
+   * table's DDL never add up past it. The watchdog's connection is reserved before the migration
+   * begins, and a migration that cannot reserve it, or loses it past the deadline, fails at once.
+   * A deadlock or an expired lock wait under live traffic (40P01, 55P03, the watchdog's 57014) is
+   * transient: the attempt rolls back — releasing every lock at once, so live requests queue
+   * behind a failed attempt no longer — and retries with backoff while the deadline allows, all
+   * inside the health-check window. Each attempt waits for its locks at most
+   * `attemptLockTimeoutMs` (3 s by default) before it gives up its place, so a live writer queued
+   * behind the migration's exclusive lock request waits no longer than one attempt's budget. Startup then fails naming the lock, well inside the platform's
    * health window. The migration's own work is not timed: a backfill or index build that takes
    * longer than the lock budget (the offline `graphyard db migrate` Job) still completes.
    */
-  async init(options: { lockTimeoutMs?: number } = {}) {
-    const digest = `migration sha256:${createHash('sha256').update(migration).digest('hex')}`;
-    const recorded = await this.recordedGeneration();
-    if (recorded && recorded.version > schemaVersion) throw newerSchema(recorded.version);
-    if (recorded?.version === schemaVersion && recorded.digest === digest) return;
-    const timeout = Math.max(1, Math.floor(options.lockTimeoutMs ?? migrationLockTimeoutMs));
-    const deadline = Date.now() + timeout;
-    const db = await this.pool.connect();
-    // The watchdog's connection is reserved before the migration begins: at the database's
-    // connection limit, startup fails here, boundedly, rather than migrating without a deadline.
-    let guard: pg.PoolClient;
-    try { guard = await reserve(this.pool); } catch (error) {
-      db.release();
-      throw new Error(`Schema migration to generation ${schemaVersion} could not reserve the connection its lock-wait watchdog needs (${(error as Error).message}); startup fails instead of migrating without a deadline — retry the deploy`, { cause: error });
-    }
-    let lost: Error | undefined;
-    const lose = (error: Error) => { lost ??= error; };
-    guard.on('error', lose);
-    guard.on('end', () => lose(new Error('Connection terminated')));
-    let waitingOn = `the migration advisory lock pg_advisory_xact_lock(${advisoryLocks.migration})`;
-    // A watchdog that cannot run past the deadline aborts the migration: without it, lock waits
-    // inside one step could restart lock_timeout without end.
-    let abort!: (error: Error) => void, aborted: Error | undefined;
-    const abandoned = new Promise<never>((_, reject) => { abort = error => { aborted ??= error; reject(error); }; });
-    abandoned.catch(() => {});
-    // Each step may wait for a lock only for what is left of the migration's single deadline.
-    const step = async (waiting: string, sql: string, values?: unknown[]) => {
-      waitingOn = waiting;
-      await Promise.race([db.query(`SET LOCAL lock_timeout = ${Math.max(1, deadline - Date.now())}`), abandoned]);
-      return Promise.race([db.query(sql, values), abandoned]);
-    };
-    // lock_timeout restarts for every lock one step's statements wait on; past the deadline
-    // the watchdog cancels whichever lock wait is still running.
-    let cancelledWaiting = false, watching = true, poll: NodeJS.Timeout | undefined, polling = Promise.resolve();
-    const watch = async (pid: number) => {
-      if (!watching) return;
-      try {
-        if (lost) throw lost;
-        const { rows } = await guard.query("SELECT pg_cancel_backend(pid) AS cancelled FROM pg_stat_activity WHERE pid=$1 AND wait_event_type='Lock'", [pid]);
-        if (rows[0]?.cancelled) cancelledWaiting = true;
-        else if (watching) poll = setTimeout(() => { polling = watch(pid); }, 100);
-      } catch (error) {
-        if (watching) abort(new Error(`Schema migration to generation ${schemaVersion} lost the connection its lock-wait watchdog needs (${(error as Error).message}) past its ${timeout} ms deadline, while waiting for ${waitingOn}; startup fails instead of outlasting the health check — retry the deploy`, { cause: error }));
-      }
-    };
-    try {
-      await guard.query('SET application_name = \'graphyard migration watchdog\'');
-      await guard.query('SET statement_timeout = 5000');
-      const pid = Number((await db.query('SELECT pg_backend_pid() AS pid')).rows[0].pid);
-      poll = setTimeout(() => { polling = watch(pid); }, Math.max(0, deadline - Date.now()));
-      await db.query('BEGIN');
-      // The pool's statement timeout bounds coordination reads and writes, not the migration's own
-      // work: its lock waits share the deadline above, and a backfill or index build still completes.
-      await db.query('SET LOCAL statement_timeout = 0');
-      // The migration's own lock, never the coordination lock (GY-203): two migrations serialize,
-      // while the live replica's coordination transactions run on beside it.
-      await step(waitingOn, 'SELECT pg_advisory_xact_lock($1)', [advisoryLocks.migration]);
-      await step('a lock on the migration\'s shared function graphyard_immutable', migrationPrelude);
-      for (const table of tables) await step(`a lock on table ${table.name} (or an object its migration touches)`, table.ddl);
-      const current = Number((await step('a lock on table graphyard_schema', 'SELECT COALESCE(MAX(version),0) AS version FROM graphyard_schema')).rows[0].version);
-      if (current > schemaVersion) throw newerSchema(current);
-      if (current < schemaVersion) await step(waitingOn, 'INSERT INTO graphyard_schema(version, graphyard_version) VALUES($1,$2)', [schemaVersion, releaseInfo().version]);
-      await step(waitingOn, `COMMENT ON TABLE graphyard_schema IS ${literal(digest)}`);
-      await Promise.race([db.query('COMMIT'), abandoned]);
-    } catch (error) {
-      // An abandoned migration's connection is still busy: it is destroyed below, which rolls it back.
-      if (aborted) throw aborted;
-      await db.query('ROLLBACK').catch(() => {});
-      // 55P03: a lock wait hit the time left; 57014 after the watchdog fired: it cancelled a lock wait past the deadline.
-      const code = (error as { code?: string }).code;
-      if (code === '55P03' || (code === '57014' && cancelledWaiting)) throw new Error(`Schema migration to generation ${schemaVersion} gave up after ${timeout} ms waiting for ${waitingOn}, held by another session; startup fails instead of outlasting the health check — retry the deploy when it is released`, { cause: error });
-      throw error;
-    } finally {
-      // A cancel still in flight must not reach whatever this connection runs next.
-      watching = false; clearTimeout(poll); await polling;
-      db.release(aborted ? true : undefined);
-      // The watchdog's session settings must not follow its connection back into the pool.
-      guard.release(true);
-    }
-  }
-  /** The recorded generation and migration digest, read without any lock a replica holds; null before the first migration. */
-  private async recordedGeneration(): Promise<{ version: number; digest: string | null } | null> {
-    const table = (await this.pool.query("SELECT to_regclass('graphyard_schema') AS oid")).rows[0].oid;
-    if (!table) return null;
-    const { rows } = await this.pool.query("SELECT COALESCE((SELECT MAX(version) FROM graphyard_schema),0) AS version, obj_description(to_regclass('graphyard_schema'),'pg_class') AS digest");
-    return { version: Number(rows[0].version), digest: rows[0].digest };
-  }
+  async init(options: { lockTimeoutMs?: number; attemptLockTimeoutMs?: number } = {}) { return runStartupMigration(this.pool, options); }
   async schema() { return Number((await this.pool.query('SELECT COALESCE(MAX(version),0) AS version FROM graphyard_schema')).rows[0].version); }
-  /** Resolves once every connection of both pools has closed (GY-483), so the database may be stopped right after. */
-  async close() { await Promise.all([closePool(this.pool, 'main'), closePool(this.leasePool, 'lease')]); }
+  /** Resolves once every connection of all three pools has closed (GY-483), so the database may be stopped right after. */
+  async close() { await Promise.all([closePool(this.pool, 'main'), closePool(this.leasePool, 'lease'), closePool(this.reportPool, 'report')]); }
   async transaction<T>(fn: (db: pg.PoolClient, now: Date) => Promise<T>, { lane = 'request' }: { lane?: StoreLane } = {}): Promise<T> {
     const permit = lane === 'background' ? await this.background.acquire() : null;
     const db = await (lane === 'lease' ? this.leasePool : this.pool).connect().catch(error => { permit?.(); throw error; });
@@ -184,7 +106,7 @@ export class Store {
     return (await this.pool.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
   }
   async workSnapshot(): Promise<{ work: Work[]; now: string; jobs: IntegrationJob[] }> {
-    const row = (await this.pool.query("SELECT COALESCE(jsonb_agg(document ORDER BY number), '[]'::jsonb) AS work, statement_timestamp() AS observed_at, (SELECT COALESCE(jsonb_agg(jsonb_build_object('work_id',work_id,'available_at',available_at,'locked_until',locked_until,'error',error,'held_until',held_until)), '[]'::jsonb) FROM jobs) AS jobs FROM work_items")).rows[0];
+    const row = (await this.pool.query("SELECT COALESCE(jsonb_agg(document ORDER BY number), '[]'::jsonb) AS work, statement_timestamp() AS observed_at, (SELECT COALESCE(jsonb_agg(jsonb_build_object('work_id',work_id,'available_at',available_at,'locked_until',locked_until,'error',error,'held_until',held_until,'deferred_reason',deferred_reason,'unobserved',unobserved)), '[]'::jsonb) FROM jobs) AS jobs FROM work_items")).rows[0];
     return { work: row.work, now: row.observed_at.toISOString(), jobs: row.jobs };
   }
   /**
@@ -206,7 +128,7 @@ export class Store {
         FROM (SELECT w.number, ${detoasted('w.document')} AS document FROM work_items w WHERE NOT EXISTS (SELECT 1 FROM work_index i WHERE i.id = w.id AND i.settled) OFFSET 0) d
         CROSS JOIN ${coordinationRelevance(coordinationTail)} CROSS JOIN LATERAL (SELECT ${coordinationDocumentSql} AS document) x`)).rows;
       const rows = [...settled, ...live].sort((a, b) => Number(a.number) - Number(b.number));
-      const meta = (await client.query("SELECT statement_timestamp() AS observed_at, (SELECT COALESCE(jsonb_agg(jsonb_build_object('work_id',work_id,'available_at',available_at,'locked_until',locked_until,'error',error,'held_until',held_until)), '[]'::jsonb) FROM jobs) AS jobs")).rows[0];
+      const meta = (await client.query("SELECT statement_timestamp() AS observed_at, (SELECT COALESCE(jsonb_agg(jsonb_build_object('work_id',work_id,'available_at',available_at,'locked_until',locked_until,'error',error,'held_until',held_until,'deferred_reason',deferred_reason,'unobserved',unobserved)), '[]'::jsonb) FROM jobs) AS jobs")).rows[0];
       await client.query('COMMIT');
       const trimmed = new Map<string, CoordinationTrim>(rows.map(row => [row.document.id, row.trimmed as CoordinationTrim]));
       return { work: rows.map(row => row.document), now: meta.observed_at.toISOString(), jobs: meta.jobs, trimmed };
@@ -221,37 +143,35 @@ export class Store {
    * Claim the next due job. `order` names work ids in claim-priority order (GY-492) — the
    * merge-queue head and its batch, then items whose next action waits on an observation; the
    * unnamed keep the available_at order. `woken` says the claim follows a webhook delivery, observed at once.
+   * The first `headCount` named ids (the queue-head band) always come first; after them any job due
+   * for longer than `starvedAfterMs` is claimed before the rest of the named list, so a job the list
+   * never names is still claimed within that bound (2026-09-26: an item whose only refusal was a stale
+   * observation waited 40 minutes behind review-waiting items that came due again every cycle).
    */
-  async takeJob(order: string[] = []) {
+  async takeJob(order: string[] = [], headCount = 0, starvedAfterMs = observationStarvedAfterMs) {
     const token = randomUUID();
-    const result = await this.pool.query(`WITH picked AS (SELECT work_id, generation<>claimed_generation AS woken FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now()) ORDER BY array_position($1::uuid[], work_id), available_at FOR UPDATE SKIP LOCKED LIMIT 1)
+    const result = await this.pool.query(`WITH picked AS (SELECT work_id, generation<>claimed_generation AS woken FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now()) ORDER BY CASE WHEN array_position($1::uuid[], work_id) <= $3::int THEN 0 WHEN available_at < now() - ($4::text||' milliseconds')::interval * 3 THEN 1 WHEN available_at < now() - ($4::text||' milliseconds')::interval THEN 2 WHEN array_position($1::uuid[], work_id) IS NOT NULL THEN 3 ELSE 4 END, CASE WHEN available_at < now() - ($4::text||' milliseconds')::interval * 3 THEN available_at END, array_position($1::uuid[], work_id), available_at FOR UPDATE SKIP LOCKED LIMIT 1)
       UPDATE jobs SET token=$2, locked_until=now()+interval '90 seconds', attempts=attempts+1,claimed_generation=generation
-      FROM picked WHERE jobs.work_id=picked.work_id RETURNING jobs.*, picked.woken`, [order.length ? order : null, token]);
+      FROM picked WHERE jobs.work_id=picked.work_id RETURNING jobs.*, picked.woken`, [order.length ? order : null, token, Math.max(0, Math.floor(headCount)), String(Math.max(0, Math.floor(starvedAfterMs)))]);
     return result.rows[0] as { work_id: string; token: string; attempts: number; woken: boolean } | undefined;
   }
   /**
-   * Release a job with its next due time. A clean run comes back at the observation cadence its
-   * item's state earned (`availableInMs`, GY-117; twenty seconds when the caller sets none), a
-   * failed one after 45 seconds, and a concurrency retry after two. A webhook that arrived during
-   * the run has moved the generation, and the job comes back at once whatever was asked.
+   * Release a job with its next due time: a clean run at its observation cadence (`availableInMs`, GY-117), a failure after 45 seconds, a retry after two, a woken run at once.
    */
-  async finishJob(id: string, token: string, error?: string, retry = false, availableInMs?: number) {
+  async finishJob(id: string, token: string, error?: string, retry = false, availableInMs?: number, observed?: boolean) {
     const scheduled = availableInMs === undefined ? null : String(Math.max(0, Math.floor(availableInMs)));
-    await this.pool.query(`UPDATE jobs SET token=NULL,locked_until=NULL,error=$3,held_until=NULL,held_reason=NULL,held_on=NULL,refusals=CASE WHEN $3::text IS NULL THEN 0 ELSE refusals END,
-      available_at=now()+ CASE WHEN generation<>claimed_generation THEN interval '0 seconds' WHEN $4::boolean THEN interval '2 seconds' WHEN $5::text IS NOT NULL THEN ($5::text||' milliseconds')::interval WHEN $3::text IS NULL THEN interval '20 seconds' ELSE interval '45 seconds' END
-      WHERE work_id=$1 AND token=$2 AND locked_until>clock_timestamp()`, [id, token, error ?? null, retry, scheduled]);
+    await this.pool.query(`UPDATE jobs SET token=NULL,locked_until=NULL,error=$3,held_until=NULL,held_reason=NULL,held_on=NULL,deferred_reason=NULL,refusals=CASE WHEN $3::text IS NULL THEN 0 ELSE refusals END, unobserved=CASE WHEN $6::boolean IS TRUE THEN 0 WHEN $6::boolean IS FALSE THEN unobserved+1 ELSE unobserved END,
+      available_at=now()+ CASE WHEN generation<>claimed_generation THEN interval '0 seconds' WHEN $4::boolean THEN interval '2 seconds' WHEN $5::text IS NOT NULL THEN ($5::text||' milliseconds')::interval WHEN $3::text IS NULL THEN interval '20 seconds' ELSE interval '45 seconds' END WHERE work_id=$1 AND token=$2 AND locked_until>clock_timestamp()`, [id, token, error ?? null, retry, scheduled, observed ?? null]);
   }
   /**
    * Parks a job that needs a permission the App does not hold. Webhook wakeups move
    * `available_at` but never lift a hold; only a preflight that sees a different installation
    * or the hold's own bounded expiry lets the job run again, so a missing permission costs one
-   * attempt per hold. `heldOn` is the installation the hold was decided against
-   * (`installationFingerprint`), so a preflight that merely re-reads the same installation
-   * does not release it.
+   * attempt per hold. `heldOn` is the installation it was decided against (so re-reading it releases nothing); `observed` feeds the GY-506 count.
    */
-  async holdJob(id: string, token: string, reason: string, holdMs: number, heldOn: string | null = null) {
-    await this.pool.query(`UPDATE jobs SET token=NULL,locked_until=NULL,error=$3,held_reason=$3,held_on=$5,held_until=now()+($4::text||' milliseconds')::interval,available_at=now()+($4::text||' milliseconds')::interval
-      WHERE work_id=$1 AND token=$2 AND locked_until>clock_timestamp()`, [id, token, reason, String(Math.max(0, Math.floor(holdMs))), heldOn]);
+  async holdJob(id: string, token: string, reason: string, holdMs: number, heldOn: string | null = null, observed: boolean = false) {
+    await this.pool.query(`UPDATE jobs SET token=NULL,locked_until=NULL,error=$3,held_reason=$3,held_on=$5,held_until=now()+($4::text||' milliseconds')::interval,available_at=now()+($4::text||' milliseconds')::interval,deferred_reason=NULL, unobserved=CASE WHEN $6::boolean IS TRUE THEN 0 WHEN $6::boolean IS FALSE THEN unobserved+1 ELSE unobserved END
+      WHERE work_id=$1 AND token=$2 AND locked_until>clock_timestamp()`, [id, token, reason, String(Math.max(0, Math.floor(holdMs))), heldOn, observed]);
   }
   /** A permission refusal retries at the ordinary cadence a bounded number of times, then holds. */
   async refuseJob(id: string, token: string, reason: string, limit: number, holdMs: number, heldOn: string | null = null) {
@@ -278,10 +198,16 @@ export class Store {
   async heldJobs() {
     return (await this.pool.query('SELECT work_id,held_reason,held_until FROM jobs WHERE held_until>now() ORDER BY held_until')).rows as { work_id: string; held_reason: string; held_until: Date }[];
   }
-  async deferJob(id: string, token: string, until: string) {
-    await this.pool.query(`UPDATE jobs SET token=NULL,locked_until=NULL,error=NULL,
-      available_at=CASE WHEN generation<>claimed_generation THEN now() ELSE $3::timestamptz END
-      WHERE work_id=$1 AND token=$2 AND locked_until>clock_timestamp()`, [id, token, until]);
+  /** Observation jobs starved of observations three times in a row (GY-506), which `/api/status` reports and master status raises. */
+  async starvedJobs() { return (await this.pool.query(`SELECT w.document->>'key' AS key, j.unobserved, j.error, j.deferred_reason FROM jobs j JOIN work_items w ON w.id=j.work_id WHERE j.unobserved>=3 AND w.document->>'stage'<>'done' ORDER BY w.number LIMIT 50`)).rows as { key: string; unobserved: number; error: string | null; deferred_reason: string | null }[]; }
+  /** A concurrency retry: back within seconds, never an operator error, never silent (GY-506). */
+  async retryJob(id: string, token: string, reason: string, observed: boolean) {
+    await this.pool.query(`UPDATE jobs SET token=NULL,locked_until=NULL,error=NULL,held_until=NULL,held_reason=NULL,held_on=NULL,deferred_reason=$3,refusals=0, unobserved=CASE WHEN $4::boolean IS TRUE THEN 0 WHEN $4::boolean IS FALSE THEN unobserved+1 ELSE unobserved END, available_at=now()+interval '2 seconds' WHERE work_id=$1 AND token=$2 AND locked_until>clock_timestamp()`, [id, token, reason, observed]);
+  }
+  /** Reschedules past a deferral, keeping its reason on the job record (GY-506); `observed` null leaves the starvation count as it is. */
+  async deferJob(id: string, token: string, until: string, reason?: string, observed: boolean | null = false) {
+    await this.pool.query(`UPDATE jobs SET token=NULL,locked_until=NULL,error=NULL,deferred_reason=$4, unobserved=CASE WHEN $5::boolean IS TRUE THEN 0 WHEN $5::boolean IS FALSE THEN unobserved+1 ELSE unobserved END, available_at=CASE WHEN generation<>claimed_generation THEN now() ELSE $3::timestamptz END
+      WHERE work_id=$1 AND token=$2 AND locked_until>clock_timestamp()`, [id, token, until, reason ?? null, observed]);
   }
   /**
    * Whether GitHub's webhook is actually delivering: the last verified delivery recorded and the
@@ -294,8 +220,16 @@ export class Store {
   }
 }
 
+/** How long a due observation job may wait behind the claim-priority list before it is claimed first. */
+export const observationStarvedAfterMs = 5 * 60_000;
+
+/**
+ * Make an item's observation job due now. A wake never moves a job that is already due later: an
+ * item saved every minute would otherwise look freshly due forever and never reach the starvation
+ * bound `takeJob` claims ahead of the priority list (2026-09-26: items stuck for an hour on stale reads).
+ */
 export async function wakeJob(db: pg.PoolClient, id: string) {
-  await db.query('INSERT INTO jobs(work_id) VALUES($1) ON CONFLICT(work_id) DO UPDATE SET available_at=now(),generation=jobs.generation+1', [id]);
+  await db.query('INSERT INTO jobs(work_id) VALUES($1) ON CONFLICT(work_id) DO UPDATE SET available_at=LEAST(jobs.available_at, now()),generation=jobs.generation+1', [id]);
 }
 
 export async function save(db: pg.PoolClient, work: Work, actor: string, kind: string, now: Date, details?: unknown) {

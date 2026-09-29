@@ -3,12 +3,12 @@ import { isClosed } from './closure.js';
 import { deliveryState } from './delivery.js';
 import { answerCommand, parkedOnHuman, type HumanRequestRow } from './human-request.js';
 import { scopeRefusalBlocker } from './scope.js';
-import { shortShas } from '../../web/format.js';
-import { OVERDUE_MINUTES, statusDuration } from '../../web/duration.js';
-import { phaseOf, plainReason, plainStatus, statusSince } from '../../web/plain-status.js';
-import { prSteps, stepSince } from '../../web/pr-steps.js';
-import { leftFlowAt, noRelease, releaseView, servedFor, type ReleaseView } from '../../web/release.js';
-import { stalledCards } from '../../web/pages/actionless.js';
+import { shortShas } from './format.js';
+import { OVERDUE_MINUTES, statusDuration } from './duration.js';
+import { phaseOf, plainReason, plainStatus, statusSince } from './plain-status.js';
+import { prSteps, stepSince } from './pr-steps.js';
+import { leftFlowAt, noRelease, releaseView, servedFor, type ReleaseView } from './release.js';
+import { stalledCards } from './actionless.js';
 import { resourceConflicts } from '../coordination.js';
 
 /**
@@ -21,7 +21,7 @@ import { resourceConflicts } from '../coordination.js';
  * (`leftFlowAt`): a per-item deployment record is written only for policies that ask for a
  * post-deployment check, so its absence never holds work back. Merged work is moving at Deploy
  * while its check is outstanding or while the production watch observes that production does not
- * serve it yet (web/release.ts), and blocked when the check or the deployment failed. Within
+ * serve it yet (src/model/release.ts), and blocked when the check or the deployment failed. Within
  * Shipped, an item is live only once the release is observed serving it (`servedAt`, under the
  * configured production environment); until then it reads "Merged" and is not counted as shipped
  * this week. Closed work is in none.
@@ -177,13 +177,18 @@ function heldMeaning(total: number, held: string[]): string {
   return `${total - held.length} waiting for a worker · ${held.length} held`;
 }
 
-/** The role whose step is next, in the vocabulary an agent reads (`actor` on a board item). */
-export const actorRoles = ['worker', 'reviewer', 'producer', 'approver', 'master', 'executor', 'human-only'] as const;
+/**
+ * The role whose step is next, in the vocabulary an agent reads (`actor` on a board item).
+ * `held` is no role at all: the item waits behind a dependency or an exclusive resource another
+ * item holds, so nobody can act on it until that clears — never the control plane's pending step.
+ */
+export const actorRoles = ['worker', 'reviewer', 'producer', 'approver', 'master', 'executor', 'human-only', 'held'] as const;
 export type ActorRole = typeof actorRoles[number];
 const roleOf: Record<string, ActorRole> = {
   You: 'human-only', 'Master agent': 'master', 'Builder agent': 'worker', 'Reviewer agent': 'reviewer', 'Prover agent': 'producer',
   // The control plane's own steps: the dispatcher, the CI run, the merge queue, the production watch.
-  'Graphyard (automatic)': 'executor', 'Graphyard (assigns a builder)': 'executor', 'Automated checks': 'executor', 'Nobody yet': 'executor',
+  'Graphyard (automatic)': 'executor', 'Graphyard (assigns a builder)': 'executor', 'Automated checks': 'executor',
+  'Nobody yet': 'held',
 };
 
 /**
@@ -278,15 +283,27 @@ export const boardFromStatus = (work: Work[], now: number, status: any) => build
 /** True for a response shaped as a board. */
 export const isBoard = (value: any): value is Board => !!value && typeof value === 'object' && !!value.groups && groups.every(group => Array.isArray(value.groups[group]));
 
+/** True for the refusal of a server that predates `GET /api/board`: the route is not there (404). */
+export const boardRouteMissing = (error: unknown) => (error as { status?: unknown } | null)?.status === 404;
+
 /**
  * The `board` section of `master status`: every item whose next step is the master's, first and
  * with its command — blocked on scope, a decision no approver answered, a stranded merge — then
  * every other open item, with the group counts. Read from `GET /api/board`; built from the same
- * module over the snapshot and status already in hand when that read is unavailable.
+ * module over the snapshot and status already in hand only when the server predates the route
+ * (404). Any other failure — a 500, an auth refusal, a timeout, a body that is not a board — is
+ * reported as the section's `error` rather than papered over, so a failing route is seen.
  */
 export async function masterBoard(api: (path: string) => Promise<any>, snapshot: { work: Work[]; now: string }, status: any, unanswered: { work: string; id: string }[] = []) {
-  const served = await api('board').catch(() => null);
-  const board = isBoard(served) ? served : boardFromStatus(snapshot.work, Date.parse(snapshot.now), status);
+  let board: Board;
+  try {
+    const served = await api('board');
+    if (!isBoard(served)) return { error: `GET /api/board answered something that is not a board: ${JSON.stringify(served)?.slice(0, 200)}` };
+    board = served;
+  } catch (error) {
+    if (!boardRouteMissing(error)) return { error: `GET /api/board failed: ${error instanceof Error ? error.message : String(error)}` };
+    board = boardFromStatus(snapshot.work, Date.parse(snapshot.now), status);
+  }
   const items = groups.flatMap(group => board.groups[group]).map(entry => {
     const decision = unanswered.find(row => row.work === entry.key);
     return decision ? { ...entry, actor: 'master' as const, command: `graphyard master approver ${entry.key} ${decision.id}` } : entry;

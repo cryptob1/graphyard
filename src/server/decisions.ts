@@ -3,12 +3,14 @@ import type pg from 'pg';
 import { z } from 'zod';
 import { Refusal, demand, resolveEscalation, standingEscalations, type Principal, type Work } from '../model.js';
 import { save, wakeJob } from '../store.js';
-import { approvalConflict, approveCapability, assertDecisionAuthority, decisionApprovalSchema, decisionInputs, decisionPrecondition, decisionRequestSchema, decisionSituation, foldDecisions, requiredDecisionCapabilities, unansweredRefusal, type Decision, type DecisionState } from '../model/approval.js';
+import { approvalConflict, approveCapability, assertDecisionAuthority, decisionApprovalSchema, decisionInputs, decisionPrecondition, decisionRequestSchema, decisionSituation, foldDecisions, requiredDecisionCapabilities, standingRefusal, type Decision, type DecisionState } from '../model/approval.js';
 import { canonical, decisionRace, readDecisions, resolvePin, samePin, type DecisionRecord, type StaleRace } from './decision-ledger.js';
 import type { Services } from './routes.js';
 import { refuseDecision, withdrawDecision } from './decision-refusal.js';
 import { precedentAvailability } from './escalation-context.js';
+import { applyTriageClosure } from './followups.js';
 import { mergePath, namedMergePathFault } from '../master/repair-lane.js';
+import { closeWork } from './close.js';
 
 type Db = pg.PoolClient;
 // The ledger's read half lives in decision-ledger.ts (GY-102); decision-refusal.ts reads it from here too.
@@ -60,14 +62,19 @@ export async function requestDecision(services: Services, caller: Principal, id:
     const work = await findWork(db, id); demand(work, 'Work item not found', 404);
     for (const capability of requiredDecisionCapabilities(data.action, input, work!)) assertDecisionAuthority(actor, capability, work!, services.repository);
     const precondition = decisionPrecondition(data.action, input, work!); demand(!precondition, precondition!, 409);
-    // The repair lane's decision names the fault it repairs (GY-406): a merge-path location.
+    // The repair lane's decision names the fault it repairs (GY-406): a merge-path location. The
+    // name is not matched against a ledger record (GY-428, declined): a merge left pending records no
+    // refusal event, and a refusal names GitHub's reason, never the broken file. What the ledger must
+    // show is judged where the merge is made: repairLaneVerdict's `normal-merge-stalled` condition,
+    // whose recorded state the `repair.merged` audit carries as `bypassed`.
     demand(data.action !== 'repair-merge' || namedMergePathFault(data.reason), `A repair-merge reason must name the merge-path fault: the broken location, one of ${mergePath.join(', ')}`, 422);
     const history = await readDecisions(db, work!);
     // A refused decision is answered, never retried unchanged (GY-141). A rework or recover
     // refusal judged the candidate and base it was requested against, and stands only for those (GY-229).
     const situation = decisionSituation(data.action, work!);
-    const repeated = unansweredRefusal(history, data.action, input, data.reason, (a, b) => JSON.stringify(canonical(a)) === JSON.stringify(canonical(b)), data.precedent ?? [], situation);
-    demand(!repeated, repeated!, 409);
+    // The refused decision travels as a field beside the message (GY-265), so the loop answers it by id.
+    const repeated = standingRefusal(history, data.action, input, data.reason, (a, b) => JSON.stringify(canonical(a)) === JSON.stringify(canonical(b)), data.precedent ?? [], situation);
+    if (repeated) throw new Refusal(repeated.message, 409, { standingRefusal: { decision: repeated.decision, action: repeated.action, legacy: repeated.legacy } });
     const pending = history.find(decision => decision.action === data.action && (decision.state === 'requested' || decision.state === 'approved'));
     const cited = data.precedent ? [...new Set(data.precedent)].sort() : null;
     // The ledger's "precedent it relied on" is only worth following if it names real decisions:
@@ -219,7 +226,7 @@ async function resolveInTransaction(services: Services, db: Db, now: Date, work:
   return `Resolved ${decision.input.trigger} on ${work.key}`;
 }
 
-async function applyThroughEngine(services: Services, decision: DecisionRecord, approver: Principal, approvalReason: string) {
+export async function applyThroughEngine(services: Services, decision: DecisionRecord, approver: Principal, approvalReason: string) {
   // The requester acts, with the authority the two-party decision grants for this one input.
   const actor: Principal = { id: decision.requestedBy, role: 'admin', sessionKind: 'ai', displayName: `${decision.requestedBy} (decision ${decision.id} approved by ${approver.id})` };
   const reason = `${decision.reason} [decision ${decision.id}, requested by ${decision.requestedBy}, approved by ${approver.id}: ${approvalReason}]`.slice(0, 2000);
@@ -230,7 +237,15 @@ async function applyThroughEngine(services: Services, decision: DecisionRecord, 
     case 'requirements': { const work = await engine.execute(actor, 'requirements', decision.workId, { ...input, reason }, key); return `Requirements revised to policy revision ${work.policyRevision}`; }
     case 'rework': await engine.execute(actor, 'rework', decision.workId, { reason, previousWorkerStopped: true }, key); return 'Rework authorized';
     case 'recover': await engine.execute(actor, 'recover', decision.workId, { reason, previousWorkerStopped: true }, key); return 'Containment quarantine recovered';
-    case 'attest': await engine.execute(actor, 'evidence', decision.workId, input, key); return `${input.proof} attested ${input.result} for ${input.sha}`;
+    case 'attest': await engine.execute(actor, 'evidence', decision.workId, input, key, { attestation: { decision: decision.id, requestedBy: decision.requestedBy, approvedBy: approver.id } }); return `${input.proof} attested ${input.result} for ${input.sha}`;
+    case 'close': {
+      // A triage closure (its input carries the judgement's `triageAt`) applies through the triage
+      // path; a diagnostician's closure (GY-439) closes the item directly, with the approval's own
+      // composed reason.
+      if (input.triageAt !== undefined) return applyTriageClosure(services, actor, decision.workId, input, decision.id, key);
+      const work = await closeWork(services, actor, decision.workId, { kind: input.kind, reason, ref: input.ref ?? null }, key);
+      return `Closed ${work.key} as ${input.kind}${input.ref ? ` of ${input.ref}` : ''}`;
+    }
     case 'grant': { const grant = await services.proofGrants.grant(actor, input.principal, { patterns: input.patterns, reason, ...(input.expectedRevision === undefined ? {} : { expectedRevision: input.expectedRevision }) }, key); return `Granted ${input.patterns.join(', ')} to ${input.principal} (grant revision ${grant.revision})`; }
     default: throw new Error(`No engine application for ${decision.action}`);
   }

@@ -22,8 +22,9 @@ const publicDocument = (document: any) => ({ ...document, credentials: undefined
 export class OperatorAgents {
   constructor(private store: Store, private repository: string, private configuredPrincipals: { id: string; tokenHash: string }[] = []) {}
 
-  async assertConfiguredPrincipalSafe(principal: { id: string; tokenHash: string }) {
-    const collision = (await this.store.pool.query(`SELECT 1 FROM operator_agents a
+  /** `lease` runs the check on the lease pool, for a lease command's own authentication (GY-558). */
+  async assertConfiguredPrincipalSafe(principal: { id: string; tokenHash: string }, { lease = false }: { lease?: boolean } = {}) {
+    const collision = (await (lease ? this.store.leasePool : this.store.pool).query(`SELECT 1 FROM operator_agents a
       LEFT JOIN operator_credentials c ON c.agent_id=a.id
       WHERE a.id=$1 OR c.token_hash=$2 LIMIT 1`, [principal.id, principal.tokenHash])).rowCount;
     demand(!collision, 'Configured principal collides with a persisted operator agent', 401);

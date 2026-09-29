@@ -1,3 +1,4 @@
+import { optimisticExcludeEvent, optimisticMergeEvent, parseOptimisticExclude } from '../../optimistic-merge.js';
 import { z } from 'zod';
 import { demand, type Work } from '../../model.js';
 import type { IntegrationJob } from '../../coordination.js';
@@ -14,7 +15,8 @@ import { defineRoutes, parseJson } from '../routes.js';
 import { coordinationSnapshot, coordinationViewHeader } from '../work-view.js';
 import { executorHost } from './agent-registry.js';
 import { directMergeStatus } from '../../direct-merge.js';
-import { maxMergeBatchSize, mergeBatchSizeEvent } from '../../merge-queue.js';
+import { maxMergeBatchSize, maxParallelTips, mergeParallelTipsEvent, mergeBatchSizeEvent, rerunFailedChecksEvent } from '../../merge-queue.js';
+import { maxRerunFailedChecks } from '../../master/profiles.js';
 import { eventStats } from '../../store/snapshot-delta.js';
 import { productionEnvironmentEvent, productionEnvironmentName, resolvedProductionEnvironment } from '../../flow-analytics.js';
 import { boardFromStatus } from '../../model/board.js';
@@ -34,6 +36,9 @@ export const statusRoutes = defineRoutes('status', [
       // feature needs, with the operator sentences the dashboard and master status raise.
       const appPermissions = github ? github.permissionReport() ?? { appId: github.config.appId, installationId: github.config.installationId, app: String(github.config.appId), account: null, installationUrl: installationSettingsUrl(github.config.installationId), observedAt: null, verifiedAt: null, error: 'Permission preflight has not run yet', suspended: false, required: requiredPermissions(controlPlanePermissions), granted: null, missing: [], blockedFeatures: [], attention: ['GitHub App permissions have not been verified yet; the preflight runs at startup and every five minutes'] } : null;
       const heldJobs = actor.role === 'operator-agent' ? 0 : (await engine.store.heldJobs()).length;
+      // Observation jobs rescheduled three times in a row without an observation (GY-506): the
+      // merge-queue deadlock shape, raised by master status rather than left for someone to diagnose.
+      const starvedJobs = actor.role === 'operator-agent' ? [] : await engine.store.starvedJobs();
       const observedAt = (await engine.store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date;
       const work = await engine.store.list();
       const visibleWork = operatorVisible(work);
@@ -55,12 +60,12 @@ export const statusRoutes = defineRoutes('status', [
       // of pending action none of them serves, with its wait and what to start.
       const executors = executorReport(visibleWork, executorRegistry(engine), observedAt);
       return { actor, humanOnly, delegation: delegationSnapshot(principals.map(p => p.actor), visibleWork, observedAt.getTime(), limits), repository: repository || null,
-        executors: { live: executors.live.length, liveMs: executors.liveMs, served: executors.served, unserved: executors.unserved, attention: describeUnserved(executors) }, baseBranch: github?.config.base ?? process.env.GITHUB_BASE_BRANCH ?? 'main', github: !!github, check: 'Graphyard / merge', reviewProviders: ['github', ...(dispatchAvailable ? ['codex'] : []), ...(dispatchAvailable && engine.reviewerApps.length ? ['agent'] : [])], reviewerApps: engine.reviewerApps, githubPermissions, githubRepository, githubAppId: github?.config.appId ?? null, githubInstallationId: github?.config.installationId ?? null, appPermissions, heldJobs, jobs, githubBudget, webhooks,
+        executors: { live: executors.live.length, liveMs: executors.liveMs, served: executors.served, unserved: executors.unserved, attention: describeUnserved(executors) }, baseBranch: github?.config.base ?? process.env.GITHUB_BASE_BRANCH ?? 'main', github: !!github, check: 'Graphyard / merge', reviewProviders: ['github', ...(dispatchAvailable ? ['codex'] : []), ...(dispatchAvailable && engine.reviewerApps.length ? ['agent'] : [])], reviewerApps: engine.reviewerApps, githubPermissions, githubRepository, githubAppId: github?.config.appId ?? null, githubInstallationId: github?.config.installationId ?? null, appPermissions, heldJobs, starvedJobs, jobs, githubBudget, webhooks,
         // The installation facts the master and doctor raise as attention: capacity variables
         // that no longer cover the roster, what production serves against the base branch, and
         // the build/protocol the CLI checks before brokering a merge. Production names work
         // items across the repository, so a scoped operator agent does not see it.
-        delegationLimits: services.delegationLimits, build, production: actor.role === 'operator-agent' ? null : production?.status() ?? null, productionEnvironment, ciAppIds: engine.ciAppIds, mergeQueue: { batchSize: engine.mergeBatchSize },
+        delegationLimits: services.delegationLimits, build, production: actor.role === 'operator-agent' ? null : production?.status() ?? null, productionEnvironment, ciAppIds: engine.ciAppIds, mergeQueue: { batchSize: engine.mergeBatchSize, optimistic: engine.optimisticMerge, optimisticExclude: engine.optimisticExclude, parallelTips: engine.parallelTips, rerunFailedChecks: engine.rerunFailedChecks },
         // The documentation policy this control plane stamps on new items, which doctor compares
         // with the checkout's committed graphyard.json (GY-293).
         documentation: engine.documentation,
@@ -73,6 +78,8 @@ export const statusRoutes = defineRoutes('status', [
         fleet: ['admin', 'coordinator', 'reader', 'slice-lead'].includes(actor.role) ? await services.agentRegistry.snapshot(executorHost(url, req)) : null,
         // Direct-merge mode (direct-merge.ts): the open windows and the one line master status shows while any is.
         directMerge: await directMergeStatus(engine.store.pool, engine.directMergeEnvironment, observedAt),
+        // Heartbeat latency and the renewals refused or failed server-side, this process, last 10 minutes (GY-558).
+        leaseHealth: engine.leaseHealth.report(),
         now: observedAt.toISOString(), release: releaseInfo(), schema: schemaVersion };
     },
   },
@@ -107,22 +114,44 @@ export const statusRoutes = defineRoutes('status', [
     },
   },
   {
-    // The master loop publishes `mergeQueue.batchSize` from its own configuration (GY-330), which
-    // lives only on the master's host: how many consecutive queue entries one combined tip
-    // validates. Recorded once per change in the installation ledger and applied to every
-    // evaluation from then on; a restarted server reads it back from there.
+    // The master loop publishes `mergeQueue.batchSize` (GY-330), `mergeQueue.parallelTips` (GY-498)
+    // and `mergeQueue.optimistic` (GY-500) from its own configuration, which lives only on the
+    // master's host: how many consecutive queue entries one combined tip validates, how many queue
+    // positions are validated at once, and which eligible entries merge past the queue. Each is
+    // recorded once per change in the installation ledger and applied to every evaluation from then
+    // on; a restarted server reads it back from there. `rerunFailedChecks` (GY-516), how many times
+    // a failed required check is rerun on its sha, travels the same way, as does `optimisticExclude`
+    // (GY-503), the repository's own shared-infrastructure globs.
     method: 'POST', path: '/api/merge-queue',
     async handle(context) {
       const { actor, services: { engine } } = context;
       demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
-      const batchSize = (await parseJson(context, 4096, '{}'))?.batchSize;
-      demand(Number.isSafeInteger(batchSize) && batchSize >= 1 && batchSize <= maxMergeBatchSize, `batchSize must be an integer from 1 to ${maxMergeBatchSize}`, 400);
-      const previous = await engine.loadMergeBatchSize();
-      const latest = (await engine.store.pool.query('SELECT 1 FROM events WHERE work_id IS NULL AND kind=$1 LIMIT 1', [mergeBatchSizeEvent])).rowCount;
-      engine.mergeBatchSize = batchSize;
-      if (latest && previous === batchSize) return { mergeQueue: { batchSize }, recorded: false };
-      await engine.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, mergeBatchSizeEvent, JSON.stringify({ batchSize, previous: latest ? previous : null })]);
-      return { mergeQueue: { batchSize }, recorded: true };
+      const body = await parseJson(context, 16384, '{}');
+      const { batchSize, optimistic, optimisticExclude, parallelTips, rerunFailedChecks } = body ?? {};
+      demand(batchSize !== undefined || optimistic !== undefined || optimisticExclude !== undefined || parallelTips !== undefined || rerunFailedChecks !== undefined, 'batchSize, optimistic, optimisticExclude, parallelTips or rerunFailedChecks is required', 400);
+      if (batchSize !== undefined) demand(Number.isSafeInteger(batchSize) && batchSize >= 1 && batchSize <= maxMergeBatchSize, `batchSize must be an integer from 1 to ${maxMergeBatchSize}`, 400);
+      if (rerunFailedChecks !== undefined) demand(Number.isSafeInteger(rerunFailedChecks) && rerunFailedChecks >= 0 && rerunFailedChecks <= maxRerunFailedChecks, `rerunFailedChecks must be an integer from 0 to ${maxRerunFailedChecks}`, 400);
+      demand(optimistic === undefined || typeof optimistic === 'boolean', 'optimistic must be true or false', 400);
+      const exclude = optimisticExclude === undefined ? undefined : parseOptimisticExclude(optimisticExclude) ?? undefined;
+      demand(optimisticExclude === undefined || exclude !== undefined, 'optimisticExclude must be at most 100 repository-relative globs (no whitespace, . or .. segments)', 400);
+      if (parallelTips !== undefined) demand(Number.isSafeInteger(parallelTips) && parallelTips >= 1 && parallelTips <= maxParallelTips, `parallelTips must be an integer from 1 to ${maxParallelTips}`, 400);
+      await engine.loadMergeBatchSize();
+      let recorded = false;
+      // Each value is applied only once the ledger holds it (GY-384): a failed INSERT leaves the
+      // evaluation on the recorded value and the master unpublished, so its next cycle retries.
+      const record = async (kind: string, field: string, value: number | boolean | readonly string[], previous: number | boolean | readonly string[], apply: () => void) => {
+        const latest = (await engine.store.pool.query('SELECT 1 FROM events WHERE work_id IS NULL AND kind=$1 LIMIT 1', [kind])).rowCount;
+        if (latest && JSON.stringify(previous) === JSON.stringify(value)) return apply();
+        await engine.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, kind, JSON.stringify({ [field]: value, previous: latest ? previous : null })]);
+        apply();
+        recorded = true;
+      };
+      if (batchSize !== undefined) await record(mergeBatchSizeEvent, 'batchSize', batchSize, await engine.loadMergeBatchSize(), () => { engine.mergeBatchSize = batchSize; });
+      if (parallelTips !== undefined) await record(mergeParallelTipsEvent, 'parallelTips', parallelTips, await engine.loadParallelTips(), () => { engine.parallelTips = parallelTips; });
+      if (rerunFailedChecks !== undefined) await record(rerunFailedChecksEvent, 'rerunFailedChecks', rerunFailedChecks, await engine.loadRerunFailedChecks(), () => { engine.rerunFailedChecks = rerunFailedChecks; });
+      if (optimistic !== undefined) await record(optimisticMergeEvent, 'optimistic', optimistic, engine.optimisticMerge, () => { engine.optimisticMerge = optimistic; });
+      if (exclude !== undefined) await record(optimisticExcludeEvent, 'optimisticExclude', exclude, engine.optimisticExclude, () => { engine.optimisticExclude = exclude; });
+      return { mergeQueue: { batchSize: engine.mergeBatchSize, optimistic: engine.optimisticMerge, optimisticExclude: engine.optimisticExclude, parallelTips: engine.parallelTips, rerunFailedChecks: engine.rerunFailedChecks }, recorded };
     },
   },
   {
@@ -183,7 +212,10 @@ export const statusRoutes = defineRoutes('status', [
     method: 'GET', path: '/api/events',
     async handle({ actor, url, services, operatorVisible }) {
       const query = parseEventHistoryQuery(url.searchParams);
-      if (actor.role === 'operator-agent') { demand(query.work, 'Operator-agent history reads require a scoped work item', 403); const item = (await services.engine.store.list()).find(w => w.id === query.work); demand(item && operatorVisible([item]).length, 'Work item is outside this operator-agent scope', 403); }
+      // An approver judges decisions resting on the ledger (GY-642), so one scoped to every item
+      // reads it whole; the read grants nothing, and every other operator agent names its item.
+      const wholeLedger = actor.role === 'operator-agent' && !!actor.capabilities?.includes('decision:approve') && !!actor.scope?.workItems.includes('*');
+      if (actor.role === 'operator-agent' && !wholeLedger) { demand(query.work, 'Operator-agent history reads require a scoped work item', 403); const item = (await services.engine.store.list()).find(w => w.id === query.work); demand(item && operatorVisible([item]).length, 'Work item is outside this operator-agent scope', 403); }
       const history = await readEventHistory(services.engine.store.pool, query);
       return query.view === 'rows' ? history.events : history;
     },

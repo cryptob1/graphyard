@@ -1,7 +1,7 @@
 import { deliveryState, deploySmokeRequired, postDeployMs, rollbackGuidance, type Work } from '../../src/model';
-import { deliveryLabel, safeExternalUrl } from '../format';
+import { deliveryLabel, safeExternalUrl } from '../../src/model/format';
 import { CandidateSha } from '../candidate';
-import { formatDuration } from '../duration';
+import { formatDuration } from '../../src/model/duration';
 
 /**
  * The second confidence layer for one delivery: what the release served, what the trusted

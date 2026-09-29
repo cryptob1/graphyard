@@ -133,13 +133,13 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
       };
       if (await dispatch(publicRoutes)) return;
       if (url.pathname.startsWith('/api/')) {
-        context.actor = await authenticate(services, req.headers.authorization, services.repository);
+        context.actor = await authenticate(services, req.headers.authorization, services.repository, req.method, url.pathname);
         if (await dispatch(apiRoutes)) return;
         return send(404, { error: 'Route not found' });
       }
       await dispatch([staticRoutes]);
     } catch (error) {
-      if (error instanceof Refusal) return send(error.status, { error: error.message });
+      if (error instanceof Refusal) return send(error.status, { ...error.details, error: error.message });
       if (error instanceof z.ZodError) return send(400, { error: 'Invalid input', issues: error.issues });
       if (error instanceof SyntaxError || error instanceof URIError) return send(400, { error: 'Malformed request' });
       console.error(requestFailure(req.method, req.url, error));

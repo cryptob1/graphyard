@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { UNKNOWN_DURATION, durationMinutes, formatAge, formatDuration } from '../web/duration';
+import { UNKNOWN_DURATION, durationMinutes, formatAge, formatDuration } from '../src/model/duration.js';
 
 test('formatDuration renders minutes below one hour', () => {
   assert.equal(formatDuration(0), '0m');

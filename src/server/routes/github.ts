@@ -24,7 +24,7 @@ export const githubRoutes = defineRoutes('github', [
         // Wake only the items the event is about; a move of the base branch or a queue ref touches them all.
         const { all, prs, shas } = webhookSubjects(payload, github?.config.base ?? 'main');
         if (!all && !prs.length && !shas.length) return;
-        await db.query(`UPDATE jobs SET available_at=now(),generation=generation+1 WHERE $1::boolean OR work_id IN (SELECT id FROM work_items
+        await db.query(`UPDATE jobs SET available_at=LEAST(available_at, now()),generation=generation+1 WHERE $1::boolean OR work_id IN (SELECT id FROM work_items
           WHERE document->'submission'->>'pr' = ANY($2::text[]) OR document->'candidate'->>'sha' = ANY($3::text[]) OR document->'queue'->'speculation'->>'tip' = ANY($3::text[]))`,
           [all, prs.map(String), shas]);
       });

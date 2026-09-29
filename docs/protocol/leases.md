@@ -5,7 +5,7 @@ Claims last 120 seconds, renewed at least every 30. Every owner mutation carries
 
 ## Workspaces
 
-Register the exact branch, path and host ID (`graphyard register GY-1 workspace.json`) before submitting. Branches begin `graphyard/` and are globally unique, paths unique per host (historical reservations included); put the epoch in both.
+Register the exact branch, path and host ID (`graphyard register GY-1 workspace.json`) before submitting. Branches begin `graphyard/`, globally unique; paths are unique per host (historical reservations included); put the epoch in both.
 
 ## `watch`
 
@@ -16,6 +16,6 @@ Register the exact branch, path and host ID (`graphyard register GY-1 workspace.
 - `submit` (CLI `complete`) ends it; later heartbeats are refused with `Implementation lease for epoch N ended when GY-N was submitted; stop heartbeating after complete`.
 - `park` records a human-only request and releases it.
 - A coordinator `capacity` report (`event: "exhausted"`) releases it for another account.
-- Otherwise it expires, classified from the ledger for the unsubmitted epoch: an unwithdrawn `blocked` report is `lease.expired` with cause `blocked-awaiting-operator`; an admin `--previous-worker-stopped` attestation is `stopped-by-attestation`; `capacity.exhausted` is `exhausted-capacity`; nothing is a `lease-loss` escalation, auto-settled if a record later explains it ([settling](../delegation.md#who-may-settle-what)).
+- Otherwise it expires, classified from the unsubmitted epoch's ledger: an unwithdrawn `blocked` report is `lease.expired` with cause `blocked-awaiting-operator`; an admin `--previous-worker-stopped` attestation is `stopped-by-attestation`; `capacity.exhausted` is `exhausted-capacity`; nothing is a `lease-loss` escalation, auto-settled if a record later explains it ([settling](../delegation.md#who-may-settle-what)).
 
 

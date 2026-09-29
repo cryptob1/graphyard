@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { defaultPiModel, piRunner } from './pi.js';
+import { lstatSync, readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { defaultPiModel, piRunner, piSmoke, type SmokeResult } from './pi.js';
 import type { FleetLaunchAccount } from '../fleet.js';
 import { registryToolsArgs } from '../master/environments.js';
 import { endRun, liveRun, registerRun } from './registry.js';
@@ -33,10 +35,46 @@ export function registryHeadlessLaunch(account: FleetLaunchAccount) {
   const environment: Record<string, string> = { ...contract.environment, ...(contract.homeVariable && account.home ? { [contract.homeVariable]: account.home } : {}) };
   return { command: contract.kind, model: modelId ?? defaultPiModel, args, environment };
 }
+/**
+ * The provider key an account's registry entry names by reference (GY-446), read from its file in
+ * the account's login home at the moment a run starts, as the one variable the runtime reads. The
+ * file must be a regular file of mode 0600; its content appears in no error, record or log.
+ */
+export function accountKeyEnvironment(account: Pick<FleetLaunchAccount, 'name' | 'home' | 'key'>): Record<string, string> {
+  if (!account.key) return {};
+  if (!account.home) throw new Error(`${account.name} names key file ${account.key.file} but no login home to read it from`);
+  const file = resolve(account.home, account.key.file);
+  let value: string;
+  try {
+    const info = lstatSync(file);
+    if (!info.isFile() || info.mode & 0o077) throw new Error(`${file} must be a regular file with mode 0600 (chmod 600 ${file})`);
+    value = readFileSync(file, 'utf8').trim();
+  } catch (error) { throw new Error(`${account.name}'s key file cannot be read: ${error instanceof Error ? error.message.replace(/^ENOENT: /, '') : 'unreadable'}`); }
+  if (!value || /[\u0000-\u001f\u007f]/.test(value)) throw new Error(`${account.name}'s key file ${file} must hold the key alone, on one line`);
+  return { [account.key.variable]: value };
+}
+/** A registry account's headless runner: every run reads the account's key afresh, into its own environment only. */
 export function registryRunner(account: FleetLaunchAccount): Runner {
   const launch = registryHeadlessLaunch(account);
-  return piRunner({ command: launch.command, model: launch.model, args: launch.args, environment: launch.environment });
+  return { name: 'pi', start: (prompt, options) => piRunner({ command: launch.command, model: launch.model, args: launch.args, environment: { ...launch.environment, ...accountKeyEnvironment(account) } }).start(prompt, options) };
 }
+/**
+ * The one-prompt smoke test of a registry account (GY-446): its runtime, login home, key and model,
+ * none of a role's policy. A key file that cannot be read fails the test with that reason.
+ */
+export async function smokeRegistryAccount(account: FleetLaunchAccount, options: { cwd?: string; timeoutMs?: number; command?: string; commandArgs?: string[] } = {}): Promise<SmokeResult> {
+  const launch = registryHeadlessLaunch({ ...account, fleet: { ...account.fleet, policy: undefined } });
+  let key: Record<string, string>;
+  try { key = accountKeyEnvironment(account); } catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) }; }
+  return piSmoke({ command: options.command ?? launch.command, commandArgs: options.commandArgs, model: launch.model, args: launch.args, environment: { ...launch.environment, ...key } },
+    { cwd: options.cwd ?? account.home ?? undefined, timeoutMs: options.timeoutMs, redact: Object.values(key) });
+}
+/**
+ * How a headless run ended, as the registry counts it (GY-446): with a result, without one, or —
+ * for a run the loop itself cancelled — not the account's doing, so not counted.
+ */
+export const runOutcome = (record: RunRecord): 'result' | 'no-result' | undefined =>
+  record.result?.ok ? 'result' : record.result?.reason === 'cancelled' ? undefined : 'no-result';
 
 export type Applied = RunRecord['applied'][number];
 const failure = (error: unknown) => error instanceof Error ? error.message : String(error);
@@ -46,12 +84,12 @@ const failure = (error: unknown) => error instanceof Error ? error.message : Str
  * sees it, and apply its submission when it ends. `settled` resolves to the record the session
  * keeps: the run's last events, its result, and what became of each submission.
  */
-export function startNarrowRun<T>(input: { runner: Runner; name: string; role: 'approver' | 'producer'; work: string; subject: string; prompt: string; options: RunOptions<T>;
+export function startNarrowRun<T>(input: { runner: Runner; name: string; role: 'approver' | 'producer'; work: string; subject: string; prompt: string; options: RunOptions<T>; checkout?: string;
   apply: (result: RunResult<T>) => Promise<Applied[]> }) {
   const live = liveRun(input.name);
   if (live) throw new Error(`A ${live.role} run named ${input.name} is already running for ${live.work}`);
   const run = input.runner.start(input.prompt, input.options), startedAt = new Date().toISOString();
-  registerRun({ name: input.name, role: input.role, work: input.work, subject: input.subject, run: run as Run<unknown> });
+  registerRun({ name: input.name, role: input.role, work: input.work, subject: input.subject, run: run as Run<unknown>, ...(input.checkout ? { checkout: input.checkout } : {}) });
   const settled = run.result().then(async result => {
     let applied: Applied[];
     try { applied = await input.apply(result); }
@@ -111,9 +149,10 @@ export const producerRunOptions = (cwd: string, binding: { sha: string; baseSha:
   },
 });
 
-export function piApproverPrompt(config: { repository: string; cliPath: string }, key: string, decision: string, identity: string) {
+export function piApproverPrompt(config: { repository: string; cliPath: string }, key: string, decision: string, identity: string, clone?: string) {
   const cli = `node ${config.cliPath}`;
   return `You are the independent Graphyard approver for ${config.repository}, acting as ${identity}. Judge decision ${decision} on ${key}: run ${cli} master decisions ${key}, read the item with ${cli} status ${key}, its pull request and history, and weigh the requester's reason against the item's criteria and the operator's goals. `
+    + (clone ? `Your working directory is a scratch directory of your own. Read the code in ${clone}, a clone of the repository made for this run alone and removed when it ends: it has its own refs, index and working tree, detached at the commit you judge, and no remote, so a write inside the clone stays inside it. Every other checkout is read-only to you: judge it, never modify it, and work only in the clone and your working directory. ` : '')
     + `Then call the graphyard_decide tool exactly once with decision "${decision}", approve true if the decision is justified or false if it is not, and your reason; a decline is a call with approve false, never an exit without one. Graphyard applies your verdict as ${identity}, so do not run master approve or master refuse yourself. `
     + 'Never approve a decision you requested, implemented, or produced evidence for; never edit, push, merge, review, or submit evidence. Stop after the call.';
 }
@@ -124,7 +163,7 @@ export function piProducerPrompt(config: { repository: string }, binding: { key:
   const attached = criteria.filter(criterion => criterion.proofs.some(proof => binding.proofs.includes(proof)));
   return `You are an independent Graphyard proof producer for ${config.repository}. Produce evidence for work item ${binding.key} (pull request #${binding.pr}) at exact head ${binding.sha} against base ${binding.baseSha} under policy revision ${binding.policyRevision}, for the ${binding.group} proof group: ${binding.proofs.join(', ')}. `
     + `The criteria these proofs establish: ${attached.map(criterion => `${criterion.id} (${criterion.proofs.filter(proof => binding.proofs.includes(proof)).join(', ')}): ${criterion.text}`).join(' ')} `
-    + `Work in a detached worktree of the exact head at ${checkout.worktree}: git -C ${repository} fetch origin ${binding.sha} && git -C ${repository} worktree add --detach ${checkout.worktree} ${binding.sha}. Install and build there, then run what establishes each proof — start from the tests named for it (grep the proof name under tests/) — with every GRAPHYARD_* and HERDR_* variable unset and a free GRAPHYARD_TEST_PORT. `
+    + `Work in a detached worktree of the exact head at ${checkout.worktree}: git -C ${repository} fetch origin ${binding.sha} && git -C ${repository} worktree add --detach ${checkout.worktree} ${binding.sha}. Install and build there, then run what establishes each proof — start from the tests named for it (grep the proof name under tests/) — with every GRAPHYARD_* and HERDR_* variable unset and a free GRAPHYARD_TEST_PORT. A proof's cases are the ones whose title begins with its name, counted from a run of its whole test file, never narrowed — that title rule applies to unit: and integration: proofs only. A manual: proof is judged, not counted from titles: its executed is the number of test cases and checks you ran to judge the criterion, recorded with its exercise record. `
     + 'Do not edit, commit, push, rebase or merge the candidate, and never weaken, skip or narrow a test to make a proof pass. '
     + `A proof that passes against an unchanged tree proves nothing, so for each proof also run it in a second detached worktree of the same head at ${stripped} (git -C ${repository} worktree add --detach ${stripped} ${binding.sha}) with the behaviour its criterion describes removed — revert or stub exactly the lines of the change that implement it. `
     + `Then call the graphyard_submit_evidence tool once per proof with proof, sha "${binding.sha}", baseSha "${binding.baseSha}", policyRevision ${binding.policyRevision}, result pass or fail, executed as the cases that actually ran, skipped, and exercise {criterion, behaviour, result, executed} as the stripped run's true outcome; a failing or incomplete run is submitted as result fail, never omitted. Graphyard submits it as your producer principal and its gates decide whether it is trusted. `

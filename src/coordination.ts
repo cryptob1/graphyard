@@ -3,7 +3,7 @@ import { namedPaths } from './model/scope.js';
 import { behindBaseHold } from './model/behind-base.js';
 import { baseRefreshConflict, currentBaseRefreshCarry, pendingBaseRefresh } from './merge-queue.js';
 
-export interface IntegrationJob { work_id: string; available_at: string; locked_until: string | null; error: string | null; held_until?: string | null }
+export interface IntegrationJob { work_id: string; available_at: string; locked_until: string | null; error: string | null; held_until?: string | null; deferred_reason?: string | null; unobserved?: number }
 export interface Diagnostic { kind: string; message: string; next: string }
 export function resourceConflicts(work: Work, all: Work[], now: number) {
   return all.filter(w => w.id !== work.id && (w.containmentQuarantine || w.lease && Date.parse(w.lease.expiresAt) > now))
@@ -96,14 +96,30 @@ export function broadScopeRefusals(plannedFiles: string[], text: string[] = []):
     return { scope, narrower, reason: `${scope} is a root-level directory scope: the change-scope check then admits any file under ${scope}, so a submission is held to almost nothing there — ${instead}` };
   });
 }
+/** True when the item plans a hot file: one two or more live attempts are already changing (`hotspots`, GY-882). */
+const touchesHot = (item: Work, hot: ReadonlySet<string>) => {
+  if (!hot.size) return false;
+  for (const path of item.plannedFiles) for (const file of hot) if (pathScopesOverlap(path, file)) return true;
+  return false;
+};
+
 /**
  * Smallest scope first among ready items of the same operator priority: fewest root-level
  * directories, then fewest directories, then fewest files, then the older item. A small item that
  * lands early is one fewer re-integration for everything it would otherwise have waited behind.
+ * Given a hot set (`hotFileSet`, GY-882), an item of the same priority that touches no file two or
+ * more live attempts are already changing is offered before one that does; the order above then
+ * decides within each group. This stays a pure reordering — overlap still holds nothing, and a hot
+ * item still dispatches beside its peers rather than waiting for them. The hot set is computed once
+ * per cycle from one snapshot and passed in: heat is a property of the whole set, and a comparator
+ * driven only by (a, b) must not derive it mid-sort. The default empty set is the cold order, so
+ * every existing `.sort(dispatchOrder)` call site is unchanged.
  */
-export function dispatchOrder(a: Work, b: Work) {
+export function dispatchOrder(a: Work, b: Work, hot: ReadonlySet<string> = new Set()) {
   const left = scopeBreadth(a.plannedFiles), right = scopeBreadth(b.plannedFiles);
-  return a.priority - b.priority || left.broad.length - right.broad.length || left.directories - right.directories || left.files - right.files || Date.parse(a.createdAt) - Date.parse(b.createdAt);
+  const hotA = touchesHot(a, hot), hotB = touchesHot(b, hot);
+  return a.priority - b.priority || (hotA !== hotB ? (hotA ? 1 : -1) : 0)
+    || left.broad.length - right.broad.length || left.directories - right.directories || left.files - right.files || Date.parse(a.createdAt) - Date.parse(b.createdAt);
 }
 
 export function diagnose(work: Work, all: Work[], now: number, jobs: IntegrationJob[] = []): Diagnostic[] {
@@ -126,7 +142,12 @@ export function diagnose(work: Work, all: Work[], now: number, jobs: Integration
   for (const r of resourceConflicts(work, all, now)) add('resource-busy', `${r.resource} is reserved by ${r.key}`, 'Wait for the owner to release its lease; do not use the resource concurrently.');
   const job = jobs.find(j => j.work_id === work.id);
   const held = !!job?.held_until && Date.parse(job.held_until) > now;
-  if (held) add('integration-held', job!.error ?? 'Integration work is held on a GitHub App permission', `Held rather than retried: accept the App permission and the preflight that sees the installation change releases it, or it re-checks once at ${job!.held_until}.`);
+  // A job rescheduled three times in a row without saving an observation is the GY-506 deadlock
+  // shape: the record says what each reschedule answered and where the queue is stuck because of it.
+  const unobserved = job?.unobserved ?? 0;
+  if (work.submission && unobserved >= 3) add('observation-starved', `${work.key}'s observation job has finished ${unobserved} times in a row without saving an observation${job!.error ? `; last refusal: ${job!.error}` : ''}${job!.deferred_reason ? `; last reschedule: ${job!.deferred_reason}` : ''}`,
+    'The merge queue cannot advance behind an item nothing observes. Read the recorded reasons: a task-changed retry names what keeps rewriting the item, a budget deferral names its reset; if no reason is recorded the job loop is failing before the observation.');
+  else if (held) add('integration-held', job!.error ?? 'Integration work is held on a GitHub App permission', `Held rather than retried: accept the App permission and the preflight that sees the installation change releases it, or it re-checks once at ${job!.held_until}.`);
   else if (job?.error) add('integration-error', job.error, `Automatic retry is scheduled at ${job.available_at}; inspect integration configuration if failures persist.`);
   if (work.submission && !work.observation) add('unobserved', 'Submitted PR has not been observed for the current requirements', 'Check the GitHub connection and reconciliation job; missing observation is not success.');
   if (work.submission && work.observation && now - Date.parse(work.observation.at) >= 120000) add('stale-observation', 'GitHub observation is older than two minutes', 'Restore provider connectivity; the merge gate requires a fresh observation.');
