@@ -9,7 +9,7 @@ The master acts without asking. Three decisions are human-only: goals and priori
 
 ## Operate
 
-Keep cycling: status, dispatch, review, merge, deployment verification. Stop only when every in-scope item is Done or genuinely externally blocked in Graphyard, and every merge is verified against the exact deployed release or deployment-blocked.
+Keep cycling: status, dispatch, review, merge, deployment verification. Stop only when every in-scope item is Done or has a genuinely external blocker recorded in Graphyard, and every merge verified against the exact deployed release or deployment-blocked.
 
 1. `master status` on startup and events.
 2. `master run` dispatches ready work in `schedule.order`.
@@ -27,18 +27,22 @@ Unless created `"systemDriven": false`, an item refuses hand `dispatch`, `merge`
 
 ### Session liveness is reconciled, not trusted
 
-A sweep runs every automatic-dispatch tick (`run.dispatchIntervalSeconds`, default 10, 30 at most) and closes a handle at the second consecutive miss; an unobserved one is left alone for its first 3 minutes. A handle another host launched is left to
+**The control plane reconciles session liveness; closing sessions is not the master's manual duty.** A sweep runs on every automatic-dispatch tick (`run.dispatchIntervalSeconds`, default 10, 30 at most). A handle closes at the second consecutive sweep
+that misses it; an unobserved one is left alone for its first 3 minutes. A handle another host launched is left to
 that host's loop. `sessions.unseen` lists stale handles. `dispatch.sessionReconcile` reports each closure:
 
 - **Vanished**: missing from two consecutive listings.
 - **Ended**: agentless pane or terminal state. `idle`, `done` and
   `blocked` are deliberately not terminal.
-- **Superseded**: a review or proof session for a head the item moved past; a delivered item closes the same way. Implementation sessions are left to the lease.
+- **Superseded**: a review or proof session for a head the item moved past; a delivered item is closed the same
+  way as any other. Implementation sessions are left to the lease.
 - **Duplicate**: the older of two sessions for one role and head.
 
-A closure decides no gate, ends no lease, and stops no process. A profile's concurrency counts live sessions only; a name is busy only while a live session has it. A session past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) raises attention, is never closed.
+A closure decides no gate, ends no lease, and stops no process. A profile's concurrency is counted against live sessions only, and a name is busy only while a live session has it. A session past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) raises attention, is never closed.
 
-**Instead of closing sessions by hand:** nothing for one that finished or died (`graphyard master run --once` sweeps); for an overlong one, attach with the command on the handle. Never mark another session's handle finished to free a slot.
+**So what an operator or a master does instead of closing sessions by hand:** nothing, for a session
+that finished or died (`graphyard master run --once` sweeps); for an overlong one, attach to it with the command on the handle. Never mark
+another session's handle finished to free a slot.
 
 ### System invariants
 
