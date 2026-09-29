@@ -42,6 +42,18 @@ export const optimisticMergeEvent = 'merge-queue.optimistic';
 /** The installation-ledger event the control plane reads the published exclude globs back from (GY-503). */
 export const optimisticExcludeEvent = 'merge-queue.optimistic-exclude';
 
+/**
+ * The published `mergeQueue.optimistic` as this process last read it from the installation ledger
+ * (github.ts processJob, beside the batch size), or null until then. One server process serves one
+ * repository, so the process-wide reading is that repository's. The submission observer observes
+ * through its own GitHub instance, built from the environment and never loading settings
+ * (engine.ts observeSubmission), so `observe` falls back to this before it pays for the base
+ * compare: with the lane off, no observation of this process pays for one (GY-925).
+ */
+let publishedLane: boolean | null = null;
+export const publishOptimisticLane = (enabled: boolean): void => { publishedLane = enabled; };
+export const publishedOptimisticLane = (): boolean | null => publishedLane;
+
 // ---- Eligibility (AC-1) --------------------------------------------------------------------------
 
 /**
@@ -51,7 +63,9 @@ export const optimisticExcludeEvent = 'merge-queue.optimistic-exclude';
  * directories whose change can break any test anywhere, so disjointness by file says nothing
  * about them. They fit most repositories and name no one repository's files: a repository tunes
  * them in `mergeQueue.optimisticExclude` (master config, published beside `optimistic`), and
- * onboarding writes the defaults there so they are named and editable per repository.
+ * onboarding writes the defaults there so they are named and extendable per repository — extendable,
+ * because a copy still identical to a shipped default list is read as the current defaults (GY-925),
+ * so a default glob added later reaches the installs onboarded before it.
  */
 export const defaultOptimisticExclude = [
   // Manifests: a dependency, script or build change can break every test anywhere.
@@ -65,6 +79,35 @@ export const defaultOptimisticExclude = [
   // Schema and migration directories: what the store and every integration test stand on.
   '**/migrations/', '**/migration/', '**/migrate/', '**/*migration*', '**/schema*', '**/schemas/',
 ] as const;
+
+/**
+ * The default lists earlier installs onboarded with (GY-925). Onboarding copies the product
+ * defaults into `mergeQueue.optimisticExclude` and `master init` deliberately keeps that copy,
+ * so an install configured before the defaults changed would otherwise never see a default glob
+ * added later. A change to the defaults appends the list it replaced here — that is the whole
+ * migration: a configured list whose globs are exactly one shipped list's was never tuned by the
+ * repository and is read as the current defaults, while a list the repository added to or dropped
+ * from keeps standing exactly as configured.
+ */
+const shippedDefaultExcludes: readonly (readonly string[])[] = [defaultOptimisticExclude];
+
+/** Globs compared as a set, so a copied list is recognized whatever order it was written in. */
+const excludeFingerprints = new WeakMap<readonly string[], string>();
+const excludeFingerprint = (globs: readonly string[]): string => {
+  let marked = excludeFingerprints.get(globs);
+  if (!marked) { marked = [...new Set(globs)].sort().join('\n'); excludeFingerprints.set(globs, marked); }
+  return marked;
+};
+
+/**
+ * The exclude list actually in effect (GY-925): an untouched copy of a shipped default list is
+ * read as the current defaults, and a repository's own tuning stands exactly as configured.
+ */
+export function optimisticExcludeInEffect(configured: readonly string[] | null | undefined): readonly string[] {
+  if (!configured || configured === defaultOptimisticExclude) return defaultOptimisticExclude;
+  const marked = excludeFingerprint(configured);
+  return shippedDefaultExcludes.some(shipped => excludeFingerprint(shipped) === marked) ? defaultOptimisticExclude : configured;
+}
 
 /** The globs an exclude list must satisfy: repository-relative, one path segment or tree each, bounded like the documentation paths are. */
 export function parseOptimisticExclude(value: unknown): string[] | null {
@@ -80,12 +123,13 @@ export function parseOptimisticExclude(value: unknown): string[] | null {
 }
 
 /**
- * Whether `path` touches shared infrastructure under the repository's exclude globs: any configured
- * glob names it, or — configured none — a product default does. A change to one never merges
- * optimistically, and neither does anything whose base changed one since its own run.
+ * Whether `path` touches shared infrastructure under the repository's exclude globs: any
+ * configured glob names it, or a product default does — the defaults a copy was never tuned
+ * away from always apply (GY-925). A change to one never merges optimistically, and neither
+ * does anything whose base changed one since its own run.
  */
 export function sharedInfrastructure(path: string, globs: readonly string[] = defaultOptimisticExclude): boolean {
-  return globs.some(glob => documentationGlobMatches(glob, path));
+  return optimisticExcludeInEffect(globs).some(glob => documentationGlobMatches(glob, path));
 }
 
 /** What made an entry eligible, recorded on the item while it holds the optimistic lane and kept on its merge. */
@@ -208,6 +252,13 @@ export function currentLane(work: Pick<Work, 'optimistic'>, lane: Omit<Optimisti
 
 // ---- The main guard (AC-2) -----------------------------------------------------------------------
 
+/**
+ * The main guard (GY-500) ticks on this interval in github.ts's job loop: each tick reads the
+ * required suite's verdict on the optimistic merge commits that have not concluded and acts on
+ * the state it finds. The overdue threshold below is floored at two of these ticks.
+ */
+export const mainGuardIntervalMs = 30_000;
+
 /** The required suite's verdict on one merge commit: every required check passed, one failed, or not all have concluded. */
 export type PostMergeVerdict = { verdict: 'pass' } | { verdict: 'fail'; failing: string[] } | { verdict: 'pending' };
 const failedConclusions = new Set(['failure', 'timed_out', 'cancelled', 'action_required', 'startup_failure', 'stale']);
@@ -250,6 +301,13 @@ export interface OptimisticRevert {
   pr: number | null; head: string | null; mergeSha: string | null; refusal: string | null;
   /** For a refused revert: the base branch commit whose required suite passed again, which ends the hold on optimistic merges. */
   resolvedBy?: { sha: string; at: string } | null;
+  /**
+   * Set once, by the guard tick that first found this revert overdue (GY-925): the instant the
+   * threshold was crossed, on the guard's own clock. Readers without a clock of their own —
+   * master status's attention text — read this recorded fact instead of recomputing overdue, so
+   * what the ledger recorded and what is rendered cannot drift across hosts whose clocks differ.
+   */
+  overdueAt?: string;
 }
 
 /** The item's latest optimistic merge, when its current delivery is one. */
@@ -258,7 +316,8 @@ export function currentOptimisticMerge(work: Pick<Work, 'stage' | 'delivery' | '
   return last && work.stage === 'done' && work.delivery?.mergeSha === last.mergeSha && !last.revert ? last : null;
 }
 
-export interface GuardMerge { key: string; id: string; mergeSha: string; mergedAt: string; verdict: PostMergeVerdict['verdict']; failing: string[] }
+export interface GuardMerge { key: string; id: string; mergeSha: string; mergedAt: string; verdict: PostMergeVerdict['verdict']; failing: string[];
+  /** When the required suite's verdict was observed on the merge commit: the CI duration the revert-overdue threshold reads (GY-925). */ observedAt?: string }
 /**
  * Where main stands after the optimistic merges: the unreverted ones from the last green one on,
  * oldest first, and what the guard does next.
@@ -282,7 +341,7 @@ export function mainGuard(all: Pick<Work, 'id' | 'key' | 'stage' | 'delivery' | 
   const reverting = reverted('opened'), refused = reverted('refused');
   const merges = all.flatMap(work => {
     const merge = currentOptimisticMerge(work);
-    return merge ? [{ key: work.key, id: work.id, mergeSha: merge.mergeSha, mergedAt: merge.mergedAt, verdict: merge.postMerge?.verdict ?? 'pending', failing: merge.postMerge?.verdict === 'fail' ? merge.postMerge.failing : [] }] : [];
+    return merge ? [{ key: work.key, id: work.id, mergeSha: merge.mergeSha, mergedAt: merge.mergedAt, verdict: merge.postMerge?.verdict ?? 'pending', failing: merge.postMerge?.verdict === 'fail' ? merge.postMerge.failing : [], ...(merge.postMerge?.observedAt ? { observedAt: merge.postMerge.observedAt } : {}) }] : [];
   }).sort((a, b) => Date.parse(a.mergedAt) - Date.parse(b.mergedAt) || (a.key < b.key ? -1 : 1));
   // The last green commit: the newest passing merge before the first failure (or the newest of all
   // when none failed). The window starts there — the bisection's known-good bound — and runs to now.
@@ -292,7 +351,7 @@ export function mainGuard(all: Pick<Work, 'id' | 'key' | 'stage' | 'delivery' | 
   const window = merges.slice(Math.max(0, lastGreen));
   const held = reverting ?? refused;
   if (held) {
-    const merge = held.merge, culprit: GuardMerge = { key: held.work.key, id: held.work.id, mergeSha: merge.mergeSha, mergedAt: merge.mergedAt, verdict: 'fail', failing: merge.revert!.failing };
+    const merge = held.merge, culprit: GuardMerge = { key: held.work.key, id: held.work.id, mergeSha: merge.mergeSha, mergedAt: merge.mergedAt, verdict: 'fail', failing: merge.revert!.failing, ...(merge.postMerge?.observedAt ? { observedAt: merge.postMerge.observedAt } : {}) };
     return held === reverting ? { state: 'reverting', window, culprit, revert: merge.revert! } : { state: 'refused', window, culprit, revert: merge.revert! };
   }
   if (firstFail < 0) return window.some(merge => merge.verdict === 'pending') ? { state: 'pending', window } : { state: 'green', window };
@@ -320,13 +379,45 @@ export function bisectCulprit(window: GuardMerge[]): { culprit: GuardMerge; prob
   return { culprit: window[low], probes };
 }
 
-export function describeGuard(guard: GuardState): string {
+/** A duration in the guard's own prose ("45s", "12m5s", "3h2m"), as github.ts renders lags. */
+const duration = (ms: number) => ms >= 3_600_000 ? `${Math.floor(ms / 3_600_000)}h${Math.round(ms % 3_600_000 / 60_000)}m`
+  : ms >= 60_000 ? `${Math.floor(ms / 60_000)}m${Math.round(ms % 60_000 / 1000)}s` : `${Math.round(ms / 1000)}s`;
+
+/**
+ * When a reverting revert is overdue (GY-925): it has waited longer than the required suite took
+ * on the culprit's own merge commit — the CI duration its verdict's `observedAt` reads against the
+ * merge time — floored at two guard ticks so a fast suite never flags within the tick its verdict
+ * was observed in. One threshold for the guard's own description and for the `optimistic.revert.pending`
+ * event github.ts records, whose turn to overdue is also stamped on the revert (`overdueAt`), so the
+ * attention text and the ledger never drift.
+ */
+export const revertOverdueThresholdMs = (culprit: Pick<GuardMerge, 'mergedAt' | 'observedAt'>): number =>
+  Math.max(culprit.observedAt ? Math.max(0, Date.parse(culprit.observedAt) - Date.parse(culprit.mergedAt)) : 0, 2 * mainGuardIntervalMs);
+
+/** How long the revert has been open without landing. */
+export const revertWaitedMs = (revert: Pick<OptimisticRevert, 'at'>, now: Date): number => Math.max(0, now.getTime() - Date.parse(revert.at));
+
+/** Whether the guard's reverting revert is overdue (GY-925): waited past the threshold above. */
+export const revertOverdue = (guard: Extract<GuardState, { state: 'reverting' }>, now: Date): boolean =>
+  revertWaitedMs(guard.revert, now) > revertOverdueThresholdMs(guard.culprit);
+
+/**
+ * The guard's own prose. A caller that passes no clock can only repeat recorded fact: overdue is
+ * claimed from the revert's `overdueAt` stamp, never from this host's wall clock, so a description
+ * rendered on another host reads exactly what the ledger recorded (GY-925). Callers that hold a
+ * clock of their own — the guard tick — pass it and read the live wait besides.
+ */
+export function describeGuard(guard: GuardState, now?: Date): string {
   switch (guard.state) {
     case 'green': return guard.window.length ? `main is green after ${guard.window.at(-1)!.key}` : 'no optimistic merge is awaiting its post-merge run';
     case 'pending': return `the required suite is running on main after ${guard.window.filter(merge => merge.verdict === 'pending').map(merge => `${merge.key} (${merge.mergeSha.slice(0, 12)})`).join(', ')}`;
     case 'await': return `main failed after an optimistic merge; bisecting ${guard.window.map(merge => merge.key).join(', ')}, waiting for the required suite on ${guard.probe.key}'s merge ${guard.probe.mergeSha.slice(0, 12)}`;
     case 'culprit': return `${guard.culprit.key}'s merge ${guard.culprit.mergeSha.slice(0, 12)} broke main (${guard.culprit.failing.join(', ') || 'required checks failed'})${guard.kept.length ? `; ${guard.kept.map(merge => merge.key).join(', ')} stay${guard.kept.length === 1 ? 's' : ''}` : ''}`;
-    case 'reverting': return `reverting ${guard.culprit.key}'s merge ${guard.culprit.mergeSha.slice(0, 12)}${guard.revert.pr ? ` through PR #${guard.revert.pr}` : ''}`;
+    case 'reverting': {
+      const thresholdMs = revertOverdueThresholdMs(guard.culprit);
+      const waitedMs = guard.revert.overdueAt ? Date.parse(guard.revert.overdueAt) - Date.parse(guard.revert.at) : now ? revertWaitedMs(guard.revert, now) : null;
+      return `reverting ${guard.culprit.key}'s merge ${guard.culprit.mergeSha.slice(0, 12)}${guard.revert.pr ? ` through PR #${guard.revert.pr}` : ''}${waitedMs !== null && waitedMs > thresholdMs ? `; the revert is overdue: it has waited ${duration(waitedMs)} against the ${duration(thresholdMs)} attention threshold, and holds every optimistic merge with main red` : ''}`;
+    }
     case 'refused': return `${guard.culprit.key}'s merge ${guard.culprit.mergeSha.slice(0, 12)} broke main (${guard.culprit.failing.join(', ') || 'required checks failed'}) and cannot be reverted automatically: ${guard.revert.refusal}`;
   }
 }
