@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { capabilityTiers, fleetRoles, looksLikeSecret, quotaStates, type FleetAccountView, type FleetView, type RolePolicy } from '../../src/model/registry';
+import { formatAge } from '../../src/model/duration';
 import { sealForHost } from '../seal';
 import type { Dashboard } from './dashboard';
 
@@ -65,12 +66,43 @@ export function ConnectCard({ connect, onCancel, onAnswer, onRetry, onRemove }: 
 // so it may name a token prefix without being refused (GY-397).
 export const pastesCredential = (form: FormData) => [...form.entries()].some(([name, value]) => name !== 'reason' && typeof value === 'string' && value.split(/[\s,]+/).some(looksLikeSecret));
 
-export function AccountCard({ account, connect, onChangeRoles }: { account: FleetAccountView; connect?: ConnectView; onChangeRoles?: (account: string) => void }) {
-  return <div className="criterion" data-account={account.name}>
+/**
+ * How old an account's quota reading may be before the fleet panel calls it an old probe
+ * (GY-945): executors fold what they observe into the registry on every action, so on a working
+ * fleet a reading is minutes old, and one that has stood for over an hour says nothing about a
+ * wall the provider may have lifted since. The one freshness bound every reader applies;
+ * docs/dashboard.md states it.
+ */
+export const quotaStaleThresholdMs = 60 * 60_000;
+
+/**
+ * An account's probe health, for the fleet panel (GY-945): `failed` when its last smoke test
+ * failed (the probe that proves the account works failed it), `stale` when its quota was never
+ * observed or was observed longer than `quotaStaleThresholdMs` ago — an old reading, however
+ * alarming it reads — and `fresh` otherwise. `text` is what the card shows beside the observation
+ * time; every tone draws its own class, so an operator can tell a real wall from an old probe.
+ */
+export function probeStatus(account: Pick<FleetAccountView, 'observedAt' | 'smoke' | 'quotaSource'>, now: number): { tone: 'fresh' | 'stale' | 'failed'; text: string } {
+  if (account.smoke?.result === 'fail') return { tone: 'failed', text: `probe failed${account.smoke.reason ? `: ${account.smoke.reason}` : ''}` };
+  const verb = account.quotaSource === 'operator' ? 'marked' : 'observed';
+  if (account.observedAt === null || !Number.isFinite(Date.parse(account.observedAt))) return { tone: 'stale', text: `quota never ${verb}` };
+  const age = formatAge(account.observedAt, now);
+  return Date.parse(account.observedAt) < now - quotaStaleThresholdMs
+    ? { tone: 'stale', text: `old probe — quota ${verb} ${age} ago` }
+    : { tone: 'fresh', text: `quota ${verb} ${age} ago` };
+}
+
+/** A usage window's reading with the reset the registry carries for it, when it carries one. */
+export const usageText = (usage: FleetAccountView['usage']) => usage.map(entry => `${entry.window} ${entry.percent}%${entry.resetsAt ? ` (resets ${when(entry.resetsAt)})` : ''}`).join(', ');
+
+export function AccountCard({ account, connect, onChangeRoles, now = Date.now() }: { account: FleetAccountView; connect?: ConnectView; onChangeRoles?: (account: string) => void; now?: number }) {
+  const probe = probeStatus(account, now);
+  const live = account.liveSessions.length;
+  return <div className="criterion" data-account={account.name} data-probe={probe.tone}>
     <strong className={account.eligible ? undefined : 'amber'}>{account.name} · {account.runtime} · {account.model}{account.modelId ? ` (${account.modelId})` : ''}{ connect?.provider ? ` · ${connect.provider}` : '' } · {account.eligible ? 'eligible' : 'ineligible'}</strong>
     {account.ineligible && <p role="status" className="amber">Ineligible: {account.ineligible}</p>}
-    <p>Roles: {account.roles.length ? account.roles.map(entry => `${entry.role} (${entry.preference} of ${entry.of})`).join(', ') : 'none'} · Live sessions: {account.liveSessions.length ? account.liveSessions.map(session => `${session.role}${session.work ? ` on ${session.work}` : ''} since ${when(session.since)}`).join('; ') : 'none'}{account.maxSessions !== null ? ` (limit ${account.maxSessions})` : ''}{onChangeRoles && <> <button data-change-roles={account.name} onClick={() => onChangeRoles(account.name)}>change</button></>}</p>
-    <p>Quota: {account.quota}{account.usage.length ? ` — ${account.usage.map(entry => `${entry.window} ${entry.percent}%`).join(', ')}` : ''} · Resets: {when(account.resetsAt)} · Login: {account.loggedIn === null ? 'not observed' : account.loggedIn ? 'logged in' : 'logged out'} · Observed {when(account.observedAt)}{account.quotaSource === 'operator' ? ' (marked by an operator)' : ''}</p>
+    <p>Roles: {account.roles.length ? account.roles.map(entry => `${entry.role} (${entry.preference} of ${entry.of})`).join(', ') : 'none'} · Live sessions: {live}{live ? ` — ${account.liveSessions.map(session => `${session.role}${session.work ? ` on ${session.work}` : ''} since ${when(session.since)}`).join('; ')}` : ''}{account.maxSessions !== null ? ` (limit ${account.maxSessions})` : ''}{onChangeRoles && <> <button data-change-roles={account.name} onClick={() => onChangeRoles(account.name)}>change</button></>}</p>
+    <p>Quota: {account.quota}{account.usage.length ? ` — ${usageText(account.usage)}` : ''} · Resets: {when(account.resetsAt)} · Login: {account.loggedIn === null ? 'not observed' : account.loggedIn ? 'logged in' : 'logged out'} · Observed {when(account.observedAt)}{account.quotaSource === 'operator' ? ' (marked by an operator)' : ''} <span className={`probe ${probe.tone}`} data-probe={probe.tone}>{probe.text}</span></p>
     {connect?.placement && <p className="muted">Joined by default: {connect.placement.join(', ')}</p>}
     <p className="muted">Capability: {account.capability?.tier ?? 'unknown'}{account.capability?.contextTokens ? ` · ${account.capability.contextTokens.toLocaleString()} token context` : ''} · {cost(account)} · Credential by reference: {account.home ?? 'the runtime\'s own default login'} on {account.host}{account.enabled ? '' : ' · disabled'}</p>
   </div>;
@@ -82,8 +114,8 @@ export const policyText = (policy: RolePolicy | undefined) => {
   return parts.join(' · ');
 };
 
-/** The Agents page body, pure over the view so it renders the same in a test as in the browser. */
-export function FleetOverview({ fleet, connects = [], onChangeRoles, onCancelConnect, onAnswerConnect, onRetryConnect, onRemoveConnect }: { fleet: FleetView; connects?: ConnectView[]; onChangeRoles?: (account: string) => void; onCancelConnect?: (id: string) => void; onAnswerConnect?: (id: string, code: string) => Promise<void>; onRetryConnect?: (connect: ConnectView) => void; onRemoveConnect?: (id: string) => void }) {
+/** The Agents page body, pure over the view so it renders the same in a test as in the browser. `now` pins the probe clock (tests); the page takes the reading time. */
+export function FleetOverview({ fleet, connects = [], now, onChangeRoles, onCancelConnect, onAnswerConnect, onRetryConnect, onRemoveConnect }: { fleet: FleetView; connects?: ConnectView[]; now?: number; onChangeRoles?: (account: string) => void; onCancelConnect?: (id: string) => void; onAnswerConnect?: (id: string, code: string) => Promise<void>; onRetryConnect?: (connect: ConnectView) => void; onRemoveConnect?: (id: string) => void }) {
   const running = fleet.sessions.filter(session => !session.endedAt);
   const byName = new Map(connects.filter(connect => connect.name).map(connect => [connect.name!, connect]));
   return <>
@@ -91,7 +123,7 @@ export function FleetOverview({ fleet, connects = [], onChangeRoles, onCancelCon
     {fleet.attention.map(line => <div role="alert" className="notice danger" key={line}>{line}</div>)}
     <section><div className="section-title"><h2>Accounts <span className="count">{fleet.accounts.length}</span></h2></div>
       {connects.map(connect => <ConnectCard key={connect.id} connect={connect} onCancel={onCancelConnect} onAnswer={onAnswerConnect} onRetry={onRetryConnect} onRemove={onRemoveConnect}/>)}
-      {fleet.accounts.map(account => <AccountCard key={account.name} account={account} connect={byName.get(account.name)} onChangeRoles={onChangeRoles}/>)}
+      {fleet.accounts.map(account => <AccountCard key={account.name} account={account} connect={byName.get(account.name)} onChangeRoles={onChangeRoles} now={now}/>)}
       {!fleet.accounts.length && !connects.length && <p>No account is connected yet. Connect an account above: pick a provider, paste its key or finish its sign-in — no shell, no configuration files.</p>}
     </section>
     <section><div className="section-title"><h2>Roles <span className="count">{fleet.roles.length}</span></h2></div>
