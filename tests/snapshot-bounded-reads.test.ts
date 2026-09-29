@@ -188,6 +188,9 @@ test('unit:cli-reads-bounded-snapshot — CLI commands read bounded snapshot or 
       }
       return response.end(JSON.stringify({}));
     });
+    // The CLI's reads ride one keep-alive connection; the git steps between them can outlast
+    // node's 5 s idle close, so the fixture holds connections as long as the test runs.
+    syncServer.keepAliveTimeout = 120_000;
     control.state.reads.length = 0; control.state.violations.length = 0;
     await new Promise<void>(resolve => syncServer.listen(0, '127.0.0.1', resolve));
     const syncOrigin = `http://127.0.0.1:${(syncServer.address() as { port: number }).port}`;
@@ -203,9 +206,11 @@ test('unit:cli-reads-bounded-snapshot — CLI commands read bounded snapshot or 
       await writeFile(join(originRepo, 'shared.txt'), 'theirs\n');
       await commit(originRepo, 'Theirs');
       const sync = execFile(process.execPath, [launcher, 'sync', 'GY-1'], { cwd: clone, env: { ...process.env, GRAPHYARD_URL: syncOrigin, GRAPHYARD_TOKEN: 'fixture' } });
-      await assert.rejects(sync, (error: { code: number }) => error.code === 1, 'sync reports the conflict and exits non-zero');
-      assert.deepEqual(control.state.violations, [], 'the sync attribution read is not a full work-snapshot read');
-      assert.deepEqual(control.state.reads.filter(read => read.path === 'work-snapshot').map(read => read.coordination), [true], 'the sync attribution read is the coordination view');
+      const outcome = await sync.then(() => ({ code: 0, output: '' }), (error: { code?: number | string; stdout?: string; stderr?: string }) =>
+        ({ code: error.code, output: `stdout: ${error.stdout ?? ''}\nstderr: ${error.stderr ?? ''}`.trim() }));
+      assert.equal(outcome.code, 1, `sync reports the conflict and exits non-zero\n${outcome.output}`);
+      assert.deepEqual(control.state.violations, [], `the sync attribution read is not a full work-snapshot read\n${outcome.output}`);
+      assert.deepEqual(control.state.reads.filter(read => read.path === 'work-snapshot').map(read => read.coordination), [true], `the sync attribution read is the coordination view\n${outcome.output}`);
     } finally { syncServer.closeAllConnections(); await new Promise<void>(resolve => { syncServer.close(() => resolve()); setTimeout(resolve, 2_000).unref(); }); await rm(cwd, { recursive: true, force: true }); }
 
     // The watch supervisor's containment revalidation reads the same view (the source carries

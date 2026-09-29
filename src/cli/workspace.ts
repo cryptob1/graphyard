@@ -98,8 +98,14 @@ async function syncWork({ api, print, base: serverUrl }: CliContext, work: any) 
   conflicts = unmerged();
   if (conflicts.length) {
     const landed = new Set(git('rev-list', `${mergeBase}..${baseTip}`).split('\n').filter(Boolean));
-    // Attribution is a courtesy: an unreadable snapshot never hides the conflict list.
-    const all: Work[] = await api('work-snapshot?view=coordination').then((snapshot: any) => Array.isArray(snapshot) ? snapshot : Array.isArray(snapshot?.work) ? snapshot.work : []).catch(() => []);
+    // Attribution is a courtesy: an unreadable snapshot never hides the conflict list. A busy
+    // runner can retire the keep-alive socket while the merge runs, so a failed read retries
+    // twice on a fresh connection before the conflicts are reported unattributed (GY-864).
+    let all: Work[] = [];
+    for (let attempt = 0; attempt < 3 && !all.length; attempt++) {
+      if (attempt) await new Promise(resolve => setTimeout(resolve, 250));
+      all = await api('work-snapshot?view=coordination').then((snapshot: any) => Array.isArray(snapshot) ? snapshot : Array.isArray(snapshot?.work) ? snapshot.work : []).catch(() => []);
+    }
     const remaining = attributeConflicts(conflicts, all, sha => landed.has(sha), generated?.files ?? []);
     print({ key: work.key, base: `origin/${baseBranch}`, baseTip, merged: false, conflicts: remaining, regenerated, detail, plannedFiles: work.plannedFiles,
       next: `Resolve each remaining conflict (each names the shipped items that landed it), stage it, and rerun sync ${work.key}: it regenerates the generated files from the resolved sources and commits the merge. Files outside plannedFiles must match origin/${baseBranch} byte-for-byte: git checkout ${baseTip.slice(0, 12)} -- PATH restores one.` });
