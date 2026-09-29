@@ -88,7 +88,9 @@ export class SimulatedGitHub {
   tip: string;
   prs = new Map<number, PullRequest>();
   /** Every merge GitHub performed, in order, with the time it did. */
-  merges: { key: string; pr: number; sha: string; at: number; state: string; mode: 'immediate' | 'auto-merge' }[] = [];
+  merges: { key: string; pr: number; sha: string; at: number; state: string; mode: 'immediate' | 'auto-merge' | 'outside' }[] = [];
+  /** Every landed peer an observation reported, as `observed KEY -> landed KEY` (GY-756). */
+  landedReports: string[] = [];
   /** Reviewers' plans per item: the verdict each successive review of it gives. */
   verdicts = new Map<string, ('APPROVED' | 'CHANGES_REQUESTED')[]>();
   /** Reviewer profiles that are out of quota: a request dispatched to one is answered with a usage-limit verdict. */
@@ -120,6 +122,14 @@ export class SimulatedGitHub {
    * as reverts — the reading this item fixes, staged as a fault the simulated day must recover from.
    */
   staleMergeBase = new Set<string>();
+  /**
+   * GY-831. Heads for which `gh pr view` answers a head other than the record's, so every guarded
+   * merge attempt for them refuses with one unchanged message. A rework round's new head is never
+   * listed, so the fault holds only the candidate it was staged for.
+   */
+  stuckHeads = new Set<string>();
+  /** GY-831. Items whose reviewer verdict is posted by the bound reviewer App identity itself. */
+  botReviewers = new Set<string>();
   /** How many times the landing check ran in the loop, the bases it judged, and the two compare kinds it asked. */
   landingChecks = 0; landingBases = new Set<string>(); ancestorCompares = 0; blindCompares = 0;
   private serial = 0;
@@ -234,10 +244,10 @@ export class SimulatedGitHub {
   }
   /** A pull request's file list as GitHub's files endpoint answers it: the head's changes since its merge base with the pull request's base. */
   prFiles(pr: PullRequest) { return this.diff(this.mergeBase(pr.base, pr.head), pr.head); }
-  /** The pull request as `GET /pulls/:number` answers what the landing check's `landedOn` reads of it. */
+  /** The pull request as `GET /pulls/:number` answers what the landing check's `landedOn` reads of it, its head included. */
   pull(pr: number) {
     const record = this.prs.get(pr);
-    return record ? { merged: !!record.merged, merge_commit_sha: record.merged?.sha ?? null, state: record.open ? 'open' : 'closed' } : null;
+    return record ? { merged: !!record.merged, merge_commit_sha: record.merged?.sha ?? null, head: { sha: record.head }, state: record.open ? 'open' : 'closed' } : null;
   }
   /**
    * The production landing check over this repository, exactly as the real observer computes it
@@ -292,12 +302,13 @@ export class SimulatedGitHub {
     for (const pr of [...this.prs.values()].filter(entry => entry.open)) {
       const pushedAt = pr.pushed.get(pr.head)!;
       const ciDone = now - pushedAt >= this.options.ciMs;
-      // The reviewer judges a head once CI reported on it.
+      // The reviewer judges a head once CI reported on it. An item in `botReviewers` is judged by
+      // the bound reviewer App identity, whose approval a Graphyard-authored tip carries.
       if (ciDone && now - pushedAt >= this.options.ciMs + this.options.reviewMs && !pr.reviews.some(review => review.sha === pr.head)) {
         const plan = this.verdicts.get(pr.key) ?? [];
         const state = plan.shift() ?? 'APPROVED';
         this.verdicts.set(pr.key, plan);
-        pr.reviews.push({ reviewer: 'reviewer', sha: pr.head, state, id: ++this.serial, submittedAt: new Date(now).toISOString() });
+        pr.reviews.push({ reviewer: this.botReviewers.has(pr.key) ? 'graphyard-reviewer[bot]' : 'reviewer', sha: pr.head, state, id: ++this.serial, submittedAt: new Date(now).toISOString() });
       }
       // A reviewer App answers the request it was dispatched: an exhausted profile with its usage-limit verdict.
       const request = pr.agentRequests.at(-1);
@@ -317,7 +328,9 @@ export class SimulatedGitHub {
     if (check?.conclusion !== 'success') return 'BLOCKED';
     return now - check.at >= (this.slowRecompute.has(pr.key) ? 6 * minute : 0) ? pr.settledState : 'BLOCKED';
   }
-  private merge(pr: PullRequest, now: number, mode: 'immediate' | 'auto-merge') {
+  /** A merge somebody made on GitHub by hand, outside Graphyard's queue: nothing asked for it. */
+  mergeOutside(pr: PullRequest, now: number) { this.merge(pr, now, 'outside'); return pr.merged!; }
+  private merge(pr: PullRequest, now: number, mode: 'immediate' | 'auto-merge' | 'outside') {
     const state = this.mergeState(pr, now);
     // A head that already contains the base tip lands its own tree, as GitHub's merge commit does.
     const head = this.commits.get(pr.head)!, landsTree = this.contains(pr.head, this.tip);
@@ -360,6 +373,8 @@ export class SimulatedGitHub {
         // revert, from the head's merge base with that commit, so a stale refusal clears on an
         // unchanged head (GY-839).
         const landing = pr.open && !pr.merged ? await world.landing(work, peers) : undefined;
+        // Every landed peer the landing check reported (GY-756), as `observed KEY -> landed KEY`.
+        world.landedReports.push(...(landing?.landed ?? []).map(entry => `${work.key} -> ${entry.key}`));
         return {
           clockOffset: { min: 0, max: 0 }, prState: pr.open ? 'open' : 'closed', draft: false, prCreatedAt: new Date(pr.createdAt).toISOString(),
           candidate: { sha: pr.head, baseSha: pr.base, pr: pr.number, branch: pr.branch, author: pr.author, createdAt: new Date(pr.createdAt).toISOString() },
@@ -474,9 +489,17 @@ export class SimulatedGitHub {
   gh(repository: string) {
     return async (command: string, args: string[]) => {
       if (command !== 'gh') throw new Error(`Unexpected command ${command}`);
-      if (args[0] === 'pr' && args[1] === 'view') { const pr = this.prs.get(Number(args[2]))!; return JSON.stringify({ headRefOid: pr.head, baseRefName: this.options.baseBranch, state: pr.open ? 'OPEN' : 'MERGED', isDraft: false }); }
+      if (args[0] === 'pr' && args[1] === 'view') {
+        const pr = this.prs.get(Number(args[2]))!;
+        return JSON.stringify({ headRefOid: this.stuckHeads.has(pr.head) ? sha('stuck', pr.head) : pr.head, baseRefName: this.options.baseBranch, state: pr.open ? 'OPEN' : 'MERGED', isDraft: false });
+      }
       const path = args.find(arg => arg.startsWith(`repos/${repository}/`)) ?? '';
       if (path.endsWith(`/git/ref/heads/${this.options.baseBranch}`)) return JSON.stringify({ ref: `refs/heads/${this.options.baseBranch}`, object: { type: 'commit', sha: this.tip } });
+      const reviews = /\/pulls\/(\d+)\/reviews$/.exec(path);
+      if (reviews) {
+        const pr = this.prs.get(Number(reviews[1]))!;
+        return JSON.stringify(pr.reviews.map(review => ({ id: review.id, user: { login: review.reviewer }, commit_id: review.sha, state: review.state })));
+      }
       const commit = /\/commits\/([0-9a-f]{40})$/.exec(path)?.[1];
       if (commit) return JSON.stringify({ sha: commit, commit: { tree: { sha: this.commits.get(commit)?.tree ?? sha('tree', commit) } } });
       throw new Error(`Unexpected gh call: ${args.join(' ')}`);

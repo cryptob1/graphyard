@@ -1,5 +1,5 @@
 // Concern: cycle steps 5–7 — shepherd reviews and proofs, the guarded merge, deployment verification.
-import { reviewProviderOf, reviewerProfileFor, exhaustedReviewerProfiles, deploySmokeRequired, deliveryState, rollbackGuidance } from '../model.js';
+import { carriedApproval, reviewProviderOf, reviewerProfileFor, exhaustedReviewerProfiles, deploySmokeRequired, deliveryState, rollbackGuidance } from '../model.js';
 import { mergedWithoutAuthorization, unauthorizedMergeViolation, approvedMerge, transientMergeRace } from '../master.js';
 import { type Work } from '../model.js';
 import { queueSequencingReason } from '../merge-queue.js';
@@ -41,6 +41,46 @@ export function mergeRetryDue(previous: DaemonAction | undefined, work: Work, cy
   if (readyToRetry(previous, cycle)) return true;
   if (previous?.state !== 'failed' || work.violations.length || !work.gates.every(gate => gate.passed)) return false;
   return now - Date.parse(previous.at) >= Math.min(mergeRetryBaseMs * 2 ** Math.max(0, previous.attempts - 1), mergeRetryCapMs);
+}
+
+/** How long the guarded merge may refuse one candidate for one unchanged reason before the loop acts on it (GY-831). */
+export const repeatedMergeRefusalMs = 10 * 60_000;
+/**
+ * GY-831. A guarded merge refused for the same reason on consecutive attempts past
+ * `repeatedMergeRefusalMs` is not retried for good: on 2026-09-26 GY-470 headed a twenty-item queue
+ * for an hour while every attempt was refused for a carried approval the re-post could not use,
+ * and nothing moved until a master requested rework by hand. The loop raises attention naming the
+ * reason and the next step, and takes that step itself through the control plane: a carried
+ * approval is cleared so the review gate requests a fresh review of the tip, and otherwise the
+ * candidate is marked for a rework decision the approver judges. Either way the item leaves the
+ * queue head and the next entry heads it. Acted on once per candidate, reason and recovery phase:
+ * the phase is the carried binding the action would clear, so a re-review that is answered — the
+ * carry gone, the refusal standing — re-arms the handling and moves the candidate on to the rework
+ * action instead of being deduplicated away by the first phase's marker (GY-831 review). A carry
+ * re-bound to another review is a phase of its own.
+ */
+export async function actOnRepeatedRefusal(cycle: Cycle, item: Work, mergeKey: string, reason: string, since: string) {
+  const { state, effects, now, performed } = cycle;
+  const minutes = Math.floor((now() - Date.parse(since)) / 60_000);
+  if (now() - Date.parse(since) < repeatedMergeRefusalMs) return;
+  const carry = carriedApproval(item), carried = !!carry;
+  const key = `${mergeKey}:repeated:${carry ? `carry:${carry.reviewId ?? 'unnumbered'}:${carry.originalSha}` : 'rework'}`, previous = state.actions[key];
+  if (previous?.state === 'done' && previous.since === since) return;
+  // Like the refusal itself, the attention is the gate working, not a daemon fault: no fault kind.
+  const next = carried
+    ? `Graphyard clears the carried approval so the review gate requests a fresh review of tip ${item.candidate!.sha.slice(0, 12)}, and the next queue entry heads the queue meanwhile`
+    : `Graphyard marks candidate ${item.candidate!.sha.slice(0, 12)} for a rework decision the approver judges, and the next queue entry heads the queue meanwhile`;
+  const attention = `${item.key}: the guarded merge has refused candidate ${item.candidate!.sha.slice(0, 12)} on every attempt for ${minutes} minutes with the same reason: ${reason}. Next step: ${next}.`;
+  if (!effects.refuseMerge) {
+    performed.push(await record(state, key, { kind: 'escalation', work: item.key, principal: null, state: 'failed', detail: `${attention} This loop cannot report the refusal to the control plane, so a master reports it with graphyard master decide ${item.key} rework REASON`, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle, since }, now(), effects.persist, null));
+    return;
+  }
+  try {
+    await effects.refuseMerge(item, reason, since);
+    performed.push(await record(state, key, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail: attention, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle, since }, now(), effects.persist, null));
+  } catch (error) {
+    performed.push(await record(state, key, { kind: 'escalation', work: item.key, principal: null, state: 'failed', detail: `${attention} Reporting it failed and is retried on the next refusal: ${message(error)}`, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle, since }, now(), effects.persist, null));
+  }
 }
 
 /** Step 5: shepherd reviews and proofs for submitted candidates. */
@@ -178,10 +218,13 @@ export async function mergeStep(cycle: Cycle) {
           if (reread) { target = reread; continue; }
         }
         // A refusal is the gate working, not a daemon fault: record it (no fault kind, so it is no
-        // recurrence instance and files no structural item) and keep cycling.
-        performed.push(await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'failed',
-          detail: `Guarded merge refused for ${item.key}${race ? ` after ${retries + 1} attempt(s) this cycle, each lost to a concurrent write; not counted toward the backoff` : ''}: ${message(error)}`,
-          attempts: race ? previous?.attempts ?? 0 : state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist, null));
+        // recurrence instance and files no structural item) and keep cycling. The refusal keeps the
+        // time it was first given while its detail stays the same (GY-831).
+        const detail = `Guarded merge refused for ${item.key}${race ? ` after ${retries + 1} attempt(s) this cycle, each lost to a concurrent write; not counted toward the backoff` : ''}: ${message(error)}`;
+        const since = !race && previous?.state === 'failed' && previous.detail === detail ? previous.since ?? previous.at : new Date(now()).toISOString();
+        performed.push(await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'failed', detail,
+          attempts: race ? previous?.attempts ?? 0 : state.actions[key].attempts, cycle: state.cycle, ...(race ? {} : { since }) }, now(), effects.persist, null));
+        if (!race) await actOnRepeatedRefusal(cycle, target, key, message(error), since);
         return;
       }
     }
