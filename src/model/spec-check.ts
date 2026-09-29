@@ -34,9 +34,9 @@ const namedHoldersMax = 3, unresolvedMax = 8;
 const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 /** The literals a route symbol carries before its first path parameter: `GET /api/work/([^/]+)/x` grounds as `/api/work/`. */
 const routePrefix = (route: string) => route.split(/[:{]/)[0].replace(/\/$/, '');
-/** The declaration needle a symbol resolves by: an export line, never a mention, an import or prose — a symbol declared nowhere is one the item creates. */
+/** The declaration needle a symbol resolves by: an export line, never a mention, an import or prose — a symbol declared nowhere is one the item creates. POSIX ERE only: git grep -E has no (?:…) groups. */
 export const symbolDeclarationNeedle = (symbol: string) =>
-  `export\\s+(?:declare\\s+)?(?:abstract\\s+)?(?:async\\s+)?(?:function\\s*\\*?\\s+|const\\s+|class\\s+|type\\s+|interface\\s+|enum\\s+)${escapeRegExp(symbol)}\\b`;
+  `export\\s+(declare\\s+)?(abstract\\s+)?(async\\s+)?(function\\s*\\*?\\s+|const\\s+|class\\s+|type\\s+|interface\\s+|enum\\s+)${escapeRegExp(symbol)}\\b`;
 
 /**
  * Every fault in the item's spec, against `tree` (the base files, as scopeExists reads them) and

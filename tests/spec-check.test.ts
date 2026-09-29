@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { baseTree, derivedIntent, releaseSpecGate } from '../src/cli/planned-files-intent.js';
-import { specCheck, specCheckRefusal, specRulesPrompt, type SpecSearch } from '../src/model/spec-check.js';
+import { baseSpecSearch, specCheck, specCheckRefusal, specRulesPrompt, symbolDeclarationNeedle, type SpecSearch } from '../src/model/spec-check.js';
 import { criteriaRuleSection, followUpItem, type LaunchThread } from '../src/review-threads.js';
 import { triagePrompt } from '../src/triage.js';
 import { researchPrompt } from '../src/research.js';
@@ -103,7 +103,8 @@ test('unit:spec-references-resolve — a symbol declared in a planned file passe
   assert.deepEqual(passing, { unresolved: [], proofless: [] });
   assert.equal(asked.length, 1);
   assert.equal(asked[0].kind, 'symbol');
-  assert.match(asked[0].needle, /export\\s\+\(\?:declare\\s\+\)\?\(\?:abstract\\s\+\)\?\(\?:async\\s\+\)\?/, 'a symbol is resolved by an export declaration, never a mention');
+  assert.match(asked[0].needle, /export\\s\+\(declare\\s\+\)\?\(abstract\\s\+\)\?\(async\\s\+\)\?/, 'a symbol is resolved by an export declaration, never a mention');
+  assert.doesNotMatch(asked[0].needle, /\(\?:/, 'the needle stays POSIX ERE: git grep -E refuses the (?:… group');
   assert.match(asked[0].needle, /derivePlannedFiles\\b/);
   const refusing = await specCheck({ criteria, plannedFiles: ['src/model/work.ts'] }, tree, { async filesMatching() { return new Set(['src/other.ts']); } });
   assert.deepEqual(refusing.unresolved, [{ criterion: 'AC-1', kind: 'symbol', reference: 'derivePlannedFiles', holder: 'src/other.ts' }]);
@@ -158,6 +159,14 @@ test('unit:spec-references-resolve — the release gate reads the tree only when
   assert.equal(vacuous, null, 'criteria naming no path, route or symbol need no tree');
   await assert.rejects(releaseSpecGate(root, 'main', { criteria: [{ id: 'AC-1', text: 'GET /api/work returns the item.', proofs: ['unit:x'] }] }, { tree: noTree }), /no tree was read/,
     'an unreadable base refuses rather than passing a reference unresolved');
+});
+
+test('unit:spec-references-resolve — the git-backed search grades a symbol needle with real git grep -E: the declaration is found and an undeclared name returns empty, never aborting', async () => {
+  const search = baseSpecSearch(root, 'main');
+  assert.deepEqual([...await search.filesMatching('symbol', symbolDeclarationNeedle('derivePlannedFiles'))].sort(), ['src/model/work.ts', 'src/other.ts'],
+    'the export declaration line resolves every holder');
+  assert.deepEqual([...await search.filesMatching('symbol', symbolDeclarationNeedle('noSuchSymbolAnywhere'))], [],
+    'a symbol declared nowhere is created by the item, not unresolved');
 });
 
 test('unit:task-writing-prompts-carry-rules — the triage, research and review follow-up prompts each carry the three task-writing rules', () => {
