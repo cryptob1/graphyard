@@ -83,7 +83,9 @@ const trusted = (proof: string, extra: Record<string, unknown> = {}) => ({ id: r
 test('unit:bootstrap-policy-model defers only the marked criterion and keeps every other gate', () => {
   const work = fixture();
   const deferred = evaluate(work, [work], new Date(), [15368]);
-  assert.deepEqual(acceptance({ ...work, gates: deferred.gates } as Work).reasons, ['AC-2: unit:supervisor-stop needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy'],
+  assert.deepEqual(acceptance({ ...work, gates: deferred.gates } as Work).reasons, ['AC-2: unit:supervisor-stop needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy',
+    // GY-883: the unobserved change rides the medium lane, which adds its own demand beside the criterion's.
+    'AC-2: unit:supervisor-stop needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy (the medium lane adds this demand beside its criterion)'],
     'the bootstrap criterion is deferred while every other criterion still demands proof');
   assert.deepEqual(requiredProofs(work, [work]), ['unit:supervisor-stop']);
   assert.equal(deferred.gates.find(gate => gate.name === 'review')!.passed, true);
@@ -176,7 +178,8 @@ test('integration:bootstrap-policy-gate lands a bootstrap candidate on review, C
   assert.ok(Date.parse(stamped.declaredAt) > 0, 'the declaration carries a server-stamped time');
   assert.deepEqual(stamped.contractPaths, [contract]);
 
-  assert.deepEqual(acceptance(work).reasons, ['AC-2: unit:supervisor-stop needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy'],
+  assert.deepEqual(acceptance(work).reasons, ['AC-2: unit:supervisor-stop needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy',
+    'AC-2: unit:supervisor-stop needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy (the medium lane adds this demand beside its criterion)'],
     'the deferred proof is not demanded of this candidate; the remaining criterion still is');
 
   const proven = await prove(work, 'unit:supervisor-stop');
@@ -252,6 +255,8 @@ test('integration:bootstrap-policy-inheritance requires the deferred proof of th
     criteria: [{ id: 'AC-1', text: 'The change behaves', proofs: ['unit:heir'] }] });
   assert.deepEqual(acceptance(heir).reasons.slice().sort(), [
     'AC-1: unit:heir needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy',
+    // GY-883: the medium lane adds its own demand beside the criterion's; the inherited obligation is never lane-touched.
+    'AC-1: unit:heir needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy (the medium lane adds this demand beside its criterion)',
     `Bootstrap obligation inherited from ${origin.key} AC-1: integration:inherit-harness needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy`,
   ].sort(), 'the deferred proof is inherited as a required criterion');
   assert.deepEqual(inheritedObligations(heir, await all()).map(obligation => obligation.proof), ['integration:inherit-harness']);
@@ -399,7 +404,8 @@ test('integration:bootstrap-policy-authority keeps bootstrap mode away from work
     /Operator permission required/, 'a worker cannot revise its own criteria into bootstrap mode');
   assert.equal((await current(work.id)).criteria[0].bootstrap, undefined);
   assert.deepEqual(acceptance(await current(work.id)).reasons,
-    ['AC-1: integration:worker-authority-harness needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy'],
+    ['AC-1: integration:worker-authority-harness needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy',
+    'AC-1: integration:worker-authority-harness needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy (the medium lane adds this demand beside its criterion)'],
     'the worker’s own proof requirement stands');
 });
 

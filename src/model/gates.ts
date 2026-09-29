@@ -115,16 +115,22 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[],
   };
   // A bootstrap criterion's proofs are deferred here and required of the next change that
   // touches the same contract; review, CI and every other criterion still gate this one.
-  // The lane decides which of the change's own criterion proofs are demanded of it (GY-883
-  // AC-2): a low-lane item lands on its required CI checks and one approving review with its
-  // producer-run proofs and manual attestations not demanded, medium adds its producer proofs,
-  // high keeps the full path. What the lane never lifts is a family it does not scale (`e2e:`)
-  // or an inherited obligation — both are demanded in every lane, and a recorded failure still
-  // returns the head in every lane.
+  // Every criterion-named proof is required in every lane (GY-883): the item's lane scales
+  // the ceremony beside its criteria, never the criteria themselves — a path heuristic must
+  // not weaken a task's requirements. Inherited obligations below are likewise never waived.
   for (const ac of work.criteria.filter(criterion => !criterion.bootstrap)) for (const proof of ac.proofs) {
-    if (!laneDemandsProof(lane, proof)) continue;
     if (unproven(proof)) reasons.push(`${ac.id}: ${demanded(proof)}`);
   }
+  // The lane's own demand rides beside the criteria, never instead of them (GY-883 AC-2):
+  // medium adds the change's producer-run proofs to the verdict, high adds its manual
+  // attestations too, and low adds nothing — a low-lane item lands once its criteria are
+  // proven, its required CI checks are green and one approving review stands. The added line
+  // leads with its criterion id, so every reader that maps a criterion refusal maps this one.
+  const laneRequirements_ = laneRequirements(lane);
+  if (laneRequirements_.producerProofs || laneRequirements_.manualAttestations)
+    for (const ac of work.criteria.filter(criterion => !criterion.bootstrap)) for (const proof of ac.proofs)
+      if (laneDemandsProof(lane, proof) && unproven(proof))
+        reasons.push(`${ac.id}: ${demanded(proof)} (the ${lane} lane adds this demand beside its criterion)`);
   for (const obligation of inheritedObligations(work, all)) {
     if (unproven(obligation.proof)) reasons.push(`Bootstrap obligation inherited from ${obligation.key} ${obligation.criterionId}: ${demanded(obligation.proof)}`);
   }

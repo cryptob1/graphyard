@@ -20,11 +20,12 @@ export type Lane = typeof lanes[number];
  * through `src/install/` and deployment through the `deploy/` tree, the Dockerfile and
  * compose.yaml. The schema and credential surfaces are the repository's real ones: the database
  * schema and its persistence layer under `src/store/`, authentication and principals under
- * `src/server/`, beside the public-API routes.
+ * `src/server/`, beside the public-API routes and the assembler that wires them
+ * (`src/server/index.ts`).
  */
 export const highRiskPaths = [
   /^migrations\/schema/, /^auth\/credentials/,
-  /^src\/store\//, /^src\/server\/(routes|auth|principals)/,
+  /^src\/store\//, /^src\/server\/(routes|auth|principals|index)/,
   /^src\/install\//, /^deploy\//, /^Dockerfile(\.|$)/, /^compose\.ya?ml$/,
 ] as const;
 
@@ -63,15 +64,13 @@ export const laneSpeedTargets: Record<Lane, number> = { low: 30 * 60_000, medium
 /**
  * What each lane's landability asks for beyond the gates every lane keeps (ready, build, review,
  * test, merge): which proof families the lane itself demands of the change, and whether a rework
- * round waits for an approved two-party decision. The lane decides which of the change's own
- * criterion proofs are demanded of it — GY-883 AC-2: a low-lane item is landable with its required
- * CI checks green and one approving review, its producer-run proofs and manual attestations not
- * required of it; medium adds its producer proofs; high keeps the full path. What no lane ever
- * removes: the families the lane does not scale (`e2e:`), a proof a delivered change deferred and
- * this item inherited, and a recorded failure — those hold in every lane, because a path heuristic
- * must not weaken a task's standing requirements. Rework approval is required in every lane: the
- * two-party decision invariant is the repository's standing authority contract and never varies by
- * lane.
+ * round waits for an approved two-party decision. The lane only ever adds ceremony beside an
+ * item's authored criteria — it never removes a proof the criteria name, in any lane: a path
+ * heuristic must not weaken a task's requirements. Low therefore lands once its criteria are
+ * proven, its required CI checks are green and one approving review stands — the lane itself adds
+ * nothing; medium adds the change's producer-run proofs; high adds manual attestations too.
+ * Rework approval is required in every lane: the two-party decision invariant is the repository's
+ * standing authority contract and never varies by lane.
  */
 export interface LaneRequirements { producerProofs: boolean; manualAttestations: boolean; reworkApprover: boolean }
 export function laneRequirements(lane: Lane): LaneRequirements {
@@ -80,12 +79,12 @@ export function laneRequirements(lane: Lane): LaneRequirements {
     : { producerProofs: true, manualAttestations: true, reworkApprover: true };
 }
 
-/** Whether the lane demands one proof family of the change: the producer-run `unit:` and `integration:` proofs from medium, `manual:` attestations from high, every other family in every lane. */
+/** Whether the lane itself demands one proof family of the change, beside its criteria: the producer-run `unit:` and `integration:` proofs from medium, `manual:` attestations from high, and `e2e:` never — the verdict demands every criterion-named proof in every lane whatever this returns. */
 export function laneDemandsFamily(lane: Lane, family: string): boolean {
   const requirements = laneRequirements(lane);
   return family === 'unit' || family === 'integration' ? requirements.producerProofs
     : family === 'manual' ? requirements.manualAttestations
-    : true;
+    : false;
 }
 export const laneDemandsProof = (lane: Lane, proof: string) => laneDemandsFamily(lane, proof.slice(0, Math.max(0, proof.indexOf(':'))));
 
