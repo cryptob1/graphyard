@@ -1,10 +1,22 @@
 import { readFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { wholeDocument } from '../model/work-summary.js';
 import { inheritedObligations } from '../model.js';
 import { diagnose, fileConflicts, obligationLedger, proofAuthorization, proofPreview, resourceConflicts } from '../coordination.js';
 import { handoff } from '../repository-setup.js';
 import { eventHistoryLimits, parseEventHistoryFlags } from '../events-history.js';
 import { defineCommands } from './registry.js';
+
+/**
+ * The one proof of an item a follow-up finding is promoted into (GY-896): the finding is addressed
+ * in code, or declined with a recorded reason. A `manual:` proof a producer session may hold, so
+ * the promoted item is shepherded like the batch it came from; until a producer holds the name it
+ * stays a proof gap (unauthorizedProofs), which raises the operator's grant decision. It is not the
+ * batch's own `manual:review-followups-triaged`, so a promoted item never counts as its parent's
+ * follow-up item.
+ */
+const promotedFindingProof = 'manual:review-followup-addressed';
+const promotedFindingPreamble = 'The promoted finding is addressed in code, or declined with a recorded reason: ';
 
 /** Reading work: control-plane status, the ledger, diagnosis, creation and history. */
 export const workCommands = defineCommands([
@@ -57,42 +69,49 @@ export const workCommands = defineCommands([
   },
   {
     name: 'promote-followup',
-    help: ['  promote-followup GY-N INDEX   Promote finding INDEX from follow-up GY-N to a new work item (operator)'],
+    help: ['  promote-followup GY-N INDEX   Promote finding INDEX of follow-up GY-N to its own work item (operator)'],
     async run({ id, args, api, print }) {
       if (!args[0]) throw new Error('Usage: graphyard work promote-followup GY-N INDEX');
       const index = Number(args[0]);
       if (!Number.isInteger(index) || index < 1) throw new Error('INDEX must be a positive integer');
-
       const snapshot = await api('work-snapshot');
-      const followupItem = snapshot.work.find((w: any) => w.id === id || w.key === id);
-      if (!followupItem) throw new Error(`Unknown follow-up item ${id}`);
-
-      const { followUpEntries } = await import('../model/machine-backlog.js');
+      const listed = snapshot.work.find((w: any) => w.id === id || w.key === id);
+      if (!listed) throw new Error(`Unknown work item ${id}`);
+      const { followUpEntries, followUpParent } = await import('../model/machine-backlog.js');
+      // A settled batch is served as a summary without its description; its findings live in the
+      // origin the summary keeps, and the whole document answers for the rest.
+      const followupItem = await wholeDocument(listed, api);
+      const parentKey = followUpParent(followupItem);
+      if (!parentKey) throw new Error(`${followupItem.key} is not a review follow-up item`);
       const findings = followUpEntries(followupItem);
-      if (index > findings.length) throw new Error(`Finding ${index} not found (item has ${findings.length} findings)`);
-
+      if (index > findings.length) throw new Error(`${followupItem.key} holds ${findings.length} finding(s); there is no finding ${index}`);
       const finding = findings[index - 1]!;
-      const parentId = followupItem.dependencies?.[0];
-      const parentItem = snapshot.work.find((w: any) => w.id === parentId);
-      if (!parentItem) throw new Error(`Parent item ${parentId} not found`);
-
+      const parentItem = snapshot.work.find((w: any) => w.id === followupItem.dependencies?.[0] || w.key === parentKey);
+      if (!parentItem) throw new Error(`The followed-up item ${parentKey} was not found`);
+      // One work item per promoted finding, decided before anything is sent: the title names the
+      // batch and the finding index, so a rerun finds the item the first run created and changes
+      // nothing, and the create itself goes out under a deterministic idempotency key, so the
+      // server replays the recorded create for the same request instead of making a second item.
+      // The promotion is one transaction — the create — so no partial state can arise; the batch
+      // keeps every finding, and its triage decides the rest as before.
+      const title = `Promoted follow-up ${followupItem.key} finding ${index}: ${finding.text}`.slice(0, 200);
+      const existing = snapshot.work.find((w: any) => w.title === title);
+      if (existing) return print({ promoted: { from: followupItem.key, finding: index, parent: parentItem.key }, item: existing, duplicate: true,
+        message: `Finding ${index} of ${followupItem.key} was already promoted to ${existing.key}` });
       const newWork = {
-        title: `Follow-up: ${finding.text.slice(0, 100)}`,
-        description: `From follow-up of ${parentItem.key}: ${finding.text}\n${finding.path ? `File: ${finding.path}` : ''}`,
+        title,
+        description: `Promoted from ${followupItem.key}, the follow-up batch of ${parentKey}${finding.ref ? `; raised at ${finding.ref}` : ''}.\n\nFinding${finding.path ? ` (${finding.path})` : ''}: ${finding.text}`.slice(0, 20000),
         type: 'chore' as const,
         priority: 2,
         dependencies: [parentItem.id],
-        criteria: [{ id: 'AC-1', text: `Address the finding: ${finding.text}`, proofs: [] }],
+        criteria: [{ id: 'AC-1', text: `${promotedFindingPreamble}${finding.text}`.slice(0, 2000), proofs: [promotedFindingProof] }],
+        producerProofs: [promotedFindingProof],
         plannedFiles: finding.path ? [finding.path] : [],
-        reason: `Promoted from follow-up findings of ${followupItem.key}`,
+        reason: `Promoted from ${followupItem.key} finding ${index}`,
       };
-
-      const created = await api('work', newWork);
-      return print({
-        promoted: { key: followupItem.key, finding: index, text: finding.text },
-        created: created,
-        message: `Follow-up finding promoted to ${created.key}`,
-      });
+      const created = await api('work', newWork, `promote-followup:${followupItem.key}:${index}:${createHash('sha256').update(JSON.stringify(newWork)).digest('hex').slice(0, 32)}`);
+      return print({ promoted: { from: followupItem.key, finding: index, parent: parentItem.key }, item: created, duplicate: false,
+        message: `Finding ${index} of ${followupItem.key} promoted to ${created.key}` });
     },
   },
   {
