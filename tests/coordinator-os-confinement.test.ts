@@ -180,7 +180,7 @@ test('unit:linked-worktree-coordinator-confined — a coordinator that is itself
   // The install path holds whitespace: Git writes the pointer's path verbatim to the end of the
   // line, and a pointer parse that stopped at the first space fell back to the pointer file and left
   // the coordinator writable (GY-957, acceptance finding).
-  const base = mkdtempSync(join(tmpdir(), 'graphyard confinement linked '));
+  const base = await temporaryDirectory('confinement linked');
   try {
     const { main, root, worktree } = linkedWorktreeCoordinatorFixture(base);
     const gitDir = join(main, '.git');
@@ -239,7 +239,7 @@ test('unit:linked-worktree-coordinator-confined — a coordinator that is itself
 });
 
 test('unit:unresolved-git-pointer-refused — a coordinator whose `.git` pointer names no Git directory refuses every launch instead of confining the pointer file', async () => {
-  const base = mkdtempSync(join(tmpdir(), 'graphyard-confinement-pointer-'));
+  const base = await temporaryDirectory('confinement-pointer');
   try {
     const { root, worktree } = linkedWorktreeCoordinatorFixture(base);
     const input = { kind: 'claude', args: [], coordinatorRoot: root, sessionDirectory: worktree, platform: 'linux' as const, mountNamespaceWorks: true, bwrap: 'bwrap' };
