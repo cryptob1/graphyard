@@ -9,20 +9,20 @@ Graphyard decides whether work may advance; runtimes such as Herdr run the sessi
 2. **Build**: a worker claims a lease and worktree, and submits a PR.
 3. **Review**: an independent reviewer approves the exact commit.
 4. **Test**: Graphyard observes CI itself.
-5. **Acceptance**: granted producers report evidence for that commit — its criteria's proofs, plus the ceremony its lane adds (see [risk lanes](#risk-lanes)).
+5. **Acceptance**: granted producers report evidence for that commit — the criteria's proofs its lane requires (see [risk lanes](#risk-lanes)).
 6. **Done**: Graphyard rechecks every gate, merges, and observes the merge.
 
 A card stops at its first refusing gate, naming what is missing; nothing sets a stage directly.
 
 ## Risk lanes
 
-Every item rides a **risk lane**, decided from the paths its change touches by the shipped path policy (`src/model/policy.ts`) and stamped on the item with its speed target in `master status`: any path under `migrations/schema`, `auth/credentials`, the schema and persistence layer (`src/store/`), authentication, principals, the public API, its assembler and the credential-loading bootstrap under `src/server/`, the operator agent, proof grants, or the installation and deployment surfaces (`src/install/`, `deploy/`, the Dockerfile, `compose.yaml`) rides **high**; test-only, docs-only and single-module changes (paths sharing their leading segments) ride **low**, and everything else rides **medium**. A rename is classified from both endpoints. The lane is an input to the one landability verdict (`src/model/gates.ts`): it takes the item's lane, adds the lane's ceremony beside the item's criteria, and reports the lane with its speed target.
+Every item rides a **risk lane**, decided from the paths its change touches by the shipped path policy (`src/model/policy.ts`) and stamped on the item with its speed target in `master status`: any path under `migrations/schema`, `auth/credentials`, the schema and persistence layer (`src/store/`), authentication, principals, the public API, its assembler and the credential-loading bootstrap under `src/server/`, the operator agent, proof grants, or the installation and deployment surfaces (`src/install/`, `deploy/`, the Dockerfile, `compose.yaml`) rides **high**; test-only, docs-only and single-module changes (paths sharing their leading segments) ride **low**, and everything else rides **medium**. A rename is classified from both endpoints. The lane is an input to the one landability verdict (`src/model/gates.ts`): it takes the item's lane, decides from it which facts it requires, and reports the lane with its speed target.
 
-- **Low** lands once its criteria are proven, on its required CI checks and one approving review: the lane adds nothing — a bad low-risk change is caught and reverted, not prevented.
-- **Medium** adds the change's producer-run proofs (`unit:`, `integration:`) beside its criteria.
-- **High** adds manual attestations (`manual:`) too: the full path.
+- **Low** lands on its required CI checks and one approving review: the producer-run proofs and `manual:` attestations its criteria name are not required, no producer is dispatched for them, and its reworks are applied without an approver decision — a bad low-risk change is caught and reverted, not prevented.
+- **Medium** adds its producer-run proofs (`unit:`, `integration:`); its reworks need no approver either.
+- **High** keeps the full path: producer proofs, `manual:` attestations, and a two-party approver decision for every rework.
 
-The lane only ever adds ceremony beside an item's authored criteria — it never removes a proof the criteria name, in any lane: a path heuristic must not weaken a task's requirements. Every criterion-named proof is demanded in every lane — the acceptance gate names it, the review hold waits for it, producer dispatch covers it — and an `e2e:` proof, an inherited obligation and a recorded failure hold in every lane. Rework stays a two-party decision in every lane: that is the standing authority contract. Speed targets ship per lane — low p50 30 min, medium 60 min, high 4 h — and are reported beside it.
+An `e2e:` proof and an inherited bootstrap obligation are required in every lane, and an unobserved change rides medium but keeps its rework approver. A rework needing no approver is recorded in the decision ledger as approved by `graphyard-risk-lane`. Speed targets ship per lane — low p50 30 min, medium 60 min, high 4 h — and are reported beside it.
 
 ![Bootstrap versus normal operation: one supervised worker, then a fleet with separate credentials.](diagrams/bootstrap-vs-normal.svg)
 

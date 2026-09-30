@@ -9,7 +9,7 @@ import { distinct, reviewProviders, reviewerProfileSchema } from './review.js';
  * The ceremony an item runs is decided by the risk of what it changes, not by one high-ceremony
  * path for everything. `low` lands with its required CI checks green and one approving review —
  * catch-and-revert suits it; `medium` adds its producer-run proofs; `high` keeps the full path,
- * producer proofs, manual attestations and approver decisions alike.
+ * producer proofs, manual attestations and approver decisions alike (`laneRequirements`).
  */
 export const lanes = ['low', 'medium', 'high'] as const;
 export type Lane = typeof lanes[number];
@@ -66,30 +66,31 @@ export const laneSpeedTargets: Record<Lane, number> = { low: 30 * 60_000, medium
 
 /**
  * What each lane's landability asks for beyond the gates every lane keeps (ready, build, review,
- * test, merge): which proof families the lane itself demands of the change, and whether a rework
- * round waits for an approved two-party decision. The lane only ever adds ceremony beside an
- * item's authored criteria — it never removes a proof the criteria name, in any lane: a path
- * heuristic must not weaken a task's requirements. Low therefore lands once its criteria are
- * proven, its required CI checks are green and one approving review stands — the lane itself adds
- * nothing; medium adds the change's producer-run proofs; high adds manual attestations too.
- * Rework approval is required in every lane: the two-party decision invariant is the repository's
- * standing authority contract and never varies by lane.
+ * test, merge): which proof families the verdict requires of the change, and whether a rework
+ * round waits for an approved two-party decision. Low lands with its required CI checks green and
+ * one approving review — the producer-run proofs and manual attestations its criteria name are not
+ * required of it, and its reworks are applied without an approver; medium adds its producer-run
+ * proofs; high keeps the full path: producer proofs, manual attestations and approver decisions.
  */
 export interface LaneRequirements { producerProofs: boolean; manualAttestations: boolean; reworkApprover: boolean }
 export function laneRequirements(lane: Lane): LaneRequirements {
-  return lane === 'low' ? { producerProofs: false, manualAttestations: false, reworkApprover: true }
-    : lane === 'medium' ? { producerProofs: true, manualAttestations: false, reworkApprover: true }
+  return lane === 'low' ? { producerProofs: false, manualAttestations: false, reworkApprover: false }
+    : lane === 'medium' ? { producerProofs: true, manualAttestations: false, reworkApprover: false }
     : { producerProofs: true, manualAttestations: true, reworkApprover: true };
 }
 
-/** Whether the lane itself demands one proof family of the change, beside its criteria: the producer-run `unit:` and `integration:` proofs from medium, `manual:` attestations from high, and `e2e:` never — the verdict demands every criterion-named proof in every lane whatever this returns. */
-export function laneDemandsFamily(lane: Lane, family: string): boolean {
+/**
+ * Whether the lane requires one proof family of the change: the producer-run `unit:` and
+ * `integration:` proofs from medium, `manual:` attestations only in high, and `e2e:` in every lane
+ * — it runs against the deployed or CI-built system, not in a producer session.
+ */
+export function laneRequiresFamily(lane: Lane, family: string): boolean {
   const requirements = laneRequirements(lane);
   return family === 'unit' || family === 'integration' ? requirements.producerProofs
     : family === 'manual' ? requirements.manualAttestations
-    : false;
+    : true;
 }
-export const laneDemandsProof = (lane: Lane, proof: string) => laneDemandsFamily(lane, proof.slice(0, Math.max(0, proof.indexOf(':'))));
+export const laneRequiresProof = (lane: Lane, proof: string) => laneRequiresFamily(lane, proof.slice(0, Math.max(0, proof.indexOf(':'))));
 
 /**
  * The changed paths an item's lane is decided from: every observed scope file's path and, for a
@@ -109,6 +110,15 @@ export function observedPaths(observation: { scopeFiles?: readonly { path: strin
 export function itemLane(work: { observation?: Parameters<typeof observedPaths>[0] }): Lane {
   return determineLane(observedPaths(work.observation));
 }
+
+/**
+ * Whether a rework round on this item waits for an independent approver (GY-883 AC-2): only in the
+ * high lane. A low or medium item's rework decision is applied as soon as it is requested, with the
+ * lane recorded as its ground — the requester's own authority to request it is checked as ever. The
+ * waiver needs a lane read from an observed diff: a change nobody has observed keeps its approver.
+ */
+export const reworkNeedsApprover = (work: Parameters<typeof itemLane>[0]) =>
+  !observedPaths(work.observation).length || laneRequirements(itemLane(work)).reworkApprover;
 
 // Bootstrap mode: an operator may defer a criterion's proofs for the single change that
 // introduces the harness those proofs depend on. The proof is never dropped. It becomes a

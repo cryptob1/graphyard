@@ -336,10 +336,7 @@ test('integration:auto-rebase-conflict-guard — a conflicting base returns the 
   assert.equal(partial.stage, 'review');
   assert.deepEqual(gate(partial, 'acceptance').reasons, [
     'AC-1: unit:rebase needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy',
-    'AC-1: integration:rebase needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy',
-    // GY-883: the item rides the medium lane, which adds its own demand for both producer-run proofs beside the criteria.
-    'AC-1: unit:rebase needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy (the medium lane adds this demand beside its criterion)',
-    'AC-1: integration:rebase needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy (the medium lane adds this demand beside its criterion)']);
+    'AC-1: integration:rebase needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy']);
   assert.equal(diagnose(partial, await store.list(), Date.now()).filter(entry => entry.kind === 'base-refresh-required').length, 3);
 });
 

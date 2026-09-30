@@ -81,15 +81,10 @@ test('unit:manual-proof-not-title-counted — a judged manual pass proves its cr
   // under the proof's title judged nothing.
   assert.equal(outcomeOf(item([{}, evidence(UNIT, { executed: 0 })]), MANUAL), 'proven');
   assert.equal(outcomeOf(item([{}, evidence(UNIT, { executed: 0 })]), UNIT), 'failed');
-  // GY-883: the fixture rides the high lane, whose own demand for the producer-run proof is added
-  // beside the criterion's, never instead of it.
-  assert.deepEqual(acceptanceReasons(item([{}, evidence(UNIT, { executed: 0 })])), [`AC-2: ${UNIT} needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy`,
-    `AC-2: ${UNIT} needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy (the high lane adds this demand beside its criterion)`]);
+  assert.deepEqual(acceptanceReasons(item([{}, evidence(UNIT, { executed: 0 })])), [`AC-2: ${UNIT} needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy`]);
   // The gate names the manual proof without the title-count demand it never had.
   assert.deepEqual(acceptanceReasons(item([])), [`AC-1: ${MANUAL} needs trusted passing evidence, with skipped = 0, for this candidate and policy`,
-    `AC-2: ${UNIT} needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy`,
-    `AC-1: ${MANUAL} needs trusted passing evidence, with skipped = 0, for this candidate and policy (the high lane adds this demand beside its criterion)`,
-    `AC-2: ${UNIT} needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy (the high lane adds this demand beside its criterion)`]);
+    `AC-2: ${UNIT} needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy`]);
 });
 
 test('unit:attested-is-manual-only — the zero-execution exception is the manual family alone; e2e keeps the title rule', () => {

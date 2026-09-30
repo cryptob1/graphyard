@@ -280,9 +280,7 @@ test('integration:queue-carry-refusals — a foreign author, extra parents, an u
   assert.equal(intersecting.carry.approval.carried, true, 'the predecessor touched no reviewed file');
   assert.deepEqual(intersecting.carry.evidence.map(entry => [entry.proof, entry.carried]), [['unit:queue', true], ['integration:docs', false]]);
   assert.equal(intersecting.review, true); assert.equal(intersecting.acceptance.passed, false);
-  // GY-883: the item rides the medium lane, which adds its own demand for the proof beside the criterion's.
-  assert.deepEqual(intersecting.acceptance.reasons, ['AC-1: integration:docs needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy',
-    'AC-1: integration:docs needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy (the medium lane adds this demand beside its criterion)']);
+  assert.deepEqual(intersecting.acceptance.reasons, ['AC-1: integration:docs needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy']);
   assert.deepEqual([intersecting.binding.approval.state, ...intersecting.binding.evidence.map(entry => [entry.proof, entry.state])], ['carried', ['unit:queue', 'carried'], ['integration:docs', 'required']]);
   assert.match(intersecting.binding.evidence[1].reason, /changed docs\/queue\.md inside the scope of evidence/);
   const reviewed = await attempt({ ...graphyard, baseChanges: ['tests/queue.test.ts'] });

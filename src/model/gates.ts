@@ -11,7 +11,7 @@ import { carriedApproval, evidenceBindsCandidate } from './carry.js';
 import { placeInQueue, type MergeQueueSettings } from './queue.js';
 import { regressionRefusals } from '../regression-guard.js';
 import { mechanicalFailure, mechanicalVerdicts, evidenceProves, attestedProof } from './mechanical-proofs.js';
-import { itemLane, laneDemandsProof, laneRequirements, laneSpeedTargets, type Lane } from './policy.js';
+import { itemLane, laneRequiresProof, laneRequirements, laneSpeedTargets, type Lane } from './policy.js';
 
 // Pure evaluation: neither worker assertions nor UI state can authorize progression.
 declare module './work.js' {
@@ -115,22 +115,13 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[],
   };
   // A bootstrap criterion's proofs are deferred here and required of the next change that
   // touches the same contract; review, CI and every other criterion still gate this one.
-  // Every criterion-named proof is required in every lane (GY-883): the item's lane scales
-  // the ceremony beside its criteria, never the criteria themselves — a path heuristic must
-  // not weaken a task's requirements. Inherited obligations below are likewise never waived.
+  // The lane decides which of the criteria's facts the verdict requires (GY-883 AC-2, AC-3): low
+  // requires none of their producer-run proofs or manual attestations — it lands on its required
+  // CI checks and one approving review — medium requires the producer-run proofs, high every
+  // family. An e2e proof is required in every lane, and so is an inherited obligation below.
   for (const ac of work.criteria.filter(criterion => !criterion.bootstrap)) for (const proof of ac.proofs) {
-    if (unproven(proof)) reasons.push(`${ac.id}: ${demanded(proof)}`);
+    if (laneRequiresProof(lane, proof) && unproven(proof)) reasons.push(`${ac.id}: ${demanded(proof)}`);
   }
-  // The lane's own demand rides beside the criteria, never instead of them (GY-883 AC-2):
-  // medium adds the change's producer-run proofs to the verdict, high adds its manual
-  // attestations too, and low adds nothing — a low-lane item lands once its criteria are
-  // proven, its required CI checks are green and one approving review stands. The added line
-  // leads with its criterion id, so every reader that maps a criterion refusal maps this one.
-  const laneRequirements_ = laneRequirements(lane);
-  if (laneRequirements_.producerProofs || laneRequirements_.manualAttestations)
-    for (const ac of work.criteria.filter(criterion => !criterion.bootstrap)) for (const proof of ac.proofs)
-      if (laneDemandsProof(lane, proof) && unproven(proof))
-        reasons.push(`${ac.id}: ${demanded(proof)} (the ${lane} lane adds this demand beside its criterion)`);
   for (const obligation of inheritedObligations(work, all)) {
     if (unproven(obligation.proof)) reasons.push(`Bootstrap obligation inherited from ${obligation.key} ${obligation.criterionId}: ${demanded(obligation.proof)}`);
   }
