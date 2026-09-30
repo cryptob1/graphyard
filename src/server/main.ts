@@ -17,6 +17,7 @@ import { generatedFilesVariable } from '../install/generated-files.js';
 import { startDirectMerge } from '../direct-merge.js';
 import { GitHubCacheStore } from '../github-cache.js';
 import { pruneReceipts, receiptPruneIntervalMs } from '../store/receipts.js';
+import { compactLedger, configuredLedgerRetentionMs, ledgerCompactionIntervalMs } from '../store/compaction.js';
 
 /** Process entry: configuration, migration, the HTTP server and the reconciliation tick. */
 export async function main() {
@@ -82,7 +83,7 @@ export async function main() {
   });
   // A recurring intervention becomes work on its own (GY-98): the detection reads the ledger, so
   // it runs once a minute rather than every tick.
-  let patternsAt = 0, receiptsPrunedAt = 0;
+  let patternsAt = 0, receiptsPrunedAt = 0, ledgerCompactedAt = 0;
   // The observation workers run beside the tick, never in it: a queue of due jobs is drained at
   // the concurrency the installation sets, whatever the rest of the tick is doing (GY-492).
   const observing = github ? startObservationWorkers(engine, github) : null;
@@ -95,6 +96,8 @@ export async function main() {
     await step('projectFlow', () => projectFlow(engine.store, { batches: 4 }));
     // Bounded, on the pool, never under the coordination lock: receipts past the replay window go.
     if (Date.now() - receiptsPrunedAt >= receiptPruneIntervalMs) { receiptsPrunedAt = Date.now(); await step('pruneReceipts', () => pruneReceipts(store.pool).catch(error => { console.error('receipt pruning failed', error instanceof Error ? error.message : 'unknown'); return 0; })); }
+    // Routine ledger rows past the retention window go in bounded, audited batches (store/compaction.ts).
+    if (Date.now() - ledgerCompactedAt >= ledgerCompactionIntervalMs) { ledgerCompactedAt = Date.now(); await step('compactLedger', () => compactLedger(store.pool, { retentionMs: configuredLedgerRetentionMs() }).catch(error => { console.error('ledger compaction failed', error instanceof Error ? error.message : 'unknown'); return null; })); }
     // The pattern scan's ledger query is quadratic in the events table and held the whole tick for
     // good once the table grew (2026-09-23): it runs only where an operator opts in until it is bounded.
     if (process.env.GRAPHYARD_INTERVENTION_PATTERNS === '1' && Date.now() - patternsAt >= 60_000) {
