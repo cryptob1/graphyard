@@ -77,7 +77,7 @@ function harness(item: { current: Work[] }, live: HerdrAgent, extra: Partial<Dae
 const resolvedAction = (detail: string, at: string): DaemonAction => ({ kind: 'dispatch', work: null, principal: null, state: 'done', detail, attempts: 1, epoch: null, cycle: 0, at });
 const row = (actions: Record<string, DaemonAction>, key: string) => actions[key];
 
-test('unit:exit-evidence-retained — a close whose pane closed but whose registry update failed is retried on the retained exit, never against a live agent', async () => {
+test('unit:exit-evidence-retained — a close whose pane closed but whose registry update failed retries only the registry update', async () => {
   const { directory, master } = await setup();
   try {
     const item = { current: [held({ lease: { owner: 'zeta-9', epoch: 2, expiresAt: iso(minutes(600)) }, lastAssignment: { owner: 'zeta-9', epoch: 2, claimedAt: iso(-minutes(230)) }, sessions: [staleHandle('zeta-9:2', 'w1:p923', 'zeta-9')] })] };
@@ -102,70 +102,83 @@ test('unit:exit-evidence-retained — a close whose pane closed but whose regist
     assert.deepEqual(log.closed, ['w1:p923'], 'the pane was closed');
     assert.equal(flaky.log.sessions.length, 0, 'the registry update failed');
     assert.equal(row(state.actions, closeKey)?.state, 'failed');
-    assert.match(row(state.actions, closeKey)!.detail, /registry unavailable; its witnessed exit is retained/);
-    assert.equal(row(state.actions, evidenceKey)?.state, 'waiting', 'the witnessed exit is retained outside the prunable ledger');
+    assert.match(row(state.actions, closeKey)!.detail, /registry unavailable; its pane is closed and only the registry update is retried/);
+    assert.equal(row(state.actions, evidenceKey)?.state, 'waiting', 'the closed pane and its witnessed exit are retained outside the prunable ledger');
     assert.match(row(state.actions, evidenceKey)!.detail, /the claude runtime is no longer the foreground process of pane w1:p923/);
 
-    // The pane gone, a sole pane empties its workspace's listing: the sight cannot be taken again,
-    // and the retained exit is what completes the registry update.
+    // The pane gone, a sole pane empties its workspace's listing and Herdr may not answer at all:
+    // the sight cannot be taken again, and the retained record completes the registry update
+    // without closing the pane a second time — even were its id reused by a live agent.
     listing.length = 0;
+    listing.push({ name: 'agent-reused', pane_id: 'w1:p923', agent_status: 'working', agent: 'claude' });
     failRegistry = false;
-    await runCycle(master, state, flaky.effects, () => clock + 2 * launchAppearanceMs);
+    const unanswered = harness(item, live, { herdr: () => ({ agents: [], available: false }),
+      closeSession: pane => { closes++; log.closed.push(pane); },
+      recordSession: async (_work, input) => { log.sessions.push(input); } });
+    await runCycle(master, state, unanswered.effects, () => clock + 2 * launchAppearanceMs);
+    assert.equal(closes, 1, 'the retry never closes the pane again');
+    assert.deepEqual(log.closed, ['w1:p923']);
     assert.equal(log.sessions.length, 1);
     assert.equal(log.sessions[0].state, 'finished');
     assert.match(log.sessions[0].outcome!, /closed by the loop: the claude runtime is no longer the foreground process of pane w1:p923/);
-    assert.match(log.sessions[0].outcome!, /witnessed before the earlier close attempt/);
-    assert.match(log.sessions[0].outcome!, /pane w1:p923 was already gone/);
+    assert.match(log.sessions[0].outcome!, /pane w1:p923 closed on an earlier attempt, so only the registry update is retried/);
     assert.equal(row(state.actions, closeKey)?.state, 'done');
 
     // With the handle finished on the record, the retained evidence is swept.
     item.current = [held({ lease: { owner: 'zeta-9', epoch: 2, expiresAt: iso(minutes(600)) }, lastAssignment: { owner: 'zeta-9', epoch: 2, claimedAt: iso(-minutes(230)) }, sessions: [{ ...handle, state: 'finished', outcome: 'closed by the loop' }] })];
-    await runCycle(master, state, flaky.effects, () => clock + 3 * launchAppearanceMs);
+    await runCycle(master, state, unanswered.effects, () => clock + 3 * launchAppearanceMs);
     assert.equal(row(state.actions, evidenceKey), undefined, 'evidence whose handle is no longer running is swept');
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
 });
 
-test('unit:exit-evidence-never-against-a-live-agent — retained evidence waits while Herdr lists an agent in the pane again', async () => {
+test('unit:exit-evidence-never-replays-a-close — a close that failed with its pane standing keeps no evidence and is retried only on a fresh, confirmed sight', async () => {
   const { directory, master } = await setup();
   try {
     const item = { current: [held({ lease: { owner: 'zeta-9', epoch: 2, expiresAt: iso(minutes(600)) }, lastAssignment: { owner: 'zeta-9', epoch: 2, claimedAt: iso(-minutes(230)) }, sessions: [staleHandle('zeta-9:2', 'w1:p923', 'zeta-9')] })] };
     const live: HerdrAgent = { name: 'agent-alpha', pane_id: 'w1:plive', agent_status: 'working', agent: 'claude' };
     const exited: HerdrAgent = { pane_id: 'w1:p923', agent: null, agent_status: 'unknown' };
     const listing: HerdrAgent[] = [exited, live];
-    const { log, effects } = harness(item, live, { herdr: () => ({ agents: listing, available: true }) });
+    const { effects } = harness(item, live, { herdr: () => ({ agents: listing, available: true }) });
     const state = emptyDaemonState(master);
     const handle = item.current[0].sessions![0], closeKey = `close:implementation:work-923:zeta-9:2:${handle.startedAt}`, evidenceKey = `close-evidence:implementation:work-923:zeta-9:2:${handle.startedAt}`;
     await runCycle(master, state, effects, () => clock);
 
-    // The close itself fails, so the pane stands and the evidence is written for its retry.
+    // The close itself fails, so the pane stands: nothing is retained that could replay it.
     const flaky = harness(item, live, { herdr: () => ({ agents: listing, available: true }),
       closeSession: pane => { throw new Error(`herdr refused the close of ${pane}`); } });
     await runCycle(master, state, flaky.effects, () => clock + launchAppearanceMs);
     assert.equal(row(state.actions, closeKey)?.state, 'failed');
-    assert.equal(row(state.actions, evidenceKey)?.state, 'waiting', 'the witnessed exit is retained for the retry');
+    assert.equal(row(state.actions, evidenceKey), undefined, 'a pane still standing leaves no evidence to replay');
 
-    // Herdr lists a live agent in the pane again: the exit no longer stands, and neither the sight
-    // nor the retained evidence closes anything.
-    exited.agent = 'zeta';
-    exited.agent_status = 'working';
-    await runCycle(master, state, flaky.effects, () => clock + 2 * launchAppearanceMs);
-    assert.equal(flaky.log.sessions.filter(entry => entry.state === 'finished').length, 0, 'the retained exit is never used against a live agent');
-    assert.equal(row(state.actions, closeKey)?.state, 'failed');
-    assert.equal(Object.keys(state.actions).filter(key => key.startsWith('exited:implementation:')).length, 0, 'the sighting lapsed when the agent was seen again');
+    // No later cycle that cannot confirm the exit closes the pane: Herdr unavailable, a listing
+    // that read nothing of the workspace, or the pane listed with its agent field omitted.
+    const views: Array<{ agents: HerdrAgent[]; available: boolean }> = [
+      { agents: [], available: false },
+      { agents: [{ name: 'other', pane_id: 'w9:p1', agent_status: 'working', agent: 'claude' }], available: true },
+      { agents: [{ pane_id: 'w1:p923', agent_status: 'working' }, live], available: true },
+    ];
+    let offset = 2;
+    for (const view of views) {
+      const blind = harness(item, live, { herdr: () => view });
+      await runCycle(master, state, blind.effects, () => clock + offset++ * launchAppearanceMs);
+      assert.deepEqual(blind.log.closed, [], 'the pane is never closed without a current, confirmed sight');
+      assert.equal(blind.log.sessions.filter(entry => entry.state === 'finished').length, 0);
+      assert.equal(row(state.actions, evidenceKey), undefined);
+    }
+    assert.equal(Object.keys(state.actions).filter(key => key.startsWith('exited:implementation:')).length, 0, 'the unconfirmed sighting lapsed');
 
-    // The agent leaves for good: a fresh two-sighting witness closes the session plainly.
-    exited.agent = null;
-    exited.agent_status = 'unknown';
+    // The agent is seen gone again: a fresh two-sighting witness closes the session plainly.
     const plain = harness(item, live, { herdr: () => ({ agents: listing, available: true }) });
-    await runCycle(master, state, plain.effects, () => clock + 3 * launchAppearanceMs);
+    await runCycle(master, state, plain.effects, () => clock + offset++ * launchAppearanceMs);
     assert.equal(plain.log.sessions.length, 0, 'a new sighting starts over rather than closing on the old one');
-    await runCycle(master, state, plain.effects, () => clock + 4 * launchAppearanceMs);
+    await runCycle(master, state, plain.effects, () => clock + offset++ * launchAppearanceMs);
+    assert.deepEqual(plain.log.closed, ['w1:p923']);
     assert.equal(plain.log.sessions.length, 1);
     assert.equal(plain.log.sessions[0].state, 'finished');
     assert.match(plain.log.sessions[0].outcome!, /the agent has exited/);
-    assert.doesNotMatch(plain.log.sessions[0].outcome!, /witnessed before the earlier close attempt/, 'a fresh witness needs no retained evidence');
+    assert.match(plain.log.sessions[0].outcome!, /pane w1:p923 closed$/);
     assert.equal(row(state.actions, closeKey)?.state, 'done');
   } finally {
     await rm(directory, { recursive: true, force: true });
