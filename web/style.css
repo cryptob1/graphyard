@@ -302,6 +302,11 @@ img.mark{width:26px;height:26px}
 .health.live{color:var(--shipped)}.health.live .health-dot{background:var(--shipped);border-color:var(--shipped)}
 .health.stale{color:var(--needs-you)}.health.stale .health-dot{border-color:var(--needs-you)}
 .workers-note{margin:var(--space-3) 0}
+/* The fleet panel's probe mark (GY-945): a fresh quota reading reads as plain text, an old one
+   as the needs-you amber, a failed probe as the blocked colour — shared tokens, no page colours. */
+.probe{color:var(--text-2)}
+.probe.stale{color:var(--needs-you)}
+.probe.failed{color:var(--blocked)}
 @media(max-width:650px){.sessions-table,.sessions-table tbody,.sessions-table tr,.sessions-table th[scope=row],.sessions-table td{display:block;width:100%}.sessions-table thead{display:none}.sessions-table tr{border-top:1px solid var(--border);padding:var(--space-2) 0}.sessions-table td,.sessions-table th[scope=row]{border:0;padding:6px var(--space-4)}.sessions-table td::before{content:attr(data-label);display:block;font-size:var(--type-tiny);color:var(--text-3)}}
 /* A commit shows eight characters; the whole SHA stays in the text so a selection copies it. */
 code.sha{display:inline-block;max-width:8ch;overflow:hidden;white-space:nowrap;vertical-align:bottom;font-family:var(--font-mono)}
