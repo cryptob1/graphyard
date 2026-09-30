@@ -1,5 +1,6 @@
-import { appendOnly, defineTable } from '../tables.js';
+import { defineTable } from '../tables.js';
 import { eventWorkFunctions } from '../snapshot-delta.js';
+import { eventsImmutableDdl } from '../compaction.js';
 
 /** Work aggregates, their immutable history, and the durable integration jobs behind them. */
 export const workItems = defineTable({
@@ -33,7 +34,8 @@ CREATE INDEX IF NOT EXISTS events_deployment_contained ON events(work_id,seq DES
 CREATE INDEX IF NOT EXISTS events_deployment_pending ON events(created_at DESC,seq DESC)
   WHERE kind='production.deployment-pending';
 ${eventWorkFunctions}
-${appendOnly('events')}`,
+-- Append-only but for the audited compaction of routine rows (store/compaction.ts, GY-979).
+${eventsImmutableDdl}`,
 });
 export const receipts = defineTable({
   name: 'receipts', orderBy: 'actor,key',
