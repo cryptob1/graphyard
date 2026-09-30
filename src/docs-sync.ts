@@ -7,7 +7,7 @@ import type { MasterConfig } from './master/profiles.js';
 import { loadMasterConfig } from './master/config.js';
 import { accountLaunch } from './master/environments.js';
 import { closeFailedLaunch, launchStartMs, startAgentSession } from './master/launch.js';
-import { createdHerdrTab, type HerdrAgent, herdrJson } from './master/herdr.js';
+import { createdHerdrTab, type HerdrAgent, herdrJson, observeHerdrAgents } from './master/herdr.js';
 import { autonomousSession, destructivePromptGuidance, herdrAttach } from './master/dispatch.js';
 import { selectApproverAccount, type SessionRegistrar } from './master/autonomy.js';
 import { registeredLaunch } from './model/session-state.js';
@@ -90,3 +90,16 @@ export async function launchDocsSync(root: string, work: Work, plan: DocsSyncPla
   return { agentName: name, pane: pane ?? null, account: chosen.account?.name ?? null, runtime: kind, session: chosen.fleet?.account.fleet.session ?? null };
 }
 
+
+/** The loop's docs-sync effects (GY-566); a loop without them sends every confirmed conflict to rework as before. */
+export interface DocsSyncEffects {
+  /** Launches the docs-sync session for a conflict confined to docs pages (`launchDocsSync`); it replaces a rework decision the loop could otherwise request. */
+  docsSync: (work: Work, plan: DocsSyncPlan) => Promise<{ agentName: string; pane: string | null; account: string | null; runtime: string; session: string | null }>;
+  /** The paths git reports conflicting when `head` merges with `base`, from this checkout (`localConflictPaths`); null when it cannot tell. */
+  conflictPaths: (work: Work, head: string, base: string) => Promise<string[] | null>;
+}
+
+export const docsSyncEffects = (root: string, run: ChildRun, register: (work: Work) => SessionRegistrar): DocsSyncEffects => ({
+  docsSync: async (work, plan) => launchDocsSync(root, work, plan, await observeHerdrAgents(run), run, register(work)),
+  conflictPaths: async (work, head, base) => work.candidate ? localConflictPaths(root, work.candidate.branch, head, base) : null,
+});
