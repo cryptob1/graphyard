@@ -275,7 +275,7 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
  * re-post cannot use it.
  */
 let days = 0;
-async function simulateDay(options: { hours: number; regression?: 'approvers-left-open'; handApprovers?: boolean; capacityWait?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; plan?: Partial<typeof basePlan> }) {
+async function simulateDay(options: { hours: number; regression?: 'approvers-left-open'; handApprovers?: boolean; capacityWait?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; protectedBranch?: boolean; plan?: Partial<typeof basePlan> }) {
   const dayStart = clock.now();
   // A day may restage the shared scenario: the day-scoped view of the plan is what every fault
   // below arms from, while each test's own assertions still read the shared base plan.
@@ -781,6 +781,8 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   // recovery against the exact candidate and review the faults were staged on.
   const stale: { stuckArmedAt: number | null; stuckHead: string | null; stuckReported: boolean; lostAt: number | null; carried: { reviewer: string; reviewId: number; originalSha: string } | null } =
     { stuckArmedAt: null, stuckHead: null, stuckReported: false, lostAt: null, carried: null };
+  // GY-854: the entry whose branch turned protected behind the failing tip, and when.
+  const restoreFault = { key: null as string | null, armedAt: null as number | null };
   const releasedScope = new Set<number>();
   // GY-852: the reassigned item's own pane and the pane the reused name came to hold.
   const reassign = { pane: null as string | null, phantom: null as string | null, phantomGone: false };
@@ -918,6 +920,15 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
           }
         }
       }
+      // GY-854: once an entry's published tip is chained behind the failing tip's entry, its branch
+      // turns protected against Graphyard's writes. The rebuild the queue owes it once that entry
+      // leaves unlanded is refused, the stale tip is ejected for its restore, and every restore
+      // write is refused too: the loop must stop after two attempts, not repeat per cycle.
+      if (options.protectedBranch && options.queued?.failTip && !restoreFault.key) {
+        const failing = items[options.queued.failTip - 1].key;
+        const behind = (await store.list()).find(item => item.key !== failing && item.candidate && item.queue?.speculation?.tip === item.candidate.sha && item.queue.speculation.predecessors.includes(failing));
+        if (behind) { restoreFault.key = behind.key; restoreFault.armedAt = clock.now(); github.refusedBranches.add(behind.key); }
+      }
       // GY-498: sample the window after the pass's publications, then apply a mid-day master-config
       // edit, which the cycle about to run publishes the way an operator's edit is published.
       if (options.queued) {
@@ -982,7 +993,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
   return { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, herdr, hand, escalations, spent, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, landingRefusals, foreignPane,
     mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted, stale, approverPanes, herdrClosed: herdr.closed, diagnosisModel: settings.model, capacityRefused, capacityLaunched, capacityWaiters,
-    decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, reassign, confined, unconfinedRefusals };
+    decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, reassign, confined, unconfinedRefusals, restoreFault };
 }
 
 /**
@@ -1288,6 +1299,20 @@ test('unit:soak-invariants-hold — the parallel-tip window validates several qu
   assert.equal(status.mergeQueue.parallelTips, reconfigure.window, 'status reports the narrowed window');
   const seconds = (performance.now() - began) / 1000;
   assert.ok(seconds < 150, `the queue-only day runs inside its budget (${seconds.toFixed(1)} s)`);
+});
+
+test('unit:soak-invariants-hold — an ejected tip whose restore GitHub refuses is restored at most twice per contaminated head, then held under the escalation with no further branch writes, while the queue moves and every invariant holds', { timeout: 300_000 }, async () => {
+  // GY-854: a queue-only day in which item two's first tip fails and keeps failing, and the branch
+  // of the entry whose tip was chained behind it turns protected against Graphyard's writes. Once
+  // item two leaves unlanded, that entry's tip holds its unlanded work: the queue ejects it for a
+  // restore, and GitHub refuses every write of every restore. The loop offers a failed restore
+  // once more, then escalates it — across every cycle of the day, never a third branch write.
+  const failTip = 2;
+  const day = await simulateDay({ hours: 3, queued: { window: 4, failTip, releaseEveryMs: 3 * minute }, protectedBranch: true,
+    plan: { items: 6, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), breaksMain: 0, flaky: { rerunPasses: 0, rerunFails: 0 } } });
+  const { final, github, violations, failures, restoreFault } = day;
+  console.error(JSON.stringify({ restoreFault, writes: github.restoreWrites, violations, failures: failures.slice(0, 5) }, null, 1));
+  for (const item of final) console.error(item.key, item.stage, JSON.stringify(item.baseRefresh?.restore ?? null), (item.gates ?? []).flatMap(gate => gate.passed ? [] : gate.reasons).join('; ').slice(0, 300));
 });
 
 test('unit:soak-invariants-hold — hand-launched approvers that vanish or stop without judging are relaunched within the bound, a refused relaunch is retried, and the spent watches keep every invariant holding', { timeout: 120_000 }, async () => {

@@ -262,7 +262,10 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
     // candidate, resolved when the control plane reports what its merge did.
     const target = pending ? { head: item.candidate!.sha, base: pending.baseTip } : refresh ? { head: refresh.from.sha, base: refresh.base } : null;
     if (!target) return;
-    const key = `refresh:${item.id}:${target.head}:${target.base}:${item.policyRevision}`;
+    // A restore's retry reads the same head and base tip as the attempt before it, so the attempt
+    // is part of the key: the escalated attempt is reported, not folded into the first (GY-854).
+    const attempt = !pending && refresh?.restore?.attempts && refresh.restore.attempts > 1 ? `:attempt-${refresh.restore.attempts}` : '';
+    const key = `refresh:${item.id}:${target.head}:${target.base}:${item.policyRevision}${attempt}`;
     if (pending) {
       if (state.actions[key]) return;
       performed.push(await record(state, key, { kind: 'refresh', work: item.key, principal: null, state: 'started',
