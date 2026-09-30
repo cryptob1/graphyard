@@ -33,7 +33,8 @@ import type { FaultClassPolicy, FaultKind, faultClassItem } from '../model/fault
 import type { ControlPlaneStatus } from '../master.js';
 import { readCredentialFile } from '../master.js';
 import { onceAnnotations, timingFaultAttention, type ReportedAttention } from './faults.js';
-import { type BaseCheck, type baseFailureItem, parseFailedTests } from '../model/base-failure.js';
+import type { baseFailureItem } from '../model/base-failure.js';
+import { type BaseFailureEffects, baseFailureReads } from './base-failure-reads.js';
 import type { daemonSummary } from './run.js';
 import { observeDeployment } from './deployment.js';
 import { detectLoopSupervisorUnit, performSelfUpgrade, type SelfUpgradeOutcome } from './upgrade.js';
@@ -65,7 +66,7 @@ export const capacityKey = (role: CapacityRole) => `capacity:${role}`;
  */
 export const promptTarget = (agent: Pick<HerdrAgent, 'name' | 'pane_id'>) => agent.pane_id ?? agent.name ?? '';
 
-export interface DaemonEffects {
+export interface DaemonEffects extends BaseFailureEffects {
   closeSession: (pane: string) => void | Promise<void>;
   dispatch: (work: Work, profile: WorkerProfile, agents: HerdrAgent[], snapshot: { work: Work[]; now: string }) => Promise<unknown>;
   requestProof: (work: Work) => void | Promise<void>;
@@ -317,19 +318,6 @@ export interface DaemonEffects {
    */
   fileFaultClass?: (input: ReturnType<typeof faultClassItem>, key: string) => Promise<Work>;
   /**
-   * GY-528. The failing test names in one CI job's log, read outside any coordination transaction
-   * (a check run's id is its job's). A completed job's log does not change, so each is read once.
-   */
-  failedTests?: (jobId: number) => Promise<string[]>;
-  /** GY-528. The latest completed run of one required check on the base branch head, read the same way. */
-  baseCheck?: (check: string) => Promise<BaseCheck>;
-  /** GY-528. Reruns one failed CI job of a candidate a base failure blocked, once the base passes again. */
-  rerunJob?: (jobId: number) => Promise<void>;
-  /** GY-528. Files the P0 item a base failure raises, as the operator-agent identity, under a key naming the test and base head. */
-  fileBaseFailure?: (input: ReturnType<typeof baseFailureItem>, key: string) => Promise<Work>;
-  /** GY-528. Asks the control plane to merge the repaired base into a blocked candidate's branch (the `refresh` command). */
-  refreshCandidate?: (work: Work, reason: string, key: string) => Promise<Work>;
-  /**
    * The diagnostician (GY-439): its settings, the runners of its primary and fallback runs, the
    * excerpts it reads, and filing and deciding as the master's operator-agent identity. Absent while
    * `run.diagnostician.enabled` is false or the operator-agent or approver identity is missing:
@@ -520,17 +508,6 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     return result;
   };
   const coordinatorStatus = async () => await asCoordinator('status') as ControlPlaneStatus & Record<string, unknown>;
-  // A completed job's log never changes: each is read once, bounded, and a failed read is tried again.
-  const logs = new Map<number, Promise<string[]>>();
-  const jobLogs = (jobId: number): Promise<string[]> => {
-    const kept = logs.get(jobId);
-    if (kept) return kept;
-    if (logs.size >= 200) logs.delete(logs.keys().next().value!);
-    const entry = Promise.resolve(run('gh', ['api', `repos/${current().repository}/actions/jobs/${jobId}/logs`], { maxBuffer: 128 * 1024 * 1024 })).then(parseFailedTests);
-    logs.set(jobId, entry);
-    entry.catch(() => { if (logs.get(jobId) === entry) logs.delete(jobId); });
-    return entry;
-  };
   const annotations = onceAnnotations(async checkRunId => JSON.parse(await run('gh', ['api', '--paginate', `repos/${current().repository}/check-runs/${checkRunId}/annotations`])));
   const decide: DaemonEffects['decide'] = async (work, action, reason, input = {}) => {
     const post = (target: Work) => asOperatorAgent('POST', `work/${target.id}/decide`, { action, input: decisionInput(action, target, input), reason });
@@ -778,19 +755,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       // A required check red on the clock is named as master status names it, after buildMasterStatus.
       return { ...reported, items: [...reported.items, ...await timingFaultAttention(work, current().repository, annotations)] };
     },
-    // GY-528: the base-failure reads use the master's own gh, like the annotations above.
-    failedTests: jobLogs,
-    baseCheck: async check => {
-      const config = current();
-      const read = JSON.parse(String(await run('gh', ['api', `repos/${config.repository}/commits/${encodeURIComponent(config.baseBranch)}/check-runs?check_name=${encodeURIComponent(check)}&per_page=100`])));
-      const runs: any[] = Array.isArray(read?.check_runs) ? read.check_runs : [];
-      const baseSha = String(runs[0]?.head_sha ?? JSON.parse(String(await run('gh', ['api', `repos/${config.repository}/commits/${encodeURIComponent(config.baseBranch)}`, '--jq', '{sha: .sha}']))).sha);
-      const completed = runs.filter(entry => entry.status === 'completed').sort((a, b) => b.id - a.id)[0];
-      if (!completed) return { check, baseSha, state: runs.length ? 'pending' : 'none', jobId: null, url: null, tests: null };
-      const state = completed.conclusion === 'success' ? 'passed' : ['failure', 'timed_out'].includes(completed.conclusion) ? 'failed' : 'none';
-      return { check, baseSha, state, jobId: completed.id, url: completed.html_url ?? null, tests: state === 'failed' ? await jobLogs(completed.id).catch(() => null) : null };
-    },
-    rerunJob: async jobId => { await run('gh', ['api', '--method', 'POST', `repos/${current().repository}/actions/jobs/${jobId}/rerun`]); },
+    ...baseFailureReads(run, current),
     get fileBaseFailure() { return current().operatorAgent ? (input: ReturnType<typeof baseFailureItem>, key: string) => asOperatorAgent('POST', 'work', input, key) as Promise<Work> : undefined; },
     get refreshCandidate() { return current().operatorAgent ? (work: Work, reason: string, key: string) => asOperatorAgent('POST', `work/${work.id}/refresh`, { reason, base: work.observation?.baseTip }, key) as Promise<Work> : undefined; },
     // The diagnostician acts only through the two identities a two-party decision needs (GY-439).
