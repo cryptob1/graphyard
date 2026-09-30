@@ -1,8 +1,12 @@
 import { useEffect, useState } from 'react';
 import type { Dashboard } from './dashboard';
 
-/** How long the first status read may take before the page says the control plane cannot be reached. */
-export const VERIFY_TIMEOUT_MS = 10_000;
+/**
+ * How long the server may take to answer the first status read before the page says the control
+ * plane cannot be reached. /api/status alone ran 3 s at the median and 10-15 s at the tail on
+ * 2026-09-30, so 10 s told reachable operators it was down.
+ */
+export const VERIFY_TIMEOUT_MS = 30_000;
 export const REJECTED_NOTICE = 'That token was not accepted';
 export const HELPER_TEXT = 'Tokens are scoped to your role and kept for this browser session.';
 
@@ -12,9 +16,11 @@ export type VerifyOutcome = { kind: 'accepted'; status: unknown } | { kind: 'rej
 export interface VerifyClock { setTimeout(run: () => void, ms: number): unknown; clearTimeout(timer: unknown): void }
 
 /**
- * Reads /api/status with the token once, then runs `load` (the dashboard's first read) with the status. It always
- * settles: accepted with the status, rejected on 401 or 403 (or when `load` throws an error marked unauthorized), and unreachable on any other failure or when the
- * status reply and the load have not both finished within VERIFY_TIMEOUT_MS.
+ * Reads /api/status with the token once, then runs `load` (the dashboard's first read) with the status. It
+ * settles accepted with the status, rejected on 401 or 403 (or when `load` throws an error marked unauthorized),
+ * and unreachable on any other failure or when the status reply has not arrived within VERIFY_TIMEOUT_MS. The
+ * deadline covers only reaching the server: once /api/status has answered, the server is reachable, so a slow
+ * dashboard load keeps the page verifying (with its "Use another token" escape) instead of calling it unreachable.
  */
 export function verifyToken(token: string, fetcher: typeof fetch, clock: VerifyClock, load: (status: unknown, signal: AbortSignal) => Promise<void> = async () => {}): { result: Promise<VerifyOutcome>; cancel(): void } {
   const controller = new AbortController();
@@ -26,6 +32,8 @@ export function verifyToken(token: string, fetcher: typeof fetch, clock: VerifyC
       if (response.status === 401 || response.status === 403) return { kind: 'rejected' };
       if (!response.ok) return { kind: 'unreachable' };
       const status = await response.json();
+      // The server answered: the reachability deadline is met, and the dashboard's first read runs without it.
+      clock.clearTimeout(timer);
       await load(status, controller.signal);
       return { kind: 'accepted', status };
     } catch (error) { return (error as { unauthorized?: boolean })?.unauthorized ? { kind: 'rejected' } : { kind: 'unreachable' }; }

@@ -147,7 +147,7 @@ test('unit:login-verify-states verifying shows progress and resolves as pending,
     await clock.advance(VERIFY_TIMEOUT_MS);
     assert.deepEqual(seen(), { kind: 'accepted', status: { actor: { role: 'admin' } } }, 'the outcome does not change afterwards');
   }
-  // Accepted waits for the dashboard's first read, under the same deadline; its failures resolve too.
+  // Accepted waits for the dashboard's first read; the deadline covers only reaching the server, and the read's failures resolve too.
   const ok = () => new Response(JSON.stringify({ actor: { role: 'admin' } }), { status: 200 });
   {
     const clock = fakeClock(), network = fakeFetch(); let loaded: unknown = null; let finish: () => void = noop;
@@ -158,12 +158,18 @@ test('unit:login-verify-states verifying shows progress and resolves as pending,
     assert.deepEqual(loaded, { actor: { role: 'admin' } }); assert.deepEqual(seen(), { kind: 'accepted', status: { actor: { role: 'admin' } } });
   }
   {
-    const clock = fakeClock(), network = fakeFetch(); let signal: AbortSignal | null = null;
-    const seen = await outcomeOf(verifyToken('token-1', network.fetcher, clock, (_, abort) => { signal = abort; return new Promise(noop); }).result);
+    // A server that answered /api/status is reachable: a slow dashboard read keeps the page verifying
+    // past the deadline instead of reporting the control plane unreachable, and still lands accepted.
+    const clock = fakeClock(), network = fakeFetch(); let signal: AbortSignal | null = null; let finish: () => void = noop;
+    const seen = await outcomeOf(verifyToken('token-1', network.fetcher, clock, (_, abort) => { signal = abort; return new Promise<void>(resolve => { finish = resolve; }); }).result);
     network.reply(ok()); await settle(); await settle();
-    await clock.advance(VERIFY_TIMEOUT_MS);
-    assert.deepEqual(seen(), { kind: 'unreachable' }, 'a first read that never answers ends in unreachable'); assert.ok(signal!.aborted);
+    assert.equal(clock.pending(), 0, 'the reachability deadline is cleared once the server answers');
+    await clock.advance(VERIFY_TIMEOUT_MS * 2);
+    assert.equal(seen(), null, 'a slow first read is still verifying, never unreachable'); assert.ok(!signal!.aborted, 'the first read is not aborted');
+    finish(); await settle();
+    assert.deepEqual(seen(), { kind: 'accepted', status: { actor: { role: 'admin' } } });
   }
+  assert.ok(VERIFY_TIMEOUT_MS >= 30_000, 'the status reply gets at least 30 s: its tail ran 10-15 s on 2026-09-30');
   for (const [failure, expected] of [[new Error('Unable to load dashboard (502).'), 'unreachable'], [Object.assign(new Error(REJECTED_NOTICE), { unauthorized: true }), 'rejected']] as const) {
     const clock = fakeClock(), network = fakeFetch();
     const seen = await outcomeOf(verifyToken('token-1', network.fetcher, clock, async () => { throw failure; }).result);
