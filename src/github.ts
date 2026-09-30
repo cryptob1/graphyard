@@ -15,10 +15,13 @@ import { foldDecisions } from './model/approval.js';
 import { normalMergeState, repairAudit, repairAuditEvent, repairLaneVerdict, type RepairAudit, type RepairLaneVerdict } from './master/repair-lane.js';
 import { currentOptimisticMerge, describeGuard, mainGuard, postMergeVerdict, retestAfterRevert, revertRefusal, verdictCommit, type GuardState, type OptimisticMerge, type OptimisticRevert } from './optimistic-merge.js';
 export { CHECK_NAME };
-import { alreadyMergeableRefusal, approvalOfHead, baseRefreshNeeded, dismissedVerdict, enqueueRequestCurrent, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, owedCheckReruns, pendingRestore, predictQueue, queuePlacement, queueRef, mergeCheckBranch, treeIdenticalPrediction, type GitHubMergeQueueState, type HeadForcePush, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type ObservedApproval, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread } from './merge-queue.js';
+import { alreadyMergeableRefusal, approvalOfHead, baseRefreshNeeded, failedConclusions as failedCheckConclusions, dismissedVerdict, enqueueRequestCurrent, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, owedCheckReruns, pendingRestore, predictQueue, queuePlacement, queueRef, mergeCheckBranch, treeIdenticalPrediction, type GitHubMergeQueueState, type HeadForcePush, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type ObservedApproval, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread } from './merge-queue.js';
 import { blockedFeatures, controlPlanePermissions, describeShortfall, permissionShortfalls, requiredPermissions, type PermissionFeature, type PermissionLevel, type PermissionShortfall } from './github-permissions.js';
 import { agentOwner, type AttentionItem } from './master/attention.js';
+import { budgetedPage, docsWords, repositoryConfigFile, repositoryDocsBudget, type DocsWordBudget, type DocsWordCount, type TipDocs } from './model/documentation.js';
 import type { IntegrationJob } from './coordination.js';
+import { BoundedCache, EtagCache, blobContentBytes, blobContentValueBytes, etagCacheEntries } from './github-response-cache.js';
+export { etagCacheBytes, etagCacheEntries } from './github-response-cache.js';
 
 /** Out-of-scope paths compared against the base tip per observation; the rest are refused as uncompared. */
 export const scopeLookupBudget = 200;
@@ -573,7 +576,7 @@ export class GitHub {
   private blockedUntil = 0;
   private rateFailures = 0;
   private authentication?: Promise<void>;
-  private cache = new Map<string, { etag: string; value: any }>();
+  private cache = new EtagCache();
   private ancestry = new Map<string, boolean>();
   private usage = { since: Date.now(), total: 0, notModified: 0, byKind: new Map<string, number>(), remaining: null as string | null, reset: null as string | null, token: '' };
   /** Once a minute, logs what the App spent: requests, free 304s, the costliest endpoints, and GitHub's own remaining budget of the token that last answered. */
@@ -601,7 +604,7 @@ export class GitHub {
    */
   optimisticLaneEnabled: boolean | null = null;
   /** Blob bytes by sha (GY-863's landing merge-result judgement); a blob's content is immutable, so each is asked once. */
-  private blobContents = new Map<string, Buffer>();
+  private blobContents = new BoundedCache<Buffer>(ancestryEntries, blobContentBytes, blobContentValueBytes, content => content.length);
   /** The persisted cold layer under the four maps above (src/github-cache.ts), when attached. */
   private persisted: GitHubCacheStore | null = null;
   private warming: Promise<void> | null = null;
@@ -940,18 +943,19 @@ export class GitHub {
     this.meter(method, path, response, token);
     this.record(path, response, true, Date.now(), true, token);
     // A 304 costs no rate budget. Refresh the entry's recency so a full observation round stays cached.
-    if (response.status === 304 && cached) { this.rateFailures = 0; this.cache.delete(path); this.cache.set(path, cached); this.persisted?.touch('etag', path); return structuredClone(cached.value); }
+    if (response.status === 304 && cached) { this.rateFailures = 0; this.cache.keep(path, cached.etag, cached.text); this.persisted?.touch('etag', path); return JSON.parse(cached.text); }
     const refused = await this.refusal(response, `${method} ${path}`);
     if (refused) throw refused;
     this.rateFailures = 0;
-    const value = response.status === 204 ? null : await response.json();
+    const text = response.status === 204 ? null : await response.text();
+    const value = text === null ? null : JSON.parse(text);
     const etag = response.headers.get('etag');
     if (method === 'GET') {
       this.cache.delete(path);
-      if (etag) {
-        this.cache.set(path, { etag, value: structuredClone(value) });
+      // The entry keeps the answer's text, not its object graph, within the cache's byte bound (GY-975).
+      if (etag && text !== null) {
+        this.cache.keep(path, etag, text);
         this.persisted?.put('etag', path, value, etag);
-        if (this.cache.size > etagCacheEntries) this.cache.delete(this.cache.keys().next().value!);
       }
     }
     return value;
@@ -1206,6 +1210,8 @@ export class GitHub {
         ? { provider: 'codex' as const, sha: pr.head.sha, approved: false, reason: unready }
         : await observeCodex(this, pr.number, pr.head.sha, reviews, pr.user.id, work.reviewRequest, candidateBase, work.policyRevision, this.config.appId)
       : await this.observeAgent(work, pr, reviews, candidateBase, unready);
+    // A failing published tip carries its docs counts, from which a budget overflow is attributed (GY-574).
+    const docsBudget = publishedTip && !pr.merged && pr.state === 'open' ? await this.tipDocs(work, pr.head.sha, bound, checks) : undefined;
     const confirmed = await this.request(`/pulls/${work.submission!.pr}`);
     demand(confirmed.head.sha === pr.head.sha && confirmed.base.sha === pr.base.sha && confirmed.base.ref === pr.base.ref && confirmed.head.ref === pr.head.ref
       && confirmed.state === pr.state && confirmed.draft === pr.draft && confirmed.merged === pr.merged, 'PR changed while collecting evidence; retry');
@@ -1227,10 +1233,85 @@ export class GitHub {
       ...(pr.mergeable === null && pr.state === 'open' && !pr.merged ? { mergeabilityUnknown: true } : {}),
       protected: protection.protected, conversations, files: files.map(f => f.filename), at: startedAt,
       baseTip: branch.tip, baseTree: branch.tree, baseTipContained, baseTipAncestor: contained, scopeFiles,
-      ...(landing ? { landing } : {}), ...(revertedDelivery ? { revertedDelivery } : {}), ...(baseChanges !== undefined ? { baseChanges } : {}),
+      ...(landing ? { landing } : {}), ...(revertedDelivery ? { revertedDelivery } : {}), ...(baseChanges !== undefined ? { baseChanges } : {}), ...(docsBudget ? { docsBudget } : {}),
       ...(dismissals.forcePushes.length ? { headForcePushes: dismissals.forcePushes } : {}),
     };
   }
+  /**
+   * The docs word counts of a published queue tip whose required checks failed (GY-574): the tip's
+   * own pages and those of the base it was built on, so the batch plan can attribute a docs-budget
+   * overflow to the entry that crossed it instead of bisecting to the queue head. Only a failing
+   * published tip is counted, and a page's words are read once per blob, so a passing queue costs
+   * nothing and a failing tip costs its two trees and the pages it changed. `onlyFailure` is set when
+   * no other required check failed; whether the suite's failure is the budget is read from the counts.
+   * The budget and the pages it counts are the ones the tip's own graphyard.json configures; a tip
+   * whose project keeps no budget carries no record, and its failure is bisected as before.
+   */
+  async tipDocs(work: Work, head: string, base: string, checks: { id?: number; name: string; status: string; conclusion: string | null }[]): Promise<TipDocs | undefined> {
+    const required = new Set(work.policy.checks ?? []);
+    const latest = new Map<string, string>();
+    for (const check of [...checks].sort((a, b) => (a.id ?? 0) - (b.id ?? 0))) if (required.has(check.name) && check.status === 'completed') latest.set(check.name, check.conclusion ?? '');
+    const failed = [...latest.values()].filter(result => failedCheckConclusions.has(result)).length;
+    if (!failed) return undefined;
+    // The counts only sharpen an ejection: a tip they cannot be read for is bisected as before, never left unobserved.
+    try {
+      const budget = await this.docsBudgetAt(head);
+      if (!budget) return undefined;
+      const [pages, before] = await Promise.all([this.docsWordCount(head, budget), this.docsWordCount(base, budget)]);
+      return pages && before ? { sha: head, base: before, pages, onlyFailure: failed === 1, budget } : undefined;
+    } catch (error) {
+      console.error(`GitHub docs word counts for ${work.key} tip ${head.slice(0, 12)} were unreadable; its failure is bisected: ${error instanceof Error ? error.message : String(error)}`);
+      return undefined;
+    }
+  }
+  /** The files of a commit's tree, read once per commit; null when GitHub truncates the tree. */
+  private async docsTree(ref: string): Promise<{ path: string; type: string; sha: string }[] | null> {
+    const known = this.docsTrees.get(ref);
+    if (known !== undefined) return known;
+    const tree = await this.request(`/git/trees/${encodeURIComponent(ref)}?recursive=1`);
+    const files = tree?.truncated || !Array.isArray(tree?.tree) ? null : (tree.tree as { path: string; type: string; sha: string }[]).filter(entry => entry.type === 'blob');
+    if (/^[a-f0-9]{40}$/.test(ref)) { this.docsTrees.set(ref, files); if (this.docsTrees.size > 64) this.docsTrees.delete(this.docsTrees.keys().next().value!); }
+    return files;
+  }
+  private docsTrees = new Map<string, { path: string; type: string; sha: string }[] | null>();
+  private async blobText(sha: string) {
+    const blob = await this.request(`/git/blobs/${sha}`);
+    return Buffer.from(String(blob?.content ?? ''), blob?.encoding === 'base64' ? 'base64' : 'utf8').toString('utf8');
+  }
+  /** The documentation word budget a commit's committed graphyard.json configures; null when it keeps none. */
+  async docsBudgetAt(ref: string): Promise<DocsWordBudget | null> {
+    const config = (await this.docsTree(ref))?.find(entry => entry.path === repositoryConfigFile);
+    if (!config) return null;
+    // One configuration version is read once, however many tips carry it.
+    if (!this.docsBudgets.has(config.sha)) { this.docsBudgets.set(config.sha, repositoryDocsBudget(await this.blobText(config.sha))); if (this.docsBudgets.size > 64) this.docsBudgets.delete(this.docsBudgets.keys().next().value!); }
+    return this.docsBudgets.get(config.sha)!;
+  }
+  private docsBudgets = new Map<string, DocsWordBudget | null>();
+  /** Words per page `budget` counts at a commit, as tests/docs-budget.test.ts counts them; null when GitHub truncates the tree. */
+  async docsWordCount(ref: string, budget: DocsWordBudget): Promise<DocsWordCount | null> {
+    const key = `${ref}:${JSON.stringify(budget)}`;
+    const counted = this.docsCounts.get(key);
+    if (counted) return counted;
+    const files = await this.docsTree(ref);
+    if (!files) return null;
+    const pages = files.filter(entry => budgetedPage(entry.path, budget));
+    const words = await boundedMap(pages, peerContainmentConcurrency, page => {
+      const known = this.docsBlobWords.get(page.sha);
+      if (known) return known;
+      const reading = this.blobText(page.sha).then(docsWords);
+      this.docsBlobWords.set(page.sha, reading);
+      reading.catch(() => { if (this.docsBlobWords.get(page.sha) === reading) this.docsBlobWords.delete(page.sha); });
+      if (this.docsBlobWords.size > ancestryEntries) this.docsBlobWords.delete(this.docsBlobWords.keys().next().value!);
+      return reading;
+    });
+    const count: DocsWordCount = Object.fromEntries(pages.map((page, index) => [page.path, words[index]]));
+    // A commit's pages never change: a tip observed again while it waits is counted once.
+    if (/^[a-f0-9]{40}$/.test(ref)) { this.docsCounts.set(key, count); if (this.docsCounts.size > 64) this.docsCounts.delete(this.docsCounts.keys().next().value!); }
+    return count;
+  }
+  private docsCounts = new Map<string, DocsWordCount>();
+  /** Words per docs blob, shared while in flight: a blob never changes, so each page version is read from GitHub once. */
+  private docsBlobWords = new Map<string, Promise<number>>();
   /**
    * The commit the candidate would land on, and what landing there would revert (see
    * merge-queue.ts LandingCheck). The judgement is the shared `landingCheck` below, over this
@@ -1330,7 +1411,6 @@ export class GitHub {
     demand(entry && typeof entry === 'object' && typeof entry.content === 'string', `GitHub did not return the content of blob ${sha.slice(0, 12)}`, 502);
     const content = entry.encoding === 'base64' ? Buffer.from(entry.content, 'base64') : Buffer.from(entry.content, 'utf8');
     this.blobContents.set(sha, content);
-    if (this.blobContents.size > ancestryEntries) this.blobContents.delete(this.blobContents.keys().next().value!);
     return content;
   }
   async verify(work: Work, peers?: Work[]): Promise<Observation> {
@@ -2333,11 +2413,6 @@ async function restoreBranch(engine: Engine, github: GitHub, work: Work, owed: B
 }
 /** A held job waits this long before one bounded re-check, unless a preflight sees the installation change first. */
 export const permissionHoldMs = 30 * 60_000;
-/**
- * Conditional-request cache size. One observation round reads roughly ten paths per open PR; a cache
- * smaller than a round evicts every entry before its reuse, so no request earns a free 304.
- */
-export const etagCacheEntries = 4096;
 /** Commit-pair ancestry answers kept; each is immutable, so the bound only limits memory. */
 export const ancestryEntries = 16384;
 /** Commit-pair histories kept; each is immutable. */
