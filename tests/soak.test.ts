@@ -106,6 +106,8 @@ const soakConfig: MasterConfig = masterConfigSchema.parse({ version: 1, url: 'ht
 const start = Date.parse('2031-06-02T08:00:00Z');
 /** Where the day's worker worktrees stand, as the launcher lays them out (…/.graphyard/worktrees/KEY-EPOCH, GY-980). */
 const soakWorktreeRoot = '/tmp/soak/.graphyard/worktrees';
+/** The leftover panes a day other than the main one seeds (GY-842's original eight). */
+const sideDayLeftovers = 8;
 const basePlan = {
   items: 15, releaseEveryMs: 15 * minute, workMs: 20 * minute,
   // GY-842: review panes of a previous day, standing agentless with their worktrees deleted —
@@ -387,7 +389,11 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   // ---- reclaim removed while the panes stood on. Enough of them that the sweep's per-pass bound
   // ---- is what paces the drain, and one pane Graphyard never launched that it must never touch.
   // Pane ids are this simulated world's own, so two days on one control plane never collide.
-  const world = `w${days}:`, leftovers = plan.leftovers, foreignPane = `${world}operator`;
+  // The full backlog, and GY-980's worktree leftovers below, stand only on the main day that
+  // asserts their drain: every other day runs near its own timeout on CI and keeps the eight panes
+  // it always had, unless its plan names its own.
+  const backlogDay = Object.keys(options).every(key => key === 'hours');
+  const world = `w${days}:`, leftovers = backlogDay || options.plan?.leftovers != null ? plan.leftovers : sideDayLeftovers, foreignPane = `${world}operator`;
   for (let index = 0; index < leftovers; index++) {
     const work = items[index], pane = `${world}left${index}`;
     herdr.shell(pane, `/tmp/soak/leftover-${index} (deleted)`);
@@ -400,7 +406,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   // ---- epoch, and ended sessions whose agents still idle in their panes, named as recorded. The
   // ---- day's own workers stand in Graphyard worktrees too, so the sweep meets them leased.
   const previousWorktrees: string[] = [];
-  for (let index = 0; index < plan.worktreeLeftovers; index++) {
+  for (let index = 0; index < (backlogDay ? plan.worktreeLeftovers : 0); index++) {
     const work = items[index % items.length];
     const unrecorded = `${world}tree${index}`, stuck = `${world}stuck${index}`, idle = `${world}idle${index}`;
     herdr.shell(unrecorded, `${soakWorktreeRoot}/${work.key}-${90 + index}`);
