@@ -1,95 +1,55 @@
-import { describe, it } from 'node:test';
-import * as assert from 'node:assert';
-import { containmentVerificationSchema, containmentSettlementRefusals } from '../src/quarantine.js';
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
 import type { Work } from '../src/model.js';
+import { verifyContainmentDeath } from '../src/master/containment.js';
+import { containmentSettlementRefusals, containmentVerificationSchema } from '../src/quarantine.js';
 
-describe('Containment verification with large process lists', () => {
-  it('survives and settles a scope with 350 attributed processes', () => {
-    // Build a verification with one scope containing 350 attributed processes
-    const bigPids = Array.from({ length: 350 }, (_, i) => i + 1);
+const host = 'coordinator-host';
+const bigScope = 'graphyard-watch-4100-big.scope';
+const neighbourScope = 'graphyard-watch-4200-own.scope';
+const lapsed = new Date(Date.now() - 600_000).toISOString();
 
-    const verification = {
-      method: 'linux-proc-systemd' as const,
-      host: 'testhost',
-      uid: 1000,
-      platform: 'linux',
-      workspacePath: '/home/user/workspace',
-      observedAt: new Date().toISOString(),
-      clockOffset: { min: -100, max: 100 },
-      processes: [],
-      scopes: [
-        {
-          unit: 'graphyard-watch-1234-test.scope',
-          activeState: 'active',
-          processes: [],
-          attributed: bigPids.slice(0, 200),
-          attributedCount: 350,
-          truncated: true,
-        },
-        {
-          unit: 'graphyard-watch-5678-other.scope',
-          activeState: 'active',
-          processes: [401, 402],
-          attributed: [],
-          truncated: false,
-        },
-      ],
-      held: [
-        { pid: 401, command: '/bin/bash', cwd: '/home/user/workspace', unit: 'graphyard-watch-5678-other.scope' },
-        { pid: 402, command: '/bin/sleep 10', cwd: '/home/user/workspace', unit: 'graphyard-watch-5678-other.scope' },
-      ],
-      recordedScope: { unit: 'graphyard-watch-1234-test.scope', pid: 1234, activeState: 'active' },
-      inaccessible: 0,
-      unverifiable: [],
-    };
+function quarantined(key: string, epoch: number, unit: string, pid: number) {
+  return {
+    id: `${key}-id`, key, epoch, lease: null, sessions: [],
+    workspaces: [{ epoch, owner: 'worker', host, path: `/srv/graphyard/worktrees/${key}-${epoch}`, branch: `graphyard/${key.toLowerCase()}-${epoch}` }],
+    containmentQuarantine: { owner: 'worker', epoch, at: lapsed, settlementHash: 'a'.repeat(64), leaseExpiresAt: lapsed, launchExpiresAt: lapsed, launchAcknowledgedAt: lapsed, scope: { unit, pid } },
+  } as unknown as Work;
+}
 
-    // Verify it parses
-    const parsed = containmentVerificationSchema.parse(verification);
-    assert.ok(parsed, 'Verification should parse successfully');
+/** One host probe: the big scope holds 350 processes of another live assignment, the other scope has ended. */
+function probe(target: { workspacePath: string; scope?: { unit: string; pid: number } | null }) {
+  return {
+    method: 'linux-proc-systemd' as const, platform: 'linux', uid: 1000, workspacePath: target.workspacePath, processes: [], held: [], inaccessible: 0, unverifiable: [],
+    recordedScope: target.scope ? { ...target.scope, activeState: target.scope.unit === bigScope ? 'active' : 'not-found' } : null,
+    scopes: [{ unit: bigScope, activeState: 'active', processes: [], attributed: Array.from({ length: 350 }, (_, index) => 10_000 + index) }],
+  };
+}
 
-    // Verify the big scope is recorded as truncated and live
-    const bigScope = parsed.scopes[0];
-    assert.strictEqual(bigScope.truncated, true, 'Big scope should be marked truncated');
-    assert.strictEqual(bigScope.attributedCount, 350, 'Big scope should record total count');
-    assert.strictEqual(bigScope.attributed.length, 200, 'Big scope should have list truncated to 200');
-    assert.strictEqual(bigScope.activeState, 'active', 'Big scope should be active');
+test('unit:verification-survives-large-scope a scope of 350 attributed processes is recorded truncated and live, and another quarantine in the same verification settles', async () => {
+  const options = { observedAt: new Date().toISOString(), hostId: host, clockOffset: { min: 0, max: 1 }, probe };
+  // Another item, whose own recorded scope has ended, is verified on the same host beside the big scope.
+  const other = await verifyContainmentDeath(quarantined('GY-2', 3, neighbourScope, 4200), options);
+  assert.ok(other.verification, 'the verification parses despite a 350-process scope');
+  assert.equal(containmentVerificationSchema.safeParse(other.verification).success, true);
+  const big = other.verification.scopes.find(scope => scope.unit === bigScope)!;
+  assert.equal(big.truncated, true);
+  assert.equal(big.attributedTotal, 350);
+  assert.equal(big.attributed.length, 200);
+  assert.equal(big.activeState, 'active', 'the truncated scope is recorded live');
+  assert.deepEqual(other.refusals, []);
+  assert.equal(other.settleable, true, "another item's quarantine settles");
 
-    // Create a work item with a containment quarantine for the big scope
-    const work: Pick<Work, 'containmentQuarantine' | 'lease' | 'workspaces' | 'sessions'> = {
-      containmentQuarantine: {
-        owner: 'test-worker',
-        epoch: 1,
-        at: new Date().toISOString(),
-        settlementHash: 'test-hash',
-        launchAcknowledgedAt: new Date().toISOString(),
-        launchExpiresAt: new Date(Date.now() - 200_000).toISOString(),
-        leaseExpiresAt: new Date(Date.now() - 200_000).toISOString(),
-        scope: { unit: 'graphyard-watch-1234-test.scope', pid: 1234 },
-      },
-      lease: null,
-      workspaces: [{ epoch: 1, owner: 'test-worker', host: 'testhost', path: '/home/user/workspace', branch: 'test' }],
-      sessions: [],
-    };
+  // The item whose own scope is the truncated one is judged conservatively: live, never proven stopped.
+  const own = await verifyContainmentDeath(quarantined('GY-1', 2, bigScope, 4100), options);
+  assert.equal(own.settleable, false);
+  assert.ok(own.refusals.some(reason => reason.includes(bigScope) && reason.includes('judges the scope live')), own.refusals.join('\n'));
 
-    // Test settlement refusals
-    const now = Date.now();
-    const refusals = containmentSettlementRefusals(work, parsed, {
-      now,
-      graceMs: 100_000,
-      freshnessMs: 200_000,
-      clockToleranceMs: 5_000,
-    });
-
-    // The big truncated scope should NOT block settlement
-    const blockedByBigScope = refusals.some(r => r.includes('graphyard-watch-1234-test.scope') && r.includes('still holds'));
-    assert.strictEqual(blockedByBigScope, false, 'Big truncated scope should not block settlement');
-
-    // But the other scope with processes should block
-    const blockedByOtherScope = refusals.some(r => r.includes('graphyard-watch-5678-other.scope') && r.includes('still holds'));
-    assert.strictEqual(blockedByOtherScope, true, 'Other scope with processes should block settlement');
-
-    // Settlement should be blocked only because of the other scope's processes
-    assert.ok(refusals.length > 0, 'Should have refusals due to other scope');
-    assert.ok(refusals.every(r => !r.includes('graphyard-watch-1234-test.scope')), 'No refusals should mention the big truncated scope');
+  // Holding lists record the full count, and a truncated holding scope fences whoever it is.
+  const holding = containmentVerificationSchema.parse({
+    ...other.verification,
+    scopes: [{ unit: bigScope, activeState: 'active', processes: Array.from({ length: 200 }, (_, index) => 20_000 + index), attributed: [], truncated: true, processesTotal: 350 }],
   });
+  const refusals = containmentSettlementRefusals(quarantined('GY-2', 3, neighbourScope, 4200), holding, { now: Date.parse(options.observedAt) });
+  assert.ok(refusals.some(reason => reason.includes('still holds 350 process(es)')), refusals.join('\n'));
 });
