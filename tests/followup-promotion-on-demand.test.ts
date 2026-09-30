@@ -5,40 +5,39 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
-import { followUpItem, type LaunchThread } from '../src/review-threads.js';
-import { followUpEntries, followUpParent } from '../src/model/machine-backlog.js';
+import { followUpParent } from '../src/model/machine-backlog.js';
 import { workCommands } from '../src/cli/work.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
-// GY-896 AC-2 against the real control plane: a recorded follow-up batch stays retrievable by
-// item and by PR, and the `work promote-followup` command promotes one finding to its own item —
-// exactly once: a rerun finds the item the first run created and never files a duplicate.
+// GY-896 AC-2 against the real control plane: a follow-up batch recorded on an approved item stays
+// retrievable by item and by pull request (`graphyard followups`), and `graphyard promote-followup`
+// promotes one finding to its own work item on an operator's demand — exactly once: a rerun answers
+// the item the first run created and never files a duplicate.
 
 const repository = 'owner/followup-promotion';
 const operator: Principal = { id: 'promotion-operator', role: 'admin', sessionKind: 'ai' };
-const credentials = [operator].map(principal => ({ ...principal, token: `promotion-${principal.id}-${'x'.repeat(32)}` }));
+const coordinator: Principal = { id: 'promotion-master', role: 'coordinator', sessionKind: 'ai' };
+const credentials = [operator, coordinator].map(principal => ({ ...principal, token: `promotion-${principal.id}-${'x'.repeat(32)}` }));
 const token = (principal: Principal) => credentials.find(credential => credential.id === principal.id)!.token;
 let database: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
 
-const call = async (path: string, body?: unknown, key: string = randomUUID()) => {
-  const response = await fetch(`${url}/api/${path}`, { method: body === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${token(operator)}`, 'Content-Type': 'application/json', 'Idempotency-Key': key }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+const call = async (principal: Principal, path: string, body?: unknown, key: string = randomUUID()) => {
+  const response = await fetch(`${url}/api/${path}`, { method: body === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${token(principal)}`, 'Content-Type': 'application/json', 'Idempotency-Key': key }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   return { status: response.status, body: await response.json() as any };
 };
-/** The CLI context's `api`, against the test server. */
-const api = async (path: string, data?: unknown, requestId?: string) => {
-  const result = await call(path, data, requestId);
-  assert.equal(result.status, 200, JSON.stringify(result.body));
+/** The CLI context's `api` for `principal`, against the test server. */
+const apiAs = (principal: Principal) => async (path: string, data?: unknown, requestId?: string) => {
+  const result = await call(principal, path, data, requestId);
+  if (result.status !== 200) throw new Error(JSON.stringify(result.body));
   return result.body;
 };
+const api = apiAs(operator);
 const reload = async (key: string) => (await store.list()).find(item => item.key === key)!;
-const thread = (id: string, path: string, excerpt: string): LaunchThread =>
-  ({ id, author: 'graphyard-reviewer', path, line: 30, outdated: false, excerpt, url: `https://github.com/${repository}/pull/7#discussion-r-${id}` });
-const promote = workCommands.find(command => command.name === 'promote-followup')!;
-/** The real command handler, as the launcher invokes it. */
-const runPromote = async (id: string, index: string) => {
+/** A real command handler, as the launcher invokes it. */
+const run = async (name: string, id: string, args: string[], as = api) => {
   const printed: any[] = [];
-  await promote.run!({ id, args: [index], api, print: (value: unknown) => printed.push(value) } as any, undefined);
+  await workCommands.find(command => command.name === name)!.run!({ id, args, api: as, print: (value: unknown) => printed.push(value) } as any, undefined);
   return printed[0]!;
 };
 
@@ -54,45 +53,59 @@ before(async () => {
 });
 after(async () => { http?.close(); await store?.close(); await database?.stop(); });
 
-test('unit:followup-promotion-on-demand — an operator promotes one finding to its own item once, and the batch stays retrievable', async () => {
+test('unit:followup-promotion-on-demand — a recorded batch is retrievable by item and PR, and an operator promotes one finding once', async () => {
   const parent = await api('work', { title: 'Parent', plannedFiles: ['src/a.ts'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:a'] }] }) as Work;
-  const batch = await api('work', { ...followUpItem({ key: parent.key, workId: parent.id, pr: 7, sha: 'b'.repeat(40), reviewId: 11 }, [thread('T1', 'src/a.ts', 'the retry is unbounded')], [{ path: 'src/b.ts', line: null, text: 'the cache never expires' }]), policy: { checks: ['test'], review: true } }) as Work;
+  const other = await api('work', { title: 'Other', plannedFiles: ['src/z.ts'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:z'] }] }) as Work;
+  const approve = async (work: Work, pr: number, findings: { path: string | null; text: string; ref?: string }[]) => {
+    await store.pool.query(`UPDATE work_items SET document = jsonb_set(document, '{candidate}', $2::jsonb) WHERE id=$1`,
+      [work.id, JSON.stringify({ pr, sha: String(pr).padEnd(40, 'e'), author: 'worker', branch: `graphyard/${work.key}`, baseSha: 'd'.repeat(40), createdAt: new Date().toISOString() })]);
+    return apiAs(coordinator)(`work/${work.key}/followups`, { findings, reason: `approval of ${work.key}` });
+  };
+  await approve(parent, 7, [{ path: 'src/a.ts', text: 'the retry is unbounded', ref: `https://github.com/${repository}/pull/7#discussion-r-T1` }, { path: 'src/b.ts', text: 'the cache never expires' }]);
+  await approve(other, 8, [{ path: null, text: 'the naming is inconsistent' }]);
+  const before = (await store.list()).length;
 
   // Retrievable by item ...
-  assert.deepEqual(followUpEntries(await api(`work/${batch.key}`)).map(entry => entry.path), ['src/a.ts', 'src/b.ts']);
-  // ... and by PR: the batch's title names the pull request its approval reviewed.
-  const byPr = (await api('work-snapshot')).work.filter((item: any) => followUpParent(item) === parent.key && item.title.includes('(PR #7)'));
-  assert.deepEqual(byPr.map((item: any) => item.key), [batch.key]);
+  const byItem = await run('followups', parent.key, []);
+  assert.equal(byItem.key, parent.key);
+  assert.deepEqual(byItem.findings.map((finding: any) => [finding.index, finding.path, finding.pr]), [[1, 'src/a.ts', 7], [2, 'src/b.ts', 7]]);
+  // ... and by pull request: only the batches recorded for it.
+  const byPr = await run('followups', '--pr', ['7']);
+  assert.equal(byPr.pr, 7);
+  assert.deepEqual(byPr.batches.map((batch: any) => [batch.key, batch.findings.length]), [[parent.key, 2]]);
+  assert.deepEqual((await run('followups', '--pr', ['8'])).batches.map((batch: any) => batch.key), [other.key]);
 
   // Promotion: one finding becomes its own item, planned on the finding's file, carrying a
-  // required proof and depending on the followed-up item.
-  const first = await runPromote(batch.key, '1');
+  // required proof and depending on the approved item.
+  const first = await run('promote-followup', parent.key, ['1']);
   assert.equal(first.duplicate, false);
+  assert.deepEqual(first.promoted, { from: parent.key, finding: 1, parent: parent.key });
   const promoted = await reload(first.item.key);
-  assert.equal(promoted.title, `Promoted follow-up ${batch.key} finding 1: the retry is unbounded`);
+  assert.equal(promoted.title, `Promoted follow-up of ${parent.key} (${parent.key} finding 1): the retry is unbounded`);
   assert.equal(promoted.stage, 'backlog');
-  assert.deepEqual(promoted.criteria[0].proofs, ['manual:review-followup-addressed']);
-  assert.ok(promoted.criteria[0].proofs.length >= 1, 'the promoted criterion carries a required proof');
+  assert.deepEqual(promoted.criteria.map(criterion => criterion.proofs), [['manual:review-followup-addressed']]);
   assert.deepEqual(promoted.producerProofs, ['manual:review-followup-addressed']);
   assert.deepEqual(promoted.dependencies, [parent.id]);
   assert.deepEqual(promoted.plannedFiles, ['src/a.ts']);
-  assert.match(promoted.description, new RegExp(`Promoted from ${batch.key}`));
-  assert.match(promoted.description, /the retry is unbounded/);
-  // A promoted item is an ordinary item, not its parent's second follow-up item.
-  assert.equal(followUpParent(promoted), null);
+  assert.match(promoted.description!, /PR #7/);
+  assert.match(promoted.description!, /discussion-r-T1/);
+  assert.equal(followUpParent(promoted), null, 'a promoted item is an ordinary item, not a follow-up item');
+  assert.equal((await store.list()).length, before + 1, 'promotion files exactly one item');
 
-  // The same promotion again finds the item the first run created: no duplicate is filed.
-  const again = await runPromote(batch.key, '1');
-  assert.equal(again.duplicate, true);
-  assert.equal(again.item.key, first.item.key);
-  assert.equal((await store.list()).filter(item => item.title === `Promoted follow-up ${batch.key} finding 1: the retry is unbounded`).length, 1);
+  // The batch marks the finding promoted, and the same promotion again answers that item: no duplicate.
+  assert.deepEqual((await run('followups', parent.key, [])).findings.map((finding: any) => finding.promoted), [first.item.key, null]);
+  const again = await run('promote-followup', parent.key, ['1']);
+  assert.deepEqual([again.duplicate, again.item.key], [true, first.item.key]);
+  assert.equal((await store.list()).length, before + 1);
 
   // The other finding promotes separately, to its own item.
-  const second = await runPromote(batch.key, '2');
+  const second = await run('promote-followup', parent.key, ['2']);
   assert.notEqual(second.item.key, first.item.key);
   assert.deepEqual((await reload(second.item.key)).plannedFiles, ['src/b.ts']);
 
-  // Refusals: an item that is not a follow-up batch, and an index beyond the findings.
-  await assert.rejects(runPromote(parent.key, '1'), /not a review follow-up item/);
-  await assert.rejects(runPromote(batch.key, '9'), /no finding 9/);
+  // Refusals: an index beyond the findings, an item that holds none, and a caller who is not an operator.
+  await assert.rejects(run('promote-followup', parent.key, ['9']), /no finding 9/);
+  const bare = await api('work', { title: 'Bare', plannedFiles: ['src/y.ts'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:y'] }] }) as Work;
+  await assert.rejects(run('promote-followup', bare.key, ['1']), /holds no follow-up findings/);
+  await assert.rejects(run('promote-followup', other.key, ['1'], apiAs(coordinator)), /Only an operator/);
 });

@@ -1,50 +1,47 @@
-<!-- page: Operate Graphyard | 4 | the machine-filed backlog: batching, retrieval, triage, promotion. -->
+<!-- page: Operate Graphyard | 4 | review follow-ups: recorded on the item, retrieved, promoted on demand. -->
 # Review follow-ups
 
 The independent reviewer's approval may name findings beyond an item's acceptance criteria and
-judge each FOLLOW-UP. Graphyard records them as a machine-filed backlog item on its own — never
-as one dispatchable work item per review.
+judge each FOLLOW-UP. Graphyard records them against the approved item itself — never as a work
+item, neither one per review nor one per item — and an operator promotes a finding to a work item
+only on demand.
 
-## One batch per parent
+## Recorded on the item and the pull request
 
-Every follow-up of one approved item (the parent) lives in one backlog item, titled
-`Follow-ups from the approved review of GY-N (PR #M)`:
+When the loop holds an approval of an item's candidate, it records the approval's follow-ups on
+that item's own record (`POST /api/work/GY-N/followups`, a `followups.recorded` event naming the
+pull request and head):
 
-- The first approval files the batch. It starts in the backlog stage, not ready: it awaits
-  triage and is never a ready-stage item that carries no implementation.
-- Each later approval of the same parent appends its new findings to that same batch
-  (`POST /api/work/GY-N/followups`), deduplicated by file path and finding text, and recorded in
-  the item's history. No second item is filed while one is open.
-- The batch depends on the parent, so it is never dispatched against a base that lacks the
-  reviewed change.
+- Every approval of the same item adds only the findings the item's batch does not hold yet,
+  deduplicated by file path and finding text. A retried filing records nothing twice.
+- On the pull request, each follow-up thread gets a reply naming the item and is resolved; a
+  finding with no thread is already on the approval's own `Follow-up finding:` line.
+- Nothing is filed: the backlog gains no item, and no ready-stage item carries no implementation.
 
-## Triaging a batch
-
-The loop's triage step judges every machine-filed item within 24 hours: release it at a
-priority, close it (superseded by a delivered item, or not worth doing), or merge it into
-another open item. A release applies at once; a closure or merge is applied only once an
-independent approver approves it. Past 24 hours untriaged, `master status` raises attention.
+Follow-up items filed before this (`Follow-ups from the approved review of GY-N (PR #M)`) still
+take a later approval's findings while open, and are triaged as before
+([machine-filed backlog](master-agent.md#machine-filed-backlog)).
 
 ## Retrieving a batch
 
-- By item: `graphyard status GY-N` answers the batch itself;
-  `graphyard work events GY-N` answers its history.
-- By PR: the batch title names the parent and the pull request
-  (`Follow-ups from the approved review of GY-N (PR #M)`), so a filter over
-  `graphyard work list` finds every batch of one pull request.
+    graphyard followups GY-N
+    graphyard followups --pr N
+
+The first answers item `GY-N`'s batch (`GET /api/work/GY-N/followups`); the second every batch
+recorded for pull request `N` (`GET /api/followups?pr=N`). Each finding is numbered from 1 and
+names its file, text, the thread it was raised on, the pull request and head its approval
+reviewed, and the item it was promoted to, if any.
 
 ## Promoting a finding
 
-    graphyard work promote-followup GY-N INDEX
+    graphyard promote-followup GY-N INDEX
 
-An operator promotes one finding of batch `GY-N` (1-based, in the order the batch lists its
-findings) to an ordinary work item of its own. The promoted item carries the finding as its
-criterion, plans the finding's file, depends on the parent, and requires the proof
-`manual:review-followup-addressed` — the finding is addressed in code, or declined with a
-recorded reason — which a producer session may hold once the operator grants it.
+An operator (an admin, or an operator agent holding `intent:create`) promotes finding `INDEX` of
+`GY-N`'s batch (`POST /api/work/GY-N/promote`) to an ordinary work item of its own, in the
+backlog. It carries the finding as its criterion, plans the finding's file, depends on the
+approved item, and requires `manual:review-followup-addressed` — the finding is addressed in
+code, or declined with a recorded reason — which a producer session may hold once granted.
 
-The promotion is one transaction and cannot file a duplicate: the promoted item's title names
-the batch and the finding index, so repeating the command finds the item the first run created,
-and the create itself is sent under a deterministic idempotency key the server replays. The
-batch keeps every finding; its triage decides the rest as before. A promoted item is an
-ordinary item, not a second follow-up item of the parent.
+A finding is promoted once: promotions of one finding are serialized, the batch marks it with
+the item it became, and repeating the command answers that item (`"duplicate": true`). The batch
+keeps every finding; the rest wait until an operator promotes them.
