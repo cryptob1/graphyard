@@ -5,7 +5,8 @@ import { closeSync, existsSync, mkdirSync, openSync, realpathSync, rmSync, statS
 import { dirname, join } from 'node:path';
 /** Whether `path` is a directory; mirrors the launcher's own check for re-exposed paths. */
 const isDirectory = (path: string) => { try { return statSync(path).isDirectory(); } catch { return false; } };
-import { bwrapOnPath, coordinatorConfinement, coordinatorConfinementRefusal, hostProcessLaunchTargets, processLaunchMaskWords, sessionMountNamespaceWorks, workerConfinementRefusal } from '../src/master/profiles.js';
+import { bwrapOnPath, coordinatorConfinement, coordinatorConfinementRefusal, hostProcessLaunchTargets, processLaunchMaskWords, secretsBusPath, sessionMountNamespaceWorks, workerConfinementRefusal } from '../src/master/profiles.js';
+import { createServer } from 'node:net';
 import { headlessConfinementWrapper, launcherCoordinatorRoot, launcherRootUndetermined, prepareConfinedGitPaths, sessionConfinement, startAgentSession } from '../src/master/launch.js';
 import { confiningSpawn } from '../src/runner/roles.js';
 import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
@@ -113,7 +114,9 @@ test('unit:coordinator-write-blocked-for-shell — every runtime kind launches c
     }
     for (const socket of launchTargets.busSockets.filter(path => existsSync(path) && !isDirectory(path))) {
       const socketIdx = confinement.wrapper.indexOf(realpathSync(socket));
-      assert.ok(socketIdx > 0 && confinement.wrapper[socketIdx - 2] === '--ro-bind' && confinement.wrapper[socketIdx - 1] === '/dev/null', `the namespace replaces the bus socket ${socket} with an unconnectable device`);
+      const replacement = confinement.wrapper[socketIdx - 1];
+      assert.ok(socketIdx > 0 && confinement.wrapper[socketIdx - 2] === '--ro-bind' && (replacement === '/dev/null' || (!!launchTargets.secretsBus && replacement === realpathSync(launchTargets.secretsBus))),
+        `the namespace replaces the bus socket ${socket} with an unconnectable device or the keyring-only proxy`);
     }
     assert.ok(processLaunchMaskWords({ directories: ['/run/user/4242/systemd', '/run/dbus', '/run/dbus'], busSockets: ['/run/user/4242/bus', '/run/user/4242/nested'] }, [root]).length > 0, 'the mask words are built for channels that exist');
     if (isDirectory('/run/dbus')) {
@@ -156,7 +159,28 @@ test('unit:coordinator-write-blocked-for-shell — every runtime kind launches c
   }
 });
 
-test('unit:allocated-checkout-re-exposed — a reviewer or producer launched from the coordinator root gets its allocated checkout writable, never the checkout itself', async () => {
+test('unit:sandbox-keyring-proxy — the session bus is replaced by the keyring-only proxy when its socket is live, and by an unconnectable device otherwise', async () => {
+  const base = await temporaryDirectory('confinement-secrets-bus');
+  const server = createServer();
+  try {
+    const bus = join(base, 'bus'), proxy = join(base, 'graphyard-secrets-bus'), stale = join(base, 'stale-file');
+    writeFileSync(bus, ''); writeFileSync(stale, '');
+    await new Promise<void>(done => server.listen(proxy, done));
+    const canonicalBus = realpathSync(bus);
+    assert.deepEqual(processLaunchMaskWords({ busSockets: [bus], secretsBus: proxy }, []), ['--ro-bind', realpathSync(proxy), canonicalBus], 'a live proxy socket stands in for the session bus');
+    assert.deepEqual(processLaunchMaskWords({ busSockets: [bus], secretsBus: join(base, 'missing') }, []), ['--ro-bind', '/dev/null', canonicalBus], 'no proxy socket keeps the bus unconnectable');
+    assert.deepEqual(processLaunchMaskWords({ busSockets: [bus], secretsBus: stale }, []), ['--ro-bind', '/dev/null', canonicalBus], 'a regular file is never taken for the proxy');
+    assert.deepEqual(processLaunchMaskWords({ busSockets: [bus], secretsBus: 'relative/socket' }, []), ['--ro-bind', '/dev/null', canonicalBus], 'a relative proxy path is ignored');
+    assert.equal(secretsBusPath(1000, { GRAPHYARD_SECRETS_BUS: proxy }), proxy, 'the environment names the proxy socket');
+    assert.equal(secretsBusPath(1000, { XDG_RUNTIME_DIR: '/run/user/1000' }), '/run/user/1000/graphyard-secrets-bus', 'the default lives in the runtime directory');
+    assert.equal(secretsBusPath(4242, {}), '/run/user/4242/graphyard-secrets-bus', 'without XDG_RUNTIME_DIR the default is the uid runtime directory');
+  } finally {
+    await new Promise<void>(done => server.close(() => done()));
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('unit:allocated-checkout-re-exposed —a reviewer or producer launched from the coordinator root gets its allocated checkout writable, never the checkout itself', async () => {
   const base = await temporaryDirectory('confinement-session');
   try {
     const { root } = coordinatorFixture(base);
