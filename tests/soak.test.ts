@@ -1306,41 +1306,6 @@ test('unit:soak-invariants-hold — the parallel-tip window validates several qu
   assert.ok(seconds < 150, `the queue-only day runs inside its budget (${seconds.toFixed(1)} s)`);
 });
 
-test('unit:soak-invariants-hold — an ejected tip whose restore GitHub refuses is restored at most twice per contaminated head, then held under the escalation with no further branch writes, and every invariant holds', { timeout: 300_000 }, async () => {
-  // GY-854: a queue-only day in which item three's first tip, chained behind item two's, fails and
-  // keeps failing after its rerun. Item two's tip passes but GitHub is slow to make it mergeable, so
-  // item three is ejected while item two is still queued: the ejected tip holds item two's unlanded
-  // commits and the control plane owes the branch a restore. GitHub refuses every write of every
-  // restore. The loop offers a failed restore once more, then escalates it, and every cycle after
-  // that — the day runs on until item two is about to land — writes nothing more to the branch.
-  const failTip = 3;
-  const day = await simulateDay({ hours: 1, queued: { window: 4, failTip, releaseEveryMs: 3 * minute }, protectedBranch: true,
-    plan: { items: 6, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), breaksMain: 0, flaky: { rerunPasses: 0, rerunFails: 0 } } });
-  const { items, final, github, violations, failures, dayStart } = day;
-  assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
-  assert.deepEqual(failures, [], 'no cycle failed');
-  const ejectee = final.find(item => item.key === items[failTip - 1].key)!, ahead = final.find(item => item.key === items[failTip - 2].key)!;
-  assert.notEqual(ahead.stage, 'done', 'the entry ahead is still unlanded when the day ends: the ejected tip carried unlanded work all day');
-  const restore = ejectee.baseRefresh?.restore;
-  assert.ok(restore, `the ejected tip was restored: ${JSON.stringify(ejectee.queueHistory)}`);
-  assert.deepEqual(restore!.foreign, [ahead.key], 'the restore names the unlanded entry the tip carried');
-  assert.equal(restore!.outcome, 'unpublished', 'a refused restore is never recorded done');
-  assert.equal(restore!.attempts, 2, 'the failed restore was retried once');
-  assert.match(restore!.escalated ?? '', /failed twice without the candidate changing and stops repeating \(branch reset refused\)/, 'the second failure escalated with its reason');
-  assert.match(restore!.failure ?? '', /Protected branch update failed/, 'the record carries what GitHub refused');
-  // Each attempt stopped at its refused branch reset: two writes over the whole day, both refused,
-  // and none in the cycles after the escalation was recorded.
-  const writes = github.restoreWrites.filter(write => write.key === ejectee.key);
-  assert.deepEqual(writes.map(write => [write.write, write.refused]), [['reset', true], ['reset', true]], `at most two restore attempts for the contaminated head: ${JSON.stringify(writes)}`);
-  assert.ok(Date.parse(restore!.performedAt!) - dayStart < 45 * minute, 'the escalation was recorded early in the day, with many cycles after it');
-  assert.ok(writes.every(write => write.at <= Date.parse(restore!.performedAt!)), 'no branch write followed the escalation');
-  assert.equal(github.restoreWrites.filter(write => write.key !== ejectee.key).length, 0, 'no other branch was restored');
-  // master status named the escalation, with what GitHub refused, while it stood; the worker's
-  // rework round for the failed tip then replaced the branch head, which ends the contamination.
-  const escalation = day.restoreLines.find(entry => /the restore is not on the branch .* escalated: it stops repeating/.test(entry));
-  assert.ok(escalation?.includes(restore!.failure!), `master status named the escalation: ${JSON.stringify(day.restoreLines)}`);
-});
-
 test('unit:soak-invariants-hold — hand-launched approvers that vanish or stop without judging are relaunched within the bound, a refused relaunch is retried, and the spent watches keep every invariant holding', { timeout: 120_000 }, async () => {
   // GY-551: for every decision a master put to an approver by hand the loop now launches up to two
   // more sessions itself and keeps the spent watch past the bound, so both repeat per item here.
@@ -1623,4 +1588,39 @@ test('unit:soak-invariants-hold — a worker idle past its bound whose pane died
   assert.equal(reclaim?.state, 'done');
   assert.match(reclaim.detail, /its pane .* has been gone from the runtime .* keeping the attempt's branch/);
   assert.equal(final.find(item => item.key === items[n - 1].key)!.stage, 'done', 'the item was delivered by its next attempt');
+});
+
+test('unit:soak-invariants-hold — an ejected tip whose restore GitHub refuses is restored at most twice per contaminated head, then held under the escalation with no further branch writes, and every invariant holds', { timeout: 300_000 }, async () => {
+  // GY-854: a queue-only day in which item three's first tip, chained behind item two's, fails and
+  // keeps failing after its rerun. Item two's tip passes but GitHub is slow to make it mergeable, so
+  // item three is ejected while item two is still queued: the ejected tip holds item two's unlanded
+  // commits and the control plane owes the branch a restore. GitHub refuses every write of every
+  // restore. The loop offers a failed restore once more, then escalates it, and every cycle after
+  // that — the day runs on until item two is about to land — writes nothing more to the branch.
+  const failTip = 3;
+  const day = await simulateDay({ hours: 1, queued: { window: 4, failTip, releaseEveryMs: 3 * minute }, protectedBranch: true,
+    plan: { items: 6, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), breaksMain: 0, flaky: { rerunPasses: 0, rerunFails: 0 } } });
+  const { items, final, github, violations, failures, dayStart } = day;
+  assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  const ejectee = final.find(item => item.key === items[failTip - 1].key)!, ahead = final.find(item => item.key === items[failTip - 2].key)!;
+  assert.notEqual(ahead.stage, 'done', 'the entry ahead is still unlanded when the day ends: the ejected tip carried unlanded work all day');
+  const restore = ejectee.baseRefresh?.restore;
+  assert.ok(restore, `the ejected tip was restored: ${JSON.stringify(ejectee.queueHistory)}`);
+  assert.deepEqual(restore!.foreign, [ahead.key], 'the restore names the unlanded entry the tip carried');
+  assert.equal(restore!.outcome, 'unpublished', 'a refused restore is never recorded done');
+  assert.equal(restore!.attempts, 2, 'the failed restore was retried once');
+  assert.match(restore!.escalated ?? '', /failed twice without the candidate changing and stops repeating \(branch reset refused\)/, 'the second failure escalated with its reason');
+  assert.match(restore!.failure ?? '', /Protected branch update failed/, 'the record carries what GitHub refused');
+  // Each attempt stopped at its refused branch reset: two writes over the whole day, both refused,
+  // and none in the cycles after the escalation was recorded.
+  const writes = github.restoreWrites.filter(write => write.key === ejectee.key);
+  assert.deepEqual(writes.map(write => [write.write, write.refused]), [['reset', true], ['reset', true]], `at most two restore attempts for the contaminated head: ${JSON.stringify(writes)}`);
+  assert.ok(Date.parse(restore!.performedAt!) - dayStart < 45 * minute, 'the escalation was recorded early in the day, with many cycles after it');
+  assert.ok(writes.every(write => write.at <= Date.parse(restore!.performedAt!)), 'no branch write followed the escalation');
+  assert.equal(github.restoreWrites.filter(write => write.key !== ejectee.key).length, 0, 'no other branch was restored');
+  // master status named the escalation, with what GitHub refused, while it stood; the worker's
+  // rework round for the failed tip then replaced the branch head, which ends the contamination.
+  const escalation = day.restoreLines.find(entry => /the restore is not on the branch .* escalated: it stops repeating/.test(entry));
+  assert.ok(escalation?.includes(restore!.failure!), `master status named the escalation: ${JSON.stringify(day.restoreLines)}`);
 });
