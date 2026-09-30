@@ -307,9 +307,8 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
         await effects.withdraw(item, standing.id, `The candidate moved to ${decision.binding.slice(0, 12)}; ${stale}, so it can never apply and is withdrawn for a request that names the current candidate`);
         standing = undefined;
       }
-      // Nor more than one attest decision (GY-521), and an attestation binds a proof on one head.
-      // One for an earlier head can never apply and is taken back, as a merge is; one for another
-      // proof on this head is judged first, and this one is asked once it settles.
+      // Nor more than one attest decision (GY-521): one for an earlier head can never apply and is
+      // taken back, as a merge is; one for another proof on this head is judged first.
       if (standing && decision.action === 'attest') {
         const head = standing.input?.sha === item.candidate?.sha && standing.input?.baseSha === item.candidate?.baseSha && standing.input?.policyRevision === item.policyRevision;
         if (!head || standing.input?.proof !== decision.input?.proof) {
@@ -561,6 +560,16 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   // A producer request whose attempts are used up calls for a rework once its escalation has stood
   // a cycle (GY-496): the proof step raised it on an earlier cycle, with each attempt's outcome.
   const exhausted = (await cycle.exhaustedProofs()).filter(entry => { const raised = state.actions[exhaustedProofKey(entry)]; return !!raised && raised.cycle < state.cycle; });
+  // A needed decision with no watch is requested once its failed attempt may retry, or escalated
+  // with the commands that request it by hand when this loop runs without the decision effects.
+  const requestNeeded = async (item: Work, decision: RoutineDecision, key: string) => {
+    const previous = state.actions[key];
+    if (previous?.state === 'failed' && !readyToRetry(previous, state.cycle)) return;
+    if (effects.decide && effects.approver) return request(item, decision, key, null);
+    const escalationKey = `escalation:decision:${item.id}:${decision.binding}`, input = decision.action === 'attest' ? ` '${JSON.stringify(decision.input)}'` : '';
+    const detail = `${item.key} needs a${decision.action === 'attest' ? 'n' : ''} ${decision.action} decision: ${decision.reason} This loop runs without the decision effects, so it cannot request one: graphyard master decide ${item.key} ${decision.action}${input} REASON, then graphyard master approver ${item.key} DECISION`;
+    if (detailChanged(state.actions[escalationKey], detail)) performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[escalationKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+  };
   for (const item of workToProcess) await isolate('decision', item, item.key, async () => {
     const assessment = assessments[item.id];
     // A request step 2 refused this cycle is read as it was decided, not as the snapshot saw it.
@@ -597,45 +606,25 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       else if (watch.session) await endApproverSession(item, watch, `approver for ${watch.work} decision ${watch.decision} settled`);
       return;
     }
-    const previous = state.actions[key];
     // A `done` entry with no watch is a cursor written before requests were supervised; the
     // request path adopts the decision it left standing and launches an approver for it.
-    if (previous?.state === 'failed' && !readyToRetry(previous, state.cycle)) return;
-    if (!effects.decide || !effects.approver) {
-      const escalationKey = `escalation:decision:${item.id}:${decision.binding}`;
-      const detail = `${item.key} needs a ${decision.action} decision: ${decision.reason} This loop runs without the decision effects, so it cannot request one: graphyard master decide ${item.key} ${decision.action} REASON, then graphyard master approver ${item.key} DECISION`;
-      if (detailChanged(state.actions[escalationKey], detail)) performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[escalationKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
-      return;
-    }
-    await request(item, decision, key, null);
+    await requestNeeded(item, decision, key);
   });
-  // 4c+. Attestations (GY-521). A `manual:` proof no producer session may run is satisfied only by
-  //      a two-party attest decision, and an item whose only refusal left is such a proof used to
-  //      wait hours for a master to notice. The loop requests one per proof, bound to the proof and
-  //      the exact head, and supervises it exactly as a routine decision; the control plane holds
-  //      one attest decision at a time, so a second proof is asked once the first settles. A head
-  //      change moves the binding, and the cleanup below withdraws the request nobody judged.
+  // 4c+. Attestations (GY-521). A `manual:` proof no producer session may run is met only by a
+  //      two-party attest decision. The loop requests one per proof, bound to the proof and exact
+  //      head, one at a time, and supervises it as a routine decision; a head change moves the
+  //      binding, and the cleanup below withdraws the request nobody judged.
   for (const item of snapshot.work) await isolate('decision', item, item.key, async () => {
     const attestations = attestDecisions(item, snapshot.work, clock);
     let judging = false;
     for (const decision of attestations) {
       const key = decisionKey(item, decision), watch = state.approvals[key];
       needed.add(key);
-      if (!watch) continue;
-      if (!watch.settledAt) { judging = true; await supervise(item, decision, key, watch); }
-      else if (watch.session) await endApproverSession(item, watch, `approver for ${watch.work} decision ${watch.decision} settled`);
+      if (watch && !watch.settledAt) { judging = true; await supervise(item, decision, key, watch); }
+      else if (watch?.session) await endApproverSession(item, watch, `approver for ${watch.work} decision ${watch.decision} settled`);
     }
     const next = judging ? undefined : attestations.find(decision => !state.approvals[decisionKey(item, decision)]);
-    if (!next) return;
-    const key = decisionKey(item, next), previous = state.actions[key];
-    if (previous?.state === 'failed' && !readyToRetry(previous, state.cycle)) return;
-    if (!effects.decide || !effects.approver) {
-      const escalationKey = `escalation:decision:${item.id}:${next.binding}`;
-      const detail = `${item.key} needs an attest decision: ${next.reason} This loop runs without the decision effects, so it cannot request one: graphyard master decide ${item.key} attest '${JSON.stringify(next.input)}' REASON, then graphyard master approver ${item.key} DECISION`;
-      if (detailChanged(state.actions[escalationKey], detail)) await note(escalationKey, item, 'escalation', 'done', detail);
-      return;
-    }
-    await request(item, next, key, null);
+    if (next) await requestNeeded(item, next, decisionKey(item, next));
   });
   // A watch whose item no longer needs its decision — applied and moved on, or overtaken by a new
   // head — has nothing left to judge. Its session is closed rather than left holding a provider
