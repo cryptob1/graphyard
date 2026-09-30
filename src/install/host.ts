@@ -227,6 +227,8 @@ export interface HostSettings {
   principals: PlannedPrincipal[];
   /** The one-time dashboard sign-in claim for this apply; null in a plan. */
   claim: string | null;
+  /** Why an earlier apply's credentials on the host could not be read back; apply refuses to generate new ones while it is set. */
+  secretsUnreadable?: string | null;
   /** `UID:GID` of the graphyard account, resolved on the host once it exists. */
   owner: string | null;
   /** Where the loop, executors and restore run the Graphyard CLI from: this installer's own commit. */
@@ -255,28 +257,41 @@ export async function hostRemote(ctx: AdapterContext): Promise<Transport> {
 }
 
 /**
- * Reads the credentials an earlier apply wrote on the host, so a re-apply never rotates them. An
- * unreachable host (or one not created yet) yields none; apply generates them after the preflight gate.
+ * Reads the credentials an earlier apply wrote on the host, so a re-apply never rotates them. A host
+ * not created yet yields none, and so does a file the host says does not exist; apply generates
+ * those after the preflight gate. Any other outcome — a failed SSH exec, a refused read, a file that
+ * holds no credential — is `unreadable`: apply then refuses to generate anything, since a fresh
+ * database password would lock the server out of the Postgres an earlier apply initialised.
  */
 export async function readHostSecrets(ctx: AdapterContext, principals: PlannedPrincipal[]) {
   const tokens = new Map<string, string>();
-  let databasePassword = '';
   const layout = ctx.host!.layout;
   let remote: Transport;
-  try { remote = await hostRemote(ctx); } catch { return { tokens, databasePassword }; }
+  try { remote = await hostRemote(ctx); } catch { return { tokens, databasePassword: '', unreadable: null }; }
+  const unreadable: string[] = [];
   const read = async (path: string) => {
-    const result = await remote.exec('cat', [path], { allowFailure: true, timeout: 60_000 }).catch(() => ({ stdout: '', stderr: '', code: 1 }));
-    const value = result.code === 0 ? result.stdout.trim() : '';
-    return value.length >= 32 && !/\s/.test(value) ? value : '';
+    let result: { stdout: string; stderr: string; code: number };
+    try { result = await remote.exec('cat', [path], { allowFailure: true, timeout: 60_000 }); }
+    catch (error) { unreadable.push(`${path}: ${error instanceof Error ? error.message : String(error)}`); return ''; }
+    if (result.code !== 0) {
+      if (!/No such file/i.test(result.stderr)) unreadable.push(`${path}: exit ${result.code} ${result.stderr.trim()}`.trim());
+      return '';
+    }
+    const value = result.stdout.trim();
+    if (value.length >= 32 && !/\s/.test(value)) return value;
+    unreadable.push(`${path}: holds no credential`);
+    return '';
   };
   for (const principal of principals) { const token = await read(hostTokenFile(layout, principal.id)); if (token) tokens.set(principal.id, ctx.vault.add(token)); }
-  databasePassword = await read(hostDatabasePasswordFile(layout));
-  return { tokens, databasePassword: databasePassword ? ctx.vault.add(databasePassword) : '' };
+  const databasePassword = await read(hostDatabasePasswordFile(layout));
+  // Paths only: a failed read's stderr never carries the file's content, and the vault scrubs what it knows.
+  return { tokens, databasePassword: databasePassword ? ctx.vault.add(databasePassword) : '', unreadable: unreadable.length ? ctx.vault.scrub(unreadable.join('; ')) : null };
 }
 
 /** Generates what the host is missing, in memory; the host setEnv writes it there with mode 0600. */
 export function generateHostSecrets(ctx: AdapterContext) {
   const host = ctx.host!;
+  if (host.secretsUnreadable) throw new Error(`The host's existing credentials could not be read, so none is generated (a new database password would lock the server out of its Postgres): ${host.secretsUnreadable}. Fix the host's reachability or the file and apply again.`);
   for (const principal of host.principals) if (!host.tokens.has(principal.id)) host.tokens.set(principal.id, ctx.vault.add(generateToken()));
   if (!ctx.databasePassword) ctx.databasePassword = ctx.vault.add(randomBytes(24).toString('base64url'));
   host.claim = newClaim();

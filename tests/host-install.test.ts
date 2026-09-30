@@ -2,10 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { createPublicKey, createVerify } from 'node:crypto';
-import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, statSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { tmpdir } from 'node:os';
 import { parseEnv } from 'node:util';
 import { dirname, join } from 'node:path';
 import { applyInstall, buildPlan, prepareInstall, type InstallInputs } from '../src/install/index.js';
@@ -17,6 +16,7 @@ import { workerConfinementRefusal } from '../src/master/profiles.js';
 import { authenticate } from '../src/server/auth.js';
 import { signinRoutes, claimHashOf } from '../src/server/routes/signin.js';
 import { claimFromHash } from '../web/pages/login.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { allText, appKey, harness, GRAPHYARD_APP_ID, HETZNER_SERVER_TYPES, type Harness } from './install-harness.js';
 
 // GY-717: the self-contained Graphyard host. Each test is named for the proof it produces, and its
@@ -192,6 +192,19 @@ test('unit:host-install-plan — a loop that cannot be set up on the host fails 
   } finally { await fixture.cleanup(); }
 });
 
+test('unit:host-install-plan — a re-apply that cannot read the host\'s existing credentials refuses instead of rotating them', async () => {
+  const fixture = await harness({ provider: 'host', serverUrl: 'https://graphyard.example.test' });
+  try {
+    await applyHost(fixture, hostInputs());
+    const password = fixture.hostFiles.get(`${CONFIG}/database.password`)!.content;
+    // The same host and operator machine, with the SSH read of the database password failing transiently.
+    const flaky = await harness({ provider: 'host', serverUrl: 'https://graphyard.example.test', root: fixture.root, configHome: fixture.configHome, hostFiles: fixture.hostFiles,
+      extraResponses: [{ match: `cat ${CONFIG}/database.password`, result: { stdout: '', stderr: 'ssh: connect to host 203.0.113.20 port 22: Connection timed out', code: 255 } }] });
+    await assert.rejects(applyHost(flaky, hostInputs()), /existing credentials could not be read, so none is generated .*database\.password: exit 255 ssh: connect to host/);
+    assert.equal(fixture.hostFiles.get(`${CONFIG}/database.password`)!.content, password, 'the database password is not rotated');
+  } finally { await fixture.cleanup(); }
+});
+
 test('unit:host-install-plan — a private managed repository that cannot be cloned fails the install with the reason', async () => {
   const fixture = await harness({ provider: 'host', serverUrl: 'https://graphyard.example.test',
     extraResponses: [{ match: 'clone --quiet', result: { stdout: '', stderr: "remote: Repository not found.\nfatal: repository 'https://github.com/owner/project.git/' not found", code: 128 } }] });
@@ -252,7 +265,7 @@ test('unit:self-contained-auth-plan — self-contained authentication needs no S
 });
 
 test('unit:self-contained-auth-plan — with no SSH and no manual file editing, a worker on a fresh host has a working push and pull request credential: git\'s credential helper and the gh wrapper mint a narrowed one-hour App installation token from the key the installer wrote', async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'gy717-github-'));
+  const directory = await temporaryDirectory('gy717-github');
   const requests: { url: string; authorization: string; body: any }[] = [];
   const server = createServer((request, response) => {
     let body = '';
@@ -303,7 +316,6 @@ test('unit:self-contained-auth-plan — with no SSH and no manual file editing, 
     assert.doesNotMatch(await run('node', [helper, 'get'], 'protocol=https\nhost=example.test\n\n'), /password=/);
   } finally {
     server.close();
-    rmSync(directory, { recursive: true, force: true });
   }
 });
 

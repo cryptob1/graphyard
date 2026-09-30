@@ -153,6 +153,7 @@ export async function prepareInstall(cwd: string, rawInputs: InstallInputs, depe
     const stored = await readHostSecrets(context, principals);
     for (const [principal, token] of stored.tokens) tokens.set(principal, token);
     context.databasePassword = stored.databasePassword;
+    context.host!.secretsUnreadable = stored.unreadable;
   }
   const materialized = tokens.size === principals.length && !!context.databasePassword;
   const adapter = dependencies.adapter ?? (selfContained ? selfContainedAdapter(provider === 'host' ? existingMachineAdapter : adapterFor(provider)) : adapterFor(provider));
