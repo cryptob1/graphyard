@@ -27,7 +27,7 @@ Unless created `"systemDriven": false`, an item refuses hand `dispatch`, `merge`
 
 ### Base-branch breakages
 
-CI's `test` run annotates failed tests (`graphyard-failed-tests:`). When each also fails on the head's base but passes on the tip, the item records `baseBreak` and the tip is merged in (trigger `base breakage`), not reworked; `master status` names test, breaking base, fixing tip. A rework decision awaiting a fresh observation wakes its own.
+A failed `test` run, on a PR or main, annotates each failed test (`graphyard-failed-tests:`). If each fails on the head's base but passes on the tip, `baseBreak` is recorded and the tip merged in (trigger `base breakage`), not reworked; `master status` names test, breaking base, fixing tip. A rework decision awaiting observation wakes it.
 
 ### Session liveness is reconciled, not trusted
 
