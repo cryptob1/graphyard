@@ -235,33 +235,6 @@ export function pinningTestGround(path: string, reason: string, testText: string
   return null;
 }
 
-// ---------------------------------------------------------------------------
-// Documentation-gate tests (GY-954). A change that touches the documentation breaks the tests
-// that read it — a word budget over every page, for one — yet no criterion names such a test and
-// its source pins no label. When the item's scope or ask reaches the documentation it must keep
-// current, a test whose source names a documentation path is the change's own scope, grounded
-// like a pinning test from what the loop read on the base. Anything else goes to the approver.
-// ---------------------------------------------------------------------------
-
-/** True when the item's change touches the documentation it must keep current: its scope or its ask names a documentation path. */
-export function touchesDocumentation(item: { plannedFiles?: readonly string[]; documentation?: ItemDocumentation | null }, paths: readonly string[]) {
-  const scopes = itemDocumentationPaths(item);
-  const named = (path: string) => scopes.some(scope => scope === path || documentationGlobMatches(scope, path));
-  return [...(item.plannedFiles ?? []), ...paths].some(named);
-}
-/** The literal chunks a documentation glob contributes to a source search: `docs/`, `README.md`; a `*` contributes nothing. */
-const globChunks = (scope: string) => scope.split('*').map(part => part.trim()).filter(part => part.length >= 4);
-/**
- * The ground a documentation-gate test is granted on, or null: a test whose source names a
- * documentation path this change touches. Only a test file is granted, and only on text the loop
- * read from the base; an unrelated test still goes to the approver.
- */
-export function documentationTestGround(path: string, text: string | null, documentation: readonly string[]): string | null {
-  if (!text || !testFile(path)) return null;
-  const named = documentation.find(scope => globChunks(scope).some(chunk => text.includes(chunk)));
-  return named ? `${path} reads the documentation (${named}) this change rewrites` : null;
-}
-
 /**
  * True when a request the loop refused would be approved by the rules as they stand now — a rule
  * change, or a widening that made its implication hold — so the loop asks the control plane to
@@ -324,3 +297,5 @@ export function scopeDecisionReason(key: string, request: Pick<ScopeRequestState
  * outcome reader lives beside the merge of pending asks, in model/scope-collapse.ts.
  */
 export { type ScopeRequestOutcome, scopeOutcomeMessage, scopeRequestOutcome } from './scope-collapse.js';
+/** Documentation-gate tests (GY-954) live in model/scope-docs-gate.ts, within the module budget. */
+export { documentationTestGround, touchesDocumentation } from './scope-docs-gate.js';
