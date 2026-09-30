@@ -111,7 +111,7 @@ export function parseResetTime(text: string, now: number): string | null {
 /**
  * A runtime's own retry marker beside a limit notice (GY-973): OpenCode 1.18 does not stop on a
  * spent account, it prints `Weekly/Monthly Limit Exhausted. … [retrying in 4s attempt #5]` and
- * retries forever, so Herdr keeps reporting the session as working. The marker is the runtime
+ * retries forever, so its host keeps reporting the session as working. The marker is the runtime
  * speaking, not the agent: an agent's prose never carries an attempt counter in brackets.
  */
 const retryMarker = /\[\s*retrying\b[^\]]*\]|\bretrying in \d+(?:\.\d+)?\s*(?:ms|s|m|h)?\b[^\n]*?\battempt\s*#?\d+/i;

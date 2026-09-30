@@ -25,7 +25,7 @@ Every launch runs with the checkout unwritable to shell commands (GY-888). A cod
 
 A profile's `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`) unless the [agent registry](onboarding.md#configure-the-fleet) defines the role. A launch takes the first logged-in account under `run.quotaCeilingPercent`, else **fails over** (`dispatch.accounts`).
 
-On a limit notice mid-session the loop commits worker changes as unpushed `WIP:`, records `capacity.exhausted` (not `lease-loss`), holds the account until reset, relaunches on the next. A runtime auto-retrying on spent quota fails over while working: a retry marker (`[retrying in 4s attempt #5]`) flags it.
+On a mid-session limit notice the loop commits worker changes as unpushed `WIP:`, records `capacity.exhausted` (not `lease-loss`), relaunches on the next account or awaits reset. So does a working session auto-retrying (`[retrying in 4s attempt #5]`).
 
 ## How a session starts
 
@@ -41,7 +41,7 @@ The launcher writes `.graphyard/launch/NAME.request` (and Claude's `NAME.role`),
 GY=/path/to/checkout/.graphyard/launch/NAME; claude … --settings /path/to/repo/.graphyard/harness/producer-PROFILE.json --append-system-prompt-file "$GY.role" "$(cat "$GY.request")"
 ```
 
-The typed line is bounded at **512 bytes** whatever the request is.
+The typed line is bounded at **512 bytes**.
 
 #### The start bound reads the pane
 
@@ -68,8 +68,7 @@ Every launch records its pane on the item's session handle; when the loop ends t
 ### The dispatcher's own state
 
 - **The dispatcher bounds its own state where it composes it**, each cut marked with an ellipsis.
-- **A cursor that fails its schema is repaired, not fatal**; the repair is logged once with the
-  path that failed.
-- **A tick failure is attributed and surfaced.** `dispatch.lastFailure` names it. Three consecutive failures raise one attention item: no reviewer or producer session is being launched for any item. `graphyard master restart` repairs the cursor.
+- **A cursor that fails its schema is repaired, not fatal**; logged once with the failing path.
+- **A tick failure is attributed and surfaced.** `dispatch.lastFailure` names it. Three consecutive failures raise one attention item: no reviewer or producer is launching. `graphyard master restart` repairs the cursor.
 
 **A session that exits at launch is classified from its pane.** `herdr agent get` answers only `agent_not_found` for a runtime that exits **at launch**, so the dispatcher uses `herdr pane read`: a **provider limit notice** fails over exactly as a mid-session exhaustion does; any other cause is refused with the pane's last words and retried.
