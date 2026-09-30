@@ -36,7 +36,7 @@ import { performSelfUpgrade, type SelfUpgradeOutcome } from '../src/daemon/upgra
 import { defaultOptimisticExclude } from '../src/optimistic-merge.js';
 import { queuePlacement } from '../src/merge-queue.js';
 import { shipHeldFollowUps, type ShipFollowUps, type ShipRuns } from '../src/reviewer.js';
-import { followUpEntries, followUpParent } from '../src/model/machine-backlog.js';
+import { followUpEntries, followUpParent, hasShipped } from '../src/model/machine-backlog.js';
 import { repeatedClientErrorLimit } from '../src/retry-stop.js';
 import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } from './helpers/soak-world.js';
 
@@ -960,7 +960,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     const all = await store.list();
     for (const item of all) {
       const parent = followUpParent(item), of = parent && all.find(entry => entry.key === parent);
-      if (of && !isClosed(item) && item.stage !== 'done' && of.stage !== 'done') followUpDay.early.push(`${item.key} is open while its parent ${parent} is in ${of.stage}`);
+      if (of && !isClosed(item) && item.stage !== 'done' && !hasShipped(of)) followUpDay.early.push(`${item.key} is open while its parent ${parent} has not shipped (${of.stage})`);
     }
   }
   const jobsDue = async () => Number((await store.pool.query('SELECT count(*) AS due FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now())')).rows[0].due);
@@ -1918,11 +1918,12 @@ test('unit:soak-invariants-hold — a worker idle past its bound whose pane died
 test('unit:soak-invariants-hold — review follow-ups across a day: approvals of unshipped parents (re-approvals during rework included) are held on them, each delivered parent gets exactly one follow-up item, a parent closed unshipped drops its findings, a refused ship stops at the bound, and every invariant holds', { timeout: 300_000 }, async () => {
   // GY-845: the follow-up filing and the ship step run every pass, so they belong in this world.
   // Item 1's first head is spent by its producer and reworked, so it is approved twice; item 2 is
-  // sent back by its reviewer first; item 4's ship is refused all day.
-  const parents = [1, 2, 3, 4], refused = 4;
+  // sent back by its reviewer first; item 3's optimistic merge breaks main, so it is delivered,
+  // reverted and reopened before it ships, and approved again; item 4's ship is refused all day.
+  const parents = [1, 2, 3, 4], refused = 4, reverted = 3;
   const { items, final, violations, failures, followUpDay } = await simulateDay({
     hours: 6, followUps: { parents, refused },
-    plan: { items: 6, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set([2]), deaths: new Set(), breaksMain: 0, infrastructure: new Set([5]), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), outOfQueue: { item: 6, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 6 } },
+    plan: { items: 6, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set([2]), deaths: new Set(), breaksMain: reverted, infrastructure: new Set([5]), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), outOfQueue: { item: 6, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 6 } },
   });
   assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}`), [], 'all six items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds, follow-ups-per-parent included, across the approvals, the ships and the close');
@@ -1930,7 +1931,8 @@ test('unit:soak-invariants-hold — review follow-ups across a day: approvals of
   assert.deepEqual(followUpDay.early, [], 'no follow-up item was ever open while its parent had not shipped');
   const all = await store.list();
   const followUpsOf = (key: string) => all.filter(item => followUpParent(item) === key);
-  assert.ok((followUpDay.approvals.get(items[0].key) ?? []).length >= 2, `item 1 was re-approved during its rework: ${JSON.stringify([...followUpDay.approvals])}`);
+  for (const n of [1, reverted]) assert.ok((followUpDay.approvals.get(items[n - 1].key) ?? []).length >= 2, `item ${n} was re-approved during its rework: ${JSON.stringify([...followUpDay.approvals])}`);
+  assert.ok(final.find(item => item.key === items[reverted - 1].key)!.optimisticMerges?.some(merge => merge.revert?.state === 'merged'), 'item 3\'s first merge was reverted, reopening it');
   for (const n of parents) {
     const key = items[n - 1].key, approvals = followUpDay.approvals.get(key) ?? [];
     assert.ok(approvals.length >= 1, `${key} was approved`);

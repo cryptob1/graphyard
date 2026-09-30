@@ -236,14 +236,24 @@ export interface PendingFollowUps {
   filed?: { item: string; at: string } | null;
   dropped?: { reason: string; at: string } | null;
 }
-type Parent = Pick<Work, 'key' | 'stage'> & { closure?: Closure | null; pendingFollowUps?: PendingFollowUps | null };
+type Parent = Pick<Work, 'key' | 'stage'> & Partial<Pick<Work, 'delivery' | 'optimisticMerges'>> & { closure?: Closure | null; pendingFollowUps?: PendingFollowUps | null };
+/**
+ * Whether a parent has shipped: delivered, and, when that delivery is an optimistic merge (GY-500),
+ * with main's required suite passed on it — until then a failing suite reverts the merge and
+ * reopens the parent, so its follow-ups stay held on it.
+ */
+export function hasShipped(parent: Parent) {
+  if (!isDelivered(parent)) return false;
+  const merge = parent.optimisticMerges?.find(entry => entry.mergeSha === parent.delivery?.mergeSha);
+  return !merge || merge.postMerge?.verdict === 'pass';
+}
 /** The findings a parent holds that still wait to be filed or dropped. */
 export const heldFollowUps = (parent: Pick<Parent, 'pendingFollowUps'>) => {
   const held = parent.pendingFollowUps;
   return held && !held.filed && !held.dropped ? held.findings : [];
 };
 /** Whether a delivered parent's held findings are owed a follow-up item now. */
-export const shippedFollowUpsOwed = (parent: Parent) => isDelivered(parent) && heldFollowUps(parent).length > 0;
+export const shippedFollowUpsOwed = (parent: Parent) => hasShipped(parent) && heldFollowUps(parent).length > 0;
 /** `findings` held on the parent, deduplicated as a follow-up item's are; `added` names the new ones. */
 export function holdFollowUps(parent: Parent, findings: readonly FollowUpEntry[], now: Date) {
   const merged = mergeFollowUpEntries(heldFollowUps(parent), findings);
@@ -261,7 +271,7 @@ export function dropHeldFollowUps(parent: Parent, now: Date) {
 /** Whether a follow-up item's parent has not shipped yet: triage never judges it until it does. */
 export function awaitsParent(item: Filed, all: readonly Parent[]) {
   const parent = followUpParent(item), found = parent ? all.find(entry => entry.key === parent) : undefined;
-  return !!found && !isDelivered(found);
+  return !!found && !hasShipped(found);
 }
 
 /**
@@ -270,7 +280,7 @@ export function awaitsParent(item: Filed, all: readonly Parent[]) {
  */
 export function pendingFollowUpsReport(all: readonly (Parent & Pick<Work, 'title'>)[]) {
   return all.filter(parent => heldFollowUps(parent).length).map(parent => {
-    const shipped = isDelivered(parent), findings = heldFollowUps(parent);
+    const shipped = hasShipped(parent), findings = heldFollowUps(parent);
     return { parent: parent.key, title: parent.title, stage: parent.stage, shipped, findings: findings.length, sample: findings.slice(0, 3).map(finding => finding.text.slice(0, 200)),
       next: shipped ? `${parent.key} shipped: the loop files these as its one follow-up item on its next pass` : `held on ${parent.key} until it ships, then filed as its one follow-up item` };
   });
@@ -287,7 +297,7 @@ export function foldUnshippedFollowUps(all: Work[], actor: string, now: Date) {
   const folded: { work: Work; parent: Work; added: number }[] = [], parents = new Set<Work>();
   for (const item of all) {
     const key = open(item) ? followUpParent(item) : null, parent = key ? all.find(entry => entry.key === key) : undefined;
-    if (!parent || isDelivered(parent)) continue;
+    if (!parent || hasShipped(parent)) continue;
     const { added } = holdFollowUps(parent, followUpEntries(item), now);
     const closure: Closure = { kind: 'superseded', ref: parent.key, by: actor, at: now.toISOString(), from: item.stage,
       reason: `Folded back onto ${parent.key}, which has not shipped: its follow-ups wait there and become one follow-up item when it is delivered (GY-845 follow-up migration)` };
