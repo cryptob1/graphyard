@@ -10,12 +10,12 @@ The control-plane App holds (`src/github-permissions.ts`):
 | Actions | Read and write | rerun failed workflow jobs on the unchanged candidate (failed CI reruns) |
 | Administration | Read | inspect branch protection (pull request observation) |
 | Checks | Read and write | read CI check runs (pull request observation); publish `Graphyard / merge` on the exact candidate commit (the required check) |
-| Contents | Read and write | read commits, trees and pull request files (pull request observation); publish speculative merge-queue tips and their `refs/graphyard/queue/*` refs (the merge queue) |
+| Contents | Read and write | read commits, trees and pull request files (pull request observation); publish speculative merge-queue tips: the merge commit on the candidate branch and the `refs/graphyard/queue/*` ref that binds it (the merge queue) |
 | Issues | Read | receive `issue_comment` webhooks carrying review results (comment webhooks) |
 | Metadata | Read | read the managed repository (repository access) |
 | Pull requests | Read and write | read pull requests and reviews (pull request observation); post review request comments (review dispatch) |
 
-A reviewer App never holds Contents: write, Checks or Administration; workers are not Apps. It holds:
+A reviewer App is never granted Contents: write, Checks, or Administration; worker identities are not Apps at all. It holds:
 
 | Permission | Access | Needed to |
 | --- | --- | --- |
@@ -46,11 +46,11 @@ Before merging, the reviewer App re-posts a carried approval onto the tip: a car
 
 ### Parallel tips
 
-`mergeQueue.parallelTips` (master config, default 4, `POST /api/merge-queue`) stacked tips test at once; entries merge in order once every tip through theirs passes, each publication waking successors, re-reading in-flight verdicts. Each entry validates on its own tip: one CI duration covers four positions, at the cost of concurrent CI and a discarded suffix on failure; `parallelTips: 1` restores batching. A failing tip ejects its entry once those ahead pass; later tips rebuild.
+`mergeQueue.parallelTips` (master config, default 4, `POST /api/merge-queue`) stacked tips test at once; entries merge in order once every tip through theirs passes, each publication waking successors, re-reading in-flight verdicts. Each entry validates on its own tip, costing concurrent CI and, on failure, the suffix; `parallelTips: 1` restores batching. A failing tip ejects its entry once those ahead pass; later tips rebuild.
 
 ### Optimistic merges
 
-`mergeQueue.optimistic` (default on): a green entry disjoint from base changes and shared infrastructure lands head-bound, unqueued; a main guard [reverts](master-agent.md#repair-lane) and reopens culprits (`master status`: `optimisticMerge`). Shared infrastructure is the master config's `mergeQueue.optimisticExclude` globs, product defaults (manifests, lockfiles, CI config, test helpers, migrations), never merged optimistically, nor anything whose base changed one since its run; `optimistic: false` disables the lane.
+`mergeQueue.optimistic` (default on): a green entry disjoint from base changes and shared infrastructure lands head-bound, unqueued; a main guard [reverts](master-agent.md#repair-lane) and reopens culprits (`master status`: `optimisticMerge`). Shared infrastructure is the master config's `mergeQueue.optimisticExclude` globs, product defaults (manifests, lockfiles, CI config, test helpers, migrations), never merged optimistically, nor anything whose base since changed one; `optimistic: false` disables the lane.
 
 ### Proofs in CI
 
@@ -62,7 +62,7 @@ With `"deploySmoke": true` the master dispatches the smoke install once the rele
 
 ## Enforcement boundary
 
-GitHub merges only heads whose required check passed; restrict other merge identities. A lease-losing worker can still push.
+GitHub merges only heads whose required check passed; restrict other merge identities. Lease-losing workers can still push.
 
 ## Identity-bound agent review
 
