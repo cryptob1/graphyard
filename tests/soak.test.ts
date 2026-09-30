@@ -405,7 +405,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     const unrecorded = `${world}tree${index}`, stuck = `${world}stuck${index}`, idle = `${world}idle${index}`;
     herdr.shell(unrecorded, `${soakWorktreeRoot}/${work.key}-${90 + index}`);
     herdr.shell(stuck, `${soakWorktreeRoot}/${work.key}-${80 + index}/src`);
-    await api(principals.coordinator, 'POST', `work/${work.id}/session`, { id: `review-stuck-${index}`, kind: 'review', runtime: 'claude', host: 'soak-host', epoch: 80 + index,
+    await api(principals.coordinator, 'POST', `work/${work.id}/session`, { id: `review-stuck-${index}`, kind: 'review', runtime: 'claude', host: 'soak-host',
       subject: `${work.key}: review (previous day, its runtime exited at start)`, state: 'running', pane: stuck, attach: `herdr pane attach ${stuck}` });
     herdr.agents.set(idle, { name: `review-previous-${index}`, pane_id: idle, agent: 'claude', agent_status: 'idle', cwd: `/tmp/soak/checkouts/review-previous-${index}` });
     await api(principals.coordinator, 'POST', `work/${work.id}/session`, { id: `review-ended-${index}`, kind: 'review', runtime: 'claude', host: 'soak-host', agentName: `review-previous-${index}`,
@@ -739,9 +739,12 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     snapshot, dispatch, requestProof, approver, merge, refuseMerge,
     closeSession: async pane => {
       if (options.regression === 'approvers-left-open' && /approver/.test(herdr.agents.get(pane)?.name ?? '')) return;
-      // GY-980: no step closes a worker's pane while its attempt holds a live lease.
+      // GY-980: no step closes a worker's pane while its attempt holds a live lease — the sweep's
+      // worktree shells and idle agents included — unless its runtime exited, whose session end
+      // closes the bare shell under the lease its supervisor still holds (GY-544).
       const session = sessions.find(entry => entry.pane === pane), lease = session ? (await store.list()).find(item => item.id === session.work)?.lease : null;
-      if (session && lease && lease.epoch === session.epoch && Date.parse(lease.expiresAt) > clock.now()) closedLeased.push(`${session.key} epoch ${session.epoch} pane ${pane}`);
+      const exited = session?.exitsAt != null && clock.now() >= session.exitsAt;
+      if (session && !exited && lease && lease.epoch === session.epoch && Date.parse(lease.expiresAt) > clock.now()) closedLeased.push(`${session.key} epoch ${session.epoch} pane ${pane}`);
       herdr.close(pane);
     },
     decide: (work, action, reason, input = {}) => {
