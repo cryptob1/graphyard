@@ -15,6 +15,7 @@ import { environmentBlocker, environmentFailure } from '../worker-sandbox.js';
 import type { CliContext } from './context.js';
 import { installUnderLease } from './install-under-lease.js';
 import { defineCommands, workMutation } from './registry.js';
+import { keepBlockedWork } from './lease.js';
 
 export { installUnderLease };
 
@@ -153,7 +154,8 @@ export const workspaceCommands = defineCommands([
         const epoch = work.workspaces.find((w: any) => w.branch === quietBranch())?.epoch ?? work.lease?.epoch;
         if (!failure || epoch === undefined) throw error;
         const reason = environmentBlocker(`sync ${work.key}`, process.env.GRAPHYARD_HERDR_AGENT_KIND, failure);
-        await workMutation(context, work)('blocked', { epoch, reason });
+        const partialWork = keepBlockedWork(work, epoch);
+        await workMutation(context, work)('blocked', { epoch, reason, ...(partialWork ? { partialWork } : {}) });
         throw new Error(`${reason} Recorded as the blocker on ${work.key}.`);
       }
     },

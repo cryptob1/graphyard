@@ -31,6 +31,7 @@ import { claimAction, openActions, reconcileActions, renewClaim, settleAction, s
 import { livenessFallback, livenessOf, livenessRepairEntry } from './model/liveness.js';
 import { agentRequestSchema, boundedAgentRequests, deciderFor, expireAgentRequests, leaseHeldRequestTypes, requestResolutionRefusal, resolveSatisfiedScopeRequests, type AgentRequest } from './model/agent-requests.js';
 import { recordSession, sessionHandleSchema, sessionObservationFields } from './model/sessions.js';
+import { blockedAttemptMarker, partialWorkSchema, retainedExhaustions, type ExhaustionRecord } from './model/capacity.js';
 import { beginAttempt, endAttempt, endLapsedAttempt, recordIntervention, recordRework, recordSubmission } from './pipeline-speed.js';
 import { foldDecisions, type Decision } from './model/approval.js';
 import { coveringWindow, directMergeAuthorization, directMergeFromEnv, directMergeWindows, sweepDirectMerges, type DirectMergeWindow } from './direct-merge.js';
@@ -94,7 +95,9 @@ const commands = {
   // `documentation` is the worker's explicit statement that the change alters no documented
   // behaviour: the other way the standard documentation criterion is met (model/documentation.ts).
   submit: z.object({ epoch, pr: z.number().int().positive(), documentation: z.string().trim().min(1).max(1000).optional() }).strict(),
-  blocked: z.object({ epoch, reason: z.string().max(2000).nullable() }).strict(),
+  // `partialWork` is how the worker's CLI kept what the attempt had not committed before the
+  // blocker ended it (GY-1008): the same record an interrupted attempt carries.
+  blocked: z.object({ epoch, reason: z.string().max(2000).nullable(), partialWork: partialWorkSchema.optional() }).strict(),
   // An empty request clears this attempt's open one; otherwise it must ask for something the
   // planned scope does not already carry. `paths` widens, and the two fields the loop never
   // decides are stated as plainly as the widening is: `remove` drops planned containment and
@@ -1090,7 +1093,24 @@ export class Engine {
       }
       if (command === 'release') { endAttempt(work, data.epoch, 'released', now); work.lease = null; }
       // A blocked report is a hand-off to the master or operator; the item's timeline counts it.
-      if (command === 'blocked') { work.blocker = data.reason; if (data.reason) recordIntervention(work, 'blocked'); }
+      if (command === 'blocked') {
+        work.blocker = data.reason;
+        if (data.reason) {
+          recordIntervention(work, 'blocked');
+          // GY-1008: recording a blocker ends the attempt in this same transaction, so a blocked
+          // item holds no worker slot while the loop re-checks its cause. The work it had is kept
+          // (committed on its branch, and what it had not committed as the CLI's WIP commit), and
+          // the next attempt's request names that commit, as for any interrupted attempt.
+          const partialWork = data.partialWork ?? { state: 'not-applicable' as const, detail: 'the blocked attempt reported no partial work; its commits stay on its branch' };
+          const record: ExhaustionRecord = { role: 'worker', cause: 'interrupted', epoch: data.epoch, profile: actor.id.slice(0, 80), account: null, runtime: actor.runtime?.slice(0, 40) ?? null,
+            reason: `${blockedAttemptMarker}${data.epoch}: ${data.reason}`.slice(0, 500), resetsAt: null, partialWork, at: now.toISOString(), owner: actor.id, recordedBy: actor.id };
+          const capacity = work.capacity ?? { exhaustions: [], escalations: [] };
+          work.capacity = { ...capacity, exhaustions: [...capacity.exhaustions, record].slice(-retainedExhaustions) };
+          endAttempt(work, data.epoch, 'released', now);
+          work.lease = null;
+          work.scopeRequest = null;
+        }
+      }
       if (command === 'scope') {
         const asks = data.paths.length || data.remove?.length || data.criteria?.length;
         if (!asks) {
@@ -1232,6 +1252,8 @@ export class Engine {
       }
       if (command === 'submit') {
         demand(work.workspaces.some(w => w.epoch === data.epoch), 'Register the assignment workspace first');
+        // A submission ends the run of blockers the loop cleared in a row (GY-1008).
+        if (work.blockerProbe) work.blockerProbe = { ...work.blockerProbe, clears: 0 };
         demand(!all.some(w => w.id !== work!.id && w.submission?.pr === data.pr), 'Pull request is already linked to another task');
         demand(!work.submission || work.submission.pr === data.pr, 'A submitted task cannot switch pull requests');
         if (observation) {

@@ -10,6 +10,7 @@ import { prSteps, stepSince } from './pr-steps.js';
 import { leftFlowAt, noRelease, releaseView, servedFor, type ReleaseView } from './release.js';
 import { stalledCards } from './actionless.js';
 import { resourceConflicts } from '../coordination.js';
+import { blockerClassMeaning, blockerView, type BlockerView } from './blocker-class.js';
 
 /**
  * The board (GY-200): every open item in its one group, with who acts next, the command that
@@ -141,6 +142,9 @@ export function nextActor(work: Work, group: Group | null, now: number, release:
   }
   // Blocked means the step's own actor cannot clear it (a recorded blocker, a stall, a violation,
   // a refusal no retry fixes, a failed check after deploying): the master agent acts next.
+  // A blocker of a routine class is the loop's to clear (GY-1008): it re-checks the cause each cycle.
+  const blocker = group === 'blocked' ? blockerView(work) : null;
+  if (blocker && !blocker.needsSomeone) return { who: 'Graphyard (automatic)', does: `Re-checks the ${blocker.class} blocker every cycle and clears it once the cause is gone: ${blockerClassMeaning[blocker.class].split(';')[1]?.trim() ?? blockerClassMeaning[blocker.class]}` };
   if (group === 'blocked') return { who: 'Master agent', does: release.failed.has(work.key) && work.stage === 'done' ? 'Find out why production has not deployed it, and record the cause' : 'Clear what blocks it, or hand the decision to an approver agent' };
   if (group === 'up-next') {
     const held = upNextHold(work, all, now);
@@ -224,7 +228,7 @@ export function nextCommand(work: Work, group: Group | null, actor: ActorRole, h
   if (group === 'backlog') return actor === 'master' ? `graphyard master release ${key}` : null;
   if (work.scopeRequest && work.blocker?.startsWith(scopeRefusalBlocker))
     return terminalScopeRefusal(work) ? `graphyard master requirements ${key} FILE REASON` : `graphyard master scope ${key}`;
-  if (work.blocker) return `graphyard master unblock ${key} REASON`;
+  if (work.blocker) return blockerView(work)?.needsSomeone === false ? null : `graphyard master unblock ${key} REASON`;
   if (work.stage === 'done') return actor === 'master' ? `graphyard master verify-deployment ${key}` : null;
   if (refusalsOf(work, 'merge').some(reason => escalation.test(reason))) return `graphyard master decide ${key} resolve REASON`;
   const mergeable = !!work.submission && work.gates.every(gate => gate.passed || gate.name === 'merge');
@@ -246,6 +250,8 @@ export interface BoardItem {
   since: string;
   /** Past the fault bound (`overdueAfterMs`) in a group that carries a clock. */
   overdue: boolean;
+  /** The standing blocker's class, whether it needs someone, and the loop's last and next probe of it (GY-1008); absent without a blocker. */
+  blocker?: BlockerView;
 }
 export interface Board {
   now: string;
@@ -254,6 +260,8 @@ export interface Board {
   groups: Record<OpenGroup, BoardItem[]>;
   counts: Record<OpenGroup, number>;
   open: number;
+  /** Open items with a standing blocker, and of them the ones needing someone: only a genuine or human-only class (GY-1008). */
+  blockers?: { total: number; needingSomeone: number };
 }
 
 /** Every open item into its group with its next actor, command, since and overdue. */
@@ -268,12 +276,19 @@ export function buildBoard(work: Work[], now: number, humanRows?: HumanRequestRo
     const since = group === 'needs-you' ? entry.humanRequest?.at ?? rows.get(entry.id)?.request.at ?? statusSince(entry, now)
       : group === 'blocked' && stalls.has(entry.id) ? stalls.get(entry.id)!.heldSince
         : timed ? stepSince(entry, now, null, release) : statusSince(entry, now);
+    const blocker = blockerView(entry);
     return { id: entry.id, key: entry.key, title: entry.title, priority: entry.priority, group, stage: entry.stage, owner: entry.lease?.owner ?? entry.lastAssignment?.owner ?? null,
-      actor, who, does, command: nextCommand(entry, group, actor, rows.get(entry.id)), since, overdue: timed && statusDuration(since, now).overdue };
+      actor, who, does, command: nextCommand(entry, group, actor, rows.get(entry.id)), since, overdue: timed && statusDuration(since, now).overdue, ...(blocker ? { blocker } : {}) };
   };
   const board = Object.fromEntries(groups.map(group => [group, byGroup[group].map(entry => item(entry, group))])) as Record<OpenGroup, BoardItem[]>;
   return { now: new Date(now).toISOString(), overdueAfterMs: OVERDUE_MINUTES * 60_000, groups: board,
-    counts: Object.fromEntries(groups.map(group => [group, board[group].length])) as Record<OpenGroup, number>, open };
+    counts: Object.fromEntries(groups.map(group => [group, board[group].length])) as Record<OpenGroup, number>, open, blockers: blockerCounts(groups.flatMap(group => board[group])) };
+}
+
+/** How many board rows carry a blocker, and how many of those need someone (GY-1008). */
+export function blockerCounts(items: Pick<BoardItem, 'blocker'>[]) {
+  const blocked = items.filter(item => item.blocker);
+  return { total: blocked.length, needingSomeone: blocked.filter(item => item.blocker!.needsSomeone).length };
 }
 
 /**
@@ -311,6 +326,6 @@ export async function masterBoard(api: (path: string) => Promise<any>, snapshot:
     const decision = unanswered.find(row => row.work === entry.key);
     return decision ? { ...entry, actor: 'master' as const, command: `graphyard master approver ${entry.key} ${decision.id}` } : entry;
   });
-  return { counts: board.counts, open: board.open, overdueAfterMs: board.overdueAfterMs,
+  return { counts: board.counts, open: board.open, overdueAfterMs: board.overdueAfterMs, blockers: board.blockers ?? blockerCounts(items),
     owed: items.filter(entry => entry.actor === 'master'), others: items.filter(entry => entry.actor !== 'master') };
 }

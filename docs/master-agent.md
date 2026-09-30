@@ -44,6 +44,10 @@ A closure decides no gate, ends no lease, and stops no process. A profile's conc
 that finished or died (`graphyard master run --once` sweeps); for an overlong one, attach to it with the command on the handle. Never mark
 another session's handle finished to free a slot.
 
+### Blocked work unblocks itself
+
+`blocked` ends its attempt (uncommitted work kept as a WIP commit), freeing the slot. Each cycle the loop classes the blocker: `github-credential`, `control-plane-error`, `sandbox-path`, `worktree-mismatch` and `outside-scope-test-failure` are probed (inside the worker's sandbox) and cleared once the probe passes; `planned-file-scope` (files plus commit) becomes an approver widening; `needs-decision` gets its approver launched. Only `genuine` and `human-only` (or three clears in a row) need someone. Board and status show class and last/next probe ([details](operations-reference.md#blocked-work-unblocks-itself)).
+
 ### System invariants
 
 Each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `lingering-sessions` (30 min), `refresh-churn` (3 per own head), `merge-stall` (10 min), `cycle-p90` (30 s), `untriaged-backlog` (24 h), `deploy-lease-loss` (0). Faults per class; thresholds: `invariants` in `.graphyard/master.json`; `tests/soak.test.ts` enforces.

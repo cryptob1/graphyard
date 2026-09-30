@@ -1,5 +1,6 @@
 // Concern: the master status report — dispatch sessions, role concurrency, schedule, branches and deliveries.
 import { concurrentOverlap, scopeBreadth, inFlight, dispatchable, dispatchOrder } from '../coordination.js';
+import { blockerView } from '../model/blocker-class.js';
 import type { ConflictReport } from '../conflicts.js';
 import { standingCapacity, describeCapacity, quotaRoles } from '../model/capacity.js';
 import { parkedOnHuman, humanDecisionLabel, answerCommand, openHumanRequests } from '../model/human-request.js';
@@ -281,6 +282,8 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       // A branch carrying another item's unlanded commits and the restore for it (GY-127), and
       // an approval GitHub dismissed for a merge-base change that the control plane restored.
       contamination, restoredApproval: approvalRestored,
+      // The standing blocker's class, the loop's last probe of it and when it runs next (GY-1008).
+      blocker: blockerView(work),
       scope: scopeBreadth(work.plannedFiles), overlap: { concurrent }, conflicts,
       // Execution versus wait so far, rework rounds and hand-offs, from the item's own timeline.
       speed: pipelineSpeed(work, now),

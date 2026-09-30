@@ -13,6 +13,22 @@ Restart `graphyard master run` freely; it never dispatches twice. `master status
 
 A lease expires 120 seconds after the last heartbeat, or one further lease period after a recorded server-side renewal fault; the next claim, a higher epoch, keeps the worktree. An unexplained lapse raises `lease-loss` ([classification](protocol/leases.md#how-a-lease-ends)), blocking merge until [settled](delegation.md#who-may-settle-what).
 
+## Blocked work unblocks itself
+
+A worker's `blocked GY-N EPOCH REASON` commits what its worktree had not committed (`WIP: GY-N attempt N blocked`) and, in the same transaction as the blocker, ends the attempt as released: the lease goes, the attempt's capacity record carries `blocked on epoch N: REASON` with the kept commit, and the next attempt's request names it. Each cycle (`blockers` step) the loop reads every standing blocker into one class (`src/model/blocker-class.ts`) and acts:
+
+| Class | Probe, every cycle | Cleared when |
+| --- | --- | --- |
+| `github-credential` | `gh auth status` and `git ls-remote origin HEAD` inside the worker's runtime sandbox, in the attempt's worktree | both pass |
+| `control-plane-error` | the server's health check | it reports healthy |
+| `sandbox-path` | the named path (or its nearest existing parent) written inside the sandbox | the write succeeds |
+| `worktree-mismatch` | whether the attempt still holds a lease | it has ended |
+| `outside-scope-test-failure` | the base branch tip | it moved past the tip first seen |
+| `planned-file-scope` | the decision step requests an additive `requirements` widening for the approver | plannedFiles cover the named files |
+| `needs-decision` | the standing decision's approver is launched if no session judges it | no decision stands requested |
+
+Each probe is written to the item (`POST /api/work/KEY/blocker-probe`, coordinator) when its result or detail changes and at least every five minutes; a pass clears the blocker in that write (`blocker.cleared`, naming the probe). The control plane re-classifies the blocker first and refuses to clear a `genuine` or `human-only` one, or a fourth clear in a row without a submission. Those are the only blockers `master status` and the board count as needing someone; the rest show who acts next as `Graphyard (automatic)` with the class, last probe and next probe time.
+
 ## Supervisor died leaving a containment quarantine
 
 On the worker `graphyard master settle-containment GY-N "reason"` verifies nothing survives; only the loop excuses an idle pane shell (childless, parent `herdr server`). If refused, confirm the stop, then `rework` or `recover-containment` once delivered ([recipes](operations.md#recovery-recipes)).

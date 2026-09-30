@@ -9,7 +9,8 @@ Create with `POST /api/work` ([example](../../examples/work.json)): `title` and 
 - `ready`, `unblock`: `{"reason":…}` (operator agents add `expectedRevision`).
 - `resolve`: `{"trigger":…, "expectedRevision":…, "reason":…}`; a human `admin`, or any `admin` with `"attestation":{"kind":"blocked"|"stopped-worker","epoch":N}` for an explained `lease-loss`.
 - `rework`, `recover`: `{"reason":…, "previousWorkerStopped":true}`; `admin` (`recover` for a delivered quarantine).
-- `claim` `{}`; `heartbeat`, `release` `{"epoch":1}`; `blocked` `{"epoch":1,"reason":…}` (null clears).
+- `claim` `{}`; `heartbeat`, `release` `{"epoch":1}`; `blocked` `{"epoch":1,"reason":…,"partialWork":…}`: a reason ends the attempt and releases the lease; null clears while leased.
+- `blocker-probe` `{blocker,class,probe,result,detail,nextAt}`: coordinator; a `pass` clears a routine blocker ([classes](../operations-reference.md#blocked-work-unblocks-itself)).
 - `workspace`: `{"epoch":1,"host":…,"path":…,"branch":"graphyard/gy-1-1"}`.
 - `submit`: `{"epoch":1,"pr":123}`, refused (`409`) when a file outside `plannedFiles` [regresses shipped code](../coordination.md#refuse-candidates-that-revert-shipped-code-outside-their-scope).
 - `deployment`: `{"sha":…, "mergeSha":…, "source":"endpoint", "observedAt":…}`; coordinator or admin, delivered work, once.
