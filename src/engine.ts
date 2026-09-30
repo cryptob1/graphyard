@@ -8,7 +8,7 @@ import { leaseCommands } from './store/pools.js';
 import { compactHeartbeatReceipt } from './store/receipts.js';
 import { authorizedForProof, unauthorizedProofs } from './proof-grants.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, submittedEpoch, type Attestation, requireCurrent, createSchema, criterionSchema, bindingApproval, carriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type ApprovalIdentity, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type EvidenceAttestation, type Lease, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
+import { activeLease, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, submittedEpoch, type Attestation, requireCurrent, createSchema, criterionSchema, bindingApproval, carriedApproval, currentCarry, refreshedCarriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type ApprovalIdentity, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type EvidenceAttestation, type Lease, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
 import { Refusal, demandWork } from './model/refusal.js';
 import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
@@ -134,6 +134,11 @@ const commands = {
   // unlanded commits (GY-127). It carries no head: the restore is decided from the record and the
   // observation, run by the reconciliation job, and recorded on `baseRefresh.restore`.
   repair: z.object({ reason: z.string().trim().min(1).max(2000) }).strict(),
+  // The coordinator reporting that the guarded merge refused this exact candidate (GY-831): a
+  // carried approval it could not re-post, or one reason repeated since `since`. The control plane
+  // decides what follows from the record: a carried approval is cleared so the review gate asks
+  // for a fresh review of the tip, and otherwise the candidate is marked for a rework decision.
+  mergerefused: z.object({ sha, baseSha: sha, policyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000), since: z.iso.datetime().optional() }).strict(),
 } as const;
 const executorName = z.string().trim().min(1).max(200).regex(/^[^\u0000-\u001f\u007f]+$/);
 const actionClaimSchema = z.object({
@@ -817,6 +822,23 @@ export class Engine {
           head: null, conflict: null, merge: null, carry: null,
           restore: { contaminated: candidate.sha, foreign: contamination!.foreign, own: contamination!.own, cause: 'repair', requested: { by: actor.id, at: now.toISOString(), reason: data.reason },
             reason: `head ${candidate.sha.slice(0, 12)} carries the unlanded commits of ${contamination!.foreign.join(', ')} (${contamination!.source.join(' and ')})`, performedAt: null, outcome: null } };
+      }
+      if (command === 'mergerefused') {
+        demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
+        const candidate = work.candidate;
+        demand(candidate && candidate.sha === data.sha && candidate.baseSha === data.baseSha && work.policyRevision === data.policyRevision && !work.observation?.merged,
+          `${work.key} candidate changed since the refused merge; the refusal no longer describes it`, 409);
+        const carried = carriedApproval(work), at = now.toISOString();
+        if (carried) {
+          // Every record that carried the approval onto this candidate stops carrying it, naming the
+          // review it could not re-post so the same dismissal is never restored over the refusal.
+          const refused = { reviewer: carried.reviewer, ...(carried.reviewId !== undefined ? { reviewId: carried.reviewId } : {}), originalSha: carried.originalSha, at };
+          const reason = `the guarded merge could not use the carried approval of ${carried.originalSha.slice(0, 12)} by ${carried.reviewer}${carried.reviewId !== undefined ? ` (review ${carried.reviewId})` : ''}: ${data.reason}; a fresh independent approval of ${candidate!.sha.slice(0, 12)} is required`;
+          for (const carry of onto(work, candidate!.sha)) if (carry.approval.carried) carry.approval = { carried: false, reason: reason.slice(0, 2000), refused };
+        }
+        work.mergeRefusal = { sha: data.sha, baseSha: data.baseSha, policyRevision: data.policyRevision, reason: data.reason, since: data.since ?? at, at, by: actor.id, action: carried ? 'rereview' : 'rework',
+          ...(carried ? { approval: { reviewer: carried.reviewer, ...(carried.reviewId !== undefined ? { reviewId: carried.reviewId } : {}), originalSha: carried.originalSha } } : {}),
+          carry: structuredClone(currentCarry(work)) };
       }
       if (command === 'reviewpolicy') {
         if (actor.role !== 'operator-agent') admin(actor);
@@ -1874,6 +1896,11 @@ export class Engine {
     if (exactApproval(work) || carriedApproval(work)) return null;
     const dismissed = dismissedApproval(work);
     if (!dismissed) return null;
+    // A carried approval the guarded merge could not re-post (GY-831) is not restored from the
+    // same dismissed review: the refusal re-required the review, and only a new approval answers it.
+    const standing = currentCarry(work)?.approval, refusal = work.mergeRefusal;
+    const refused = standing && !standing.carried && standing.refused ? standing.refused : refusal?.sha === work.candidate?.sha ? refusal?.approval : undefined;
+    if (refused && refused.reviewer.toLowerCase() === dismissed.reviewer.toLowerCase() && refused.reviewId === dismissed.reviewId) return null;
     const candidate = work.candidate!, observation = work.observation!, at = now.toISOString();
     const short = candidate.sha.slice(0, 12);
     const review = dismissed.reviewId !== undefined ? ` (review ${dismissed.reviewId})` : '';
@@ -2324,6 +2351,16 @@ export class Engine {
       // An approval GitHub withdrew for a merge-base change on this unchanged head binds again
       // before the gates read the record, so no review request is opened for it (GY-127).
       const restoredApproval = observation.merged ? null : this.restoreDismissedApproval(work, now);
+      // A newer approval of the head the tip was built from replaces the carried binding (GY-831),
+      // so the re-post before the merge names a review the pull request still holds.
+      const refreshed = observation.merged ? null : refreshedCarriedApproval(work);
+      const carrying = refreshed ? currentCarry(work) : null;
+      if (refreshed && carrying) {
+        const replaced = carrying.approval as CarriedApproval;
+        carrying.approval = refreshed;
+        await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'review.carry-refreshed',
+          JSON.stringify({ details: { reviewer: refreshed.reviewer, reviewId: refreshed.reviewId, sha: refreshed.originalSha, replaced: { reviewId: replaced.reviewId ?? null, sha: replaced.originalSha }, candidate: work.candidate!.sha } })]);
+      }
       // A required check that just failed on this candidate is owed one rerun before it counts, and
       // a rerun that concluded is resolved with its own conclusion (GY-516), before the gates read it.
       const reruns = reconcileCheckReruns(work, this.ciAppIds, this.rerunFailedChecks, now);

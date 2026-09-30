@@ -214,6 +214,11 @@ export function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge
   // differs from that recommendation (GY-259): the head no longer builds what was asked.
   const research = researchRework(work);
   if (research) return { action: 'rework', ...research };
+  // The guarded merge refused this very candidate for the same reason past the loop's bound, and
+  // no carried approval was there to re-require (GY-831): nothing the control plane holds re-binds
+  // it, so the candidate returns to a worker rather than holding the queue head.
+  const refused = work.reworkRequested ? null : repeatedMergeRefusal(work);
+  if (refused) return { action: 'rework', reason: `${work.key}: the guarded merge refused candidate ${refused.sha.slice(0, 12)} on every attempt since ${refused.since} with the same reason: ${refused.reason.slice(0, 1200)}. Nothing the control plane holds re-binds it, so the candidate returns to a worker.`, binding: `${refused.sha}:merge-refused` };
   // An unexercised `manual:` proof is answered by an attestation carrying its exercise record
   // (GY-523), never by rework: nothing in the change is wrong, only the record of the attestation.
   const attestation = attestationDecision(work);
@@ -589,3 +594,9 @@ export function approvalStep(watch: ApprovalWatch, decision: { state: string; ou
 }
 /** Every gate green on a submitted candidate: what "mergeable" means to the cycle and its budget. */
 export const mergeableCandidate = (work: Work) => work.stage === 'merge' && !!work.candidate && !work.violations.length && work.gates.every(gate => gate.passed);
+/** GY-831. The repeated merge refusal the control plane recorded for exactly the current candidate that calls for a rework decision, or null. */
+export function repeatedMergeRefusal(work: Pick<Work, 'mergeRefusal' | 'candidate' | 'policyRevision'>) {
+  const refusal = work.mergeRefusal, candidate = work.candidate;
+  return refusal && refusal.action === 'rework' && candidate && refusal.sha === candidate.sha && refusal.baseSha === candidate.baseSha && refusal.policyRevision === work.policyRevision ? refusal : null;
+}
+

@@ -1,7 +1,6 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, stat } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
@@ -22,6 +21,7 @@ import { supervise } from '../src/supervisor.js';
 import { probeSupervisorAbsence } from '../src/containment-probe.js';
 import { providerMergeInstant } from './helpers/merge-instants.js';
 import { assertDispatchable, assessContainment, buildMasterStatus, snapshotWithClock } from '../src/master.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 // @ts-expect-error The trusted runner intentionally uses dependency-free JavaScript outside the candidate source.
 import { exercise } from '../scripts/acceptance-contract.mjs';
 // @ts-expect-error The trusted runner intentionally uses dependency-free JavaScript outside the candidate source.
@@ -43,7 +43,7 @@ let http: ReturnType<typeof server>; let url: string;
 const workInput = { title: 'Claims are exclusive', criteria: [{ id: 'AC-1', text: 'Only one agent claims the work', proofs: ['integration:claim-safety'] }] };
 before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-test-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('test'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init(); engine = new Engine(store, [15368], 120, 'owner/project');
   engine.reviewerApps = reviewerApps; engine.controlPlaneAppId = GRAPHYARD_APP;
@@ -171,7 +171,7 @@ test('transactional launch acknowledgement races rework without a stale start or
   let w = await claimed();
   const settlementToken = 'd'.repeat(64), settlementHash = createHash('sha256').update(settlementToken).digest('hex');
   w = await engine.execute(worker, 'quarantine', w.id, { epoch: 1, settlementHash }, randomUUID());
-  const dir = await mkdtemp(join(tmpdir(), 'graphyard-launch-race-')), marker = join(dir, 'started');
+  const dir = await temporaryDirectory('launch-race'), marker = join(dir, 'started');
   let releaseResponse!: () => void, acknowledgementCommitted!: () => void, monotonic = 0;
   const responseGate = new Promise<void>(resolve => { releaseResponse = resolve; });
   const committed = new Promise<void>(resolve => { acknowledgementCommitted = resolve; });

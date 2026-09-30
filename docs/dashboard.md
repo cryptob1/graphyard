@@ -22,6 +22,10 @@ Running rows offer:
 - **Copy local**, on the launching host: `herdr agent attach w1V:pJD`.
 - **Copy remote**: `herdr --help` documents `herdr --machine <label-or-id> <command>`, `herdr --remote <ssh-target>`; interactive attachment is not forwarded by `--machine`, so the form focuses the pane then attaches remotely: `herdr --machine vishrog agent focus w1V:pJD && herdr --remote vishrog`.
 
+## Settings › Agents: the fleet panel
+
+**Can launch now?**: per role, can it launch, else why and when. **Accounts** is one table with one chip per account, first that applies: Disabled, No role, Spent, Launch failing (failed smoke test, role hold, or a start failure within the hour), Unavailable, Working, Idle; times are local with a countdown (`web/agent-status.ts`). **Account details** holds each card; a quota reading over an hour old (`quotaStaleThresholdMs` in `web/pages/fleet.tsx`) is marked **old probe**, a failed smoke test **probe failed**. Settings pages share `web/components/page-layout.tsx`; operator identity ids wait behind **Identifiers**.
+
 ## The status sentence
 
 Rows show **Build, Validate, Test, Review, Prove, Merge, Deploy**. A merged item reads *Merged*, then *Live* once production serves it (counted this week). Moving and Blocked rows past thirty minutes turn overdue.

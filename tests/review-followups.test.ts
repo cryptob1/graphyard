@@ -1,8 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { generateKeyPairSync } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -12,6 +11,7 @@ import { coalescedScope, followUpItem, parseFollowUpFindings, parseFollowUpThrea
 import { bindReviewer, boundSessionLedger, followUpExhaustedRetryMs, followUpFilingBoundMs, followUpThreadIds, launchReview, readReviewLedger, reconcileReviews, releaseClosedRequests, reviewLedgerSpec, reviewPrompt, reviewRetryPrompt, saveReviewerProfile, threadResolutionAttempts, updateReviewLedger } from '../src/reviewer.js';
 import { routineDecision, setAsideFollowUpThreads, threadResolutionGraceMs } from '../src/master-daemon.js';
 import type { Observation, Work } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-166, 2026-09-24: GY-164 took 19 attempts and five hours; its reviewer confirmed both criteria
 // met around round 16 and kept requesting changes for new edge cases. The reviewer now judges the
@@ -29,7 +29,7 @@ const verdict = (state = 'APPROVED') => ({ state, reviewer, reviewId: 77, submit
 const criteria = [{ id: 'AC-1', text: 'The widget counts every frob.', proofs: ['unit:frob-count'] }, { id: 'AC-2', text: 'The count is shown on the dashboard.', proofs: ['unit:frob-dashboard'] }];
 
 async function boundMaster() {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-followups-')), credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-followups-credentials-'));
+  const root = await temporaryDirectory('followups'), credentialDirectory = await temporaryDirectory('followups-credentials');
   execFileSync('git', ['init', '-q', root]);
   execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
   await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory, herdrWorkspace: 'wE' }, coordinatorStatus as typeof fetch);

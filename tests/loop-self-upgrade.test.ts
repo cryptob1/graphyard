@@ -1,8 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
@@ -12,6 +11,7 @@ import { describeSelfUpgrade, performSelfUpgrade } from '../src/daemon/upgrade.j
 import { releaseLag, readBaseTip, releaseLagGraceMs, upgradeRefusalAttention } from '../src/master/release-lag.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
 import { readRelease, writeExecutorRegistration, type ExecutorRegistration } from '../src/executor-fleet.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-437: the loop and the executors upgrade themselves to the merged release. After every merge
@@ -29,8 +29,8 @@ const git = (root: string, ...args: string[]) => execFileSync('git', ['-C', root
 const hex = (letter: string) => letter.repeat(40);
 
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-loop-upgrade-'));
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-loop-upgrade-credentials-'));
+  const root = await temporaryDirectory('loop-upgrade');
+  const directory = await temporaryDirectory('loop-upgrade-credentials');
   const credentialFile = join(directory, 'coordinator.token');
   await writeFile(credentialFile, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
   const master: MasterConfig = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile, cliPath: launcher,
@@ -41,7 +41,7 @@ async function fixture() {
 
 /** A real one-commit repository, for the parts that run the shipped git reads. */
 async function repository() {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-loop-upgrade-repo-'));
+  const root = await temporaryDirectory('loop-upgrade-repo');
   await writeFile(join(root, 'README.md'), 'first\n');
   git(root, 'init', '-q');
   git(root, 'add', 'README.md');
@@ -383,7 +383,7 @@ test('unit:release-lag-visible — master status reports the release the loop an
     assert.deepEqual(young.components[0].behind.map(entry => entry.key), ['GY-1', 'GY-2']);
     assert.equal(young.components[0].late, false, 'began nine minutes ago: not yet named');
     assert.equal(young.attention.length, 0);
-    const empty = await mkdtemp(join(tmpdir(), 'graphyard-loop-upgrade-empty-'));
+    const empty = await temporaryDirectory('loop-upgrade-empty');
     try {
       assert.equal(await readBaseTip(empty, 'main', real), null, 'a checkout that never fetched reads the tip as unknown');
     } finally { await rm(empty, { recursive: true, force: true }); }
