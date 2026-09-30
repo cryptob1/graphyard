@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -10,6 +9,7 @@ import { emptyDaemonState, orphanedSupervisors, runCycle, stopWatchSupervisor, t
 import { nameOrphanSupervisors, supervisorReclaimCommand } from '../src/cli/master-status.js';
 import { buildMasterStatus, masterConfigSchema, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import type { Work } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const leaseMs = 120_000;
@@ -115,7 +115,7 @@ function item(leaseExpiresAt: string | null, overrides: Partial<Work> = {}): Wor
 }
 
 async function daemon(work: (cycle: number) => Work[], overrides: Partial<DaemonEffects> = {}) {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-orphan-'));
+  const directory = await temporaryDirectory('orphan');
   const credentialFile = join(directory, 'coordinator.token');
   await writeFile(credentialFile, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
   const config: MasterConfig = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile, cliPath: launcher,
