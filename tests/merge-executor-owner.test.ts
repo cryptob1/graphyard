@@ -1,8 +1,6 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
@@ -14,6 +12,7 @@ import { assertMergeCandidate, buildMasterStatus, masterConfigSchema, mergeExecu
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { queueRef, type QueueSpeculation } from '../src/merge-queue.js';
 import { Refusal, type Observation, type Principal, type Work } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-92: a merge execution is owned by the executor instance that acquired it, a losing executor
@@ -39,7 +38,7 @@ let serial = 0;
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 22;
-  pg = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-merge-executor-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('merge-executor'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('merge_executor_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/merge_executor_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'owner/project'); engine.submissionObserver = null;

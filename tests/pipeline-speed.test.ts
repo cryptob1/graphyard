@@ -3,8 +3,7 @@ import assert from 'node:assert/strict';
 import { execFile, execFileSync } from 'node:child_process';
 import { createHmac, randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
-import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
@@ -20,6 +19,7 @@ import { managedInstructions } from '../src/repository-setup.js';
 import { assertDispatchable, buildMasterStatus, dispatchSchedule, managedMasterInstructions, masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { acceptedMergeAt, beginAttempt, endAttempt, endLapsedAttempt, nearestRankPercentiles, pipelineSpeed, pipelineSpeedSummary, recordIntervention, recordRework, recordSubmission, speedTarget, type PipelineTimeline } from '../src/pipeline-speed.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 // @ts-expect-error Dependency-free protected workflow script.
 import { planCiProofs } from '../scripts/contracts.mjs';
 // @ts-expect-error Dependency-free measurement script.
@@ -49,7 +49,7 @@ let pr = 540;
 const github = { config: { repository: 'owner/project', appId: 1234, installationId: 1, base: 'main' } } as unknown as GitHub;
 before(async () => {
   const port = Number(process.env.GRAPHYARD_PIPELINE_SPEED_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 20);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-pipeline-speed-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('pipeline-speed'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'owner/project');
@@ -148,7 +148,7 @@ test('integration:speed-regression-guard — complete refuses a candidate whose 
 // A bare origin with a shipped module, a worker branch that re-resolved that module while merging
 // main, and the fake control plane the CLI reads the item from.
 async function syncFixture(plannedFiles: string[]) {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-speed-sync-'));
+  const root = await temporaryDirectory('speed-sync');
   const origin = join(root, 'origin.git'), main = join(root, 'main'), branch = join(root, 'branch');
   const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
   execFileSync('git', ['init', '-q', '--bare', '-b', 'main', origin]);
@@ -236,7 +236,7 @@ function stubEffects(items: () => Work[], log: { kind: string; key: string; sha:
 }
 
 test('integration:speed-auto-dispatch — one passing observation records one producer request per proof group on the exact head in the same transaction, a single dispatcher tick launches every producer together within the 30-second bound, the review request follows the head\'s mechanical proofs (GY-115) and the next tick launches the reviewer, and no master command is involved', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-speed-dispatch-'));
+  const directory = await temporaryDirectory('speed-dispatch');
   try {
     let item = await submitted('Auto-dispatched head', ['src/pipeline-speed.ts'], { producerProofs: ['manual:speed-target-met'] });
     assert.equal(item.autoDispatch?.review, null); assert.equal(item.autoDispatch?.producers.length, 0);
@@ -571,7 +571,7 @@ test('integration:speed-metrics — the periodic measurement summarizes submit�
     res.statusCode = 401; res.end('{}');
   });
   await new Promise<void>(resolve => snapshot.listen(0, '127.0.0.1', resolve));
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-speed-measure-'));
+  const directory = await temporaryDirectory('speed-measure');
   const previous = { url: process.env.GRAPHYARD_URL, token: process.env.GRAPHYARD_TOKEN, file: process.env.GRAPHYARD_TOKEN_FILE };
   const logged: string[] = []; const log = console.log;
   try {

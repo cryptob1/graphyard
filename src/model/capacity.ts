@@ -153,11 +153,6 @@ export function detectRetryingExhaustion(output: string, now: number): Exhaustio
   return findExhaustion(output, now, true);
 }
 
-/** What a session says about its quota, read by whether its host reports it stopped or still working. */
-export function sessionExhaustion(output: string, stopped: boolean, now: number): ExhaustionSignal | null {
-  return stopped ? detectExhaustion(output, now) : detectRetryingExhaustion(output, now);
-}
-
 /** How an interrupted attempt's uncommitted work was kept, or that there was none to keep. */
 export const partialWorkStates = ['committed', 'discarded', 'clean', 'not-applicable'] as const;
 export const partialWorkSchema = z.object({

@@ -1,9 +1,9 @@
 import { test } from 'node:test';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { generateKeyPairSync } from 'node:crypto';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
@@ -126,7 +126,7 @@ class HerdrStub {
 
 /** A master installed for real launches: the reviewer App bound, reviewer, producer, worker, approver and operator-agent profiles on record. */
 async function launchedMaster() {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-pane-reclaim-')), credentials = await mkdtemp(join(tmpdir(), 'graphyard-pane-reclaim-credentials-'));
+  const root = await temporaryDirectory('pane-reclaim'), credentials = await temporaryDirectory('pane-reclaim-credentials');
   execFileSync('git', ['init', '-q', root]);
   execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
   execFileSync('git', ['-c', 'user.email=graphyard@example', '-c', 'user.name=graphyard', 'commit', '--allow-empty', '-m', 'init'], { cwd: root });
@@ -145,7 +145,7 @@ async function launchedMaster() {
   } as MasterConfig;
   // The launchers each load the master file themselves, so the roles' identities are persisted.
   await writeFile(join(root, '.graphyard/master.json'), JSON.stringify(enriched), { mode: 0o600 });
-  return { root, credentials, config: enriched, cleanup: async () => { await rm(root, { recursive: true, force: true }); await rm(credentials, { recursive: true, force: true }); } };
+  return { root, credentials, config: enriched, cleanup: async () => {} };
 }
 
 test('unit:session-end-closes-pane — one session of every pane-opening role is launched, registered, ended by the loop, and its pane closes in the same step, exactly once', async () => {
