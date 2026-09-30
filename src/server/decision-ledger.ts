@@ -32,16 +32,36 @@ type TerminalState = 'stale' | 'withdrawn';
  */
 export interface ResolvePin { policyRevision: number; sha: string | null; baseSha: string | null; epoch: number; lease?: number | null; escalations: { trigger: string; at: string }[] }
 export const resolvePin = (work: Work): ResolvePin => ({ policyRevision: work.policyRevision, sha: work.candidate?.sha ?? null, baseSha: work.candidate?.baseSha ?? null, epoch: work.epoch, lease: work.lease?.epoch ?? null, escalations: standingEscalations(work).map(entry => ({ trigger: entry.trigger, at: entry.at })) });
+/**
+ * What a release decision is pinned to (GY-951): the unreleased-backlog state its judgement rests
+ * on. A heartbeat, a session report, a workspace registration or action-queue bookkeeping between
+ * the request and the approval moves the item's revision without touching any of it — the master
+ * judged "this item should be worked now" on the item as it stands, and it still stands. A new
+ * blocker, a criteria revision or the item's release by another path moves exactly one field.
+ */
+export interface ReleasePin { stage: Work['stage']; ready: boolean; blocker: string | null; policyRevision: number }
+/**
+ * What an unblock decision is pinned to: the blocker its judgement clears. A blocker cleared and
+ * re-set by another path — the same field, a different incident — moves the pin, so the approval
+ * cannot clear an incident its approver never read.
+ */
+export interface UnblockPin { blocker: string | null; stage: Work['stage'] }
+export const decisionPin = (work: Work, action: 'release' | 'unblock'): ReleasePin | UnblockPin =>
+  action === 'release'
+    ? { stage: work.stage, ready: work.ready, blocker: work.blocker ?? null, policyRevision: work.policyRevision }
+    : { blocker: work.blocker ?? null, stage: work.stage };
 // jsonb does not keep object key order, so the recorded pin compares in a canonical form.
 export const canonical = (value: unknown): unknown => Array.isArray(value) ? value.map(canonical)
   : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a < b ? -1 : 1).map(([key, entry]) => [key, canonical(entry)]))
   : value;
+/** Whether the pinned state still holds, whatever pin shape it was recorded in. */
+export const pinHolds = (current: unknown, pinned: unknown) => JSON.stringify(canonical(current)) === JSON.stringify(canonical(pinned));
 // A pin recorded before it named the held lease cannot show the lease still stands, so it never
 // matches: a replacement lease that lapsed since is invisible to its other fields, and approving it
 // would clear the incident after that loss had gone unrecorded. The requester asks again.
 export const samePin = (current: ResolvePin, pinned: ResolvePin | null | undefined) =>
-  !!pinned && 'lease' in pinned && JSON.stringify(canonical(current)) === JSON.stringify(canonical(pinned));
-export type DecisionRecord = Omit<Decision, 'state'> & { state: DecisionState | TerminalState; race: { expected: unknown; current: unknown } | null; pin: ResolvePin | null };
+  !!pinned && 'lease' in pinned && pinHolds(current, pinned);
+export type DecisionRecord = Omit<Decision, 'state'> & { state: DecisionState | TerminalState; race: { expected: unknown; current: unknown } | null; pin: ResolvePin | ReleasePin | UnblockPin | null };
 
 /** The fold itself, over one item's decision entries in ledger order. */
 function foldLedger(workId: string, rows: { actor: string; kind: string; payload: any; created_at: Date | string }[]): DecisionRecord[] {
@@ -99,8 +119,9 @@ export interface StaleRace { expected: unknown; current: unknown }
 /**
  * Whether approval failed on a pin that can never match again: the item revision, the policy
  * revision or the candidate moved past the one the decision was requested against, and
- * revisions never move back; or the resolve's pin moved — the incident cleared, a second
- * narrowing or a replacement claim behind it, or a new candidate head — where every mover
+ * revisions never move back; or a pin moved — the resolve's incident cleared, a second
+ * narrowing or a replacement claim behind it, or a new candidate head; a release's backlog
+ * state, blocker, criteria or stage; an unblock's blocker or stage — where every mover
  * moves a field revisions never move back either.
  */
 export function decisionRace(decision: DecisionRecord, work: Work): StaleRace | null {
@@ -110,8 +131,16 @@ export function decisionRace(decision: DecisionRecord, work: Work): StaleRace | 
     || work.candidate.baseSha !== decision.input.baseSha || work.policyRevision !== decision.input.policyRevision))
     return { expected: { sha: decision.input.sha, baseSha: decision.input.baseSha, policyRevision: decision.input.policyRevision },
       current: { sha: work.candidate?.sha ?? null, baseSha: work.candidate?.baseSha ?? null, policyRevision: work.policyRevision } };
-  if ((decision.action === 'release' || decision.action === 'unblock') && decision.input.expectedRevision !== work.revision)
+  if ((decision.action === 'release' || decision.action === 'unblock') && decision.input.expectedRevision !== work.revision) {
+    // A pinned request races only on what its pin names (GY-951): the bookkeeping that moved the
+    // revision without touching the pinned state is not a race at all, and the approval relaxes
+    // it. What moved the pin moved for good, exactly as the revision did before it.
+    if (decision.pin) {
+      const current = decisionPin(work, decision.action);
+      return pinHolds(current, decision.pin) ? null : { expected: decision.pin, current };
+    }
     return { expected: { revision: decision.input.expectedRevision }, current: { revision: work.revision } };
+  }
   // A triage closure binds the judgement it applies; a newer judgement, or a settled one, never returns to it.
   if (decision.action === 'close' && (work.triage?.state !== 'proposed' || work.triage.at !== decision.input.triageAt))
     return { expected: { triageAt: decision.input.triageAt }, current: { triageAt: work.triage?.at ?? null, state: work.triage?.state ?? null } };
@@ -121,7 +150,7 @@ export function decisionRace(decision: DecisionRecord, work: Work): StaleRace | 
     if (!decision.pin) return decision.input.expectedRevision !== work.revision
       ? { expected: { revision: decision.input.expectedRevision }, current: { revision: work.revision } } : null;
     const current = resolvePin(work);
-    return samePin(current, decision.pin) ? null : { expected: decision.pin, current };
+    return samePin(current, decision.pin as ResolvePin) ? null : { expected: decision.pin, current };
   }
   return null;
 }

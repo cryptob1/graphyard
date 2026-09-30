@@ -23,6 +23,9 @@ import { ciCheckName, ciCheckRefusalPattern } from './ci-refusal.js';
  * matches no earlier rule is an escalation by construction — the control plane never drops one on
  * the floor because nobody wrote a rule for it.
  */
+
+/** The check conclusions that are the change's to fix; the rest — a stale or neutral run, a startup failure — is a re-read's, never rework. */
+export const checkReworkConclusions = ['failure', 'timed_out', 'action_required', 'cancelled'];
 export const refusalRules: { gate: string | null; match: RegExp; kind: NextActionKind }[] = [
   // ready
   { gate: 'ready', match: /^Not released from backlog$/, kind: 'escalate' },
@@ -124,6 +127,21 @@ export function reviewStandstill(work: Work, all: Work[] = [work], now = new Dat
 }
 
 /**
+ * The required checks whose newest run failed on exactly the current candidate head with no rerun
+ * still held (GY-516), sorted: the record's own grounds for returning the head to a worker. One
+ * classifier, read twice (GY-951): the loop's rework decisions and the engine's own settle of the
+ * mechanical round both read this, so neither can drift from what the record says.
+ */
+export function failedRequiredChecks(work: Pick<Work, 'submission' | 'reworkRequested' | 'candidate' | 'observation' | 'stage' | 'policy' | 'gates' | 'checkReruns'>): string[] {
+  if (!work.submission || work.reworkRequested || !work.candidate || !work.observation || work.stage === 'done') return [];
+  if (work.observation.candidate.sha !== work.candidate.sha || work.observation.merged || work.observation.prState === 'closed') return [];
+  return work.policy.checks.filter(name => {
+    const latest = requiredCheck(work, name);
+    return !!latest && checkReworkConclusions.includes(latest.result) && !checkRerunHeld(work, name);
+  }).sort();
+}
+
+/**
  * The single action kind a refusal maps to. `work` decides the three cases the refusal text cannot:
  * a CI check that reported a failure (rework) rather than one still to answer (re-read), a
  * merge-gate refusal raised by a standing escalation or lead hold rather than by the queue, and a
@@ -134,7 +152,7 @@ export function refusalAction(work: Work, gate: string, refusal: string, all: Wo
   if (name !== null) {
     const latest = requiredCheck(work, name);
     // A failure held by its one owed or running rerun (GY-516) is answered by the rerun's reading.
-    return latest && ['failure', 'timed_out', 'action_required', 'cancelled'].includes(latest.result) && !checkRerunHeld(work, name) ? 'request-rework' : 'resync';
+    return latest && checkReworkConclusions.includes(latest.result) && !checkRerunHeld(work, name) ? 'request-rework' : 'resync';
   }
   if (gate === 'review') {
     const standstill = reviewStandstill(work, all, now);

@@ -1,7 +1,8 @@
 // Concern: routine decisions — standing verdicts, decision reasons and the approver step.
 import { type Work, type AgentReview, reviewProviderOf, standingEscalations, leaseLossEpoch, RefusedResponse } from '../model.js';
 import { routableScopeRequest, scopeDecisionBinding, scopeDecisionReason } from '../model/scope.js';
-import { baseRefreshConflict, checkRerunHeld, requiredCheck, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, restoringAfterEjectionPrefix, speculativeConflict, type ReviewThread, describeThread } from '../merge-queue.js';
+import { baseRefreshConflict, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, restoringAfterEjectionPrefix, speculativeConflict, type ReviewThread, describeThread } from '../merge-queue.js';
+import { failedRequiredChecks } from '../model/refusal-mapping.js';
 import { mechanicalFailure, mechanicalProof, mechanicalVerdicts, producerManualFailure, producerManualFailures } from '../model/mechanical-proofs.js';
 import { unexercisedFindings } from '../auto-dispatch.js';
 import { decisionBindingMax } from '../model/approval.js';
@@ -249,18 +250,14 @@ export function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge
  * a3b75653db55, its `test` check failed, and the item sat in Test for over four hours with its
  * next step named for no one. The latest attempt of each check decides, so a rerun that is still
  * going or passed asks for nothing; the binding names the head and the failed checks.
+ * The grounds are the shared classifier's (`failedRequiredChecks`, GY-951): since the engine
+ * settles this round itself, this is the recovery path for a head the engine's own guards held —
+ * a live lease, an unsettled fence — which a two-party decision judges exactly as before.
  */
 export function failedCheckRework(work: Work): { reason: string; binding: string } | null {
-  const candidate = work.candidate, observation = work.observation;
-  if (!work.submission || work.reworkRequested || !candidate || !observation || work.stage === 'done') return null;
-  if (observation.candidate.sha !== candidate.sha || observation.merged || observation.prState === 'closed') return null;
-  const failed = work.policy.checks.filter(name => {
-    const latest = requiredCheck(work, name);
-    // A failure awaiting its one rerun (GY-516) is not yet the worker's: a rework round would push a
-    // new head and lose the queue position, approval and proofs the rerun keeps.
-    return !!latest && ['failure', 'timed_out', 'action_required', 'cancelled'].includes(latest.result) && !checkRerunHeld(work, name);
-  }).sort();
-  if (!failed.length) return null;
+  const candidate = work.candidate;
+  const failed = failedRequiredChecks(work);
+  if (!candidate || !failed.length) return null;
   return { reason: `${work.key}: required CI check${failed.length === 1 ? '' : 's'} ${failed.join(', ')} failed on candidate ${candidate.sha.slice(0, 12)}. No gate passes a head whose required checks failed, so the item returns to a worker to fix what CI found.`,
     binding: `${candidate.sha}:ci:${failed.join(',')}` };
 }
