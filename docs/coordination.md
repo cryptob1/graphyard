@@ -19,10 +19,6 @@ A criterion states an outcome and its proofs:
 
 `plannedFiles` (paths, or directory prefixes ending `/`) is the change-scope contract, not a lock: the [merge queue](github.md#merge-queue) and `sync` rework integrate overlapping items. `master status` records `overlap.concurrent` and candidates `git merge-tree` cannot merge. A root-level directory is `highConflict`, refused without `--allow-broad-scope`. Only `exclusiveResources`, reserved at claim, hold a dispatch.
 
-## One landability verdict: gates, queue and landing guard use the same answer
-
-`evaluateLandability(work, all, now)` is the single authority for whether a candidate can land. It returns `{ verdict: "landable" }` or `{ verdict: "refused", reasons: [{ gate, reason }] }`, computed on demand from the live facts keyed by candidate SHA and policy version. The build gate, acceptance checks, merge queue, and landing guard all consume this verdict: an entry is ejected from the queue only for a reason the verdict gives; a candidate is refused only when landability is refused. This eliminates the drift where two components disagreed (GY-871 carried files, GY-875 executed=0 evidence, GY-863 false revert). The verdict is pure and deterministic: it never reads a stored or cached verdict, so evidence revocation or policy changes propagate immediately.
-
 ## Review gate: verdicts, not threads
 
 The gate is the reviewer's approval of the exact head plus required CI; threads are inputs: an approval names each listed one resolved, follow-up (filed as backlog) or overridden, or is withdrawn; the loop resolves those named. A filing refused as a reused idempotency key links that key's item (same parent and approval), or files under an approval-and-body-hash key. Retries stop after 10 consecutive identical 4xx failures, raising one attention item naming step, error and item. After two rework rounds a bot's thread is advisory. Required conversation resolution is drift: `master protection --apply`.
@@ -30,6 +26,8 @@ The gate is the reviewer's approval of the exact head plus required CI; threads 
 ## Refuse candidates that revert shipped code outside their scope
 
 `plannedFiles` also bounds what a candidate may change. At `complete`, on every new head and at landing, files inside scope and new files pass; every other file must match the bound base byte-for-byte. A deletion, revert or rewrite is refused, naming the files and their shipping items; carried files (another item's unlanded commits) are no ejection (GY-871). A worker cannot widen `plannedFiles`; a scope request or audited revision can. Asks over 20 files in one directory, or past the 100-entry cap, become their deepest common directory (`tests/`), naming the files covered; pending asks merge into one decision.
+
+One landability verdict, `evaluateLandability` (`src/model/landability.ts`), is the single authority on whether a candidate can land: the build and acceptance gates are its refusals, and the merge queue ejects an entry only for a reason it gives. It is computed from live facts keyed by candidate SHA and policy revision, never stored; each refusal records its version and inputs on the gate and the ejection. A landability ejection is not sticky: once the verdict is landable, the same head re-enters the queue.
 
 ### Keep current with `graphyard sync`
 
