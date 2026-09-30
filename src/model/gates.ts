@@ -1,7 +1,8 @@
-import { baseRefreshConflict, conversationProtectionRefusal, requiredCheck, checkRerunStatus, restoringAfterEjection, tipValidation } from '../merge-queue.js';
+import { baseRefreshConflict, ciPendingReason, conversationProtectionRefusal, requiredCheck, checkRerunStatus, restoringAfterEjection, tipValidation } from '../merge-queue.js';
 import type { QueueEjection, QueueEntry, QueueHistoryEntry } from '../merge-queue.js';
 import type { Gate, Stage, Work } from './work.js';
 import { escalationRefusals } from './escalation.js';
+import { ciCheckRefusal } from './ci-refusal.js';
 import { leadHoldRefusal } from './delegation.js';
 import { currentEvidence, evidenceIndependenceRefusals } from './evidence.js';
 import { inheritedObligations } from './bootstrap.js';
@@ -23,6 +24,18 @@ declare module './work.js' {
 
 /** The merge gate's refusal while GitHub has not computed a pull request's mergeability (GY-548). */
 export const mergeabilityComputingRefusal = 'GitHub is computing mergeability against the current base; the next observation reads it again';
+
+/**
+ * The test-gate lift the merge queue's validation pays for (GY-332): a tip the queue accounts for
+ * covers exactly the CI-pending refusals, so only those leave the test gate; any other refusal is
+ * the candidate's own, stays, and keeps the gate failed. `null` lifts nothing: no validation
+ * running, no refusals paid.
+ */
+export function settleTestGate(test: Gate, validating: string[] | null): void {
+  if (!validating) return;
+  test.reasons = test.reasons.filter(reason => !ciPendingReason(reason));
+  test.passed = !test.reasons.length;
+}
 
 /**
  * `mergeQueue` names the settings the queue evaluates by: `batchSize`, the parallel-tip `parallelTips`
@@ -72,7 +85,7 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[],
     ...(changesRequested ? ['Outstanding change requests must be resolved through a new review'] : []),
   ] : []);
   const checkReasons = work.policy.checks.filter(name => requiredCheck(work, name, ciAppIds)?.result !== 'success')
-    .map(name => `Required CI check ${name} has not passed on the current candidate${current ? checkRerunStatus(work, name) : ''}`);
+    .map(name => ciCheckRefusal(name, current ? checkRerunStatus(work, name) : ''));
   gates.push({ name: 'test', ciAppIds: [...ciAppIds], reasons: checkReasons, passed: checkReasons.length === 0 });
   const reasons: string[] = [];
   // GY-895: the pass rule is per family — a manual: proof is judged as an attestation, so its
@@ -119,9 +132,16 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[],
   // gate, and the test gate, which judges the candidate's own change, stands. A batch member the
   // plan merges on its batch's passing combined tip needs no verdict on its own tip (GY-330). Under
   // a parallel-tip window (GY-498) the entry is validated by the tips it merges behind instead.
+  //
+  // Ordering (GY-332): the test gate is settled only after `placeInQueue` has run on the gates as
+  // they stood, so an entry validating its tip was placed as ineligible. That is sound because
+  // `eligible` decides only whether an unqueued candidate enters the queue and whether it is told it
+  // has not; a queued entry leaves only by ejection, never for ineligibility, and `tipValidation`
+  // answers only for a queued entry whose tip is its candidate. Only the CI-pending refusals the tip
+  // accounts for are lifted; any other test-gate refusal stands.
   const test = gates.find(g => g.name === 'test')!;
   const validating = tipValidation(work, queueState.queue, test.reasons);
-  if (validating) { test.reasons = []; test.passed = true; }
+  settleTestGate(test, validating);
   // GitHub's `mergeable: null` is a computation it has not finished, not a refusal (GY-548): it is
   // named as such and read again on the next observation. A queued entry is not held on it at
   // all: what merges is its speculative tip, and that tip's own CI and merge decide.

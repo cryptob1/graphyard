@@ -1,7 +1,7 @@
 import { test } from 'node:test';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { dispatchOrder } from '../src/coordination.js';
@@ -85,7 +85,7 @@ function daemonConfig(credentialFile: string, workers: WorkerProfile[]): MasterC
 }
 const launchProfile = (name: string, credentialFile: string): WorkerProfile => ({ name, principal: `${name}-principal`, agentName: `agent-${name}`, mode: 'launch', kind: 'codex', credentialFile, agentArgs: [], approvals: 'auto', environment: {} });
 async function daemon(profiles: string[]) {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-hotspot-scheduling-'));
+  const directory = await temporaryDirectory('hotspot-scheduling');
   const token = join(directory, 'coordinator.token'); await writeFile(token, coordinatorToken, { mode: 0o600 });
   const credential = join(directory, 'worker.token'); await writeFile(credential, workerToken, { mode: 0o600 });
   const master = daemonConfig(token, profiles.map(name => launchProfile(name, credential)));
@@ -98,7 +98,7 @@ async function daemon(profiles: string[]) {
     requestProof: () => {}, merge: async () => ({}), observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
   };
-  return { master, effects, log, state: emptyDaemonState(master), set: (items: Work[], atMs = 0) => { snapshotWork = items; offsetMs = atMs; }, cleanup: () => rm(directory, { recursive: true, force: true }) };
+  return { master, effects, log, state: emptyDaemonState(master), set: (items: Work[], atMs = 0) => { snapshotWork = items; offsetMs = atMs; }, cleanup: () => Promise.resolve() };
 }
 
 test('unit:dispatch-prefers-non-overlapping — the durable loop offers the cold item first and still dispatches every ready item in one cycle; when only hot items are ready they all dispatch too', async () => {

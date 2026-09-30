@@ -1,8 +1,7 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
@@ -25,6 +24,7 @@ import { views } from '../web/pages/index.js';
 import WorkDetails from '../web/pages/work-details.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
 import { unknownFeatures } from '../web/features.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-422. On 2026-09-25, after a day of 2,000+ sessions, 180 new items and 137 closures, the routes
@@ -83,7 +83,7 @@ function document(index: number, settled: boolean, now: number): Work {
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 422;
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-scale-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('scale'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_scale');
   databaseUrl = `postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_scale`;
   store = new Store(databaseUrl);
@@ -243,7 +243,7 @@ function masterConfig(credentialFile: string, worktreeRoot: string): MasterConfi
 }
 
 test('unit:status-degrades-per-section — master status still returns every other section when the interventions route times out, with interventions marked unavailable and the error named; a failed request is logged with its route and the SQL statement that timed out', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-scale-root-')), secrets = await mkdtemp(join(tmpdir(), 'graphyard-scale-secrets-'));
+  const root = await temporaryDirectory('scale-root'), secrets = await temporaryDirectory('scale-secrets');
   try {
     execFileSync('git', ['init', '-q', root]);
     const credential = join(secrets, 'coordinator.token');
