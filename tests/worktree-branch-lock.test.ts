@@ -2,8 +2,8 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm, writeFile } from 'node:fs/promises';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -33,7 +33,7 @@ const symbolicRef = (cwd: string) => spawnSync('git', ['-C', cwd, 'symbolic-ref'
 
 /** A host repository with one file, the way an assignment checkout carries one. */
 async function host() {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-branch-lock-'));
+  const root = await temporaryDirectory('branch-lock');
   execFileSync('git', ['init', '-q', '-b', 'main', root]);
   for (const [key, value] of [['user.email', 'branch-lock@example.com'], ['user.name', 'Branch Lock Test'], ['commit.gpgsign', 'false']]) execFileSync('git', ['config', key, value], { cwd: root });
   await writeFile(join(root, 'source.ts'), 'export const value = 1;\n');
@@ -227,7 +227,7 @@ test('unit:workspace-failure-spares-profile — the engine keeps the preserved-a
 });
 
 test('unit:workspace-failure-spares-profile — the loop cools off no profile for a workspace failure and keeps the git message on the item\'s record; any other failure still does', async () => {
-  const home = await mkdtemp(join(tmpdir(), 'graphyard-branch-lock-home-'));
+  const home = await temporaryDirectory('branch-lock-home');
   const config: MasterConfig = masterConfigSchema.parse({
     version: 1, url: 'https://graphyard.example', credentialFile: join(home, 'coordinator.token'), cliPath: launcher,
     repository: 'owner/project', baseBranch: 'main', githubAppId: 4242, hostId: 'lock-host', masterAgentName: 'graphyard-master-lock',
@@ -272,8 +272,8 @@ test('unit:workspace-failure-spares-profile — the loop cools off no profile fo
 });
 
 test('unit:workspace-failure-spares-profile — the launcher tolerates a claim the worktree command already released as a workspace failure, and wraps only a release that could not reach the server', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-branch-lock-launch-'));
-  const credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-branch-lock-credentials-'));
+  const root = await temporaryDirectory('branch-lock-launch');
+  const credentialDirectory = await temporaryDirectory('branch-lock-credentials');
   const credential = join(credentialDirectory, 'worker.token');
   const calls: string[][] = [];
   const base = 'c'.repeat(40);
@@ -321,7 +321,7 @@ function gitPath(cwd: string, name: string) {
 let database: InstanceType<typeof EmbeddedPostgres>, store: Store, engine: Engine;
 before(async () => {
   const port = Number(process.env.GRAPHYARD_BRANCH_LOCK_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 187);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-branch-lock-db-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('branch-lock-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`);
   await store.init();

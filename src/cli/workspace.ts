@@ -14,9 +14,6 @@ import { acknowledgeContainment, containmentCredentials, establishContainment, r
 import { environmentBlocker, environmentFailure } from '../worker-sandbox.js';
 import { runChild } from '../child-runner.js';
 import { releaseHeldBranch, releaseUnderFailure, type PreservedWorktree } from '../master/worktrees.js';
-import { installUnderLease } from '../daemon/sessions.js';
-// The installer lives with the session-lease helpers it renews; the CLI path is kept for tests.
-export { installUnderLease };
 import type { CliContext } from './context.js';
 import { installUnderLease } from './install-under-lease.js';
 import { defineCommands, workMutation } from './registry.js';
@@ -222,16 +219,11 @@ export const workspaceCommands = defineCommands([
         startPoint = remoteBranch;
       }
       const hostId = context.individualHostId();
-      // GY-860 AC-1: an earlier attempt's worktree that still holds this branch — checked out, or
-      // stopped inside a rebase, merge or cherry-pick — never fails this allocation: its state is
-      // preserved onto the item, its operation ended, its HEAD detached; the branch ref never moves.
-      // The reservation, with what the holder carried, is registered before the holder is touched;
-      // a refused registration or a failed release is a workspace failure that costs no attempt.
+      // GY-860: an earlier attempt's worktree holding this branch (checked out, or mid rebase, merge or
+      // cherry-pick) is recorded with the reservation, then released; the branch ref never moves.
+      // A refused reservation or a failed release is a workspace failure that costs no attempt.
       let released: { preserved: PreservedWorktree; reused: boolean } | null;
-      try {
-        released = await releaseHeldBranch(root, branch, path, runChild,
-          preserved => mutate('workspace', { epoch, host: hostId, path, branch, ...(preserved ? { preserved } : {}) }));
-      }
+      try { released = await releaseHeldBranch(root, branch, path, runChild, preserved => mutate('workspace', { epoch, host: hostId, path, branch, ...(preserved ? { preserved } : {}) })); }
       catch (error) {
         const detail = error instanceof Error ? error.message : 'git failed';
         await releaseUnderFailure(mutate, epoch, `Reserving ${branch} or releasing an earlier attempt's hold on it failed: ${detail}`);
@@ -244,9 +236,7 @@ export const workspaceCommands = defineCommands([
         if (work.submission) execFileSync('git', ['-C', path, 'reset', '--hard', startPoint], { stdio: ['ignore', 'ignore', 'inherit'] });
       }
       catch (error) {
-        // GY-860 AC-2: this failure is the host's git state, not the attempt's — the claim is
-        // released with the git message (which undoes the epoch), so the launcher's own release
-        // afterwards finds nothing left to release.
+        // GY-860: the host's git state failed, not the attempt; releasing with the message undoes the epoch.
         const detail = error instanceof Error ? error.message : 'git worktree failed';
         await releaseUnderFailure(mutate, epoch, detail);
         throw new Error(`Git worktree creation failed: ${detail}. The claim was released as a workspace failure, so the attempt costs nothing; inspect the event and repair the host before it redispatches.`);
