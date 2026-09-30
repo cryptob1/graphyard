@@ -78,8 +78,7 @@ export interface DaemonEffects {
    * waits for the operator exactly as it did before.
    */
   decideScope?: (work: Work) => Promise<Work>;
-  /** Wake the item's own observation; the item once a newer reading is saved, else null (GY-793). */
-  observe?: (work: Work, waitMs: number) => Promise<Work | null>;
+  /** Wake the item's own observation; the item once a newer reading is saved, else null (GY-793). */ observe?: (work: Work, waitMs: number) => Promise<Work | null>;
   /**
    * The review findings standing against the item's head — its unresolved threads and its
    * reviewer's latest change request (review-scope.ts) — read outside every transaction.
