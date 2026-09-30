@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 import type { Work } from '../src/model.js';
 import type { MasterConfig } from '../src/master.js';
 import { runExecutor, type ExecutorEffects } from '../src/auto-dispatch.js';
@@ -104,7 +104,7 @@ test('unit:resync-never-blocks-executor — a resync claim wakes the observation
 });
 
 test('unit:executor-watchdog-abort-recorded — an executor whose previous process was killed mid-action records at start which action and item it was running, and master status raises it as an attention item until the process stops', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-executor-abort-'));
+  const directory = await temporaryDirectory('executor-abort');
   const master = { credentialFile: join(directory, 'coordinator.token'), hostId: 'vishrog' } as MasterConfig;
   const name = 'graphyard-master@vishrog/1', unit = 'graphyard-executor@1.service';
   const input = { name, host: 'vishrog', pid: 4242, principal: 'graphyard-master', kinds: ['resync'], intervalSeconds: 5, root: '/srv/graphyard', release: { commit: 'a'.repeat(40), dirty: false }, supervisor: unit };

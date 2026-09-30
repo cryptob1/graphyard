@@ -77,7 +77,7 @@ export const views: readonly View[] = [
   { id: 'automation', icon: '◇', label: 'Operator automation', section: 'settings', adminOnly: true, visible: dashboard => configured(dashboard.features.automation), render: dashboard => <AutomationPage operatorAgents={dashboard.operatorAgents} operatorAgentsError={dashboard.operatorAgentsError} setView={dashboard.setView}/> },
   // The agent registry: a Settings page for the identities that may read it, since it names hosts and login homes.
   // Every agent's runtime, account, role and launch policy is configured and shown here (GY-170).
-  { id: 'agents', icon: '⛭', label: 'Agents', section: 'settings', visible: dashboard => ['admin', 'coordinator', 'reader', 'slice-lead'].includes(role(dashboard)), render: dashboard => <FleetPage api={dashboard.api} status={dashboard.status}/> },
+  { id: 'agents', icon: '⛭', label: 'Agents', section: 'settings', visible: dashboard => ['admin', 'coordinator', 'reader', 'slice-lead'].includes(role(dashboard)), render: dashboard => <FleetPage api={dashboard.api} status={dashboard.status} observedAt={dashboard.observedAt}/> },
   { id: 'guide', icon: '?', label: 'How Graphyard works', render: () => <GuidePage/> },
 ];
 

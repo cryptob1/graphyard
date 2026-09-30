@@ -133,8 +133,8 @@ export function attestationExercise(work: Pick<Work, 'criteria' | 'candidate'>, 
 export const attestConfirmation = (baseSha?: string) =>
   `An attest decision carries an exercise record (criterion, behaviour removed, executed, result fail) that is yours to confirm: before approving it, run its proof against the candidate base${baseSha ? ` ${baseSha}` : ''} — the tree without the change — and see it fail, and against the candidate and see it pass; refuse it otherwise. The record states only that the proof fails there with at least one case executed, so say in your approval reason what you ran on each tree, how many cases executed, and the failure you saw. `;
 /** The Pi approver's prompt, with the attestation confirmation before its call to decide; the caller guards it on the decision being an attest (carriesAttestation, GY-535). */
-export const piApproverWithAttestation = (config: MasterConfig, work: Work, decision: string, repository?: string) =>
-  piApproverPrompt(config, work.key, decision, config.approver!.id, repository).replace('Then call the graphyard_decide tool', `${attestConfirmation(work.candidate?.baseSha)}Then call the graphyard_decide tool`);
+export const piApproverWithAttestation = (config: MasterConfig, work: Work, decision: string, clone?: string) =>
+  piApproverPrompt(config, work.key, decision, config.approver!.id, clone).replace('Then call the graphyard_decide tool', `${attestConfirmation(work.candidate?.baseSha)}Then call the graphyard_decide tool`);
 /**
  * GY-535. Whether an approver's prompt carries the attestation confirmation: only an attest
  * decision's, the only one whose record names a proof its approver must run, so any other approver
@@ -315,6 +315,17 @@ async function abandonLaunch(error: unknown, pane: string | undefined, tabId: st
  */
 export const approverSessionId = (decision: string) => `approver:${decision}`;
 /**
+ * The approver's own copy of the repository (GY-564): a clone with its own refs, index, working tree and object store, detached at the candidate head (or the current head when none is bound), with no remote.
+ * Nothing is shared with the operator's repository (GY-926): no `--shared` alternates — git-clone(1) calls them dangerous: gc/prune there can delete objects the approver's clone needs, and the file would name the operator's store — and no hardlinks.
+ * The bound SHA is fetched while the remote exists; one the repository cannot supply refuses the launch rather than silently detach at HEAD, where the approver would judge an unrelated tree.
+ */
+export async function approverClone(root: string, target: string, sha?: string, run: ChildRun = defaultChildRun) {
+  await run('git', ['clone', '--quiet', '--no-hardlinks', '--no-checkout', root, target], { cwd: root });
+  if (sha) try { await run('git', ['-C', target, 'fetch', '--quiet', 'origin', sha], { cwd: target }); } catch { /* not in the operator's repository */ }
+  await run('git', ['-C', target, 'remote', 'remove', 'origin'], { cwd: target });
+  await run('git', ['-C', target, 'checkout', '--quiet', '--detach', sha ?? 'HEAD'], { cwd: target });
+}
+/**
  * A headless approver's run (GY-169), in a directory of its own under the managed worktree root
  * (GY-391) — never the operator's repository, which the destructive-command guard would otherwise
  * treat as the run's worktree and let it remove files in. The directory goes when the run ends,
@@ -324,8 +335,9 @@ async function startHeadlessApprover(root: string, config: MasterConfig, work: W
   const checkout = await allocateManagedCheckout(root, config, 'approval', work.key, work.candidate?.sha ?? '0'.repeat(40), randomUUID(), headless.filesystem);
   let started: ReturnType<typeof startNarrowRun>;
   try {
+    await approverClone(root, checkout.worktree, work.candidate?.sha);
     started = startNarrowRun({ runner, name, role: 'approver', work: work.key, subject: decision, checkout: checkout.directory,
-      prompt: attest ? piApproverWithAttestation(config, work, decision, root) : piApproverPrompt(config, work.key, decision, config.approver!.id, root),
+      prompt: attest ? piApproverWithAttestation(config, work, decision, checkout.worktree) : piApproverPrompt(config, work.key, decision, config.approver!.id, checkout.worktree),
       options: approverRunOptions(checkout.directory, decision, { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: config.approver!.credentialFile, GRAPHYARD_HOST_ID: config.hostId }, piRuntimeSchema.parse(config.run.pi ?? {}).approverTimeoutMinutes * 60_000),
       apply: async result => result.ok ? [await applyDecision(config.url, token, work, result.payload, headless.fetcher)] : [] });
   } catch (error) { await settleCheckout(root, checkout.directory); throw error; }
@@ -363,7 +375,7 @@ export async function launchApprover(root: string, work: Work, decision: string,
     // The run is the session: the registry's slot is given back the moment it ends.
     // Its outcome counts toward the account's runs without a result (GY-446).
     const settled = started.settled.then(async run => { await registry.release(`the headless approver run for ${work.key} ended`, runOutcome(run)); return run; },
-      async error => { await registry.release(`the headless approver run for ${work.key} ended`); throw error; });
+      async error => { await registry.release(`the headless approver run for ${work.key} ended`, 'no-result'); throw error; });
     settled.catch(() => { /* the run's own record carries its failure */ });
     return { agentName: name, work: work.key, decision, identity: config.approver!.id, pane: null as string | null, runtime: 'pi' as const, delivery: 'request' as RequestDelivery, focusChanged: false, session: registry.account.fleet.session,
       account: { environment: registry.account.name, kind: registry.account.kind, quota: registry.health?.quota ?? null, skipped: registry.skipped },

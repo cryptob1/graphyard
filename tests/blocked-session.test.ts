@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { blockedPromptFailMs, dispatchKey, emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
@@ -9,6 +8,7 @@ import { classifyRuntimePrompt, destructivePromptGuidance, masterConfigSchema, w
 import { producerPrompt } from '../src/producer.js';
 
 import type { Work } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const clock = Date.parse('2030-01-01T00:00:00Z');
@@ -46,7 +46,7 @@ const unknownPrompt = [
 ].join('\n');
 
 async function setup() {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-blocked-'));
+  const directory = await temporaryDirectory('blocked');
   const credentialFile = join(directory, 'coordinator.token'), worker = join(directory, 'worker.token');
   await writeFile(credentialFile, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
   await writeFile(worker, 'worker-token-'.padEnd(40, 'x'), { mode: 0o600 });

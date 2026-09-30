@@ -1,8 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createElement } from 'react';
@@ -19,6 +18,7 @@ import { releaseView } from '../src/model/release.js';
 import OverviewPage from '../web/pages/overview.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
 import { NOW, boardStatus, boardWork } from '../browser-tests/ui-board.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-200: one board. The dashboard derived its groups in the browser (web/groups.ts) while master
@@ -50,11 +50,21 @@ function scenario(): Work[] {
     scopeRequest: { epoch: 2, paths: ['docs/board.md'], reason: 'The board endpoint needs its page', requestedBy: 'worker-a', at: at(-80 * minute),
       decision: { state: 'refused', reason: 'outside the widening rule', at: at(-79 * minute), decidedBy: 'graphyard', waitedMs: minute, paths: ['docs/board.md'], requestedBy: 'worker-a', requestedAt: at(-80 * minute), epoch: 2 } },
     gates: refusing({ ready: [refused], build: ['Worker has not submitted implementation for this attempt'] }) });
+  // The over-cap refusal GY-906 made terminal: no fold represents the ask, so the card names
+  // `master requirements`, which can fold or split it, not the plain union `master scope` posts
+  // past the same bound (GY-936).
+  const overCap = `${scopeRefusalBlocker}: no fold represents the ask within the 100 entries plannedFiles holds (101 after folding)`;
+  const capped = make('GY-173', 'Over-cap refused item', { stage: 'build', stageEnteredAt: at(-90 * minute), blocker: overCap,
+    plannedFiles: Array.from({ length: 100 }, (_, index) => `tests/bulk/case-${index}.ts`),
+    lease: { owner: 'worker-a', epoch: 2, expiresAt: at(20 * minute) },
+    scopeRequest: { epoch: 2, paths: ['src/other/next.ts'], reason: 'The new path moves onto the shared helper too', requestedBy: 'worker-a', at: at(-80 * minute),
+      decision: { state: 'refused', reason: 'no fold represents the ask within the 100 entries plannedFiles holds (101 after folding)', at: at(-79 * minute), decidedBy: 'graphyard', waitedMs: minute, paths: ['src/other/next.ts'], requestedBy: 'worker-a', requestedAt: at(-80 * minute), epoch: 2 } },
+    gates: refusing({ ready: [overCap], build: ['Worker has not submitted implementation for this attempt'] }) });
   const held = make('GY-174', 'Held item', { stage: 'merge', stageEnteredAt: at(-45 * minute), submission: { epoch: 1, pr: 74 } as Work['submission'],
     candidate: { sha: sha('h'), baseSha: sha('b'), pr: 74, branch: 'graphyard/gy-174-1', author: 'worker', createdAt: at(-2 * 60 * minute) } as Work['candidate'],
     gates: refusing({ merge: ['Unresolved lease-loss escalation requires operator resolution: the builder lost contact'] }) });
   const waiting = make('GY-175', 'Held behind its dependency', { stage: 'ready', gates: refusing({ ready: ['Dependency GY-172 is unfinished'], build: ['Worker has not submitted implementation for this attempt'] }) });
-  return [...work, scope, held, waiting];
+  return [...work, scope, capped, held, waiting];
 }
 
 /** GET /api/board, through the route the server registers, over a store holding `work`. */
@@ -77,6 +87,7 @@ test('unit:board-api-matches-dashboard — GET /api/board gives each open item i
     assert.deepEqual({ group: item.group, actor: item.actor, command: item.command }, { group, actor, command }, key);
   };
   expect('GY-172', 'blocked', 'master', 'graphyard master scope GY-172');
+  expect('GY-173', 'blocked', 'master', 'graphyard master requirements GY-173 FILE REASON');
   expect('GY-174', 'blocked', 'master', 'graphyard master decide GY-174 resolve REASON');
   expect('GY-175', 'up-next', 'held', null);
   expect('GY-21', 'moving', 'executor', 'graphyard master merge GY-21');
@@ -110,7 +121,7 @@ test('unit:board-api-matches-dashboard — GET /api/board gives each open item i
 });
 
 async function masterFixture() {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-board-master-'));
+  const root = await temporaryDirectory('board-master');
   const git = (...args: string[]) => execFileSync('git', ['-C', root, '-c', 'user.name=Graphyard', '-c', 'user.email=graphyard@example.com', ...args], { stdio: 'ignore' });
   git('init', '-q'); git('remote', 'add', 'origin', 'https://github.com/owner/project.git');
   await writeFile(join(root, 'README.md'), 'board\n'); git('add', 'README.md'); git('commit', '-q', '-m', 'board');

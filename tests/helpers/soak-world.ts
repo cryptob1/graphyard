@@ -122,6 +122,14 @@ export class SimulatedGitHub {
    * as reverts — the reading this item fixes, staged as a fault the simulated day must recover from.
    */
   staleMergeBase = new Set<string>();
+  /**
+   * GY-831. Heads for which `gh pr view` answers a head other than the record's, so every guarded
+   * merge attempt for them refuses with one unchanged message. A rework round's new head is never
+   * listed, so the fault holds only the candidate it was staged for.
+   */
+  stuckHeads = new Set<string>();
+  /** GY-831. Items whose reviewer verdict is posted by the bound reviewer App identity itself. */
+  botReviewers = new Set<string>();
   /** How many times the landing check ran in the loop, the bases it judged, and the two compare kinds it asked. */
   landingChecks = 0; landingBases = new Set<string>(); ancestorCompares = 0; blindCompares = 0;
   private serial = 0;
@@ -294,12 +302,13 @@ export class SimulatedGitHub {
     for (const pr of [...this.prs.values()].filter(entry => entry.open)) {
       const pushedAt = pr.pushed.get(pr.head)!;
       const ciDone = now - pushedAt >= this.options.ciMs;
-      // The reviewer judges a head once CI reported on it.
+      // The reviewer judges a head once CI reported on it. An item in `botReviewers` is judged by
+      // the bound reviewer App identity, whose approval a Graphyard-authored tip carries.
       if (ciDone && now - pushedAt >= this.options.ciMs + this.options.reviewMs && !pr.reviews.some(review => review.sha === pr.head)) {
         const plan = this.verdicts.get(pr.key) ?? [];
         const state = plan.shift() ?? 'APPROVED';
         this.verdicts.set(pr.key, plan);
-        pr.reviews.push({ reviewer: 'reviewer', sha: pr.head, state, id: ++this.serial, submittedAt: new Date(now).toISOString() });
+        pr.reviews.push({ reviewer: this.botReviewers.has(pr.key) ? 'graphyard-reviewer[bot]' : 'reviewer', sha: pr.head, state, id: ++this.serial, submittedAt: new Date(now).toISOString() });
       }
       // A reviewer App answers the request it was dispatched: an exhausted profile with its usage-limit verdict.
       const request = pr.agentRequests.at(-1);
@@ -480,9 +489,17 @@ export class SimulatedGitHub {
   gh(repository: string) {
     return async (command: string, args: string[]) => {
       if (command !== 'gh') throw new Error(`Unexpected command ${command}`);
-      if (args[0] === 'pr' && args[1] === 'view') { const pr = this.prs.get(Number(args[2]))!; return JSON.stringify({ headRefOid: pr.head, baseRefName: this.options.baseBranch, state: pr.open ? 'OPEN' : 'MERGED', isDraft: false }); }
+      if (args[0] === 'pr' && args[1] === 'view') {
+        const pr = this.prs.get(Number(args[2]))!;
+        return JSON.stringify({ headRefOid: this.stuckHeads.has(pr.head) ? sha('stuck', pr.head) : pr.head, baseRefName: this.options.baseBranch, state: pr.open ? 'OPEN' : 'MERGED', isDraft: false });
+      }
       const path = args.find(arg => arg.startsWith(`repos/${repository}/`)) ?? '';
       if (path.endsWith(`/git/ref/heads/${this.options.baseBranch}`)) return JSON.stringify({ ref: `refs/heads/${this.options.baseBranch}`, object: { type: 'commit', sha: this.tip } });
+      const reviews = /\/pulls\/(\d+)\/reviews$/.exec(path);
+      if (reviews) {
+        const pr = this.prs.get(Number(reviews[1]))!;
+        return JSON.stringify(pr.reviews.map(review => ({ id: review.id, user: { login: review.reviewer }, commit_id: review.sha, state: review.state })));
+      }
       const commit = /\/commits\/([0-9a-f]{40})$/.exec(path)?.[1];
       if (commit) return JSON.stringify({ sha: commit, commit: { tree: { sha: this.commits.get(commit)?.tree ?? sha('tree', commit) } } });
       throw new Error(`Unexpected gh call: ${args.join(' ')}`);

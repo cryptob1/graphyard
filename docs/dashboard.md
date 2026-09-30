@@ -7,7 +7,7 @@ One sidebar: **Work**, **Workers**, **Shipped**, **Tests**, **Insights**, **Sett
 
 ## Work: one classification
 
-Each open item is in one group: **Needs you** (only you may decide), **Blocked**, **Moving**, **Up next** or **Backlog**; a tile counts and filters one.
+Each open item is in one group: **Needs you** (only you may decide), **Blocked**, **Moving**, **Up next** or **Backlog**; a tile counts and filters one group.
 
 `GET /api/board` serves the groups, not the page. Items carry `group`, `stage`, `owner`, `actor` (`worker`, `reviewer`, `producer`, `approver`, `master`, `executor`, `human-only`, `held`), `command` (or null), `since` and `overdue` (past `overdueAfterMs`). `master status` lists the master's items as `board.owed`.
 
@@ -22,13 +22,17 @@ Running rows offer:
 - **Copy local**, on the launching host: `herdr agent attach w1V:pJD`.
 - **Copy remote**: `herdr --help` documents `herdr --machine <label-or-id> <command>`, `herdr --remote <ssh-target>`; interactive attachment is not forwarded by `--machine`, so the form focuses the pane then attaches remotely: `herdr --machine vishrog agent focus w1V:pJD && herdr --remote vishrog`.
 
+## Settings › Agents: the fleet panel
+
+Every registry account, as `graphyard master registry` reports it: runtime, model, quota state, each usage window with its reset time, eligibility and its reason, role preferences, and live sessions against the account's limit. Each card shows when the quota was last observed; a reading over an hour old (`quotaStaleThresholdMs` in `web/pages/fleet.tsx`) or never observed is marked **old probe**, a failed smoke test **probe failed** — a real wall, told apart from an old probe.
+
 ## The status sentence
 
 Rows show **Build, Validate, Test, Review, Prove, Merge, Deploy**. A merged item reads *Merged*, then *Live* once production serves it (counted this week). Moving and Blocked rows past thirty minutes turn overdue.
 
 ## An item page
 
-Below the summary: **What is left**, **Requirements** (✓ or ○ per criterion), **Pull request**, **Test cases** and **Activity**. **Technical details** holds gates, sessions, evidence, overlaps.
+Below the summary: **What is left**, **Requirements** (✓ or ○ per criterion), **Pull request**, **Test cases** and **Activity**. **Technical details** holds gates, sessions, evidence and overlaps (`Shares files with GY-166, GY-167 (tests/)`).
 
 ## Insights
 
