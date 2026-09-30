@@ -580,7 +580,7 @@ test('integration:registry-setup-proposal — setup discovers the logged-in CLIs
  */
 async function fullWorkerRole() {
   await reset();
-  const homes = await mkdtemp(join(scratch, 'homes-'));
+  const homes = await temporaryDirectory('homes', scratch);
   const home = await login(homes, 'claude-w', 'claude');
   await ok('agent-registry/runtimes', operator, { runtime: runtimeNamed('claude'), reason: 'register' });
   await ok('agent-registry/models', operator, { model: { name: 'opus', id: 'claude-opus-5', capability: { tier: 'frontier' } }, reason: 'model' });
