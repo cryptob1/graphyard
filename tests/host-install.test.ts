@@ -1,10 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { execFile } from 'node:child_process';
+import { createPublicKey, createVerify } from 'node:crypto';
+import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { tmpdir } from 'node:os';
 import { parseEnv } from 'node:util';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import { applyInstall, buildPlan, prepareInstall, type InstallInputs } from '../src/install/index.js';
-import { claimHash, hostRuntimes, CONNECT_PATH, OPENCODE_WORKER_PERMISSION, HOST_USER, MIGRATE_SOURCE_VARIABLE, SIGNIN_CLAIM_VARIABLE } from '../src/install/host.js';
+import { claimHash, ghWrapper, hostGithubFiles, hostLayout, hostRuntimes, CONNECT_PATH, HOST_GH_WRAPPER, OPENCODE_WORKER_PERMISSION, HOST_USER, MIGRATE_SOURCE_VARIABLE, SIGNIN_CLAIM_VARIABLE } from '../src/install/host.js';
 import { hostSizing, recommendServerType, parseServerTypes } from '../src/install/pricing.js';
 import { ensureTokens, fingerprint, installDirectory, plannedPrincipals, Vault, writeInstallRecord } from '../src/install/secrets.js';
 import { principalSchema } from '../src/server/principals.js';
@@ -12,7 +17,7 @@ import { workerConfinementRefusal } from '../src/master/profiles.js';
 import { authenticate } from '../src/server/auth.js';
 import { signinRoutes, claimHashOf } from '../src/server/routes/signin.js';
 import { claimFromHash } from '../web/pages/login.js';
-import { allText, harness, HETZNER_SERVER_TYPES, type Harness } from './install-harness.js';
+import { allText, appKey, harness, GRAPHYARD_APP_ID, HETZNER_SERVER_TYPES, type Harness } from './install-harness.js';
 
 // GY-717: the self-contained Graphyard host. Each test is named for the proof it produces, and its
 // title states the behaviour in that proof's own criterion's words, so a producer's stripped run
@@ -66,6 +71,9 @@ test('unit:host-install-plan — the host plan names every unit, runtime and cre
     // The dashboard reaches sessions on the same machine: no relay is provisioned, and the plan says so.
     assert.equal(host.sessionViewer, 'local');
     assert.equal(plan.actions.find(action => action.id === 'host.session-viewer')?.state, 'satisfied');
+    // Workers' GitHub credential: minted on the host from the App key, never typed in.
+    assert.ok(host.credentials.some(entry => entry.path === `${CONFIG}/github/app-private-key.pem`));
+    assert.match(plan.actions.find(action => action.id === 'host.github')!.title, /mint one-hour App installation tokens narrowed to owner\/project/);
     assert.ok(!plan.actions.some(action => action.id === 'local.profiles'), 'profiles are not registered on the operator machine');
   } finally { await fixture.cleanup(); }
 });
@@ -134,6 +142,21 @@ test('unit:host-install-plan — apply provisions the fixture host: units, runti
     assert.ok(!clone.args.some(arg => arg.includes('installation-token-for-tests')));
     assert.ok(![...files.values()].some(file => file.content.includes('installation-token-for-tests')), 'the clone token is written nowhere on the host');
 
+    // Workers push and open pull requests with nobody logging in: gh is installed, the App key and the
+    // token helper sit in <install>/github at 0600, gh is wrapped, and git is pointed at the helper.
+    assert.match(bootstrap, /command -v gh >\/dev\/null \|\| \(apt-get update && apt-get install -y gh\)/);
+    for (const name of ['app.json', 'app-private-key.pem', 'graphyard-github-credential.mjs']) {
+      const file = files.get(`${CONFIG}/github/${name}`)!;
+      assert.ok(file, name);
+      assert.equal(file.mode, 0o600, name);
+      assert.equal(file.owner, '1001:1001', name);
+    }
+    assert.equal(files.get(`${CONFIG}/github/app-private-key.pem`)!.content.trim(), appKey.trim());
+    assert.deepEqual(JSON.parse(files.get(`${CONFIG}/github/app.json`)!.content), { appId: GRAPHYARD_APP_ID, installationId: 500, repository: 'owner/project' });
+    assert.equal(files.get(HOST_GH_WRAPPER)?.mode, 0o755);
+    assert.ok(lines.some(line => line.endsWith(`git config --global credential.https://github.com.helper !node ${CONFIG}/github/graphyard-github-credential.mjs`)), 'git uses the helper for github.com');
+    assert.ok(lines.some(line => line.endsWith('git config --global user.name graphyard-owner-project[bot]')), 'commits carry the App bot identity');
+
     assert.deepEqual(summary.host!.units.filter(unit => unit.active !== 'active'), []);
     assert.equal(summary.host!.sessionViewer, 'local');
     assert.equal(summary.profiles.master.configured, true);
@@ -144,6 +167,7 @@ test('unit:host-install-plan — apply provisions the fixture host: units, runti
     const replanned = JSON.stringify(await buildPlan(again));
     for (const token of session.tokens.values()) assert.ok(!replanned.includes(token));
     assert.ok(!replanned.includes(session.context.databasePassword));
+    assert.ok(!replanned.includes(appKey.split('\n')[1]) && !JSON.stringify(summary).includes(appKey.split('\n')[1]), 'the App key reaches no plan or summary');
     assert.match(replanned, /"fingerprint":"[0-9a-f]{12}"/);
   } finally { await fixture.cleanup(); }
 });
@@ -224,6 +248,62 @@ test('unit:self-contained-auth-plan — self-contained authentication needs no S
   } finally {
     if (previous === undefined) delete process.env.HCLOUD_TOKEN; else process.env.HCLOUD_TOKEN = previous;
     await fixture.cleanup();
+  }
+});
+
+test('unit:self-contained-auth-plan — with no SSH and no manual file editing, a worker on a fresh host has a working push and pull request credential: git\'s credential helper and the gh wrapper mint a narrowed one-hour App installation token from the key the installer wrote', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'gy717-github-'));
+  const requests: { url: string; authorization: string; body: any }[] = [];
+  const server = createServer((request, response) => {
+    let body = '';
+    request.on('data', chunk => { body += chunk; });
+    request.on('end', () => {
+      requests.push({ url: request.url ?? '', authorization: String(request.headers.authorization ?? ''), body: JSON.parse(body || '{}') });
+      response.writeHead(201, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({ token: `minted-worker-token-${requests.length}`, expires_at: new Date(Date.now() + 3_600_000).toISOString() }));
+    });
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const api = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    // The files the installer puts on the host, written into a scratch <install>/github.
+    const layout = { ...hostLayout('owner-project', '/opt/graphyard/owner-project', '/var/lib/graphyard/owner-project'), githubDirectory: directory };
+    for (const file of hostGithubFiles(layout, 'owner/project', { appId: GRAPHYARD_APP_ID, installationId: 500, slug: 'graphyard-owner-project', privateKey: appKey }, '1001:1001')) {
+      if (file.path === HOST_GH_WRAPPER) continue;
+      writeFileSync(file.path, file.path.endsWith('app.json') ? JSON.stringify({ ...JSON.parse(file.content), api }) : file.content, { mode: file.mode });
+    }
+    const helper = join(directory, 'graphyard-github-credential.mjs');
+    const env = { PATH: process.env.PATH ?? '', HOME: directory, GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0' };
+    const run = (program: string, args: string[], input = '') => new Promise<string>((resolve, reject) => {
+      const child = execFile(program, args, { env, timeout: 30_000 }, (error, stdout, stderr) => error ? reject(new Error(`${program} ${args.join(' ')}: ${stderr || error.message}`)) : resolve(stdout));
+      child.stdin!.end(input);
+    });
+
+    // git push authenticates through the helper exactly as the host's git config points it.
+    const filled = await run('git', ['-c', 'credential.helper=', '-c', `credential.https://github.com.helper=!node ${helper}`, 'credential', 'fill'], 'protocol=https\nhost=github.com\npath=owner/project.git\n\n');
+    assert.match(filled, /^username=x-access-token$/m);
+    assert.match(filled, /^password=minted-worker-token-1$/m);
+    // The token is an App installation token for this installation, narrowed to the managed repository.
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].url, '/app/installations/500/access_tokens');
+    assert.deepEqual(requests[0].body, { repositories: ['project'], permissions: { contents: 'write', pull_requests: 'write', metadata: 'read' } });
+    const [header, claims, signature] = requests[0].authorization.replace(/^Bearer /, '').split('.');
+    assert.ok(createVerify('RSA-SHA256').update(`${header}.${claims}`).verify(createPublicKey(appKey), signature, 'base64url'), 'signed with the App key');
+    assert.equal(JSON.parse(Buffer.from(claims, 'base64url').toString()).iss, String(GRAPHYARD_APP_ID));
+    assert.equal(statSync(join(directory, 'token.json')).mode & 0o777, 0o600, 'the cached token is private');
+
+    // gh pr create takes GH_TOKEN from the wrapper; the cached token is reused, not re-minted.
+    const fakeGh = join(directory, 'fake-gh');
+    writeFileSync(fakeGh, '#!/bin/sh\necho "GH_TOKEN=$GH_TOKEN args=$*"\n', { mode: 0o755 });
+    const wrapper = join(directory, 'gh');
+    writeFileSync(wrapper, ghWrapper(helper, fakeGh), { mode: 0o755 });
+    assert.equal((await run(wrapper, ['pr', 'create', '--fill'])).trim(), 'GH_TOKEN=minted-worker-token-1 args=pr create --fill');
+    assert.equal(requests.length, 1, 'a cached token is reused until near its expiry');
+    // Another host's credential request is left to git's next helper.
+    assert.doesNotMatch(await run('node', [helper, 'get'], 'protocol=https\nhost=example.test\n\n'), /password=/);
+  } finally {
+    server.close();
+    rmSync(directory, { recursive: true, force: true });
   }
 });
 

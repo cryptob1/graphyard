@@ -45,6 +45,8 @@ export interface HostLayout {
   user: string; home: string;
   /** ~graphyard/.config/graphyard/<install>: every credential on the host. */
   configDirectory: string; tokensDirectory: string; accountsDirectory: string; migrationDirectory: string; profilesDirectory: string;
+  /** <install>/github: the App key and the credential helper workers push and open pull requests with. */
+  githubDirectory: string;
   /** The Compose bundle (server.env, db.env, compose.yaml, Caddyfile) the system units run. */
   workdir: string;
   /** Postgres data: the attached volume on Hetzner, /var/lib/graphyard/<install> on an existing machine. */
@@ -63,6 +65,7 @@ export function hostLayout(installId: string, workdir: string, dataPath: string)
     user: HOST_USER, home: HOST_HOME, configDirectory,
     tokensDirectory: `${configDirectory}/tokens`, accountsDirectory: `${configDirectory}/accounts`,
     migrationDirectory: `${configDirectory}/migration`, profilesDirectory: `${configDirectory}/profiles`,
+    githubDirectory: `${configDirectory}/github`,
     workdir, dataPath,
     graphyard: `${HOST_HOME}/graphyard`, cli: `${HOST_HOME}/graphyard/bin/graphyard.mjs`,
     checkout: `${HOST_HOME}/code/${installId}`,
@@ -290,7 +293,7 @@ export function asUser(remote: Transport, cwd: string, program: string, args: st
 }
 
 /**
- * Idempotent machine preparation, run as root: Docker, Node 24, git and bubblewrap (with the
+ * Idempotent machine preparation, run as root: Docker, Node 24, git, gh and bubblewrap (with the
  * unprivileged user namespaces it needs, checked by running it) when missing, the graphyard
  * account with lingering (so its user units run without a login), and the private directories.
  */
@@ -303,6 +306,8 @@ export function bootstrapScript(layout: HostLayout) {
     'systemctl enable --now docker',
     `node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 24 ? 0 : 1)' 2>/dev/null || (curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && apt-get install -y nodejs)`,
     'command -v git >/dev/null || apt-get install -y git',
+    // Workers open their pull requests with gh; the host's wrapper (hostGithubFiles) authenticates it.
+    'command -v gh >/dev/null || (apt-get update && apt-get install -y gh)',
     // Worktree dependency installs and non-Actions unit proofs run under bubblewrap, which refuses
     // without it; Ubuntu 24.04 also restricts the unprivileged user namespaces it needs by default.
     'command -v bwrap >/dev/null || apt-get install -y bubblewrap',
@@ -310,7 +315,7 @@ export function bootstrapScript(layout: HostLayout) {
     'bwrap --unshare-user --ro-bind / / true',
     `id -u ${HOST_USER} >/dev/null 2>&1 || useradd --create-home --shell /bin/bash ${HOST_USER}`,
     `loginctl enable-linger ${HOST_USER}`,
-    `install -d -m 0700 -o ${HOST_USER} -g ${HOST_USER} ${[`${HOST_HOME}/.config`, `${HOST_HOME}/.config/environment.d`, `${HOST_HOME}/.config/graphyard`, layout.configDirectory, layout.tokensDirectory, layout.accountsDirectory, layout.migrationDirectory, layout.profilesDirectory, layout.userUnitDirectory, `${HOST_HOME}/code`].map(q).join(' ')}`,
+    `install -d -m 0700 -o ${HOST_USER} -g ${HOST_USER} ${[`${HOST_HOME}/.config`, `${HOST_HOME}/.config/environment.d`, `${HOST_HOME}/.config/graphyard`, layout.configDirectory, layout.tokensDirectory, layout.accountsDirectory, layout.migrationDirectory, layout.profilesDirectory, layout.githubDirectory, layout.userUnitDirectory, `${HOST_HOME}/code`].map(q).join(' ')}`,
     `install -d -m 0755 ${q(layout.workdir)} ${q(`${layout.dataPath}/postgres`)}`,
   ].join('\n');
 }
@@ -341,6 +346,58 @@ export function hostFiles(ctx: AdapterContext, values: EnvValue[], owner: string
 // ---------------------------------------------------------------------------
 // Migration: moving an existing installation onto the host
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// The workers' GitHub credential
+// ---------------------------------------------------------------------------
+
+/** The Graphyard App the host's workers push and open pull requests as. */
+export interface HostGithubApp { appId: number; installationId: number; slug: string; botUserId?: number; privateKey: string }
+
+const credentialHelperSource = fileURLToPath(new URL('../../deploy/host/graphyard-github-credential.mjs', import.meta.url));
+export const hostGithubKeyFile = (layout: HostLayout) => `${layout.githubDirectory}/app-private-key.pem`;
+export const hostCredentialHelper = (layout: HostLayout) => `${layout.githubDirectory}/graphyard-github-credential.mjs`;
+/** The gh every account on the host runs first on its PATH; it execs the packaged gh. */
+export const HOST_GH_WRAPPER = '/usr/local/bin/gh';
+
+/** A gh that sets GH_TOKEN from the credential helper when the caller can read it and has none of its own. */
+export function ghWrapper(helper: string, gh = '/usr/bin/gh') {
+  return [
+    '#!/bin/sh',
+    '# Graphyard self-contained host (GY-717): gh authenticated with a one-hour App installation token.',
+    `if [ -z "\${GH_TOKEN:-}" ] && [ -r ${shellQuote(helper)} ]; then`,
+    `  GH_TOKEN="$(node ${shellQuote(helper)} token)" || exit 1`,
+    '  export GH_TOKEN',
+    'fi',
+    `exec ${shellQuote(gh)} "$@"`,
+    '',
+  ].join('\n');
+}
+
+/**
+ * What gives the graphyard account a GitHub credential with nobody logging into the host: the App
+ * key and its facts (0600, in <install>/github), the helper that mints narrowed one-hour
+ * installation tokens from them, and the gh wrapper. git is pointed at the helper by
+ * `hostGitConfig`, so a worker's `git push` and `gh pr create` both work on a fresh host.
+ */
+export function hostGithubFiles(layout: HostLayout, repository: string, app: HostGithubApp, owner: string): BundleFile[] {
+  return [
+    { path: `${layout.githubDirectory}/app.json`, content: `${JSON.stringify({ appId: app.appId, installationId: app.installationId, repository }, null, 2)}\n`, mode: 0o600, owner },
+    { path: hostGithubKeyFile(layout), content: app.privateKey.endsWith('\n') ? app.privateKey : `${app.privateKey}\n`, mode: 0o600, owner },
+    { path: hostCredentialHelper(layout), content: readFileSync(credentialHelperSource, 'utf8'), mode: 0o600, owner },
+    { path: HOST_GH_WRAPPER, content: ghWrapper(hostCredentialHelper(layout)), mode: 0o755 },
+  ];
+}
+
+/** The graphyard account's global git settings: the credential helper for github.com, and the App's bot as the commit identity. */
+export function hostGitConfig(layout: HostLayout, app: Pick<HostGithubApp, 'slug' | 'botUserId'>): [string, string][] {
+  const bot = `${app.slug}[bot]`;
+  return [
+    ['credential.https://github.com.helper', `!node ${hostCredentialHelper(layout)}`],
+    ['user.name', bot],
+    ['user.email', `${app.botUserId ? `${app.botUserId}+` : ''}${bot}@users.noreply.github.com`],
+  ];
+}
 
 export const migrationSteps = [
   { id: 'migrate.freeze', title: 'Stop the old master loop and its executors on this machine' },
@@ -485,6 +542,7 @@ export function hostPlan(ctx: AdapterContext): HostPlan {
     credentials: [
       ...host.principals.map(principal => ({ path: hostTokenFile(layout, principal.id), mode: '0600' as const, holds: `${principal.role} credential of ${principal.id}` })),
       { path: hostDatabasePasswordFile(layout), mode: '0600', holds: 'the Postgres password' },
+      { path: hostGithubKeyFile(layout), mode: '0600', holds: 'the GitHub App key workers\' one-hour push and pull request tokens are minted from' },
       ...accounts.map(account => ({ path: account.credentialFile, mode: '0600' as const, holds: `the ${account.runtime} login of account ${account.name}, written when it is connected from the dashboard` })),
     ],
     accounts,
@@ -499,7 +557,7 @@ function hostActions(ctx: AdapterContext, observation: AdapterObservation): Plan
   const host = ctx.host!;
   const state = observation.installed ? 'update' as const : 'create' as const;
   const actions: PlanAction[] = [
-    { id: 'host.bootstrap', target: 'host', state, title: `Prepare the machine: Docker, Node 24 and git when missing, the ${HOST_USER} account with lingering, and ${plan.configDirectory} (mode 0700)`, command: 'sh -c <bootstrap script>' },
+    { id: 'host.bootstrap', target: 'host', state, title: `Prepare the machine: Docker, Node 24, git, gh and bubblewrap when missing, the ${HOST_USER} account with lingering, and ${plan.configDirectory} (mode 0700)`, command: 'sh -c <bootstrap script>' },
     { id: 'host.credentials', target: 'host', state, title: `Write every Graphyard credential on the host only, mode 0600, owned by ${HOST_USER}; the provisioning token never leaves this machine`, values: plan.credentials.map(entry => ({ name: entry.path, value: REDACTED, secret: true, note: entry.holds })) },
     { id: 'host.graphyard', target: 'host', state, title: `Check out Graphyard at ${host.ref} in ${host.layout.graphyard} for the loop, the executors and restores`, command: `git clone ${GRAPHYARD_SOURCE} ${host.layout.graphyard}` },
     ...plan.units.filter(unit => unit.scope === 'system').map(unit => ({ id: `host.unit.${unit.role}`, target: 'host' as const, state, title: `Supervise ${unit.role} with the system unit ${unit.path} (Restart=always, starts at boot)`, command: `systemctl enable --now ${unit.name}` })),
@@ -507,6 +565,7 @@ function hostActions(ctx: AdapterContext, observation: AdapterObservation): Plan
     { id: 'host.runtimes', target: 'host', state, title: `Install the agent runtimes: ${plan.runtimes.map(runtime => `${runtime.kind} (${runtime.package})`).join(', ')}`, command: `npm install -g ${plan.runtimes.map(runtime => runtime.package).join(' ')}` },
     { id: 'host.herdr', target: 'host', state, title: `Install Herdr for ${HOST_USER}, supervise its server with the user unit ${host.layout.userUnitDirectory}/graphyard-herdr.service, and create the workspace ${plan.herdr.workspace}` },
     { id: 'host.checkout', target: 'host', state, title: `Clone ${ctx.repository} into ${plan.checkout}, the loop's working directory, with a one-hour GitHub App installation token passed on standard input (never stored)` },
+    { id: 'host.github', target: 'host', state, title: `Give workers a GitHub credential without anyone logging in: git's credential helper and the gh wrapper (${HOST_GH_WRAPPER}) mint one-hour App installation tokens narrowed to ${ctx.repository} (Contents and Pull requests write) from ${hostGithubKeyFile(host.layout)}; commits are made as the App's bot` },
     { id: 'host.environment', target: 'host', state, title: `Point the ${HOST_USER} user manager at ${host.layout.accountsDirectory} for login homes and ${host.layout.configDirectory} for credentials (${hostEnvironmentFile(host.layout)})` },
     { id: 'host.master', target: 'host', state, title: `Configure the master loop with the coordinator credential (master init --token-stdin) and supervise it as ${host.layout.userUnitDirectory}/graphyard-master.service` },
     { id: 'host.executors', target: 'host', state, title: `Supervise ${host.executors} executor slot(s) as graphyard-executor@N.service user units; the resident executor registers the host's connect key and serves every dashboard connect` },
@@ -526,6 +585,8 @@ export interface HostFleetRequest {
   url: string; adminToken: string; coordinatorToken: string; reviewer: string | null;
   /** A one-hour GitHub App installation token for cloning the managed repository; used on standard input, never stored. */
   cloneToken: string;
+  /** The Graphyard App, whose key the host keeps (0600) so workers can push and open pull requests. */
+  github: HostGithubApp;
   fetch: typeof fetch; log: (line: string) => void;
 }
 
@@ -590,6 +651,12 @@ export async function installHostFleet(ctx: AdapterContext, request: HostFleetRe
   };
   let herdrWorkspace = workspaceIn((await asUser(remote, HOST_HOME, layout.herdr, ['workspace', 'list'], { allowFailure: true })).stdout);
   if (!herdrWorkspace) herdrWorkspace = workspaceIn((await asUser(remote, HOST_HOME, layout.herdr, ['workspace', 'create', '--cwd', layout.checkout, '--label', label], { allowFailure: true })).stdout);
+
+  // Workers push and open pull requests as the App: its key and the token helper go to <install>/github
+  // (0600), gh is wrapped to take its token from the helper, and git is pointed at the helper.
+  ctx.vault.add(request.github.privateKey);
+  for (const file of hostGithubFiles(layout, ctx.repository, request.github, owner)) await remote.putFile(file.path, file.content, file.mode, file.owner);
+  for (const [name, value] of hostGitConfig(layout, request.github)) await asUser(remote, HOST_HOME, 'git', ['config', '--global', name, value]);
 
   // A private repository needs a credential the graphyard account does not hold: the App's
   // installation token arrives on standard input and reaches git through a one-shot credential

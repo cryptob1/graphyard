@@ -512,6 +512,7 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
       url, adminToken: session.tokens.get(principalOfRole(session.principals, 'admin').id)!, coordinatorToken: session.tokens.get(principalOfRole(session.principals, 'coordinator').id)!,
       reviewer: session.inputs.reviewer ?? null, fetch: deps.fetch, log,
       cloneToken: vault.add((await installationToken(facts, deps.fetch)).token),
+      github: { appId: facts.appId, installationId: facts.installationId, slug: facts.slug, privateKey: facts.privateKey, ...(facts.botUserId ? { botUserId: facts.botUserId } : {}) },
     })
     : null;
   const profiles = fleet ? fleet.profiles : await registerProfiles(session, url);
@@ -567,7 +568,7 @@ async function authenticatedStatus(session: InstallSession, url: string) {
   return { actor: String(body.actor.id), role: String(body.actor.role), repository: String(body.repository), githubAppId: body.githubAppId ?? null };
 }
 
-async function resolveApp(session: InstallSession, url: string, record: InstallRecord): Promise<AppFacts & { slug: string }> {
+async function resolveApp(session: InstallSession, url: string, record: InstallRecord): Promise<AppFacts & { slug: string; botUserId?: number }> {
   const { deps } = session;
   if (!deps.githubApp) throw new Error('No GitHub App flow is available in this environment');
   const facts = await deps.githubApp({ root: session.root, repository: session.inputs.repository, origin: url, file: appCredentialFile(session) });
