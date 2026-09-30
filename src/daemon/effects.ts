@@ -214,6 +214,12 @@ export interface DaemonEffects {
   /** Tells the process supervisor the loop is alive, so a hung cycle becomes a restart. */
   notify?: (state: 'ready' | 'alive') => void | Promise<void>;
   /**
+   * Sets this process's watchdog window with the supervisor (GY-947): systemd's WATCHDOG_USEC
+   * notification, which a unit with NotifyAccess=all accepts from the service at runtime. The loop
+   * uses it only to lengthen a window too short for its interval.
+   */
+  setWatchdog?: (windowMs: number) => void | Promise<void>;
+  /**
    * Mid-session capacity (GY-89). `sessionOutput` reads the tail of a stopped session's own
    * terminal, which is where a runtime says its provider account is spent; `reportCapacity`
    * records what the loop observed on the item. A loop wired without the two never fails a
@@ -791,6 +797,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       persist: persistLoop,
     }),
     notify: async state => { await run('systemd-notify', state === 'ready' ? ['--ready'] : ['WATCHDOG=1']); },
+    setWatchdog: async windowMs => { await run('systemd-notify', [`WATCHDOG_USEC=${Math.round(windowMs) * 1000}`]); },
     persist: persistLoop,
   };
 }

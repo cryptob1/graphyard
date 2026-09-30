@@ -32,7 +32,8 @@ RestartSec=10
 # The loop sends a keep-alive after every completed cycle, so systemd restarts it when the cycles
 # stop rather than when the process does. The window must stay longer than two cycle intervals
 # (run.intervalSeconds, 20 by default) or a healthy loop would be restarted mid-cycle; the loop
-# records that mismatch by name in `master status` instead of obeying it.
+# raises a shorter window for itself (WATCHDOG_USEC, admitted by NotifyAccess=all) to six intervals,
+# and records the mismatch by name in `master status` only when it cannot.
 WatchdogSec=180
 NotifyAccess=all
 TimeoutStopSec=120

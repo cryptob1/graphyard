@@ -306,7 +306,8 @@ export const upgradeStateSchema = z.object({
   /** The verified deployed release the checkout was last aligned with: a new sha is a new trigger. */
   alignedRelease: z.string().regex(/^[0-9a-f]{7,40}$/).nullable().default(null),
   /** The checkout moved to `to` and the restarts it owes are not done yet: the fleet, then the loop itself. */
-  pending: z.object({ from: z.string().nullable(), to: z.string(), code: z.boolean() }).strict().nullable().default(null),
+  /** `selfOnly`: the fleet was restarted and only the loop's own re-execution is still owed (GY-947). */
+  pending: z.object({ from: z.string().nullable(), to: z.string(), code: z.boolean(), selfOnly: z.boolean().optional() }).strict().nullable().default(null),
   /** The last alignment that completed: what was checked out, whether loaded code moved, and what was restarted. */
   last: z.object({ at: z.string(), from: z.string().nullable(), to: z.string(), code: z.boolean(), executors: z.string().max(300).nullable(), self: z.boolean() }).strict().nullable().default(null),
   /** Why the checkout was left untouched (dirty, not detached): master status names it until it clears. */

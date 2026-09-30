@@ -7,7 +7,7 @@ import { faultClassPolicyFromEnv, type FaultClassPolicy } from '../model/fault-c
 import { faultRecurrenceReport } from './faults.js';
 import { diagnosisReport } from './diagnosis.js';
 import { latencyBudget, silenceReport } from './metrics.js';
-import { boundedPersist, cycleCost, cycleTimes, cycleDelay, cycleFailureCeiling, describeFailingCall, loopLiveness, namedEffects, noteCycleFailure, noteCycleSuccess, noteUnhandled, watchdogPlan } from './liveness.js';
+import { boundedPersist, cycleCost, cycleTimes, cycleDelay, cycleFailureCeiling, describeFailingCall, loopLiveness, namedEffects, noteCycleFailure, noteCycleSuccess, noteUnhandled, requiredWatchdogMs, watchdogFit, watchdogPlan } from './liveness.js';
 import type { DaemonEffects } from './effects.js';
 import { Launcher, defaultLaunchConcurrency, runCycle } from './cycle.js';
 import { detailChanged } from './decisions.js';
@@ -126,8 +126,23 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
   // Under a supervisor that watches for keep-alives, a hung cycle is a restart rather than a
   // silent pipeline; a window that would restart a healthy loop is recorded and left to the
   // supervisor's configuration rather than worked around.
-  const watchdog = watchdogPlan(options.environment ?? process.env, interval());
-  for (const action of await noteWatchdog(state, watchdog, new Date(now()).toISOString(), effects.persist)) log(`[graphyard-master] ${action.kind} ${action.state}: ${action.detail}`);
+  // GY-947: a window too short for the interval — a hand-installed unit, or one written for another
+  // interval — is raised for this process through the supervisor's own notification, to the window
+  // the generated unit writes; only a window the loop cannot raise is recorded as the fault.
+  let watchdog = watchdogPlan(options.environment ?? process.env, interval());
+  const fitWatchdog = async () => {
+    if (watchdog.supervised && watchdog.refusal && effects.setWatchdog) {
+      const windowMs = requiredWatchdogMs(interval());
+      try {
+        await effects.setWatchdog(windowMs);
+        log(`[graphyard-master] the supervisor's watchdog window (${Math.round(watchdog.windowMs! / 1000)}s) is not longer than two cycle intervals; the loop raised it to ${windowMs / 1000}s for this process`);
+        watchdog = watchdogFit(windowMs, interval());
+        return;
+      } catch (error) { watchdog = { ...watchdog, refusal: `${watchdog.refusal}; the loop could not raise it to ${windowMs / 1000}s itself: ${message(error)}` }; }
+    }
+    for (const action of await noteWatchdog(state, watchdog, new Date(now()).toISOString(), effects.persist)) log(`[graphyard-master] ${action.kind} ${action.state}: ${action.detail}`);
+  };
+  await fitWatchdog();
   if (watchdog.supervised) { try { await effects.notify?.('ready'); } catch (error) { log(`[graphyard-master] supervisor notification failed: ${message(error)}`); } }
   let stopping = false;
   // A supervisor's SIGTERM must land during the wait, not one whole interval later.
@@ -190,6 +205,8 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
       try {
         if (options.reload) {
           for (const action of await noteConfigReload(state, await options.reload().then(reload => { config = reload.config; return reload; }), effects.persist)) log(`[graphyard-master] ${action.kind} ${action.state}: ${action.detail}`);
+          // A reloaded interval is judged against the window this process holds.
+          if (watchdog.supervised) { watchdog = watchdogFit(watchdog.windowMs, interval()); await fitWatchdog(); }
         }
         phase = 'cycle';
         const result = await runCycle(config, state, effects, now, launcher);

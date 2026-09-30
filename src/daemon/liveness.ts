@@ -5,6 +5,7 @@ import { boundDaemonState, type CycleFailures, type CycleMetrics, type CycleStep
 import type { LatencyBudget, SilenceReport } from './metrics.js';
 import type { DaemonEffects } from './effects.js';
 import { slowestSteps } from '../master/timings.js';
+import { loopWatchdogSeconds } from '../supervisor.js';
 
 // ---- The loop's own liveness ---------------------------------------------------------------
 export type LoopState = 'running' | 'slow' | 'stalled' | 'absent';
@@ -257,12 +258,22 @@ export function slowCycleAttention(report: { liveness: Pick<LoopLiveness, 'state
  * The supervisor's watchdog, when the loop runs under one. A cycle that hangs leaves the process
  * alive and the pipeline silent, which no `Restart=` setting notices; a keep-alive per cycle turns
  * a stalled cycle into a supervised restart. A window shorter than two intervals would restart a
- * healthy loop instead, so that is refused by name rather than obeyed.
+ * healthy loop instead, so that is refused by name rather than obeyed; the loop then raises its own
+ * window to `requiredWatchdogMs` (GY-947), and records the refusal only when it cannot.
  */
 export function watchdogPlan(environment: Record<string, string | undefined>, intervalMs: number) {
   if (!environment.NOTIFY_SOCKET) return { supervised: false, windowMs: null as number | null, refusal: null as string | null };
   const microseconds = Number(environment.WATCHDOG_USEC);
-  const windowMs = Number.isFinite(microseconds) && microseconds > 0 ? Math.round(microseconds / 1000) : null;
+  return watchdogFit(Number.isFinite(microseconds) && microseconds > 0 ? Math.round(microseconds / 1000) : null, intervalMs);
+}
+/**
+ * The window the loop asks its supervisor for when the unit's own is too short for the interval:
+ * the one the generated unit writes for it (`loopWatchdogSeconds`), so a hand-installed or older
+ * unit converges on what `master init` would install instead of restarting a healthy loop.
+ */
+export const requiredWatchdogMs = (intervalMs: number) => loopWatchdogSeconds(Math.ceil(intervalMs / 1000)) * 1000;
+/** A supervised window judged against the interval: the refusal names a window too short for it. */
+export function watchdogFit(windowMs: number | null, intervalMs: number) {
   const seconds = (ms: number) => `${Math.round(ms / 1000)}s`;
   return { supervised: true, windowMs,
     refusal: windowMs !== null && windowMs <= 2 * intervalMs
