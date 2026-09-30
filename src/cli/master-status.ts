@@ -94,33 +94,30 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const dispatch = 'error' in dispatchCursor ? { running: false, failures: [] as { requestId: string; kind: string; attempts: number; reason: string; at: string; nextAt: string }[], error: dispatchCursor.error } : withStuckRequests(dispatchSummary(dispatchCursor, Date.now(), master.run.dispatchIntervalSeconds * 1000, master.run.awaitReviewers ?? defaultAwaitReviewers.logins), stuck.stuck);
   // A dispatcher failing its tick launches nothing; it is named before the requests it is not launching.
   const dispatchItems = dispatchFailureAttention(dispatch);
-  const workerLaunches = await timedStep('worker launches', () => workerLaunchStatus(root, master));
-  dispatchItems.push(...workerLaunches.items);
+  // Start failures per account and each profile's last launch (GY-417).
+  const launches = await timedStep('worker launches', () => workerLaunchStatus(root, master));
+  dispatchItems.push(...launches.items);
   const containment = await timedStep('containment', () => assessContainment(snapshot.work, { hostId: master.hostId, observedAt: snapshot.now, clockOffset }));
-  // Disk is reported from the host, not from the cursor: the volume filling is what stops it. The
-  // plan is `master reclaim`'s, over the cached inventory (GY-360): a thousand tree walks per call
-  // made status take minutes.
+  // Disk is read from the host: the volume filling stops the loop. The plan is `master reclaim`'s,
+  // over the cached inventory (GY-360).
   const worktrees = worktreesDirectory(root);
   const inventory = await timedStep('worktrees', () => statusWorktreeInventory(root).catch(() => ({ entries: [], at: null, cached: false }))), trees = inventory.entries, reclaimPlan = planWorktreeReclaim(trees, snapshot.work, { now: Date.now(), idleMs: reclaimIdleMs(master) });
   const disk = diskPressure(worktrees, await freeBytes(worktrees), diskThresholdBytes(master), reclaimPlan);
-  // The managed worktree root is a volume of its own as often as not: proof and review checkouts
-  // live there, and it is judged against its own minimum and budget before a write there fails.
+  // The managed worktree root, often its own volume, is judged against its own minimum and budget.
   const managedRoot = await timedStep('managed root', () => managedRootStatus(root, master, [...reviewRecords, ...producerRecords]));
   const diskAttention = [...diskPressureAttention(disk), ...managedRoot.attention];
   const daemonState = await readDaemonState(root, master).catch(error => ({ error: error instanceof Error ? error.message : 'Master daemon state is unreadable' }));
   const intervalMs = master.run.intervalSeconds * 1000;
   const cycling = 'error' in daemonState ? null : daemonSummary(daemonState, Date.now(), intervalMs, master.hostId);
   const daemon = cycling ?? { running: false, error: (daemonState as { error: string }).error };
-  // The loop's own health comes before every work item: an absent or stalled coordinator is why
-  // nothing else on this list is moving; a cycle past its interval names its costly step.
+  // The loop's own health comes first: a stalled coordinator is why nothing else moves.
   const loopItems: AttentionItem[] = cycling
     ? [...loopAttention({ liveness: cycling.liveness, silence: cycling.silence, budget: cycling.budget, failures: cycling.failures, cost: cycling.cost }), ...slowCycleAttention(cycling), ...approverLaunchAttention(cycling)]
     : [{ subject: 'loop', text: `The master loop's cursor cannot be read, so whether it is cycling is unknown: ${(daemonState as { error: string }).error}`, ...agentOwner('master', 'graphyard master restart (a supervised deployment restarts it on its own: systemctl --user restart graphyard-master)') }];
   // Browser administration is reported beside the work it unblocks: a pending sudo code is
   // the one thing the operator must act on, and the recent ledger entries say who changed what.
   const administration = { browser: master.browser ? { profile: master.browser.profile } : null, ...summarizeAdministration((await readAdministrationLedger(root)).entries, await readSudoState(root)) };
-  // A worker session Herdr no longer reports, on an assignment whose lease is still advancing, is
-  // an orphaned supervisor rather than a session that finished; it is named with what reclaims it.
+  // A worker session Herdr no longer reports, its lease still advancing, is an orphaned supervisor.
   // Reviewer and producer profiles go in with their concurrency (GY-107): status reports, per
   // role, sessions running against the limit and the longest wait for a slot.
   const mergeQueue = mergeQueueStatus(master, snapshot, coordinator);
@@ -129,7 +126,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     snapshot.work, master.workers, runtime, Date.parse(snapshot.now)));
   // A check failed on the clock says so, against its budget; a routed scope request, its approver.
   const status = routedScopeStatus(await timedStep('timing failures', () => qualifyTimingFailures(sessions, snapshot.work, master.repository, ghCheckAnnotations(master.repository))), snapshot.work, cycling?.approvals);
-  for (const worker of status.workers) Object.assign(worker, workerLaunches.rows[worker.profile] ?? {});
+  for (const worker of status.workers) Object.assign(worker, launches.rows[worker.profile] ?? {});
   // Rework rounds by cause (GY-643), out-of-item causes removed, cached beside the worktree
   // inventory (GY-725); a failed read marks the section.
   try { status.speed.reworkRounds = await reworkRoundsWithOwnCauses(status.speed.reworkRounds, masterApi, snapshot, 100, { root }); }
