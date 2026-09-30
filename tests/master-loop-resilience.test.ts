@@ -1,8 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID, generateKeyPairSync } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -17,6 +16,7 @@ import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, removeR
 import { launchProducer, producerIdleGraceMs, producerPrompt, readProducerLedger, reconcileProducers, sessionRetries, sessionRetry, sessionRetryBaseMs, sessionRetryLimit, summarizeProducers, unstartedRetryLimit, type ProducerRecord } from '../src/producer.js';
 import { emptyDispatchCursor, readDispatchCursor, runAutoDispatch, runDispatchTick, tickReadTimeout, type DispatchEffects } from '../src/auto-dispatch.js';
 import { emptyDaemonState, noteConfigReload, readDaemonState, runCycle, runDaemon, type DaemonEffects } from '../src/master-daemon.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 // @ts-expect-error Dependency-free operator script.
 import { assertRosterSafe, awaitServedTokens, generatedProducer, mergeRoster, parseOptions, pendingSecretSyncs, rosterPreview, secretsDue, secretSyncRecord, secretsToSync } from '../scripts/configure-integrations.mjs';
 import { readMasterGuide } from './helpers/master-guide.js';
@@ -63,14 +63,14 @@ const requested = (overrides: Partial<Work> = {}) => {
 };
 
 async function repository() {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-resilience-'));
+  const root = await temporaryDirectory('resilience');
   execFileSync('git', ['init', '-q', root]);
   execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
   return root;
 }
 /** A master installed in a throwaway repository, its credentials outside it. */
 async function installed(options: { reviewer?: boolean; herdrWorkspace?: string } = {}) {
-  const root = await repository(), credentials = await mkdtemp(join(tmpdir(), 'graphyard-resilience-credentials-'));
+  const root = await repository(), credentials = await temporaryDirectory('resilience-credentials');
   await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory: credentials, herdrWorkspace: options.herdrWorkspace ?? 'wE' }, coordinatorStatus as typeof fetch);
   if (options.reviewer) await bindReviewer(root, { appId: 5678, installationId: 91011, slug: 'graphyard-reviewer', privateKey, credentialDirectory: join(credentials, 'reviewers') }, async () => ({ repository: 'owner/project', permissions: { metadata: 'read', contents: 'read', pull_requests: 'write' } }));
   const token = async (name: string) => { const file = join(credentials, `${name}.token`); await writeFile(file, `${name}-token-`.padEnd(40, 'x'), { mode: 0o600 }); return file; };
@@ -161,7 +161,7 @@ test('integration:producer-session-retry — a failed or expired producer sessio
   } finally { await cleanup(); }
 
   // The loop: a failed session waits for its retry time, then is relaunched for the same request; a reviewer session likewise.
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-resilience-loop-'));
+  const directory = await temporaryDirectory('resilience-loop');
   try {
     const coordinator = join(directory, 'coordinator.token'); await writeFile(coordinator, coordinatorToken, { mode: 0o600 });
     const config = masterConfig(coordinator, { reviewer: { appId: 5678, installationId: 91011, slug: 'graphyard-reviewer', credentialFile: join(directory, 'reviewer.json'), boundAt: at }, reviewers: [{ name: 'claude-reviewer', agentName: 'review-claude-1', kind: 'claude', agentArgs: [], approvals: 'auto', environment: {} }] });
@@ -220,7 +220,7 @@ test('integration:master-config-reload — a running loop adopts master.json cha
   } finally { await cleanup(); }
 
   // The coordination loop adopts autoMerge between cycles and records a refusal once, as an escalation naming the setting.
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-resilience-daemon-'));
+  const directory = await temporaryDirectory('resilience-daemon');
   try {
     const coordinator = join(directory, 'coordinator.token'); await writeFile(coordinator, coordinatorToken, { mode: 0o600 });
     const manual = masterConfig(coordinator, { autoMerge: false }), automatic = masterConfig(coordinator, { autoMerge: true });
@@ -250,7 +250,7 @@ test('integration:master-config-reload — a running loop adopts master.json cha
   } finally { await rm(directory, { recursive: true, force: true }); }
 
   // The dispatcher picks up a producer profile added to master.json: the request that waited for one launches.
-  const dispatchDirectory = await mkdtemp(join(tmpdir(), 'graphyard-resilience-dispatch-'));
+  const dispatchDirectory = await temporaryDirectory('resilience-dispatch');
   try {
     const coordinator = join(dispatchDirectory, 'coordinator.token'); await writeFile(coordinator, coordinatorToken, { mode: 0o600 });
     const bare = masterConfig(coordinator, { producers: [] }), equipped = masterConfig(coordinator);
@@ -345,7 +345,7 @@ test('integration:master-profile-management — producer profiles can be replace
 
 test('integration:loop-missing-worktree — the loop survives a registered worktree whose path is missing or hidden, and the example unit does not hide proof worktrees', async () => {
   const { root, credentials, cleanup } = await installed();
-  const outside = await mkdtemp(join(tmpdir(), 'graphyard-resilience-proof-'));
+  const outside = await temporaryDirectory('resilience-proof');
   try {
     execFileSync('git', ['-c', 'user.email=t@example.com', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init'], { cwd: root });
     const missing = join(outside, 'graphyard-proof-gy-69-missing'), hiddenParent = join(outside, 'private'), hidden = join(hiddenParent, 'graphyard-proof-gy-69-hidden');
@@ -602,7 +602,7 @@ test('unit:autonomous-session-prompts — reviewer, producer and worker sessions
   } finally { await cleanup(); }
 
   // A worker blocked on a prompt while it holds its assignment is recorded as a failed session, once.
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-resilience-worker-'));
+  const directory = await temporaryDirectory('resilience-worker');
   try {
     const coordinator = join(directory, 'coordinator.token'); await writeFile(coordinator, coordinatorToken, { mode: 0o600 });
     const workerCredential = join(directory, 'worker.token'); await writeFile(workerCredential, 'worker-token-'.padEnd(40, 'x'), { mode: 0o600 });

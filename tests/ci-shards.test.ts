@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { dependencyMap, listTestFiles, mergeDurations, readDurations, selectAffected, selectForRun, shardFiles, shardImbalance } from '../scripts/ci-tests.mjs';
 import { nestedFirst, nestedPortGap, nodeTestArgs, runTests } from './helpers/run-tests.js';
 import { readWorkflow } from '../src/protection.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-499: the required `test` check ran the whole suite on one runner in about fifteen minutes, on
 // every rework round, base refresh and queue tip. It is now an aggregate over a matrix of shard jobs
@@ -53,17 +53,15 @@ test('unit:ci-sharded — the required test check aggregates a matrix of four du
   assert.deepEqual(split.map(entry => entry.durationMs), [90, 90]);
 
   // The runner runs one shard of the selection, and nothing at all for an empty one.
-  const cwd = await mkdtemp(join(tmpdir(), 'graphyard-ci-shards-'));
-  try {
-    await writeFile(join(cwd, 'list.txt'), 'tests/one.test.ts\ntests/two.test.ts\n'); await writeFile(join(cwd, 'none.txt'), '');
-    const first = nodeTestArgs(cwd, ['--shard', '1/2', '--files-from', 'list.txt']), second = nodeTestArgs(cwd, ['--shard=2/2', '--files-from', 'list.txt']);
-    assert.deepEqual([...first.args, ...second.args].filter(arg => !arg.startsWith('-')).sort(), ['tests/one.test.ts', 'tests/two.test.ts']);
-    assert.deepEqual([first.ordered, second.ordered, nodeTestArgs(cwd, ['--shard', '1/2', '--test-only', 'tests/one.test.ts']).ordered], [true, true, false]);
-    assert.deepEqual(nodeTestArgs(cwd, ['--shard', '1/1', '--durations', 'd.jsonl', '--files-from', 'list.txt']).args.slice(0, 2), ['--durations', join(cwd, 'd.jsonl')]);
-    assert.equal(nodeTestArgs(cwd, ['--shard', '3/3', '--files-from', 'list.txt']).empty, true);
-    assert.equal(nodeTestArgs(cwd, ['--files-from', 'none.txt']).empty, true);
-    assert.ok(nodeTestArgs(cwd, ['--durations', 'd.jsonl', 'tests/one.test.ts']).args.some(arg => arg.endsWith('file-durations.mjs')));
-  } finally { await rm(cwd, { recursive: true, force: true }); }
+  const cwd = await temporaryDirectory('ci-shards');
+  await writeFile(join(cwd, 'list.txt'), 'tests/one.test.ts\ntests/two.test.ts\n'); await writeFile(join(cwd, 'none.txt'), '');
+  const first = nodeTestArgs(cwd, ['--shard', '1/2', '--files-from', 'list.txt']), second = nodeTestArgs(cwd, ['--shard=2/2', '--files-from', 'list.txt']);
+  assert.deepEqual([...first.args, ...second.args].filter(arg => !arg.startsWith('-')).sort(), ['tests/one.test.ts', 'tests/two.test.ts']);
+  assert.deepEqual([first.ordered, second.ordered, nodeTestArgs(cwd, ['--shard', '1/2', '--test-only', 'tests/one.test.ts']).ordered], [true, true, false]);
+  assert.deepEqual(nodeTestArgs(cwd, ['--shard', '1/1', '--durations', 'd.jsonl', '--files-from', 'list.txt']).args.slice(0, 2), ['--durations', join(cwd, 'd.jsonl')]);
+  assert.equal(nodeTestArgs(cwd, ['--shard', '3/3', '--files-from', 'list.txt']).empty, true);
+  assert.equal(nodeTestArgs(cwd, ['--files-from', 'none.txt']).empty, true);
+  assert.ok(nodeTestArgs(cwd, ['--durations', 'd.jsonl', 'tests/one.test.ts']).args.some(arg => arg.endsWith('file-durations.mjs')));
 
   // A shard's measured durations refresh the baseline, and the rest of the record is kept.
   const merged = mergeDurations({ schema: 1, files: { 'tests/a.test.ts': 5, 'tests/gone.test.ts': 9 } }, ['{"file":"tests/b.test.ts","durationMs":1234.4,"passed":true}\n'], ['tests/a.test.ts', 'tests/b.test.ts']);
@@ -71,7 +69,7 @@ test('unit:ci-sharded — the required test check aggregates a matrix of four du
 });
 
 async function fixture(files: Record<string, string>) {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-affected-'));
+  const root = await temporaryDirectory('affected');
   for (const [path, text] of Object.entries(files)) { await mkdir(dirname(join(root, path)), { recursive: true }); await writeFile(join(root, path), text); }
   return root;
 }
@@ -132,12 +130,10 @@ test('a test run started inside another test run reserves its ports above the pa
   // This file runs inside the suite's window; a run it starts lands above that window's every offset.
   const parent = Number(process.env.GRAPHYARD_TEST_PORT);
   assert.ok(parent > 0, 'the suite runs under a reserved GRAPHYARD_TEST_PORT');
-  const project = await mkdtemp(join(tmpdir(), 'graphyard-nested-run-'));
-  try {
-    await mkdir(join(project, 'tests'));
-    await writeFile(join(project, 'tests/port.test.ts'), "import { test } from 'node:test';\ntest('reserved', () => {});\n");
-    const run = await runTests({ cwd: project, args: ['tests/port.test.ts'], stdio: 'pipe', ports: { span: 20 } });
-    assert.equal(run.code, 0, run.stdout + run.stderr);
-    assert.ok(run.base >= parent + nestedPortGap, `nested window ${run.base} lies above the parent's ${parent} and its offsets`);
-  } finally { await rm(project, { recursive: true, force: true }); }
+  const project = await temporaryDirectory('nested-run');
+  await mkdir(join(project, 'tests'));
+  await writeFile(join(project, 'tests/port.test.ts'), "import { test } from 'node:test';\ntest('reserved', () => {});\n");
+  const run = await runTests({ cwd: project, args: ['tests/port.test.ts'], stdio: 'pipe', ports: { span: 20 } });
+  assert.equal(run.code, 0, run.stdout + run.stderr);
+  assert.ok(run.base >= parent + nestedPortGap, `nested window ${run.base} lies above the parent's ${parent} and its offsets`);
 });

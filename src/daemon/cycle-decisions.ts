@@ -1,6 +1,8 @@
 // Concern: cycle step 4c — request and supervise the routine decisions and their approver sessions.
 import { decisionSituation, uncitedRefusals } from '../model/approval.js';
 import type { Work } from '../model.js';
+import { detectRuntimeExhaustion } from '../master/environments.js';
+import { approverRuntime } from '../master/autonomy.js';
 import { canonicalJson } from '../onboarding.js';
 import { type ContainmentAssessment, type HerdrAgent, type RoleCapacity, approverProfile, ownLoginAccounts, approverSessionId, approverSessionName, approvedMerge, decisionInput } from '../master.js';
 import { type ApprovalWatch, approvalWatchSchema, carriedSession, type DaemonActionKind, latencySampleSchema, message, scopeMeasurementSchema } from './state.js';
@@ -8,7 +10,6 @@ import { decisionKey, scopeAnsweredAt, scopeKey, scopeOutcomeAnswered } from './
 import { readyToRetry } from './sessions.js';
 import { approvalStep, type ApprovalStep, boundDetail, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, maxApproverCloses, maxRefusalAnswers, maxApproverLaunches, maxDecisionRequests, namePaths, neededDecision, observedFrom, resolveCovers, reworkDecisionReason, refusalNamedIn, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, standingVerdict, withheldDecision } from './decisions.js';
 import { type DaemonEffects, failoverKey, record, stoppedStates } from './effects.js';
-import { detectExhaustion } from '../model/capacity.js';
 import { capacityRefusal } from '../fleet.js';
 import { sessionName } from '../session-name.js';
 import type { Cycle } from './cycle.js';
@@ -120,6 +121,19 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     // at a role concurrency of 1 the live slot would refuse it, and the id is the only way to end it.
     if (watch.session && !listed && !await endApproverSession(item, watch, `approver for ${watch.work} decision ${watch.decision} replaced`))
       throw new Error(`registry session ${watch.session} of the replaced approver could not be ended, so no replacement is launched while it holds the role's slot; ending it is tried again next cycle`);
+    // GY-924: the hold for an older decision's capacity-waiting relaunch is taken here, before the
+    // launch is counted and handed off, not inside the launcher slot: the launcher counts a body as
+    // running for its whole duration, so approver launches that waited in `start` while an older
+    // capacity relaunch was slow or hung filled the shared pool and left worker dispatches and
+    // session failovers queued for up to the stand-down. Held like a capacity wait (GY-182): nothing
+    // ran, so no launch is counted, the watch joins the oldest-first queue (GY-849), and the
+    // guarded relaunch path makes it once the launcher is clear. A cycle that settles its launches
+    // within itself has no shared pool; its inline wait in `start` stands.
+    if (!listed && cycle.detached && capacityRelaunchInFlight(watch.decision)) {
+      Object.assign(watch, { agentName: null, pane: null, capacity: `held behind another decision's capacity-waiting relaunch still on the launcher; its approver is launched once that settles`.slice(0, 500) });
+      await effects.persist(state);
+      return `held behind another decision's capacity-waiting relaunch on the launcher; its approver is launched once that settles`;
+    }
     Object.assign(watch, { launches: watch.launches + 1, agentName: name, pane: listed?.pane_id ?? null, launchedAt: stamp, account: adopted?.account ?? null, runtime: adopted?.runtime ?? null, session: adopted?.session ?? null });
     // GY-920: adopting a session that is already judging the decision ends any capacity wait the
     // watch still carried. The wait described a launch that never happened; kept, it would have
@@ -142,17 +156,18 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   };
   /** The approver launch the launcher runs, and what it did with the watch. */
   const start = async (item: Work, watch: ApprovalWatch) => {
-    // GY-920: the account grab is where oldest-first is won or lost (GY-849). The guarded relaunch
-    // path hands capacity-waiting decisions over one at a time, but a launch whose watch carries no
-    // capacity mark — a brand-new decision's first above all, requested after the older waiter was
-    // handed off — is handed off beside it, and with the launcher running more than one body at once
-    // its approver call could take the very account or slot the older waiter's relaunch was handed
-    // off for. So every approver launch holds here while another decision's capacity-waiting
-    // relaunch is still on the launcher, and makes its call only once that one has settled: first
-    // submitted, first served, whatever the concurrency. The wait is bounded; past it the launch
-    // proceeds as it did before, and the next cycle's guarded relaunch path applies.
-    const standDownBy = Date.now() + 300_000;
-    while (capacityRelaunchInFlight(watch.decision) && Date.now() < standDownBy) await new Promise(resolve => setTimeout(resolve, 50));
+    // GY-849: the account grab is where oldest-first is won or lost. A cycle that settles its
+    // launches within itself runs this body inline beside the step, so it holds here while another
+    // decision's capacity-waiting relaunch is still on the launcher and makes its call only once
+    // that one has settled: first submitted, first served, whatever the concurrency. The wait is
+    // bounded; past it the launch proceeds as it did before, and the next cycle's guarded relaunch
+    // path applies. The loop's own launcher never sees that wait (GY-924): it counts a body as
+    // running for its whole duration, so a waiting approver once held a shared slot while doing no
+    // work, and `launch` holds such launches back before submission instead.
+    if (!cycle.detached) {
+      const standDownBy = Date.now() + 300_000;
+      while (capacityRelaunchInFlight(watch.decision) && Date.now() < standDownBy) await new Promise(resolve => setTimeout(resolve, 50));
+    }
     let launched: Awaited<ReturnType<NonNullable<DaemonEffects['approver']>>>;
     try { launched = await effects.approver!(item, watch.decision); }
     catch (error) {
@@ -196,7 +211,9 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     if (!effects.sessionOutput || !effects.reportCapacity || !watch.agentName) return false;
     const agent = (await sessions()).agents.find(candidate => candidate.name === watch.agentName);
     if (!agent || !stoppedStates.includes(agent.agent_status ?? '')) return false;
-    const signal = await Promise.resolve(effects.sessionOutput(agent)).then(output => output ? detectExhaustion(output, clock) : null, () => null);
+    // Judged against the approver's own runtime's provider messages: free prose about a quota is
+    // not a provider limit notice, whatever it mentions (GY-421).
+    const signal = await Promise.resolve(effects.sessionOutput(agent)).then(output => output ? detectRuntimeExhaustion(output, watch.runtime ?? approverRuntime(config), clock) : null, () => null);
     if (!signal) return false;
     const session = `${watch.decision}:${watch.launchedAt ?? watch.launches}`;
     const key = failoverKey('approver', item, session), previous = state.actions[key];
