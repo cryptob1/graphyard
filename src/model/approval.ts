@@ -4,6 +4,7 @@ import { proofSchema } from './proof.js';
 import { criterionSchema, resourcesSchema } from './policy.js';
 import { implementerIdentities, proofExerciseSchema } from './evidence.js';
 import { standingEscalations } from './escalation.js';
+import { closureKinds } from './closure.js';
 import { reconciliationRefusalPrefix } from '../merge-queue.js';
 import { createSchema, escalationTriggers, operatorCapability, type OperatorCapability, type Principal, type Work } from './work.js';
 
@@ -59,9 +60,10 @@ export const decisionInputs = {
   // only the same head, base and grounds, never another ground on the same head.
   rework: z.object({ previousWorkerStopped: z.literal(true), binding: groundsBinding.optional() }).strict(),
   recover: z.object({ previousWorkerStopped: z.literal(true), binding: groundsBinding.optional() }).strict(),
+  // The triage closure (GY-402) binds its judgement (`triageAt`); the diagnostician's duplicate closure (GY-439) binds the item revision.
+  close: z.union([ z.object({ kind: z.enum(['superseded', 'obsolete', 'duplicate']), ref: z.string().regex(/^[A-Z][A-Z0-9]*-\d+$/).nullable(), reason: z.string().trim().min(1).max(2000), triageAt: z.iso.datetime() }).strict(),
+    z.object({ kind: z.enum(closureKinds), ref: z.string().trim().min(1).max(200).nullable().optional(), expectedRevision: revision }).strict()]),
   grant: z.object({ principal: principalId, patterns: z.array(z.string().min(1).max(200)).min(1).max(50), expectedRevision: z.number().int().min(0).optional() }).strict(),
-  // Bound to the triage judgement it applies (its `at`): a later judgement is a new decision.
-  close: z.object({ kind: z.enum(['superseded', 'obsolete', 'duplicate']), ref: z.string().regex(/^[A-Z][A-Z0-9]*-\d+$/).nullable(), reason: z.string().trim().min(1).max(2000), triageAt: z.iso.datetime() }).strict(),
   // Head-bound: the repair lane merges exactly this head (expectedHeadOid) and nothing else.
   'repair-merge': z.object({ sha }).strict(),
 } satisfies Record<DecisionAction, z.ZodType>;
@@ -253,7 +255,7 @@ export function requiredDecisionCapabilities(action: DecisionAction, input: any,
 export function decisionPrecondition(action: DecisionAction, input: any, work: Work): string | null {
   if (action === 'recover') return work.stage === 'done' && work.containmentQuarantine ? null : 'Containment recovery applies to delivered work that is still quarantined';
   if (work.stage === 'done') return 'Delivered work is immutable; create a follow-up task';
-  if ((action === 'release' || action === 'unblock' || action === 'resolve') && input.expectedRevision !== work.revision) return `Task revision changed (now ${work.revision}); reload and request again`;
+  if ((action === 'release' || action === 'unblock' || action === 'resolve' || (action === 'close' && input.expectedRevision !== undefined)) && input.expectedRevision !== work.revision) return `Task revision changed (now ${work.revision}); reload and request again`;
   if (action === 'release' && (work.stage !== 'backlog' || work.ready)) return 'Only unreleased backlog work can be released';
   if (action === 'unblock' && !work.blocker) return 'Task has no blocker to clear';
   if (action === 'resolve' && !standingEscalations(work).some(entry => entry.trigger === input.trigger)) return `No standing ${input.trigger} escalation; standing: ${standingEscalations(work).map(entry => entry.trigger).join(', ') || 'none'}`;
@@ -264,7 +266,7 @@ export function decisionPrecondition(action: DecisionAction, input: any, work: W
       return `The decision names ${String(input.sha).slice(0, 12)} but the current candidate is ${work.candidate?.sha.slice(0, 12) ?? 'none'} at policy revision ${work.policyRevision}`;
   }
   if (action === 'rework' && !work.submission) return 'Rework applies to submitted work';
-  if (action === 'close' && (work.triage?.state !== 'proposed' || work.triage.at !== input.triageAt)) return `${work.key} has no proposed triage closure from ${input.triageAt}; its triage is ${work.triage ? `${work.triage.state} from ${work.triage.at}` : 'not recorded'}`;
+  if (action === 'close' && input.triageAt !== undefined && (work.triage?.state !== 'proposed' || work.triage.at !== input.triageAt)) return `${work.key} has no proposed triage closure from ${input.triageAt}; its triage is ${work.triage ? `${work.triage.state} from ${work.triage.at}` : 'not recorded'}`;
   if (action === 'repair-merge') {
     if (work.repair !== 'merge-path') return `${work.key} does not carry "repair": "merge-path"; only a merge-path repair item may use the repair lane`;
     if (!work.candidate || work.candidate.sha !== input.sha) return `The decision names ${String(input.sha).slice(0, 12)} but the current candidate is ${work.candidate?.sha.slice(0, 12) ?? 'none'}`;

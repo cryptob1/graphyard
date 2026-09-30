@@ -1,20 +1,21 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { processJob, type GitHub } from '../src/github.js';
 import { server } from '../src/server.js';
 import { daemonEffects, routineDecision } from '../src/master-daemon.js';
+import { checkStates } from '../src/model/pr-steps.js';
+import { plainReason } from '../src/model/plain-status.js';
 import { refusalAction } from '../src/model/refusal-mapping.js';
 import { checkRerunVisibilityMs, queueRef, reconcileCheckReruns, rerunFailedChecksEvent, tipVerdict, type QueuePlacement, type QueueSpeculation } from '../src/merge-queue.js';
 import { defaultRerunFailedChecks, masterConfigSchema, maxRerunFailedChecks, rerunFailedChecks } from '../src/master/profiles.js';
 import { defaultOptimisticExclude } from '../src/optimistic-merge.js';
-import type { Observation, Principal, Work } from '../src/model.js';
+import { evaluate, type Observation, type Principal, type Work } from '../src/model.js';
 
 // GY-516: a single infrastructure flake on a merge-queue tip ejected the validated head and cost the
 // whole queue a review, proof and CI round. A failed required check is rerun once on the same sha
@@ -28,7 +29,8 @@ let database: EmbeddedPostgres, store: Store, engine: Engine;
 let pr = 700;
 before(async () => {
   const port = Number(process.env.GRAPHYARD_TIP_FLAKE_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 516);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-tip-flake-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  const databaseDir = await temporaryDirectory('tip-flake');
+  database = new EmbeddedPostgres({ databaseDir, user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'owner/project'); engine.controlPlaneAppId = 1234;
@@ -179,7 +181,7 @@ test('unit:tip-flake-rerun-once — a failed check on a candidate head outside t
   step = await reconcile(step.work, [run('test', 41, 'failure'), run('test', 43, 'failure'), run('typecheck', 42, 'success')]);
   assert.deepEqual(step.reruns, []);
   assert.deepEqual(step.work.checkReruns!.map(entry => entry.state), ['failed']);
-  assert.deepEqual(gate(step.work, 'test').reasons, [failing]);
+  assert.deepEqual(gate(step.work, 'test').reasons, [failing + '; rerun: failed again after rerunning its failed jobs']);
   // The second failure on the same sha is the worker's: the rework round is asked for as before.
   assert.equal(refusalAction(step.work, 'test', failing), 'request-rework');
   assert.deepEqual([routineDecision(step.work, { autoMerge: true }, Date.now())?.action, routineDecision(step.work, { autoMerge: true }, Date.now())?.binding], ['rework', `${head}:ci:test`]);
@@ -248,4 +250,104 @@ test('unit:tip-flake-rerun-configurable — mergeQueue.rerunFailedChecks default
     observation: { candidate: { sha: head, baseSha: base }, merged: false, checks: [run('test', 61, 'failure'), run('test', 62, 'failure')] } } as unknown as Work;
   assert.deepEqual(reconcileCheckReruns(item, [15368], 1, new Date()).transitions, [], 'one rerun spent at the default');
   assert.deepEqual(reconcileCheckReruns(item, [15368], 2, new Date()).transitions.map(entry => [entry.kind, entry.rerun.failedRunId]), [['check.rerun.owed', 62]]);
+});
+
+test('manual:review-followups-triaged GY-731.1: gate, rerun hold and rework select the same trusted run by ID', async () => {
+  await clearQueue();
+  const main = sha40('b731'), head = sha40('a731');
+  let work = await submitted('Trusted rerun selection');
+  const checks = [
+    { ...run('test', 101, 'failure'), attempt: 8 },
+    run('typecheck', 102, 'success'),
+    { ...run('test', 999, 'failure'), appId: 777, attempt: 99 },
+  ];
+  work = await engine.observe(work.id, work.revision, seen(work, { sha: head, baseSha: main }, checks));
+  assert.equal(work.queue ?? null, null);
+  assert.match(gate(work, 'test').reasons[0], /rerun: one rerun of its failed jobs is owed/);
+  assert.equal(checkStates(work, [15368]).find(check => check.name === 'test')?.state, 'failed');
+  assert.match(plainReason(gate(work, 'test').reasons[0], 'test').text, /rerun: one rerun.*owed/);
+  assert.equal(routineDecision(work, { autoMerge: true }, Date.now()), null);
+  assert.equal(refusalAction(work, 'test', gate(work, 'test').reasons[0]), 'resync');
+  let step = await reconcile(work, checks);
+  assert.deepEqual(step.reruns, [101], 'the unrelated App is never rerun');
+  assert.match(gate(step.work, 'test').reasons[0], /rerun: its failed jobs are rerunning \(workflow run 9001\)/);
+  assert.equal(routineDecision(step.work, { autoMerge: true }, Date.now()), null);
+  // A larger check-run ID wins even when an older run has a higher workflow attempt.
+  step = await reconcile(step.work, [...checks, { ...run('test', 103, 'pending'), attempt: 1 }]);
+  assert.equal(routineDecision(step.work, { autoMerge: true }, Date.now()), null);
+  assert.equal(refusalAction(step.work, 'test', gate(step.work, 'test').reasons[0]), 'resync');
+  step = await reconcile(step.work, [...checks, { ...run('test', 103, 'success'), attempt: 1 }]);
+  assert.equal(gate(step.work, 'test').passed, true);
+  assert.equal(routineDecision(step.work, { autoMerge: true }, Date.now()), null);
+});
+
+test('manual:review-followups-triaged GY-731.2: custom and empty CI trust configurations reach downstream rework decisions', async () => {
+  await clearQueue();
+  const custom = new Engine(store, [777], 120, 'owner/project');
+  let work = await submitted('Custom CI rerun selection');
+  const candidate = { sha: sha40('a732'), baseSha: sha40('b732') };
+  const checks = [{ ...run('test', 10, 'failure'), appId: 777 }, run('test', 999, 'failure'), { ...run('typecheck', 11, 'success'), appId: 777 }];
+  work = await custom.observe(work.id, work.revision, seen(work, candidate, checks));
+  assert.deepEqual(gate(work, 'test').ciAppIds, [777]);
+  assert.equal(routineDecision(work, { autoMerge: true }, Date.now()), null);
+  work = await custom.observe(work.id, work.revision, seen(work, candidate, [...checks, { ...run('test', 12, 'failure'), appId: 777 }]));
+  assert.equal(refusalAction(work, 'test', gate(work, 'test').reasons[0]), 'request-rework');
+  assert.equal(routineDecision(work, { autoMerge: true }, Date.now())?.action, 'rework');
+  const empty = new Engine(store, [], 120, 'owner/project');
+  work = await empty.observe(work.id, work.revision, seen(work, candidate, checks));
+  assert.deepEqual(gate(work, 'test').ciAppIds, []);
+  assert.equal(routineDecision(work, { autoMerge: true }, Date.now()), null);
+  assert.equal(refusalAction(work, 'test', gate(work, 'test').reasons[0]), 'resync');
+});
+
+test('manual:review-followups-triaged GY-731.4: owed reruns expire without a visible run and are never requested twice', async () => {
+  await clearQueue();
+  let work = await submitted('Lost rerun request');
+  const candidate = { sha: sha40('a733'), baseSha: sha40('b733') };
+  work = await engine.observe(work.id, work.revision, seen(work, candidate, [run('test', 10, 'failure')]));
+  const now = new Date(), at = new Date(now.getTime() - checkRerunVisibilityMs).toISOString();
+  work = { ...work, checkReruns: [{ ...work.checkReruns![0], at }] };
+  for (const checks of [[run('test', 10, 'failure')], [], [{ ...run('test', 999, 'pending'), appId: 777 }]]) {
+    const result = reconcileCheckReruns({ ...work, observation: seen(work, candidate, checks) }, [15368], 1, now);
+    assert.deepEqual(result.reruns.map(entry => entry.state), ['expired']);
+    assert.deepEqual(result.transitions.map(entry => entry.kind), ['check.rerun.expired']);
+    assert.match(result.reruns[0].detail!, /remained owed.*15 minutes/);
+    assert.deepEqual(reconcileCheckReruns({ ...work, checkReruns: result.reruns }, [15368], 1, now).transitions, []);
+  }
+  const visible = reconcileCheckReruns({ ...work, observation: seen(work, candidate, [run('test', 11, 'pending')]) }, [15368], 1, now);
+  assert.equal(visible.reruns[0].state, 'requested', 'a visible run may finish past the visibility bound');
+});
+
+test('manual:review-followups-triaged GY-731.3: a known missing Actions grant holds the job before calling GitHub', async () => {
+  await clearQueue();
+  let work = await submitted('Missing rerun permission');
+  const candidate = { sha: sha40('a734'), baseSha: sha40('b734') };
+  const checks = [run('test', 10, 'failure'), run('typecheck', 11, 'success')];
+  work = await engine.observe(work.id, work.revision, seen(work, candidate, checks));
+  await onlyJob(work);
+  const stub = adapter(candidate, () => checks, async () => ({ runId: 44 }));
+  stub.github.permissionShortfall = feature => feature === 'check-rerun' ? 'App lacks Actions: write' : null;
+  await processJob(engine, stub.github);
+  work = await reload(work);
+  assert.deepEqual(stub.reruns, []);
+  assert.equal(work.checkReruns![0].state, 'owed');
+  assert.match(gate(work, 'test').reasons[0], /rerun: one rerun.*owed/);
+});
+
+
+test('manual:review-followups-triaged GY-731.2b: unqueued terminal rerun outcomes stay visible and classify as rework', async () => {
+  await clearQueue();
+  let work = await submitted('Rerun outcome visibility');
+  const candidate = { sha: sha40('a735'), baseSha: sha40('b735') };
+  work = await engine.observe(work.id, work.revision, seen(work, candidate, [run('test', 10, 'failure'), run('typecheck', 11, 'success')]));
+  for (const state of ['refused', 'expired', 'failed'] as const) {
+    const changed = { ...work, checkReruns: [{ ...work.checkReruns![0], state, detail: 'Provider response\nmore detail' }] };
+    Object.assign(changed, evaluate(changed, [changed], new Date(), [15368]));
+    const reason = gate(changed, 'test').reasons[0];
+    assert.match(reason, new RegExp(`rerun: ${state}`));
+    assert.equal(refusalAction(changed, 'test', reason), 'request-rework');
+    assert.equal(checkStates(changed, [15368]).find(check => check.name === 'test')?.state, 'failed');
+    assert.equal(plainReason(reason, 'test').known, true);
+    assert.match(plainReason(reason, 'test').text, new RegExp(`rerun: ${state}`));
+  }
 });

@@ -1,6 +1,5 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -8,10 +7,11 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { answeringWidening, emptyDaemonState, runCycle, scopeRoutineDecision, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { approverSessionName, decisionInput, masterConfigSchema, type HerdrAgent, type MasterConfig } from '../src/master.js';
-import { liveScopeWidening, scopeRequestOutcome, type ScopeRequestState } from '../src/model/scope.js';
-import { collapseArea, collapsePlannedFiles, mergedScopeRequest, plannedFilesMax } from '../src/model/scope-collapse.js';
+import { liveScopeWidening, plannedFilesMax, redecidableScopeRefusal, routableScopeRequest, scopeRequestOutcome, type ScopeRequestState } from '../src/model/scope.js';
+import { collapseArea, collapsePlannedFiles, mergedScopeRequest, widenedPlannedFiles } from '../src/model/scope-collapse.js';
 import type { Principal, Work } from '../src/model.js';
 
 // GY-549: a change that legitimately touches more than 100 files (GY-421 migrated 158 test files)
@@ -94,7 +94,7 @@ const requirementsDecisions = async (work: Work) => (await ok(master.token, 'GET
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 549;
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-scope-collapse-db-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('scope-collapse-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('scope_collapse_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/scope_collapse_test`); await store.init();
   engine = new Engine(store, [15368], 300, repository); engine.submissionObserver = null;
@@ -226,4 +226,75 @@ test('unit:widening-applies-under-lease — an approved plannedFiles-only fold a
   assert.equal(liveScopeWidening(current, { ...current, plannedFiles: [layout, 'tests/helpers/'] }), true);
   assert.equal(liveScopeWidening({ ...current, plannedFiles: [layout, 'tests/'] }, { ...current, plannedFiles: [layout, 'tests/', 'tests/a.test.ts'] }), false, 'a path already covered widens nothing');
   assert.equal(liveScopeWidening(current, { ...current, criteria: [{ ...criteria[0], text: 'Changed' }], plannedFiles: [layout, 'tests/'] }), false);
+});
+
+test('unit:direct-widening-folds-over-cap — a wide ask the rule or a review finding approves directly is folded as a routed one is, never applied past the cap', async () => {
+  // One cap: the work schema refuses exactly what the fold keeps under.
+  const within = { title: 'cap', criteria, plannedFiles: testFiles(plannedFilesMax) };
+  assert.equal((await call(master.token, 'POST', 'work', { ...within, plannedFiles: testFiles(plannedFilesMax + 1), reason: 'Over the cap' })).status, 400, 'one entry past plannedFilesMax is refused');
+
+  // The implication rule approves a criterion's directory outright: 60 planned plus 50 asked is over the cap.
+  const wide = [{ id: 'AC-1', text: `Every file under tests/ creates its temporary directories through ${helper}`, proofs: ['unit:temp-dirs'] }];
+  const planned = [layout, helper, ...testFiles(58, 'tests/legacy/')];
+  let work = await ok(master.token, 'POST', 'work', { title: 'direct fold', plannedFiles: planned, criteria: wide, reason: 'Operator goal: a wide ask the rule approves fits the cap' }) as Work;
+  work = await ok(master.token, 'POST', `work/${work.id}/ready`, { expectedRevision: work.revision, reason: 'Ready for the attempt' }) as Work;
+  work = await reload((await engine.execute(implementer, 'claim', work.id, {}, randomUUID())).id);
+  const migrated = testFiles(50);
+  await ask(work, migrated, 'Every test file moves onto the shared temp-dir helper');
+  work = await reload(work.id);
+  if (work.scopeRequest) work = await ok(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.scopeRequest.epoch }) as Work;
+  work = await reload(work.id);
+  assert.equal(work.scopeDecision!.state, 'approved', work.scopeDecision!.reason);
+  assert.ok(work.plannedFiles.length <= plannedFilesMax, `the applied widening fits the cap (${work.plannedFiles.length} entries)`);
+  assert.deepEqual(work.plannedFiles, [layout, 'tests/'], 'the planned and asked test files fold into one tests/ entry');
+
+  // A review finding's widening is posted by the loop as a requirements revision: folded the same way, and within the cap it is the plain union.
+  const item = { key: 'GY-9', policyRevision: 3, criteria: wide, dependencies: [], plannedFiles: planned } as unknown as Work;
+  const request: ScopeRequestState = { epoch: 2, paths: migrated, reason: 'finding', requestedBy: 'implementer', at: 't1' };
+  assert.deepEqual(answeringWidening(item, request, migrated, 'a review finding names them')!.plannedFiles, [layout, 'tests/']);
+  assert.deepEqual(answeringWidening(item, request, migrated.slice(0, 2), 'a review finding names them')!.plannedFiles, [...planned, ...migrated.slice(0, 2)]);
+});
+
+test('unit:unrepresentable-widening-refused — an ask no fold represents is refused on both direct paths, never applied or posted past the cap', async () => {
+  // One hundred planned exact paths in one directory, and one more implied path in another: the
+  // only folding candidates are the new path's own directories, holding a single entry, so the
+  // union of plannedFilesMax + 1 cannot be represented and every applicant refuses it (GY-630).
+  const bulk = testFiles(plannedFilesMax, 'tests/bulk/');
+  const wide = [{ id: 'AC-1', text: `src/other/next.ts behaves: it also creates its temporary directories through ${helper}`, proofs: ['unit:temp-dirs'] }];
+  assert.deepEqual(widenedPlannedFiles({ criteria: wide, plannedFiles: bulk }, ['src/other/next.ts']),
+    { plannedFiles: [...bulk, 'src/other/next.ts'], collapsed: [], representable: false }, 'the shared helper names the fold unrepresentable');
+
+  // The implication rule refuses instead of approving: the item is blocked on the refusal, the
+  // request stays open carrying it, and plannedFiles are exactly as they were.
+  let work = await ok(master.token, 'POST', 'work', { title: 'unrepresentable', plannedFiles: bulk, criteria: wide, reason: 'Operator goal: an ask no fold can represent is refused, not applied' }) as Work;
+  work = await ok(master.token, 'POST', `work/${work.id}/ready`, { expectedRevision: work.revision, reason: 'Ready for the attempt' }) as Work;
+  work = await reload((await engine.execute(implementer, 'claim', work.id, {}, randomUUID())).id);
+  await ask(work, ['src/other/next.ts'], 'The new path moves onto the shared helper too');
+  work = await reload(work.id);
+  work = await ok(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch }) as Work;
+  work = await reload(work.id);
+  assert.equal(work.scopeDecision!.state, 'refused');
+  assert.match(work.scopeDecision!.reason, /no fold represents the ask within the 100 entries plannedFiles holds \(101 after folding\)/);
+  assert.equal(work.scopeRequest!.decision!.state, 'refused', 'the request stays open carrying the refusal');
+  assert.deepEqual(work.plannedFiles, bulk, 'nothing was applied past the cap');
+  assert.match(work.blocker ?? '', /Scope request refused: no fold represents the ask/);
+  // The refusal is not re-decided: the rules as they stand still refuse, so no churn follows.
+  assert.equal(redecidableScopeRefusal(work), false);
+
+  // And nothing is routed: a fold that cannot represent the ask proposes a revision the schema
+  // would refuse on every attempt, so the loop escalates instead of requesting a decision.
+  const loop = harness(), state = emptyDaemonState(loopConfig());
+  await loop.cycle(state);
+  await loop.cycle(state);
+  work = await reload(work.id);
+  assert.equal(loop.about(work).length, 0, 'no requirements decision is requested for an unrepresentable fold');
+  assert.equal((await requirementsDecisions(work)).length, 0);
+
+  // The loop's direct widening refuses before posting: answeringWidening returns null, so no
+  // oversized revision is ever sent to be rejected.
+  const item = { key: 'GY-9', policyRevision: 3, criteria: wide, dependencies: [], plannedFiles: bulk } as unknown as Work;
+  const request: ScopeRequestState = { epoch: 2, paths: ['src/other/next.ts'], reason: 'finding', requestedBy: 'implementer', at: 't1' };
+  assert.equal(answeringWidening(item, request, ['src/other/next.ts'], 'a review finding names it'), null, 'the loop refuses to post what the schema would reject');
+  // The routed ask itself names nothing for the approver to judge.
+  assert.equal(routableScopeRequest({ ...work, lease: work.lease }, Date.now()), null, 'an unrepresentable fold is never routed');
 });
