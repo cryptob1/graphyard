@@ -27,13 +27,15 @@ import { GitHubChargeLedger } from './github-charges.js';
  *   asks GitHub, exactly as it did before the cache was persisted.
  */
 export type GitHubCacheKind = 'etag' | 'ancestry' | 'blob' | 'history' | 'immutable';
+/** The map operations `load` needs; the adapter's etag and immutable maps are byte-bounded caches (src/github-response-cache.ts). */
+interface LoadableMap<V> { readonly size: number; has(key: string): boolean; set(key: string, value: V): unknown; delete(key: string): boolean; keys(): IterableIterator<string> }
 export interface GitHubCacheMaps {
-  etag: Map<string, { etag: string; value: any }>;
+  etag: LoadableMap<{ etag: string; value: any }>;
   ancestry: Map<string, boolean>;
   blob: Map<string, string | null>;
   history: Map<string, Set<string> | null>;
   /** Optional so a caller that keeps no whole-response layer loads none of it. */
-  immutable?: Map<string, unknown>;
+  immutable?: LoadableMap<unknown>;
 }
 export interface GitHubCacheOptions { flushMs?: number; pruneMs?: number; maxRows?: number; maxBytes?: number; maxValueBytes?: number; maxPending?: number; maxImmutableRows?: number; maxImmutableBytes?: number }
 type Pending = { kind: GitHubCacheKind; etag: string | null; value: string } | 'touch';
@@ -83,7 +85,7 @@ ORDER BY updated_at, key`, [prefix, caps.etag, caps.ancestry, caps.blob, caps.hi
         loaded++;
       }
       for (const kind of Object.keys(caps) as GitHubCacheKind[]) {
-        const map = maps[kind] as Map<string, unknown> | undefined;
+        const map = maps[kind] as LoadableMap<unknown> | undefined;
         while (map && map.size > (caps[kind] ?? 0)) map.delete(map.keys().next().value!);
       }
       return loaded;

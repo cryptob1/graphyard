@@ -21,6 +21,8 @@ import { blockedFeatures, controlPlanePermissions, describeShortfall, permission
 import { agentOwner, type AttentionItem } from './master/attention.js';
 import { budgetedPage, docsWords, repositoryConfigFile, repositoryDocsBudget, type DocsWordBudget, type DocsWordCount, type TipDocs } from './model/documentation.js';
 import type { IntegrationJob } from './coordination.js';
+import { BoundedCache, EtagCache, blobContentBytes, blobContentValueBytes, etagCacheEntries } from './github-response-cache.js';
+export { etagCacheBytes, etagCacheEntries } from './github-response-cache.js';
 
 /** Out-of-scope paths compared against the base tip per observation; the rest are refused as uncompared. */
 export const scopeLookupBudget = 200;
@@ -610,7 +612,7 @@ export class GitHub {
   private blockedUntil = 0;
   private rateFailures = 0;
   private authentication?: Promise<void>;
-  private cache = new Map<string, { etag: string; value: any }>();
+  private cache = new EtagCache();
   private ancestry = new Map<string, boolean>();
   private usage = { since: Date.now(), total: 0, notModified: 0, byKind: new Map<string, number>(), remaining: null as string | null, reset: null as string | null, token: '' };
   /** Once a minute, logs what the App spent: requests, free 304s, the costliest endpoints, and GitHub's own remaining budget of the token that last answered. */
@@ -628,8 +630,12 @@ export class GitHub {
   }
   private blobs = new Map<string, string | null>();
   private histories = new Map<string, Set<string> | null>();
-  /** Whole responses of immutable reads (`immutableRead`): a commit by SHA, a compare of two exact SHAs (GY-806). */
-  private immutable = new Map<string, unknown>();
+  /**
+   * Whole responses of immutable reads (`immutableRead`): a commit by SHA, a compare of two exact SHAs
+   * (GY-806). Kept as JSON text within a byte bound, as the conditional-request cache is (GY-975): a
+   * compare carries every changed file's patch, so an entry count alone does not bound the heap.
+   */
+  private immutable = new ImmutableCache();
   private immutableReads = new Map<string, Promise<any>>();
   /** The clock the shared per-cycle reads are timed on; a replay drives it. */
   clock: () => number = Date.now;
@@ -649,7 +655,7 @@ export class GitHub {
    */
   optimisticLaneEnabled: boolean | null = null;
   /** Blob bytes by sha (GY-863's landing merge-result judgement); a blob's content is immutable, so each is asked once. */
-  private blobContents = new Map<string, Buffer>();
+  private blobContents = new BoundedCache<Buffer>(ancestryEntries, blobContentBytes, blobContentValueBytes, content => content.length);
   /** The persisted cold layer under the four maps above (src/github-cache.ts), when attached. */
   private persisted: GitHubCacheStore | null = null;
   private warming: Promise<void> | null = null;
@@ -1000,11 +1006,11 @@ export class GitHub {
    */
   private async immutableRequest(path: string): Promise<any> {
     await this.warm();
-    if (this.immutable.has(path)) {
-      const value = this.immutable.get(path);
-      this.immutable.delete(path); this.immutable.set(path, value);
+    const hot = this.immutable.get(path);
+    if (hot !== undefined) {
+      this.immutable.set(path, hot);
       this.persisted?.touch('immutable', path);
-      return structuredClone(value);
+      return JSON.parse(hot);
     }
     let reading = this.immutableReads.get(path);
     if (!reading) {
@@ -1013,23 +1019,26 @@ export class GitHub {
         if (this.persisted) {
           const stored = await this.persisted.lookup('immutable', path);
           if (stored !== undefined && stored !== null) {
-            this.immutable.set(path, structuredClone(stored));
+            this.keepImmutable(path, stored);
             this.persisted.touch('immutable', path);
-            if (this.immutable.size > this.immutableHotEntries) this.immutable.delete(this.immutable.keys().next().value!);
             return stored;
           }
         }
         const value = await this.send(path, 'GET', undefined, false);
         if (value !== null && value !== undefined) {
-          this.immutable.set(path, structuredClone(value));
+          this.keepImmutable(path, value);
           this.persisted?.put('immutable', path, value);
-          if (this.immutable.size > this.immutableHotEntries) this.immutable.delete(this.immutable.keys().next().value!);
         }
         return value;
       })().finally(() => this.immutableReads.delete(path));
       this.immutableReads.set(path, reading);
     }
     return structuredClone(await reading);
+  }
+  /** Keep an immutable answer in the hot layer as its text, evicting the oldest-used past either bound. */
+  private keepImmutable(path: string, value: unknown) {
+    this.immutable.set(path, value);
+    while (this.immutable.size > this.immutableHotEntries) this.immutable.delete(this.immutable.keys().next().value!);
   }
   /** One request to GitHub. `conditional` uses and keeps the ETag cache; an immutable read needs neither. */
   private async send(path: string, method: string, body: unknown, conditional: boolean): Promise<any> {
@@ -1052,18 +1061,19 @@ export class GitHub {
     this.meter(method, path, response, token);
     this.record(path, response, true, Date.now(), true, token, method);
     // A 304 costs no rate budget. Refresh the entry's recency so a full observation round stays cached.
-    if (response.status === 304 && cached) { this.rateFailures = 0; this.cache.delete(path); this.cache.set(path, cached); this.persisted?.touch('etag', path); return structuredClone(cached.value); }
+    if (response.status === 304 && cached) { this.rateFailures = 0; this.cache.keep(path, cached.etag, cached.text); this.persisted?.touch('etag', path); return JSON.parse(cached.text); }
     const refused = await this.refusal(response, `${method} ${path}`);
     if (refused) throw refused;
     this.rateFailures = 0;
-    const value = response.status === 204 ? null : await response.json();
+    const text = response.status === 204 ? null : await response.text();
+    const value = text === null ? null : JSON.parse(text);
     const etag = response.headers.get('etag');
     if (method === 'GET') {
       this.cache.delete(path);
-      if (etag && conditional) {
-        this.cache.set(path, { etag, value: structuredClone(value) });
+      // The entry keeps the answer's text, not its object graph, within the cache's byte bound (GY-975).
+      if (etag && conditional && text !== null) {
+        this.cache.keep(path, etag, text);
         this.persisted?.put('etag', path, value, etag);
-        if (this.cache.size > etagCacheEntries) this.cache.delete(this.cache.keys().next().value!);
       }
     }
     return value;
@@ -1561,7 +1571,6 @@ export class GitHub {
     demand(entry && typeof entry === 'object' && typeof entry.content === 'string', `GitHub did not return the content of blob ${sha.slice(0, 12)}`, 502);
     const content = entry.encoding === 'base64' ? Buffer.from(entry.content, 'base64') : Buffer.from(entry.content, 'utf8');
     this.blobContents.set(sha, content);
-    if (this.blobContents.size > ancestryEntries) this.blobContents.delete(this.blobContents.keys().next().value!);
     return content;
   }
   /** Two fresh observations that must agree: the final check before a merge shares no cycle read (GY-806). */
@@ -2565,17 +2574,22 @@ async function restoreBranch(engine: Engine, github: GitHub, work: Work, owed: B
 }
 /** A held job waits this long before one bounded re-check, unless a preflight sees the installation change first. */
 export const permissionHoldMs = 30 * 60_000;
-/**
- * Conditional-request cache size. One observation round reads roughly ten paths per open PR; a cache
- * smaller than a round evicts every entry before its reuse, so no request earns a free 304.
- */
-export const etagCacheEntries = 4096;
 /** Commit-pair ancestry answers kept; each is immutable, so the bound only limits memory. */
 export const ancestryEntries = 16384;
 /** Commit-pair histories kept; each is immutable. */
 export const historyEntries = 2048;
 /** Whole immutable responses kept (commits by SHA, compares of two SHAs); the oldest-used is evicted past this. */
 export const immutableEntries = 4096;
+/** The JSON text the immutable hot layer retains in all, and the most one answer may take of it; a larger answer is served from the persisted layer. */
+export const immutableBytes = 64 * 1024 * 1024, immutableValueBytes = 8 * 1024 * 1024;
+/**
+ * The immutable hot layer: JSON text bounded by entries and bytes. `set` takes a parsed answer, as the
+ * persisted layer loads it, or text already kept; `get` returns the text, which each caller parses afresh.
+ */
+class ImmutableCache extends BoundedCache<string> {
+  constructor() { super(immutableEntries, immutableBytes, immutableValueBytes, text => 2 * text.length); }
+  override set(key: string, value: unknown) { return super.set(key, typeof value === 'string' ? value : JSON.stringify(value)); }
+}
 /** Peer containment compares one observation keeps in flight. */
 export const peerContainmentConcurrency = 8;
 async function boundedMap<T, R>(items: T[], limit: number, run: (item: T) => Promise<R>): Promise<R[]> {
