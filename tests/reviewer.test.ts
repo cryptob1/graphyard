@@ -313,7 +313,7 @@ test('dispatch starts a supervised worker with its runtime approval contract, an
     const dispatched = await dispatchWork(root, ready(), profile, [], run, [ready()], async () => ({ epoch: 4, path: join(root, 'assigned'), base: 'c'.repeat(40) }));
     assert.equal(dispatched.launch.applied, true);
     // GY-93: the instruction follows the flags as the runtime's positional prompt.
-    assert.match(calls[1][3], / -- cursor --force --trust "\$\(cat "\$GY\.request"\)"$/, 'the supervised command carries the runtime non-interactive flags, then the request');
+    assert.match(calls[1][3], / -- agent --force --trust "\$\(cat "\$GY\.request"\)"$/, 'the supervised command carries the runtime non-interactive flags, then the request');
     assert.ok(expandTypedCommand(calls[1][3]).args.at(-1)!.startsWith(`${autonomyContract} Implement GY-42: `), 'Cursor loads no role file, so the autonomy contract leads the request (GY-184)');
     // GY-184: a session that would wait at its runtime's approval prompts is never started.
     const optOutCalls: string[][] = [];
