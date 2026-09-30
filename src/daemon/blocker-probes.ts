@@ -1,9 +1,15 @@
 // Concern: the probe of each environmental blocker class (GY-1008) — what it runs, and where: inside the confinement a worker gets.
+import { existsSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
 import type { Work } from '../model.js';
-import type { BlockerClassification } from '../model/blocker-class.js';
+import type { MasterConfig } from '../master.js';
+import type { ChildRun } from '../child-runner.js';
+import type { BlockerClass, BlockerClassification } from '../model/blocker-class.js';
+export type { BlockerClassification };
 import { runtimeSandboxes } from '../worker-sandbox.js';
 
+/** What the loop writes on the item for one probe (POST work/ID/blocker-probe). */
+export interface BlockerProbeRecord { blocker: string; class: BlockerClass; probe: string; result: 'pass' | 'fail'; detail: string; nextAt: string | null }
 /** The launch a worker gets: its runtime kind, the arguments that carry its sandbox, and its environment. */
 export interface WorkerLaunch { kind?: string | null; args: string[]; environment?: Record<string, string> }
 /** What one probe found: what it ran, whether the cause no longer stands, and what it saw. */
@@ -75,4 +81,22 @@ export async function probeBlocker(item: Work, classification: BlockerClassifica
     }
     default: return null;
   }
+}
+
+/**
+ * The probe as the loop wires it: the worker profile the next attempt would get (the blocked
+ * attempt's own, else the first launch profile), run in the attempt's worktree when it is on this
+ * host and in this checkout otherwise, with the base tip read from `origin`.
+ */
+export function loopBlockerProbe(config: MasterConfig, root: string, run: ChildRun, planeHealth: () => Promise<string | null>) {
+  return (work: Work, classification: BlockerClassification) => {
+    const holder = work.lease?.owner ?? work.lastAssignment?.owner;
+    const launched = config.workers.filter(worker => worker.mode === 'launch');
+    const profile = launched.find(worker => worker.principal === holder) ?? launched[0];
+    const workspace = work.workspaces.find(entry => entry.epoch === work.epoch && entry.host === config.hostId);
+    return probeBlocker(work, classification, { run: (command, args, options) => run(command, args, { ...options, timeoutMs: 30_000 }), planeHealth,
+      baseTip: async () => String(await run('git', ['-C', root, 'ls-remote', 'origin', `refs/heads/${config.baseBranch}`])).split(/\s/)[0] ?? '',
+      launch: profile ? { kind: profile.kind, args: profile.agentArgs ?? [], environment: profile.environment } : null,
+      cwd: workspace && existsSync(workspace.path) ? workspace.path : root, clock: Date.now() });
+  };
 }

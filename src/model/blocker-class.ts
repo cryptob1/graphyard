@@ -149,3 +149,17 @@ export function blockerView(work: Pick<Work, 'blocker' | 'humanRequest' | 'block
     nextProbeAt: needsSomeone(classification.class) || spent ? null : probe?.nextAt ?? null,
   };
 }
+
+/** Who acts next on an item blocked on a routine class: the loop, which re-checks the cause every cycle (GY-1008); null otherwise. */
+export function routineBlocker(work: Pick<Work, 'blocker' | 'humanRequest' | 'blockerProbe'>): { who: string; does: string } | null {
+  const view = blockerView(work);
+  if (!view || view.needsSomeone) return null;
+  const meaning = blockerClassMeaning[view.class];
+  return { who: 'Graphyard (automatic)', does: `Re-checks the ${view.class} blocker every cycle and clears it once the cause is gone: ${meaning.split(';')[1]?.trim() ?? meaning}` };
+}
+
+/** How many rows carry a blocker, and how many of those need someone (GY-1008). */
+export function blockerCounts(items: { blocker?: BlockerView | null }[]) {
+  const blocked = items.filter(item => item.blocker);
+  return { total: blocked.length, needingSomeone: blocked.filter(item => item.blocker!.needsSomeone).length };
+}

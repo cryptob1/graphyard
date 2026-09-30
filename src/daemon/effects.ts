@@ -1,14 +1,12 @@
 // Concern: the effects a cycle acts through — their interface, cursor records, and the production wiring.
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { productionEnvironmentFromEnv } from '../flow-analytics.js';
 import { type ChildRun, ChildWaitLedger, childRunner } from '../child-runner.js';
 import type { Work } from '../model.js';
 import type { DecisionSituation } from '../model/approval.js';
 import type { ScopeRequestState } from '../model/scope.js';
-import type { BlockerClassification } from '../model/blocker-class.js';
-import { probeBlocker, type BlockerProbeResult } from './blocker-probes.js';
+import { loopBlockerProbe, type BlockerClassification, type BlockerProbeRecord, type BlockerProbeResult } from './blocker-probes.js';
 import { successorWidening } from '../model/successors.js';
 import type { SessionHandleInput } from '../model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from '../request-settlement.js';
@@ -170,14 +168,7 @@ export interface DaemonEffects {
   reclaimResources?: (work: Work[], agents: HerdrAgent[] | null) => Promise<ResourceReclaimReport>;
   /** Why the plane cannot record a dispatch's result (its /healthz verdict), or null when it can. */
   planeHealth?: () => Promise<string | null>;
-  /**
-   * GY-1008: probes the cause of one standing blocker the way the next attempt would meet it —
-   * the credential and write probes inside the worker's own confinement (blocker-probes.ts) —
-   * and answers null for a class with no probe. A loop wired without it probes nothing.
-   */
-  probeBlocker?: (work: Work, classification: BlockerClassification) => Promise<BlockerProbeResult | null>;
-  /** GY-1008: records a blocker probe on the item as the coordinator; a passing one clears the blocker (POST work/ID/blocker-probe). */
-  recordBlockerProbe?: (work: Work, body: { blocker: string; class: string; probe: string; result: 'pass' | 'fail'; detail: string; nextAt: string | null }) => Promise<Work>;
+  /** GY-1008: probe a blocker's cause as the next attempt meets it (blocker-probes.ts), and record it as the coordinator; a pass clears it. */ probeBlocker?: (work: Work, classification: BlockerClassification) => Promise<BlockerProbeResult | null>; recordBlockerProbe?: (work: Work, body: BlockerProbeRecord) => Promise<Work>;
   /**
    * Requests one routine decision with the master's own operator-agent identity and returns it.
    * A loop configured without these three keeps cycling: each routine decision is then recorded as
@@ -668,18 +659,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     closeSession: pane => closeHerdrPane(pane, run),
     reclaimResources: (work, agents) => reclaimResources(root, current(), { work, agents }, { closePane: pane => closeHerdrPane(pane, run) }),
     planeHealth: () => dispatchRefusal(current().url, fetcher),
-    probeBlocker: (work, classification) => {
-      const config = current(), holder = work.lease?.owner ?? work.lastAssignment?.owner;
-      // The profile the next attempt would get: the blocked attempt's own, else the first launch profile.
-      const launched = config.workers.filter(worker => worker.mode === 'launch');
-      const profile = launched.find(worker => worker.principal === holder) ?? launched[0];
-      const workspace = work.workspaces.find(entry => entry.epoch === work.epoch && entry.host === config.hostId);
-      return probeBlocker(work, classification, { run: (command, args, options) => run(command, args, { ...options, timeoutMs: 30_000 }), planeHealth: () => dispatchRefusal(config.url, fetcher),
-        baseTip: async () => String(await run('git', ['-C', root, 'ls-remote', 'origin', `refs/heads/${config.baseBranch}`])).split(/\s/)[0] ?? '',
-        launch: profile ? { kind: profile.kind, args: profile.agentArgs ?? [], environment: profile.environment } : null,
-        cwd: workspace && existsSync(workspace.path) ? workspace.path : root, clock: Date.now() });
-    },
-    recordBlockerProbe: (work, body) => mutate(`work/${work.id}/blocker-probe`, body) as Promise<Work>,
+    probeBlocker: (work, classification) => loopBlockerProbe(current(), root, run, () => dispatchRefusal(current().url, fetcher))(work, classification), recordBlockerProbe: (work, body) => mutate(`work/${work.id}/blocker-probe`, body) as Promise<Work>,
     dispatch: (work, profile, agents, snapshot) => dispatchWork(root, work, profile, agents, run, snapshot.work, undefined, undefined, undefined, snapshot.now, { agents: () => listHerdrAgents(run) }),
     recordSession: (work, handle) => mutate(`work/${work.id}/session`, handle),
     decideScope: work => mutate(`work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch }),

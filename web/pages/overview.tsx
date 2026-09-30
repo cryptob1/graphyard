@@ -87,7 +87,7 @@ export default function OverviewPage({ work, board, status, query, setQuery, set
       </button>)}</div>
       {only && <p className="filter-note">Showing {groupLabel[only]} only · <button type="button" className="text-button" onClick={() => setOnly(null)}>Show every group</button></p>}
       {section('needs-you', 'only you can decide these')}
-      {section('blocked', board?.blockers?.total ? `${board.blockers.needingSomeone} of ${board.blockers.total} blockers need someone; the loop clears the rest` : undefined)}
+      {section('blocked')}
       {section('moving')}
       {section('up-next')}
       {shown('backlog') && byGroup.backlog.length > 0 && <details className="work-group group-backlog" aria-label="Backlog" data-group-section="backlog" open={only === 'backlog'}>

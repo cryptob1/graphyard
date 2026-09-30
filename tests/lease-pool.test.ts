@@ -94,9 +94,10 @@ test('unit:lease-pool-isolated — renewal, claim, complete and blocked obtain a
       const renewal = await timed(() => http.post(engineer, `work/${work.id}/heartbeat`, { epoch: work.epoch }));
       assert.equal(renewal.value.status, 200, JSON.stringify(renewal.value.body));
       assert.ok(renewal.ms < 2000, `the heartbeat, authentication included, completed in ${Math.round(renewal.ms)} ms`);
-      const blocked = await timed(() => http.post(engineer, `work/${work.id}/blocked`, { epoch: work.epoch, reason: 'waiting on a fixture' }));
+      // A report with a reason ends the attempt (GY-1008), so the one timed here is the null report
+      // a leased worker sends: the same command on the same pool, and the attempt goes on to submit.
+      const blocked = await timed(() => http.post(engineer, `work/${work.id}/blocked`, { epoch: work.epoch, reason: null }));
       assert.equal(blocked.value.status, 200, JSON.stringify(blocked.value.body)); assert.ok(blocked.ms < 2000, `blocked completed in ${Math.round(blocked.ms)} ms`);
-      await http.post(engineer, `work/${work.id}/blocked`, { epoch: work.epoch, reason: null });
       const claim = await timed(() => http.post(rival, `work/${open.id}/claim`, {}));
       assert.equal(claim.value.status, 200, JSON.stringify(claim.value.body)); assert.ok(claim.ms < 2000, `claim completed in ${Math.round(claim.ms)} ms`);
       const complete = await timed(() => http.post(engineer, `work/${work.id}/submit`, { epoch: work.epoch, pr: 558 }));

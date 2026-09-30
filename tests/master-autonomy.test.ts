@@ -110,7 +110,7 @@ test('integration:master-autonomy-setup — onboarding provisions the master and
     work = await engine.execute(worker, 'blocked', work.id, { epoch: work.epoch, reason: 'Waiting on a fixture' }, randomUUID());
     work = await runAutonomyCommand(root, config, 'unblock', [work.key, 'Fixture is ready'], dependencies()) as Work;
     assert.equal(work.blocker, null);
-    await engine.execute(worker, 'release', work.id, { epoch: work.epoch }, randomUUID());
+    assert.equal(work.lease, null, 'the blocker already ended the attempt (GY-1008)');
     const additions = join(root, 'additions.json');
     await writeFile(additions, JSON.stringify({ criteria: [...work.criteria, { id: 'AC-2', text: 'Documented', proofs: ['unit:documented'] }] }));
     work = await runAutonomyCommand(root, config, 'requirements', [work.key, additions, 'Documentation is part of done'], dependencies()) as Work;

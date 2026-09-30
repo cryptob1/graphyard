@@ -182,6 +182,9 @@ export function timelineReplay(resume?: ReplayState | null) {
       shadow.lease = null;
     } else if (event.kind === 'blocked') {
       if (details.reason) recordIntervention(shadow, 'blocked');
+      // Since GY-1008 a blocker ends its attempt as released in the same write; a row from before
+      // that kept the lease, which its document still shows.
+      if (details.reason && held && snapshot && !snapshot.lease) { endAttempt(shadow, details.epoch ?? held.epoch, 'released', at); shadow.lease = null; }
     } else if (event.kind === 'requirements') {
       // The revision that kept its lease widened planned files for the attempt under way: it
       // hands nothing to anybody. Every other revision ends the attempt and is a hand-off.

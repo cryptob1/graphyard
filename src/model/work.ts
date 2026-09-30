@@ -13,7 +13,6 @@ import type { SessionHandle } from './sessions.js';
 import { namedPaths, pathScope, pathScopeContains, plannedFilesMax, type ScopeDecision, type ScopeRequestState } from './scope.js';
 import type { CapacityState } from './capacity.js';
 import type { HumanRequest } from './human-request.js';
-import type { BlockerProbe } from './blocker-class.js';
 import type { ResearchRecord } from '../research.js';
 import type { RepairAudit } from '../master/repair-lane.js';
 import type { Closure } from './closure.js';
@@ -173,9 +172,7 @@ export interface Work extends Create {
    * ended that attempt's lease and parked the item; the answer clears it, and answered requests
    * are kept in `humanRequests` (see model/human-request.ts).
    */
-  humanRequest?: HumanRequest | null; humanRequests?: HumanRequest[];
-  /** The loop's last probe of the standing blocker's cause (GY-1008); see model/blocker-class.ts. */
-  blockerProbe?: BlockerProbe | null;
+  humanRequest?: HumanRequest | null; humanRequests?: HumanRequest[]; /** The loop's last probe of the blocker's cause (GY-1008). */ blockerProbe?: import('./blocker-class.js').BlockerProbe | null;
   /** What the research step found before build, and the product questions it asked (src/research.ts). */
   researchBrief?: ResearchRecord | null;
   /** Set when the item was closed without delivery (model/closure.ts); a closed item is `done` but never delivered. */
