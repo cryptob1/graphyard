@@ -3,6 +3,7 @@
 
 - `GET /healthz`: unauthenticated.
 - `GET /api/status`: principal, integrations, `appPermissions`, held/failed jobs, `githubBudget`, clock.
+- `GET /api/github/installation`: coordinator; installation and App permissions, read now by the App.
 - `GET /api/work-snapshot`: `{work, now}` with `autoDispatch` requests; age leases against `now`. Open items whole; settled deliveries `summary: true`, without prose or histories. `view=coordination` trims open items; `view=full` exports everything.
 - `GET /api/work/ID|KEY`: one whole document; `/api/work`: all.
 - `GET /api/interventions?window=7|30|90`: the window's ledger rows only (`ledger.since`).

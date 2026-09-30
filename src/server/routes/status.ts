@@ -98,6 +98,17 @@ export const statusRoutes = defineRoutes('status', [
     },
   },
   {
+    // The installation and the App's requested permissions, read now with the App's own credential
+    // (GY-964): `master browser app-permissions` and `installation-accept` decide and verify from
+    // this, never from whatever the operator's gh token happens to be scoped to see.
+    method: 'GET', path: '/api/github/installation',
+    async handle({ actor, services: { github } }) {
+      demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
+      demand(github, 'GitHub is not configured on this control plane', 503);
+      return github.installationState();
+    },
+  },
+  {
     // The master loop publishes the production environment it resolves from its own configuration
     // (`graphyard master config productionEnvironment=…`), which lives only on the master's host.
     // Recorded once per change in the installation ledger; every status and flow read uses it.
