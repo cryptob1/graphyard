@@ -1,6 +1,6 @@
 // Concern: cycle steps 1–1d and 1g — close finished sessions, fail over exhausted ones, answer blocked prompts, recover dead workers and exited sessions; the resume waits they hand to live in cycle-resume.ts.
 import type { Work } from '../model.js';
-import { detectExhaustion, type CapacityRole } from '../model/capacity.js';
+import { sessionExhaustion, type CapacityRole } from '../model/capacity.js';
 import { classifyRuntimePrompt, continueAfterDecline, type EscalationSession, escalationProfile, type HerdrAgent, ownLoginAccounts, profileAccount, type RuntimePrompt } from '../master.js';
 import { standingEscalations } from '../model/escalation.js';
 import { capacityRecheckMs } from '../auto-dispatch.js';
@@ -64,8 +64,12 @@ export async function closeStep(cycle: Cycle) {
   //     producer request is launched again at once. Nobody repoints a profile by hand.
   const failedOver = new Set<string>();
   if (effects.sessionOutput && effects.reportCapacity) {
-    const stopped = (name: string) => { const agent = agents.find(candidate => candidate.name === name); return agent && stoppedStates.includes(agent.agent_status ?? '') ? agent : null; };
-    const notice = async (agent: HerdrAgent) => { try { const output = await effects.sessionOutput!(agent); return output ? detectExhaustion(output, clock) : null; } catch { return null; } };
+    const listed = (name: string) => agents.find(candidate => candidate.name === name) ?? null;
+    const stopped = (name: string) => { const agent = listed(name); return agent && stoppedStates.includes(agent.agent_status ?? '') ? agent : null; };
+    // A session Herdr still reports working counts only when its runtime is retrying on the notice
+    // (GY-973): OpenCode retries a spent account forever and never stops for the stopped-state read.
+    const notice = async (agent: HerdrAgent) => { try { const output = await effects.sessionOutput!(agent); return output ? sessionExhaustion(output, stoppedStates.includes(agent.agent_status ?? ''), clock) : null; } catch { return null; } };
+    const onNotice = (agent: HerdrAgent) => stoppedStates.includes(agent.agent_status ?? '') ? 'stopped on' : 'is retrying on';
     const held = async (role: CapacityRole, profile: string, item: Work, signal: { reason: string; resetsAt: string | null }) => {
       const selected = await effects.selectedAccount?.(role, profile) ?? null;
       const account = selected?.environment ?? null;
@@ -75,7 +79,7 @@ export async function closeStep(cycle: Cycle) {
       return { account, runtime: selected?.kind ?? null };
     };
     for (const profile of config.workers.filter(worker => worker.mode === 'launch')) await isolate('failover', heldBy(profile), profile.name, async () => {
-      const agent = stopped(profile.agentName);
+      const agent = listed(profile.agentName);
       const item = open.find(candidate => !!candidate.lease && candidate.lease.owner === profile.principal && Date.parse(candidate.lease.expiresAt) > clock);
       if (!agent || !item || item.submission?.epoch === item.lease!.epoch) return;
       const key = failoverKey('worker', item, item.lease!.epoch), previous = state.actions[key];
@@ -85,7 +89,7 @@ export async function closeStep(cycle: Cycle) {
       failedOver.add(item.id);
       const epoch = item.lease!.epoch, attempts = (previous?.attempts ?? 0) + 1;
       const resets = signal.resetsAt ? `resets ${signal.resetsAt}` : 'reset time unknown';
-      await record(state, key, { kind: 'failover', work: item.key, principal: profile.principal, epoch, state: 'started', detail: `${profile.agentName} on ${item.key} (epoch ${epoch}) stopped on its provider's limit notice: ${signal.reason}`, attempts, cycle: state.cycle }, now(), effects.persist);
+      await record(state, key, { kind: 'failover', work: item.key, principal: profile.principal, epoch, state: 'started', detail: `${profile.agentName} on ${item.key} (epoch ${epoch}) ${onNotice(agent)} its provider's limit notice: ${signal.reason}`, attempts, cycle: state.cycle }, now(), effects.persist);
       try {
         const partialWork = await effects.preserveWork?.(item, epoch) ?? { state: 'not-applicable' as const, detail: 'this loop has no access to the attempt worktree' };
         const { account, runtime } = await held('worker', profile.name, item, signal);
@@ -106,7 +110,7 @@ export async function closeStep(cycle: Cycle) {
       }
     });
     for (const session of await effects.launchedSessions?.().catch(() => [] as LaunchedSession[]) ?? []) await isolate('failover', open.find(candidate => candidate.key === session.work) ?? null, session.agentName, async () => {
-      const agent = stopped(session.agentName), item = open.find(candidate => candidate.key === session.work);
+      const agent = listed(session.agentName), item = open.find(candidate => candidate.key === session.work);
       if (!agent || !item) return;
       const key = failoverKey(session.role, item, session.record), previous = state.actions[key];
       // Its relaunch is still on the launcher: the failover is in flight, not due again.
@@ -114,7 +118,7 @@ export async function closeStep(cycle: Cycle) {
       const signal = await notice(agent);
       if (!signal) return;
       const attempts = (previous?.attempts ?? 0) + 1, resets = signal.resetsAt ? `resets ${signal.resetsAt}` : 'reset time unknown';
-      await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'started', detail: `${session.role} session ${session.agentName} for ${item.key} stopped on its provider's limit notice: ${signal.reason}`, attempts, cycle: state.cycle }, now(), effects.persist);
+      await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'started', detail: `${session.role} session ${session.agentName} for ${item.key} ${onNotice(agent)} its provider's limit notice: ${signal.reason}`, attempts, cycle: state.cycle }, now(), effects.persist);
       try {
         const { account, runtime } = await held(session.role, session.profile, item, signal);
         await effects.reportCapacity!(item, { event: 'exhausted', role: session.role, ...(session.requestId ? { requestId: session.requestId } : {}), profile: session.profile, account, runtime, reason: signal.reason, resetsAt: signal.resetsAt,
@@ -214,10 +218,10 @@ export async function closeStep(cycle: Cycle) {
         });
         return;
       }
-      const agent = stopped(session.agentName);
+      const agent = listed(session.agentName);
       if (previous?.state === 'done' || !readyToRetry(previous, state.cycle)) return;
       const signal = agent ? await notice(agent) : null;
-      if (!signal) { await handlerFinished(session, !!agent); return; }
+      if (!signal) { await handlerFinished(session, !!agent && !!stopped(session.agentName)); return; }
       const attempts = (previous?.attempts ?? 0) + 1, resets = signal.resetsAt ? `resets ${signal.resetsAt}` : 'reset time unknown';
       try {
         // A handler on no named account spent its runtime's own login, which an approver launches on too.
