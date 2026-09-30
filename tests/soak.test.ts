@@ -336,7 +336,6 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   // GY-498: in the queue-only day one item's first tip fails and keeps failing after its rerun, so
   // the window has to attribute the failure to it and rebuild the tips behind it without it.
   if (options.queued?.failTip) github.flaky.set(items[options.queued.failTip - 1].key, 'rerun-fails');
-  if (process.env.SOAK_ALSO_FAILS) github.flaky.set(items[Number(process.env.SOAK_ALSO_FAILS) - 1].key, 'rerun-fails');
   // GY-831: the lostCarry item's reviews are the bound reviewer App's own, whose approval a
   // Graphyard-authored tip carries — and whose review the day will take away once it is carried.
   if (options.stale) github.botReviewers.add(items[options.stale.lostCarry - 1].key);
