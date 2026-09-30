@@ -1,7 +1,7 @@
 import { agentOwner, type AttentionItem, type AttentionOwner } from '../master.js';
 import type { Work } from '../model.js';
 import { humanNeededActions, type HumanNeededRow } from '../model/next-action.js';
-import { decideScopeRequest, scopeRefusalBlocker, terminalScopeRefusal } from '../model/scope.js';
+import { decideScopeRequest, scopeRefusalBlocker, terminalScopeRefusal, type ScopeVerdict } from '../model/scope.js';
 import { elapsed } from '../model/sessions.js';
 import { routedScopeRequests } from './status-attention.js';
 
@@ -35,8 +35,10 @@ export function scopeRequestAttention(snapshot: { work: Work[]; now: string }, a
     const request = work.scopeRequest;
     const live = request && work.lease && work.lease.epoch === request.epoch && Date.parse(work.lease.expiresAt) > Date.parse(snapshot.now);
     if (!live || routed(work)) return [];
-    const decision = request.decision ?? decideScopeRequest(work, request);
-    if (decision.state === 'approved') return [];
+    const decision: ScopeVerdict = request.decision ?? decideScopeRequest(work, request);
+    // A partly implied ask is granted for what the rules ground (GY-954); the narrowed rest still
+    // stands refused, and it stays an attention line for exactly those paths.
+    if (decision.state === 'approved' && !decision.rest?.length) return [];
     return [{ subject: work.key, text: `${request.requestedBy} needs files outside plannedFiles: ${request.paths.join(', ')} — ${request.reason}. The widening rule refuses it: ${decision.reason}`,
       ...agentOwner('master', terminalScopeRefusal(work) ? `graphyard master requirements ${work.key} FILE REASON` : `graphyard master scope ${work.key}`) }];
   });

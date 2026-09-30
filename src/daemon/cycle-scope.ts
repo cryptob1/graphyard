@@ -1,6 +1,6 @@
 // Concern: cycle step 2 — decide open scope requests and measure the decision budget.
 import type { Work } from '../model.js';
-import { type ScopeRequestState, pathScope, pathScopeContains, pinningTestGround, plannedFilesMax, redecidableScopeRefusal, routableScopeRequest, testFile, unplannedPaths } from '../model/scope.js';
+import { type ScopeRequestState, documentationTestGround, itemDocumentationPaths, pathScope, pathScopeContains, pinningTestGround, plannedFilesMax, redecidableScopeRefusal, routableScopeRequest, testFile, touchesDocumentation, unplannedPaths } from '../model/scope.js';
 import { widenedPlannedFiles } from '../model/scope-collapse.js';
 import { barrelSuccessorGround, criterionSymbolGround, criterionSymbols, criterionTestGround, phraseCallees } from '../model/criterion-scope.js';
 import { type Successor, successorGround, successorsOf } from '../model/successors.js';
@@ -50,6 +50,12 @@ export async function automaticScopeGrounds(item: Work, request: ScopeRequestSta
       if (barrel) { grounds.push({ path, ground: barrel }); continue; }
       const pinning = testFile(path) ? pinningTestGround(path, request.reason, text, planned) ?? criterionTestGround(path, text, symbols) : null;
       if (pinning) { grounds.push({ path, ground: pinning }); continue; }
+      // GY-954: a test that reads the documentation is the companion of a change that rewrites a
+      // page — its gate breaks on the rewrite — so it is grounded from the text the loop read.
+      if (testFile(path) && touchesDocumentation(item, paths)) {
+        const gate = documentationTestGround(path, text, itemDocumentationPaths(item));
+        if (gate) { grounds.push({ path, ground: gate }); continue; }
+      }
       if (mentions) for (const identifier of phraseCallees(text, symbols).slice(0, 20)) if (!searched.has(identifier)) searched.set(identifier, await mentions(identifier));
       const symbol = criterionSymbolGround(path, text, symbols, searched);
       if (symbol) { grounds.push({ path, ground: symbol }); continue; }
@@ -83,11 +89,12 @@ export async function scopeStep(cycle: Cycle) {
   //     It answers with the time the control plane recorded the widening, or null when it did not widen.
   // What an automatic widening stood on, in the audit detail: the grounds it actually used.
   const widenedOn = (grounds: { ground: string }[], count: number): string => {
-    const kinds = new Set(grounds.map(entry => entry.ground.startsWith('successor of ') ? 'successor' : /^review /.test(entry.ground) ? 'finding' : 'criteria'));
+    const kinds = new Set(grounds.map(entry => entry.ground.startsWith('successor of ') ? 'successor' : /^review /.test(entry.ground) ? 'finding' : / reads the documentation \(/.test(entry.ground) ? 'docs-gate' : 'criteria'));
     if (kinds.size === 1 && kinds.has('successor')) return `the base branch's split or rename of a planned file`;
     if (kinds.size === 1 && kinds.has('finding')) return `the review finding that names ${count === 1 ? 'it' : 'them'}`;
+    if (kinds.size === 1 && kinds.has('docs-gate')) return `a test that reads the documentation this change rewrites`;
     if (kinds.size === 1) return `what the item's criteria name: a symbol a file defines or calls, or text a test pins`;
-    return [kinds.has('finding') && 'a review finding', kinds.has('successor') && `the base branch's split or rename of a planned file`, kinds.has('criteria') && `what the item's criteria name`].filter(Boolean).join(' and ');
+    return [kinds.has('finding') && 'a review finding', kinds.has('successor') && `the base branch's split or rename of a planned file`, kinds.has('docs-gate') && 'a documentation-gate test', kinds.has('criteria') && `what the item's criteria name`].filter(Boolean).join(' and ');
   };
   const widenOnFindings = async (item: Work, request: ScopeRequestState): Promise<string | null> => {
     if (!(effects.reviewFindings || effects.baseSuccessions || effects.baseText) || !effects.widenScope || request.remove?.length || request.criteria?.length) return null;
@@ -173,10 +180,13 @@ export async function scopeStep(cycle: Cycle) {
       const waited = `${Math.round(decision.waitedMs / 1000)}s after ${request.requestedBy} asked`;
       performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done',
         detail: boundDetail(decision.state === 'approved'
-          ? `Widened ${item.key} with ${namePaths(request.paths)} ${waited}: ${decision.reason}`
+          ? `Widened ${item.key} with ${namePaths(decision.paths)} ${waited}: ${decision.reason}`
           : `Refused ${item.key}'s scope request for ${request.paths.length ? namePaths(request.paths) : 'no path'} ${waited}: ${decision.reason}`),
         attempts, cycle: state.cycle }, now(), effects.persist));
-      const widenedAt = decision.state === 'refused' ? await widenOnFindings(decided, decided.scopeRequest ?? { ...request, decision }) : null;
+      // A partly implied ask leaves a narrowed refusal standing for the rest (GY-954); it is
+      // judged on the findings in this same cycle, as a whole refusal is.
+      const rest = decided.scopeRequest?.decision?.state === 'refused' ? decided.scopeRequest : null;
+      const widenedAt = rest || decision.state === 'refused' ? await widenOnFindings(decided, decided.scopeRequest ?? { ...request, decision }) : null;
       if (widenedAt) {
         if (routed) state.scope.push(scopeMeasurementSchema.parse({ work: item.key, epoch: request.epoch, at: widenedAt, waitedMs: Math.max(0, Date.parse(widenedAt) - Date.parse(request.at)), state: 'approved' }));
         return;

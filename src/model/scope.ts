@@ -150,11 +150,13 @@ export const scopeBlockedBudgetMs = 900_000;
 export const scopeDecisionSample = 10;
 /** The most entries plannedFiles holds: the one bound the work schema, the follow-up planner and every widening share (GY-630). */
 export const plannedFilesMax = 100;
-export interface ScopeVerdict { state: ScopeDecision['state']; reason: string; paths: string[] }
+export interface ScopeVerdict { state: ScopeDecision['state']; reason: string; paths: string[]; rest?: string[] }
 /**
  * The decision itself, computed from the item's own record: never from what the requester claims.
- * A purely additive request whose every path is implied is approved with the implication as its
- * audited reason; everything else is refused with the reason it was refused for.
+ * A purely additive request is decided per path (GY-954): every path the item implies is approved
+ * with the implication as its audited reason, and — when the ask mixed implied paths with ones
+ * nothing implies — only the rest is refused, as `rest`, so one ungrounded companion no longer
+ * refuses the whole ask. A refusal names the reason it was refused for.
  */
 export function decideScopeRequest(
   item: { plannedFiles?: readonly string[]; criteria: readonly ScopeCriterion[]; documentation?: ItemDocumentation | null },
@@ -172,17 +174,23 @@ export function decideScopeRequest(
   const implied = [...impliedScopes(item.criteria, options.documentation ?? itemDocumentationPaths(item)),
     ...(plansDocumentationTree(item.plannedFiles) ? (options.documentationConsumers ?? documentationConsumerScopes).map(scope => ({ scope, kind: 'documentation-consumer' as const, why: `${scope} renders or tests the documentation this item rewrites` })) : [])];
   const matched = paths.map(path => ({ path, by: scopeImplication(path, implied) }));
-  const outside = matched.filter(entry => !entry.by).map(entry => entry.path);
-  if (outside.length) return refused(`${outside.join(', ')} ${outside.length === 1 ? 'is' : 'are'} outside what this item's own criteria and the repository's documentation rule imply; an operator decides scope the item does not already carry`);
+  const granted = matched.filter(entry => entry.by), rest = matched.filter(entry => !entry.by).map(entry => entry.path);
+  // GY-954: per-path, not all-or-nothing. What the rules imply is granted in the same answer; a
+  // refusal is only for what is left, so an ask that mixes its docs and consumers with companions
+  // the rules cannot name no longer blocks the whole change behind the approver.
+  if (!granted.length) return refused(`${rest.join(', ')} ${rest.length === 1 ? 'is' : 'are'} outside what this item's own criteria and the repository's documentation rule imply; an operator decides scope the item does not already carry`);
   // An implied ask no fold can represent under the plannedFiles cap is refused, never applied or
   // routed: the schemas hold the same bound, and no narrower fold exists to grant instead (GY-630).
   // The refusal names the action that can carry it (GY-906): a requirements revision whose
   // plannedFiles can fold or split the ask under the cap — the plain union `master scope` posts is
   // refused by that same bound, so it can never carry an ask this refusal answered.
-  const folded = collapsePlannedFiles(item.plannedFiles ?? [], paths, collapseArea(item)).plannedFiles;
+  const folded = collapsePlannedFiles(item.plannedFiles ?? [], granted.map(entry => entry.path), collapseArea(item)).plannedFiles;
   if (folded.length > plannedFilesMax)
     return refused(`no fold represents the ask within the ${plannedFilesMax} entries plannedFiles holds (${folded.length} after folding); decide it with graphyard master requirements GY-N FILE REASON, whose plannedFiles can fold or split the ask under the cap — a plain union of exact paths is refused by the same bound`);
-  return { state: 'approved', reason: `additive scope the item already implies — ${matched.map(entry => `${entry.path} (${entry.by!.why})`).join('; ')}`, paths };
+  const reason = `additive scope the item already implies — ${granted.map(entry => `${entry.path} (${entry.by!.why})`).join('; ')}`;
+  if (!rest.length) return { state: 'approved', reason, paths: granted.map(entry => entry.path) };
+  return { state: 'approved', reason: `${reason}; the rest (${rest.join(', ')}) ${rest.length === 1 ? 'is' : 'are'} outside what this item's own criteria and the repository's documentation rule imply and ${rest.length === 1 ? 'goes' : 'go'} to the independent approver`,
+    paths: granted.map(entry => entry.path), rest };
 }
 
 // ---------------------------------------------------------------------------
@@ -225,6 +233,33 @@ export function pinningTestGround(path: string, reason: string, testText: string
     if (holder) return `${path} pins "${quote.text.length > 80 ? `${quote.text.slice(0, 79)}…` : quote.text}", which planned file ${holder.path} holds`;
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Documentation-gate tests (GY-954). A change that touches the documentation breaks the tests
+// that read it — a word budget over every page, for one — yet no criterion names such a test and
+// its source pins no label. When the item's scope or ask reaches the documentation it must keep
+// current, a test whose source names a documentation path is the change's own scope, grounded
+// like a pinning test from what the loop read on the base. Anything else goes to the approver.
+// ---------------------------------------------------------------------------
+
+/** True when the item's change touches the documentation it must keep current: its scope or its ask names a documentation path. */
+export function touchesDocumentation(item: { plannedFiles?: readonly string[]; documentation?: ItemDocumentation | null }, paths: readonly string[]) {
+  const scopes = itemDocumentationPaths(item);
+  const named = (path: string) => scopes.some(scope => scope === path || documentationGlobMatches(scope, path));
+  return [...(item.plannedFiles ?? []), ...paths].some(named);
+}
+/** The literal chunks a documentation glob contributes to a source search: `docs/`, `README.md`; a `*` contributes nothing. */
+const globChunks = (scope: string) => scope.split('*').map(part => part.trim()).filter(part => part.length >= 4);
+/**
+ * The ground a documentation-gate test is granted on, or null: a test whose source names a
+ * documentation path this change touches. Only a test file is granted, and only on text the loop
+ * read from the base; an unrelated test still goes to the approver.
+ */
+export function documentationTestGround(path: string, text: string | null, documentation: readonly string[]): string | null {
+  if (!text || !testFile(path)) return null;
+  const named = documentation.find(scope => globChunks(scope).some(chunk => text.includes(chunk)));
+  return named ? `${path} reads the documentation (${named}) this change rewrites` : null;
 }
 
 /**

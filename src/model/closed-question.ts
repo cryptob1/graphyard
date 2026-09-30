@@ -114,6 +114,10 @@ export function closedQuestionRefusal(work: Work, proof: string): string | null 
     const verdict = decideScopeRequest(work, scope);
     if (verdict.state === 'refused')
       return `${work.key} has an open scope request its criteria do not name (${verdict.reason}); an answer never approves a scope widening — an operator decides it`;
+    // A partly implied ask is granted for what the rules ground (GY-954); the rest still stands
+    // refused, and an answer never approves it — the approver does.
+    if (verdict.rest?.length)
+      return `${work.key} has an open scope request whose remaining paths its criteria do not name (${verdict.rest.join(', ')}); an answer never approves a scope widening — the independent approver decides it`;
   }
   return null;
 }
