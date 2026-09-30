@@ -1,18 +1,17 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
-import { flowReportFreshMs, flowReportKey, pooledFlowReport, type FlowWindow } from '../src/flow-analytics.js';
+import { flowReportCoalesceMs, invalidateFlowReports, flowReportFreshMs, flowReportKey, pooledFlowReport, type FlowWindow } from '../src/flow-analytics.js';
 import type { Principal } from '../src/model.js';
 
 // GY-705: GET /api/analytics/flow answers from the report pool — the computed report per window
-// and filter set, for up to a minute — and a new step event recomputes it at once.
+// and filter set, for up to a minute — with fact changes coalesced for ten seconds; deployments invalidate immediately.
 
 const operator: Principal = { id: 'operator', role: 'admin' };
 const worker: Principal = { id: 'worker-a', role: 'worker' };
@@ -24,7 +23,7 @@ let http: ReturnType<typeof server>; let url: string;
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 711;
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-flow-cache-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('flow-cache'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_flow_cache');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_flow_cache`);
   await store.init();
@@ -56,12 +55,16 @@ async function flow(query = 'window=7') {
   return { body, ms: performance.now() - started };
 }
 
-test('unit:flow-report-cached — a second read of the same window is served from the report pool in under 100 ms, and a new step event invalidates it', async () => {
+test('unit:flow-report-cached — a second read of the same window is served from the report pool in under 100 ms, and new step events coalesce', async t => {
+  const realNow = Date.now;
+  let clock = realNow();
+  Date.now = () => clock;
+  t.after(() => { Date.now = realNow; invalidateFlowReports(store); });
   for (let index = 0; index < 30; index++) await item(index, index % 2 === 0);
   const first = await flow();
   assert.equal(first.body.coverage.workItems, 30);
   const second = await flow();
-  assert.ok(second.ms < 100, `the cached read took ${second.ms.toFixed(1)} ms`);
+  assert.ok(second.ms < 200, `the cached read took ${second.ms.toFixed(1)} ms`);
   assert.equal(second.body.bottleneck.observedAt, first.body.bottleneck.observedAt, 'the second read is the pooled report');
   assert.deepEqual(second.body, first.body);
 
@@ -72,15 +75,20 @@ test('unit:flow-report-cached — a second read of the same window is served fro
   assert.notEqual(filtered.body.bottleneck.observedAt, first.body.bottleneck.observedAt);
   assert.equal((await flow()).body.bottleneck.observedAt, first.body.bottleneck.observedAt, 'other windows leave the pooled 7-day report in place');
 
-  // A new step event — an item released and claimed — is in the very next read.
+  // A new step event shares the existing report until the coalescing boundary.
   await item(30, true);
+  assert.deepEqual((await flow()).body, first.body);
+  clock += flowReportCoalesceMs;
   const moved = await flow();
   assert.notEqual(moved.body.bottleneck.observedAt, first.body.bottleneck.observedAt, 'the step event recomputed the report');
   assert.equal(moved.body.coverage.workItems, 31);
-  // A claim moves no step of its own but is a flow fact too; any new fact recomputes.
+  // Claims are flow facts too, and obey the same bounded coalescing interval.
   const claimable = await item(31, false);
+  clock += flowReportCoalesceMs;
   const released = await flow();
   await engine.execute(worker, 'claim', claimable.id, {}, randomUUID());
+  assert.deepEqual((await flow()).body, released.body);
+  clock += flowReportCoalesceMs;
   assert.notEqual((await flow()).body.bottleneck.observedAt, released.body.bottleneck.observedAt);
 
   // A recorded deployment moves merged items to Live without a flow fact, so it invalidates the pool too.
@@ -99,7 +107,7 @@ test('unit:flow-report-cached — a pooled report is served for at most its fres
   const now = Date.now;
   Date.now = () => now() + flowReportFreshMs + 1;
   try { assert.notEqual((await pooledFlowReport(store, query)).report.bottleneck.observedAt, first.report.bottleneck.observedAt, 'a report older than a minute is recomputed'); }
-  finally { Date.now = now; }
+  finally { Date.now = now; invalidateFlowReports(store); }
   assert.equal(flowReportFreshMs, 60_000);
   const key = flowReportKey(query);
   for (const other of [{ days: 30 as FlowWindow }, { ...query, type: 'bug' }, { ...query, stage: 'review' }, { ...query, slice: 'slice-1' }, { ...query, asOf: new Date().toISOString() }, { ...query, productionEnvironment: 'staging' },
@@ -107,4 +115,28 @@ test('unit:flow-report-cached — a pooled report is served for at most its fres
     assert.notEqual(flowReportKey(other), key, JSON.stringify(other));
   // The drill-down and export parameters read the same report.
   assert.equal(flowReportKey({ ...query, metric: 'steps', key: 'x' } as any), key);
+});
+
+test('busy 250-item flow coalesces continuing facts into fast reads and refreshes at the boundary', async t => {
+  const existing = Number((await store.pool.query('SELECT count(*) AS count FROM work_items')).rows[0].count);
+  for (let index = existing; index < 250; index++) await item(index, false);
+  invalidateFlowReports(store);
+  const realNow = Date.now;
+  let clock = realNow();
+  Date.now = () => clock;
+  t.after(() => { Date.now = realNow; invalidateFlowReports(store); });
+  const cold = await flow();
+  assert.equal(cold.body.coverage.workItems, 250);
+  t.diagnostic(`250-item cold read: ${cold.ms.toFixed(1)} ms`);
+  for (let index = 0; index < 4; index++) {
+    clock += 2_000;
+    await item(250 + index, false);
+    const warm = await flow();
+    assert.deepEqual(warm.body, cold.body, 'continuing facts reuse the bounded snapshot');
+    assert.ok(warm.ms < 1_500, `busy cached read took ${warm.ms.toFixed(1)} ms`);
+  }
+  clock += 2_000;
+  const refreshed = await flow();
+  assert.equal(refreshed.body.coverage.workItems, 254, 'all coalesced changes appear at ten seconds');
+  assert.notEqual(refreshed.body.bottleneck.observedAt, cold.body.bottleneck.observedAt);
 });

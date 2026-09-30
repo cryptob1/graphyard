@@ -1,10 +1,9 @@
-import { baseRefreshConflict, defaultMergeBatchSize, describeTipWindow, ejectedTipRestore, ejectionReason, nextQueueSequence, pendingBaseRefresh, pendingRestore, predictQueue, predecessorWait, predecessorWaitText, queueHistoryLimit, queueBatch, queuePlacement, sameMergeBatch, sameTips, stuckBatchMs, windowBatchView } from '../merge-queue.js';
+import { baseRefreshConflict, defaultMergeBatchSize, describeTipWindow, ejectedTipRestore, ejectionReason, mergeRefusalEjectionPrefix, standingMergeRefusal, nextQueueSequence, pendingBaseRefresh, pendingRestore, predictQueue, predecessorWait, predecessorWaitText, queueHistoryLimit, queueBatch, queuePlacement, sameMergeBatch, sameTips, stuckBatchMs, windowBatchView } from '../merge-queue.js';
 import type { QueueEjection, QueueHistoryEntry, QueuePlacement } from '../merge-queue.js';
 import type { Work } from './work.js';
 import { behindBaseHold } from './behind-base.js';
 import { carriedApproval, currentCarry, describeGround } from './carry.js';
 import { currentEvidence } from './evidence.js';
-import { evaluateLandability } from './landability.js';
 import { exactApproval } from './review.js';
 import { requiredProofs } from './bootstrap.js';
 import { defaultOptimisticMerge, defaultOptimisticExclude, optimisticEligibility, type OptimisticEligibility } from '../optimistic-merge.js';
@@ -25,31 +24,13 @@ export const queueSettings = (settings: number | MergeQueueSettings | undefined)
  * optimisticEligibility). It merges head-bound at once, with no queue reason on its merge gate;
  * main is guarded after the merge instead. An entry that stops being eligible joins as any other.
  */
-/**
- * Verdict-gated re-entry: a landability-family ejection allows re-entry once evaluateLandability
- * returns landable. Non-landability ejections keep sha+policyRevision stickiness.
- */
-function canReenter(work: Work, all: Work[], now: Date): boolean {
-  const { queueEjection: ejection, candidate } = work;
-  // No ejection, so can re-enter
-  if (!ejection) return true;
-  // Ejection doesn't match current head, so can re-enter
-  if (!candidate || ejection.sha !== candidate.sha || ejection.policyRevision !== work.policyRevision) return true;
-  // Only verdict-gated re-entry for landability-family ejections (family === 'landability')
-  // Non-landability ejections (family === null or undefined) keep sha stickiness, no re-entry
-  if (ejection.family !== 'landability') return false;
-  // Landability-family ejections re-enter if the verdict is landable
-  const verdict = evaluateLandability(work, all, now);
-  return verdict.verdict === 'landable';
-}
-
 export function placeInQueue(work: Work, all: Work[], now: Date, ciAppIds: number[], eligible: boolean, settings: number | MergeQueueSettings = defaultMergeBatchSize) {
   const { batchSize, optimistic: optimisticMode, optimisticExclude, parallelTips } = queueSettings(settings);
   const history = [...(work.queueHistory ?? [])];
   const candidate = work.candidate;
   let queue = work.queue ?? null, queueSequence = work.queueSequence ?? 0, ejection = work.queueEjection ?? null;
   const record = (event: QueueHistoryEntry['event'], reason?: string, tip?: string) => {
-    history.push({ at: now.toISOString(), event, sequence: queueSequence, ...(reason ? { reason } : {}), ...(tip ? { tip } : {}) });
+    history.push({ at: now.toISOString(), event, sequence: queueSequence, ...(reason ? { reason } : {}), ...(tip ? { tip } : {}), ...(event === 'ejected' ? { conflict: null } : {}) });
     if (history.length > queueHistoryLimit) history.splice(0, history.length - queueHistoryLimit);
   };
   const probe = { ...work, queue, queueSequence, gates: [], violations: work.violations } as Work;
@@ -63,25 +44,12 @@ export function placeInQueue(work: Work, all: Work[], now: Date, ciAppIds: numbe
   const optimistic: OptimisticEligibility | null = !queue && eligible ? optimisticEligibility(work, all, { enabled: optimisticMode, gatesPass: eligible, exclude: optimisticExclude }) : null;
   if (optimistic?.eligible) return { queue: null, queueSequence, ejection, history, reasons: [] as string[], placement: null, optimistic };
   if (queue && reason) {
-    // Determine if this ejection came from a landability-family refusal (build or acceptance gate).
-    // Non-landability reasons (CI, review, threads, etc.) get family: null to keep sha stickiness.
-    const verdict = evaluateLandability(probe, all, now);
-    const isLandabilityReason = verdict.verdict === 'refused' && (
-      (verdict.reasons.some(r => r.gate === 'build') && reason.includes('Landing speculative tip would fail')) ||
-      (verdict.reasons.some(r => r.gate === 'acceptance') && (reason.includes('Proof ') && (reason.includes(' failed on speculative tip') || reason.includes(' was revoked on speculative tip') || reason.includes('Proof requirements not met'))))
-    );
-    ejection = {
-      at: now.toISOString(),
-      sequence: queue.sequence,
-      reason,
-      sha: candidate?.sha ?? null,
-      policyRevision: work.policyRevision,
-      conflict: null,
-      family: isLandabilityReason ? 'landability' : null
-    };
+    ejection = { at: now.toISOString(), sequence: queue.sequence, reason, sha: candidate?.sha ?? null, policyRevision: work.policyRevision, conflict: null };
     record('ejected', reason, queue.speculation?.tip ?? candidate?.sha);
     queue = null;
-  } else if (!queue && eligible && (canReenter(work, all, now) || predecessorReentry(work, all))) {
+  } else if (!queue && eligible && (!(ejection && candidate && ejection.sha === candidate.sha && ejection.policyRevision === work.policyRevision) || predecessorReentry(work, all)
+    // A candidate ejected for a merge refusal a fresh approval has since answered re-enters (GY-831).
+    || ejection!.reason.startsWith(mergeRefusalEjectionPrefix) && !standingMergeRefusal(work))) {
     queueSequence = nextQueueSequence(all);
     queue = { sequence: queueSequence, enqueuedAt: now.toISOString(), policyRevision: work.policyRevision, speculation: null };
     ejection = null;
@@ -168,7 +136,7 @@ export function queueEjectionRecord(work: Work, all: Work[], reason: string, now
   const predecessors = conflict ? placement?.predecessors ?? [] : null;
   const ejection: QueueEjection = { at, sequence, reason, sha: work.candidate?.sha ?? null, policyRevision: work.policyRevision,
     conflict: conflict ? { base: placement?.predictedBase ?? null } : null, ...(predecessors ? { predecessors } : {}) };
-  const history = [...(work.queueHistory ?? []), { at, event: 'ejected' as const, sequence, reason, ...(work.queue!.speculation ? { tip: work.queue!.speculation.tip } : {}), ...(predecessors ? { predecessors } : {}) }].slice(-queueHistoryLimit);
+  const history = [...(work.queueHistory ?? []), { at, event: 'ejected' as const, sequence, reason, conflict: ejection.conflict, ...(work.queue!.speculation ? { tip: work.queue!.speculation.tip } : {}), ...(predecessors ? { predecessors } : {}) }].slice(-queueHistoryLimit);
   return { ejection, history };
 }
 
