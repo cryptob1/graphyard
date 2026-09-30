@@ -350,6 +350,7 @@
     "tests/launches-off-cycle.test.ts": 20753,
     "tests/lease-lapse.test.ts": 3241,
     "tests/lease-lifecycle.test.ts": 3106,
+    "tests/ledger-compaction.test.ts": 2400,
     "tests/lease-loss-resolve.test.ts": 1162,
     "tests/lease-pool.test.ts": 16296,
     "tests/live-scope-widening.test.ts": 3195,
