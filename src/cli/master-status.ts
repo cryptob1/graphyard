@@ -50,7 +50,7 @@ export { approveScopeRequest } from './master-scope.js';
 // Observation throughput and the queue head's lag live beside the observation schedule they read;
 // the report reads them from here, as do the tests.
 export { observationThroughputStatus };
-// The attention builders live beside each other in `status-attention.ts`; the report reads them from here.
+// The attention builders live in `status-attention.ts`; the report reads them from here.
 import { mergeStallAttention } from './status-attention.js';
 export { approverLaunchAttention, mergeStallAttention, nameOrphanSupervisors, orphanSupervisorAttention, stalledItemAttention, supervisorReclaimCommand } from './status-attention.js';
 export { humanNeededAttention, needsHumanActions, scopeRequestAttention } from './owed-report.js';

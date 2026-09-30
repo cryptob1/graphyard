@@ -10,8 +10,8 @@ import { GitHub } from '../src/github.js';
 import { writeDocumentationConfig } from '../src/repository-setup.js';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { dirname, join } from 'node:path';
 
 // GY-574: main sat at exactly its 12,000-word docs budget, so two queued items that each added a few
@@ -195,8 +195,8 @@ function docsRepository(count: (sha: string) => DocsWordCount | null) {
 }
 
 /** A Git checkout whose main commit holds `files`, for counting the base branch as the loop does. */
-function checkout(files: Record<string, string>) {
-  const root = mkdtempSync(join(tmpdir(), 'graphyard-docs-budget-'));
+async function checkout(files: Record<string, string>) {
+  const root = await temporaryDirectory('docs-budget');
   const git = (...args: string[]) => { const result = spawnSync('git', args, { cwd: root, encoding: 'utf8' }); assert.equal(result.status, 0, result.stderr); };
   git('init', '-q', '-b', 'main');
   for (const [path, text] of Object.entries(files)) { mkdirSync(dirname(join(root, path)), { recursive: true }); writeFileSync(join(root, path), text); }
@@ -215,9 +215,8 @@ test('unit:docs-budget-per-project — a project with no wordBudget is never che
   assert.equal(documentationDrift({ paths: ['docs/'], changelog: null, wordBudget: { total: 10, perPage: 5 } }, { paths: ['docs/'], changelog: null }), null, 'the budget is read from the committed file, so a deployment without it is no drift');
 
   // No wordBudget: nothing is counted, no attention is raised and no trim item is filed — however large the docs.
-  const unbudgeted = checkout({ 'graphyard.json': JSON.stringify({ documentation: { paths: ['docs/', 'README.md'], changelog: null } }), 'README.md': prose(50_000), 'docs/a.md': prose(50_000) });
-  const none = checkout({ 'README.md': prose(50_000) });
-  t.after(() => { for (const root of [unbudgeted, none]) rmSync(root, { recursive: true, force: true }); });
+  const unbudgeted = await checkout({ 'graphyard.json': JSON.stringify({ documentation: { paths: ['docs/', 'README.md'], changelog: null } }), 'README.md': prose(50_000), 'docs/a.md': prose(50_000) });
+  const none = await checkout({ 'README.md': prose(50_000) });
   for (const root of [unbudgeted, none]) {
     assert.equal(await docsWordCountAt(root, 'main'), null, 'a project that configures no budget is not counted');
     const status = await docsHeadroomStatus(root, 'main');
@@ -236,11 +235,10 @@ test('unit:docs-budget-per-project — a project with no wordBudget is never che
     { kind: 'test', combination: ['GY-1'] }, 'without a configured budget nothing is attributed; the batch is bisected');
 
   // A project with its own budget: its own numbers, over its own paths (narrowed within its documentation paths).
-  const budgeted = checkout({
+  const budgeted = await checkout({
     'graphyard.json': JSON.stringify({ documentation: { paths: ['guide/', 'README.md', 'AGENTS.md'], changelog: null, wordBudget: { total: 100, perPage: 60, paths: ['guide/', 'README.md'] } } }),
     'README.md': prose(40), 'guide/intro.md': prose(58), 'guide/diagram.png': prose(500), 'AGENTS.md': prose(5_000), 'docs/other.md': prose(5_000),
   });
-  t.after(() => rmSync(budgeted, { recursive: true, force: true }));
   assert.equal((await writeDocumentationConfig(budgeted, { paths: ['guide/', 'README.md', 'AGENTS.md'], changelog: null })).state, 'unchanged', 'a scan proposes no budget, so a committed one is not drift from it');
   const counted = (await docsWordCountAt(budgeted, 'main'))!;
   assert.deepEqual(counted.pages, { 'README.md': 40, 'guide/intro.md': 58 }, 'only Markdown pages inside the budgeted documentation paths are counted');
