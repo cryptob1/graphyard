@@ -1,8 +1,7 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID, generateKeyPairSync } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -19,6 +18,7 @@ import { assertProducerCandidate, independentProducerProfiles, launchProducer, p
 import { attributePersistFailure, bounded, capacityReasonLimit, cursorTextLimit, dispatchCursorPath, dispatchCursorSchema, dispatchEffects, dispatchFailureAttention, dispatchFailureLimit, dispatchFailureReasonLimit, dispatchRetryMinMs, dispatchSummary, emptyDispatchCursor, InstantExitError, readDispatchCursor, repairDispatchCursor, runAutoDispatch, runDispatchTick, selectReviewerProfile, watchInstantExit, writeDispatchCursor, type CursorRepair, type DispatchCursor, type DispatchEffects } from '../src/auto-dispatch.js';
 import { exhaustionReportSchema } from '../src/model/capacity.js';
 import { readMasterGuide } from './helpers/master-guide.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // Each test is named for the proof it produces, so acceptance evidence maps to one executed
 // case per required proof: unit:auto-dispatch-binding, integration:auto-dispatch-review,
@@ -202,7 +202,7 @@ let database: EmbeddedPostgres, store: Store, engine: Engine;
 let pr = 640;
 before(async () => {
   const port = Number(process.env.GRAPHYARD_AUTO_DISPATCH_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 18);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-auto-dispatch-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('auto-dispatch'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'owner/project'); engine.principals = [operator, implementer, producer];
@@ -276,7 +276,7 @@ test('integration:auto-dispatch-review — the control plane records the review 
 });
 
 test('integration:auto-dispatch-review — a pending reviewer session for a replaced head is cancelled with its token withdrawn, and the launch records the request it answers', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-dispatch-reviewer-')), credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-dispatch-credentials-'));
+  const root = await temporaryDirectory('dispatch-reviewer'), credentialDirectory = await temporaryDirectory('dispatch-credentials');
   try {
     execFileSync('git', ['init', '-q', root]); execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
     const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
@@ -354,7 +354,7 @@ function stubEffects(items: () => Work[], log: string[], overrides: Partial<Disp
 }
 
 test('integration:auto-dispatch-producers — one tick launches exactly one reviewer and one producer per proof group for a submitted head, idempotently per request, within the 30-second bound', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-dispatch-loop-'));
+  const directory = await temporaryDirectory('dispatch-loop');
   try {
     const token = join(directory, 'coordinator.token'); await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
     const config = masterConfig(token);
@@ -395,7 +395,7 @@ test('integration:auto-dispatch-producers — one tick launches exactly one revi
 });
 
 test('integration:auto-dispatch-producers — busy or dependent producer profiles wait, a refused launch backs off and is reported, and Herdr being unreadable launches nothing', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-dispatch-loop-'));
+  const directory = await temporaryDirectory('dispatch-loop');
   try {
     const token = join(directory, 'coordinator.token'); await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
     const single = masterConfig(token, { producers: [{ name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: join(directory, 'producer-a.token'), agentArgs: [], approvals: 'auto', environment: {} }] });
@@ -449,7 +449,7 @@ test('integration:auto-dispatch-producers — busy or dependent producer profile
     const blind = await runDispatchTick(config, emptyDispatchCursor(config), stubEffects(() => [requestedWork()], [], { agents: () => null }), () => clock);
     assert.deepEqual(blind.launched, []); assert.equal(blind.waiting.length, 3); assert.match(blind.waiting[0].reason, /Herdr session inventory is unavailable/);
     // The cursor lives beside the coordinator credential, stays private, and refuses another repository.
-    const root = await mkdtemp(join(tmpdir(), 'graphyard-dispatch-root-')); execFileSync('git', ['init', '-q', root]);
+    const root = await temporaryDirectory('dispatch-root'); execFileSync('git', ['init', '-q', root]);
     try {
       assert.equal(dispatchCursorPath(config), join(directory, 'coordinator.dispatch.json'));
       await writeDispatchCursor(config, { ...emptyDispatchCursor(config), ticks: 3 });
@@ -465,7 +465,7 @@ test('integration:auto-dispatch-producers — busy or dependent producer profile
 });
 
 test('integration:auto-dispatch-producers — a producer session is launched on the exact head with its own credential path, records the launch, and settles on evidence, cancellation, expiry, or an idle session', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-dispatch-producer-')), credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-dispatch-producer-credentials-'));
+  const root = await temporaryDirectory('dispatch-producer'), credentialDirectory = await temporaryDirectory('dispatch-producer-credentials');
   try {
     execFileSync('git', ['init', '-q', root]); execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
     const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
@@ -578,7 +578,7 @@ test('manual:auto-dispatch-status — the master guide, the generated instructio
 const coordinatorToken = async (directory: string) => { const token = join(directory, 'coordinator.token'); await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 }); return token; };
 
 test('unit:dispatcher-reasons-bounded — every string the dispatcher writes into its cursor is bounded where it is composed, with room for the sentence that wraps it, so a 2,000-character refusal persists and reads as an ellipsis inside the cap', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-dispatch-bounded-')), root = await mkdtemp(join(tmpdir(), 'graphyard-dispatch-bounded-root-'));
+  const directory = await temporaryDirectory('dispatch-bounded'), root = await temporaryDirectory('dispatch-bounded-root');
   try {
     execFileSync('git', ['init', '-q', root]);
     assert.equal(bounded('short', 10), 'short'); assert.equal(bounded('x'.repeat(10), 5), 'xxxx…'); assert.equal(bounded('x'.repeat(10), 5).length, 5);
@@ -634,7 +634,7 @@ test('unit:dispatcher-reasons-bounded — every string the dispatcher writes int
 });
 
 test('unit:dispatcher-cursor-repaired — a cursor that fails validation on load or before persist is repaired in place and logged once with the path that failed, and the next tick loads it, launches the pending request and persists', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-dispatch-repair-')), root = await mkdtemp(join(tmpdir(), 'graphyard-dispatch-repair-root-'));
+  const directory = await temporaryDirectory('dispatch-repair'), root = await temporaryDirectory('dispatch-repair-root');
   try {
     execFileSync('git', ['init', '-q', root]);
     const config = masterConfig(await coordinatorToken(directory));
@@ -678,7 +678,7 @@ test('unit:dispatcher-cursor-repaired — a cursor that fails validation on load
 });
 
 test('integration:dispatcher-tick-failure-visible — a tick that cannot persist is attributed to the request, item and field it composed, and three consecutive failures raise the attention item that no reviewer or producer is being launched and why', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-dispatch-failing-'));
+  const directory = await temporaryDirectory('dispatch-failing');
   try {
     const config = masterConfig(await coordinatorToken(directory));
     const item = requestedWork(), review = item.autoDispatch!.review!;
@@ -727,7 +727,7 @@ test('integration:dispatcher-tick-failure-visible — a tick that cannot persist
 });
 
 test('integration:instant-exit-classified — a session Herdr cannot find seconds after its launch is classified from its pane: a provider limit notice holds the account and relaunches the request on the next account, and any other cause is recorded with the pane\'s last words', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-instant-exit-')), credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-instant-exit-credentials-')), homes = await mkdtemp(join(tmpdir(), 'graphyard-instant-exit-homes-'));
+  const root = await temporaryDirectory('instant-exit'), credentialDirectory = await temporaryDirectory('instant-exit-credentials'), homes = await temporaryDirectory('instant-exit-homes');
   try {
     execFileSync('git', ['init', '-q', root]); execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
     const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
@@ -842,7 +842,7 @@ test('manual:dispatcher-state-docs-review — the master guide states that the d
 });
 
 test('unit:review-waits-for-bot-reviewers — a reviewer launch waits, bounded, for the configured bot reviewers to review the head, launches once they have, and never waits when the bound is 0', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-await-bots-'));
+  const directory = await temporaryDirectory('await-bots');
   try {
     const token = join(directory, 'coordinator.token'); await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
     const reviewLaunches = (log: string[]) => log.filter(entry => entry.startsWith('review:'));
@@ -873,7 +873,7 @@ test('unit:review-waits-for-bot-reviewers — a reviewer launch waits, bounded, 
 });
 
 test('a bot-review read that never settles holds the tick only to its own deadline: producers on the same item and a later one launch in that tick, and the review launches as on a failed read', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-await-bots-hung-'));
+  const directory = await temporaryDirectory('await-bots-hung');
   try {
     const token = join(directory, 'coordinator.token'); await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
     const log: string[] = [], first = requestedWork(), second = requestedWork({ id: 'work-65', key: 'GY-65', candidate: { sha: H2, baseSha: B, pr: 65, branch: 'graphyard/gy-65-1', author: 'implementer' }, observation: observation({ sha: H2, baseSha: B }) });
@@ -895,7 +895,7 @@ test('a bot-review read that never settles holds the tick only to its own deadli
 });
 
 test('a deferred reviewer launches as soon as its bot read settles, beside the producer pass rather than behind every producer start', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-await-bots-race-'));
+  const directory = await temporaryDirectory('await-bots-race');
   try {
     const token = join(directory, 'coordinator.token'); await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
     const log: string[] = [], first = requestedWork(), second = requestedWork({ id: 'work-65', key: 'GY-65', candidate: { sha: H2, baseSha: B, pr: 65, branch: 'graphyard/gy-65-1', author: 'implementer' }, observation: observation({ sha: H2, baseSha: B }) });
@@ -917,7 +917,7 @@ test('a deferred reviewer launches as soon as its bot read settles, beside the p
 });
 
 test('producers launch before any reviewer waits on a bot read: an unanswered read delays no producer on its item or a later one, only the reviewer launches after it', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-await-bots-order-'));
+  const directory = await temporaryDirectory('await-bots-order');
   try {
     const token = join(directory, 'coordinator.token'); await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
     const log: string[] = [], first = requestedWork(), second = requestedWork({ id: 'work-65', key: 'GY-65', candidate: { sha: H2, baseSha: B, pr: 65, branch: 'graphyard/gy-65-1', author: 'implementer' }, observation: observation({ sha: H2, baseSha: B }) });
@@ -938,7 +938,7 @@ test('producers launch before any reviewer waits on a bot read: an unanswered re
 });
 
 test('a reviewer launching beside the producer pass takes turns with a producer launch over a shared Herdr agent name, and reads its room again after the turn: a slot taken meanwhile is a capacity wait, not a refusal', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-await-bots-names-'));
+  const directory = await temporaryDirectory('await-bots-names');
   try {
     const token = join(directory, 'coordinator.token'); await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
     const log: string[] = [], item = requestedWork(), requested = Date.parse(item.autoDispatch!.review!.requestedAt);
@@ -962,7 +962,7 @@ test('a reviewer launching beside the producer pass takes turns with a producer 
 });
 
 test('a launch takes a turn only on the agent name of the profile it is launching on: a reviewer whose failover profile shares a producer\'s name launches on its own primary without waiting behind that producer launch', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-await-bots-failover-names-'));
+  const directory = await temporaryDirectory('await-bots-failover-names');
   try {
     const token = join(directory, 'coordinator.token'); await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
     const log: string[] = [], item = requestedWork(), requested = Date.parse(item.autoDispatch!.review!.requestedAt);
@@ -996,7 +996,7 @@ const twoReviewers = (token: string) => {
 };
 
 test('unit:settled-unanswered-retried — a reviewer session that settled without a verdict while its request stands is attempted again on another profile, up to the dispatch failure limit, then raised once as attention and never launched again', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-settled-retry-'));
+  const directory = await temporaryDirectory('settled-retry');
   try {
     const token = join(directory, 'coordinator.token'); await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
     const config = twoReviewers(token), log: string[] = [], item = requestedWork(), review = item.autoDispatch!.review!;
@@ -1048,7 +1048,7 @@ test('unit:settled-unanswered-retried — a reviewer session that settled withou
 });
 
 test('unit:reviewer-reminded-before-retry — a reviewer that judged but did not post is reminded once, and relaunched only when no verdict follows within two minutes', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-reminded-retry-'));
+  const root = await temporaryDirectory('reminded-retry');
   try {
     await mkdir(join(root, '.graphyard'), { recursive: true });
     const token = join(root, 'coordinator.token'); await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
@@ -1104,7 +1104,7 @@ function decisionLoop(items: () => Work[], decided: { action: string; reason: st
 const loopConfig = (token: string) => masterConfigSchema.parse({ ...masterConfig(token), autoMerge: true, workers: [] });
 
 test('unit:non-exercising-evidence-reworked — evidence recorded as not exercising its criterion is sent back to the worker: a rework decision quoting the producer finding is requested within one cycle, and no producer is launched for that head again', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-unexercised-'));
+  const directory = await temporaryDirectory('unexercised');
   try {
     const token = join(directory, 'coordinator.token'); await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
     const finding = 'unit:auto-dispatch-binding still passed with the change removed: the mutation that drops the head binding from the request id left every assertion green';
@@ -1136,7 +1136,7 @@ test('unit:non-exercising-evidence-reworked — evidence recorded as not exercis
 });
 
 test('unit:failed-proof-reworked-before-review — a failed trusted proof on a head with unresolved review threads is sent back to its worker on the next cycle, the reason naming the proof and the threads', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-failed-proof-'));
+  const directory = await temporaryDirectory('failed-proof');
   try {
     const token = join(directory, 'coordinator.token'); await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
     const threads = { required: true, unresolved: [{ id: 'PRRT_open01', author: 'chatgpt-codex-connector[bot]', path: 'src/claims.ts', line: 42, outdated: false }] };

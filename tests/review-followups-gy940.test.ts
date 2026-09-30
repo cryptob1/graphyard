@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
@@ -10,6 +9,7 @@ import { promptTarget } from '../src/daemon/effects.js';
 import { masterConfigSchema, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import type { Work } from '../src/model.js';
 import type { SessionHandle, SessionHandleInput } from '../src/model/sessions.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-940 — the four follow-ups the approved review of GY-852 (PR #425) filed, each a way a
@@ -20,11 +20,15 @@ import type { SessionHandle, SessionHandleInput } from '../src/model/sessions.js
  *    the reusable agent name's new holder; the name is the fallback only for a launch that
  *    recorded no pane at all.
  * 2. A waiting attempt whose blocker or scope request clears after its recorded pane has
- *    disappeared is ended, not held for ever behind a name the absence checks now believe.
+ *    disappeared is ended on a stable absence — one listing miss starts a bound instead of ending
+ *    the attempt, a reappearance cancels it, and the attempt is handed on only once the absence
+ *    has stood past it — not held for ever behind a name the absence checks now believe.
  * 3. A pane that vanishes while the worker was still active starts the gone-pane reclaim bound
  *    itself, though no idle marker was ever created.
  * 4. A pane the name resolves to is refused while the attempt's own handle exists but records no
- *    pane yet: the resolution cannot be verified, and the pane may be another item's.
+ *    pane yet: the resolution cannot be verified, and the pane may be another item's. A handle
+ *    that never records one has its cleared wait reclaimed on the same bounded path, so the
+ *    refusal cannot hold the item for ever.
  */
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const clock = Date.parse('2030-01-01T00:00:00Z');
@@ -54,7 +58,7 @@ const dangerousRm = [
 ].join('\n').replaceAll('│', ' ');
 
 async function setup() {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-gy940-'));
+  const directory = await temporaryDirectory('gy940');
   const credentialFile = join(directory, 'coordinator.token'), worker = join(directory, 'worker.token');
   await writeFile(credentialFile, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
   await writeFile(worker, 'worker-token-'.padEnd(40, 'x'), { mode: 0o600 });
@@ -166,15 +170,45 @@ test('unit:gy940-wait-resolved-pane-gone — a wait that clears after the attemp
     assert.equal(log.capacity.length, 0, 'a waiting attempt is not ended');
 
     // The blocker clears: the recorded pane is still gone, so the resolution cannot be delivered.
-    // The attempt ends and the item goes to a new attempt; nothing is pasted into the name's holder.
+    // One listing miss is not ownership truth (the inventory and its availability check are
+    // separate reads, and listings transiently drop panes), so the first observation only starts
+    // the reclaim bound; the attempt stands, and nothing is pasted into the name's holder.
     item.current = [held('work-940', 'GY-940', 'alpha-principal', 1, { sessions: [implHandle('alpha-principal', 1, 'w1:pMine')] })];
     await runCycle(master, state, effects, () => clock + 30_000);
+    assert.deepEqual(log.targets, [], 'nothing is pasted into the pane the reassigned name holds');
+    assert.deepEqual(log.preserved, [], 'one listing miss does not end the attempt');
+    assert.equal(log.capacity.length, 0, 'the attempt stands while the absence is young');
+    const bound = state.actions['idle:work-940:1'];
+    assert.equal(bound?.state, 'waiting', 'the first gone-pane observation starts the reclaim bound');
+    assert.match(bound.detail, /its pane w1:pMine has been gone from the runtime since this cycle while its cleared wait stood undelivered/);
+
+    // The pane is listed again — even while its session sits on a runtime prompt — so the absence
+    // the bound was started on no longer stands, and the bound is cancelled, not served later.
+    listing[0] = { name: sharedName, pane_id: 'w1:pMine', agent_status: 'blocked', agent: 'claude' };
+    await runCycle(master, state, effects, () => clock + minutes(2));
+    assert.equal(state.actions['idle:work-940:1'], undefined, 'the reappearance cancelled the reclaim bound');
+    assert.equal(log.capacity.length, 0, 'and the attempt was not ended behind it');
+
+    // The pane goes away again: the bound starts afresh from the new observation, not the old one.
+    listing[0] = { name: sharedName, pane_id: 'w1:pOther', agent_status: 'idle', agent: 'claude' };
+    await runCycle(master, state, effects, () => clock + minutes(3));
+    // Read afresh: the cancellation assertion above narrowed the direct lookup to undefined.
+    const restarted = (key => state.actions[key])('idle:work-940:1');
+    assert.equal(restarted?.state, 'waiting', 'the bound restarted with the new absence');
+    assert.equal(restarted.at, iso(minutes(3)), 'dated from the new observation, not the first one');
+    assert.equal(log.capacity.length, 0, 'still not ended while the new absence is young');
+
+    // The absence stands past the bound on a later cycle: the attempt ends and the item goes to a
+    // new attempt; nothing is closed and the name's holder is never touched.
+    await runCycle(master, state, effects, () => clock + minutes(6));
     assert.deepEqual(log.targets, [], 'nothing is pasted into the pane the reassigned name holds');
     assert.deepEqual(log.preserved, [1], 'the attempt keeps what it left, on its branch');
     assert.equal(log.capacity.length, 1, 'the attempt ends on the record, which frees the item for a new attempt');
     assert.equal(log.capacity[0].cause, 'interrupted');
-    assert.match(String(log.capacity[0].reason), /its pane w1:pMine has been gone from the runtime since it waited, so the cleared wait cannot be delivered to it, and its agent name is no address/);
-    assert.deepEqual(log.closed, [], 'a pane that is gone is not closed, and the name\'s holder is never touched');
+    assert.match(String(log.capacity[0].reason), /its pane w1:pMine has been gone from the runtime since .*, so the cleared wait cannot be delivered to it, and its agent name is no address/);
+    // The stable absence also satisfies 1g's exited-session confirmation, so the attempt's own dead
+    // pane may be closed there; the pane the reused name now holds never is.
+    assert.ok(log.closed.every(pane => pane === 'w1:pMine'), `only the attempt's own dead pane was ever closed, never the name's holder: ${JSON.stringify(log.closed)}`);
     const reclaim = state.actions['resume:reclaim:work-940:1'];
     assert.equal(reclaim?.state, 'done');
     assert.match(reclaim.detail, /keeping the attempt's branch/);
@@ -242,6 +276,56 @@ test('unit:gy940-unrecorded-pane-unverified — a pane the name resolves to is r
     await runCycle(master, state, effects, () => clock + 60_000);
     assert.deepEqual(log.targets, ['w1:pReal'], 'the re-prompt reaches the pane this attempt\'s own handle records');
     assert.match(String(log.capacity), /^$/, 'no attempt was ended: the session was reachable all along');
+
+    // The recovery stands: the bound the unverifiable handle started was cancelled by the
+    // delivery, so the attempt is never reclaimed for it afterwards.
+    await runCycle(master, state, effects, () => clock + minutes(10));
+    assert.equal(state.actions['resume:reclaim:work-940:2'], undefined, 'no reclaim was ever started for this attempt');
+    assert.match(state.actions['idle:work-940:2']?.detail ?? '', /has shown no activity since this cycle/, 'only the ordinary idle marker stands, not the unverifiable bound');
+    assert.match(String(log.capacity), /^$/, 'and the attempt stands');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('unit:gy940-unverifiable-handle-reclaim — a handle that never records a pane has its cleared wait reclaimed on a bounded path', async () => {
+  const { directory, master } = await setup();
+  try {
+    // The attempt's handle exists but its coordinate write has failed for good: the name's
+    // holder is listed every cycle, so the name-based absence recovery sees a live session,
+    // and the refusal below would stand for ever without a bound.
+    const item = { current: [held('work-940', 'GY-940', 'alpha-principal', 2, { blocker: 'waiting on a decision', sessions: [implHandle('alpha-principal', 2, null)] })] };
+    const listing: HerdrAgent[] = [{ name: sharedName, pane_id: 'w1:pForeign', agent_status: 'idle', agent: 'claude' }];
+    const { log, effects } = harness(item, () => listing);
+    const state = emptyDaemonState(master);
+    await runCycle(master, state, effects, () => clock);
+    assert.equal(state.actions['resume:blocker:work-940:2']?.state, 'waiting', 'what the attempt waits on is marked');
+
+    // The blocker clears: the resolution is refused — the name's holder cannot be verified as
+    // this attempt's — and the first unverifiable observation only starts the reclaim bound.
+    item.current = [held('work-940', 'GY-940', 'alpha-principal', 2, { sessions: [implHandle('alpha-principal', 2, null)] })];
+    await runCycle(master, state, effects, () => clock + 30_000);
+    assert.deepEqual(log.targets, [], 'nothing is pasted into the pane the name happens to hold');
+    const refused = Object.values(state.actions).find(action => action.state === 'failed'
+      && /pane w1:pForeign cannot be verified as GY-940's session alpha-principal:2: its handle records no pane yet/.test(action.detail));
+    assert.ok(refused, `the unsafe paste is still refused on the record: ${JSON.stringify(Object.values(state.actions).map(action => action.detail))}`);
+    assert.deepEqual(log.preserved, [], 'the first unverifiable observation does not end the attempt');
+    const bound = state.actions['idle:work-940:2'];
+    assert.equal(bound?.state, 'waiting', 'the unverifiable handle starts the reclaim bound');
+    assert.match(bound.detail, /its handle alpha-principal:2 records no pane yet/);
+
+    // Still unverifiable past the bound: the attempt is handed to a new one that keeps its
+    // branch — the wait can never be delivered, and the lease no longer holds the item.
+    await runCycle(master, state, effects, () => clock + minutes(5));
+    assert.deepEqual(log.targets, [], 'nothing is ever pasted into the pane the name holds');
+    assert.deepEqual(log.preserved, [2], 'the attempt keeps what it left, on its branch');
+    assert.equal(log.capacity.length, 1, 'the bounded reclaim ends the attempt on the record');
+    assert.equal(log.capacity[0].cause, 'interrupted');
+    assert.match(String(log.capacity[0].reason), /its handle alpha-principal:2 has recorded no pane since .*, so the cleared wait cannot be verified deliverable to it, and its agent name is no address/);
+    assert.deepEqual(log.closed, [], 'no pane is closed: none is verifiably this attempt\'s');
+    const reclaim = state.actions['resume:reclaim:work-940:2'];
+    assert.equal(reclaim?.state, 'done');
+    assert.match(reclaim.detail, /keeping the attempt's branch/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

@@ -527,6 +527,11 @@ export interface AppPermissionReport {
   required: Record<string, PermissionLevel>; granted: Record<string, string> | null;
   missing: PermissionShortfall[]; blockedFeatures: PermissionFeature[]; attention: string[];
 }
+/** The installation as the App's own credential reads it, and the permissions the App requests (GY-964). */
+export interface InstallationState {
+  appId: number; installationId: number; slug: string; account: string | null; accountType: string; installationUrl: string;
+  suspended: boolean; permissions: Record<string, string>; app: Record<string, string>;
+}
 /**
  * The installation a hold was decided against: identity, suspension and the granted levels of
  * the last verified reading. A hold is released when a passing preflight reports a different
@@ -848,6 +853,33 @@ export class GitHub {
     return now >= this.preflightDueAt ? this.preflight(now) : null;
   }
   permissionReport(): AppPermissionReport | null { return this.preflightState ? structuredClone(this.preflightState) : null; }
+  /**
+   * The installation and the permissions the App itself requests, read now with the App JWT
+   * (GY-964). `master browser app-permissions` and `installation-accept` decide and verify from
+   * this, so they run whenever the App sees its installation, whatever scopes the operator's gh
+   * token carries. It leaves the preflight schedule and its hold alone.
+   */
+  async installationState(): Promise<InstallationState> {
+    demand(Date.now() >= this.blockedUntil, `GitHub requests paused until ${new Date(this.blockedUntil).toISOString()} after a rate limit`, 502);
+    const read = async (path: string, context: string) => {
+      const response = await fetch(`https://api.github.com${path}`, { headers: this.appHeaders(), signal: AbortSignal.timeout(15_000) });
+      this.record(path.replace(/\/\d+$/, ''), response, false);
+      const refused = await this.refusal(response, context);
+      if (refused) throw refused;
+      return response.json() as Promise<any>;
+    };
+    const installation = await read(`/app/installations/${this.config.installationId}`, 'GET /app/installations');
+    const app = await read('/app', 'GET /app');
+    const levels = (value: unknown): Record<string, string> => value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).filter(([, level]) => typeof level === 'string')) as Record<string, string> : {};
+    return {
+      appId: this.config.appId, installationId: this.config.installationId,
+      slug: typeof installation?.app_slug === 'string' && installation.app_slug ? installation.app_slug : String(app?.slug ?? this.config.appId),
+      account: typeof installation?.account?.login === 'string' ? installation.account.login : null,
+      accountType: String(installation?.account?.type ?? installation?.target_type ?? 'User'),
+      installationUrl: typeof installation?.html_url === 'string' && /^https:\/\/github\.com\//.test(installation.html_url) ? installation.html_url : installationSettingsUrl(this.config.installationId),
+      suspended: !!installation?.suspended_at, permissions: levels(installation?.permissions), app: levels(app?.permissions),
+    };
+  }
   /**
    * The reason a feature must wait, or null when the last preflight found the permissions it
    * needs. Before any preflight nothing is held: a hold is only ever placed on a verified fact.

@@ -2,8 +2,7 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { accountLaunch, agentLaunchPlan, buildMasterStatus, checkAgentEnvironment, deliverPrompt, discoverAgentEnvironments, dispatchWork, herdrErrorCode, inspectProducerCredentials, inspectWorkerCredentials, loadMasterConfig, masterHarness, masterSettingsFromArgs, NoHealthyAccountError, prepareAgentEnvironment, PromptNotAcceptedError, readEnvironmentLog, saveMasterSettings, selectAccount, sessionHarnessFile, setupAgentEnvironments, setupMaster, sharedGitDirectory, startMaster, type EnvironmentProbe } from '../src/master.js';
@@ -16,6 +15,7 @@ import { launchAuthorization } from '../src/repository-setup.js';
 import { autonomyContract } from '../src/autonomy.js';
 import type { Work } from '../src/model.js';
 import { readMasterGuide } from './helpers/master-guide.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // Each test is named for the proof it produces: integration:agent-env-discovery,
 // integration:agent-quota-failover, integration:prompt-delivery-confirmed and
@@ -31,7 +31,7 @@ const hour = 3_600_000, future = (ms = hour) => new Date(Date.now() + ms).toISOS
 // A private directory of agent environments for the whole file, so nothing reads the machine's own.
 let environments = '';
 const previousRoot = process.env.GRAPHYARD_AGENT_ENVIRONMENTS;
-before(async () => { environments = await mkdtemp(join(tmpdir(), 'graphyard-agent-environments-')); process.env.GRAPHYARD_AGENT_ENVIRONMENTS = environments; });
+before(async () => { environments = await temporaryDirectory('agent-environments'); process.env.GRAPHYARD_AGENT_ENVIRONMENTS = environments; });
 after(async () => { if (previousRoot === undefined) delete process.env.GRAPHYARD_AGENT_ENVIRONMENTS; else process.env.GRAPHYARD_AGENT_ENVIRONMENTS = previousRoot; await rm(environments, { recursive: true, force: true }); });
 
 async function account(directory: string, name: string, login: 'claude' | 'codex' | 'opencode' | 'cursor' | null, token = `${name}-oauth-token`) {
@@ -61,13 +61,13 @@ function usage(byToken: Record<string, { five: number; seven: number } | number>
 }
 
 async function repository() {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-agent-envs-'));
+  const root = await temporaryDirectory('agent-envs');
   execFileSync('git', ['init', '-q', root]);
   execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
   return root;
 }
 async function master(options: { reviewer?: boolean } = {}) {
-  const root = await repository(), credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-agent-envs-credentials-'));
+  const root = await repository(), credentialDirectory = await temporaryDirectory('agent-envs-credentials');
   const setup = await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory, herdrWorkspace: 'workspace-graphyard' }, coordinatorStatus as typeof fetch);
   if (options.reviewer) await bindReviewer(root, { appId: 5678, installationId: 91011, slug: 'graphyard-reviewer', privateKey, credentialDirectory: join(credentialDirectory, 'reviewers') }, installed);
   return { root, credentialDirectory, setup, cleanup: async () => { await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); } };
@@ -179,7 +179,7 @@ test('integration:agent-env-discovery — onboarding discovers or creates one en
 });
 
 test('integration:agent-quota-failover — every launch checks login and quota, skips an exhausted or logged-out account with its reason in master status, and fails over to the next healthy one', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-quota-'));
+  const directory = await temporaryDirectory('quota');
   const homes = { spent: await account(directory, 'claude-a', 'claude'), out: await account(directory, 'claude-b', null), fresh: await account(directory, 'claude-c', 'claude'), codex: await account(directory, 'codex', 'codex'), codexB: await account(directory, 'codex-b', 'codex') };
   await codexUsage(homes.codex, 98);
   const { root, credentialDirectory, cleanup } = await master({ reviewer: true });
@@ -391,7 +391,7 @@ test('integration:max-autonomy-permissions — every launched agent gets its run
   // Codex keeps its sandbox, widened to what the role needs: network, and the shared Git directory.
   const codex = accountLaunch({ kind: 'codex', approvals: 'auto', agentArgs: [], environment: {} }, null, { writable: ['/repo/.git'] });
   assert.deepEqual(codex.args.slice(-4), ['-c', 'sandbox_workspace_write.network_access=true', '--add-dir', '/repo/.git']);
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-autonomy-'));
+  const directory = await temporaryDirectory('autonomy');
   const fresh = { name: 'claude-z', kind: 'claude' as const, home: await account(directory, 'claude-z', null) };
   assert.equal((await prepareAgentEnvironment(fresh)).length, 1); assert.deepEqual(await prepareAgentEnvironment(fresh), [], 'preparing is idempotent');
   assert.equal(JSON.parse(await readFile(join(fresh.home, 'settings.json'), 'utf8')).skipDangerousModePermissionPrompt, true);

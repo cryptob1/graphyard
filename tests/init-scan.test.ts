@@ -2,12 +2,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { availableRuntimes, buildProposal, detectDeploy, detectStack, environmentTopology, hasSharedDatabase, workflowCheckNames } from '../src/onboarding.js';
 import { applyProposal, loadAppliedSetup, loadProposal, proposalDigest, readSetupStatus, repositoryScanDifference, saveProposal, scanProposal, setupDrift } from '../src/repository-setup.js';
 import { workerProfileSchema } from '../src/master.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const scan = (files: Record<string, string>) => ({ files: Object.keys(files), contents: files });
 
@@ -106,7 +106,7 @@ async function addFile(root: string, path: string, content: string) {
 }
 
 async function fixtureRepo(files: Record<string, string>, remote = 'git@github.com:owner/repo.git') {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-scan-'));
+  const root = await temporaryDirectory('scan');
   execFileSync('git', ['init', '-q', root]);
   if (remote) execFileSync('git', ['remote', 'add', 'origin', remote], { cwd: root });
   for (const [path, content] of Object.entries(files)) await addFile(root, path, content);

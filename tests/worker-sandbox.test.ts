@@ -2,8 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, execFileSync, spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
-import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { chmod, mkdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { delimiter, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
@@ -12,6 +11,7 @@ import { accountLaunch, dispatchWork, launchCommandLimit, setupMaster, workAtten
 import { environmentBlocked, environmentBlocker, environmentFailure, grantWorkerPaths, runtimeSandboxes, verifyWorkerSandbox, WorkerSandboxError, workerPaths, writablePaths, type SandboxExec } from '../src/worker-sandbox.js';
 import type { Work } from '../src/model.js';
 import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-134: a Codex worker could not write its worktree's own Git admin directory, so the mandatory
 // `graphyard sync` failed at `git fetch` and the item presented as a ready-gate refusal.
@@ -25,7 +25,7 @@ const codexInstalled = spawnSync('codex', ['--version'], { stdio: 'ignore' }).st
 
 /** A repository laid out like a Graphyard checkout: an origin, the main clone, and a managed linked worktree. */
 async function linkedWorktree(name = 'GY-1-1') {
-  const root = await realpath(await mkdtemp(join(tmpdir(), 'graphyard-sandbox-')));
+  const root = await realpath(await temporaryDirectory('sandbox'));
   const origin = join(root, 'origin.git'), main = join(root, 'repo');
   execFileSync('git', ['init', '-q', '--bare', '-b', 'main', origin]);
   execFileSync('git', ['clone', '-q', origin, main], { stdio: 'ignore' });
@@ -97,7 +97,7 @@ function codexLikeSandbox(calls: string[][]): SandboxExec {
 
 async function dispatchFixture() {
   const fixture = await linkedWorktree('GY-7-1');
-  const credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-sandbox-credentials-'));
+  const credentialDirectory = await temporaryDirectory('sandbox-credentials');
   const credential = join(credentialDirectory, 'worker.token'); await writeFile(credential, workerToken, { mode: 0o600 });
   git(fixture.main, 'remote', 'set-url', 'origin', 'https://github.com/owner/project.git');
   await setupMaster(fixture.main, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory }, (async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }))) as typeof fetch);
