@@ -1,9 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
@@ -297,7 +296,8 @@ test('unit:parallel-tips-visible — the flow report behind Insights counts merg
 
 test('unit:parallel-speculative-tips — the master publishes mergeQueue.parallelTips from master.json, and the control plane validates by it and reads it back from the installation ledger', async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 498;
-  const database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-parallel-tips-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  const databaseDir = await temporaryDirectory('parallel-tips');
+  const database = new EmbeddedPostgres({ databaseDir, user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_parallel_tips');
   const store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_parallel_tips`);
   const tokens = { coordinator: 'm'.repeat(32), worker: 'w'.repeat(32) };
