@@ -2,8 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildMasterStatus, loadMasterConfig, setupMaster } from '../src/master.js';
@@ -12,6 +11,7 @@ import { assertSessionLedgerRoom, unrecordedPaneStopped, bindReviewer, boundSess
 import { producerLedgerSpec, readProducerLedger, saveProducerLedger, sessionRetry, sessionRetryLimit, type ProducerRecord } from '../src/producer.js';
 import { ledgerRefusalAttention } from '../src/master-status.js';
 import type { Observation, Work } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // Each test is named for the proof it produces (GY-131): unit:terminal-reviews-reaped,
 // integration:full-ledger-still-launches, unit:ledgers-share-one-bound and
@@ -39,13 +39,13 @@ function producer(index: number, state: ProducerRecord['state'], extra: Partial<
 }
 
 async function ledgerRoot() {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-ledger-cap-'));
+  const root = await temporaryDirectory('ledger-cap');
   await mkdir(join(root, '.graphyard'), { recursive: true, mode: 0o700 });
   return { root, cleanup: () => rm(root, { recursive: true, force: true }) };
 }
 
 async function boundMaster() {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-ledger-cap-')), credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-ledger-cap-credentials-'));
+  const root = await temporaryDirectory('ledger-cap'), credentialDirectory = await temporaryDirectory('ledger-cap-credentials');
   execFileSync('git', ['init', '-q', root]);
   execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
   await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory, herdrWorkspace: 'wE' }, coordinatorStatus as typeof fetch);

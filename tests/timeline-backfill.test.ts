@@ -1,7 +1,5 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
@@ -14,6 +12,7 @@ import { buildMasterStatus } from '../src/master.js';
 import { mergeTimeline, pipelineSpeed, pipelineSpeedSummary, type PipelineTimeline, type TimelineBackfill } from '../src/pipeline-speed.js';
 import { backfillLimits, backfillPipelineTimelines, catchUpPipelineTimelines, pipelineBackfillState, resetPipelineBackfillState } from '../src/pipeline-backfill.js';
 import { readFlow } from '../src/flow-analytics.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const operator: Principal = { id: 'operator', role: 'admin' };
 const worker: Principal = { id: 'worker-a', role: 'worker' };
@@ -26,7 +25,7 @@ let pullRequest = 7100;
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_BACKFILL_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 26);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-backfill-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('backfill'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_backfill');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_backfill`);
   await store.init();

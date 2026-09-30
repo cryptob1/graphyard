@@ -2,8 +2,7 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createElement } from 'react';
@@ -21,9 +20,10 @@ import { bindReviewer, launchReview, saveReviewerProfile } from '../src/reviewer
 import { NoHealthyAccountError, atomicPrivateWrite, buildMasterStatus, dispatchWork, launchApprover, loadMasterConfig, selectAccount, setupMaster, type EnvironmentProbe } from '../src/master.js';
 import { applyRegistryMutation, chooseSession, emptyRegistry, fleetRoles, fleetView, foldObservation, launchGraceMs, proposedRuntimes, sessionEnded, settleSessions, type AgentRegistry as Registry, type FleetSession, type FleetView } from '../src/model/registry.js';
 import type { Principal, Work } from '../src/model.js';
-import { FleetOverview } from '../web/pages/fleet.js';
+import { FleetOverview, pastesCredential } from '../web/pages/fleet.js';
 import { views, visibleViews } from '../web/pages/index.js';
 import { expandTypedCommand, requestOf, startedAtOnce } from './helpers/launch-shell.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const operator: Principal = { id: 'operator', role: 'admin' };
 const coordinator: Principal = { id: 'master', role: 'coordinator' };
@@ -41,7 +41,7 @@ let http: ReturnType<typeof server>, url: string, scratch: string;
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_REGISTRY_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 45);
-  scratch = await mkdtemp(join(tmpdir(), 'graphyard-registry-'));
+  scratch = await temporaryDirectory('registry');
   database = new EmbeddedPostgres({ databaseDir: join(scratch, 'pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('registry_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/registry_test`); await store.init();
@@ -86,7 +86,7 @@ function network(byToken: Record<string, { five: number; seven: number }>): Envi
 }
 /** A master installation bound to the test control plane; its master.json names no runtime account at all. */
 async function master(workers: { name: string; principal: string; kind: string; agentArgs?: string[] }[] = []) {
-  const root = await mkdtemp(join(scratch, 'repo-')), credentialDirectory = await mkdtemp(join(scratch, 'credentials-'));
+  const root = await temporaryDirectory('repo', scratch), credentialDirectory = await temporaryDirectory('credentials', scratch);
   execFileSync('git', ['init', '-q', root]); execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
   const bound = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
   await setupMaster(root, { url, token: tokens.get('master')!, cliPath: launcher, credentialDirectory, hostId: HOST, herdrWorkspace: 'workspace-graphyard' }, bound as typeof fetch);
@@ -146,7 +146,7 @@ async function dispatch(root: string, config: any, profile: string, probe: Envir
 // ---------------------------------------------------------------------------
 test('integration:agent-registry-model — the control plane stores runtimes with launch contracts, accounts that reference a credential, models with cost and capability, and ordered roles with a concurrency limit, configured through the API, the CLI and the dashboard', async () => {
   await reset();
-  const homes = await mkdtemp(join(scratch, 'homes-'));
+  const homes = await temporaryDirectory('homes', scratch);
   const claudeHome = await login(homes, 'claude-a', 'claude', 'claude-a-very-secret-oauth-token');
   const empty: FleetView = await ok('agent-registry', auditor);
   assert.equal(empty.configured, false); assert.deepEqual([empty.runtimes, empty.accounts, empty.roles], [[], [], []]);
@@ -196,7 +196,11 @@ test('integration:agent-registry-model — the control plane stores runtimes wit
   const posted = [...page.matchAll(/=> [`']agent-registry\/([^`']+)[`']/g)].map(match => `/api/agent-registry/${match[1].replace(/\$\{field\(form, 'collection'\)\}/, 'accounts').replace(/\$\{[^}]+\}/g, 'name')}`);
   assert.ok(posted.length >= 6, 'runtime, model, account, role, quota and remove forms');
   // GY-397: the browser's credential check reads the launch data only; the audit reason is prose that may name a token prefix.
-  assert.match(page, /form\.entries\(\)\]\.some\(\(\[name, value\]\) => name !== 'reason' && typeof value === 'string' && value\.split\([^)]*\)\.some\(looksLikeSecret\)/);
+  const formOf = (fields: Record<string, string>) => { const form = new FormData(); for (const [name, value] of Object.entries(fields)) form.append(name, value); return form; };
+  assert.equal(pastesCredential(formOf({ tools: 'Read, sk-ant-api03-abcdefghijklmnop', reason: 'Pasting a key by mistake' })), true, 'a secret in launch data is refused');
+  assert.equal(pastesCredential(formOf({ home: 'sk-ant-api03-abcdefghijklmnop', reason: 'r' })), true);
+  assert.equal(pastesCredential(formOf({ tools: 'Read, Grep', reason: 'Rotated sk-ant-api03-abcdefghijklmnop out of the old home' })), false, 'a secret-shaped audit reason is still accepted');
+  assert.equal(pastesCredential(formOf({ tools: 'Read, Grep', reason: 'Plain reason' })), false);
   for (const path of posted) assert.ok(served.some(route => typeof route === 'string' ? route === path : route.test(path)), `${path} is served`);
   assert.ok(visibleViews({ status: { actor: { role: 'admin' } }, features: {} } as any).some(view => view.id === 'agents') && !visibleViews({ status: { actor: { role: 'worker' } }, features: {} } as any).some(view => view.id === 'agents'));
   assert.ok(views.some(view => view.id === 'agents'));
@@ -245,7 +249,7 @@ test('integration:agent-registry-model — the control plane stores runtimes wit
 // ---------------------------------------------------------------------------
 test('integration:registry-driven-selection — an executor\'s action runs on the first account of its role that is placed on its host, logged in, within quota and under its limits; the choice and its reason are recorded; no runtime or account comes from code or a profile', async () => {
   await reset();
-  const homes = await mkdtemp(join(scratch, 'homes-'));
+  const homes = await temporaryDirectory('homes', scratch);
   const spent = await login(homes, 'claude-spent', 'claude'), out = await login(homes, 'claude-out', null), fresh = await login(homes, 'claude-fresh', 'claude');
   const probe = network({ 'claude-spent-oauth-token': { five: 20, seven: 100 }, 'claude-fresh-oauth-token': { five: 5, seven: 10 } });
   for (const runtime of proposedRuntimes) await ok('agent-registry/runtimes', operator, { runtime, reason: 'register' });
@@ -388,7 +392,7 @@ test('integration:registry-driven-selection — an executor\'s action runs on th
 // ---------------------------------------------------------------------------
 test('integration:registry-live-capacity — capacity is a registry change with no restart and no file edit: an account added mid-run takes the next action, an exhausted one is skipped, and a removed runtime\'s roles fall back in order', async () => {
   await reset();
-  const homes = await mkdtemp(join(scratch, 'homes-'));
+  const homes = await temporaryDirectory('homes', scratch);
   const homeA = await login(homes, 'claude-a', 'claude'), homeB = await login(homes, 'claude-b', 'claude'), codexHome = await login(homes, 'codex-a', 'codex');
   const probe = network({ 'claude-a-oauth-token': { five: 1, seven: 1 }, 'claude-b-oauth-token': { five: 1, seven: 1 } });
   await ok('agent-registry/apply', operator, { runtimes: [runtimeNamed('claude')], models: [{ name: 'opus', id: 'claude-opus-5' }], accounts: [{ name: 'claude-a', runtime: 'claude', model: 'opus', credential: { host: HOST, home: homeA } }],
@@ -502,9 +506,14 @@ test('unit:registry-visibility — master status and the dashboard show each acc
 // ---------------------------------------------------------------------------
 // AC-5 — setup discovers the host and proposes a registry (the onboarding review is manual:registry-onboarding-review)
 // ---------------------------------------------------------------------------
-test('integration:registry-setup-proposal — setup discovers the logged-in CLIs and their accounts, proposes a registry, and a new installation reaches a working fleet with no hand-written profile; the onboarding guide adds a runtime, an account and a role in that order', async () => {
+test('integration:registry-setup-proposal — setup discovers the logged-in CLIs and their accounts, proposes a registry, and a new installation reaches a working fleet with no hand-written profile; the onboarding guide adds a runtime, an account and a role in that order', async t => {
   await reset();
-  const directory = await mkdtemp(join(scratch, 'environments-')), home = await mkdtemp(join(scratch, 'home-'));
+  const directory = await temporaryDirectory('environments', scratch), home = await temporaryDirectory('home', scratch);
+  // opencode keeps its login under XDG_DATA_HOME, which a host may set outside `home`; pin it to
+  // the isolated home so discovery sees only the logins this test created.
+  const hostDataHome = process.env.XDG_DATA_HOME;
+  t.after(() => { if (hostDataHome === undefined) delete process.env.XDG_DATA_HOME; else process.env.XDG_DATA_HOME = hostDataHome; });
+  process.env.XDG_DATA_HOME = join(home, '.local/share');
   const isolated = await login(directory, 'claude-b', 'claude'); await login(directory, 'claude-c', null); const codexHome = await login(directory, 'codex-a', 'codex');
   await login(home, '.claude', 'claude');
   const logins = await discoverHostLogins({ directory, home, executables: name => name === 'muse' });
@@ -541,7 +550,7 @@ test('integration:registry-setup-proposal — setup discovers the logged-in CLIs
   // Every command the guide prints is run as written: a documented form the CLI cannot parse — a
   // value starting with a dash written apart from its flag, say — is a broken onboarding, and an
   // onboarding review is the only thing that ever found it.
-  const empty = await mkdtemp(join(scratch, 'no-logins-'));
+  const empty = await temporaryDirectory('no-logins', scratch);
   const written: { path: string; data: any }[] = [];
   const recording = { read: async () => emptyRegistry(), write: async (path: string, data: unknown) => { written.push({ path, data }); return { revision: 1, registry: {} }; } };
   const documented = documentedCommands(guide);
