@@ -40,14 +40,14 @@ export const docsOnlyPaths = /^docs\/|(^|\/)README\.md$|^AGENTS\.md$|\.mdx?$/;
  * The lane one change rides in, from the shipped path policy: any high-risk path makes the change
  * high; a change only of tests or only of docs is low; a change kept inside one module — every
  * path sharing the same leading segments, such as `src/model/` — is low; everything else is
- * medium. An unknown change (no paths at all) is medium: the default lane asks for proofs until
- * the policy can see the change is small. The shared prefix counts only up to the first segment
+ * medium. An unknown change (no paths at all) is high: until the policy can see what a change
+ * touches, it keeps the full path — no proof, attestation or approver is waived for it. The shared prefix counts only up to the first segment
  * where the paths diverge: `src/model/index.ts` and `src/cli/index.ts` share `src/` and nothing
  * past it, so they are two modules, not one.
  */
 export function determineLane(paths: readonly string[]): Lane {
   const changed = [...new Set(paths)];
-  if (!changed.length) return 'medium';
+  if (!changed.length) return 'high';
   if (changed.some(path => highRiskPaths.some(pattern => pattern.test(path)))) return 'high';
   if (changed.every(path => testOnlyPaths.test(path) || docsOnlyPaths.test(path))) return 'low';
   const segments = changed.map(path => path.split('/').filter(Boolean));
@@ -97,7 +97,7 @@ export const laneRequiresProof = (lane: Lane, proof: string) => laneRequiresFami
  * rename, both of its endpoints — a rename out of a high-risk tree is a change to the high-risk
  * surface whatever its destination, so the source rides beside it. The observation's file list is
  * the diff when no scope was read at all; an empty scope list is no paths, the unknown change that
- * defaults to medium.
+ * keeps the full (high) path.
  */
 export function observedPaths(observation: { scopeFiles?: readonly { path: string; previousPath?: string }[] | null; files?: readonly string[] } | null | undefined): string[] {
   if (!observation) return [];
@@ -106,7 +106,7 @@ export function observedPaths(observation: { scopeFiles?: readonly { path: strin
     : [...(observation.files ?? [])];
 }
 
-/** The lane of the change an item carries: the diff its observation holds; unknown stays medium. */
+/** The lane of the change an item carries: the diff its observation holds; an unknown change rides high. */
 export function itemLane(work: { observation?: Parameters<typeof observedPaths>[0] }): Lane {
   return determineLane(observedPaths(work.observation));
 }
@@ -114,11 +114,10 @@ export function itemLane(work: { observation?: Parameters<typeof observedPaths>[
 /**
  * Whether a rework round on this item waits for an independent approver (GY-883 AC-2): only in the
  * high lane. A low or medium item's rework decision is applied as soon as it is requested, with the
- * lane recorded as its ground — the requester's own authority to request it is checked as ever. The
- * waiver needs a lane read from an observed diff: a change nobody has observed keeps its approver.
+ * lane recorded as its ground — the requester's own authority to request it is checked as ever. A
+ * change nobody has observed rides high, so it keeps its approver.
  */
-export const reworkNeedsApprover = (work: Parameters<typeof itemLane>[0]) =>
-  !observedPaths(work.observation).length || laneRequirements(itemLane(work)).reworkApprover;
+export const reworkNeedsApprover = (work: Parameters<typeof itemLane>[0]) => laneRequirements(itemLane(work)).reworkApprover;
 
 // Bootstrap mode: an operator may defer a criterion's proofs for the single change that
 // introduces the harness those proofs depend on. The proof is never dropped. It becomes a

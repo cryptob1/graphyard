@@ -91,7 +91,7 @@ test('unit:risk-lane-assigned — test-only, docs-only and single-module changes
   assert.equal(determineLane(['src/model/policy.ts', 'src/model/gates.ts', 'src/model/work.ts']), 'low');
 });
 
-test('unit:risk-lane-assigned — everything else is medium, and an unknown change defaults to medium', () => {
+test('unit:risk-lane-assigned — everything else is medium, and an unknown change keeps the full high path', () => {
   assert.equal(determineLane(['src/model/policy.ts', 'src/cli/main.ts']), 'medium');
   assert.equal(determineLane(['src/model/gates.ts', 'tests/risk-lanes.test.ts', 'docs/glossary.md']), 'medium');
   assert.equal(determineLane(['src/a.ts', 'src/b.ts']), 'medium', 'sharing only src/ is not one module');
@@ -99,7 +99,7 @@ test('unit:risk-lane-assigned — everything else is medium, and an unknown chan
   assert.equal(determineLane(['src/model/index.ts', 'src/cli/index.ts']), 'medium', 'src/model/ and src/cli/ are two modules despite the shared tail');
   assert.equal(determineLane(['src/a/run.ts', 'src/b/run.ts', 'src/c/run.ts']), 'medium', 'every file sharing a basename is still three modules');
   assert.equal(determineLane(['package.json']), 'medium');
-  assert.equal(determineLane([]), 'medium');
+  assert.equal(determineLane([]), 'high', 'a change the policy cannot see waives nothing');
   assert.equal(determineLane(['src/model/policy.ts', 'deploy/install/setup.sh']), 'high', 'high wins over the single-module rule');
 });
 
@@ -165,7 +165,7 @@ test('unit:lane-sets-required-gates — only a high-lane rework needs an approve
   assert.equal(reworkNeedsApprover(item(['src/model/a.ts', 'src/cli/b.ts'])), false, 'a medium rework is applied without an approver');
   assert.equal(reworkNeedsApprover(item(['src/server/auth.ts'])), true, 'a high rework waits for its independent approver');
   const unknown = item([]); unknown.observation = null;
-  assert.equal(reworkNeedsApprover(unknown), true, 'an unobserved change keeps its approver: the waiver needs an observed diff');
+  assert.equal(reworkNeedsApprover(unknown), true, 'an unobserved change rides high and keeps its approver');
 });
 
 test('unit:lane-sets-required-gates — an e2e proof and an inherited bootstrap obligation are required in every lane', () => {
@@ -285,14 +285,14 @@ test('unit:lanes-feed-verdict — the review hold and the producer dispatch foll
   assert.equal(producerGroupDecisions(low, [low], new Date()).some(group => group.state === 'request'), false, 'no producer session is asked for a low item');
 });
 
-test('unit:lanes-feed-verdict — the verdict reads the observed diff, and an unobserved change stays medium', () => {
+test('unit:lanes-feed-verdict — the verdict reads the observed diff, and an unobserved change keeps the full high path', () => {
   const work = item(['src/model/policy.ts'], ['unit:core-flow', 'manual:safety-attestation'], ['migrations/schema/003.sql']);
   assert.equal(verdict(work).lane, 'low', 'the observed diff decides the lane');
   work.observation = null;
-  assert.equal(verdict(work).lane, 'medium', 'with no observation, the change is unknown and its producer proofs stay required');
-  const empty = item([], ['unit:core-flow']);
-  assert.equal(verdict(empty).lane, 'medium', 'an observed empty diff is also unknown, and its producer proofs stay required');
-  assert.equal(acceptance(empty).passed, false, 'an unknown lane does not lift producer proofs');
+  assert.equal(verdict(work).lane, 'high', 'with no observation, the change is unknown and nothing is waived');
+  const empty = item([], ['unit:core-flow', 'manual:safety-attestation']);
+  assert.equal(verdict(empty).lane, 'high', 'an observed empty diff is also unknown');
+  assert.deepEqual(requiredProofs(empty, [empty]), ['unit:core-flow', 'manual:safety-attestation'], 'an unknown lane lifts no proof');
 });
 
 test('unit:lanes-feed-verdict — the per-lane speed targets are shipped and reported with the lane', () => {
