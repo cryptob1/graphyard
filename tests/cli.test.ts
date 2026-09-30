@@ -11,6 +11,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { createHash, generateKeyPairSync, randomUUID, verify } from 'node:crypto';
 import { realpath } from 'node:fs/promises';
 import { executionAttestationPayload } from '../src/runner-collector.js';
+import { attestable } from './helpers/attestor-ancestry.js';
 import { MERGE_PROTOCOL } from '../src/protocol-version.js';
 import { captureTrackedRoot, linuxProcessRecord, signalTrackedProcesses, supervise, systemdContainment } from '../src/supervisor.js';
 import { acknowledgeContainment, containmentCredentials, establishContainment, isConfirmedCoordinationRefusal, revalidateContainment, settleContainment } from '../src/quarantine.js';
@@ -767,7 +768,24 @@ test('the packaged runner path is usable from the CLI and refuses evidence-produ
   } finally { await new Promise<void>(r => http.close(() => r())); await rm(cwd, { recursive: true, force: true }); }
 });
 
-test('the runner holds authority while the host attestor executes and signs the attempt', async () => {
+/**
+ * One `runner supervise` over a pipe. The attestor reads its supervision request from stdin,
+ * so the two lines have to be written to a live pipe and the stream closed — `execFile` has
+ * no `input` option, and an unwritten pipe would leave a command that gets as far as reading
+ * waiting forever.
+ */
+const superviseOnce = (cwd: string, settings: NodeJS.ProcessEnv, request: string) => new Promise<string>((settled, refused) => {
+  const child = spawn(process.execPath, [launcher, 'runner', 'supervise'], { cwd, env: settings, stdio: ['pipe', 'pipe', 'pipe'] });
+  let out = '', diagnostics = '';
+  child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
+  child.stdout.on('data', chunk => { out += chunk; });
+  child.stderr.on('data', chunk => { diagnostics += chunk; });
+  child.on('error', refused);
+  child.on('close', code => code === 0 ? settled(out) : refused(new Error(diagnostics || `supervise exited ${code}`)));
+  child.stdin.end(`${request}\n{"proceed":true}\n`);
+});
+
+test('the runner holds authority while the host attestor executes and signs the attempt', async t => {
   const cwd = await mkdtemp(join(tmpdir(), 'graphyard-supervision-'));
   const posts: string[] = [];
   const requestId = randomUUID(), attemptId = randomUUID();
@@ -831,6 +849,14 @@ test('the runner holds authority while the host attestor executes and signs the 
     await writeFile(plan, JSON.stringify({ registration: { id: 'preview-runner', revision: 1 }, imageRepository: 'example/graphyard-runner',
       oraclePath: oracle, outputPath: output, timeoutMs: 60_000, runAsUser,
       supervisor: { command: process.execPath, args: [launcher, 'runner', 'supervise'] } }));
+    // Where a worker sandbox stats the directories above the fixture as another account, the
+    // attestor refuses it at preflight: asserted and noted, with nothing acknowledged (GY-966).
+    const sandboxed = JSON.stringify({ plan: { grant: authority(), imageRepository: 'example/graphyard-runner', oraclePath: oracle, outputPath: output, timeoutMs: 60_000, runAsUser } });
+    if (!await attestable(t, oracle, () => superviseOnce(cwd, attestorEnv, sandboxed))) {
+      assert.deepEqual(authorityReads, ['dispatched'], 'the refusal precedes the execution re-read');
+      assert.deepEqual(posts, [], 'nothing was dispatched or acknowledged');
+      return;
+    }
     const attempted = JSON.parse((await exec(process.execPath, [launcher, 'runner', 'attempt', plan], { cwd, env: attestorEnv, maxBuffer: 8 << 20 })).stdout);
 
     // Acknowledgement sits between the attestor's preflight and its first container.
@@ -854,19 +880,7 @@ test('the runner holds authority while the host attestor executes and signs the 
     const attempt2Grant = attempted.record.grant;
     const supervision = JSON.stringify({ plan: { grant: attempt2Grant, imageRepository: 'example/graphyard-runner',
       oraclePath: oracle, outputPath: output, timeoutMs: 60_000, runAsUser } });
-    // The attestor reads its supervision request from stdin, so the two lines have to be
-    // written to a live pipe and the stream closed — `execFile` has no `input` option, and
-    // an unwritten pipe would leave a command that gets as far as reading waiting forever.
-    const supervise = (settings: NodeJS.ProcessEnv, request = supervision) => new Promise<string>((settled, refused) => {
-      const child = spawn(process.execPath, [launcher, 'runner', 'supervise'], { cwd, env: settings as NodeJS.ProcessEnv, stdio: ['pipe', 'pipe', 'pipe'] });
-      let out = '', diagnostics = '';
-      child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
-      child.stdout.on('data', chunk => { out += chunk; });
-      child.stderr.on('data', chunk => { diagnostics += chunk; });
-      child.on('error', refused);
-      child.on('close', code => code === 0 ? settled(out) : refused(new Error(diagnostics || `supervise exited ${code}`)));
-      child.stdin.end(`${request}\n{"proceed":true}\n`);
-    });
+    const supervise = (settings: NodeJS.ProcessEnv, request = supervision) => superviseOnce(cwd, settings, request);
     await assert.rejects(supervise(env), /GRAPHYARD_ATTESTOR_KEY/);
 
     // `proceed: true` on the pipe is a sequencing signal, not authority. Whatever the
@@ -892,7 +906,7 @@ test('the runner holds authority while the host attestor executes and signs the 
   } finally { await new Promise<void>(r => http.close(() => r())); await rm(cwd, { recursive: true, force: true }); }
 });
 
-test('the runner retries a lost acknowledgement response idempotently and starts nothing before the replay confirms it', async () => {
+test('the runner retries a lost acknowledgement response idempotently and starts nothing before the replay confirms it', async t => {
   const cwd = await mkdtemp(join(tmpdir(), 'graphyard-ack-retry-'));
   const requestId = randomUUID(), attemptId = randomUUID();
   const { publicKey, privateKey } = generateKeyPairSync('ed25519');
@@ -961,6 +975,14 @@ test('the runner retries a lost acknowledgement response idempotently and starts
     await writeFile(plan, JSON.stringify({ registration: { id: 'preview-runner', revision: 1 }, imageRepository: 'example/graphyard-runner',
       oraclePath: oracle, outputPath: output, timeoutMs: 60_000, runAsUser: `${containerUid}:${process.getgid!()}`,
       supervisor: { command: process.execPath, args: [launcher, 'runner', 'supervise'] } }));
+    const grant = { requestId, attemptId, epoch: 1, runner: { id: 'preview-runner', revision: 1 }, executionHost: 'unix:///var/run/docker.sock', attestationPublicKey,
+      executionNetwork: 'gy-isolated', bundleDigest, runnerImageDigest: `sha256:${'b'.repeat(64)}`, targetUrl: 'https://preview.example.test/', deadline, testAccountDigest: null };
+    const sandboxed = JSON.stringify({ plan: { grant, imageRepository: 'example/graphyard-runner', oraclePath: oracle, outputPath: output, timeoutMs: 60_000, runAsUser: `${containerUid}:${process.getgid!()}` } });
+    // A worker sandbox's refusal at preflight is asserted and noted instead (GY-966).
+    if (!await attestable(t, oracle, () => superviseOnce(cwd, attestorEnv, sandboxed))) {
+      assert.deepEqual(events, ['authority:dispatched'], 'nothing is acknowledged for a refused boundary');
+      return;
+    }
     const attempted = JSON.parse((await exec(process.execPath, [launcher, 'runner', 'attempt', plan], { cwd, env: attestorEnv, maxBuffer: 8 << 20 })).stdout);
 
     // The lost response was retried as the same acknowledgement: one request key, one

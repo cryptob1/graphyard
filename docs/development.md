@@ -21,14 +21,16 @@ npm ci && npm run build && npm test
 
 `npm test` hides `GRAPHYARD_*`/`HERDR_*` variables and reserves free Postgres ports. Worktree installs need [bubblewrap](install.md#preconditions).
 
+Where a sandbox stats `/tmp`, `/home` as uid 65534, attestor tests assert their ownership refusal, noted; `tests/helpers/unprivileged-stat.mjs` simulates this.
+
 ## CI
 
 `test` aggregates shards balanced by `tests/helpers/timing-baseline.json`; pull requests run affected tests, `main` and queue tips all (`scripts/ci-tests.mjs`).
 
 ## Documentation
 
-`docs/README.md` and `docs/protocol.md` are generated in full from each page's `<!-- page: Section | order | summary -->` line by `npm run docs:check -- --write`; `GRAPHYARD_GENERATED_FILES` ([value](coordination.md#generated-files-never-conflict)) exempts them from the regression guard. README.md and `docs/` stay within the word budgets of `tests/docs-budget.test.ts`, each topic on one page: link, never restate.
+`docs/README.md` and `docs/protocol.md` are generated from each page's `<!-- page: Section | order | summary -->` line by `npm run docs:check -- --write` ([regression guard](coordination.md#generated-files-never-conflict)). `tests/docs-budget.test.ts` budgets README.md and `docs/` words; each topic has one page: link, never restate.
 
 ## Trusted contracts
 
-Trusted CI runs only protected source, refusing candidates whose base lacks the contract: land the harness and its `scripts/contracts.mjs` entry first, then require later work's proof.
+Trusted CI runs only protected source, refusing bases without the contract: land the harness and `scripts/contracts.mjs` entry first.
