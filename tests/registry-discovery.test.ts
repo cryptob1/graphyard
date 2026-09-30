@@ -4,7 +4,7 @@ import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { registryCommand } from '../src/cli/master-registry.js';
-import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { boundDaemonState, daemonStateSchema, emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import type { MasterConfig, HerdrAgent } from '../src/master.js';
 import type { Work } from '../src/model.js';
 import { applyRegistryMutation, emptyRegistry, fleetRoles, type AgentRegistry } from '../src/model/registry.js';
@@ -173,6 +173,8 @@ test('unit:registry-discovers-agent-environments — propose discovers every ~/.
     held: [string, { reason: string; role: string; profile: string }][];
     outputs: Record<string, string>;
     unavailable?: boolean;
+    refuseEnd?: boolean;
+    failLaunch?: boolean;
   }
 
   function effects(config: MasterConfig, state: { master: Harness }, work: Work[], at: { value: number }, extra: Partial<DaemonEffects> = {}): DaemonEffects {
@@ -190,10 +192,14 @@ test('unit:registry-discovers-agent-environments — propose discovers every ~/.
       requestSmoke: () => {},
       sessionOutput: async (agent: HerdrAgent) => state.master.outputs[agent.name ?? ''] ?? '',
       promptSession: async (agent: HerdrAgent, text: string) => { state.master.wakes.push(text); },
-      endRegistrySession: async (session: string, reason: string) => { state.master.ended.push([session, reason]); },
+      endRegistrySession: async (session: string, reason: string) => {
+        if (state.master.refuseEnd) throw new Error('the registry answered 503');
+        state.master.ended.push([session, reason]);
+      },
       holdAccount: async (account: string, observed: { reason: string; role: string; profile: string }) => { state.master.held.push([account, observed]); },
       masterSession: { launch: async handover => {
         state.master.launches.push(handover);
+        if (state.master.failLaunch) throw Object.assign(new Error('the runtime never started'), { registrySession: `reg-orphan-${state.master.launches.length}` });
         return { agentName: config.masterAgentName!, pane: `pane-${state.master.launches.length}`, runtime: 'claude', account: 'claude-a', session: `reg-${state.master.launches.length}` };
       } },
       persist: async () => {},
@@ -334,6 +340,47 @@ test('unit:registry-discovers-agent-environments — propose discovers every ~/.
     assert.equal(harness.launches.length, 5, 'the role relaunches from the durable handover');
     assert.equal(state.master.rotations, 5);
     assert.equal(state.master.pane, 'pane-5');
+
+    // A release the registry refuses is never forgotten: the role runs one session at a time, so a
+    // leaked row would refuse every relaunch. The rotation keeps it owed on the cursor, the next
+    // cycles end it again, and it leaves the cursor once the registry takes it back.
+    const t5 = 340_000 + 33 * 60_000 + 260_000;
+    const endedSessions = (): string[] => harness.ended.map(entry => entry[0]);
+    const owed = (): string[] => state.master.unreleased.map(entry => entry.session);
+    harness.agents = [];
+    harness.refuseEnd = true;
+    await cycle(t5 + 400_000);
+    await cycle(t5 + 420_000);
+    assert.equal(state.master.lastEnd?.cause, 'exited');
+    assert.deepEqual(owed(), ['reg-5'], 'the refused release stays owed on the cursor');
+    assert.equal(harness.launches.length, 6);
+    await cycle(t5 + 440_000);
+    assert.deepEqual(owed(), ['reg-5'], 'still owed while the registry refuses');
+    assert.equal(state.actions['master:release']?.state, 'waiting');
+    assert.match(state.actions['master:release']!.detail, /reg-5/);
+    harness.refuseEnd = false;
+    await cycle(t5 + 460_000);
+    assert.deepEqual(owed(), [], 'the owed release clears once the registry takes it back');
+    assert.ok(endedSessions().includes('reg-5'), 'the owed session is ended');
+    assert.equal(state.actions['master:release']?.state, 'done');
+
+    // A failed launch whose cleanup could not end its registry session hands that id back: owed the same way, then ended.
+    harness.agents = [];
+    harness.failLaunch = true;
+    harness.refuseEnd = true;
+    const t6 = t5 + 460_000;
+    await cycle(t6 + 400_000);
+    await cycle(t6 + 420_000);
+    assert.equal(state.master.lastEnd?.cause, 'exited');
+    assert.equal(state.actions['master:launch']?.state, 'failed');
+    assert.deepEqual(owed().sort(), ['reg-6', 'reg-orphan-7']);
+    harness.refuseEnd = false;
+    harness.failLaunch = false;
+    await cycle(t6 + 440_000);
+    assert.deepEqual(owed(), [], 'every owed session is ended once the registry answers');
+    assert.ok(endedSessions().includes('reg-orphan-7'));
+    assert.equal(harness.launches.length, 8, 'the role relaunches once its slot is free');
+    assert.equal(state.master.agentName, cfg.masterAgentName);
   });
 
   test('unit:master-wake-on-event — a material event produces exactly one wake naming its cause, an unchanged cycle none, a changed state one more, and the heartbeat is only the silence fallback', async () => {
@@ -376,5 +423,26 @@ test('unit:registry-discovers-agent-environments — propose discovers every ~/.
     assert.deepEqual(state.master.lastWake?.causes, []);
     await cycle(40_000 + 6 * 60_000 + 20_000);
     assert.equal(harness.wakes.length, 2, 'the heartbeat clock resets, so silence does not wake every cycle');
+  });
+
+  test('a backlog of more actionable subjects than any count bound wakes the master once, and quiet cycles after it none, with every cursor write fitted to its schema', async () => {
+    const cfg = config({ masterHeartbeatMinutes: 60 });
+    const state = emptyDaemonState(cfg);
+    const harness: Harness = { agents: [], launches: [], wakes: [], closed: [], ended: [], held: [], outputs: {} };
+    const work = Array.from({ length: 150 }, (_, index) => item(`GY-${index + 1}`));
+    const at = { value: clock0 };
+    // Every write goes through the cursor's bound and schema, as `graphyard master run` persists it.
+    const loop = effects(cfg, { master: harness }, work, at, { persist: async written => { daemonStateSchema.parse(boundDaemonState(written)); } });
+    const cycle = (offsetMs: number) => { at.value = clock0 + offsetMs; return runCycle(cfg, state, loop, () => at.value); };
+    await cycle(0);
+    harness.agents = [sessionAgent(cfg, 'pane-1')];
+    for (const offset of [20_000, 40_000, 60_000]) await cycle(offset);
+    assert.deepEqual(harness.wakes, [], 'a 150-subject backlog the handover named never reads as changed');
+    assert.equal(Object.keys(state.master.subjects).length, 150, 'every standing subject keeps its digest');
+    work.push(item('GY-151'));
+    await cycle(80_000);
+    for (const offset of [100_000, 120_000, 140_000]) await cycle(offset);
+    assert.equal(harness.wakes.length, 1, 'the one event wakes once, and the cycles after it are quiet');
+    assert.match(harness.wakes[0], /dispatch:GY-151/);
   });
 }

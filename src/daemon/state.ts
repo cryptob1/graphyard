@@ -342,8 +342,19 @@ export const masterSessionSchema = z.object({
   misses: z.number().int().min(0).default(0),
   /** True from hand-off until the launch settles, so no cycle doubles it. */
   launching: z.boolean().default(false),
-  /** Per subject key, the digest of its detail when it was last woken about (or first seen). */
+  /**
+   * Per subject key, the digest of its detail when it was last woken about (or first seen). It is
+   * never cut to a count: it tracks exactly the current actionable subjects (pruned to them every
+   * cycle, like `silence.subjects`, which already holds each with its detail), and a digest dropped
+   * for a bound would read as a changed subject and wake the session every cycle with no event.
+   */
   subjects: z.record(z.string().max(60), z.string().max(40)).default({}),
+  /**
+   * Registry sessions an ended or failed launch could not give back: the master role runs one
+   * session at a time, so a leaked row would refuse every relaunch. Each is ended again every cycle
+   * until the registry takes it back, or until the registry's own session cap has ended it.
+   */
+  unreleased: z.array(z.object({ session: z.string().max(200), since: z.string(), reason: z.string().max(300) }).strict()).max(20).default([]),
 }).strict();
 export type MasterSessionState = z.infer<typeof masterSessionSchema>;
 export const emptyMasterSession = (): MasterSessionState => masterSessionSchema.parse({});
@@ -538,8 +549,7 @@ export function boundDaemonState(state: DaemonState): DaemonState {
     state.master.session = cut(state.master.session, 200);
     if (state.master.lastEnd) state.master.lastEnd = { ...state.master.lastEnd, cause: cut(state.master.lastEnd.cause, 40), detail: cut(state.master.lastEnd.detail, 500) };
     if (state.master.lastWake) state.master.lastWake = { ...state.master.lastWake, causes: state.master.lastWake.causes.slice(-20).map(cause => cut(cause, 60)) };
-    const subjects = Object.entries(state.master.subjects).slice(-100);
-    if (subjects.length !== Object.keys(state.master.subjects).length) state.master.subjects = Object.fromEntries(subjects);
+    state.master.unreleased = state.master.unreleased.slice(-20).map(entry => ({ ...entry, session: cut(entry.session, 200), reason: cut(entry.reason, 300) }));
   }
   const failures = state.failures;
   if (failures.last) Object.assign(failures.last, { call: cut(failures.last.call, 100), reason: cut(failures.last.reason, 1000) });

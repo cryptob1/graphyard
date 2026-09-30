@@ -29,7 +29,7 @@ On a runtime's own limit notice (never agent text) the loop commits worker chang
 
 ## The loop's own master session
 
-The loop launches the master session as a fleet role (`master registry role set master ACCOUNTS …`) pinned to one session, holding its registry slot until the loop ends it; unconfigured, nothing launches. Either path (`master start` too) adopts a live session named `masterAgentName`. Its first request is the master prompt plus a durable handover naming standing judgement work. It relaunches on exit (two missed readings; an unreadable Herdr inventory is none), a limit notice (account held), or past `run.masterSessionMinutes` (default 240), deferred during a merge. Each cycle wakes it naming changed subjects; `run.masterHeartbeatMinutes` (default 30) of silence buys one heartbeat. `master status` shows `daemon.master`.
+The loop launches the master session as a fleet role (`master registry role set master ACCOUNTS …`) pinned to one session, holding its registry slot until the loop ends it; unconfigured, nothing launches. Either path (`master start` too) adopts a live session named `masterAgentName`. Its first request is the master prompt plus a durable handover naming standing judgement work. It relaunches on exit (two missed readings; an unreadable inventory is none), a limit notice (account held), or past `run.masterSessionMinutes` (default 240), deferred at most 30 minutes for an open item's merge. A failed registry end is retried each cycle. Each cycle wakes it naming changed subjects; `run.masterHeartbeatMinutes` (default 30) of silence buys one heartbeat. `master status` shows `daemon.master`.
 
 ## How a session starts
 
