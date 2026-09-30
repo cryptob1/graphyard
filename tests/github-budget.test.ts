@@ -183,6 +183,10 @@ test('unit:github-shared-cycle-reads — twenty items observed in one cycle make
   const quiet = { refs: refs(), protections: protections() };
   for (const work of items) { now += 500; await github.observe(work, items); }
   assert.deepEqual([refs() - quiet.refs, protections() - quiet.protections], [1, 1]);
+  // A guard before a write and the final verification never take the cycle's read: they see the branch as it is now.
+  const guarded = { refs: refs(), protections: protections() };
+  await github.baseBranch(); await github.protection(); await github.verify(items[0], items);
+  assert.deepEqual([refs() - guarded.refs, protections() - guarded.protections], [3, 3]);
 });
 
 // ---- The control plane, for the webhook-driven observation ----
@@ -199,13 +203,11 @@ before(async () => {
   await postgres.initialise(); await postgres.start(); await postgres.createDatabase('graphyard_test');
 });
 const replicas: Store[] = [];
-after(async () => { if (http) await new Promise(resolve => http.close(resolve)); for (const replica of replicas) await replica.close(); if (postgres) await postgres.stop(); });
-/** A store on the shared database, as one replica holds it. */
-async function replicaStore() {
-  const opened = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await opened.init();
-  replicas.push(opened); return opened;
-}
-async function database() { return store ??= await replicaStore(); }
+after(async () => { if (http) await new Promise(resolve => http.close(resolve)); if (store) await store.close(); for (const replica of replicas) await replica.close(); if (postgres) await postgres.stop(); });
+const openStore = async () => { const opened = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await opened.init(); return opened; };
+/** A second store on the shared database, as another replica holds it. */
+async function replicaStore() { const opened = await openStore(); replicas.push(opened); return opened; }
+async function database() { return store ??= await openStore(); }
 /** One replica's engine over its own store on the shared database. */
 function replicaEngine(on: Store) {
   const replica = new Engine(on, [CI], 120, REPOSITORY); replica.controlPlaneAppId = APP;
@@ -321,8 +323,8 @@ test('unit:github-budget-projection — replaying the recorded 2026-09-26 reques
     else if (call.endpoint === 'checkRuns') await github.request(`/commits/${entry.head}/check-runs?filter=all&per_page=100&page=1`);
     else if (call.endpoint === 'commits') await github.commitTree(call.index % 2 ? entry.head : api.main);
     else if (call.endpoint === 'compare') await github.request(`/compare/${api.main}...${entry.head}`);
-    else if (call.endpoint === 'ref') await github.baseBranch();
-    else await github.branchProtection();
+    else if (call.endpoint === 'ref') await github.cycleBaseBranch();
+    else await github.branchProtection(false, true);
   }
   const replayed = calls.length, billed = api.requests.length;
   assert.ok(replayed >= recordedPerHour - 3 && replayed > api.limit, `the replay is the recorded hour: ${replayed} calls, over the ${api.limit}/h limit uncached`);

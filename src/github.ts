@@ -1103,11 +1103,12 @@ export class GitHub {
   /**
    * The managed branch's protection as the gates read it: whether it is the protection Graphyard
    * requires, and whether it requires every review conversation resolved before a merge (GY-139).
-   * An unreadable protection is neither.
+   * An unreadable protection is neither. `shared` takes the observation cycle's read (GY-806); every
+   * other caller, a guard before a write included, reads it fresh.
    */
-  async branchProtection(requireNativeReview = false): Promise<{ protected: boolean; conversationResolution: boolean }> {
+  async branchProtection(requireNativeReview = false, shared = false): Promise<{ protected: boolean; conversationResolution: boolean }> {
     try {
-      const p = await this.sharedProtectionRead();
+      const p = shared ? await this.sharedProtectionRead() : await this.request(`/branches/${encodeURIComponent(this.config.base)}/protection`);
       // `strict` must be off: a queued tip is deliberately behind the base branch, and the merge
       // queue supersedes that setting with a published tip that already contains its validated base.
       const verified = (!requireNativeReview || p.required_pull_request_reviews?.required_approving_review_count >= 1 && p.required_pull_request_reviews?.dismiss_stale_reviews && p.required_pull_request_reviews?.require_last_push_approval) && p.required_status_checks?.strict === false && !!p.enforce_admins?.enabled && !p.allow_force_pushes?.enabled && !p.allow_deletions?.enabled
@@ -1158,9 +1159,16 @@ export class GitHub {
    * The managed branch's head and its tree, read from `refs/heads/<base>`. A pull request's
    * `base.sha` is GitHub's cached view of the same ref, refreshed only when it recomputes the
    * pull request, and it is never used for the base tip: a binding decided against it was the
-   * root cause of approvals dismissed for a merge base that had not actually changed.
+   * root cause of approvals dismissed for a merge base that had not actually changed. Read fresh:
+   * a guard before a write compares against the branch as it is now.
    */
-  async baseBranch(): Promise<{ tip: string; tree: string }> {
+  async baseBranch(): Promise<{ tip: string; tree: string }> { return this.readBaseBranch(); }
+  /**
+   * The base branch as the current observation cycle read it (GY-806): one read per `baseRefCycleMs`
+   * shared by every observation, ended early by a base push or a ref this adapter writes. Only
+   * observations use it; guards use `baseBranch`.
+   */
+  async cycleBaseBranch(): Promise<{ tip: string; tree: string }> {
     const now = this.clock();
     if (!this.sharedRef || now - this.sharedRef.at >= baseRefCycleMs || now < this.sharedRef.at) {
       const entry = { at: now, read: this.readBaseBranch() };
@@ -1292,13 +1300,13 @@ export class GitHub {
    * items' unlanded candidates in this head's history, and name the merge that took a delivery
    * off the base branch; without it those two answers are left out, never guessed.
    */
-  async observe(work: Work, peers?: Work[]): Promise<Observation> {
+  async observe(work: Work, peers?: Work[], shared = true): Promise<Observation> {
     const startedAt = new Date().toISOString();
     const pr = await this.computedMergeability(await this.request(`/pulls/${work.submission!.pr}`));
     demand(pr.base.repo.full_name.toLowerCase() === this.config.repository.toLowerCase() && pr.head.repo?.full_name.toLowerCase() === this.config.repository.toLowerCase(), 'MVP requires same-repository pull requests');
     demand(pr.base.ref === this.config.base, 'Pull request targets an unmanaged branch');
     const [checks, reviews, protection, files, branch] = await Promise.all([
-      this.pages(`/commits/${pr.head.sha}/check-runs?filter=all`, 'check_runs'), this.pages(`/pulls/${pr.number}/reviews`), this.branchProtection(nativeReviewRequired(work.policy)), this.pages(`/pulls/${pr.number}/files`), this.baseBranch(),
+      this.pages(`/commits/${pr.head.sha}/check-runs?filter=all`, 'check_runs'), this.pages(`/pulls/${pr.number}/reviews`), this.branchProtection(nativeReviewRequired(work.policy), shared), this.pages(`/pulls/${pr.number}/files`), shared ? this.cycleBaseBranch() : this.baseBranch(),
     ]);
     // Review threads are never a merge blocker in Graphyard's gate: the reviewer reads them itself
     // at launch and judges them in its verdict. The observation spends its one GraphQL read on them
@@ -1476,9 +1484,10 @@ export class GitHub {
     if (this.blobContents.size > ancestryEntries) this.blobContents.delete(this.blobContents.keys().next().value!);
     return content;
   }
+  /** Two fresh observations that must agree: the final check before a merge shares no cycle read (GY-806). */
   async verify(work: Work, peers?: Work[]): Promise<Observation> {
-    const first = await this.observe(work, peers);
-    const second = await this.observe(work, peers);
+    const first = await this.observe(work, peers, false);
+    const second = await this.observe(work, peers, false);
     const gates = (o: Observation) => JSON.stringify({ candidate: o.candidate, checks: o.checks, reviews: o.reviews, agentReview: o.agentReview, protected: o.protected, conversations: o.conversations, merged: o.merged, mergeable: o.mergeable, conflicting: o.conflicting || undefined, mergeabilityUnknown: o.mergeabilityUnknown || undefined, prState: o.prState, draft: o.draft, scopeFiles: o.scopeFiles, landing: o.landing });
     demand(gates(first) === gates(second), 'GitHub gates changed during final verification; retry');
     return second;

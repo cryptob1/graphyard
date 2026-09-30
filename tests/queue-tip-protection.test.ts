@@ -89,6 +89,9 @@ class Repo {
   adapter() {
     const github = new GitHub({ repository: 'owner/project', base: 'main', appId: 1234, installationId: 1, privateKey: 'not-used-in-adapter-test' });
     github.controlPlaneLogin = async () => APP;
+    // GitHub's push webhook for every move of main, as the route delivers it: it ends the adapter's shared base-ref read (GY-806).
+    const setRef = this.refs.set.bind(this.refs);
+    this.refs.set = (key: string, value: string) => { const result = setRef(key, value); if (key === 'heads/main') github.noteWebhook('push', { ref: 'refs/heads/main' }); return result; };
     github.request = async (rawPath: string, method = 'GET', body?: unknown) => {
       this.calls.push({ path: rawPath, method, body });
       const url = new URL(rawPath, 'http://api.test'); const path = url.pathname; const page = Number(url.searchParams.get('page') ?? 1);
