@@ -16,7 +16,7 @@ import { documentationReviewSection, type DocumentationObligation } from './mode
 import { researchReviewSection } from './research.js';
 import { openFollowUpItem } from './model/machine-backlog.js';
 import { paneAlreadyGone, sessionReported, withPaneGone } from './request-settlement.js';
-import { findingClassificationSection, freshReadFor, freshReadRecordSchema, freshReadSection, judgeFreshRead, mechanicalFixRecordSchema, mechanicalFixRequests, misclassificationAttempts, misclassificationSignal, observeGitHubCommit, planMechanicalFix, readReview, type FreshReadRecord } from './mechanical-findings.js';
+import { findingClassificationSection, freshReadFor, freshReadRecordSchema, freshReadSection, judgeFreshRead, mechanicalFixRecordSchema, mechanicalFixRequests, mechanicalRoundStartMs, misclassificationAttempts, misclassificationSignal, observeGitHubCommit, planMechanicalFix, readReview, type FreshReadRecord } from './mechanical-findings.js';
 import type { InterventionRecordInput } from './model/interventions.js';
 
 const sha40 = z.string().regex(/^[0-9a-f]{40}$/i);
@@ -1053,13 +1053,14 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
 
 /**
  * GY-971. Each approval of the current candidate is read once and its plan recorded
- * (`planMechanicalFix`): `planned` holds its follow-up filing while its head is the candidate, for
- * the loop's mechanical-fix round (daemon/decisions.ts). A plan whose round never produced a bot
- * commit falls back, and its findings are filed as follow-ups: the item was delivered at the
- * approved head, or the round submitted that head unchanged. The fresh read of a bot round's head,
+ * (`planMechanicalFix`): `planned` holds its follow-up filing, and the head's merge
+ * (daemon/cycle-delivery.ts), while its head is the candidate, for the loop's mechanical-fix round
+ * (daemon/decisions.ts). A plan whose round never produced a bot commit falls back, and its findings
+ * are filed as follow-ups: the item was delivered at the approved head, the round submitted that
+ * head unchanged, or no round started within `mechanicalRoundStartMs`. The fresh read of a bot round's head,
  * and an approval whose follow-ups were already filed, are never planned: one round per approved head.
  */
-async function planMechanicalFixes(records: ReviewRecord[], work: Work[] | undefined, repository: string, run: ChildRun | undefined, now: Date) {
+export async function planMechanicalFixes(records: ReviewRecord[], work: Work[] | undefined, repository: string, run: ChildRun | undefined, now: Date) {
   const events: string[] = [];
   let changed = 0;
   if (!work || !run) return { events, changed };
@@ -1077,9 +1078,13 @@ async function planMechanicalFixes(records: ReviewRecord[], work: Work[] | undef
       }
       const delivered = !approvesCurrentHead(record, work) && approvesFinalHead(record, work);
       const unchanged = item.candidate?.sha === record.sha && item.epoch > fix.epoch && item.submission?.epoch === item.epoch && !item.reworkRequested && !item.lease;
-      if (!delivered && !unchanged) continue;
+      // A round whose rework decision was refused, or never applied, does not hold the head for ever.
+      const stalled = item.epoch === fix.epoch && !item.reworkRequested && now.getTime() - Date.parse(fix.at) >= mechanicalRoundStartMs;
+      if (!delivered && !unchanged && !stalled) continue;
       record.mechanicalFix = { ...fix, state: 'fallback', settledAt: now.toISOString(),
-        reason: delivered ? `${record.key} was delivered at ${short} before any bot commit, so its mechanical findings are filed as follow-ups` : `the mechanical-fix round submitted ${short} unchanged, so its mechanical findings are filed as follow-ups` };
+        reason: delivered ? `${record.key} was delivered at ${short} before any bot commit, so its mechanical findings are filed as follow-ups`
+          : unchanged ? `the mechanical-fix round submitted ${short} unchanged, so its mechanical findings are filed as follow-ups`
+            : `no mechanical-fix round started within ${mechanicalRoundStartMs / 60_000} minutes of the plan (its rework decision was refused or not applied), so its mechanical findings are filed as follow-ups` };
       events.push(`mechanical-fix plan of ${record.key} approval ${fix.reviewId} fell back: ${record.mechanicalFix.reason}`);
       changed++;
       continue;
@@ -1102,7 +1107,7 @@ async function planMechanicalFixes(records: ReviewRecord[], work: Work[] | undef
  * change request is ordinary rework, and one with a `Rejected bot commit:` line is recorded as a
  * `misclassified-finding` intervention — retried on later passes until recorded, within a bound.
  */
-async function judgeFreshReads(records: ReviewRecord[], repository: string, run: ChildRun | undefined, recordIntervention: ((signal: InterventionRecordInput, key: string) => Promise<void>) | undefined, now: Date) {
+export async function judgeFreshReads(records: ReviewRecord[], repository: string, run: ChildRun | undefined, recordIntervention: ((signal: InterventionRecordInput, key: string) => Promise<void>) | undefined, now: Date) {
   const events: string[] = [];
   let changed = 0;
   for (const record of records) {

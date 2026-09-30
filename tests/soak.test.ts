@@ -36,6 +36,9 @@ import { performSelfUpgrade, type SelfUpgradeOutcome } from '../src/daemon/upgra
 import { defaultOptimisticExclude } from '../src/optimistic-merge.js';
 import { queuePlacement } from '../src/merge-queue.js';
 import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } from './helpers/soak-world.js';
+import { judgeFreshReads, planMechanicalFixes, reviewRecordSchema, type ReviewRecord } from '../src/reviewer.js';
+import { appliedMechanicalRework, freshReadFor, mechanicalFixRequests, mechanicalFixState, type MechanicalFixRequest } from '../src/mechanical-findings.js';
+import type { InterventionRecordInput } from '../src/model/interventions.js';
 
 /**
  * GY-404: per-item gates cannot catch faults that emerge from interaction over time, so this runs
@@ -260,8 +263,8 @@ before(async () => {
 after(async () => { clock.uninstall(); if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (pgServer) await pgServer.stop(); });
 
 const id = () => randomUUID();
-async function api(principal: Principal, method: 'GET' | 'POST', path: string, body?: unknown) {
-  const response = await fetch(`${url}/api/${path}`, { method, headers: { Authorization: `Bearer ${token(principal)}`, 'Content-Type': 'application/json', 'Idempotency-Key': id() }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+async function api(principal: Principal, method: 'GET' | 'POST', path: string, body?: unknown, key: string = id()) {
+  const response = await fetch(`${url}/api/${path}`, { method, headers: { Authorization: `Bearer ${token(principal)}`, 'Content-Type': 'application/json', 'Idempotency-Key': key }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   const result = await response.json() as any;
   if (!response.ok) throw new Error(`Graphyard refused ${path} (${response.status}): ${result?.error ?? JSON.stringify(result)}`);
   return result;
@@ -280,10 +283,13 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
  * produced: `stuck` is the item whose published tip GitHub answers with a head other than the
  * record's, so every guarded merge attempt refuses with one unchanged message, and `lostCarry` is
  * the item whose carried review GitHub stops holding once the tip's carry decision bound it, so the
- * re-post cannot use it.
+ * re-post cannot use it. `mechanical` keeps the review ledger the dispatcher's reconciliation keeps
+ * (GY-971), with the reviews GitHub holds, and names the item whose first approval raises findings
+ * classified mechanical whose bot commit the fresh read accepts (`applied`) and the one whose bot
+ * commit it rejects as a misclassification (`rejected`).
  */
 let days = 0;
-async function simulateDay(options: { hours: number; regression?: 'approvers-left-open'; handApprovers?: boolean; capacityWait?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; docs?: { budget: { total: number; perPage: number } }; plan?: Partial<typeof basePlan> }) {
+async function simulateDay(options: { hours: number; regression?: 'approvers-left-open'; handApprovers?: boolean; capacityWait?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; docs?: { budget: { total: number; perPage: number } }; mechanical?: { applied: number; rejected: number }; plan?: Partial<typeof basePlan> }) {
   const dayStart = clock.now();
   // A day may restage the shared scenario: the day-scoped view of the plan is what every fault
   // below arms from, while each test's own assertions still read the shared base plan.
@@ -416,9 +422,55 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   // The unrepresentable ask's worker never pushes or submits: its item stays blocked on scope.
   const hold = new Set(options.scope ? [items[scopePlan.unrepresentable - 1].key] : []);
 
+  // ---- GY-971: the review ledger, kept as the dispatcher's review reconciliation keeps it. ----
+  // Every verdict the reviewer posts is recorded as its session's, and the real planner and fresh-read
+  // judge run over the ledger on each pass, one pass behind GitHub as the dispatcher's tick is, so
+  // the loop meets each approval unclassified first. The loop reads the ledger's plans each cycle.
+  const mechanicalDay = options.mechanical;
+  const ledger: ReviewRecord[] = [], ledgered = new Set<number>(), bodies = new Map<number, { body: string; sha: string; state: string }>();
+  const misclassified: { signal: InterventionRecordInput; key: string }[] = [];
+  const botRounds: { key: string; approved: string; head: string; reviewId: number; bot: string; epoch: number }[] = [];
+  if (mechanicalDay) github.verdicts.set(items[mechanicalDay.rejected - 1].key, ['APPROVED', 'CHANGES_REQUESTED']);
+  const mechanicalItem = (key: string) => !!mechanicalDay && [mechanicalDay.applied, mechanicalDay.rejected].some(n => items[n - 1].key === key);
+  const reviewBody = (key: string, review: { sha: string; state: string }) => {
+    const n = items.findIndex(item => item.key === key) + 1, bot = botRounds.find(round => round.head === review.sha);
+    if (bot && review.state === 'CHANGES_REQUESTED') return `AC-1 unmet.\nRejected bot commit: ${review.sha} — it changed the retry bound in ${file(n)}, a behaviour change, not a typo fix`;
+    // The first approval of a scenario item raises one finding of each class.
+    if (mechanicalItem(key) && review.state === 'APPROVED' && !ledger.some(record => record.key === key))
+      return [`AC-1 met.`, `Follow-up finding: ${file(n)}:3 — "recieve" is a typo (mechanical: typo)`, `Follow-up finding: ${file(n)}:9 — the retry is unbounded when the source keeps failing (substantive: behavior)`].join('\n');
+    return 'AC-1 met.';
+  };
+  const ledgerRun = async (_command: string, args: string[]) => {
+    const match = /^repos\/owner\/project\/pulls\/\d+\/reviews\/(\d+)$/.exec(args[1] ?? ''), entry = match ? bodies.get(Number(match[1])) : undefined;
+    if (!entry) throw new Error(`the simulated GitHub cannot answer gh ${args.join(' ')}`);
+    return JSON.stringify({ id: Number(match![1]), state: entry.state, commit_id: entry.sha, body: entry.body });
+  };
+  // A head as GitHub reports its commit: its parents and the paths it changed from its first parent.
+  const observeCommit = async (head: string) => {
+    const commit = github.commits.get(head)!, parent = github.commits.get(commit.parents[0]!);
+    return { parents: commit.parents, files: commit.files.filter(path => commit.contents.get(path) !== parent?.contents.get(path)), at: new Date(commit.at).toISOString() };
+  };
+  const reconcileLedger = async () => {
+    const work = (await store.list()).filter(item => items.some(entry => entry.id === item.id));
+    const at = new Date(clock.now());
+    await planMechanicalFixes(ledger, work, repository, ledgerRun, at);
+    await judgeFreshReads(ledger, repository, ledgerRun, async (signal, key) => { misclassified.push({ signal, key }); await api(principals.coordinator, 'POST', 'interventions', signal, key); }, at);
+    for (const pr of github.prs.values()) for (const review of pr.reviews) {
+      const item = work.find(entry => entry.key === pr.key);
+      if (ledgered.has(review.id) || review.reviewer !== 'reviewer' || !item) continue;
+      ledgered.add(review.id);
+      bodies.set(review.id, { sha: review.sha, state: review.state, body: reviewBody(item.key, review) });
+      const bot = botRounds.find(round => round.head === review.sha);
+      const fresh = (await freshReadFor(mechanicalFixRequests(ledger), item.key, review.sha, { principal: bot?.bot ?? pr.author, role: 'worker' }, review.reviewer, observeCommit))?.fresh;
+      ledger.push(reviewRecordSchema.parse({ id: randomUUID(), key: item.key, pr: pr.number, sha: review.sha, baseSha: item.candidate?.baseSha ?? github.tip, policyRevision: item.policyRevision,
+        profile: 'soak-reviewer', agentName: `soak-review-${review.id}`, pane: null, sessionDirectory: '/tmp/soak/review', requestedAt: review.submittedAt, tokenExpiresAt: review.submittedAt,
+        state: 'completed', verdict: { state: review.state, reviewer: review.reviewer, reviewId: review.id, submittedAt: review.submittedAt }, ...(fresh ? { freshRead: fresh } : {}) }));
+    }
+  };
+
   // ---- Workers: the loop dispatches, the simulated session claims, works, pushes and submits (or dies). ----
   interface Session { work: string; key: string; branch: string; profile: WorkerProfile; epoch: number; attempt: number; pane: string; pushAt: number; diesAt: number | null; exitsAt: number | null; dispatchAt: number; state: 'working' | 'submitted' | 'dead' | 'exited' | 'idling' | 'reclaimed'; syncs: number; syncedFor?: string; refusedSince?: number;
-    scopeAt: number | null; misreadAt: number | null; misread: boolean }
+    scopeAt: number | null; misreadAt: number | null; misread: boolean; bot?: MechanicalFixRequest }
   const sessions: Session[] = [], lost: string[] = [];
   // GY-888: every session launch the day makes carries the coordinator confinement through the
   // launcher's own logic, and the same launch where the mount namespace cannot be built is
@@ -455,6 +507,10 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     await confine('worker', key);
     await engine.execute(principal, 'workspace', work.id, { epoch, host: 'soak-host', path, branch }, id());
     const attempt = (attempts.get(key) ?? 0) + 1; attempts.set(key, attempt);
+    // GY-971: an attempt the item's applied mechanical-fix rework started is the bot round, as the
+    // worker launcher reads it; any other rework is ordinary work.
+    const reviewId = mechanicalDay && work.candidate ? appliedMechanicalRework(work, (await api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(work.id)}/decisions`)).decisions) : null;
+    const bot = reviewId === null ? undefined : mechanicalFixRequests(ledger).find(request => request.key === key && request.reviewId === reviewId && request.head === work.candidate!.sha);
     // GY-852: the reassigned item's first session takes the lease and then sits at its prompt for
     // ever, as an idle worker does, so the loop's idle re-prompt and reclaim run against it.
     const idling = options.reassigned === n && attempt === 1;
@@ -462,7 +518,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     sessions.push({ work: work.id, key, branch, profile, epoch, attempt, pane, pushAt: idling ? Number.MAX_SAFE_INTEGER : clock.now() + plan.workMs,
       diesAt: !options.capacityWait && !idling && plan.deaths.has(n) && attempt === 1 ? clock.now() + plan.deathAfterMs : null,
       exitsAt: !idling && plan.exits.has(n) && attempt === 1 ? clock.now() + plan.exitAfterMs : null, dispatchAt: clock.now(), state: idling ? 'idling' : 'working', syncs: 0,
-      scopeAt: !idling && plan.scoped.has(n) && attempt === 1 ? clock.now() + plan.scopeAfterMs : null, misreadAt: !idling && plan.misread.has(n) && attempt === 1 ? clock.now() + plan.misreadAfterMs : null, misread: false });
+      scopeAt: !idling && plan.scoped.has(n) && attempt === 1 ? clock.now() + plan.scopeAfterMs : null, misreadAt: !idling && plan.misread.has(n) && attempt === 1 ? clock.now() + plan.misreadAfterMs : null, misread: false, ...(bot ? { bot } : {}) });
     // A scope scenario asks the moment it holds the lease, as a worker does, and keeps working
     // while the control plane decides. An ask carries at most fifty paths, so a wide ask is
     // filed in batches, which one open request of the attempt merges.
@@ -518,6 +574,21 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
           herdr.status(session.pane, 'done');
           session.state = 'dead';
         }
+        continue;
+      }
+      // The bot round makes one commit on the approved head, changing only the findings' files, and submits it.
+      if (session.bot) {
+        const approved = github.commits.get(session.bot.head)!, head = sha('bot', session.key, session.epoch);
+        const contents = new Map(approved.contents);
+        for (const path of session.bot.paths) contents.set(path, sha('content', path, head));
+        github.record({ sha: head, tree: sha('tree', head), parents: [session.bot.head], files: approved.files, at: now, message: `${session.key}: mechanical review fixes (review ${session.bot.reviewId})` }, contents);
+        const pr = [...github.prs.values()].find(entry => entry.branch === session.branch && entry.open)!;
+        Object.assign(pr, { head, autoMerge: false, mergeRequestedAt: null });
+        pr.pushed.set(head, now);
+        botRounds.push({ key: session.key, approved: session.bot.head, head, reviewId: session.bot.reviewId, bot: principal.id, epoch: session.epoch });
+        await engine.execute(principal, 'submit', session.work, { epoch: session.epoch, pr: pr.number, documentation: 'mechanical review fixes only; no documented behaviour changed' }, id());
+        session.state = 'submitted';
+        herdr.kill(session.pane);
         continue;
       }
       const head = sha('head', session.key, session.epoch);
@@ -613,14 +684,20 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     await confine('approver', work.key, coordinatorRoot!);
     const agentName = approverSessionName(work, decision), pane = herdr.open(agentName);
     approverPanes.push(pane);
-    pending.push(async () => {
+    // GY-971: the mechanical-fix day's approvers take ten minutes to judge, as a real session does,
+    // so an approved head the merge step did not hold would land before its bot round was applied.
+    const judgeAt = clock.now() + (mechanicalDay ? 10 * minute : 0);
+    pending.push(async function judge() {
+      if (clock.now() < judgeAt) { pending.push(judge); return; }
       const refuseDue = !!options.refuseReworkOf?.includes(numberOf(work)) && !refused.some(entry => entry.key === work.key)
         && (await api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(work.id)}/decisions`)).decisions.some((entry: { id: string; action: string }) => entry.id === decision && entry.action === 'rework');
       if (refuseDue) {
         await api(principals.approver, 'POST', `work/${work.id}/approve`, { action: 'refuse', decision, reason: `Refused: ${work.key}'s rework rests on grounds this approver does not accept` });
         refused.push({ key: work.key, decision });
       } else {
-        await api(principals.approver, 'POST', `work/${work.id}/approve`, { decision, reason: `Approved: the loop's routine ${decision} decision for ${work.key} rests on what it verified` });
+        // A decision the loop withdrew while the session judged (its item moved on) leaves nothing to approve.
+        await api(principals.approver, 'POST', `work/${work.id}/approve`, { decision, reason: `Approved: the loop's routine ${decision} decision for ${work.key} rests on what it verified` })
+          .catch(error => { if (!(mechanicalDay && /is already withdrawn/.test(error instanceof Error ? error.message : ''))) throw error; });
       }
       herdr.status(pane, 'done');
     });
@@ -671,7 +748,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   // GY-852: the reassigned day runs on a control plane the earlier days share, so its loop reads
   // only its own items: an earlier day's half-finished item (a rework decision nobody adopted)
   // would otherwise be dispatched, pushed and refused here for its linked pull request.
-  const ownItems = options.reassigned ? new Set(items.map(item => item.id)) : null;
+  const ownItems = options.reassigned || options.mechanical ? new Set(items.map(item => item.id)) : null;
   const snapshot = async () => { const read = await store.coordinationSnapshot(); return { work: ownItems ? read.work.filter(item => ownItems.has(item.id)) : read.work, now: read.now, jobs: read.jobs }; };
   const transport = async (path: string, data: any, key: string = id()) => {
     const match = /^work\/([^/]+)\/merge-acquire$/.exec(path);
@@ -762,6 +839,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     } : {}),
     promptSession,
     exhaustedProofs: async () => [...abandoned.values()],
+    ...(mechanicalDay ? { mechanicalFixes: async () => mechanicalFixState(ledger) } : {}),
     // The documentation day's loop counts the base branch's real pages through the counting code
     // master status runs (GY-574), over a git that answers from the simulated repository.
     ...(docs ? {
@@ -1060,6 +1138,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       if (options.capacityWait && !capacityWaiters && elapsed >= options.capacityWait.to)
         capacityWaiters = Object.values(state.approvals).filter(watch => watch.capacity).map(watch => ({ decision: watch.decision, key: watch.work, requestedAt: watch.requestedAt }));
       try {
+        if (mechanicalDay) await reconcileLedger();
         const result = await runCycle(config, state, effects, clock.now, launcher); cycles++;
         reportedDispatches += result.actions.filter(action => action.kind === 'dispatch' && action.state === 'done').length;
         escalations.push(...result.actions.filter(action => action.kind === 'escalation').map(action => action.detail));
@@ -1109,7 +1188,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
   return { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, herdr, hand, escalations, spent, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, landingRefusals, foreignPane,
     mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted, stale, approverPanes, herdrClosed: herdr.closed, diagnosisModel: settings.model, capacityRefused, capacityLaunched, capacityWaiters,
-    decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, reassign, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals };
+    decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, reassign, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, mechanical: { ledger, botRounds, misclassified } };
 }
 
 /**
@@ -1767,4 +1846,55 @@ test('unit:soak-invariants-hold — a worker idle past its bound whose pane died
   assert.equal(reclaim?.state, 'done');
   assert.match(reclaim.detail, /its pane .* has been gone from the runtime .* keeping the attempt's branch/);
   assert.equal(final.find(item => item.key === items[n - 1].key)!.stage, 'done', 'the item was delivered by its next attempt');
+});
+
+test('unit:soak-invariants-hold — review findings classified mechanical under the real loop: each approved head is planned once and held from merging until its one bot round, the fresh read settles every plan, and a rejected bot commit is recorded once as a misclassified finding, with every invariant holding', { timeout: 300_000 }, async () => {
+  // GY-971: every approval of the day is read from the review ledger the dispatcher keeps. Two
+  // items' first approvals raise a finding classified mechanical: the loop holds each approved head
+  // from merging, asks for one bot round, and the round's commit on that head is read afresh. One
+  // fresh read accepts it; the other rejects it as a misclassification, which is recorded once, and
+  // that item is reworked and delivered like any change request. The plan, the hold, the rework
+  // decision and the fresh-read judgement repeat per cycle, head and item, which is why they live here.
+  const mechanical = { applied: 2, rejected: 4 };
+  const { items, final, violations, failures, lost, github, actionKeys, mechanical: world } = await simulateDay({
+    hours: 6, mechanical,
+    plan: { items: 6, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), breaksMain: 0, infrastructure: new Set([5]), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, outOfQueue: { item: 6, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 6 } },
+  });
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all six items are delivered');
+  assert.deepEqual(violations, [], 'every system invariant holds across the mechanical-fix rounds');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.deepEqual(lost, [], 'no lease was lost');
+  // Every approval was classified, and every plan settled: applied by its fresh read, or none to make.
+  const approvals = world.ledger.filter(record => record.verdict?.state === 'APPROVED' && !record.freshRead);
+  assert.ok(approvals.length >= items.length, `every item's approval reached the ledger (${approvals.length})`);
+  assert.deepEqual(world.ledger.filter(record => record.mechanicalFix?.state === 'planned').map(record => `${record.key} ${record.sha.slice(0, 12)}`), [], 'no plan is left standing');
+  const plans = world.ledger.filter(record => record.mechanicalFix && record.mechanicalFix.state !== 'none');
+  for (const n of [mechanical.applied, mechanical.rejected]) {
+    const key = items[n - 1].key, id = items[n - 1].id;
+    const own = plans.filter(record => record.key === key);
+    assert.equal(own.length, 1, `${key}: one plan for its approved head: ${JSON.stringify(own.map(record => record.mechanicalFix))}`);
+    const plan = own[0]!.mechanicalFix!;
+    assert.equal(plan.state, 'applied', `${key}: the plan was settled by the fresh read of its bot commit`);
+    assert.deepEqual(plan.paths, [file(n)]);
+    const rounds = world.botRounds.filter(round => round.key === key);
+    assert.deepEqual(rounds.map(round => round.approved), [plan.head], `${key}: exactly one bot round, on the approved head`);
+    assert.equal(plan.commit, rounds[0]!.head, `${key}: the fresh read reviewed the bot commit`);
+    assert.equal([...actionKeys].filter(entry => entry.startsWith(`decision:rework:${id}:`) && entry.includes(':mechanical:')).length, 1, `${key}: one mechanical-fix rework decision`);
+    // No merge ahead of the round: the approved head is never what landed.
+    const merged = github.merges.filter(entry => entry.key === key);
+    assert.equal(merged.length, 1, `${key} merged once`);
+    assert.notEqual(github.commits.get(merged[0]!.sha)!.parents[1], plan.head, `${key}: the approved head ${plan.head.slice(0, 12)} was not merged ahead of its bot round`);
+    assert.ok([...actionKeys].some(entry => entry.startsWith(`escalation:${id}:${plan.head}:`) && entry.endsWith(':mechanical')), `${key}: the loop's merge step held the approved head for the round: ${[...actionKeys].filter(entry => entry.includes(id)).join(', ')}`);
+  }
+  // The accepted bot commit is what landed for its item.
+  const accepted = world.botRounds.find(round => round.key === items[mechanical.applied - 1].key)!;
+  assert.ok(github.contains(github.merges.find(entry => entry.key === accepted.key)!.sha, accepted.head), 'the accepted bot commit landed');
+  assert.equal(world.ledger.find(record => record.sha === accepted.head)?.freshRead?.judged?.outcome, 'accepted');
+  // The rejected one is recorded once as a misclassified finding, and its item was reworked and delivered without it.
+  const rejected = world.botRounds.find(round => round.key === items[mechanical.rejected - 1].key)!;
+  assert.equal(world.ledger.find(record => record.sha === rejected.head)?.freshRead?.judged?.outcome, 'rejected');
+  assert.deepEqual(world.misclassified.map(entry => [entry.signal.kind, entry.signal.work]), [['misclassified-finding', rejected.key]], 'one intervention per rejection');
+  assert.ok(!github.contains(github.merges.find(entry => entry.key === rejected.key)!.sha, rejected.head), 'the rejected bot commit did not land');
+  const report = await api(principals.coordinator, 'GET', `interventions?kind=misclassified-finding&work=${rejected.key}`);
+  assert.equal(report.byKind?.find((entry: { kind: string }) => entry.kind === 'misclassified-finding')?.count, 1, `the control plane holds the one misclassification: ${JSON.stringify(report.byKind)}`);
 });

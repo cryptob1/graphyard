@@ -5,7 +5,7 @@ import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { generateKeyPairSync } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { classifyFinding, judgeBotCommit, mechanicalFixPlan, parseClassifiedFindings, readMechanicalFixRequests, verifyBotCommit, type BotCommitObservation, type MechanicalFixPlan } from '../src/mechanical-findings.js';
+import { appliedMechanicalRework, classifyFinding, judgeBotCommit, mechanicalFixPlan, mechanicalMergeHold, mechanicalRoundStartMs, parseClassifiedFindings, planMechanicalFix, readMechanicalFixRequests, readMechanicalFixState, verifyBotCommit, type BotCommitObservation, type MechanicalFixPlan } from '../src/mechanical-findings.js';
 import { loadMasterConfig, saveWorkerProfile, setupMaster } from '../src/master.js';
 import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, reviewPrompt, reviewRetryPrompt, saveReviewerProfile, type ReviewRecord } from '../src/reviewer.js';
 import { neededDecision } from '../src/daemon/decisions.js';
@@ -110,13 +110,16 @@ async function approvedThenBotRound(root: string, body: string, commit: { parent
   const approved = item(H, 1, [{ reviewer, sha: H, state: 'APPROVED', id: 901 }]);
   const planned = await reconcileReviews(root, config, { run: first.run, observe: verdictOf(901, 'APPROVED'), work: [approved], threadsRun: github({ 901: { body, sha: H, state: 'APPROVED' } }), createFollowUpItem: create });
   const requests = await readMechanicalFixRequests(root);
+  const held = mechanicalMergeHold(approved, await readMechanicalFixState(root), Date.now());
   const decision = neededDecision(approved, { autoMerge: true }, [], requests);
-  const worker = workerPrompt({ cliPath: '/opt/graphyard/bin/graphyard.mjs', repository: 'owner/project' }, approved, { principal: botWorker }, 2, null, requests);
+  // The approver applied that rework decision: the next attempt's launch reads it and is the bot round.
+  const reviewId = appliedMechanicalRework(approved, [{ action: 'rework', state: 'applied', input: { previousWorkerStopped: true, binding: decision?.binding }, approvedAt: new Date().toISOString() }]);
+  const worker = workerPrompt({ cliPath: '/opt/graphyard/bin/graphyard.mjs', repository: 'owner/project' }, approved, { principal: botWorker }, 2, null, reviewId === null ? null : { requests, reviewId });
   // The bot round's worker pushed its commit and submitted it: the fresh read of that head is launched.
   const second = herdr();
   await launch(root, item(BOT, 2), second.run, commit);
   const fresh = recordOf((await readReviewLedger(root)).reviews, BOT);
-  return { config, filed, create, planned, requests, decision, worker, fresh, prompt: second.requests[0]! };
+  return { config, filed, create, planned, requests, held, decision, reviewId, worker, fresh, prompt: second.requests[0]! };
 }
 
 test('unit:mechanical-findings-auto-fixed — review findings are classified, and an approved head\'s mechanical ones are fixed by a worker bot commit before the fresh read, which is shown only substance', async () => {
@@ -163,6 +166,14 @@ test('unit:mechanical-findings-auto-fixed — review findings are classified, an
     assert.equal(approvalRecord.followUps, undefined, 'nothing is filed while the bot round is owed');
     assert.deepEqual(round.filed, []);
     assert.ok(round.planned.threads.some(line => /4 finding\(s\) classified mechanical/.test(line)), round.planned.threads.join('\n'));
+    // The approved head is not merged ahead of its round: the loop's merge step holds it while the plan stands, within a bound.
+    assert.match(round.held ?? '', /candidate aaaaaaaaaaaa is not merged while review 901's 4 findings classified mechanical wait/);
+    const plannedState = { requests: round.requests, unclassified: [] };
+    assert.equal(mechanicalMergeHold(item(H, 1), plannedState, Date.parse(round.requests[0]!.at) + mechanicalRoundStartMs), null, 'a plan whose round never starts holds nothing past the bound');
+    assert.equal(mechanicalMergeHold(item(BOT, 2), plannedState, Date.now()), null, 'the bot round\'s own head is not held by the plan');
+    // An approval the loop has recorded but not yet read for its findings holds the merge too, so no merge lands ahead of the plan.
+    const unclassified = { requests: [], unclassified: [{ key: 'GY-7', sha: H, since: new Date().toISOString() }] };
+    assert.match(mechanicalMergeHold(item(H, 1), unclassified, Date.now()) ?? '', /until its review is classified/);
     // 2. The loop's routine decision returns the approved head to a worker-class bot round.
     assert.equal(round.decision?.action, 'rework');
     assert.equal(round.decision?.binding, `${H}:mechanical:901`);
@@ -172,7 +183,13 @@ test('unit:mechanical-findings-auto-fixed — review findings are classified, an
     // 3. The worker launcher gives that round exactly the mechanical findings, bounded to their files, as one commit on the head.
     for (const fragment of ['mechanical-fix round', '"recieve" is a typo', 'frobCnt', `whose only parent is ${H}`, `change only ${paths.join(', ')}`, 'change no behaviour', 'complete GY-7 2 7']) assert.ok(round.worker.includes(fragment), `worker prompt: ${fragment}`);
     assert.ok(!round.worker.includes('retry loop is unbounded'), 'the bot is never handed a substantive finding');
-    assert.ok(!workerPrompt({ cliPath: '/g', repository: 'owner/project' }, item(H, 1), { principal: botWorker }, 1, null, round.requests).includes('mechanical-fix round'), 'the attempt that was approved is not a bot round');
+    assert.equal(round.reviewId, 901);
+    assert.ok(!workerPrompt({ cliPath: '/g', repository: 'owner/project' }, item(H, 1), { principal: botWorker }, 1, null, { requests: round.requests, reviewId: 901 }).includes('mechanical-fix round'), 'the attempt that was approved is not a bot round');
+    // The bot's instruction goes only with the mechanical round's own rework decision: a later sync or change-request rework of the same head is ordinary rework.
+    const applied = (binding: string, at: string) => ({ action: 'rework', state: 'applied', input: { previousWorkerStopped: true, binding }, approvedAt: at });
+    assert.equal(appliedMechanicalRework(item(H, 1), [applied(`${H}:mechanical:901`, '2026-09-30T12:00:00Z'), applied(`${H}:conflict`, '2026-09-30T12:05:00Z')]), null);
+    assert.equal(appliedMechanicalRework(item(B, 1), [applied(`${H}:mechanical:901`, '2026-09-30T12:00:00Z')]), null, 'bound to the head it named');
+    assert.equal(appliedMechanicalRework(item(H, 1), [{ ...applied(`${H}:mechanical:901`, '2026-09-30T12:00:00Z'), state: 'refused' }]), null, 'only an applied decision');
     // 4. The fresh read of the bot's head is verified as the bot commit and shown only substance.
     assert.equal(round.fresh.freshRead?.botCommit?.sha, BOT);
     assert.equal(round.fresh.freshRead?.botCommit?.bot, botWorker);
@@ -201,6 +218,10 @@ test('unit:mechanical-findings-auto-fixed — review findings are classified, an
   assert.match((verifyBotCommit(plannedFix, observed(plannedFix, { files: ['docs/widget.md', 'src/limits.ts'] }), reviewer) as { reason: string }).reason, /src\/limits\.ts, outside/);
   assert.match((verifyBotCommit(plannedFix, { ...observed(plannedFix), sha: 'nope' }, reviewer) as { reason: string }).reason, /could not be verified/, 'a malformed observation is a refusal, not a throw');
 
+  // A plan holds back every finding it keeps from filing: an approval with more substantive findings than the ledger holds is not planned.
+  const many = ['AC-1 met.', 'Follow-up finding: docs/widget.md:12 — "recieve" is a typo (mechanical: typo)', ...Array.from({ length: 51 }, (_, index) => `Follow-up finding: src/widget.ts:${index + 1} — the retry ${index} is unbounded (substantive: behavior)`)].join('\n');
+  assert.equal(planMechanicalFix({ key: 'GY-7', pr: 7, sha: H }, 901, many, 1, new Date().toISOString()).state, 'none');
+
   // A head that is not the planned bot commit is refused as one: the reviewer is handed the mechanical findings back.
   const refusedRoot = await boundMaster();
   try {
@@ -227,6 +248,25 @@ test('unit:mechanical-findings-auto-fixed — review findings are classified, an
     const description = String(filed[0]);
     assert.ok(description.includes('recieve') && description.includes('retry loop is unbounded'), 'the mechanical findings are filed as follow-ups too');
   } finally { await fallback.cleanup(); }
+
+  // A round that never starts — its rework decision refused, or never applied — falls back past the bound, and the merge it held is released.
+  const stalled = await boundMaster();
+  try {
+    const config = await loadMasterConfig(stalled.root), filed: string[] = [];
+    const first = herdr();
+    await launch(stalled.root, item(H, 1), first.run);
+    const gh = github({ 901: { body: verdict, sha: H, state: 'APPROVED' } });
+    const create = async (payload: any) => { filed.push(payload.description); return { key: 'GY-72' }; };
+    const approved = item(H, 1, [{ reviewer, sha: H, state: 'APPROVED', id: 901 }]);
+    await reconcileReviews(stalled.root, config, { run: first.run, observe: verdictOf(901, 'APPROVED'), work: [approved], threadsRun: gh, createFollowUpItem: create });
+    assert.equal(recordOf((await readReviewLedger(stalled.root)).reviews, H).mechanicalFix?.state, 'planned');
+    const late = new Date(Date.now() + mechanicalRoundStartMs + 60_000);
+    const after = await reconcileReviews(stalled.root, config, { run: first.run, work: [approved], threadsRun: gh, createFollowUpItem: create, observe: () => null, now: () => late });
+    assert.equal(recordOf(after.reviews, H).mechanicalFix?.state, 'fallback');
+    assert.match(recordOf(after.reviews, H).mechanicalFix?.reason ?? '', /no mechanical-fix round started within 60 minutes/);
+    assert.equal(filed.length, 1, 'its findings are filed');
+    assert.equal(mechanicalMergeHold(approved, await readMechanicalFixState(stalled.root), late.getTime()), null, 'nothing holds the merge any more');
+  } finally { await stalled.cleanup(); }
 });
 
 test('unit:mechanical-mislabel-caught — a substantive finding misclassified as mechanical is caught: the fresh read sees the full diff, rejects the bot commit, and the misclassification is an intervention signal for the retro', async () => {

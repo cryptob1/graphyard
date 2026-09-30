@@ -238,23 +238,63 @@ export async function readReview(repository: string, pr: number, reviewId: numbe
 /** The plan an approval of `record.sha` records: `planned` with its findings when anything on it is mechanical, `none` otherwise. */
 export function planMechanicalFix(record: { key: string; pr: number; sha: string }, reviewId: number, body: unknown, epoch: number, at: string): MechanicalFixRecord {
   const plan = mechanicalFixPlan({ key: record.key, pr: record.pr, sha: record.sha, reviewId, state: 'APPROVED', body });
-  if (!plan || plan.mechanical.length > ledgerFindingLimit || plan.paths.length > ledgerFindingLimit)
-    return { reviewId, head: record.sha, epoch, at, state: 'none', mechanical: [], substantive: [], paths: [], ...(plan ? { reason: `more than ${ledgerFindingLimit} mechanical findings or files: filed as follow-ups` } : {}) };
-  return { reviewId, head: record.sha, epoch, at, state: 'planned', mechanical: plan.mechanical.map(ledgerFinding), substantive: plan.substantive.slice(0, ledgerFindingLimit).map(ledgerFinding), paths: plan.paths };
+  // A plan carries every finding it holds back from filing, so one the ledger cannot hold whole is not made.
+  if (!plan || plan.mechanical.length > ledgerFindingLimit || plan.paths.length > ledgerFindingLimit || plan.substantive.length > ledgerFindingLimit)
+    return { reviewId, head: record.sha, epoch, at, state: 'none', mechanical: [], substantive: [], paths: [], ...(plan ? { reason: `more than ${ledgerFindingLimit} findings of one class or files: filed as follow-ups` } : {}) };
+  return { reviewId, head: record.sha, epoch, at, state: 'planned', mechanical: plan.mechanical.map(ledgerFinding), substantive: plan.substantive.map(ledgerFinding), paths: plan.paths };
 }
 
-/** A planned fix the loop acts on: its item, pull request, approved head and findings. */
-export interface MechanicalFixRequest { key: string; pr: number; head: string; reviewId: number; epoch: number; mechanical: ClassifiedFinding[]; substantive: ClassifiedFinding[]; paths: string[] }
-type PlannedRecord = { key: string; pr: number; sha: string; state: string; mechanicalFix?: MechanicalFixRecord };
+/** A planned fix the loop acts on: its item, pull request, approved head, findings, and when it was planned. */
+export interface MechanicalFixRequest { key: string; pr: number; head: string; reviewId: number; epoch: number; at: string; mechanical: ClassifiedFinding[]; substantive: ClassifiedFinding[]; paths: string[] }
+type PlannedRecord = { key: string; pr: number; sha: string; state: string; requestedAt?: string; verdict?: { state: string; submittedAt?: string }; followUps?: unknown; freshRead?: unknown; mechanicalFix?: MechanicalFixRecord };
 /** The planned fixes on the review ledger's records. */
 export const mechanicalFixRequests = (records: readonly PlannedRecord[]): MechanicalFixRequest[] => records.filter(record => record.mechanicalFix?.state === 'planned' && record.mechanicalFix.head === record.sha)
-  .map(record => { const fix = record.mechanicalFix!; return { key: record.key, pr: record.pr, head: fix.head, reviewId: fix.reviewId, epoch: fix.epoch, mechanical: fix.mechanical, substantive: fix.substantive, paths: fix.paths }; });
-/** The planned fixes, read from `.graphyard/reviews.json` under `root`; none when it cannot be read. */
-export async function readMechanicalFixRequests(root: string): Promise<MechanicalFixRequest[]> {
+  .map(record => { const fix = record.mechanicalFix!; return { key: record.key, pr: record.pr, head: fix.head, reviewId: fix.reviewId, epoch: fix.epoch, at: fix.at, mechanical: fix.mechanical, substantive: fix.substantive, paths: fix.paths }; });
+/**
+ * How long a plan waits for its bot round to start — the rework decision requested, judged and
+ * applied — before it falls back to filing its findings as follow-ups, and how long the merge of
+ * the approved head is held for it meanwhile. A refused or unjudged decision never holds a head for ever.
+ */
+export const mechanicalRoundStartMs = 60 * 60_000;
+/**
+ * A review of a head the ledger holds and has not yet classified: a session still pending on it, or
+ * an approval recorded but not yet read for its findings. The merge of that head waits for the
+ * classification (within `mechanicalRoundStartMs` of `since`), so it never lands ahead of a plan.
+ */
+export interface UnclassifiedReview { key: string; sha: string; since: string }
+export const unclassifiedReviews = (records: readonly PlannedRecord[]): UnclassifiedReview[] => records
+  .filter(record => !record.mechanicalFix && !record.followUps && !record.freshRead
+    && (record.state === 'pending' || record.state === 'completed' && record.verdict?.state === 'APPROVED'))
+  .map(record => ({ key: record.key, sha: record.sha, since: record.verdict?.submittedAt ?? record.requestedAt ?? new Date(0).toISOString() }));
+/** What the loop reads of the review ledger each cycle: the planned fixes, and the reviews not yet classified. */
+export interface MechanicalFixState { requests: MechanicalFixRequest[]; unclassified: UnclassifiedReview[] }
+export const mechanicalFixState = (records: readonly PlannedRecord[]): MechanicalFixState => ({ requests: mechanicalFixRequests(records), unclassified: unclassifiedReviews(records) });
+/** The review ledger's mechanical-fix state, read from `.graphyard/reviews.json` under `root`; empty when there is no ledger (no reviewer is bound). */
+export async function readMechanicalFixState(root: string): Promise<MechanicalFixState> {
   const { readFile } = await import('node:fs/promises');
   const { resolve } = await import('node:path');
-  try { return mechanicalFixRequests(JSON.parse(await readFile(resolve(root, '.graphyard/reviews.json'), 'utf8')).reviews ?? []); }
-  catch { return []; }
+  let text: string;
+  try { text = await readFile(resolve(root, '.graphyard/reviews.json'), 'utf8'); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { requests: [], unclassified: [] }; throw error; }
+  return mechanicalFixState(JSON.parse(text).reviews ?? []);
+}
+/** The planned fixes alone; none when the ledger cannot be read. */
+export const readMechanicalFixRequests = (root: string): Promise<MechanicalFixRequest[]> => readMechanicalFixState(root).then(state => state.requests, () => []);
+
+/**
+ * Why the guarded merge of the item's candidate waits (GY-971), or null: an approval of that head
+ * planned a mechanical fix whose bot round has not run, or a review of it is not yet classified.
+ * Either wait is bounded by `mechanicalRoundStartMs`, after which the plan falls back to follow-ups.
+ */
+export function mechanicalMergeHold(work: Pick<Work, 'key' | 'candidate'>, state: MechanicalFixState, now: number): string | null {
+  const sha = work.candidate?.sha;
+  if (!sha) return null;
+  const within = (since: string) => now - Date.parse(since) < mechanicalRoundStartMs;
+  const planned = state.requests.find(request => request.key === work.key && request.head === sha && within(request.at));
+  if (planned) return `${work.key}: candidate ${sha.slice(0, 12)} is not merged while review ${planned.reviewId}'s ${planned.mechanical.length} finding${planned.mechanical.length === 1 ? '' : 's'} classified mechanical wait${planned.mechanical.length === 1 ? 's' : ''} for the worker bot's fix and the fresh read (GY-971); the plan falls back to follow-ups if no bot round starts by ${new Date(Date.parse(planned.at) + mechanicalRoundStartMs).toISOString()}`;
+  const unclassified = state.unclassified.find(review => review.key === work.key && review.sha === sha && within(review.since));
+  if (unclassified) return `${work.key}: candidate ${sha.slice(0, 12)} is not merged until its review is classified mechanical or substantive (GY-971), which the loop's next review reconciliation does`;
+  return null;
 }
 
 /**
@@ -270,12 +310,32 @@ export function mechanicalRework(work: Work, requests: readonly MechanicalFixReq
   if (!observation.reviews.some(review => review.sha === candidate.sha && review.state === 'APPROVED' && (review.id === undefined || review.id === request.reviewId))) return null;
   const listed = request.mechanical.map(finding => `${finding.path}${finding.line !== null ? `:${finding.line}` : ''} (${finding.category})`).join(', ');
   return { reason: `${work.key}: the independent review ${request.reviewId} approved candidate ${candidate.sha.slice(0, 12)} with ${request.mechanical.length} finding${request.mechanical.length === 1 ? '' : 's'} classified mechanical (${listed}). A worker-class bot round fixes them in one commit on that head, changing only ${request.paths.join(', ')}, before the reviewer's fresh read, so the item returns to a worker for that commit (GY-971).`.slice(0, 1800),
-    binding: `${candidate.sha}:mechanical:${request.reviewId}` };
+    binding: mechanicalReworkBinding(candidate.sha, request.reviewId) };
 }
 
-/** The worker launcher's instruction for a mechanical-fix round: the plan for the head this attempt starts from, or nothing. */
-export function mechanicalWorkerSection(repository: string, cliPath: string, work: Pick<Work, 'key' | 'candidate'>, epoch: number, requests: readonly MechanicalFixRequest[]) {
-  const request = requests.find(entry => entry.key === work.key && entry.head === work.candidate?.sha && entry.epoch < epoch);
+/** The binding a mechanical-fix round's rework decision carries: the approved head and the approval that planned it. */
+export const mechanicalReworkBinding = (head: string, reviewId: number) => `${head}:mechanical:${reviewId}`;
+/**
+ * The approval whose mechanical-fix round this attempt is, read from the item's decisions: the most
+ * recently applied rework decision, when it was the mechanical round's (`mechanicalReworkBinding`)
+ * for the item's current candidate. Any other rework — a sync, a CI repair, a change request — is
+ * not a bot round, so its worker is never given the bot's instruction. Null otherwise.
+ */
+export function appliedMechanicalRework(work: Pick<Work, 'candidate'>, decisions: readonly { action: string; state: string; input?: any; approvedAt?: string | null }[]): number | null {
+  const head = work.candidate?.sha;
+  const latest = decisions.filter(decision => decision.action === 'rework' && decision.state === 'applied')
+    .sort((a, b) => Date.parse(a.approvedAt ?? '') - Date.parse(b.approvedAt ?? '')).at(-1);
+  const bound = typeof latest?.input?.binding === 'string' ? /^([0-9a-f]{40}):mechanical:(\d+)$/i.exec(latest.input.binding) : null;
+  return head && bound && bound[1] === head ? Number(bound[2]) : null;
+}
+
+/**
+ * The worker launcher's instruction for a mechanical-fix round, or nothing: `reviewId` is the
+ * approval the applied rework decision named (`appliedMechanicalRework`), and its plan is for the
+ * head this attempt starts from.
+ */
+export function mechanicalWorkerSection(repository: string, cliPath: string, work: Pick<Work, 'key' | 'candidate'>, epoch: number, requests: readonly MechanicalFixRequest[], reviewId: number | null) {
+  const request = reviewId === null ? undefined : requests.find(entry => entry.key === work.key && entry.head === work.candidate?.sha && entry.reviewId === reviewId && entry.epoch < epoch);
   if (!request) return '';
   return `This attempt is a mechanical-fix round, not a rework of substance. ${mechanicalFixPrompt(repository, request)} `
     + `Push the commit to the pull request's branch and submit it with node ${cliPath} complete ${work.key} ${epoch} ${request.pr}; unless the fixes are to documentation, add --no-docs "mechanical review fixes only; no documented behaviour changed". `;
