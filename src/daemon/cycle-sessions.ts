@@ -463,8 +463,8 @@ export async function closeStep(cycle: Cycle) {
  * closing the pane can still fail to update the registry, and the pane it closed — a sole pane
  * empties its workspace's listing — can then never be witnessed again, which would leave the handle
  * running for ever. Once the pane is closed, or found already gone, the witnessed exit is kept as a
- * waiting action (which the resolved-action prune never retires), and a retry holding it only
- * updates the registry: it never closes the pane again, so no stale evidence can end a pane that
+ * waiting action (which the resolved-action prune never retires) — a write of it that fails does
+ * not hold the registry update back — and a retry holding it only updates the registry: it never closes the pane again, so no stale evidence can end a pane that
  * still stands or has been reused. A close that fails before the pane is gone keeps no evidence and
  * is retried only on a fresh, confirmed sight.
  */
@@ -513,17 +513,21 @@ async function closeExitedWorkerSessions(cycle: Cycle, runtime: { agents: HerdrA
         // close that fails before the pane is gone leaves the handle running and keeps no evidence:
         // it is retried only on a fresh sight. Once the pane is gone that is recorded, so a failed
         // registry update is retried alone, never by closing the pane again (GY-923).
-        let closed = '';
+        let closed = '', unsaved = '';
         if (evidence) closed = `; pane ${handle.pane} closed on an earlier attempt, so only the registry update is retried`;
         else {
           if (handle.pane) {
             try { await effects.closeSession(handle.pane); closed = `; pane ${handle.pane} closed`; }
             catch (error) { if (!paneAlreadyGone(error)) throw error; closed = `; pane ${handle.pane} was already gone`; }
           }
-          await record(state, evidenceKey, { kind: 'close', work: item.key, principal: handle.principal, state: 'waiting', detail: found, attempts: 1, cycle: state.cycle }, now(), effects.persist);
+          // The evidence write is no failure boundary: the pane is gone whatever it does, so the
+          // registry update is attempted anyway, and a row the write could not persist stays on the
+          // in-memory cursor for the next persist to carry.
+          try { await record(state, evidenceKey, { kind: 'close', work: item.key, principal: handle.principal, state: 'waiting', detail: found, attempts: 1, cycle: state.cycle }, now(), effects.persist); }
+          catch (error) { unsaved = `; its closed-pane evidence is not yet persisted (${message(error)})`; }
         }
         await effects.recordSession!(item, { id: handle.id, kind: 'implementation', runtime: handle.runtime, host: handle.host, subject: handle.subject, state: 'finished', outcome: `closed by the loop: ${found}${closed}`.slice(0, 500) });
-        performed.push(await entry('done', `Closed implementation session ${handle.id} of ${item.key}${handle.pane ? ` (pane ${handle.pane})` : ''}: ${found}${closed}`));
+        performed.push(await entry('done', `Closed implementation session ${handle.id} of ${item.key}${handle.pane ? ` (pane ${handle.pane})` : ''}: ${found}${closed}${unsaved}`));
         // Its sighting and its closed-pane evidence go with it, in this cycle's sweep.
         sighted.delete(seenKey); evidenced.delete(evidenceKey);
       } catch (error) {

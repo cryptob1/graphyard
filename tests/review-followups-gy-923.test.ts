@@ -133,6 +133,34 @@ test('unit:exit-evidence-retained — a close whose pane closed but whose regist
   }
 });
 
+test('unit:exit-evidence-write-never-gates-the-registry — a closed pane whose evidence cannot be persisted still has its registry update attempted', async () => {
+  const { directory, master } = await setup();
+  try {
+    const item = { current: [held({ lease: { owner: 'zeta-9', epoch: 2, expiresAt: iso(minutes(600)) }, lastAssignment: { owner: 'zeta-9', epoch: 2, claimedAt: iso(-minutes(230)) }, sessions: [staleHandle('zeta-9:2', 'w1:p923', 'zeta-9')] })] };
+    const live: HerdrAgent = { name: 'agent-alpha', pane_id: 'w1:plive', agent_status: 'working', agent: 'claude' };
+    const listing: HerdrAgent[] = [{ pane_id: 'w1:p923', agent: null, agent_status: 'unknown' }, live];
+    const { effects } = harness(item, live, { herdr: () => ({ agents: listing, available: true }) });
+    const state = emptyDaemonState(master);
+    const handle = item.current[0].sessions![0], closeKey = `close:implementation:work-923:zeta-9:2:${handle.startedAt}`, evidenceKey = `close-evidence:implementation:work-923:zeta-9:2:${handle.startedAt}`;
+    await runCycle(master, state, effects, () => clock);
+
+    // The state volume refuses exactly the write that would persist the closed-pane evidence.
+    let refused = 0;
+    const full = harness(item, live, { herdr: () => ({ agents: listing, available: true }),
+      persist: async written => { if (written.actions[evidenceKey] && !written.actions[closeKey]?.state.match(/done|failed/) && refused === 0) { refused++; throw new Error('ENOSPC: no space left on device'); } } });
+    await runCycle(master, state, full.effects, () => clock + launchAppearanceMs);
+    assert.equal(refused, 1, 'the evidence write was refused');
+    assert.deepEqual(full.log.closed, ['w1:p923'], 'the pane was closed');
+    assert.equal(full.log.sessions.length, 1, 'the registry update was still attempted');
+    assert.equal(full.log.sessions[0].state, 'finished');
+    assert.equal(row(state.actions, closeKey)?.state, 'done');
+    assert.match(row(state.actions, closeKey)!.detail, /its closed-pane evidence is not yet persisted \(ENOSPC: no space left on device/);
+    assert.equal(row(state.actions, evidenceKey), undefined, 'the finished close sweeps its evidence in the same cycle');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('unit:exit-evidence-never-replays-a-close — a close that failed with its pane standing keeps no evidence and is retried only on a fresh, confirmed sight', async () => {
   const { directory, master } = await setup();
   try {
