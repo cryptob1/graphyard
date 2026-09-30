@@ -30,7 +30,6 @@ import type { ExhaustedProof } from '../src/daemon/decisions.js';
 import { performSelfUpgrade, type SelfUpgradeOutcome } from '../src/daemon/upgrade.js';
 import { defaultOptimisticExclude } from '../src/optimistic-merge.js';
 import { queuePlacement } from '../src/merge-queue.js';
-import { idleLeaseMs } from '../src/daemon/cycle-resume.js';
 import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } from './helpers/soak-world.js';
 
 /**
@@ -777,7 +776,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   const chainedTips = new Set<string>();
   let peakWindow = 0;
   const seenTips = new Set<string>();
-  let released = 0, split = false, noticed = false, deploys = 0, cycles = 0, reportedDispatches = 0, restarted = false, exitedRowsSeen = 0, promptRowsSeen = 0;
+  let released = 0, split = false, noticed = false, deploys = 0, cycles = 0, reportedDispatches = 0, restarted = false, exitedRowsSeen = 0;
   // GY-831: when each staged fault armed, and what the lost carry named, so the test can assert the
   // recovery against the exact candidate and review the faults were staged on.
   const stale: { stuckArmedAt: number | null; stuckHead: string | null; stuckReported: boolean; lostAt: number | null; carried: { reviewer: string; reviewId: number; originalSha: string } | null } =
@@ -962,20 +961,6 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       const running = (await store.list()).flatMap(item => (item.sessions ?? []).filter(handle => handle.kind === 'implementation' && handle.state === 'running' && handle.host === config.hostId)).length;
       exitedRowsSeen += exitedRows.length;
       if (exitedRows.length > running) violations.push(`${new Date(now).toISOString()} (+${Math.round(elapsed / minute)} min) ${exitedRows.length} exited-session sighting(s) for ${running} running implementation handle(s)`);
-      // GY-923: the two cursor row families the resolved-action prune never retires stay bounded by their sweeps —
-      // a closed pane's evidence by the implementation handles still running here, a resume-prompt dedup row by the
-      // open items it could still dedupe, and by the recency window any decision it could match must fall in.
-      const evidenceRows = Object.keys(state.actions).filter(key => key.startsWith('close-evidence:implementation:'));
-      if (evidenceRows.length > running) violations.push(`${new Date(now).toISOString()} (+${Math.round(elapsed / minute)} min) ${evidenceRows.length} close-evidence row(s) for ${running} running implementation handle(s)`);
-      const openIds = new Set((await store.list()).filter(item => item.stage !== 'done').map(item => item.id));
-      const promptRows = Object.entries(state.actions).filter(([key, action]) => key.startsWith('resume:prompt:') && action.state === 'waiting');
-      promptRowsSeen += promptRows.length;
-      const promptItems = new Set(promptRows.map(([key]) => key.split(':')[2]));
-      if (promptItems.size > openIds.size) violations.push(`${new Date(now).toISOString()} (+${Math.round(elapsed / minute)} min) resume-prompt dedup rows for ${promptItems.size} item(s), ${openIds.size} open`);
-      for (const [key, action] of promptRows) {
-        if (!openIds.has(key.split(':')[2])) violations.push(`${new Date(now).toISOString()} (+${Math.round(elapsed / minute)} min) resume-prompt dedup row ${key} outlived its item`);
-        if (clock.now() - Date.parse(action.at) > idleLeaseMs) violations.push(`${new Date(now).toISOString()} (+${Math.round(elapsed / minute)} min) resume-prompt dedup row ${key} outlived the ${idleLeaseMs / minute}-minute recency window`);
-      }
       // Between cycles, as runDaemon runs it: the self-upgrade against the simulated checkout.
       checkout.dirty = elapsed >= plan.dirtyCheckout.from && elapsed < plan.dirtyCheckout.to;
       const upgraded = await selfUpgrade(state);
@@ -997,7 +982,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
   return { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, herdr, hand, escalations, spent, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, landingRefusals, foreignPane,
     mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted, stale, approverPanes, herdrClosed: herdr.closed, diagnosisModel: settings.model, capacityRefused, capacityLaunched, capacityWaiters,
-    decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, promptRowsSeen, reassign, confined, unconfinedRefusals };
+    decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, reassign, confined, unconfinedRefusals };
 }
 
 /**
@@ -1030,7 +1015,7 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   const began = performance.now();
   const day = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
   assertLaunchesConfined(day, coordinatorRoot!);
-  const { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, state, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, herdr, landingRefusals, foreignPane, mergeQueuePosts, approverPanes, herdrClosed, diagnosisModel, decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, promptRowsSeen } = day;
+  const { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, state, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, herdr, landingRefusals, foreignPane, mergeQueuePosts, approverPanes, herdrClosed, diagnosisModel, decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen } = day;
   const undelivered = final.filter(item => item.stage !== 'done' || !item.delivery);
   assert.deepEqual(undelivered.map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
@@ -1232,9 +1217,6 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   for (const n of basePlan.exits) assert.ok(exitedClosed.some(entry => entry.startsWith(`${items[n - 1].key} `)), `${items[n - 1].key}: the handle of the worker whose runtime exited was closed as exited: ${exitedClosed.join(', ')}`);
   assert.ok(exitedRowsSeen > 0, 'the loop recorded exited-session sightings during the day');
   assert.deepEqual(Object.keys(state.actions).filter(key => key.startsWith('exited:implementation:')), [], 'no exited-session sighting outlives the day');
-  // GY-923: both never-pruned row families stayed bounded after every cycle (the violations above), and none outlives the day.
-  assert.ok(promptRowsSeen > 0, 'the loop recorded resume-prompt dedup rows during the day');
-  assert.deepEqual(Object.keys(state.actions).filter(key => key.startsWith('close-evidence:implementation:')), [], 'no closed-pane evidence outlives the day');
   assert.deepEqual(final.flatMap(item => (item.sessions ?? []).filter(handle => handle.kind === 'implementation' && handle.state === 'running').map(handle => `${item.key} ${handle.id}`)), [], 'every implementation handle is closed once its item is delivered');
   const seconds = (performance.now() - began) / 1000;
   assert.ok(seconds < 120, `the day runs well inside the three minutes the CI test job allows it (${seconds.toFixed(1)} s)`);

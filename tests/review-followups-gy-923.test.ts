@@ -219,3 +219,74 @@ test('unit:resume-prompt-dedup-survives-prune — one scope decision prompts onc
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+/**
+ * Both row families above escape `pruneDaemonState` on purpose, so only their sweeps bound them.
+ * Driven over many cycles, as the soak drives `exited:implementation:*` (GY-544): after every cycle
+ * the closed-pane evidence never exceeds the implementation handles still running here, and every
+ * resume-prompt dedup row names an open item and sits within the `idleLeaseMs` recency window.
+ */
+test('unit:never-pruned-rows-bounded — closed-pane evidence and resume-prompt dedup rows stay within their sweeps\' bounds after every cycle', async () => {
+  const { directory, master } = await setup();
+  try {
+    // Four stale implementation handles whose runtimes exited; one registry update fails three times.
+    const items = { current: [1, 2, 3, 4].map(n => held({ id: `work-92${n}`, key: `GY-92${n}`, lease: { owner: `zeta-${n}`, epoch: 2, expiresAt: iso(minutes(600)) },
+      lastAssignment: { owner: `zeta-${n}`, epoch: 2, claimedAt: iso(-minutes(230)) }, sessions: [staleHandle(`zeta-${n}:2`, `w1:p${n}`, `zeta-${n}`)] })) };
+    const live: HerdrAgent = { name: 'agent-alpha', pane_id: 'w1:plive', agent_status: 'working', agent: 'claude' };
+    const listing: HerdrAgent[] = [live, ...[1, 2, 3, 4].map(n => ({ pane_id: `w1:p${n}`, agent: null, agent_status: 'unknown' }) as HerdrAgent)];
+    let failures = 3;
+    const { effects } = harness(items, live, {
+      herdr: () => ({ agents: listing, available: true }),
+      closeSession: pane => { const at = listing.findIndex(agent => agent.pane_id === pane); if (at < 0) throw new Error('herdr: pane_not_found'); listing.splice(at, 1); },
+      recordSession: async (work, input) => {
+        if (work.id === 'work-922' && failures-- > 0) throw new Error('registry unavailable');
+        items.current = items.current.map(item => item.id !== work.id ? item : { ...item, sessions: item.sessions!.map(handle => handle.id === input.id ? { ...handle, state: input.state, outcome: input.outcome ?? null } : handle) });
+      },
+    });
+    const state = emptyDaemonState(master);
+    let evidenceSeen = 0;
+    for (let cycle = 0; cycle < 12; cycle++) {
+      await runCycle(master, state, effects, () => clock + cycle * launchAppearanceMs);
+      const running = items.current.flatMap(item => item.sessions ?? []).filter(handle => handle.kind === 'implementation' && handle.state === 'running').length;
+      const evidence = Object.keys(state.actions).filter(key => key.startsWith('close-evidence:implementation:'));
+      evidenceSeen += evidence.length;
+      assert.ok(evidence.length <= running, `cycle ${cycle}: ${evidence.length} close-evidence row(s) for ${running} running implementation handle(s)`);
+    }
+    assert.ok(evidenceSeen > 0, 'the failed registry update left closed-pane evidence for its retry');
+    assert.equal(items.current.flatMap(item => item.sessions ?? []).filter(handle => handle.state === 'running').length, 0, 'every exited handle was closed');
+    assert.deepEqual(Object.keys(state.actions).filter(key => key.startsWith('close-evidence:implementation:')), [], 'no closed-pane evidence outlives its handle');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+  const second = await setup();
+  try {
+    // Scope decisions on the held attempt, one every 45 minutes across a long day, with a prune
+    // flood between them; then the item is delivered.
+    const item = { current: [held({ plannedFiles: ['src/a.ts', 'src/b.ts'] })] };
+    const agent: HerdrAgent = { name: 'agent-alpha', pane_id: 'w1:p923', agent_status: 'idle', agent: 'claude' };
+    const { log, effects } = harness(item, agent);
+    const state = emptyDaemonState(second.master);
+    let rowsSeen = 0, flood = 0;
+    for (let step = 0; step < 40; step++) {
+      const at = clock + step * minutes(9);
+      if (step % 5 === 0) item.current = [{ ...item.current[0], scopeDecision: { state: 'approved', reason: 'criteria name it', at: new Date(at - 30_000).toISOString(), decidedBy: 'graphyard', waitedMs: 5_000,
+        paths: ['src/b.ts'], requestedBy: 'alpha-principal', requestedAt: new Date(at - 60_000).toISOString(), epoch: 1 } as Work['scopeDecision'], lease: { owner: 'alpha-principal', epoch: 1, expiresAt: new Date(at + minutes(600)).toISOString() } }];
+      if (step === 36) item.current = [{ ...item.current[0], stage: 'done', lease: null }];
+      for (let index = 0; index < 120; index++) state.actions[`flood:${flood++}`] = resolvedAction('resolved elsewhere', new Date(at).toISOString());
+      await runCycle(second.master, state, effects, () => at);
+      const open = new Set(item.current.filter(entry => entry.stage !== 'done').map(entry => entry.id));
+      const rows = Object.entries(state.actions).filter(([key, action]) => key.startsWith('resume:prompt:') && action.state === 'waiting');
+      rowsSeen += rows.length;
+      for (const [key, action] of rows) {
+        assert.ok(open.has(key.split(':')[2]), `step ${step}: dedup row ${key} outlived its item`);
+        assert.ok(at - Date.parse(action.at) <= idleLeaseMs, `step ${step}: dedup row ${key} outlived the recency window`);
+      }
+    }
+    assert.ok(rowsSeen > 0, 'the day recorded resume-prompt dedup rows');
+    const told = log.prompts.filter(text => /scope request was applied/.test(text)).length;
+    assert.equal(told, 8, 'each of the eight decisions made while the item was open was re-prompted exactly once');
+    assert.deepEqual(Object.keys(state.actions).filter(key => key.startsWith('resume:prompt:')), [], 'no dedup row outlives its delivered item');
+  } finally {
+    await rm(second.directory, { recursive: true, force: true });
+  }
+});
