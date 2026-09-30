@@ -1,12 +1,34 @@
 import { randomUUID } from 'node:crypto';
+import { spawn, type SpawnOptions } from 'node:child_process';
 import { lstatSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { defaultPiModel, piRunner, piSmoke, type SmokeResult } from './pi.js';
+import { headlessConfinementWrapper, launcherCoordinatorRoot } from '../master/launch.js';
+import { bwrapOnPath } from '../master/profiles.js';
 import type { FleetLaunchAccount } from '../fleet.js';
 import { registryToolsArgs } from '../master/environments.js';
 import { endRun, liveRun, registerRun } from './registry.js';
 import { decidePayloadSchema, evidencePayloadSchema, graphyardTools, piRuntimeSchema, type DecidePayload, type EvidencePayload } from './payloads.js';
 import { runRecord, type Run, type RunOptions, type RunRecord, type RunResult, type Runner } from './types.js';
+
+/**
+ * A child-process spawner that starts every headless run inside the coordinator confinement
+ * (GY-888): the launcher's headless roles (a `pi` approver or producer run) spawn their runtime
+ * directly, with no pane command line to carry the wrapper, so the spawn itself is wrapped — the
+ * bubblewrap words go before the runtime's command and arguments, and the run keeps its own
+ * working directory, environment and streams. A spawn that cannot be confined fails the run
+ * instead of starting it unconfined. The runner that takes this spawner always calls the
+ * three-argument form, so the wrapper is honest at every call site.
+ */
+export function confiningSpawn(base: typeof spawn = spawn, options: { coordinatorRoot?: string | null; bwrap?: string | null } = {}): typeof spawn {
+  const root = options.coordinatorRoot !== undefined ? options.coordinatorRoot : launcherCoordinatorRoot();
+  if (!root) return base;
+  const confined = ((command: string, args: readonly string[], spawnOptions: SpawnOptions) => {
+    const wrapper = headlessConfinementWrapper(root, typeof spawnOptions?.cwd === 'string' ? spawnOptions.cwd : undefined, options.bwrap !== undefined ? options.bwrap : bwrapOnPath());
+    return base(wrapper[0], [...wrapper.slice(1), command, ...args], spawnOptions);
+  }) as typeof spawn;
+  return confined;
+}
 
 /**
  * The narrow roles on the headless runner (GY-169): the approver and the unit proof producer. A
@@ -19,7 +41,9 @@ import { runRecord, type Run, type RunOptions, type RunRecord, type RunResult, t
 
 export function narrowRunner(pi: unknown): Runner {
   const configured = piRuntimeSchema.parse(pi ?? {});
-  return piRunner({ command: configured.command, model: configured.model });
+  // Every headless run is confined at its spawn (GY-888): the checkout the launcher runs from is
+  // unwritable to the run, shell commands included, exactly as for a pane session.
+  return piRunner({ command: configured.command, model: configured.model, spawn: confiningSpawn() });
 }
 
 /**
@@ -53,10 +77,10 @@ export function accountKeyEnvironment(account: Pick<FleetLaunchAccount, 'name' |
   if (!value || /[\u0000-\u001f\u007f]/.test(value)) throw new Error(`${account.name}'s key file ${file} must hold the key alone, on one line`);
   return { [account.key.variable]: value };
 }
-/** A registry account's headless runner: every run reads the account's key afresh, into its own environment only. */
+/** A registry account's headless runner: every run reads the account's key afresh, into its own environment only, and every run is confined at its spawn (GY-888). */
 export function registryRunner(account: FleetLaunchAccount): Runner {
   const launch = registryHeadlessLaunch(account);
-  return { name: 'pi', start: (prompt, options) => piRunner({ command: launch.command, model: launch.model, args: launch.args, environment: { ...launch.environment, ...accountKeyEnvironment(account) } }).start(prompt, options) };
+  return { name: 'pi', start: (prompt, options) => piRunner({ command: launch.command, model: launch.model, args: launch.args, environment: { ...launch.environment, ...accountKeyEnvironment(account) }, spawn: confiningSpawn() }).start(prompt, options) };
 }
 /**
  * The one-prompt smoke test of a registry account (GY-446): its runtime, login home, key and model,
@@ -149,10 +173,10 @@ export const producerRunOptions = (cwd: string, binding: { sha: string; baseSha:
   },
 });
 
-export function piApproverPrompt(config: { repository: string; cliPath: string }, key: string, decision: string, identity: string, repository?: string) {
+export function piApproverPrompt(config: { repository: string; cliPath: string }, key: string, decision: string, identity: string, clone?: string) {
   const cli = `node ${config.cliPath}`;
   return `You are the independent Graphyard approver for ${config.repository}, acting as ${identity}. Judge decision ${decision} on ${key}: run ${cli} master decisions ${key}, read the item with ${cli} status ${key}, its pull request and history, and weigh the requester's reason against the item's criteria and the operator's goals. `
-    + (repository ? `Your working directory is a scratch directory of your own; the repository is at ${repository} and is read-only to you: read it with git -C ${repository}, never write, move or remove anything in it. ` : '')
+    + (clone ? `Your working directory is a scratch directory of your own. Read the code in ${clone}, a clone of the repository made for this run alone and removed when it ends: it has its own refs, index and working tree, detached at the commit you judge, and no remote, so a write inside the clone stays inside it. Every other checkout is read-only to you: judge it, never modify it, and work only in the clone and your working directory. ` : '')
     + `Then call the graphyard_decide tool exactly once with decision "${decision}", approve true if the decision is justified or false if it is not, and your reason; a decline is a call with approve false, never an exit without one. Graphyard applies your verdict as ${identity}, so do not run master approve or master refuse yourself. `
     + 'Never approve a decision you requested, implemented, or produced evidence for; never edit, push, merge, review, or submit evidence. Stop after the call.';
 }
