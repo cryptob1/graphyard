@@ -1,6 +1,8 @@
 // Concern: cycle step 4c — request and supervise the routine decisions and their approver sessions.
 import { decisionSituation, uncitedRefusals } from '../model/approval.js';
 import type { Work } from '../model.js';
+import { detectRuntimeExhaustion } from '../master/environments.js';
+import { approverRuntime } from '../master/autonomy.js';
 import { canonicalJson } from '../onboarding.js';
 import { type ContainmentAssessment, type HerdrAgent, type RoleCapacity, approverProfile, ownLoginAccounts, approverSessionId, approverSessionName, approvedMerge, decisionInput } from '../master.js';
 import { type ApprovalWatch, approvalWatchSchema, carriedSession, type DaemonActionKind, latencySampleSchema, message, scopeMeasurementSchema } from './state.js';
@@ -8,7 +10,6 @@ import { decisionKey, scopeAnsweredAt, scopeKey, scopeOutcomeAnswered } from './
 import { readyToRetry } from './sessions.js';
 import { approvalStep, type ApprovalStep, attestDecisions, boundDetail, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, maxApproverCloses, maxRefusalAnswers, maxApproverLaunches, maxDecisionRequests, namePaths, neededDecision, observedFrom, resolveCovers, reworkDecisionReason, refusalNamedIn, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, standingVerdict, withheldDecision } from './decisions.js';
 import { type DaemonEffects, failoverKey, record, stoppedStates } from './effects.js';
-import { detectExhaustion } from '../model/capacity.js';
 import { capacityRefusal } from '../fleet.js';
 import { sessionName } from '../session-name.js';
 import type { Cycle } from './cycle.js';
@@ -210,7 +211,9 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     if (!effects.sessionOutput || !effects.reportCapacity || !watch.agentName) return false;
     const agent = (await sessions()).agents.find(candidate => candidate.name === watch.agentName);
     if (!agent || !stoppedStates.includes(agent.agent_status ?? '')) return false;
-    const signal = await Promise.resolve(effects.sessionOutput(agent)).then(output => output ? detectExhaustion(output, clock) : null, () => null);
+    // Judged against the approver's own runtime's provider messages: free prose about a quota is
+    // not a provider limit notice, whatever it mentions (GY-421).
+    const signal = await Promise.resolve(effects.sessionOutput(agent)).then(output => output ? detectRuntimeExhaustion(output, watch.runtime ?? approverRuntime(config), clock) : null, () => null);
     if (!signal) return false;
     const session = `${watch.decision}:${watch.launchedAt ?? watch.launches}`;
     const key = failoverKey('approver', item, session), previous = state.actions[key];
@@ -610,10 +613,8 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     // request path adopts the decision it left standing and launches an approver for it.
     await requestNeeded(item, decision, key);
   });
-  // 4c+. Attestations (GY-521). A `manual:` proof no producer session may run is met only by a
-  //      two-party attest decision. The loop requests one per proof, bound to the proof and exact
-  //      head, one at a time, and supervises it as a routine decision; a head change moves the
-  //      binding, and the cleanup below withdraws the request nobody judged.
+  // 4c+. Attestations (GY-521): one attest decision per `manual:` proof no producer may run, bound to
+  //      its exact head, one at a time; the cleanup below withdraws one a head change overtook.
   for (const item of snapshot.work) await isolate('decision', item, item.key, async () => {
     const attestations = attestDecisions(item, snapshot.work, clock);
     let judging = false;

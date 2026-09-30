@@ -1,8 +1,5 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Engine } from '../src/engine.js';
@@ -10,6 +7,7 @@ import { server } from '../src/server.js';
 import type { Principal, Work } from '../src/model.js';
 import { Store } from '../src/store.js';
 import { approverAgentCapabilities, masterOperatorCapabilities } from '../src/master.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-642: an approver judging an attestation, rework or resolve decision reads the evidence the
 // decision rests on — the events ledger and the work snapshot. The grant is a read only: every
@@ -28,7 +26,7 @@ const call = async (credential: string, method: 'GET' | 'POST', path: string, bo
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 642;
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-approver-ledger-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('approver-ledger'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('ledger_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/ledger_test`); await store.init();
   const engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null;
