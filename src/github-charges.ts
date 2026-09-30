@@ -59,11 +59,13 @@ export class GitHubChargeLedger {
   private async write(now: number, windowMs: number) {
     this.syncedAt = now;
     const batch = [...this.pending.values()]; this.pending.clear();
+    let written = false;
     try {
       if (batch.length) await this.pool.query(`INSERT INTO github_charges(installation, instance, minute, endpoint, kind, requests)
 SELECT $1, $2, to_timestamp(m / 1000.0), e, k, n FROM unnest($3::bigint[], $4::text[], $5::text[], $6::int[]) AS t(m, e, k, n)
 ON CONFLICT (installation, instance, minute, endpoint) DO UPDATE SET requests = github_charges.requests + EXCLUDED.requests`,
       [this.installation, this.instance, batch.map(entry => entry.minute), batch.map(entry => entry.endpoint), batch.map(entry => entry.kind), batch.map(entry => entry.requests)]);
+      written = true;
       const since = new Date(Math.floor((now - windowMs) / 60_000) * 60_000 + 60_000);
       const rows = (await this.pool.query(`SELECT endpoint, kind, sum(requests)::int AS requests, count(DISTINCT instance)::int AS instances FROM github_charges
 WHERE installation=$1 AND instance<>$2 AND minute >= $3 GROUP BY GROUPING SETS ((endpoint, kind), ())`, [this.installation, this.instance, since])).rows;
@@ -71,6 +73,16 @@ WHERE installation=$1 AND instance<>$2 AND minute >= $3 GROUP BY GROUPING SETS (
       this.instances = Number(rows.find(row => row.endpoint === null)?.instances ?? 0);
       await this.pool.query(`DELETE FROM github_charges WHERE installation=$1 AND minute < $2`, [this.installation, new Date(now - 2 * windowMs)]);
     } catch (error) {
+      // An unwritten batch is queued again for the next sync, merged with what was charged since,
+      // so a transient failure delays the other replicas' count instead of losing it. Minutes past
+      // the report's window are dropped, which keeps the queue bounded through a long outage.
+      if (!written) {
+        for (const entry of batch) {
+          if (entry.minute < now - windowMs) continue;
+          const key = `${entry.minute}|${entry.endpoint}`, queued = this.pending.get(key);
+          if (queued) queued.requests += entry.requests; else this.pending.set(key, entry);
+        }
+      }
       if (Date.now() - this.reportedAt >= 60_000) {
         this.reportedAt = Date.now();
         console.error(`GitHub charge ledger sync failed; the billable report counts this process alone: ${error instanceof Error ? error.message : String(error)}`);

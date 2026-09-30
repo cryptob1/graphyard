@@ -995,7 +995,8 @@ export class GitHub {
    * the immutable cache with no request, however many observations ask. Concurrent first reads of
    * the same path share one request. A cached answer needs no token, so it is served through a pause.
    * A miss in the bounded hot layer asks the persisted layer first, so eviction and restarts never
-   * make GitHub answer the same path twice.
+   * make GitHub answer a path still in use twice; every hit marks the persisted row used, so only
+   * answers nothing reads any more age out of its bound.
    */
   private async immutableRequest(path: string): Promise<any> {
     await this.warm();
@@ -1008,11 +1009,12 @@ export class GitHub {
     let reading = this.immutableReads.get(path);
     if (!reading) {
       reading = (async () => {
-        // A hot-layer miss asks the persisted layer, which never evicts an immutable answer, before GitHub.
+        // A hot-layer miss asks the persisted layer, which keeps every answer still read, before GitHub.
         if (this.persisted) {
           const stored = await this.persisted.lookup('immutable', path);
           if (stored !== undefined && stored !== null) {
             this.immutable.set(path, structuredClone(stored));
+            this.persisted.touch('immutable', path);
             if (this.immutable.size > this.immutableHotEntries) this.immutable.delete(this.immutable.keys().next().value!);
             return stored;
           }

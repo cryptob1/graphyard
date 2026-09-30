@@ -4,8 +4,8 @@ import { defineTable } from '../tables.js';
  * GitHub responses kept across restarts (src/github-cache.ts): conditional-request ETags with
  * their bodies, and answers that never change for a pinned SHA (ancestry, blobs, histories).
  * A cache, not ledger state: it is never backed up or restored, and any row may be lost without
- * changing an outcome — a missing row costs one GitHub request. Every kind but the permanent
- * whole immutable responses (GY-806) is bounded by pruning.
+ * changing an outcome — a missing row costs one GitHub request. Every kind is bounded by pruning;
+ * whole immutable responses (GY-806) have their own newest-used bound, so they outlive ETag churn.
  */
 export const githubCache = defineTable({
   name: 'github_cache', orderBy: 'key', cache: true,

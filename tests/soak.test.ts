@@ -11,7 +11,8 @@ import pg from 'pg';
 import { Store, wakeFromWebhook } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
-import { processJob } from '../src/github.js';
+import { GitHub, processJob } from '../src/github.js';
+import { GitHubCacheStore } from '../src/github-cache.js';
 import { createHash } from 'node:crypto';
 import { Refusal, type Principal, type Work } from '../src/model.js';
 import { approverSessionName, decisionInput, masterConfigSchema, mergeExecutor, type MasterConfig, type WorkerProfile } from '../src/master.js';
@@ -886,6 +887,24 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   const reassign = { pane: null as string | null, phantom: null as string | null, phantomGone: false };
   /** GY-806: the check_run deliveries, the jobs they woke, and any woken job claimed after a polled one or left unobserved. */
   const webhook = { deliveries: 0, woken: 0, refreshes: 0, skipped: 0, late: [] as string[], unobserved: [] as string[] };
+  // GY-806: the real adapter's immutable path and its persisted layer, read every cycle as an observation
+  // reads them: each open head's commit and its compare against the current base tip. GitHub itself is the
+  // simulated one (`send` answers from it). The table must stay within its bound all day while every path
+  // still read is asked of GitHub once: retired heads and moved base tips age out, live ones never do.
+  const immutableScope = `soak-${days}`, immutableBound = { rows: 40, bytes: 24 * 1024 };
+  const immutableCache = new GitHubCacheStore(store.pool, immutableScope, { flushMs: Number.MAX_SAFE_INTEGER, pruneMs: Number.MAX_SAFE_INTEGER, maxImmutableRows: immutableBound.rows, maxImmutableBytes: immutableBound.bytes });
+  const immutableClient = new GitHub({ repository, base: 'main', appId: 1234, installationId: 2, privateKey: 'not-used' });
+  immutableClient.immutableHotEntries = 8;
+  const immutableSends = new Map<string, number>();
+  Object.assign(immutableClient, { token: 'fixture-token', expires: Number.MAX_SAFE_INTEGER, send: async (path: string) => {
+    immutableSends.set(path, (immutableSends.get(path) ?? 0) + 1);
+    const [, head] = /([a-f0-9]{40})$/.exec(path) ?? [];
+    const pr = [...github.prs.values()].find(entry => entry.head === head);
+    return path.includes('/compare/') ? { status: 'ahead', ahead_by: 1, total_commits: 1, commits: [{ sha: head }], files: (pr?.files ?? []).map(filename => ({ filename, status: 'modified', patch: '@@ -1 +1 @@\n-a\n+b\n'.repeat(40) })) }
+      : { sha: head, parents: [{ sha: pr?.base }], commit: { tree: { sha: sha(`tree-${head}`) }, message: pr?.key ?? 'change' } };
+  } });
+  await immutableClient.attachCache(immutableCache);
+  const immutable = { cycles: 0, peakLive: 0, peakRows: 0, peakBytes: 0, overBound: [] as string[], refetched: [] as string[], reads: 0 };
   const jobsDue = async () => Number((await store.pool.query('SELECT count(*) AS due FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now())')).rows[0].due);
   // The day's schedule position, hoisted so the launch effects record against it: one cycle is one
   // simulated minute, and a launch the cycle handed over settles before the position advances.
@@ -1015,6 +1034,18 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       }
       webhook.refreshes += Number((await store.pool.query('SELECT count(*) AS n FROM jobs WHERE refreshed_until > now()')).rows[0].n);
       webhook.skipped += Number((await store.pool.query("SELECT count(*) AS n FROM jobs WHERE deferred_reason LIKE 'poll skipped:%' AND (refreshed_until IS NULL OR available_at > refreshed_until)")).rows[0].n);
+      immutable.peakLive = Math.max(immutable.peakLive, 2 * [...github.prs.values()].filter(pr => pr.open && !pr.merged).length);
+      for (const pr of github.prs.values()) {
+        if (!pr.open || pr.merged) continue;
+        for (const path of [`/commits/${pr.head}`, `/compare/${github.tip}...${pr.head}`]) {
+          await immutableClient.request(path); immutable.reads++;
+          if ((immutableSends.get(`/repos/${repository}${path}`) ?? 0) > 1) immutable.refetched.push(`+${Math.round(elapsed / minute)} min ${pr.key} ${path.split('/').slice(-2).join('/')}`);
+        }
+      }
+      await immutableCache.flush(); await immutableCache.prune(); immutable.cycles++;
+      const held = (await store.pool.query(`SELECT count(*)::int AS n, coalesce(sum(pg_column_size(value)), 0)::int AS bytes FROM github_cache WHERE kind = 'immutable' AND key LIKE $1`, [`${immutableScope}:%`])).rows[0];
+      immutable.peakRows = Math.max(immutable.peakRows, held.n); immutable.peakBytes = Math.max(immutable.peakBytes, held.bytes);
+      if (held.n > immutableBound.rows || held.bytes > immutableBound.bytes) immutable.overBound.push(`+${Math.round(elapsed / minute)} min ${held.n} rows ${held.bytes} bytes`);
       for (const item of await store.list()) {
         const sha = item.candidate?.sha, refused = (item.gates ?? []).flatMap(gate => gate.passed ? [] : gate.reasons)
           .find(reason => /would revert \d+ files? outside its planned files/.test(reason));
@@ -1129,7 +1160,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
   return { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, herdr, hand, escalations, spent, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, landingRefusals, foreignPane,
     mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted, stale, approverPanes, herdrClosed: herdr.closed, diagnosisModel: settings.model, capacityRefused, capacityLaunched, capacityWaiters,
-    decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, reassign, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, webhook };
+    decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, reassign, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, webhook, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size } };
 }
 
 /**
@@ -1178,6 +1209,15 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.deepEqual(webhook.unobserved, [], 'every webhook-woken item was re-observed within the minute of its delivery');
   assert.ok(webhook.refreshes > 0, 'webhook-driven observations recorded their refresh on the job');
   assert.equal(webhook.skipped, 0, 'no poll was skipped past the refresh that justified it');
+  // GY-806: the immutable cache, run through the real adapter all day, stayed within its bound while every
+  // path still read was fetched once; the day produced more distinct paths than the bound holds, so it aged out.
+  const { immutable } = day;
+  assert.ok(immutable.cycles > 0 && immutable.reads > 0, `the immutable path ran every cycle: ${JSON.stringify(immutable)}`);
+  assert.ok(immutable.distinct > immutable.bound.rows, `the day asked more distinct paths (${immutable.distinct}) than the bound holds (${immutable.bound.rows})`);
+  assert.ok(immutable.peakLive <= immutable.bound.rows, `the bound holds every path still read (${immutable.peakLive})`);
+  assert.deepEqual(immutable.overBound, [], 'immutable rows and bytes stayed within their bound every cycle');
+  assert.deepEqual(immutable.refetched, [], 'no path still read was asked of GitHub twice');
+  if (process.env.SOAK_TRACE) console.error(`immutable: ${JSON.stringify(immutable)}`);
   // The day held what it was meant to: a merge about every fifteen minutes, the rework rounds, the deaths,
   // the deploys, the split, both merge states, auto-merge, and the failover.
   // One item broke main after its optimistic merge and was reverted and reopened, so it merged twice.

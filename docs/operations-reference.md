@@ -56,13 +56,13 @@ Below **500 requests** by default, `GRAPHYARD_GITHUB_RESERVE`, non-merge observa
 
 ### Reads that are not repeated
 
-- **Immutable:** commits by SHA and exact-SHA compares: fetched once, kept permanently in `github_cache`.
+- **Immutable:** commits by SHA and exact-SHA compares: fetched once, kept in `github_cache` while read; unread ones age out past 20,000 rows or 128 MB, and a value over 1 MB stays in memory only.
 - **Per cycle:** the base ref once per 15 s (a base push or own ref write restarts it); protection every 5 minutes or after a protection, ruleset or `repository` event.
 - **Webhooks:** `pull_request`, `pull_request_review`, `check_run`, `check_suite` and `push` (branch pushes too) claim items first on any replica; a poll within a webhook-driven observation's interval is skipped (`poll skipped: a webhook refreshed this item`).
 
 ### What a pause means for gates
 
-A `403`/`429` pauses requests; gates read stale until it lifts.
+A `403`/`429` pauses requests; gates read stale until it lifts: nothing merges on an observation over two minutes old.
 
 ### Reading the budget
 
@@ -104,7 +104,7 @@ graphyard grants grant ci "integration:*,unit:*" "CI proofs"
 graphyard grants revoke ci "integration:claim-safety" "Runner decommissioned"
 ```
 
-Admins only, to `producer` principals: exact name, `kind:*`, or prefix (`manual:gy-43/*`).
+`graphyard grants` lists live authority; admins only grant or revoke, to `producer` principals: exact name, `kind:*`, or prefix (`manual:gy-43/*`).
 
 ## Setup proposals and drift
 

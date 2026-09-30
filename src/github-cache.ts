@@ -11,13 +11,18 @@ import { GitHubChargeLedger } from './github-charges.js';
  *   the whole response to a commit read by SHA or a compare of two exact SHAs, GY-806) are
  *   loaded once and never expire. ETag entries are loaded with their ETag and still revalidated
  *   with If-None-Match, which GitHub answers with a free 304.
- * - Whole immutable responses are permanent (GY-806): they are never pruned, never dropped for
- *   size or a full queue, and `lookup` answers a read the hot layer has evicted, so GitHub is asked
- *   for each at most once for the life of the database.
+ * - Whole immutable responses are kept while they are used (GY-806): `lookup` answers a read the
+ *   hot layer has evicted, and every hit refreshes the row, so a SHA an open item or queue entry
+ *   still reads is asked of GitHub at most once. They have their own bound, apart from the other
+ *   kinds, so ETag churn never evicts them: the newest-used `maxImmutableRows` rows and
+ *   `maxImmutableBytes` of values. A compare keyed by a base tip that has moved on stops being
+ *   read, ages out, and is deleted; a value over `maxValueBytes` stays in the hot layer only.
  * - Reads happen once, at attach; writes are batched write-behind on a timer, one pool query at
  *   a time, so the cache never holds more than one of the pool's connections. Plain pool queries
  *   only: never inside a coordination transaction and never under the advisory lock.
  * - Every other kind is pruned to the newest `maxRows` rows and `maxBytes` of values.
+ * - A value over `maxValueBytes`, or a put past `maxPending` queued entries, is not persisted, for
+ *   every kind: the table and its write queue stay bounded however large a compare is.
  * - A database failure never fails an observation: the maps stay as they are and the adapter
  *   asks GitHub, exactly as it did before the cache was persisted.
  */
@@ -30,11 +35,12 @@ export interface GitHubCacheMaps {
   /** Optional so a caller that keeps no whole-response layer loads none of it. */
   immutable?: Map<string, unknown>;
 }
-export interface GitHubCacheOptions { flushMs?: number; pruneMs?: number; maxRows?: number; maxBytes?: number; maxValueBytes?: number; maxPending?: number }
+export interface GitHubCacheOptions { flushMs?: number; pruneMs?: number; maxRows?: number; maxBytes?: number; maxValueBytes?: number; maxPending?: number; maxImmutableRows?: number; maxImmutableBytes?: number }
 type Pending = { kind: GitHubCacheKind; etag: string | null; value: string } | 'touch';
 
 export class GitHubCacheStore {
   readonly flushMs: number; readonly pruneMs: number; readonly maxRows: number; readonly maxBytes: number; readonly maxValueBytes: number; readonly maxPending: number;
+  readonly maxImmutableRows: number; readonly maxImmutableBytes: number;
   private pending = new Map<string, Pending>();
   private timer: NodeJS.Timeout | null = null;
   private flushing: Promise<void> | null = null;
@@ -48,6 +54,7 @@ export class GitHubCacheStore {
     this.flushMs = options.flushMs ?? 5_000; this.pruneMs = options.pruneMs ?? 10 * 60_000;
     this.maxRows = options.maxRows ?? 20_000; this.maxBytes = options.maxBytes ?? 200 * 1024 * 1024;
     this.maxValueBytes = options.maxValueBytes ?? 1024 * 1024; this.maxPending = options.maxPending ?? 10_000;
+    this.maxImmutableRows = options.maxImmutableRows ?? 20_000; this.maxImmutableBytes = options.maxImmutableBytes ?? 128 * 1024 * 1024;
   }
   private key(kind: GitHubCacheKind, key: string) { return `${this.scope}:${kind}:${key}`; }
   private report(what: string, error: unknown) {
@@ -86,10 +93,9 @@ ORDER BY updated_at, key`, [prefix, caps.etag, caps.ancestry, caps.blob, caps.hi
   put(kind: GitHubCacheKind, key: string, value: unknown, etag: string | null = null) {
     let json: string;
     try { json = JSON.stringify(value instanceof Set ? [...value] : value ?? null); } catch { return; }
-    const permanent = kind === 'immutable';
-    if (json.length > this.maxValueBytes && !permanent) return;
+    if (json.length > this.maxValueBytes) return;
     const id = this.key(kind, key);
-    if (!this.pending.has(id) && this.pending.size >= this.maxPending && !permanent) return;
+    if (!this.pending.has(id) && this.pending.size >= this.maxPending) return;
     this.pending.set(id, { kind, etag, value: json });
     this.schedule();
   }
@@ -138,13 +144,17 @@ ON CONFLICT (key) DO UPDATE SET kind=EXCLUDED.kind, etag=EXCLUDED.etag, value=EX
     }
     if (Date.now() - this.prunedAt >= this.pruneMs) await this.prune();
   }
-  /** Delete every entry but permanent ones past the newest `maxRows` rows or `maxBytes` of values. Returns the rows removed; never throws. */
+  /**
+   * Delete entries past their bound, newest-used kept: whole immutable responses past `maxImmutableRows`
+   * rows or `maxImmutableBytes` of values, every other kind past `maxRows` or `maxBytes`. Returns the rows removed; never throws.
+   */
   async prune(): Promise<number> {
     this.prunedAt = Date.now();
     try {
       const result = await this.pool.query(`DELETE FROM github_cache c USING (
-  SELECT key, row_number() OVER w AS n, sum(pg_column_size(value)) OVER w AS bytes FROM github_cache WHERE kind <> 'immutable' WINDOW w AS (ORDER BY updated_at DESC, key)
-) r WHERE c.key = r.key AND (r.n > $1 OR r.bytes > $2)`, [this.maxRows, this.maxBytes]);
+  SELECT key, kind = 'immutable' AS whole, row_number() OVER w AS n, sum(pg_column_size(value)) OVER w AS bytes FROM github_cache
+  WINDOW w AS (PARTITION BY kind = 'immutable' ORDER BY updated_at DESC, key)
+) r WHERE c.key = r.key AND (CASE WHEN r.whole THEN r.n > $3 OR r.bytes > $4 ELSE r.n > $1 OR r.bytes > $2 END)`, [this.maxRows, this.maxBytes, this.maxImmutableRows, this.maxImmutableBytes]);
       return result.rowCount ?? 0;
     } catch (error) { this.report('prune', error); return 0; }
   }

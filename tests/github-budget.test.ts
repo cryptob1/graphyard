@@ -117,7 +117,7 @@ test('unit:github-immutable-cache — a commit by SHA and a compare of two exact
   assert.equal(api.count(new RegExp(`^/commits/${fresh}$`)), 1);
 });
 
-test('unit:github-immutable-cache — an immutable answer is permanent: evicted from the hot layer, pruned for space, or after a restart, the same commit or compare is never asked of GitHub again', async t => {
+test('unit:github-immutable-cache — an immutable answer still in use is kept: evicted from the hot layer, through pruning of the other kinds, or after a restart, the same commit or compare is never asked of GitHub again', async t => {
   const api = new Api();
   t.mock.method(globalThis, 'fetch', api.fetch);
   const db = await database();
@@ -131,7 +131,7 @@ test('unit:github-immutable-cache — an immutable answer is permanent: evicted 
   for (const path of paths) assert.ok(await github.request(path), `${path} is answered`);
   assert.equal(api.requests.length, paths.length, 'no path was asked twice');
   await cache.flush();
-  // Pruning bounds the other kinds; it never removes a permanent answer.
+  // Pruning bounds the other kinds on their own bound; it never removes an immutable answer for them.
   cache.put('etag', '/pulls/1', { number: 1 }, 'W/"1"'); cache.put('etag', '/pulls/2', { number: 2 }, 'W/"2"');
   await cache.flush(); await cache.prune();
   for (const path of paths) assert.ok(await cache.lookup('immutable', `/repos/${REPOSITORY}${path}`), `${path} survives pruning`);
@@ -141,6 +141,34 @@ test('unit:github-immutable-cache — an immutable answer is permanent: evicted 
   restarted.immutableHotEntries = 1;
   for (const path of [...paths, ...paths]) await restarted.request(path);
   for (const path of paths) assert.equal(api.count(new RegExp(`^${path.replace(/[.]/g, '\\.')}$`)), 1, `${path} was fetched once`);
+});
+
+test('unit:github-immutable-cache — the immutable kind is bounded: answers nothing reads any more age out past their own row and byte bound, the ones still read stay, and an oversized value is never stored', async t => {
+  const api = new Api();
+  t.mock.method(globalThis, 'fetch', api.fetch);
+  const db = await database();
+  const cache = new GitHubCacheStore(db.pool, 'bounded', { flushMs: 60_000, pruneMs: Number.MAX_SAFE_INTEGER, maxImmutableRows: 3, maxValueBytes: 4096 });
+  const github = api.client(); await github.attachCache(cache);
+  const rows = async () => (await db.pool.query(`SELECT key FROM github_cache WHERE kind = 'immutable' AND key LIKE 'bounded:%'`)).rows.map(row => String(row.key).replace(`bounded:immutable:/repos/${REPOSITORY}`, ''));
+  // A live head is read every cycle while heads that merged or were replaced are read once and never again.
+  const live = `/commits/${sha('live-head')}`;
+  for (let index = 0; index < 6; index++) {
+    await github.request(`/commits/${sha(`retired-${index}`)}`);
+    await github.request(live);
+    await cache.flush(); await db.pool.query(`SELECT pg_sleep(0.01)`);
+  }
+  assert.equal(await cache.prune() > 0, true, 'retired answers past the bound are deleted');
+  const kept = await rows();
+  assert.equal(kept.length, 3, `the immutable kind holds its bound: ${kept.join(', ')}`);
+  assert.ok(kept.includes(live), 'the answer still read every cycle is kept');
+  assert.equal(api.count(/^\/commits\/[a-f0-9]{40}$/), 7, 'the live head was fetched once across six cycles');
+  // A compare too large to store stays in the hot layer only; the table and the write queue take none of it.
+  const huge = `/compare/${sha('base')}...${sha('huge')}`;
+  const body = (api as any).body.bind(api);
+  (api as any).body = (method: string, path: string) => path.endsWith(huge) ? { status: 'ahead', ahead_by: 1, total_commits: 1, commits: [], files: [{ filename: 'big.ts', patch: 'x'.repeat(8192) }] } : body(method, path);
+  await github.request(huge); await github.request(huge); await cache.flush();
+  assert.equal((await rows()).includes(huge), false, 'an oversized value is not persisted');
+  assert.equal(api.count(new RegExp(`^${huge.replace(/[.]/g, '\\.')}$`)), 1, 'the hot layer still answers it');
 });
 
 test('unit:github-shared-cycle-reads — twenty items observed in one cycle make one base-ref read and at most one protection read; a new cycle, a base push or a protection event reads again', async t => {
@@ -376,4 +404,22 @@ test('unit:github-budget-projection — the billable report is the installation\
   }
   const reported = observationThroughputStatus({ githubBudget: one.budget() }, { work: [], now: new Date().toISOString() });
   assert.equal(reported.budget?.billable?.perHour, 71, 'master status carries the installation-wide count');
+});
+
+test('unit:github-budget-projection — a charge batch whose write fails is queued again, so a transient database failure delays the other replicas\' count instead of losing it', async () => {
+  const db = await database();
+  let failing = true;
+  const flaky = { query: (text: string, values?: unknown[]) => failing && text.startsWith('INSERT') ? Promise.reject(new Error('connection reset')) : db.pool.query(text, values) };
+  const writer = new GitHubChargeLedger(flaky as any, 'flaky-installation', { instance: 'writer' });
+  const reader = new GitHubChargeLedger(db.pool, 'flaky-installation', { instance: 'reader' });
+  for (let index = 0; index < 4; index++) writer.charge(Date.now(), 'GET /pulls/:n', 'pulls');
+  const error = console.error; console.error = () => {};
+  try { await writer.sync(); } finally { console.error = error; }
+  await reader.sync();
+  assert.equal(reader.fleet().rows.length, 0, 'nothing reached the ledger while the write failed');
+  failing = false;
+  writer.charge(Date.now(), 'GET /pulls/:n', 'pulls');
+  await writer.sync(); await reader.sync();
+  assert.deepEqual(reader.fleet().rows.map(row => [row.endpoint, row.requests]), [['GET /pulls/:n', 5]], 'the failed batch was written with the next one');
+  await writer.close(); await reader.close();
 });
