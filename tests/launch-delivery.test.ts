@@ -161,7 +161,7 @@ test('unit:launch-command-bounded — the typed launch command line is short and
       ['gemini', '--prompt-interactive "$(cat "$GY.request")"'], ['qwen', '--prompt-interactive "$(cat "$GY.request")"'], ['copilot', '--interactive "$(cat "$GY.request")"']] as const) {
       const other = new FakePane(() => ({ agent: { agent: kind, agent_status: 'working' } }));
       const result = await startAgentSession(`${kind}-1`, kind, 'w1V:pR6', ['--flag'], request, other.run, { directory, ...other.bounds() });
-      assert.ok(other.typed!.endsWith(` ${kind} --flag ${expected}`), `${kind}: ${other.typed}`); assert.equal(result.delivery, 'request'); assert.equal(result.files.role, null);
+      assert.ok(other.typed!.endsWith(` ${kind === 'cursor' ? 'agent' : kind} --flag ${expected}`), `${kind}: ${other.typed}`); assert.equal(result.delivery, 'request'); assert.equal(result.files.role, null);
       assert.ok(!other.calls.some(call => call[0] === 'agent' && call[1] === 'prompt'), `${kind}: nothing is pasted`);
     }
     // A runtime with no way to take its request on the command line is refused before anything is typed (GY-184), never pasted into.

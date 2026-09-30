@@ -97,7 +97,8 @@ class FakeHerdr {
     if (args[0] === 'pane' && args[1] === 'run') {
       // The typed launch line, as the shell runs it: `GY=STEM; [node CLI watch KEY EPOCH --] KIND ARGS…`.
       const launch = expandTypedCommand(args[3]);
-      this.start(args[2], launch.kind, launch.args, null);
+      // Herdr detects Cursor's `agent` command as the cursor runtime (GY-976).
+      this.start(args[2], launch.kind === 'agent' ? 'cursor' : launch.kind, launch.args, null);
       return '';
     }
     if (args[0] === 'pane' && args[1] === 'read') return this.sessions.get(args[2])?.screen ?? '';
