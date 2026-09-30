@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { awaitRuntimeStart, emptySourceStarts, sessionHarnessPlan, SessionStartError, startAgentSession, workerHarnessPlan } from '../src/master.js';
 import { bashRuleMatches, claudeRuleProblem, harnessDecision, masterHarnessPlan } from '../src/harness.js';
 import { detectConsentPrompt, settingsWarning } from '../src/consent-prompt.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // A worker dispatched into a fresh worktree stopped on Claude Code's "Settings Warning" dialog
 // (Herdr: blocked; pane: "Enter to confirm · Esc to cancel") because the worker rules the launcher
@@ -64,7 +64,7 @@ test('unit:fresh-worktree-settings-warning — the launcher names Claude Code\'s
       (error: unknown) => error instanceof SessionStartError && error.startCase === 'blocked' && /settings warning/.test(error.message) && /Bash\(git push \* :\*\*\)/.test(error.message), status);
     assert.equal(blocked.calls.some(call => call[1] === 'send-keys'), false, status);
   }
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-settings-warning-'));
+  const directory = await temporaryDirectory('settings-warning');
   try {
     const launched = pane(warningScreen, 'blocked');
     await assert.rejects(startAgentSession('graphyard-claude-1', 'claude', 'w1V:p27J', ['--permission-mode', 'bypassPermissions'], 'Implement GY-159', launched.run, { directory, ...launched.bounds, holdConsent: true }),

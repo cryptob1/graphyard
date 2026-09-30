@@ -2,9 +2,8 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { open, mkdir, utimes, writeFile, type FileHandle } from 'node:fs/promises';
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import EmbeddedPostgres from 'embedded-postgres';
@@ -13,6 +12,7 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { processJob } from '../src/github.js';
+import { createHash } from 'node:crypto';
 import { Refusal, type Principal, type Work } from '../src/model.js';
 import { approverSessionName, decisionInput, masterConfigSchema, mergeExecutor, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { coordinatorConfinementRefusal, mergeBatchSize, mergeParallelTips, optimisticExcludeGlobs, optimisticMergeEnabled, rerunFailedChecks } from '../src/master/profiles.js';
@@ -23,8 +23,13 @@ import { diagnosticianSettings, diagnosisSettled } from '../src/runner/payloads.
 import type { RunOptions, RunResult, Runner } from '../src/runner/types.js';
 import type { DiagnosticianEffects } from '../src/daemon/diagnosis.js';
 import { Launcher } from '../src/daemon/cycle.js';
+import { docsHeadroomStatus, docsTrimActionKey, docsWordCountAt, type ReportedAttention } from '../src/daemon/faults.js';
+import { docsTrimTitle } from '../src/model/documentation.js';
 import { successorWidening } from '../src/model/successors.js';
 import { systemInvariants, type InvariantCheck } from '../src/model/invariants.js';
+import { reclaimResources, readReclaimReports, settleTmpReclaim } from '../src/master-resources.js';
+import { heldOpenPaths, reclaimTmpDirectories, writeTempOwner, tmpReclaimLimitPerCycle, tmpReclaimMinAgeMs, type TmpReclaimReport } from '../src/tmp-reclaim.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { lostRunReason, requestAttemptLimit, sessionRetry, sessionRetryLimit } from '../src/producer.js';
 import type { ExhaustedProof } from '../src/daemon/decisions.js';
 import { performSelfUpgrade, type SelfUpgradeOutcome } from '../src/daemon/upgrade.js';
@@ -42,9 +47,12 @@ import { mergeStallAttention } from '../src/cli/master-status.js';
  * a merge lands about every fifteen, three sent back by their reviewer, two whose worker dies, two
  * production deploys, a file split on main that re-plans an item, one pull request merged by hand
  * outside the queue that another candidate's landing check reconciles (GY-756), one pull request GitHub reports
- * CLEAN at once and one UNSTABLE, a reviewer bot out of quota that fails over, two flaky tips
- * rerun once (GY-516), one passing on the rerun and one failing again, one head whose producer
- * runs are killed, then fail until the request is spent (GY-496), and the loop's
+ * CLEAN at once and one UNSTABLE, a reviewer bot out of quota that fails over, the loop's
+ * resource reclaim with its /tmp pass (GY-421) over a scratch tmp root holding a backlog past the
+ * per-pass bound, a directory held open, one a live owner keeps, and a leftover every hour that
+ * ages past the six-hour threshold during the day, one head whose producer
+ * runs are killed, then fail until the request is spent (GY-496), two flaky tips
+ * rerun once (GY-516), one passing on the rerun and one failing again, and the
  * between-cycles self-upgrade (GY-437) against a simulated coordinator checkout that stands dirty
  * across the second deploy for a while. The plane also reports a held integration job in three
  * separate windows, so the `held-jobs` fault class recurs past its threshold and the loop files one
@@ -227,7 +235,7 @@ let pgServer: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<t
 before(async () => {
   // An offset no other test file takes: two files sharing a port fail in their `before` hook.
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 404;
-  pgServer = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-soak-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  pgServer = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('soak'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pgServer.initialise(); await pgServer.start(); await pgServer.createDatabase('soak_test');
   const connection = `postgres://graphyard:testing-only@127.0.0.1:${port}/soak_test`;
   // The database reads the simulated clock: its time functions are shadowed before the schema exists.
@@ -244,7 +252,7 @@ before(async () => {
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
   // The fixture coordinator checkout the simulated launches confine against (GY-888).
-  coordinatorBase = mkdtempSync(join(tmpdir(), 'graphyard-soak-coordinator-'));
+  coordinatorBase = await temporaryDirectory('soak-coordinator');
   coordinatorRoot = join(coordinatorBase, 'coordinator');
   const git = (...args: string[]) => execFileSync('git', ['-C', coordinatorRoot!, ...args], { stdio: 'ignore' });
   mkdirSync(join(coordinatorRoot, 'src'), { recursive: true });
@@ -255,7 +263,7 @@ before(async () => {
   git('add', '.');
   git('commit', '-m', 'coordinator');
 });
-after(async () => { clock.uninstall(); if (coordinatorBase) rmSync(coordinatorBase, { recursive: true, force: true }); if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (pgServer) await pgServer.stop(); });
+after(async () => { clock.uninstall(); if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (pgServer) await pgServer.stop(); });
 
 const id = () => randomUUID();
 async function api(principal: Principal, method: 'GET' | 'POST', path: string, body?: unknown) {
@@ -281,7 +289,7 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
  * re-post cannot use it.
  */
 let days = 0;
-async function simulateDay(options: { hours: number; regression?: 'approvers-left-open'; handApprovers?: boolean; capacityWait?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; plan?: Partial<typeof basePlan> }) {
+async function simulateDay(options: { hours: number; regression?: 'approvers-left-open'; handApprovers?: boolean; capacityWait?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; docs?: { budget: { total: number; perPage: number } }; plan?: Partial<typeof basePlan> }) {
   const dayStart = clock.now();
   // A day may restage the shared scenario: the day-scoped view of the plan is what every fault
   // below arms from, while each test's own assertions still read the shared base plan.
@@ -294,10 +302,58 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   // the queue-only, hand-approver and regression days exercise their own faults and would only
   // inherit this one's rework round.
   const mainDay = !options.queued && !options.handApprovers && !options.regression && !options.scope;
-  const github = new SimulatedGitHub({ repository, baseBranch: 'main', appId: 1234, ciAppId: 15368, reviewerApps, ciMs: 5 * minute, reviewMs: 3 * minute, firstPullRequest: 100 * ++days },
+  // The documentation day's world (GY-574): the project keeps the 12,000-word budget and its base
+  // sits 15 words under it, within the 3% warning — so the loop's headroom step counts it, and the
+  // queue tips whose entries grow the pages are what the day judges.
+  const docs = options.docs && {
+    budget: options.docs.budget,
+    // README.md 1,195 words and ten pages of 1,079: 11,985 total. The project's CI fails its
+    // docs-budget check when a commit's total is over 12,000, so each entry passes alone and the
+    // combination on a tip is what overflows — the fault the queue's attribution answers.
+    pages: { 'README.md': 1_195, ...Object.fromEntries(['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j'].map(letter => [`docs/${letter}.md`, 1_079])) } as Record<string, number>,
+    // Entry 1 grows README.md by 10 words (its tip lands at exactly the budget), entries 2, 3 and
+    // 4 each add a page of 10 words: every entry fits alone, and each combination with entry 1
+    // landed is the first tip over the budget — the fault the queue's attribution answers.
+    grow: (n: number): { page: string; words: number } | undefined =>
+      n === 1 ? { page: 'README.md', words: 10 } : n <= 4 ? { page: `docs/grown-${n}.md`, words: 10 } : undefined,
+    page: (n: number) => n === 1 ? 'README.md' : `docs/grown-${n}.md`,
+  };
+  const github = new SimulatedGitHub({ repository, baseBranch: 'main', appId: 1234, ciAppId: 15368, reviewerApps, ciMs: 5 * minute, reviewMs: 3 * minute, firstPullRequest: 100 * ++days, ...(docs ? { docs: { budget: docs.budget, pages: docs.pages } } : {}) },
     [...Array.from({ length: plan.items }, (_, index) => file(index + 1)), 'README.md']);
   const herdr = new SimulatedHerdr(() => clock.now());
   const adapter = github.adapter();
+  // ---- The host's /tmp: a scratch root the loop's reclaim step sweeps every cycle (GY-421). ----
+  // Every directory is stamped with the simulated clock, which the pass reads, so ages move with the day.
+  const reclaimRoot = await temporaryDirectory('soak-reclaim'), tmpRoot = await temporaryDirectory('soak-tmp');
+  await mkdir(join(reclaimRoot, '.graphyard'));
+  const leftover = async (name: string, ageMs: number, owner?: object) => {
+    const directory = join(tmpRoot, name), at = new Date(clock.now() - ageMs);
+    await mkdir(directory); await writeFile(join(directory, 'data'), 'x'.repeat(1024));
+    await utimes(join(directory, 'data'), at, at); await utimes(directory, at, at);
+    if (owner) await writeFile(`${directory}.owner`, JSON.stringify(owner));
+    return directory;
+  };
+  // A backlog past the per-pass bound, all stale; a dead run's marked directory, young; a young tsx cache.
+  const backlog = await Promise.all(Array.from({ length: tmpReclaimLimitPerCycle + 20 }, (_, index) => leftover(`graphyard-backlog-${index}`, tmpReclaimMinAgeMs + hour)));
+  const deadOwned = await leftover('graphyard-dead-run', 0, { pid: 2 ** 22 + 1, startedAt: 1, at: new Date(clock.now()).toISOString() });
+  const cache = await leftover('tsx-4242', 0);
+  // Stale but kept all day: one a live process holds open, one whose marked owner (this process) still runs.
+  const heldDirectory = await leftover('graphyard-held', tmpReclaimMinAgeMs + hour);
+  const holder: FileHandle = await open(join(heldDirectory, 'data'), 'r');
+  const held = await heldOpenPaths();
+  assert.ok(held.has(join(heldDirectory, 'data')), 'the open handle is visible to the holder scan');
+  const liveOwned = await leftover('graphyard-live-run', tmpReclaimMinAgeMs + hour);
+  await writeTempOwner(liveOwned);
+  const hourly: { directory: string; at: number }[] = [];
+  const tmpPasses: TmpReclaimReport[] = [];
+  let tmpInFlight = 0, tmpPeak = 0;
+  const tmpPass = async (options: Parameters<typeof reclaimTmpDirectories>[0] = {}) => {
+    tmpPeak = Math.max(tmpPeak, ++tmpInFlight);
+    // The holder set is read once above: a /proc scan per pass would time the day by the host's process count.
+    try { const report = await reclaimTmpDirectories({ ...options, held }); tmpPasses.push(report); return report; }
+    finally { tmpInFlight--; }
+  };
+
   const moveClock = async (ms: number) => { clock.advance(ms); await store.pool.query('UPDATE simulated_clock SET offset_ms=$1', [clock.offsetMs]); };
   await moveClock(0);
 
@@ -315,7 +371,13 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
         plannedFiles: bulk18,
         criteria: [{ id: 'AC-1', text: `Item ${n} behaves, and ${scopePlan.unrepresentablePath} moves onto the shared helper too`, proofs: [PROOF] }] }
       : {};
-    let work = await engine.execute(principals.operator, 'create', null, { title: `Soak item ${n}`, plannedFiles: files(n), criteria: [{ id: 'AC-1', text: plan.scoped.has(n) ? `Item ${n} behaves, with its fixture ${fixture(n)}` : `Item ${n} behaves`, proofs: [PROOF] }], ...scopeIntake }, id());
+    // A documentation day's item edits the page it grows, so the tip's docs change is its own
+    // planned scope, and its policy requires the project's docs budget check (GY-574).
+    const docsIntake = docs && n <= 4 ? {
+      plannedFiles: [...files(n), docs.page(n)],
+      policy: { checks: ['test', 'typecheck', 'unit:docs-word-budget'], review: true },
+    } : {};
+    let work = await engine.execute(principals.operator, 'create', null, { title: `Soak item ${n}`, plannedFiles: files(n), criteria: [{ id: 'AC-1', text: plan.scoped.has(n) ? `Item ${n} behaves, with its fixture ${fixture(n)}` : `Item ${n} behaves`, proofs: [PROOF] }], ...scopeIntake, ...docsIntake }, id());
     if (n === plan.exhaustedReviewer) work = await engine.execute(principals.operator, 'reviewpolicy', work.id, { provider: 'agent', expectedPolicyRevision: work.policyRevision, reason: 'Reviewed by the reviewer bots',
       reviewerProfiles: [{ name: 'claude-reviewer', runtime: 'claude', reviewerApp: 'claude-reviewer' }, { name: 'cursor-reviewer', runtime: 'cursor', reviewerApp: 'cursor-reviewer' }] }, id());
     items.push(work);
@@ -467,7 +529,8 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       }
       const head = sha('head', session.key, session.epoch);
       if (numberOf(session) === plan.breaksMain && session.attempt === 1) github.breaking.add(head);
-      const pr = github.push(session.key, session.branch, principal.id, head, files(numberOf(session)));
+      const grown = docs?.grow(numberOf(session));
+      const pr = github.push(session.key, session.branch, principal.id, head, grown ? [...files(numberOf(session)), grown.page] : files(numberOf(session)), grown);
       await engine.execute(principal, 'submit', session.work, { epoch: session.epoch, pr: pr.number, documentation: 'A simulated item: it changes no documented behaviour' }, id());
       session.state = 'submitted';
       // Its work done, the runtime exits and leaves the pane behind (GY-842); the loop's session
@@ -492,7 +555,8 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       session.refusedSince = since;
       if (now - since < 3 * minute) continue;
       session.syncs += 1; session.syncedFor = candidate; session.refusedSince = undefined;
-      github.push(session.key, session.branch, principalOf(session.profile).id, sha('head', session.key, session.epoch, 'sync', session.syncs), files(numberOf(session)));
+      const syncedGrow = docs?.grow(numberOf(session));
+      github.push(session.key, session.branch, principalOf(session.profile).id, sha('head', session.key, session.epoch, 'sync', session.syncs), syncedGrow ? [...files(numberOf(session)), syncedGrow.page] : files(numberOf(session)), syncedGrow);
     }
   };
 
@@ -664,7 +728,11 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     decisions: work => api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(work.id)}/decisions`),
     withdraw: (work, decision, reason) => api(principals.operatorAgent, 'POST', `work/${work.id}/decide`, { action: 'withdraw', decision, reason }),
     faultClassPolicy: { threshold: 3, windowHours: 24 },
-    fileFaultClass: (input, key) => engine.execute(principals.operatorAgent, 'create', null, input, key),
+    fileFaultClass: (input, key) => {
+      // The documentation trim item is what the once-only filing assertion reads (GY-574).
+      if (input.title.startsWith(docsTrimTitle)) docsFilings.push(key);
+      return engine.execute(principals.operatorAgent, 'create', null, input, key);
+    },
     diagnostician,
     baseSuccessions: async since => ({ tip: github.tip, successions: github.successions.filter(entry => github.commits.get(entry.commit)!.at >= Date.parse(since)), files: new Set(github.files) }),
     replan: (work, paths, reason) => api(principals.operatorAgent, 'POST', `work/${work.id}/requirements`, successorWidening(work, paths, reason)),
@@ -686,6 +754,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       return { source: 'endpoint', sha: production.sha, at: new Date(clock.now()).toISOString(), reason: null, deployed: serving.map(item => item.key), pending: delivered.filter(item => !serving.includes(item)).map(item => item.key) };
     },
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    reclaimResources: (work, agents) => reclaimResources(reclaimRoot, { reviewers: [], producers: [] }, { work, agents }, { closePane: pane => { herdr.close(pane); }, tmpRoot, tmpPass }),
     // What the loop's reclaim path needs to end an attempt on the record (GY-852): the partial
     // work kept on its branch, and the capacity report that ends the lease in the same transaction.
     // They ride the reassigned day alone, whose attempt is the one the loop reclaims; the other
@@ -700,6 +769,32 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     } : {}),
     promptSession,
     exhaustedProofs: async () => [...abandoned.values()],
+    // The documentation day's loop counts the base branch's real pages through the counting code
+    // master status runs (GY-574), over a git that answers from the simulated repository.
+    ...(docs ? {
+      reportedAttention: async () => {
+        const worldGit = async (_command: string, args: string[]): Promise<string> => {
+          const [op, ...operands] = args;
+          const commitOfTree = (tree: string) => [...github.commits.values()].find(entry => entry.tree === tree);
+          if (op === 'rev-parse') return `${github.commits.get(github.tip)!.tree}\n`;
+          if (op === 'ls-tree') {
+            const commit = commitOfTree(operands.at(-1)!)!;
+            return commit.files.map(path => {
+              const text = commit.contents.get(path) ?? '';
+              return `100644 blob ${createHash('sha1').update(text).digest('hex')} ${Buffer.byteLength(text)}\t${path}`;
+            }).join('\n');
+          }
+          if (op === 'show') return operands.map(spec => {
+            const [, tree, path] = /^([^:]+):(.+)$/.exec(spec)!;
+            return commitOfTree(tree)!.contents.get(path) ?? '';
+          }).join('');
+          throw new Error(`the simulated documentation checkout cannot answer git ${op}`);
+        };
+        const counted = await docsWordCountAt('/checkout', 'origin/main', worldGit);
+        const status = await docsHeadroomStatus('/checkout', 'main', () => counted);
+        return { items: [], docs: status.docs } as ReportedAttention;
+      },
+    } : {}),
   };
   // The loop publishes the master's merge-queue settings each cycle they change (GY-330, GY-498,
   // GY-500, GY-516), exactly as daemonEffects wires it; the day records what was published, when.
@@ -786,6 +881,11 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   let peakWindow = 0;
   const seenTips = new Set<string>();
   let released = 0, split = false, noticed = false, deploys = 0, cycles = 0, reportedDispatches = 0, restarted = false, exitedRowsSeen = 0;
+  // GY-574: the documentation day records the trim filings, the loop's trim actions, and when the
+  // trim item was closed with the documentation still saturated, so the once-only filing and the
+  // bounded action count are what the day itself observed.
+  const docsFilings: string[] = [], docsActions: { state: string; detail: string }[] = [];
+  let closedTrim = false;
   // GY-831: when each staged fault armed, and what the lost carry named, so the test can assert the
   // recovery against the exact candidate and review the faults were staged on.
   const stale: { stuckArmedAt: number | null; stuckHead: string | null; stuckReported: boolean; lostAt: number | null; carried: { reviewer: string; reviewId: number; originalSha: string } | null } =
@@ -814,6 +914,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       const commit = github.commit(`Split ${from}\n\nGraphyard-Successor: ${from} -> ${successors.join(', ')}`, [...github.files.filter(path => path !== from), ...successors]);
       github.successions.push(...successors.map(to => ({ from, to, commit: commit.sha, similarity: 70 })));
     }
+    if (elapsed > 0 && elapsed % hour === 0 && elapsed < options.hours * hour) hourly.push({ directory: await leftover(`graphyard-hour-${elapsed / hour}`, 0), at: elapsed });
     // GY-839: while the window stands, GitHub answers every open candidate's compares without a
     // usable merge base; afterwards its answers carry the true one again. The queue-only day runs
     // with the window past its end: its fault is the bound candidates' recovery, which the main
@@ -823,6 +924,20 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       ? new Set([...github.prs.values()].filter(pr => pr.open).map(pr => pr.head)) : new Set<string>();
     // A change landed on main outside Graphyard, moving the base under candidates already pushed.
     if (!noticed && elapsed >= plan.notice) { noticed = true; github.commit('Add NOTICE to the base branch', [...github.files, 'NOTICE']); }
+    // GY-574: an hour in, the filed trim item is closed and its trim lands on the base branch —
+    // the README gives back the words, as the trim item's own criterion delivers — with the set
+    // still inside the 3% warning, so the filing episode stays open and files nothing more. The
+    // closing comes after the crossing tip has been judged, so the day observes both halves.
+    if (docs && !closedTrim && elapsed >= 60 * minute) {
+      const trim = (await store.list()).find(item => item.title.startsWith(docsTrimTitle));
+      if (trim) {
+        closedTrim = true;
+        await api(principals.operator, 'POST', `work/${trim.key}/close`, { kind: 'obsolete', reason: 'soak: the trim item closed with the documentation still saturated' });
+        const contents = new Map(github.commits.get(github.tip)!.contents);
+        contents.set('README.md', Array.from({ length: 1_165 }, (_, index) => `t${index}`).join(' '));
+        github.commit('Trim the documentation for word-budget headroom', github.files, clock.now(), [github.tip], undefined, {}, contents);
+      }
+    }
     // GY-551: twenty minutes in, the master requests a release of the last two items by hand and
     // puts each to an approver session it launches itself; neither session judges it.
     if (options.handApprovers && elapsed === 20 * minute) for (const [n, ending] of [[plan.items, 'vanishes'], [plan.items - 1, 'stops']] as const) {
@@ -957,6 +1072,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
         const result = await runCycle(config, state, effects, clock.now, launcher); cycles++;
         reportedDispatches += result.actions.filter(action => action.kind === 'dispatch' && action.state === 'done').length;
         escalations.push(...result.actions.filter(action => action.kind === 'escalation').map(action => action.detail));
+        if (docs) for (const action of result.actions) if (action.kind === 'fault' && /documentation headroom/.test(action.detail)) docsActions.push({ state: action.state, detail: action.detail });
         for (const watch of Object.values(state.approvals)) if (hand.has(watch.decision) && watch.exhaustedAt) spent.add(watch.decision);
         if (process.env.SOAK_TRACE) for (const action of result.actions) console.error(`+${Math.round(elapsed / minute)} ${action.kind} ${action.state} ${action.work ?? ''}: ${action.detail.slice(0, 300)}`);
       }
@@ -986,13 +1102,24 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     const step = open ? minute : 10 * minute;
     elapsed += step; await moveClock(step);
   }
+  // The documentation day ends with its crossing entries held by the budget (GY-574): they are
+  // closed here, so the day's undelivered work is not a later day's loop's to dispatch and judge.
+  if (docs) {
+    await moveClock(5 * minute);
+    for (const leftover of await store.list()) {
+      if (leftover.stage === 'done' || leftover.closure) continue;
+      await api(principals.operator, 'POST', `work/${leftover.key}/close`, { kind: 'obsolete', reason: 'soak: the documentation day ends with its crossing entries held; a later day runs its own scenario' });
+    }
+  }
 
   engine.reconcileLanded = reconcileLanded; engine.directMergeEnvironment = null;
   const final = (await store.list()).filter(item => items.some(entry => entry.id === item.id));
+  await settleTmpReclaim(); await holder.close();
+  const tmp = { root: tmpRoot, backlog, deadOwned, cache, heldDirectory, liveOwned, hourly, passes: tmpPasses, peak: tmpPeak, reports: await readReclaimReports(reclaimRoot), left: readdirSync(tmpRoot) };
   if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
-  return { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, herdr, hand, escalations, spent, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, landingRefusals, foreignPane,
+  return { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, herdr, hand, escalations, spent, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, landingRefusals, foreignPane,
     mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted, stale, approverPanes, herdrClosed: herdr.closed, diagnosisModel: settings.model, capacityRefused, capacityLaunched, capacityWaiters,
-    decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, reassign, confined, unconfinedRefusals, mergeStallSightings };
+    decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, reassign, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, mergeStallSightings };
 }
 
 /**
@@ -1023,9 +1150,10 @@ function assertLaunchesConfined(day: { confined: { role: string; key: string; di
 
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 180_000 }, async () => {
   const began = performance.now();
-  const day = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24), plan: { blockedMerge: blockedMergeItem } });
+  const hours = Number(process.env.SOAK_HOURS ?? 24);
+  const day = await simulateDay({ hours, plan: { blockedMerge: blockedMergeItem } });
   assertLaunchesConfined(day, coordinatorRoot!);
-  const { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, state, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, herdr, landingRefusals, foreignPane, mergeQueuePosts, approverPanes, herdrClosed, diagnosisModel, decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen } = day;
+  const { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, tmp, state, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, herdr, landingRefusals, foreignPane, mergeQueuePosts, approverPanes, herdrClosed, diagnosisModel, decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen } = day;
   const undelivered = final.filter(item => item.stage !== 'done' || !item.delivery);
   assert.deepEqual(undelivered.map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
@@ -1191,6 +1319,25 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.ok(approverPanes.length > 0, 'the day launched approver sessions for its decisions');
   assert.deepEqual(approverPanes.filter(pane => !herdrClosed.includes(pane)), [], `every approver session the day launched was closed once its decision settled: ${JSON.stringify(herdrClosed)}`);
   assert.ok(cycles > 24 * 6, `the loop cycled through the day (${cycles} cycles)`);
+  // The /tmp pass across the day (GY-421): never two in flight, never past its bound, and what it
+  // takes is exactly what is stale and unheld.
+  assert.equal(tmp.peak, 1, 'at most one /tmp pass is in flight, whatever the cycles do');
+  assert.ok(tmp.passes.length > 1 && tmp.passes.every(pass => pass.removed.length <= tmpReclaimLimitPerCycle && pass.errors.length === 0), `every pass stays within its bound: ${tmp.passes.map(pass => pass.removed.length).filter(Boolean).join(', ')}`);
+  assert.ok(tmp.backlog.every(directory => !existsSync(directory)), 'the backlog is cleared');
+  assert.ok(tmp.passes.filter(pass => pass.removed.some(entry => tmp.backlog.includes(entry.path))).length >= 2, 'a backlog past the bound takes more than one pass');
+  assert.ok(!existsSync(tmp.deadOwned) && !existsSync(`${tmp.deadOwned}.owner`), 'a dead run\'s directory goes at once, marker and all');
+  assert.ok(existsSync(tmp.heldDirectory), 'a directory a live process holds open is kept all day');
+  assert.ok(existsSync(tmp.liveOwned), 'a directory whose owner still runs is kept all day');
+  if (hours > 7) assert.ok(!existsSync(tmp.cache), 'a tsx cache left unwritten for six hours goes');
+  const aged = tmp.hourly.filter(entry => entry.at <= (hours - 7) * hour), young = tmp.hourly.filter(entry => entry.at >= (hours - 5) * hour);
+  assert.deepEqual(aged.filter(entry => existsSync(entry.directory)).map(entry => entry.directory), [], 'each leftover goes once it is past six hours old');
+  assert.deepEqual(young.filter(entry => !existsSync(entry.directory)).map(entry => entry.directory), [], 'no leftover goes before it is six hours old');
+  const freed = tmp.passes.reduce((total, pass) => total + pass.bytes, 0), reported = tmp.reports.reduce((total, report) => total + report.tmp.bytes, 0);
+  // The last pass may finish after the day's last cycle: its bytes are the next cycle's to record.
+  const last = tmp.passes.at(-1)!.bytes;
+  assert.ok(freed >= 1024 * (tmpReclaimLimitPerCycle + 20) && reported <= freed && reported >= freed - last, `the reclaim records carry the bytes the passes freed (${reported} of ${freed})`);
+  assert.ok(tmp.reports.length <= 50, `the reclaim record stays bounded (${tmp.reports.length})`);
+  assert.ok(Object.keys(state.actions).filter(key => key.startsWith('reclaim:resources:')).length <= tmp.passes.filter(pass => pass.removed.length).length, 'the loop records a reclaim only for a pass that freed something');
   // GY-437: the between-cycles self-upgrade ran after every cycle of the day. Each deploy aligned
   // the checkout once, and restarted the fleet and the loop once (every merge touches src/); the
   // dirty checkout across the second deploy was refused, untouched, without growing the cursor,
@@ -1311,6 +1458,54 @@ test('unit:soak-invariants-hold — the parallel-tip window validates several qu
   assert.equal(status.mergeQueue.parallelTips, reconfigure.window, 'status reports the narrowed window');
   const seconds = (performance.now() - began) / 1000;
   assert.ok(seconds < 150, `the queue-only day runs inside its budget (${seconds.toFixed(1)} s)`);
+});
+
+const docsTotalDebug = (count: Record<string, number> | undefined) => count === undefined ? undefined : Object.values(count).reduce((a: number, b: number) => a + b, 0);
+test('unit:soak-invariants-hold — the documentation budget under the real loop: a base inside the 3% warning files the trim item once across the day, a tip failing only the docs budget ejects the entry whose docs change crossed it naming the words over and the pages that grew, and every invariant holds', { timeout: 300_000 }, async () => {
+  // GY-574, over the real queue, the real observer and the real word counting: the base sits at
+  // 11,985 of a 12,000-word budget (inside the 3% warning), four items grow the pages, and the day
+  // is judged on what the loop, the gates, the window and the counter do about it.
+  const { items, final, github, violations, failures, lost, docsFilings, docsActions, closedTrim, state } =
+    await simulateDay({ hours: 4, queued: { window: 4, releaseEveryMs: 10 * minute }, docs: { budget: { total: 12_000, perPage: 1_200 } },
+      plan: { items: 4, leftovers: 0, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), breaksMain: 0, flaky: { rerunPasses: 0, rerunFails: 0 } } });
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.deepEqual(lost, [], 'no worker lost its lease');
+  assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
+  // Headroom: the saturated base filed the trim item once, the day closed it with the docs still
+  // saturated, and the filing episode — not the open item — is what kept it to one.
+  assert.ok(closedTrim, 'the trim item was filed and then closed with the documentation still saturated');
+  assert.equal(docsFilings.length, 1, `exactly one filing across the day: ${JSON.stringify(docsFilings)}`);
+  assert.ok(docsActions.length <= 4, `a bounded number of loop actions for ${docsTrimActionKey} (${docsActions.length}): ${JSON.stringify(docsActions)}`);
+  assert.equal(docsActions.filter(action => action.state === 'done').length, 1, 'the one filing is the one done action');
+  assert.match(state.actions[docsTrimActionKey]?.detail ?? '', /^Filed /, 'the filing stands as the open episode on the loop cursor');
+  // Attribution: entry 1's tip fits (11,995 words) and merges, never ejected; entry 2's tip is
+  // the first failing one at 12,005 words, and its ejection names the words over and the pages
+  // that grew — never the queue head. Entries 3 and 4 each fit alone, and each combination that
+  // crossed ejects its own crossing entry the same way.
+  const head = final.find(item => item.key === items[0].key)!;
+  assert.equal(head.stage, 'done', 'entry 1 merges: its tip fit the budget');
+  assert.ok((head.queueHistory ?? []).every(entry => entry.event !== 'ejected'), 'the queue head is never the one the overflow ejects');
+  const crossing = final.find(item => item.key === items[1].key)!;
+  if (process.env.SOAK_DOCS_DEBUG) {
+    console.error('CROSSING', JSON.stringify({ stage: crossing.stage, candidate: crossing.candidate, docsBudget: crossing.observation?.docsBudget ? { ...crossing.observation.docsBudget, base: docsTotalDebug(crossing.observation.docsBudget.base), pages: docsTotalDebug(crossing.observation.docsBudget.pages) } : null, checks: crossing.observation?.checks }, null, 1));
+    for (const merge of github.merges) console.error('MERGE', JSON.stringify(merge));
+    for (const [number, pr] of github.prs) console.error('PR', number, pr.key, [...pr.pushed.keys()].map(head => { const commit = github.commits.get(head)!; const docs = [...commit.contents].filter(([path]) => path === 'README.md' || /^docs\/.+\.md$/.test(path)).map(([path, text]) => `${path}=${text.split(/\s+/).filter(Boolean).length}`); return `${head.slice(0, 8)}: ${docs.join(' ')}`; }));
+  }
+  const ejected = [items[1], items[2], items[3]].map(item => final.find(entry => entry.key === item.key)!);
+  const reasons = ejected.map(item => (item.queueHistory ?? []).map(entry => entry.reason ?? '').filter(reason => /unit:docs-word-budget failed: its docs change takes the budgeted documentation/.test(reason)));
+  assert.ok(reasons[0]!.length >= 1, `the crossing entry was ejected with the attributed reason: ${JSON.stringify((crossing.queueHistory ?? []).map(entry => [entry.event, entry.reason]))}`);
+  assert.match(reasons[0]![0], /to 12005 words, 5 over the 12000-word budget; pages that grew: docs\/grown-2\.md \(0 → 10\)/);
+  // Entries 3 and 4 fill the window behind them: while the base was over its budget their
+  // combinations were held by the project's own check, and once the trim landed they validated
+  // and merged — the queue moves again, which is what keeping headroom is for.
+  for (const item of [items[2], items[3]]) {
+    const delivered = final.find(entry => entry.key === item.key)!;
+    assert.equal(delivered.stage, 'done', `${item.key} is delivered once the trim has restored the room`);
+  }
+  // The counter's reads are bounded by what it counted: each distinct commit's tree once, each
+  // distinct page and configuration version once, whatever tips and rounds held them again.
+  assert.ok(github.docsReads.blobs.size <= 24, `blob reads are bounded by the distinct versions (${github.docsReads.blobs.size})`);
+  assert.ok(github.docsReads.trees.size <= 48, `tree reads are bounded by the distinct commits counted (${github.docsReads.trees.size})`);
 });
 
 test('unit:soak-invariants-hold — hand-launched approvers that vanish or stop without judging are relaunched within the bound, a refused relaunch is retried, and the spent watches keep every invariant holding', { timeout: 120_000 }, async () => {

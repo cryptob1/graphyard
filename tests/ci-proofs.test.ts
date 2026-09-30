@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 // @ts-expect-error Dependency-free protected workflow script.
 import { ciProofFamilies as registryFamilies, contract, contracts, planCiProofs } from '../scripts/contracts.mjs';
 // @ts-expect-error Dependency-free protected workflow script.
@@ -188,7 +188,7 @@ test('integration:ci-proofs-workflow the plan waits for the control plane to obs
 });
 
 test('integration:ci-proofs-workflow the publisher reads one report per downloaded artifact directory', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-ci-reports-'));
+  const directory = await temporaryDirectory('ci-reports');
   const { mkdir } = await import('node:fs/promises');
   await mkdir(join(directory, 'graphyard-acceptance-2-integration-claim-safety'));
   await writeFile(join(directory, 'graphyard-acceptance-2-integration-claim-safety', 'acceptance.json'), JSON.stringify(report()));
@@ -291,7 +291,7 @@ test('integration:ci-proofs-trust the installer registers the CI producer with t
   const roster = withCiProducer([{ id: 'operator', role: 'admin', token: 'o'.repeat(40) }, { id: ciProducerId, role: 'producer', proofs: ['manual:*'], token: 'kept-token-'.padEnd(40, 'k') }]);
   assert.deepEqual(roster.map(entry => entry.id), ['operator', ciProducerId]);
   assert.deepEqual((roster[1] as any).proofs, ['unit:*', 'integration:*']); assert.equal((roster[1] as any).token, 'kept-token-'.padEnd(40, 'k'));
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-ci-install-'));
+  const directory = await temporaryDirectory('ci-install');
   const file = join(directory, 'principals.json');
   await writeFile(file, JSON.stringify({ version: 1, principals: [{ id: 'operator', role: 'admin', token: 'o'.repeat(40) }, { id: 'evidence', role: 'producer', proofs: ['integration:x'], token: 'e'.repeat(40) }] }), { mode: 0o600 });
   const first = await registerCiProducer(file, [], () => 't'.repeat(40));

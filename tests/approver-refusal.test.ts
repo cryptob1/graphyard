@@ -2,8 +2,7 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
@@ -17,6 +16,7 @@ import { MERGE_PROTOCOL } from '../src/protocol-version.js';
 import { approverSessionName } from '../src/master.js';
 import { approvalStep, approvalWatchSchema } from '../src/master-daemon.js';
 import { terminalDecisions, unansweredDecisions } from '../src/cli/decision-report.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-141: an approver's refusal is a recorded outcome, not a session that ended without
 // approving. A refused decision is reported with its reason and cannot be retried unchanged, and a
@@ -45,7 +45,7 @@ const refuse = (credential: string, work: Work, decision: string, reason: string
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 141;
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-approver-refusal-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('approver-refusal'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('refusal_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/refusal_test`); await store.init();
   const engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null;
@@ -64,8 +64,8 @@ after(async () => { http?.close(); await store?.close(); await database?.stop();
  * decision histories, and records every mutation it receives with the credential that sent it.
  */
 async function stubbedMaster(item: { id: string; key: string }, decisions: () => unknown[]) {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-refusal-cli-'));
-  const credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-refusal-credentials-'));
+  const root = await temporaryDirectory('refusal-cli');
+  const credentialDirectory = await temporaryDirectory('refusal-credentials');
   const files = { coordinator: join(credentialDirectory, 'coordinator.token'), operator: join(credentialDirectory, 'operator.token'), approver: join(credentialDirectory, 'approver.token') };
   const now = () => new Date().toISOString();
   const work = { id: item.id, key: item.key, title: 'Refused', stage: 'ready', ready: true, blocker: null, priority: 1, epoch: 0, dependencies: [], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['integration:loop'] }], policy: { checks: ['test'], review: true }, plannedFiles: [], workspaces: [], evidence: [], gates: [], violations: [], createdAt: now(), updatedAt: now(), stageEnteredAt: now(), lease: null, candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], observation: null, revision: 3, policyRevision: 1 };
