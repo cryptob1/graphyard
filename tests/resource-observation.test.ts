@@ -20,7 +20,7 @@ import { runExecutorTick } from '../src/auto-dispatch.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { stalledActionAttention } from '../src/cli/master-status.js';
 import { attributeAttention, resourceStatus } from '../src/master-status.js';
-import { dispatchRefusal, loadedRevision, planeVerdict, finishedSessionGraceMs, stuckSessionMs, ledgerRetentionMs, readReclaimReports, readResources, reclaimResources, registryGaps, resourceIds, resourceRegistry, reviewLedgerBound, type ResourceInputs } from '../src/master-resources.js';
+import { dispatchRefusal, loadedRevision, planeVerdict, finishedSessionGraceMs, staleNameWindowMs, stuckSessionMs, ledgerRetentionMs, readReclaimReports, readResources, reclaimResources, registryGaps, resourceIds, resourceRegistry, reviewLedgerBound, type ResourceInputs } from '../src/master-resources.js';
 
 /**
  * GY-132: Graphyard observes its own resources.
@@ -125,9 +125,9 @@ test('integration:headroom-warned-before-exhaustion — status reports each reso
   await plane(store, async url => {
     const config = master(url);
     const warnBelow = Math.ceil(reviewLedgerBound / 10);
-    const status = async (count: number, agents: HerdrAgent[] = []) => {
+    const status = async (count: number, agents: HerdrAgent[] = [], now?: number) => {
       await saveReviewLedger(directory, { version: 1, reviews: Array.from({ length: count }, (_, index) => pinned(index)) });
-      return resourceStatus(directory, config, { reviews: (await readReviewLedger(directory)).reviews, producers: [], agents, work: [], loop: null });
+      return resourceStatus(directory, config, { reviews: (await readReviewLedger(directory)).reviews, producers: [], agents, work: [], loop: null }, { now });
     };
 
     // Every registered resource is reported, as used of bound with its headroom; the plane's own
@@ -152,7 +152,8 @@ test('integration:headroom-warned-before-exhaustion — status reports each reso
     // "busy in Herdr" on a name a finished pane holds, and a stalled launch refused by the schema.
     // Each is reported as the resource, never as the symptom.
     const finished: HerdrAgent[] = [{ name: 'reviewer-a', pane_id: 'pane-9', agent_status: 'done' }];
-    const full = await status(reviewLedgerBound, finished);
+    // Read once the finished pane outlived the reclaim window: inside it the name is being given back (GY-963).
+    const full = await status(reviewLedgerBound, finished, Date.now() + staleNameWindowMs + 60_000);
     const symptoms = [
       { subject: 'GY-7', text: 'GY-7\'s request-review action is stalled, retried only on a widening backoff: 3 attempts in a row failed for one unchanged reason — reviewer agent reviewer-a is busy in Herdr', role: 'master' as const, approvedBy: null, human: false, humanOnly: null, next: 'Clear what that reason names' },
       { subject: 'GY-8', text: `GY-8's request-review action is stalled — ${JSON.stringify(['The review ledger (.graphyard/reviews.json) refused the write: its bound is 200 records and 0 are live sessions'])}`, role: 'master' as const, approvedBy: null, human: false, humanOnly: null, next: 'Clear what that reason names' },

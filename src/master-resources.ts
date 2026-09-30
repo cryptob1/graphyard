@@ -37,6 +37,10 @@ export interface ResourceReading {
   reclaimable: number;
   /** Requests waiting on this resource; a full slot pool with nobody waiting is the fleet working, not a warning. */
   waiting?: number;
+  /** Reclaimable holders that outlived `staleNameWindowMs`: what the reclaim pass should already have given back (GY-963). */
+  overdue?: number;
+  /** The bound is a default nobody configured: the reading is reported, but raises no attention (GY-963). */
+  advisory?: boolean;
 }
 
 /** `advisory`: the bound is a default nobody configured, so reaching it warns but does not fail health. */
@@ -87,6 +91,12 @@ export const ledgerRetentionMs = 15 * 60_000;
 export const stuckSessionMs = 10 * 60_000;
 /** A finished session is closed once its record has been settled this long (the launcher's own close gets the first chance). */
 export const finishedSessionGraceMs = 60_000;
+/**
+ * How long a name nothing live owns may stay held before it is a fault (GY-963): the reclaim pass
+ * waits out the grace, then two passes that far apart, so a name inside this window is being
+ * reclaimed on schedule, and only one past it is one the pass did not give back.
+ */
+export const staleNameWindowMs = 5 * finishedSessionGraceMs;
 /** The plane's database bound when GRAPHYARD_DATABASE_MAX_BYTES is unset. */
 export const defaultDatabaseMaxBytes = 10 * 1024 ** 3;
 /** The default warning line: a tenth of the bound, and at least one unit. */
@@ -121,6 +131,19 @@ function liveOwner(profile: ReturnType<typeof roleProfiles>[number], name: strin
   if (profile.role === 'worker') return input.work.some(item => !!item.lease && item.lease.owner === profile.principal && Date.parse(item.lease.expiresAt) > input.now);
   const records: { agentName: string; state: string }[] = profile.role === 'reviewer' ? input.reviews ?? [] : input.producers ?? [];
   return records.some(record => record.state === 'pending' && record.agentName === name);
+}
+/**
+ * When the session last holding a name settled: its latest ledger record, or the session handle a
+ * launcher registered for the pane or name. Null when nothing records it, so nothing will reclaim it.
+ */
+function releasedAt(profile: ReturnType<typeof roleProfiles>[number], agent: HerdrAgent, input: Pick<ResourceInputs, 'reviews' | 'producers' | 'work'>) {
+  const records: { agentName: string; closedAt?: string; idleSince?: string; requestedAt: string }[] = profile.role === 'reviewer' ? input.reviews ?? [] : profile.role === 'producer' ? input.producers ?? [] : [];
+  const times = records.filter(record => record.agentName === agent.name).map(settledAt);
+  for (const item of input.work) for (const handle of item.sessions ?? []) {
+    if ((agent.pane_id && handle.pane === agent.pane_id) || handle.agentName === agent.name) times.push(Date.parse(handle.endedAt ?? handle.updatedAt));
+  }
+  const known = times.filter(Number.isFinite);
+  return known.length ? Math.max(...known) : null;
 }
 /** A terminal record nothing reads any more: not pinned by an open request or a verdict a pending review checks against (GY-131). */
 const unpinnedTerminal = <T extends { state: string; requestedAt: string }>(records: T[]) => {
@@ -163,7 +186,7 @@ export const resourceRegistry: ResourceDefinition[] = [
     id: 'agent-names', title: 'Herdr agent-name namespace', unit: 'names',
     bound: "each launch profile's concurrency: its fixed agent name at concurrency 1, or that many derived <agentName>-<8hex> names above it",
     usage: 'Herdr agent list: every agent whose name is one of the profile\'s session names', owner: 'Herdr, through the worker, reviewer and producer launchers in src/master.ts',
-    reclaim: `the reclaim pass closes a finished pane on one of the names once its record has been settled ${finishedSessionGraceMs / 1000}s and two passes that far apart saw it unowned (a worker pane is closed by the loop's first step once its lease ends)`,
+    reclaim: `the reclaim pass closes a finished pane on one of the names once its record has been settled ${finishedSessionGraceMs / 1000}s and two passes that far apart saw it unowned (a worker pane is closed by the loop's first step once its lease ends); a name still held ${staleNameWindowMs / 60_000} minutes after its session settled raises attention`,
     remedy: 'close the finished panes holding the names (graphyard master run --once, or herdr pane close PANE after confirming the session posted its result)',
     // A name held by a live session is the slot pool working; only names nothing live owns warn.
     warnBelow: () => 1, symptoms: [/\b(?:reviewer|producer) agent (\S+) is (?:busy|already visible) in Herdr/i, /agent_name_taken/],
@@ -171,7 +194,8 @@ export const resourceRegistry: ResourceDefinition[] = [
       if (!input.agents) return { id: profile.name, used: null, bound: profileConcurrency(profile), detail: 'Herdr could not be read', reclaimable: 0 };
       const held = input.agents.filter(agent => isProfileSession(profile, agent.name));
       const stale = held.filter(agent => !liveOwner(profile, agent.name!, input));
-      return { id: profile.name, used: held.length, bound: profileConcurrency(profile), reclaimable: stale.length,
+      const overdue = stale.filter(agent => { const at = releasedAt(profile, agent, input); return at === null || input.now - at >= staleNameWindowMs; }).length;
+      return { id: profile.name, used: held.length, bound: profileConcurrency(profile), reclaimable: stale.length, overdue,
         detail: held.length ? `${profile.role} profile ${profile.name}: ${held.map(agent => `${agent.name} (${agent.agent_status ?? 'unknown'}${stale.includes(agent) ? ', no live session' : ''}${agent.pane_id ? `, pane ${agent.pane_id}` : ''})`).join(', ')}` : `${profile.role} profile ${profile.name}: no name held` };
     }),
   },
@@ -228,12 +252,13 @@ export const resourceRegistry: ResourceDefinition[] = [
   },
   {
     id: 'database-capacity', title: 'Control-plane database', unit: 'bytes',
-    bound: `GRAPHYARD_DATABASE_MAX_BYTES on the plane (default ${defaultDatabaseMaxBytes / 1024 ** 3} GiB, which only warns; a configured bound also fails health): set it to the database volume's size`,
+    bound: `GRAPHYARD_DATABASE_MAX_BYTES on the plane (unset, the ${defaultDatabaseMaxBytes / 1024 ** 3} GiB default is advisory: reported, never an attention item or a health failure; a configured bound warns and fails health): set it to the database volume's size`,
     usage: '/healthz resources.database: pg_database_size of the plane\'s database', owner: 'the control plane (src/store)',
     reclaim: 'none automatic: the ledger is append-only history; grow the volume, or restore a backup onto a larger one (docs/operations-reference.md)',
     remedy: 'grow the database volume and raise GRAPHYARD_DATABASE_MAX_BYTES to match before writes fail',
     warnBelow: tenthOf, symptoms: [/could not extend file|No space left on device|disk full/i],
-    read: input => [{ id: '', used: input.plane?.database?.used ?? null, bound: input.plane?.database?.bound ?? null, detail: input.plane?.database?.detail ?? (input.plane ? null : 'the plane\'s /healthz could not be read'), reclaimable: 0 }],
+    read: input => [{ id: '', used: input.plane?.database?.used ?? null, bound: input.plane?.database?.bound ?? null, detail: input.plane?.database?.detail ?? (input.plane ? null : 'the plane\'s /healthz could not be read'), reclaimable: 0,
+      ...(input.plane?.database?.advisory ? { advisory: true } : {}) }],
   },
   {
     id: 'worktree-disk', title: 'Coordinator worktree disk', unit: 'bytes',
@@ -285,11 +310,14 @@ export const describeReading = (reading: ResourceReading) =>
 /**
  * Whether a reading raises attention. A low or exhausted resource does, before it is exhausted
  * where its threshold allows. Two resources are judged on what nothing live is using: a name held
- * by a running session, or a slot pool full with nobody waiting, is the fleet working.
+ * by a running session, or a slot pool full with nobody waiting, is the fleet working. A name
+ * nothing owns raises it only once it outlives the reclaim pass's own window (GY-963), and a
+ * bound nobody configured never does: a guess cannot be a fault, only the reading of one.
  */
 export function needsAttention(reading: ResourceReading) {
   if (reading.state !== 'low' && reading.state !== 'exhausted') return false;
-  if (reading.resource === 'agent-names') return reading.reclaimable > 0;
+  if (reading.advisory) return false;
+  if (reading.resource === 'agent-names') return (reading.overdue ?? 0) > 0;
   if (reading.resource === 'session-slots') return (reading.waiting ?? 0) > 0;
   return true;
 }
