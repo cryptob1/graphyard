@@ -114,7 +114,7 @@ export const policyText = (policy: RolePolicy | undefined) => {
   return parts.join(' · ');
 };
 
-/** The Agents page body, pure over the view so it renders the same in a test as in the browser. `now` pins the probe clock (tests); the page takes the reading time. */
+/** The Agents page body, pure over the view so it renders the same in a test as in the browser. `now` pins the probe clock (tests); the page passes the dashboard's server snapshot clock (GY-952). */
 export function FleetOverview({ fleet, connects = [], now, onChangeRoles, onCancelConnect, onAnswerConnect, onRetryConnect, onRemoveConnect }: { fleet: FleetView; connects?: ConnectView[]; now?: number; onChangeRoles?: (account: string) => void; onCancelConnect?: (id: string) => void; onAnswerConnect?: (id: string, code: string) => Promise<void>; onRetryConnect?: (connect: ConnectView) => void; onRemoveConnect?: (id: string) => void }) {
   const running = fleet.sessions.filter(session => !session.endedAt);
   const byName = new Map(connects.filter(connect => connect.name).map(connect => [connect.name!, connect]));
@@ -178,7 +178,7 @@ export function ConnectWizard({ providers, hosts, wizard, setWizard, onConnect, 
 }
 
 /** Settings › Agents: connect an account without a shell, and every agent the control plane launches (GY-409). */
-export default function FleetPage({ api, status }: Pick<Dashboard, 'api' | 'status'>) {
+export default function FleetPage({ api, status, observedAt }: Pick<Dashboard, 'api' | 'status' | 'observedAt'>) {
   const [fleet, setFleet] = useState<FleetView | null>(status?.fleet ?? null);
   const [connects, setConnects] = useState<ConnectView[]>(status?.connects ?? []);
   const [providers, setProviders] = useState<ConnectProviderView[]>([]);
@@ -194,6 +194,10 @@ export default function FleetPage({ api, status }: Pick<Dashboard, 'api' | 'stat
   const advanced = useRef<HTMLDetailsElement>(null);
   const roleAccounts = useRef<HTMLInputElement | null>(null);
   const canEdit = ['admin', 'coordinator'].includes(status?.actor?.role);
+  // Probe freshness reads the dashboard's server snapshot clock, not this workstation's (GY-952):
+  // registry timestamps come from the control plane's database, so a browser clock skewed past the
+  // one-hour threshold would label a fresh observation old or keep a stale one fresh.
+  const now = Number.isNaN(observedAt) ? Date.now() : observedAt;
   const load = useCallback(async () => {
     const version = ++request.current; setLoadError('');
     try {
@@ -268,7 +272,7 @@ export default function FleetPage({ api, status }: Pick<Dashboard, 'api' | 'stat
     {fleet && canEdit && <section><div className="section-title"><h2>Connect an account</h2>{!wizard.open && <button className="connect-button" data-connect-account onClick={() => setWizard({ ...closedWizard, open: true, host: hosts[0]?.host ?? null })}>Connect an account</button>}</div>
       {wizard.open && <ConnectWizard providers={providers} hosts={hosts} wizard={wizard} setWizard={setWizard} onConnect={id => void connect(id, wizard.host ?? hosts[0]?.host ?? '', wizard.key)} onClose={() => setWizard(closedWizard)}/>}
     </section>}
-    {fleet && <FleetOverview fleet={fleet} connects={connects.filter(connect => !removed.includes(connect.id))} onChangeRoles={canEdit ? changeRoles : undefined} onCancelConnect={canEdit ? id => void cancel(id) : undefined} onAnswerConnect={status?.actor?.role === 'admin' ? answer : undefined} onRetryConnect={status?.actor?.role === 'admin' ? retry : undefined} onRemoveConnect={canEdit ? remove : undefined}/>}
+    {fleet && <FleetOverview fleet={fleet} connects={connects.filter(connect => !removed.includes(connect.id))} now={now} onChangeRoles={canEdit ? changeRoles : undefined} onCancelConnect={canEdit ? id => void cancel(id) : undefined} onAnswerConnect={status?.actor?.role === 'admin' ? answer : undefined} onRetryConnect={status?.actor?.role === 'admin' ? retry : undefined} onRemoveConnect={canEdit ? remove : undefined}/>}
     {fleet && canEdit && <section><details className="advanced more-details" ref={advanced}><summary>Advanced: runtimes, models, roles and policies</summary>
       <p className="muted">Everything below names where a login lives — never the credential. Connect accounts at the top of the page; use this only to shape the fleet itself. Every change is recorded with its reason.</p>
       {formError && <p role="alert" className="amber">{formError}</p>}
