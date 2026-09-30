@@ -41,7 +41,7 @@ The launcher writes `.graphyard/launch/NAME.request` (and Claude's `NAME.role`),
 GY=/path/to/checkout/.graphyard/launch/NAME; claude … --settings /path/to/repo/.graphyard/harness/producer-PROFILE.json --append-system-prompt-file "$GY.role" "$(cat "$GY.request")"
 ```
 
-The typed line is bounded at **512 bytes**.
+The typed line is bounded at **512 bytes** whatever the request is.
 
 #### The start bound reads the pane
 
@@ -68,7 +68,8 @@ Every launch records its pane on the item's session handle; when the loop ends t
 ### The dispatcher's own state
 
 - **The dispatcher bounds its own state where it composes it**, each cut marked with an ellipsis.
-- **A cursor that fails its schema is repaired, not fatal**; logged once with the failing path.
-- **A tick failure is attributed and surfaced.** `dispatch.lastFailure` names it. Three consecutive failures raise one attention item: no reviewer or producer is launching. `graphyard master restart` repairs the cursor.
+- **A cursor that fails its schema is repaired, not fatal**; the repair is logged once with the
+  path that failed.
+- **A tick failure is attributed and surfaced.** `dispatch.lastFailure` names it. Three consecutive failures raise one attention item: no reviewer or producer session is being launched for any item. `graphyard master restart` repairs the cursor.
 
 **A session that exits at launch is classified from its pane.** `herdr agent get` answers only `agent_not_found` for a runtime that exits **at launch**, so the dispatcher uses `herdr pane read`: a **provider limit notice** fails over exactly as a mid-session exhaustion does; any other cause is refused with the pane's last words and retried.
