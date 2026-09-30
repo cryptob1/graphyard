@@ -637,9 +637,9 @@ export interface BranchRestore {
   /** How many times the restore has run for this contaminated head; absent on records that predate the count. */
   attempts?: number;
   /**
-   * Set when a restore produced the same result twice without the item's candidate changing
-   * (GY-854): the reason it stops repeating, which `master status` names. Null while the first
-   * failure stands or a retry produced something different.
+   * Set when a restore failed twice without the item's candidate changing (GY-854), whatever
+   * the kinds of the two failures: the reason it stops repeating, which `master status` names.
+   * Null while the first failure stands or a retry published its result.
    */
   escalated?: string | null;
 }
@@ -1172,14 +1172,15 @@ export function branchContamination(work: Work, all: Work[]): Contamination | nu
  * The restore an ejection owes: the ejected tip is still the branch head and carries entries that
  * have not landed. Nothing is owed once a restore for that head is recorded, pending or performed
  * — except a restore that could not publish its result (GY-854): that one is retried once, with
- * the record of the first attempt carried so a repeat of the same result escalates instead of a
- * third attempt running. An escalated restore is never retried by the loop.
+ * the record of the first attempt carried so a second failure escalates, whatever its kind,
+ * instead of a third attempt running. An escalated restore, or one already attempted twice, is
+ * never retried by the loop.
  */
 export function ejectedTipRestore(work: Work, all: Work[]): { contaminated: string; foreign: string[]; own: string | null; reason: string; previous: BranchRestore | null } | null {
   const ejection = work.queueEjection;
   if (!ejection || ejection.sha !== work.candidate?.sha) return null;
   const current = currentRestore(work);
-  if (current && (current.restore!.outcome !== 'unpublished' || current.restore!.escalated)) return null;
+  if (current && (current.restore!.outcome !== 'unpublished' || current.restore!.escalated || (current.restore!.attempts ?? 1) >= 2)) return null;
   const contamination = branchContamination(work, all);
   if (!contamination) return null;
   return { contaminated: contamination.head, foreign: contamination.foreign, own: contamination.own, reason: `ejected from the merge queue: ${ejection.reason}`, previous: current?.restore ?? null };
@@ -1223,7 +1224,7 @@ export function restoringAfterEjection(work: Work, all: Work[]): string | null {
   const refresh = currentRestore(work), restore = refresh?.restore;
   if (restore?.outcome === 'unrepairable') return null;
   if (restore?.outcome === 'unpublished' && restore.escalated)
-    return `${restoringAfterEjectionPrefix}candidate ${stale.tip.slice(0, 12)} is a speculative tip built behind ${stale.departed.join(', ')}, which left the merge queue without landing; Graphyard's restore of the branch produced the same failed result twice and stopped repeating: ${restore.failure ?? restore.escalated}. The escalation stands until what GitHub refuses is fixed or the master decides`;
+    return `${restoringAfterEjectionPrefix}candidate ${stale.tip.slice(0, 12)} is a speculative tip built behind ${stale.departed.join(', ')}, which left the merge queue without landing; Graphyard's restore of the branch failed twice and stopped repeating: ${restore.failure ?? restore.escalated}. The escalation stands until what GitHub refuses is fixed or the master decides`;
   const restored = restore?.performedAt && refresh!.head && refresh!.head !== stale.tip ? refresh!.head : null;
   const own = stale.own ? `its own reviewed head ${stale.own.slice(0, 12)}` : 'its own reviewed head';
   return `${restoringAfterEjectionPrefix}candidate ${stale.tip.slice(0, 12)} is a speculative tip built behind ${stale.departed.join(', ')}, which left the merge queue without landing, so its tree holds their unlanded work; ${restored

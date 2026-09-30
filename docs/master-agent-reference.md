@@ -25,7 +25,7 @@ Dispatch is optimistic (overlap holds nothing), smallest planned scope first; `g
 
 **A branch must never keep another item's unlanded commits.** Tips build from reviewed heads; ejection restores left branches (`baseRefresh.restore`). A tip behind an unlanded departed entry waits (`Restoring after predecessor ejection`) for its restored head; another item's carried files (`Carried from another item's tip`) are not rework, nor an ejection (GY-871). Git decides landing (`landing.landed`); landed peers deliver immediately.
 
-**A restore publishes or reports, never claims**: it reads the base tip at restore time — never a recorded one — and is `restored` only once a read-back shows GitHub's branch at that commit; an unreflected push is `outcome: 'unpublished'`, reason in `baseRefresh.restore.failure`; the same failure twice, candidate unchanged (judged by `restore.failureKind`), escalates (`baseRefresh.restore.escalated`) and `master status` names it.
+**A restore publishes or reports, never claims**: it reads the base tip at restore time — never a recorded one — and is `restored` only once a read-back shows GitHub's branch at that commit; an unreflected push is `outcome: 'unpublished'`, reason in `baseRefresh.restore.failure`; a second failure, candidate unchanged, escalates whatever its `restore.failureKind` (`baseRefresh.restore.escalated`) and `master status` names it.
 
 #### A contaminated branch
 

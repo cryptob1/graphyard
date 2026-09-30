@@ -209,7 +209,7 @@ test('unit:ejection-restore-no-silent-repeat — a restore that produces the sam
   assert.notEqual(escalated.failure, firstFailure.failure, 'the refusal texts differ, each quoting the tip of its own attempt');
   assert.ok(firstFailure.failure!.includes(moved.slice(0, 12)), firstFailure.failure ?? '');
   assert.ok(escalated.failure!.includes(movedAgain.slice(0, 12)), escalated.failure ?? '');
-  assert.match(escalated.escalated!, /same result twice without the candidate changing/);
+  assert.match(escalated.escalated!, /failed twice without the candidate changing/);
   assert.ok(escalated.escalated!.includes('stops repeating'), escalated.escalated ?? '');
   assert.equal(ejectedTipRestore(work, await store.list()), null, 'no third attempt is offered');
   assert.equal(pendingBaseRefresh(work), null, 'and no refresh is built on the contaminated head either');
@@ -232,4 +232,39 @@ test('unit:ejection-restore-no-silent-repeat — a restore that produces the sam
   assert.match(line.line, /not on the branch/);
   assert.match(line.line, /escalated: it stops repeating/);
   assert.ok(line.line.includes(escalated.failure!), line.line);
+});
+
+test('unit:ejection-restore-no-silent-repeat — a second failure of a different kind still escalates: the bound is two attempts per contaminated head, never two matching results', async () => {
+  const ahead = await predecessor();
+  const moved = sha40('b5');
+  let { work, contaminated } = await ejected('Alternating failures', ahead);
+  const observation = (item: Work) => seen(item, contaminated, moved);
+  work = await engine.observe(work.id, work.revision, observation(work));
+
+  // Attempt 1: branch protection refuses the merge.
+  await onlyJob(work);
+  await processJob(engine, adapter(observation, provider(work, { tip: moved, readback: () => contaminated, merge: 'refused' }).github).github);
+  work = await reload(work);
+  const firstFailure = work.baseRefresh!.restore!;
+  assert.deepEqual([firstFailure.outcome, firstFailure.failureKind, firstFailure.attempts, firstFailure.escalated ?? null], ['unpublished', 'merge refused', 1, null]);
+
+  // Attempt 2: the merge now goes through but GitHub never shows it — a different kind of failure.
+  await onlyJob(work);
+  const second = provider(work, { tip: moved, readback: () => contaminated });
+  await processJob(engine, adapter(observation, second.github).github);
+  work = await reload(work);
+  const escalated = work.baseRefresh!.restore!;
+  assert.deepEqual([escalated.outcome, escalated.failureKind, escalated.attempts], ['unpublished', 'read-back mismatch', 2]);
+  assert.ok(escalated.escalated, 'the second failure escalates though its kind differs from the first');
+  assert.ok(escalated.escalated!.includes('merge refused, then read-back mismatch'), escalated.escalated!);
+  assert.ok(escalated.escalated!.includes(firstFailure.failure!) && escalated.escalated!.includes(escalated.failure!), 'both reasons are named');
+  assert.equal(ejectedTipRestore(work, await store.list()), null, 'no third attempt is offered');
+
+  // Another reconciliation writes nothing to the branch: the escalation holds the item.
+  await onlyJob(work);
+  const third = provider(work, { tip: sha40('b6'), readback: () => contaminated, merge: 'refused' });
+  const job = adapter(observation, third.github);
+  await processJob(engine, job.github);
+  assert.deepEqual([job.called, third.writes], [[], []], 'no restore runs and no branch write is made after the escalation');
+  assert.equal((await reload(work)).baseRefresh!.restore!.attempts, 2);
 });

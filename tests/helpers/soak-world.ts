@@ -439,6 +439,7 @@ export class SimulatedGitHub {
       // Restores a branch that carries another item's unlanded commits (GY-127): back to the item's
       // own reviewed head, then the base branch merged onto it, exactly as production moves it.
       async restoreBranch(work: Work, restore: { contaminated: string; foreign: string[]; own: string | null; cause: string; requested: unknown; reason: string }): Promise<BaseRefresh> {
+        if (process.env.SOAK_TRACE_RESTORE) console.error(`TRACE restoreBranch ${work.key} own=${restore.own} contaminated=${restore.contaminated}`);
         const pr = world.pr(work), at = new Date(clock.now()).toISOString();
         const base = (fields: object, outcome: string, own: string | null, head = own ?? pr.head) => ({
           from: { sha: own ?? pr.head, baseSha: pr.base }, base: world.tip, baseTree: world.tree, policyRevision: work.policyRevision, at, head, conflict: null, merge: null, carry: null,

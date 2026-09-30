@@ -1657,17 +1657,17 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     const own = restore.own ?? await this.ownReviewedHead(work, pr.head.sha);
     const previous = restore.previous ?? null;
     const attempts = (previous?.attempts ?? 0) + 1;
-    // A failure the previous attempt already recorded, with the candidate unchanged since, is the
-    // repeat GY-854 escalates: the record names it and no further attempt is offered. The repeat
-    // is judged by the stable failure kind, never the diagnostic string — a refusal's text quotes
-    // the base tip or the produced commit, which move between attempts while the refusal itself
-    // (push refused, branch protection, a branch left where it was) is the same.
-    const repeated = (outcome: BranchRestore['outcome'], kind: RestoreFailureKind | null, failure: string | null): string | null =>
-      previous && previous.outcome === outcome && kind !== null && (previous.failureKind ?? null) === kind
-        ? `the restore produced the same result twice without the candidate changing and stops repeating (${kind}): ${failure}`
+    // A second failed attempt with the candidate unchanged since is the repeat GY-854 escalates:
+    // the record names it and no further attempt is offered. The bound is the attempt count, never
+    // whether the two failures match — a refusal's text quotes the base tip or the produced commit,
+    // and its kind can alternate (a refused merge, then a transient read-back failure), so a rule
+    // that waits for two identical results would let differing failures repeat without limit.
+    const repeated = (kind: RestoreFailureKind | null, failure: string | null): string | null =>
+      previous?.failureKind && kind !== null
+        ? `the restore failed twice without the candidate changing and stops repeating (${previous.failureKind === kind ? kind : `${previous.failureKind}, then ${kind}`}): ${previous.failure && previous.failure !== failure ? `${previous.failure}; then ${failure}` : failure}`
         : null;
     const record = (fields: Partial<BaseRefresh>, outcome: BranchRestore['outcome'], kind: RestoreFailureKind | null, failure: string | null, ownValue: string | null = own): BaseRefresh => {
-      const repeat = repeated(outcome, kind, failure);
+      const repeat = repeated(kind, failure);
       return {
       from: { sha: ownValue ?? candidate!.sha, baseSha: candidate!.baseSha }, base: branch.tip, baseTree: branch.tree, policyRevision: work.policyRevision, at,
       head: outcome === 'unpublished' ? null : fields.head ?? ownValue ?? candidate!.sha, conflict: null, merge: null, carry: null,
@@ -2349,8 +2349,8 @@ async function restoreBranch(engine: Engine, github: GitHub, work: Work, owed: B
   if (held) return { work, published: false, held };
   const repair = 'cause' in owed!;
   const request = repair ? owed : { ...owed!, cause: 'ejection' as const, requested: null };
-  // A retry of an ejection restore carries the record of the attempt before it, so a repeat of
-  // the same failed result escalates in the record instead of a third attempt running (GY-854).
+  // A retry of an ejection restore carries the record of the attempt before it, so a second
+  // failure escalates, whatever its kind, in the record instead of a third attempt running (GY-854).
   const previous = repair ? null : owed!.previous ?? null;
   const refresh = await github.restoreBranch(work, { contaminated: request.contaminated, foreign: request.foreign, own: request.own, cause: request.cause, requested: request.requested, reason: request.reason, previous }, guard(work, false));
   const updated = await engine.bindBranchRestore(work.id, work.revision, refresh, job.token);
