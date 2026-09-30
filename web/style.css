@@ -330,3 +330,4 @@ code.sha{display:inline-block;max-width:8ch;overflow:hidden;white-space:nowrap;v
 details.advanced{margin:26px 0}
 details.advanced>summary{cursor:pointer;color:var(--up-next);font-weight:600;padding:6px 0}
 details.advanced[open]>summary{margin-bottom:14px}
+.blast-radius{margin:var(--space-3) 0 0;font-size:12px}.blast-radius summary{cursor:pointer;font-weight:600;padding:6px 0;color:var(--text-2)}.blast-radius.danger-high summary{color:var(--blocked)}.blast-radius.danger-medium summary{color:var(--needs-you)}.blast-radius ul{padding-left:20px;color:var(--text-2);line-height:1.7;margin:4px 0}
