@@ -14,7 +14,7 @@ import { removeSessionCheckout, type FilesystemProbe, type SessionCheckout } fro
 import { behindBaseHold, liveReviewRequest } from './model/dispatch.js';
 import { documentationReviewSection, type DocumentationObligation } from './model/documentation.js';
 import { researchReviewSection } from './research.js';
-import { openFollowUpItem } from './model/machine-backlog.js';
+import { heldFollowUps, openFollowUpItem, shippedFollowUpsOwed } from './model/machine-backlog.js';
 import { paneAlreadyGone, sessionReported, withPaneGone } from './request-settlement.js';
 
 const sha40 = z.string().regex(/^[0-9a-f]{40}$/i);
@@ -885,6 +885,11 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
    */
   appendFollowUps?: AppendFollowUpFindings;
   /**
+   * Files a delivered parent's held findings as its one follow-up item (GY-845, POST work/KEY/followups
+   * with `ship`), idempotent on `key`: by default as the master's operator-agent identity, with the same default as `createFollowUpItem`.
+   */
+  shipFollowUps?: ShipFollowUps;
+  /**
    * Withdraws an approval that leaves listed threads unaccounted for, as the reviewer App: by
    * default through GitHub's review dismissal with a freshly minted reviewer token, none when
    * `observe` is substituted and this is not.
@@ -1008,6 +1013,9 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
   const append = dependencies.appendFollowUps ?? (dependencies.observe ? undefined : operatorAgentAppend(root, config));
   const followUps = await fileApprovedFollowUps(root, ledger.reviews, reviewer, config.repository, dependencies.work, threadsRun, create, followUpCreateStore(root), now, append);
   changed += followUps.changed;
+  // A parent delivered since holds findings owed their one follow-up item now (GY-845).
+  const ship = dependencies.shipFollowUps ?? (dependencies.observe ? undefined : operatorAgentShip(root, config));
+  if (ship && dependencies.work) followUps.events.push(...await shipHeldFollowUps(dependencies.work, ship));
   // A request the control plane no longer holds open releases its records to the retention window.
   if (dependencies.work) changed += releaseClosedRequests(ledger.reviews, dependencies.work, now);
   if (changed) await saveChangedRecords(root, ledger.reviews, before);
@@ -1053,14 +1061,36 @@ function operatorAgentCreate(root: string, config: MasterConfig): CreateFollowUp
  * open is marked `notOpen`, so the filing files the parent's new follow-up item instead.
  */
 function operatorAgentAppend(root: string, config: MasterConfig): AppendFollowUpFindings {
-  return async (item, findings, reason, key) => {
+  return async (item, findings, reason, key, parent) => {
     const token = await agentToken(root, config, 'operatorAgent');
-    const response = await fetch(`${config.url}/api/work/${encodeURIComponent(item)}/followups`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': key }, body: JSON.stringify({ findings, reason }), signal: AbortSignal.timeout(30_000) });
+    const response = await fetch(`${config.url}/api/work/${encodeURIComponent(item)}/followups`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': key }, body: JSON.stringify({ findings, reason, ...(parent ? { parent: true } : {}) }), signal: AbortSignal.timeout(30_000) });
     const result: any = await response.json().catch(() => null);
     if (!response.ok) throw Object.assign(new Error(`Graphyard refused the follow-ups for ${item} (${response.status}): ${result?.error ?? JSON.stringify(result)}`), { notOpen: response.status === 409 && /not an open follow-up item/.test(String(result?.error)) });
     if (typeof result?.key !== 'string') throw new Error(`Graphyard did not return the follow-up item key for ${item}`);
     return { key: result.key, added: Number(result.added) || 0 };
   };
+}
+
+/** Files a delivered parent's held findings as its one follow-up item (GY-845); the key is the item filed. */
+export type ShipFollowUps = (parent: string, key: string) => Promise<{ key: string }>;
+function operatorAgentShip(root: string, config: MasterConfig): ShipFollowUps {
+  return async (parent, key) => {
+    const token = await agentToken(root, config, 'operatorAgent');
+    const response = await fetch(`${config.url}/api/work/${encodeURIComponent(parent)}/followups`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': key }, body: JSON.stringify({ ship: true, reason: `${parent} shipped; its held review follow-ups become its follow-up item` }), signal: AbortSignal.timeout(30_000) });
+    const result: any = await response.json().catch(() => null);
+    if (!response.ok) throw new Error(`Graphyard refused to file the held follow-ups of ${parent} (${response.status}): ${result?.error ?? JSON.stringify(result)}`);
+    if (typeof result?.key !== 'string') throw new Error(`Graphyard did not return the follow-up item key for ${parent}`);
+    return { key: result.key };
+  };
+}
+/** Each delivered parent still holding findings gets its one follow-up item; each outcome is an event line. */
+export async function shipHeldFollowUps(work: readonly Work[], ship: ShipFollowUps) {
+  const events: string[] = [];
+  for (const parent of work.filter(shippedFollowUpsOwed)) {
+    try { events.push(`filed the ${heldFollowUps(parent).length} follow-up finding(s) held on ${parent.key} until it shipped as ${(await ship(parent.key, `followups-after-ship:${parent.key}`)).key}`); }
+    catch (error) { events.push(`the follow-ups held on ${parent.key} could not be filed, and are retried next pass: ${(error instanceof Error ? error.message : String(error)).split('\n')[0]!.slice(0, 300)}`); }
+  }
+  return events;
 }
 
 /** Whether a completed approval binds the item's current candidate, or the head whose approval was carried onto it. */
@@ -1149,8 +1179,6 @@ async function fileApprovedFollowUps(root: string, records: ReviewRecord[], revi
   const events: string[] = [];
   let changed = 0;
   if (!run || !work || !create) return { events, changed };
-  // The follow-up item each parent holds, including one this very pass filed before the snapshot shows it (GY-402).
-  const filed = new Map<string, string>();
   for (const record of records) {
     const verdict = record.verdict;
     // The approval of the head that landed still files: the daemon may merge before the dispatcher's
@@ -1163,7 +1191,7 @@ async function fileApprovedFollowUps(root: string, records: ReviewRecord[], revi
       const saved = (await readReviewLedger(root)).reviews.find(entry => entry.id === record.id)?.followUps;
       if (saved?.reviewId === verdict.reviewId && JSON.stringify(saved) !== JSON.stringify(record.followUps)) record.followUps = saved;
       const before = JSON.stringify(record.followUps);
-      await fileApprovedFollowUp(record, verdict, reviewer, repository, work, run, create, store, now, events, append, filed);
+      await fileApprovedFollowUp(record, verdict, reviewer, repository, work, run, create, store, now, events, append);
       if (JSON.stringify(record.followUps) === before) continue;
       changed++;
       await updateReviewLedger(root, ledger => { const entry = ledger.reviews.find(candidate => candidate.id === record.id); if (entry) entry.followUps = record.followUps; });
@@ -1208,7 +1236,7 @@ async function createResolvingKeyReuse(payload: FollowUpItem, key: string, creat
 }
 
 /** One approval's follow-up filing, or its reopen check once filed; the outcome is left on `record.followUps`. */
-async function fileApprovedFollowUp(record: ReviewRecord, verdict: NonNullable<ReviewRecord['verdict']>, reviewer: string, repository: string, work: Work[], run: ChildRun, create: CreateFollowUpItem, store: ReturnType<typeof followUpCreateStore>, now: Date, events: string[], append: AppendFollowUpFindings | undefined, filed: Map<string, string>) {
+async function fileApprovedFollowUp(record: ReviewRecord, verdict: NonNullable<ReviewRecord['verdict']>, reviewer: string, repository: string, work: Work[], run: ChildRun, create: CreateFollowUpItem, store: ReturnType<typeof followUpCreateStore>, now: Date, events: string[], append: AppendFollowUpFindings | undefined) {
   const previous = record.followUps?.reviewId === verdict.reviewId ? record.followUps : undefined;
   const item = work.find(entry => entry.key === record.key)!, observedAt = item.observation?.at && item.observation.at.length <= 40 ? item.observation.at : undefined;
   // The item is on the saved record, so its kept create payload is no longer needed for a retry.
@@ -1229,20 +1257,20 @@ async function fileApprovedFollowUp(record: ReviewRecord, verdict: NonNullable<R
   if (previous && previous.attempts >= threadResolutionAttempts && (previous.item || now.getTime() - Date.parse(previous.at) < followUpExhaustedRetryMs)) return;
   let keyReuse = previous?.keyReuse;
   const resolving: CreateFollowUpItem = (payload, key) => createResolvingKeyReuse(payload, key, create, () => existingFollowUpItem(work, item, verdict.reviewId), resolved => { keyReuse = resolved; });
-  // One follow-up item per parent (GY-402): the parent's open one, which this approval appends to —
-  // unless it is this approval's own earlier item, which a retried create links instead (GY-598).
-  const existing = existingFollowUpItem(work, item, verdict.reviewId) ? undefined
-    : filed.get(record.key) ?? openFollowUpItem(work, record.key)?.key;
+  // One follow-up item per parent (GY-402), in any stage: the control plane places this approval's
+  // findings on the parent's open one, or holds them on the parent until it ships (GY-845) — unless
+  // this approval's own earlier item exists, which a retried create links instead (GY-598). Sent to
+  // the parent, never to an item chosen from this snapshot, so a stale snapshot files no second item.
+  const existing = existingFollowUpItem(work, item, verdict.reviewId) ? undefined : record.key;
   const filedNow = await fileFollowUpThreads({ repository, key: record.key, workId: item.id, pr: record.pr, sha: record.sha, reviewId: verdict.reviewId, reviewer, previous, store,
     ...(existing && append ? { existing, append } : {}),
     ...(record.threadReadFailure ? {} : record.threadsListed ? { listed: record.threadsListed } : {}) }, run, resolving, now);
-  if (filedNow.item) filed.set(record.key, filedNow.item);
   const outcome = { ...filedNow, ...(keyReuse && filedNow.item ? { keyReuse } : {}) };
   const failure = outcome.failure?.slice(0, 500), clientError = nextClientErrorRun(previous?.clientError, failure);
   // The observation the loop held when it resolved: a later one showing a resolved thread open is checked on GitHub.
   record.followUps = { ...outcome, threads: outcome.threads.map(ledgerThread), ...(outcome.findings ? { findings: outcome.findings.slice(0, followUpFindingLimit).map(finding => ({ ...finding, path: finding.path && ledgerPath(finding.path), text: finding.text.slice(0, followUpFindingMax) })) } : {}), refused: outcome.refused.slice(0, 100), ...(failure ? { failure } : {}), ...(observedAt ? { observedAt } : {}),
     ...(clientError ? { clientError } : {}), ...(retryStopped(clientError) ? { stoppedAt: now.toISOString() } : {}) };
-  if (outcome.item && !previous?.item) events.push(`filed ${outcome.threads.length} follow-up review thread(s) on ${record.key} PR #${record.pr} ${outcome.item === existing ? 'into its open follow-up item' : 'as'} ${outcome.item}, named by approval ${verdict.reviewId} of ${record.sha.slice(0, 12)}${outcome.keyReuse === 'linked' ? ' (the item its refused reused key already made)' : outcome.keyReuse === 'rekeyed' ? ' (under its body key, its approval key having been refused as reused)' : ''}`);
+  if (outcome.item && !previous?.item) events.push(`filed ${outcome.threads.length} follow-up review thread(s) on ${record.key} PR #${record.pr} ${outcome.item === record.key ? 'held on the parent until it ships:' : !outcome.keyReuse && openFollowUpItem(work, record.key)?.key === outcome.item ? 'into its open follow-up item' : 'as'} ${outcome.item}, named by approval ${verdict.reviewId} of ${record.sha.slice(0, 12)}${outcome.keyReuse === 'linked' ? ' (the item its refused reused key already made)' : outcome.keyReuse === 'rekeyed' ? ' (under its body key, its approval key having been refused as reused)' : ''}`);
   if (record.followUps.stoppedAt) events.push(`follow-up filing for ${record.key} approval ${verdict.reviewId} stopped retrying after ${clientError!.count} consecutive attempts failed with the same client error: ${failure}`);
   for (const id of outcome.resolved.filter(id => !previous?.resolved.includes(id))) events.push(`resolved follow-up review thread ${id} on ${record.key} PR #${record.pr} with a reply naming ${outcome.item}`);
   if (outcome.failure) events.push(`follow-up filing for ${record.key} approval ${verdict.reviewId} failed (attempt ${outcome.attempts}): ${outcome.failure}`);

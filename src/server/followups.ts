@@ -1,7 +1,9 @@
 import type pg from 'pg';
 import { demand, operatorCapability, type Principal, type Work } from '../model.js';
-import { isDelivered } from '../model/closure.js';
-import { appendedDescription, followUpAppendSchema, followUpEntries, followUpParent, mergeDuplicateFollowUps, mergeFollowUpEntries, triageRecordSchema, untriaged, type FollowUpEntry } from '../model/machine-backlog.js';
+import { isClosed, isDelivered } from '../model/closure.js';
+import { appendedDescription, followUpAppendSchema, followUpEntries, followUpParent, followUpParentMigrationEvent, followUpShipSchema, shippedFollowUpsOwed, foldUnshippedFollowUps, holdFollowUps, mergeDuplicateFollowUps, mergeFollowUpEntries, openFollowUpItem, triageRecordSchema, untriaged, type FollowUpEntry } from '../model/machine-backlog.js';
+import { shippedFollowUpItem } from '../review-threads.js';
+import { endAttempt } from '../pipeline-speed.js';
 import { save } from '../store.js';
 import { closeWork, settleOpenRequests } from './close.js';
 import { authenticated, digest, receipt } from './decisions.js';
@@ -27,28 +29,95 @@ function masterOnly(actor: Principal, work: Work | undefined, services: Services
  * keeping only those it does not already hold by path and finding text. An approval whose every
  * finding the item already holds changes nothing. A closed or delivered item is refused with 409
  * "not an open follow-up item", and the loop files the parent's new one instead.
+ * With `parent` (GY-845), ID is the approved item and the findings go to its open follow-up item in
+ * any stage; with none open, they are held on the parent until it ships (`followups.held`). A body
+ * with `ship` files a delivered parent's held findings as its one follow-up item (`shipFollowUps`).
  */
 export async function appendFollowUps(services: Services, caller: Principal, id: string, body: unknown, key: string) {
+  if (body && typeof body === 'object' && 'ship' in body) return shipFollowUps(services, caller, id, body, key);
   const data = followUpAppendSchema.parse(body);
   const fingerprint = digest({ id, followups: data });
   return services.engine.store.transaction(async (db, now) => {
     const actor = await authenticated(services, db, now, caller);
     const replay = await receipt(db, actor, key, fingerprint); if (replay) return replay as unknown as { key: string; added: number };
     const all = await readAll(db);
-    const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
+    let work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
     masterOnly(actor, work, services, 'append review follow-ups');
-    const parent = followUpParent(work!);
-    demand(parent && work!.stage !== 'done', `${work!.key} is not an open follow-up item`, 409);
-    const { findings, added } = mergeFollowUpEntries(followUpEntries(work!), data.findings as FollowUpEntry[]);
-    if (added.length) {
-      work!.origin = { ...work!.origin, reviewFollowUps: { parent: parent!, findings } };
-      work!.description = appendedDescription(work!.description ?? '', added, `Added by a later approval of ${parent} (${data.reason.slice(0, 300)}):`);
-      services.engine.evaluate(work!, all, now);
-      await recordDispatch(services, db, work!, now);
-      await save(db, work!, actor.id, 'followups.appended', now, { parent, added: added.length, offered: data.findings.length, reason: data.reason });
+    let result: Record<string, unknown> | null = null;
+    if (data.parent) {
+      const approved = work!, open = openFollowUpItem(all, approved.key), held = approved.pendingFollowUps;
+      if (open) work = open;
+      else if (isClosed(approved)) result = { key: approved.key, added: 0, findings: 0, dropped: held?.dropped?.reason ?? `${approved.key} was closed without shipping, so its follow-ups are dropped` };
+      else {
+        demand(!held?.filed, `${approved.key}'s follow-up item ${held?.filed?.item} is not an open follow-up item`, 409);
+        const { findings, added } = holdFollowUps(approved, data.findings as FollowUpEntry[], now);
+        if (added.length) await save(db, approved, actor.id, 'followups.held', now, { added: added.length, offered: data.findings.length, reason: data.reason });
+        result = { key: approved.key, added: added.length, findings: findings.length, held: true };
+      }
     }
-    const result = { key: work!.key, added: added.length, findings: findings.length };
+    if (!result) {
+      const parent = followUpParent(work!);
+      demand(parent && work!.stage !== 'done', `${work!.key} is not an open follow-up item`, 409);
+      const { findings, added } = await appendToItem(services, db, actor, work!, parent!, data.findings as FollowUpEntry[], `Added by a later approval of ${parent} (${data.reason.slice(0, 300)}):`, all, now, { reason: data.reason, offered: data.findings.length });
+      result = { key: work!.key, added: added.length, findings: findings.length };
+    }
     await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
+    return result;
+  });
+}
+
+/** Append `incoming` to an open follow-up item, deduplicated, saving it only when it gained a finding. */
+async function appendToItem(services: Services, db: Db, actor: Principal, work: Work, parent: string, incoming: FollowUpEntry[], heading: string, all: Work[], now: Date, details: Record<string, unknown>) {
+  const { findings, added } = mergeFollowUpEntries(followUpEntries(work), incoming);
+  if (added.length) {
+    work.origin = { ...work.origin, reviewFollowUps: { parent, findings } };
+    work.description = appendedDescription(work.description ?? '', added, heading);
+    services.engine.evaluate(work, all, now);
+    await recordDispatch(services, db, work, now);
+    await save(db, work, actor.id, 'followups.appended', now, { parent, added: added.length, ...details });
+  }
+  return { findings, added };
+}
+
+/**
+ * File a delivered parent's held findings as its one follow-up item, depending on nothing (GY-845).
+ * The findings and the create key are frozen on the parent first (`followups.filing`), so a retry
+ * sends the engine's create the same body under the same key and never files twice; then the parent
+ * records the item (`followups.filed`). Findings held after the freeze join the new item, or, if it
+ * is no longer open, stay held for the next filing.
+ */
+export async function shipFollowUps(services: Services, caller: Principal, id: string, body: unknown, key: string) {
+  const data = followUpShipSchema.parse(body);
+  const fingerprint = digest({ id, ship: true });
+  const frozen = await services.engine.store.transaction(async (db, now) => {
+    const actor = await authenticated(services, db, now, caller);
+    const replay = await receipt(db, actor, key, fingerprint); if (replay) return { replay };
+    const parent = (await readAll(db)).find(item => item.id === id || item.key === id); demand(parent, 'Work item not found', 404);
+    masterOnly(actor, parent, services, 'file held review follow-ups');
+    const held = parent!.pendingFollowUps;
+    demand(held && !held.dropped && (held.filing && !held.filed || shippedFollowUpsOwed(parent!)), `${parent!.key} is not a delivered item holding follow-ups to file`, 409);
+    if (!held!.filing) {
+      held!.filing = { key: `followups-after-ship:${parent!.key}:${digest(held!.findings).slice(0, 16)}`, count: held!.findings.length, at: now.toISOString() };
+      await save(db, parent!, actor.id, 'followups.filing', now, { ...held!.filing, reason: data.reason });
+    }
+    return { actor, parent: parent!, filing: held!.filing, findings: held!.findings.slice(0, held!.filing.count) };
+  });
+  if ('replay' in frozen) return frozen.replay;
+  const { actor, parent, filing, findings } = frozen;
+  const item = shippedFollowUpItem({ key: parent.key, pr: parent.candidate?.pr ?? null, mergeSha: parent.delivery?.mergeSha ?? null }, findings);
+  const created = await services.engine.execute(caller, 'create', null, item, filing.key);
+  return services.engine.store.transaction(async (db, now) => {
+    const all = await readAll(db);
+    const current = all.find(entry => entry.id === parent.id)!, filed = all.find(entry => entry.id === created.id)!;
+    const held = current.pendingFollowUps!;
+    const result = { key: created.key, findings: filing.count };
+    if (held.filing?.key === filing.key && !held.filed) {
+      const later = held.findings.slice(filing.count);
+      current.pendingFollowUps = later.length && filed.stage === 'done' ? { findings: later, at: now.toISOString(), filing: null, filed: null } : { ...held, filed: { item: created.key, at: now.toISOString() } };
+      await save(db, current, actor.id, 'followups.filed', now, { item: created.key, findings: filing.count, later: later.length });
+      if (later.length && filed.stage !== 'done') await appendToItem(services, db, actor, filed, current.key, later, `Held on ${current.key} after this item was filed:`, all, now, { reason: 'held after filing' });
+    }
+    await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING', [actor.id, key, fingerprint, JSON.stringify(result)]);
     return result;
   });
 }
@@ -65,9 +134,12 @@ export async function migrateFollowUps(services: Services, caller: Principal, ke
   return services.engine.store.transaction(async (db, now) => {
     const actor = await authenticated(services, db, now, caller);
     masterOnly(actor, undefined, services, 'migrate review follow-ups');
-    const replay = await receipt(db, actor, key, digest({ migrate: 'followups' })); if (replay) return replay;
     const previous = (await db.query('SELECT payload FROM events WHERE kind=$1 ORDER BY seq LIMIT 1', [followUpMigrationEvent])).rows[0]?.payload;
-    if (previous) return { ...previous, already: true };
+    // The GY-845 fold runs once the GY-402 merge is on record, on the loop's next ask, ahead of the
+    // receipt: the loop asks under the one key it always used, whose receipt predates the fold.
+    const parents = previous ? await migrateToParents(services, db, actor, now) : null;
+    const replay = await receipt(db, actor, key, digest({ migrate: 'followups' })); if (replay) return parents ? { ...replay, parents } : replay;
+    if (previous) return { ...previous, already: true, parents };
     const all = await readAll(db);
     const { merged, survivors, closed } = mergeDuplicateFollowUps(all, actor.id, now);
     for (const item of closed) {
@@ -87,6 +159,33 @@ export async function migrateFollowUps(services: Services, caller: Principal, ke
     await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, digest({ migrate: 'followups' }), JSON.stringify(payload)]);
     return payload;
   });
+}
+
+/**
+ * The one-time fold of GY-845: each open follow-up item whose parent has not shipped is closed as
+ * superseded by the parent, its findings held there (`followUpParentMigrationEvent`); a parent
+ * closed without shipping drops what it then holds, saying why. Nothing is deleted; a second run
+ * returns the first run's record.
+ */
+async function migrateToParents(services: Services, db: Db, actor: Principal, now: Date) {
+  const previous = (await db.query('SELECT payload FROM events WHERE kind=$1 ORDER BY seq LIMIT 1', [followUpParentMigrationEvent])).rows[0]?.payload;
+  if (previous) return { ...previous, already: true };
+  const all = await readAll(db);
+  const { folded, parents, dropped } = foldUnshippedFollowUps(all, actor.id, now);
+  for (const { work, parent } of folded) {
+    const settled = settleOpenRequests(work, work.closure!, now);
+    if (work.lease) { endAttempt(work, work.lease.epoch, 'released', now); work.lease = null; }
+    services.engine.evaluate(work, all, now);
+    Object.assign(work, { queue: null, mergeAuthorization: null });
+    await recordDispatch(services, db, work, now);
+    await save(db, work, actor.id, 'work.closed', now, { closure: work.closure, actor: actor.id, reason: work.closure!.reason, migration: followUpParentMigrationEvent, parent: parent.key, cancelled: settled.cancelled.map(request => request.id) });
+  }
+  for (const parent of parents) await save(db, parent, actor.id, 'followups.held', now, { migration: followUpParentMigrationEvent, findings: parent.pendingFollowUps?.findings.length ?? 0,
+    folded: folded.filter(entry => entry.parent === parent).map(entry => entry.work.key), dropped: parent.pendingFollowUps?.dropped?.reason ?? null });
+  const payload = { folded: folded.length, at: now.toISOString(), by: actor.id, parents: parents.map(parent => ({ key: parent.key, folded: folded.filter(entry => entry.parent === parent).map(entry => entry.work.key), held: parent.pendingFollowUps?.findings.length ?? 0 })),
+    dropped: dropped.map(entry => ({ key: entry.parent.key, findings: entry.dropped, reason: entry.parent.pendingFollowUps!.dropped!.reason })) };
+  await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, followUpParentMigrationEvent, JSON.stringify(payload)]);
+  return payload;
 }
 
 /**

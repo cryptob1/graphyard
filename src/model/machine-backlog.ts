@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { Closure } from './closure.js';
+import { isClosed, isDelivered, type Closure } from './closure.js';
 import type { Work } from './work.js';
 
 // ---------------------------------------------------------------------------
@@ -33,8 +33,14 @@ const entry = z.object({ path: z.string().min(1).max(1000).nullable(), text: z.s
  */
 export const reviewFollowUpsOriginSchema = z.object({ parent: z.string().regex(/^[A-Z][A-Z0-9]*-\d+$/), findings: z.array(entry).max(followUpEntriesMax) }).strict();
 export type ReviewFollowUpsOrigin = z.infer<typeof reviewFollowUpsOriginSchema>;
-/** What `POST /api/work/ID/followups` appends: the findings of one approval of the parent. */
-export const followUpAppendSchema = z.object({ findings: z.array(entry).min(1).max(200), reason: z.string().trim().min(1).max(2000) }).strict();
+/**
+ * What `POST /api/work/ID/followups` appends: the findings of one approval of the parent. With
+ * `parent`, ID names the approved item itself and the control plane places them (GY-845): on its
+ * open follow-up item, else held on the parent until it ships.
+ */
+export const followUpAppendSchema = z.object({ findings: z.array(entry).min(1).max(200), reason: z.string().trim().min(1).max(2000), parent: z.literal(true).optional() }).strict();
+/** What `POST /api/work/ID/followups` takes to file a delivered parent's held findings as its one follow-up item (GY-845). */
+export const followUpShipSchema = z.object({ ship: z.literal(true), reason: z.string().trim().min(1).max(2000) }).strict();
 
 /** The title every review follow-up item carries (src/review-threads.ts followUpItem). */
 const followUpTitle = /^Follow-ups from the approved review of ([A-Z][A-Z0-9]*-\d+)\b/;
@@ -181,9 +187,9 @@ type Triageable = Pick<Work, 'title' | 'stage' | 'ready' | 'createdAt' | 'key'> 
 export const untriaged = (work: Triageable) => !!machineKind(work) && work.stage === 'backlog' && !work.ready && (!work.triage || work.triage.state === 'refused');
 /** The item's triage clock: filed, or last refused. */
 const triageSince = (work: Triageable) => work.triage?.state === 'refused' ? work.triage.at : work.createdAt;
-/** The machine-filed items untriaged past the deadline, oldest first. */
+/** The machine-filed items untriaged past the deadline, oldest first; a follow-up whose parent has not shipped is not yet due (GY-845). */
 export function overdueTriage<T extends Triageable>(all: readonly T[], now: number): T[] {
-  return all.filter(item => untriaged(item) && now - Date.parse(triageSince(item)) > triageDeadlineMs).sort(oldestFirst);
+  return all.filter(item => untriaged(item) && !awaitsParent(item, all) && now - Date.parse(triageSince(item)) > triageDeadlineMs).sort(oldestFirst);
 }
 
 /** The attention an overdue item raises: it names the triage step, how long it has waited and how to see why it has not run. */
@@ -208,4 +214,86 @@ export function triageClosure(judgement: TriageJudgement): { kind: 'superseded' 
   if (judgement.outcome === 'release') return null;
   if (judgement.outcome === 'merge') return { kind: 'duplicate', ref: judgement.into, reason: `Merged into ${judgement.into} by triage: ${judgement.reason}`.slice(0, 2000) };
   return judgement.ref ? { kind: 'superseded', ref: judgement.ref, reason: `Already fixed by ${judgement.ref}: ${judgement.reason}`.slice(0, 2000) } : { kind: 'obsolete', ref: null, reason: `Not worth doing: ${judgement.reason}`.slice(0, 2000) };
+}
+
+// ---- Follow-ups held on their parent until it ships (GY-845) --------------------------------------
+//
+// A follow-up item filed while its parent was still in review depended on the parent, so it could
+// not be worked; triage judged it anyway, and each re-approval during rework risked another item
+// (on 2026-09-26, 48 duplicates across 29 parents). An approval's findings on an unshipped parent
+// are now held on the parent (`pendingFollowUps`), and become one follow-up item, depending on
+// nothing, only once the parent is delivered. A parent closed without shipping drops them, saying why.
+
+/**
+ * `pendingFollowUps` on a parent: the findings its approvals named beyond its criteria while it had
+ * not shipped. `filing` freezes the findings being filed and the create key once the parent is
+ * delivered, so a retried create repeats the same body; `filed` names the item they became;
+ * `dropped` says why a parent closed without shipping never files them.
+ */
+export interface PendingFollowUps {
+  findings: FollowUpEntry[]; at: string;
+  filing?: { key: string; count: number; at: string } | null;
+  filed?: { item: string; at: string } | null;
+  dropped?: { reason: string; at: string } | null;
+}
+type Parent = Pick<Work, 'key' | 'stage'> & { closure?: Closure | null; pendingFollowUps?: PendingFollowUps | null };
+/** The findings a parent holds that still wait to be filed or dropped. */
+export const heldFollowUps = (parent: Pick<Parent, 'pendingFollowUps'>) => {
+  const held = parent.pendingFollowUps;
+  return held && !held.filed && !held.dropped ? held.findings : [];
+};
+/** Whether a delivered parent's held findings are owed a follow-up item now. */
+export const shippedFollowUpsOwed = (parent: Parent) => isDelivered(parent) && heldFollowUps(parent).length > 0;
+/** `findings` held on the parent, deduplicated as a follow-up item's are; `added` names the new ones. */
+export function holdFollowUps(parent: Parent, findings: readonly FollowUpEntry[], now: Date) {
+  const merged = mergeFollowUpEntries(heldFollowUps(parent), findings);
+  if (merged.added.length) parent.pendingFollowUps = { ...parent.pendingFollowUps, findings: merged.findings, at: now.toISOString(), filed: null, dropped: null };
+  return merged;
+}
+/** A parent closed without shipping drops what it holds, recording why; the count dropped is returned. */
+export function dropHeldFollowUps(parent: Parent, now: Date) {
+  const held = heldFollowUps(parent);
+  if (!held.length || !isClosed(parent)) return 0;
+  parent.pendingFollowUps = { ...parent.pendingFollowUps!, dropped: { at: now.toISOString(),
+    reason: `${parent.key} was closed as ${parent.closure!.kind} without shipping (${parent.closure!.reason.slice(0, 500)}), so its ${held.length} pending follow-up finding(s) are dropped rather than filed` } };
+  return held.length;
+}
+/** Whether a follow-up item's parent has not shipped yet: triage never judges it until it does. */
+export function awaitsParent(item: Filed, all: readonly Parent[]) {
+  const parent = followUpParent(item), found = parent ? all.find(entry => entry.key === parent) : undefined;
+  return !!found && !isDelivered(found);
+}
+
+/**
+ * The pending follow-ups `master status` lists: each parent holding findings not yet filed, with
+ * what happens to them next — filed as its follow-up item once it ships, or on the next pass once it has.
+ */
+export function pendingFollowUpsReport(all: readonly (Parent & Pick<Work, 'title'>)[]) {
+  return all.filter(parent => heldFollowUps(parent).length).map(parent => {
+    const shipped = isDelivered(parent), findings = heldFollowUps(parent);
+    return { parent: parent.key, title: parent.title, stage: parent.stage, shipped, findings: findings.length, sample: findings.slice(0, 3).map(finding => finding.text.slice(0, 200)),
+      next: shipped ? `${parent.key} shipped: the loop files these as its one follow-up item on its next pass` : `held on ${parent.key} until it ships, then filed as its one follow-up item` };
+  });
+}
+
+/** The ledger kind of the one-time fold of unshipped parents' follow-up items (GY-845); its presence makes a second run a no-op. */
+export const followUpParentMigrationEvent = 'followups.parent-migrated';
+/**
+ * The one-time migration (GY-845): each open follow-up item whose parent has not shipped folds its
+ * findings back onto the parent and is closed as superseded by it, naming it. Nothing is deleted. A
+ * parent already closed without shipping drops what it then holds. Items are changed in place.
+ */
+export function foldUnshippedFollowUps(all: Work[], actor: string, now: Date) {
+  const folded: { work: Work; parent: Work; added: number }[] = [], parents = new Set<Work>();
+  for (const item of all) {
+    const key = open(item) ? followUpParent(item) : null, parent = key ? all.find(entry => entry.key === key) : undefined;
+    if (!parent || isDelivered(parent)) continue;
+    const { added } = holdFollowUps(parent, followUpEntries(item), now);
+    const closure: Closure = { kind: 'superseded', ref: parent.key, by: actor, at: now.toISOString(), from: item.stage,
+      reason: `Folded back onto ${parent.key}, which has not shipped: its follow-ups wait there and become one follow-up item when it is delivered (GY-845 follow-up migration)` };
+    Object.assign(item, { closure, stage: 'done', stageEnteredAt: now.toISOString(), ready: false, queue: null, mergeAuthorization: null, reviewRequest: null, scopeRequest: null, blocker: null });
+    folded.push({ work: item, parent, added: added.length }); parents.add(parent);
+  }
+  const dropped = [...parents].map(parent => ({ parent, dropped: dropHeldFollowUps(parent, now) }));
+  return { folded, parents: [...parents], dropped: dropped.filter(entry => entry.dropped) };
 }
