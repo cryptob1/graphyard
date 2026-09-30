@@ -28,8 +28,9 @@ import type { Principal, Work } from '../src/model.js';
  * while the delivered weight grows.
  *
  * unit:work-snapshot-paged — against the real server, a paged walk (cursor, pageSize) of the
- * full and default views covers every item exactly once, unpaged responses are unchanged, and
- * the coordination view stays the loop's unpaged bounded poll.
+ * full and default views covers every item exactly once, a page reads only its own documents
+ * however large the ledger grows, unpaged responses are unchanged, and the coordination view
+ * stays the loop's unpaged bounded poll.
  */
 
 const execFile = promisify(execFileCallback);
@@ -274,6 +275,38 @@ test('unit:work-snapshot-paged — GET /api/work-snapshot supports paging with c
   assert.equal(boundedPage.body.hasMore, true);
   assert.equal(boundedPage.body.nextCursor, keys(boundedPage.body).at(-1));
 
+  // A page is chosen in the database: it reads only its own documents, however large the ledger
+  // grows. Every row the store returns while one page is answered is counted by whether it
+  // carries a document (or a settled summary), and that count stays at pageSize as the ledger doubles.
+  const documentsReadFor = async (path: string) => {
+    const pool = store.pool as any, original = { query: pool.query, connect: pool.connect };
+    let documents = 0;
+    const count = (result: any) => { for (const row of result?.rows ?? []) if (row && 'document' in row) documents++; return result; };
+    pool.query = function (...args: any[]) { return original.query.apply(this, args).then(count); };
+    // pg's own pool.query checks a client out through connect(callback); only promise callers are wrapped.
+    pool.connect = async function (...args: any[]) {
+      if (args.length) return original.connect.apply(this, args);
+      const client = await original.connect.call(this), query = client.query;
+      client.query = function (...args: any[]) { return query.apply(this, args).then(count); };
+      const release = client.release;
+      client.release = function (...args: any[]) { client.query = query; client.release = release; return release.apply(this, args); };
+      return client;
+    };
+    try { const page = await get(path); assert.equal(page.status, 200, JSON.stringify(page.body)); return { documents, items: keys(page.body).length }; }
+    finally { pool.query = original.query; pool.connect = original.connect; }
+  };
+  await get('work-snapshot?view=full');
+  const before = { full: await documentsReadFor('work-snapshot?view=full&pageSize=7&cursor=3'), bounded: await documentsReadFor('work-snapshot?pageSize=7&cursor=3') };
+  for (let index = 0; index < 30; index++) {
+    await engine.execute(operator, 'create', null, { title: `Growth item ${index + 1}`, plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'test', proofs: ['unit:test'] }] }, randomUUID());
+  }
+  await get('work-snapshot?view=full');
+  const grown = { full: await documentsReadFor('work-snapshot?view=full&pageSize=7&cursor=3'), bounded: await documentsReadFor('work-snapshot?pageSize=7&cursor=3') };
+  for (const view of ['full', 'bounded'] as const) {
+    assert.deepEqual(before[view], { documents: 7, items: 7 }, `a ${view} page reads only its own seven documents`);
+    assert.deepEqual(grown[view], before[view], `a ${view} page reads no more once the ledger doubles`);
+  }
+
   // Paging is opt-in and validated; the coordination view stays the loop's unpaged poll.
   assert.equal((await get('work-snapshot?pageSize=0')).status, 400);
   assert.equal((await get('work-snapshot?pageSize=1001')).status, 400);
@@ -282,6 +315,6 @@ test('unit:work-snapshot-paged — GET /api/work-snapshot supports paging with c
   assert.equal((await get('work-snapshot?view=coordination&pageSize=5')).status, 400);
   const coordination = await get('work-snapshot?view=coordination');
   assert.equal(coordination.body.view, 'coordination');
-  assert.equal(keys(coordination.body).length, 30, 'the coordination view is not paged');
+  assert.equal(keys(coordination.body).length, 60, 'the coordination view is not paged');
   assert.equal(coordination.body.hasMore, undefined, 'the coordination view carries no paging fields');
 });

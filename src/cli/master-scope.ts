@@ -11,8 +11,9 @@ export async function approveScopeRequest(root: string, config: MasterConfig, ar
   const allowBroad = args.includes(broadScopeFlag); args = args.filter(flag => flag !== broadScopeFlag);
   if (!args[0]) throw new Error(`Use master scope GY-N [${broadScopeFlag}] [REASON]`);
   // One document by key (GY-864): the read never loads the ledger. A server that predates the
-  // single-item route answers with a snapshot body instead, so the item is read out of that.
-  const answer = await deps.coordinator(`work/${args[0]}`).catch(() => null) as any;
+  // single-item route answers with a snapshot body instead, so the item is read out of that. Only
+  // a 404 means the item is unknown; any other failure is the operator's to see as it is.
+  const answer = await deps.coordinator(`work/${args[0]}`).catch((error: { status?: number }) => { if (error?.status === 404) return null; throw error; }) as any;
   const work = (Array.isArray(answer?.work) ? answer.work.find((item: Work) => item.id === args[0] || item.key === args[0]) : answer) as Work | null;
   if (!work) throw new Error(`Unknown work item ${args[0]}`);
   const request = work.scopeRequest;

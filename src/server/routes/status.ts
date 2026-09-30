@@ -21,6 +21,7 @@ import { eventStats } from '../../store/snapshot-delta.js';
 import { productionEnvironmentEvent, productionEnvironmentName, resolvedProductionEnvironment } from '../../flow-analytics.js';
 import { boardFromStatus } from '../../model/board.js';
 import { boundedSnapshot, workDocument } from '../../store/bounded-snapshot.js';
+import { snapshotPage } from '../../store/paged-snapshot.js';
 
 /** Control-plane status and the work reads every client polls. */
 export const statusRoutes = defineRoutes('status', [
@@ -181,31 +182,23 @@ export const statusRoutes = defineRoutes('status', [
       };
       // Paging (GY-864): a reader that must still walk every document — an export, a migration —
       // asks for `cursor` (the number of the work item it last saw, the suffix of its key) and
-      // `pageSize`, and streams page by page instead of loading the whole ledger into one
-      // response. Only a request that names one of the two is paged; every other response is
-      // what it always was, so no reader is truncated silently. The coordination view, the
-      // loop's own bounded poll, is not paged. Both paged views order items by work number.
+      // `pageSize`, and streams page by page. The page is chosen in the database, so a page reads
+      // only its own documents, never the whole ledger. Only a request that names one of the two
+      // is paged; every other response is what it always was, so no reader is truncated
+      // silently. The coordination view, the loop's own bounded poll, is not paged.
       const cursorParam = url.searchParams.get('cursor'), pageSizeParam = url.searchParams.get('pageSize');
       const maxPageSize = 1000, defaultPageSize = 100;
-      const wantsPaging = cursorParam !== null || pageSizeParam !== null;
-      let cursor: number | undefined, pageSize = defaultPageSize;
-      if (wantsPaging) {
-        cursor = cursorParam === null ? undefined : Number(cursorParam);
-        pageSize = pageSizeParam === null ? defaultPageSize : Number(pageSizeParam);
+      if (cursorParam !== null || pageSizeParam !== null) {
+        const cursor = cursorParam === null ? undefined : Number(cursorParam);
+        const pageSize = pageSizeParam === null ? defaultPageSize : Number(pageSizeParam);
         demand(cursor === undefined || Number.isSafeInteger(cursor) && cursor >= 0, 'cursor must be a work item number', 400);
         demand(Number.isSafeInteger(pageSize) && pageSize >= 1 && pageSize <= maxPageSize, `pageSize must be an integer from 1 to ${maxPageSize}`, 400);
         demand(view !== 'coordination', 'the coordination view is not paged; it is the bounded read the loop polls', 400);
+        const page = scope(await snapshotPage(services.engine.store.pool, view as 'bounded' | 'full', { cursor, pageSize }));
+        return view === 'bounded' ? { ...page, view } : page;
       }
-      const paged = <T extends { work: Work[] }>(snapshot: T): T & { hasMore?: boolean; nextCursor?: number } => {
-        if (!wantsPaging) return snapshot;
-        const numberOf = (item: Work) => { const digits = /(\d+)$/.exec(item.key ?? '')?.[1]; return digits === undefined ? NaN : Number(digits); };
-        const remaining = cursor === undefined ? snapshot.work : snapshot.work.filter(item => numberOf(item) > cursor!);
-        const kept = remaining.slice(0, pageSize);
-        const more = remaining.length > kept.length;
-        return { ...snapshot, work: kept, hasMore: more, ...(more && kept.length ? { nextCursor: numberOf(kept[kept.length - 1]) } : {}) };
-      };
-      if (view === 'bounded') return paged({ ...scope(await boundedSnapshot(services.engine.store.pool)), view });
-      if (view === 'full') return paged(scope(await services.engine.store.workSnapshot()));
+      if (view === 'bounded') return { ...scope(await boundedSnapshot(services.engine.store.pool)), view };
+      if (view === 'full') return scope(await services.engine.store.workSnapshot());
       // The coordination view is trimmed in the database (GY-185): the histories it bounds never
       // leave it whole, and what the SQL cut is added to what the view says it left out.
       const { trimmed, ...snapshot } = await services.engine.store.coordinationSnapshot();
