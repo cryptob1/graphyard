@@ -200,6 +200,11 @@ test('unit:cli-reads-bounded-snapshot — CLI commands read bounded snapshot or 
       await writeFile(join(originRepo, 'shared.txt'), 'base\n');
       await commit(originRepo, 'Base');
       await execFile('git', ['clone', '-q', originRepo, clone]);
+      // The sync command runs git itself, without this fixture's per-call -c identity flags, so
+      // the clone carries its own identity: a runner without a global git config would otherwise
+      // fail the merge before the attribution read is ever issued.
+      await execFile('git', ['config', 'user.name', 'Test'], { cwd: clone });
+      await execFile('git', ['config', 'user.email', 'test@localhost'], { cwd: clone });
       await execFile('git', ['checkout', '-q', '-b', 'graphyard/gy-1-1'], { cwd: clone });
       await writeFile(join(clone, 'shared.txt'), 'mine\n');
       await commit(clone, 'Mine');
