@@ -38,10 +38,10 @@ Protection reconciles via `master protection --apply`; where only a page exists,
 | Flow | Effect |
 | --- | --- |
 | `app-permissions` | Raises App permissions to the declaration |
-| `installation-accept` | Accepts pending permission requests |
+| `installation-accept` | Accepts pending requests |
 | `protection` | Reconciles branch protection |
 
-Each flow records `record.json` under `.graphyard/master-actions/`, appending to `ledger.json`. Approving its *Confirm access* GitHub Mobile code on the device is human-only. The master never stores the profile's cookies, and must never use a merge bypass, push code or read a worker credential.
+Permission flows read `GET /api/github/installation` (App credential, not gh). Each flow records `record.json` under `.graphyard/master-actions/`, appending to `ledger.json`. Approving its *Confirm access* GitHub Mobile code on the device is human-only. The master never stores the profile's cookies, and must never use a merge bypass, push code or read a worker credential.
 
 ## Harness permissions
 
