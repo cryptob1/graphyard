@@ -384,8 +384,8 @@ async function migrateLedger(ctx: AdapterContext, remote: Transport) {
   await fence(false);
   let backup: string;
   try {
-    await local.exec('sh', ['-c', withDatabase('db backup'), host.localNode, host.localCli, file], { input: host.migrationSource, timeout: 1_800_000 });
-    await local.exec('sh', ['-c', withDatabase('db verify'), host.localNode, host.localCli, file], { input: host.migrationSource, timeout: 600_000 });
+    await local.exec('sh', ['-c', withDatabase('db backup'), host.localNode, host.localCli, file], { input: source, timeout: 1_800_000 });
+    await local.exec('sh', ['-c', withDatabase('db verify'), host.localNode, host.localCli, file], { input: source, timeout: 600_000 });
     // Read the file from this machine's disk rather than through a command's output buffer: a grown
     // ledger exceeds the transport's exec cap, while db verify and db restore already hold the whole
     // file in memory, so the copy to the host can too.
