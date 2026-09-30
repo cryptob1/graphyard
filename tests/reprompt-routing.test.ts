@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
@@ -10,6 +9,7 @@ import { promptTarget } from '../src/daemon/effects.js';
 import { masterConfigSchema, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import type { Work } from '../src/model.js';
 import type { SessionHandle, SessionHandleInput } from '../src/model/sessions.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-852: The loop's re-prompt of an idle worker reaches that worker's own pane, never another
@@ -39,7 +39,7 @@ const minutes = (count: number) => count * 60_000;
 const sharedName = 'shared-agent';
 
 async function setup() {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-reprompt-'));
+  const directory = await temporaryDirectory('reprompt');
   const credentialFile = join(directory, 'coordinator.token');
   await writeFile(credentialFile, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
   // Two launch profiles that share one agent name: the name each profile's next session reuses,
