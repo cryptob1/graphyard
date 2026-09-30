@@ -6,6 +6,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
+import { GitHubCacheStore } from '../src/github-cache.js';
+import { GitHubChargeLedger } from '../src/github-charges.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server/index.js';
 import { CHECK_NAME, GitHub, baseRefCycleMs, billableBudgetShare, observationThroughputStatus, processJob, protectionShareMs } from '../src/github.js';
@@ -117,14 +119,39 @@ test('unit:github-immutable-cache — a commit by SHA and a compare of two exact
   assert.equal(api.count(new RegExp(`^/commits/${fresh}$`)), 1);
 });
 
+test('unit:github-immutable-cache — an immutable answer is permanent: evicted from the hot layer, pruned for space, or after a restart, the same commit or compare is never asked of GitHub again', async t => {
+  const api = new Api();
+  t.mock.method(globalThis, 'fetch', api.fetch);
+  const db = await database();
+  const cache = new GitHubCacheStore(db.pool, 'permanent', { flushMs: 60_000, maxRows: 1, pruneMs: Number.MAX_SAFE_INTEGER });
+  const github = api.client(); await github.attachCache(cache);
+  github.immutableHotEntries = 2;
+  const heads = Array.from({ length: 4 }, (_, index) => sha(`permanent-${index}`));
+  const paths = [...heads.map(head => `/commits/${head}`), `/compare/${heads[0]}...${heads[1]}`];
+  for (const path of paths) await github.request(path);
+  // Every path but the last two has left the hot layer; the answers still queued for write are served.
+  for (const path of paths) assert.ok(await github.request(path), `${path} is answered`);
+  assert.equal(api.requests.length, paths.length, 'no path was asked twice');
+  await cache.flush();
+  // Pruning bounds the other kinds; it never removes a permanent answer.
+  cache.put('etag', '/pulls/1', { number: 1 }, 'W/"1"'); cache.put('etag', '/pulls/2', { number: 2 }, 'W/"2"');
+  await cache.flush(); await cache.prune();
+  for (const path of paths) assert.ok(await cache.lookup('immutable', `/repos/${REPOSITORY}${path}`), `${path} survives pruning`);
+  // Asked again from the database once the hot layer evicted it, and by a restarted adapter.
+  for (const path of paths) await github.request(path);
+  const restarted = api.client(); await restarted.attachCache(new GitHubCacheStore(db.pool, 'permanent'));
+  restarted.immutableHotEntries = 1;
+  for (const path of [...paths, ...paths]) await restarted.request(path);
+  for (const path of paths) assert.equal(api.count(new RegExp(`^${path.replace(/[.]/g, '\\.')}$`)), 1, `${path} was fetched once`);
+});
+
 test('unit:github-shared-cycle-reads — twenty items observed in one cycle make one base-ref read and at most one protection read; a new cycle, a base push or a protection event reads again', async t => {
   const api = new Api();
   t.mock.method(globalThis, 'fetch', api.fetch);
   const github = api.client();
   let now = Date.parse('2026-09-26T12:00:00Z');
   github.clock = () => now;
-  // The webhook is live: its push event is what ends a cycle early when the base moves.
-  github.noteWebhook('check_run', { repository: { full_name: REPOSITORY } });
+  // No webhook has been delivered: the sharing does not wait for one.
   const items = Array.from({ length: 20 }, (_, index) => item(index, api));
   const refs = () => api.count(/^\/git\/ref\/heads\/main$/), protections = () => api.count(/^\/branches\/main\/protection$/);
   // Half the fleet at once, as the observation workers run, and the rest one after another.
@@ -151,33 +178,44 @@ test('unit:github-shared-cycle-reads — twenty items observed in one cycle make
   await github.observe(items[3], items);
   assert.equal(protections(), 3);
 
-  // Without a live webhook nothing would say the base moved, so each observation reads it itself.
+  // A quiet hour with no webhook still shares: one read per cycle, protection every five minutes.
   now += 2 * 60 * 60_000;
-  const quiet = refs();
-  for (const work of items.slice(0, 3)) await github.observe(work, items);
-  assert.equal(refs() - quiet, 3);
+  const quiet = { refs: refs(), protections: protections() };
+  for (const work of items) { now += 500; await github.observe(work, items); }
+  assert.deepEqual([refs() - quiet.refs, protections() - quiet.protections], [1, 1]);
 });
 
 // ---- The control plane, for the webhook-driven observation ----
 
 const operator: Principal = { id: 'operator', role: 'admin' };
 const worker: Principal = { id: 'agent-a', role: 'worker' };
-let database: EmbeddedPostgres, store: Store, engine: Engine;
+let postgres: EmbeddedPostgres, store: Store | undefined, engine: Engine;
 let http: ReturnType<typeof server>, origin = '';
 const adminToken = 'o'.repeat(40);
 let port = 0;
 before(async () => {
   port = Number(process.env.GRAPHYARD_GITHUB_BUDGET_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 187);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-github-budget-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
+  postgres = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-github-budget-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  await postgres.initialise(); await postgres.start(); await postgres.createDatabase('graphyard_test');
 });
-after(async () => { if (http) await new Promise(resolve => http.close(resolve)); if (store) await store.close(); if (database) await database.stop(); });
+const replicas: Store[] = [];
+after(async () => { if (http) await new Promise(resolve => http.close(resolve)); for (const replica of replicas) await replica.close(); if (postgres) await postgres.stop(); });
+/** A store on the shared database, as one replica holds it. */
+async function replicaStore() {
+  const opened = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await opened.init();
+  replicas.push(opened); return opened;
+}
+async function database() { return store ??= await replicaStore(); }
+/** One replica's engine over its own store on the shared database. */
+function replicaEngine(on: Store) {
+  const replica = new Engine(on, [CI], 120, REPOSITORY); replica.controlPlaneAppId = APP;
+  replica.principals = [operator, worker];
+  replica.submissionObserver = null;
+  return replica;
+}
 
 async function serve(github: GitHub) {
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
-  engine = new Engine(store, [CI], 120, REPOSITORY); engine.controlPlaneAppId = APP;
-  engine.principals = [operator, worker];
-  engine.submissionObserver = null;
+  engine = replicaEngine(await database());
   http = server(engine, [{ id: 'operator', role: 'admin', token: adminToken }], github);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   origin = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
@@ -192,8 +230,8 @@ async function submitted(api: Api, title: string) {
   api.open(pr, `graphyard/${work.key.toLowerCase()}-1`);
   return engine.execute(worker, 'submit', work.id, { epoch: 1, pr }, randomUUID());
 }
-const reload = async (work: Work) => (await store.list()).find(entry => entry.id === work.id)!;
-const jobRow = async (work: Work) => (await store.pool.query('SELECT error, available_at, deferred_reason, clock_timestamp() AS now FROM jobs WHERE work_id=$1', [work.id])).rows[0] as { error: string | null; available_at: Date; deferred_reason: string | null; now: Date };
+const reload = async (work: Work) => (await store!.list()).find(entry => entry.id === work.id)!;
+const jobRow = async (work: Work) => (await store!.pool.query('SELECT error, available_at, deferred_reason, clock_timestamp() AS now FROM jobs WHERE work_id=$1', [work.id])).rows[0] as { error: string | null; available_at: Date; deferred_reason: string | null; now: Date };
 async function deliver(event: string, payload: unknown) {
   process.env.GITHUB_WEBHOOK_SECRET ??= 'webhook-secret-for-the-test';
   const raw = JSON.stringify(payload);
@@ -201,22 +239,24 @@ async function deliver(event: string, payload: unknown) {
   assert.equal(response.status, 202, 'the delivery is accepted');
 }
 
-test('unit:webhook-driven-observation — a check_run delivery re-observes its item at once, ahead of a polled job due earlier, and the poll that follows within its interval is skipped', async t => {
+test('unit:webhook-driven-observation — a check_run delivery re-observes its item at once, ahead of a polled job due earlier, and the poll that follows within its interval is skipped, whichever replica receives, claims or polls', async t => {
   const api = new Api();
   t.mock.method(globalThis, 'fetch', api.fetch);
+  // Replica A receives the webhook; replica B, on the same database with its own adapter, claims the jobs.
   const github = api.client(); await serve(github);
+  const other = api.client(), replica = replicaEngine(await replicaStore());
   let woken = await submitted(api, 'Named by the check run'); let polled = await submitted(api, 'Due by its poll');
   // Both are observed once; then the woken item's poll is an hour away and the other's is overdue.
-  for (let index = 0; index < 2; index++) { await store.pool.query('UPDATE jobs SET available_at=now()'); await processJob(engine, github); }
+  for (let index = 0; index < 2; index++) { await store!.pool.query('UPDATE jobs SET available_at=now()'); await processJob(replica, other); }
   woken = await reload(woken); polled = await reload(polled);
   assert.ok(woken.observation && polled.observation, 'both items were observed');
-  await store.pool.query("UPDATE jobs SET available_at=now()+interval '1 hour' WHERE work_id=$1", [woken.id]);
-  await store.pool.query("UPDATE jobs SET available_at=now()-interval '1 minute' WHERE work_id=$1", [polled.id]);
+  await store!.pool.query("UPDATE jobs SET available_at=now()+interval '1 hour' WHERE work_id=$1", [woken.id]);
+  await store!.pool.query("UPDATE jobs SET available_at=now()-interval '1 minute' WHERE work_id=$1", [polled.id]);
   const observedAt = { woken: woken.observation!.at, polled: polled.observation!.at };
 
   await deliver('check_run', { action: 'completed', repository: { full_name: REPOSITORY }, check_run: { head_sha: woken.candidate!.sha, app: { id: CI }, pull_requests: [{ number: woken.submission!.pr }] } });
-  assert.deepEqual(github.webhookDue(), [woken.id], 'the delivery marked the named item due');
-  await processJob(engine, github);
+  assert.deepEqual(await replica.store.webhookDue(), [woken.id], 'the delivery marked the named item due, on the job every replica claims from');
+  await processJob(replica, other);
   woken = await reload(woken); polled = await reload(polled);
   assert.ok(Date.parse(woken.observation!.at) > Date.parse(observedAt.woken), 'the item was re-observed without waiting for its poll');
   assert.equal(polled.observation!.at, observedAt.polled, 'ahead of the polled job that was due first');
@@ -224,19 +264,24 @@ test('unit:webhook-driven-observation — a check_run delivery re-observes its i
   assert.equal(scheduled.error, null);
   const pollMs = scheduled.available_at.getTime() - scheduled.now.getTime();
   assert.ok(pollMs > 60_000, `the next poll is a full interval away (${pollMs} ms)`);
-  await processJob(engine, github);
+  await processJob(replica, other);
   assert.ok(Date.parse((await reload(polled)).observation!.at) > Date.parse(observedAt.polled), 'the polled job runs next');
 
   // The poll that follows, inside the interval the webhook-driven observation scheduled, is skipped.
-  await store.pool.query("UPDATE jobs SET available_at=now()+interval '1 hour' WHERE work_id<>$1", [woken.id]);
-  await store.pool.query('UPDATE jobs SET available_at=now() WHERE work_id=$1', [woken.id]);
+  await store!.pool.query("UPDATE jobs SET available_at=now()+interval '1 hour' WHERE work_id<>$1", [woken.id]);
+  await store!.pool.query('UPDATE jobs SET available_at=now() WHERE work_id=$1', [woken.id]);
   const requests = api.requests.length, at = (await reload(woken)).observation!.at;
+  // Replica A polls: the refresh replica B recorded is on the job, so A skips it too.
   assert.equal(await processJob(engine, github), true, 'the poll was claimed');
   assert.equal(api.requests.length, requests, 'and asked GitHub nothing');
   assert.equal((await reload(woken)).observation!.at, at, 'the item was not re-observed');
   const skipped = await jobRow(woken);
   assert.match(skipped.deferred_reason ?? '', /poll skipped: a webhook refreshed this item/);
   assert.ok(skipped.available_at.getTime() - skipped.now.getTime() > 30_000, 'the job is due again when the interval ends');
+
+  // A worker's push to the pull-request branch names the item by its branch before its candidate names the new head.
+  await deliver('push', { ref: `refs/heads/${polled.candidate!.branch}`, after: sha('pushed-head'), repository: { full_name: REPOSITORY } });
+  assert.deepEqual(await replica.store.webhookDue(), [polled.id]);
 });
 
 /**
@@ -302,4 +347,33 @@ test('unit:github-budget-projection — replaying the recorded 2026-09-26 reques
   assert.equal(endpoints['GET /commits/:sha'], api.count(/^\/commits\/[a-f0-9]{40}$/));
   const reported = observationThroughputStatus({ githubBudget: budget }, { work: [], now: new Date().toISOString() });
   assert.deepEqual(reported.budget?.billable, budget.billable, 'master status carries the billable report');
+});
+
+test('unit:github-budget-projection — the billable report is the installation\'s: two replicas sharing one quota each report their combined requests, over the target where either alone is under it', async t => {
+  const api = new Api();
+  api.limit = 100; api.remaining = 100;
+  t.mock.method(globalThis, 'fetch', api.fetch);
+  const db = await database();
+  const [one, two] = [api.client(), api.client()];
+  const ledgers = [new GitHubChargeLedger(db.pool, 'shared-installation', { instance: 'replica-1' }), new GitHubChargeLedger(db.pool, 'shared-installation', { instance: 'replica-2' })];
+  one.attachChargeLedger(ledgers[0]); two.attachChargeLedger(ledgers[1]);
+  // Another installation on the same database is not this quota's spend.
+  const elsewhere = new GitHubChargeLedger(db.pool, 'other-installation', { instance: 'replica-3' });
+  for (let index = 0; index < 50; index++) elsewhere.charge(Date.now(), 'GET /pulls/:n', 'pulls');
+  await elsewhere.close();
+  for (let index = 0; index < 35; index++) { await one.request(`/pulls/${index}`); await two.request(`/pulls/${index}`); }
+  await two.request('/git/ref/heads/main');
+  const alone = one.budget().billable;
+  assert.equal(alone.perHour, 35, 'before the ledger syncs a replica sees only its own charges');
+  assert.ok(alone.share < billableBudgetShare);
+  await ledgers[0].sync(); await ledgers[1].sync(); await ledgers[0].sync();
+  for (const replica of [one, two]) {
+    const billable = replica.budget().billable;
+    assert.equal(billable.perHour, 71, 'both replicas count the installation\'s 71 requests');
+    assert.equal(billable.instances, 2);
+    assert.ok(billable.share > billableBudgetShare, `the combined share ${billable.share} is over the ${billableBudgetShare} target`);
+    assert.deepEqual(billable.byEndpoint.map(entry => [entry.endpoint, entry.requests]), [['GET /pulls/:n', 70], ['GET /git/ref/heads/:branch', 1]]);
+  }
+  const reported = observationThroughputStatus({ githubBudget: one.budget() }, { work: [], now: new Date().toISOString() });
+  assert.equal(reported.budget?.billable?.perHour, 71, 'master status carries the installation-wide count');
 });

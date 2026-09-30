@@ -10,6 +10,7 @@ import { behindBaseHold, mechanicalHold } from './model/dispatch.js';
 import { CHECK_NAME, carriedApproval, demand, nativeReviewRequired, parseReviewerApps, reviewerProfileFor, reviewProviderOf, type Observation, type ReviewerApp, type ReviewerProfile, type ScopeFile, type TipMerge, type Work, type ReviewRequest } from './model.js';
 import { inPlannedScope, threeWayMerge, type LandedCandidate } from './regression-guard.js';
 import type { GitHubCacheStore } from './github-cache.js';
+import type { GitHubChargeLedger } from './github-charges.js';
 import { nextAction } from './model/next-action.js';
 import { foldDecisions } from './model/approval.js';
 import { normalMergeState, repairAudit, repairAuditEvent, repairLaneVerdict, type RepairAudit, type RepairLaneVerdict } from './master/repair-lane.js';
@@ -202,13 +203,10 @@ export const immutableRead = (path: string) => /^\/repos\/[^/]+\/[^/]+\/(commits
 /**
  * One observation cycle (GY-806): every observation that starts within it shares one read of the
  * base branch's ref, instead of each item re-reading it. A push to the base branch (webhook) or a
- * ref this adapter writes itself ends the cycle early. Sharing needs a live webhook — one delivered
- * within `webhookLiveMs` — since only its push event says the base moved; without one each
- * observation reads the ref and protection itself, and only reads already in flight are shared.
+ * ref this adapter writes itself ends the cycle early; without a webhook the ref is at most one
+ * cycle old, the same staleness the polling backstop already allows.
  */
 export const baseRefCycleMs = 15_000;
-/** How recently a webhook must have been delivered for the per-cycle reads to be shared. */
-export const webhookLiveMs = 60 * 60_000;
 /** How long one read of the base branch's protection is shared; a protection or repository webhook ends it early. */
 export const protectionShareMs = 5 * 60_000;
 /** The share of one token's hourly limit the recorded workload must stay under once replayed (GY-806). */
@@ -217,8 +215,8 @@ export const billableBudgetShare = 0.6;
 export const observationEvents = ['pull_request', 'pull_request_review', 'check_run', 'check_suite', 'push'] as const;
 /** The events that end the shared protection read. */
 export const protectionEvents = ['branch_protection_rule', 'branch_protection_configuration', 'repository_ruleset', 'repository'] as const;
-/** How long a webhook wake waits to be claimed before it is dropped from the priority list (its job stays due). */
-export const webhookWakeTtlMs = 10 * 60_000;
+/** How long a webhook wake waits to be claimed before it is dropped from the front of the claim (its job stays due). */
+export { webhookWakeTtlMs } from './store/store.js';
 
 /** The live budget, the rate it is being spent at, and what the control plane is doing about it. */
 export interface GitHubBudget {
@@ -248,8 +246,10 @@ export interface GitHubBudget {
    * Billable requests over the last hour against the hourly budget, by endpoint (GY-806):
    * `perHour` is what the last hour charged, `limit` the token's hourly limit (GitHub's default
    * when none was read yet), `share` their ratio, and `target` the share the fleet must stay under.
+   * The count is the installation's: every replica sharing the quota (`instances`, this one
+   * included) adds its charges through the charge ledger (src/github-charges.ts).
    */
-  billable: { perHour: number; limit: number; share: number; target: number; byEndpoint: { endpoint: string; requests: number; share: number }[] };
+  billable: { perHour: number; limit: number; share: number; target: number; instances: number; byEndpoint: { endpoint: string; requests: number; share: number }[] };
   /** The schedule in force, and what each observation cost the job that made it. */
   cadence: Record<CadenceBand, number>;
   /** The throughput the observation workers have been achieving (GY-492), from the job durations of the last window. */
@@ -636,10 +636,8 @@ export class GitHub {
   private sharedRef: { at: number; read: Promise<{ tip: string; tree: string }> } | null = null;
   /** The base branch's protection, read at most every `protectionShareMs` and shared (GY-806). */
   private sharedProtection: { at: number; read: Promise<any> } | null = null;
-  /** Items a webhook made due, by work id, with when it arrived: claimed ahead of polled jobs (GY-806). */
-  private webhookWakes = new Map<string, number>();
-  /** Items a webhook-driven observation refreshed, and the poll interval that observation scheduled (GY-806). */
-  private webhookRefreshes = new Map<string, { at: number; pollMs: number }>();
+  /** How many immutable responses the hot layer keeps; a miss past it is answered by the persisted layer. */
+  immutableHotEntries = immutableEntries;
   /** Files changed between two pinned commits (GY-500); immutable, so each pair is compared once. */
   private baseChangeLists = new Map<string, string[] | null>();
   /**
@@ -657,11 +655,16 @@ export class GitHub {
   /** Load the persisted caches into the maps and write new entries behind. Resolves once loaded; never rejects. */
   attachCache(store: GitHubCacheStore) {
     this.persisted = store;
+    // The cache's database is the one every replica shares, so its charge ledger counts them all (GY-806).
+    this.chargeLedger = store.charges;
     const warming = store.load({ etag: this.cache, ancestry: this.ancestry, blob: this.blobs, history: this.histories, immutable: this.immutable },
       { etag: etagCacheEntries, ancestry: ancestryEntries, blob: ancestryEntries, history: historyEntries, immutable: immutableEntries }).then(() => { if (this.warming === warming) this.warming = null; });
     this.warming = warming;
     return warming;
   }
+  /** The installation's charges across replicas (src/github-charges.ts), attached with the cache: `budget().billable` counts them all. */
+  private chargeLedger: GitHubChargeLedger | null = null;
+  attachChargeLedger(ledger: GitHubChargeLedger) { this.chargeLedger = ledger; }
   /** A request made while the persisted cache is still loading waits for it, at most two seconds. */
   private async warm() {
     if (!this.warming) return;
@@ -739,7 +742,9 @@ export class GitHub {
     if (response.status === 304 || !charged || response.status === 429 || response.status === 403 && remaining === 0) return;
     // A measured stretch is an observation job the pace started; every other request is spend the pace must leave room for.
     if (tracked && token !== null) this.budgets.charge(token, now, !!meter);
-    this.charges.push({ at: now, kind: requestKind(path), endpoint: requestEndpoint(method, path) });
+    const charge = { at: now, kind: requestKind(path), endpoint: requestEndpoint(method, path) };
+    this.charges.push(charge);
+    this.chargeLedger?.charge(now, charge.endpoint, charge.kind);
     if (this.charges.length > 8192) this.charges = this.charges.filter(charge => now - charge.at <= budgetLedgerMs);
   }
   /** Run `fn` counting the requests it makes and the ones that actually cost budget. */
@@ -809,6 +814,12 @@ export class GitHub {
     const counts = new Map<string, number>(), endpoints = new Map<string, number>();
     for (const charge of this.charges) { counts.set(charge.kind, (counts.get(charge.kind) ?? 0) + 1); endpoints.set(charge.endpoint, (endpoints.get(charge.endpoint) ?? 0) + 1); }
     const hourly = limit ?? defaultHourlyLimit, share = (requests: number) => Math.round(requests / hourly * 10_000) / 10_000;
+    // The billable report is the installation's (GY-806): every other replica's last hour, as the
+    // charge ledger last read it, is added to this process's own charges.
+    const fleet = this.chargeLedger?.fleet() ?? { rows: [], instances: 0 };
+    const billed = new Map(endpoints);
+    for (const row of fleet.rows) billed.set(row.endpoint, (billed.get(row.endpoint) ?? 0) + row.requests);
+    const billedTotal = this.charges.length + fleet.rows.reduce((total, row) => total + row.requests, 0);
     const samples = this.samples.filter(sample => now - sample.at <= budgetLedgerMs);
     const mean = (values: number[]) => values.length ? Math.round(values.reduce((total, value) => total + value, 0) / values.length * 100) / 100 : null;
     return {
@@ -825,8 +836,8 @@ export class GitHub {
       paused: this.blockedUntil > now ? { since: new Date(this.pausedSince || now).toISOString(), until: new Date(this.blockedUntil).toISOString(),
         reason: this.pauseReason || 'GitHub refused a request for rate limiting' } : null,
       lastHour: { requests: this.charges.length, byKind: [...counts].map(([kind, requests]) => ({ kind, requests })).sort((a, b) => b.requests - a.requests || a.kind.localeCompare(b.kind)) },
-      billable: { perHour: this.charges.length, limit: hourly, share: share(this.charges.length), target: billableBudgetShare,
-        byEndpoint: [...endpoints].map(([endpoint, requests]) => ({ endpoint, requests, share: share(requests) })).sort((a, b) => b.requests - a.requests || a.endpoint.localeCompare(b.endpoint)) },
+      billable: { perHour: billedTotal, limit: hourly, share: share(billedTotal), target: billableBudgetShare, instances: 1 + fleet.instances,
+        byEndpoint: [...billed].map(([endpoint, requests]) => ({ endpoint, requests, share: share(requests) })).sort((a, b) => b.requests - a.requests || a.endpoint.localeCompare(b.endpoint)) },
       cadence: { ...observationCadenceMs },
       throughput: observationThroughput(this.jobDurations, now),
       observations: { count: samples.length, meanRequests: mean(samples.map(sample => sample.requests)), meanUncached: mean(samples.map(sample => sample.uncached)),
@@ -982,7 +993,8 @@ export class GitHub {
    * A commit by SHA or a compare of two exact SHAs (GY-806): asked of GitHub once, then served from
    * the immutable cache with no request, however many observations ask. Concurrent first reads of
    * the same path share one request. A cached answer needs no token, so it is served through a pause.
-   * On hot-cache miss, consult the persisted layer before fetching (AC-1).
+   * A miss in the bounded hot layer asks the persisted layer first, so eviction and restarts never
+   * make GitHub answer the same path twice.
    */
   private async immutableRequest(path: string): Promise<any> {
     await this.warm();
@@ -995,19 +1007,20 @@ export class GitHub {
     let reading = this.immutableReads.get(path);
     if (!reading) {
       reading = (async () => {
-        // Cold-cache lookup: if the persistent store has this immutable read, use it without fetching (GY-806)
+        // A hot-layer miss asks the persisted layer, which never evicts an immutable answer, before GitHub.
         if (this.persisted) {
           const stored = await this.persisted.lookup('immutable', path);
-          if (stored !== undefined) {
+          if (stored !== undefined && stored !== null) {
             this.immutable.set(path, structuredClone(stored));
-            return structuredClone(stored);
+            if (this.immutable.size > this.immutableHotEntries) this.immutable.delete(this.immutable.keys().next().value!);
+            return stored;
           }
         }
         const value = await this.send(path, 'GET', undefined, false);
         if (value !== null && value !== undefined) {
           this.immutable.set(path, structuredClone(value));
           this.persisted?.put('immutable', path, value);
-          if (this.immutable.size > immutableEntries) this.immutable.delete(this.immutable.keys().next().value!);
+          if (this.immutable.size > this.immutableHotEntries) this.immutable.delete(this.immutable.keys().next().value!);
         }
         return value;
       })().finally(() => this.immutableReads.delete(path));
@@ -1149,70 +1162,37 @@ export class GitHub {
    */
   async baseBranch(): Promise<{ tip: string; tree: string }> {
     const now = this.clock();
-    if (!this.sharedRef || now - this.sharedRef.at >= this.shareMs(baseRefCycleMs, now) || now < this.sharedRef.at) {
+    if (!this.sharedRef || now - this.sharedRef.at >= baseRefCycleMs || now < this.sharedRef.at) {
       const entry = { at: now, read: this.readBaseBranch() };
       this.sharedRef = entry;
-      // A failed read is not shared past its own callers, and an unshared one only while in flight.
-      const done = () => { if (this.sharedRef === entry && !this.webhookLive(this.clock())) this.sharedRef = null; };
-      entry.read.then(done, () => { if (this.sharedRef === entry) this.sharedRef = null; });
+      // A failed read is not shared past its own callers.
+      entry.read.catch(() => { if (this.sharedRef === entry) this.sharedRef = null; });
     }
     return { ...await this.sharedRef.read };
   }
-  /** The last verified webhook delivery this adapter was told of. */
-  private webhookSeenAt: number | null = null;
-  private webhookLive(now: number) { return this.webhookSeenAt !== null && now - this.webhookSeenAt <= webhookLiveMs && now >= this.webhookSeenAt; }
-  /** How long a shared read is kept: per-cycle or per-protection-interval sharing always applies (GY-806 AC-2); webhook just enables early invalidation. */
-  private shareMs(ms: number, now: number) { return ms; }
   /**
    * The base branch's protection as GitHub returns it, read at most every `protectionShareMs` and
    * shared by every observation (GY-806); a protection or repository webhook ends the share early.
    */
   private sharedProtectionRead(): Promise<any> {
     const now = this.clock();
-    if (!this.sharedProtection || now - this.sharedProtection.at >= this.shareMs(protectionShareMs, now) || now < this.sharedProtection.at) {
+    if (!this.sharedProtection || now - this.sharedProtection.at >= protectionShareMs || now < this.sharedProtection.at) {
       const entry = { at: now, read: this.request(`/branches/${encodeURIComponent(this.config.base)}/protection`) };
       this.sharedProtection = entry;
-      const done = () => { if (this.sharedProtection === entry && !this.webhookLive(this.clock())) this.sharedProtection = null; };
-      entry.read.then(done, () => { if (this.sharedProtection === entry) this.sharedProtection = null; });
+      entry.read.catch(() => { if (this.sharedProtection === entry) this.sharedProtection = null; });
     }
     return this.sharedProtection.read.then(value => structuredClone(value));
   }
   /**
-   * What a verified webhook delivery means for this adapter (GY-806): a push to the base branch ends
-   * the shared ref read, a protection or repository event ends the shared protection read, and an
-   * observation event marks the named items due ahead of polled jobs. `work` is the items the
-   * delivery woke, as the webhook route resolved them.
+   * What a verified webhook delivery means for this adapter's shared reads (GY-806): a push to the
+   * base branch ends the shared ref read, and a protection or repository event ends the shared
+   * protection read. The wake of the items it names is the job row's (`Store.takeJob`), not this
+   * adapter's, so every replica claims them first.
    */
-  noteWebhook(event: string, payload: any, work: string[] = [], now = this.clock()) {
-    this.webhookSeenAt = now;
+  noteWebhook(event: string, payload: any) {
     const ref = typeof payload?.ref === 'string' ? payload.ref : '';
     if (event === 'push' && ref === `refs/heads/${this.config.base}`) this.sharedRef = null;
     if ((protectionEvents as readonly string[]).includes(event)) this.sharedProtection = null;
-    if (!(observationEvents as readonly string[]).includes(event)) return;
-    for (const id of work) { this.webhookWakes.delete(id); this.webhookWakes.set(id, now); }
-  }
-  /** The items a webhook made due, oldest delivery first: the claim order puts them ahead of every polled job. */
-  webhookDue(now = this.clock()): string[] {
-    for (const [id, at] of this.webhookWakes) if (now - at > webhookWakeTtlMs) this.webhookWakes.delete(id);
-    return [...this.webhookWakes.keys()];
-  }
-  /** Take an item's webhook wake as its job is claimed: true when the claim is webhook-driven. */
-  takeWebhookWake(work: string): boolean { return this.webhookWakes.delete(work); }
-  /** Record that a webhook-driven observation refreshed the item and when its poll is next due. */
-  noteWebhookRefresh(work: string, pollMs: number, now = this.clock()) {
-    this.webhookRefreshes.set(work, { at: now, pollMs });
-    if (this.webhookRefreshes.size > 1000) for (const [id, entry] of this.webhookRefreshes) if (now - entry.at > entry.pollMs) this.webhookRefreshes.delete(id);
-  }
-  /**
-   * When a polled observation of the item is skipped because a webhook refreshed it within its poll
-   * interval: the time the poll is next due, or null when the poll should run.
-   */
-  webhookRefreshedUntil(work: string, now = this.clock()): number | null {
-    const refreshed = this.webhookRefreshes.get(work);
-    if (!refreshed) return null;
-    const until = refreshed.at + refreshed.pollMs;
-    if (now >= until || now < refreshed.at) { this.webhookRefreshes.delete(work); return null; }
-    return until;
   }
   private async readBaseBranch(): Promise<{ tip: string; tree: string }> {
     const ref = await this.request(`/git/ref/heads/${this.config.base.split('/').map(encodeURIComponent).join('/')}`);
@@ -2674,19 +2654,17 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
   // priority being advisory and the publication guard rechecking ownership; re-read after the
   // claim only if claim order ever gains a correctness role.
   const all = await engine.store.list();
-  // Items a webhook made due are claimed ahead of every polled job, the queue head included (GY-806).
   // The band spans the parallel-tip window too (GY-498): every entry validated at once is claimed first.
+  // A job an observation webhook made due is claimed ahead of all of it by `takeJob` itself (GY-806).
   const band = Math.max(engine.mergeBatchSize, engine.parallelTips);
-  const open = new Set(all.filter(work => work.stage !== 'done').map(work => work.id));
-  const woken = (github.webhookDue?.() ?? []).filter(id => open.has(id));
-  const polled = observationClaimOrder(all, band, Date.now(), budgetTight(github.budget?.())).filter(id => !woken.includes(id));
-  const job = await engine.store.takeJob([...woken, ...polled], woken.length + observationHeadCount(all, band));
+  const job = await engine.store.takeJob(observationClaimOrder(all, band, Date.now(), budgetTight(github.budget?.())), observationHeadCount(all, band));
   if (!job) return false;
-  const viaWebhook = github.takeWebhookWake?.(job.work_id) ?? false;
+  const viaWebhook = job.webhook === true;
   // A poll of an item a webhook-driven observation refreshed within its poll interval is skipped
   // (GY-806): nothing is asked of GitHub, and the job is due again when that interval ends. A job
-  // woken by a state change or a webhook is never skipped.
-  const refreshedUntil = !job.woken && !viaWebhook ? github.webhookRefreshedUntil?.(job.work_id) ?? null : null;
+  // woken by a state change or a webhook is never skipped. The refresh is the job row's, so the
+  // replica that claims the poll need not be the one that made the refresh.
+  const refreshedUntil = !job.woken && !viaWebhook && job.refreshed && job.refreshed_until ? new Date(job.refreshed_until).getTime() : null;
   if (refreshedUntil !== null) {
     await engine.store.deferJob(job.work_id, job.token, new Date(refreshedUntil).toISOString(), `poll skipped: a webhook refreshed this item; next poll ${new Date(refreshedUntil).toISOString()}`, null);
     return true;
@@ -2844,7 +2822,7 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
     const cadence = schedule.cadence && (head ? { ...schedule.cadence, band: 'merge' as const, ms: headObservationSeconds * 1000 }
       : { ...schedule.cadence, band: schedule.cadence.band === 'merge' ? 'active' as const : schedule.cadence.band, ms: Math.max(idleObservationSeconds * 1000, schedule.cadence.ms) });
     if (cadence && work) github.recordObservation?.(work.id, { requests, uncached, band: cadence.band, cadenceMs: cadence.ms });
-    if (viaWebhook && observed && !settled && !held && cadence && work) github.noteWebhookRefresh?.(work.id, cadence.ms);
+    if (viaWebhook && observed && !settled && !held && cadence && work) await engine.store.noteWebhookRefresh(job.work_id, job.token, cadence.ms);
     if (settled) return true;
     if (work?.stage === 'done') await engine.store.pool.query('DELETE FROM jobs WHERE work_id=$1 AND token=$2', [job.work_id, job.token]);
     if (held) await engine.store.holdJob(job.work_id, job.token, held, permissionHoldMs, heldOn(), observed);

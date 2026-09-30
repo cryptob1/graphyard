@@ -1,4 +1,5 @@
 import type pg from 'pg';
+import { GitHubChargeLedger } from './github-charges.js';
 
 /**
  * The GitHub adapter's response caches, persisted so a restart starts warm (github_cache,
@@ -10,10 +11,13 @@ import type pg from 'pg';
  *   the whole response to a commit read by SHA or a compare of two exact SHAs, GY-806) are
  *   loaded once and never expire. ETag entries are loaded with their ETag and still revalidated
  *   with If-None-Match, which GitHub answers with a free 304.
+ * - Whole immutable responses are permanent (GY-806): they are never pruned, never dropped for
+ *   size or a full queue, and `lookup` answers a read the hot layer has evicted, so GitHub is asked
+ *   for each at most once for the life of the database.
  * - Reads happen once, at attach; writes are batched write-behind on a timer, one pool query at
  *   a time, so the cache never holds more than one of the pool's connections. Plain pool queries
  *   only: never inside a coordination transaction and never under the advisory lock.
- * - The table is pruned to the newest `maxRows` rows and `maxBytes` of values.
+ * - Every other kind is pruned to the newest `maxRows` rows and `maxBytes` of values.
  * - A database failure never fails an observation: the maps stay as they are and the adapter
  *   asks GitHub, exactly as it did before the cache was persisted.
  */
@@ -36,8 +40,11 @@ export class GitHubCacheStore {
   private flushing: Promise<void> | null = null;
   private prunedAt = 0;
   private reportedAt = 0;
+  /** The installation's billable charges across replicas (GY-806), on the same database and scope; the adapter attaches it with the cache. */
+  readonly charges: GitHubChargeLedger;
   /** `scope` separates installations that share one database; the adapter passes its installation id. */
   constructor(private pool: Pick<pg.Pool, 'query'>, private scope = '', options: GitHubCacheOptions = {}) {
+    this.charges = new GitHubChargeLedger(pool, scope);
     this.flushMs = options.flushMs ?? 5_000; this.pruneMs = options.pruneMs ?? 10 * 60_000;
     this.maxRows = options.maxRows ?? 20_000; this.maxBytes = options.maxBytes ?? 200 * 1024 * 1024;
     this.maxValueBytes = options.maxValueBytes ?? 1024 * 1024; this.maxPending = options.maxPending ?? 10_000;
@@ -79,9 +86,10 @@ ORDER BY updated_at, key`, [prefix, caps.etag, caps.ancestry, caps.blob, caps.hi
   put(kind: GitHubCacheKind, key: string, value: unknown, etag: string | null = null) {
     let json: string;
     try { json = JSON.stringify(value instanceof Set ? [...value] : value ?? null); } catch { return; }
-    if (json.length > this.maxValueBytes) return;
+    const permanent = kind === 'immutable';
+    if (json.length > this.maxValueBytes && !permanent) return;
     const id = this.key(kind, key);
-    if (!this.pending.has(id) && this.pending.size >= this.maxPending) return;
+    if (!this.pending.has(id) && this.pending.size >= this.maxPending && !permanent) return;
     this.pending.set(id, { kind, etag, value: json });
     this.schedule();
   }
@@ -92,13 +100,13 @@ ORDER BY updated_at, key`, [prefix, caps.etag, caps.ancestry, caps.blob, caps.hi
     this.pending.set(id, 'touch');
     this.schedule();
   }
-  /** Look up a single entry from the persistent store, or undefined if not found. Never throws. */
+  /** One entry, queued or stored, for a read the hot layer no longer holds; undefined when there is none. Never throws. */
   async lookup(kind: GitHubCacheKind, key: string): Promise<any> {
-    try {
-      const id = this.key(kind, key);
-      const row = (await this.pool.query('SELECT value FROM github_cache WHERE key = $1', [id])).rows[0];
-      return row?.value;
-    } catch { return undefined; }
+    const id = this.key(kind, key);
+    const queued = this.pending.get(id);
+    if (queued && queued !== 'touch') return JSON.parse(queued.value);
+    try { return (await this.pool.query('SELECT value FROM github_cache WHERE key = $1', [id])).rows[0]?.value; }
+    catch (error) { this.report('lookup', error); return undefined; }
   }
   private schedule() {
     if (this.timer) return;
@@ -130,19 +138,19 @@ ON CONFLICT (key) DO UPDATE SET kind=EXCLUDED.kind, etag=EXCLUDED.etag, value=EX
     }
     if (Date.now() - this.prunedAt >= this.pruneMs) await this.prune();
   }
-  /** Delete everything past the newest `maxRows` rows or `maxBytes` of values. Returns the rows removed; never throws. */
+  /** Delete every entry but permanent ones past the newest `maxRows` rows or `maxBytes` of values. Returns the rows removed; never throws. */
   async prune(): Promise<number> {
     this.prunedAt = Date.now();
     try {
       const result = await this.pool.query(`DELETE FROM github_cache c USING (
-  SELECT key, row_number() OVER w AS n, sum(pg_column_size(value)) OVER w AS bytes FROM github_cache WINDOW w AS (ORDER BY updated_at DESC, key)
+  SELECT key, row_number() OVER w AS n, sum(pg_column_size(value)) OVER w AS bytes FROM github_cache WHERE kind <> 'immutable' WINDOW w AS (ORDER BY updated_at DESC, key)
 ) r WHERE c.key = r.key AND (r.n > $1 OR r.bytes > $2)`, [this.maxRows, this.maxBytes]);
       return result.rowCount ?? 0;
     } catch (error) { this.report('prune', error); return 0; }
   }
-  /** Stop the timer and write what is queued. */
+  /** Stop the timers and write what is queued. */
   async close() {
     if (this.timer) { clearTimeout(this.timer); this.timer = null; }
-    await this.flush();
+    await Promise.all([this.flush(), this.charges.close()]);
   }
 }

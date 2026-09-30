@@ -5,7 +5,7 @@
 
 The `X-GitHub-Event` header decides what a delivery does beyond waking jobs:
 
-- `pull_request`, `pull_request_review`, `check_run`, `check_suite` and `push`: the woken items are claimed ahead of polled jobs.
+- `pull_request`, `pull_request_review`, `check_run`, `check_suite` and `push`: the woken items are claimed ahead of polled jobs, by whichever replica claims next. A `push` to any other branch wakes the item whose candidate is on that branch.
 - A `push` to the base branch: also ends the shared base-ref read.
 - `branch_protection_rule`, `branch_protection_configuration`, `repository_ruleset` and `repository`: end the shared protection read.
 

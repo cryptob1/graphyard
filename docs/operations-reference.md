@@ -58,9 +58,9 @@ About ten requests uncached; unchanged, none.
 
 ### Reads that are not repeated
 
-- **Immutable:** a commit by SHA (`GET /commits/:sha`) and a compare of two exact SHAs (`GET /compare/A...B`) are fetched once, then answered from the cache (persisted in `github_cache`) with no request at all.
-- **Shared per cycle:** while a webhook has been delivered in the last hour, every observation starting within one 15-second cycle shares one read of the base branch ref. A push to the base branch, or a ref Graphyard writes, starts a new cycle. Branch protection is read at most every 5 minutes, or again after a `branch_protection_rule`, `branch_protection_configuration`, `repository_ruleset` or `repository` event. With no live webhook, each observation reads both itself.
-- **Webhook-driven:** a `pull_request`, `pull_request_review`, `check_run`, `check_suite` or `push` delivery makes the named items' jobs due at once, claimed ahead of polled jobs. A webhook-driven observation also skips the item's next poll if it falls within that observation's poll interval; the job reads `poll skipped: a webhook refreshed this item`.
+- **Immutable:** a commit by SHA (`GET /commits/:sha`) and a compare of two exact SHAs (`GET /compare/A...B`) are fetched once, then answered from the cache with no request at all. They are kept permanently in `github_cache`: never pruned, and read back from there after the in-memory layer evicts them or the server restarts.
+- **Shared per cycle:** every observation starting within one 15-second cycle shares one read of the base branch ref, webhook or not. A push to the base branch, or a ref Graphyard writes, starts a new cycle. Branch protection is read at most every 5 minutes, or again after a `branch_protection_rule`, `branch_protection_configuration`, `repository_ruleset` or `repository` event.
+- **Webhook-driven:** a `pull_request`, `pull_request_review`, `check_run`, `check_suite` or `push` delivery makes the named items' jobs due at once, claimed ahead of polled jobs. A push to a pull-request branch names its item by branch. A webhook-driven observation also skips the item's next poll if it falls within that observation's poll interval; the job reads `poll skipped: a webhook refreshed this item`. The wake and the refresh are stored on the job row (`jobs.webhook_at`, `jobs.refreshed_until`), so with several replicas any replica claims and skips alike.
 
 ### What a pause means for gates
 
@@ -72,7 +72,8 @@ A rate-limit `403`/`429` pauses requests; gates read stale until it lifts: nothi
 
 `githubBudget.billable` (in `master status` as `observationThroughput.budget.billable`) reports:
 
-- `perHour`: billable requests in the last hour.
+- `perHour`: billable requests in the last hour, across the installation: every replica on the same database records its charges in `github_charges` and adds the others' (synced every 15 seconds).
+- `instances`: how many replicas that count includes.
 - `limit`: the token's hourly limit.
 - `share`: `perHour` as a fraction of `limit`.
 - `target`: 0.6, the share the fleet must stay under.
